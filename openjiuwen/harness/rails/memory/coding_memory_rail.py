@@ -25,6 +25,11 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.prompts.sections.coding_memory import (
     build_coding_memory_section,
 )
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachmentManager,
+    PromptAttachmentKind,
+    PromptAttachmentScope,
+)
 from openjiuwen.core.memory.lite.coding_memory_tools import (
     init_memory_manager_async,
 )
@@ -80,6 +85,7 @@ class CodingMemoryRail(DeepAgentRail):
         
         # SystemPromptBuilder 引用
         self.system_prompt_builder = None
+        self.attachment_manager = None
         self._tool_ctx: CodingMemoryToolContext | None = None
     
     def init(self, agent) -> None:
@@ -92,6 +98,12 @@ class CodingMemoryRail(DeepAgentRail):
         
         # 获取 system_prompt_builder
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
+        attachment_manager = getattr(agent, "prompt_attachment_manager", None)
+        self.attachment_manager = (
+            attachment_manager
+            if isinstance(attachment_manager, PromptAttachmentManager)
+            else None
+        )
         
         # 保存 agent_id
         agent_id = getattr(getattr(agent, "card", None), "id", None)
@@ -125,6 +137,7 @@ class CodingMemoryRail(DeepAgentRail):
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("memory")
             self.system_prompt_builder = None
+        self.attachment_manager = None
     
     def _register_coding_memory_tools(self, agent) -> None:
         """注册 Coding Memory 工具到 agent.
@@ -299,7 +312,9 @@ class CodingMemoryRail(DeepAgentRail):
             index = await self._read_memory_index()
             if index:
                 header = "## 当前记忆索引\n\n" if lang == "cn" else "## Current memory index\n\n"
-                section.content[lang] += "\n\n" + header + index
+                await self._upsert_dynamic_memory_attachment(ctx, header + index)
+            else:
+                await self._clear_dynamic_memory_attachment(ctx)
             self.system_prompt_builder.add_section(section)
             return
         
@@ -322,16 +337,54 @@ class CodingMemoryRail(DeepAgentRail):
                 if lang == "cn" else
                 f"\n\n({self._total_memories} total. Use coding_memory_read for others.)"
             )
-            section.content[lang] += "\n\n" + header + self._recalled_content + footer
+            await self._upsert_dynamic_memory_attachment(
+                ctx,
+                header + self._recalled_content + footer,
+            )
         else:
             # 无召回结果 → 降级注入索引
             index = await self._read_memory_index()
             if index:
                 header = "## 当前记忆索引\n\n" if lang == "cn" else "## Current memory index\n\n"
-                section.content[lang] += "\n\n" + header + index
+                await self._upsert_dynamic_memory_attachment(ctx, header + index)
+            else:
+                await self._clear_dynamic_memory_attachment(ctx)
         
         self.system_prompt_builder.add_section(section)
-    
+
+    async def _upsert_dynamic_memory_attachment(
+        self,
+        ctx: AgentCallbackContext,
+        content: str,
+    ) -> None:
+        if self.attachment_manager is None:
+            return
+        writer = self.attachment_manager.for_context(ctx)
+        try:
+            await writer.upsert_section(
+                section="coding_memory_context",
+                content=content,
+                scope=PromptAttachmentScope.TURN,
+                kind=PromptAttachmentKind.MEMORY,
+                source="agent_core.coding_memory",
+                priority=85,
+                content_kind="text/markdown",
+            )
+        except ValueError as exc:
+            logger.warning("[CodingMemoryRail] skip memory attachment: %s", exc)
+
+    async def _clear_dynamic_memory_attachment(self, ctx: AgentCallbackContext) -> None:
+        if self.attachment_manager is None:
+            return
+        writer = self.attachment_manager.for_context(ctx)
+        try:
+            await writer.clear_section(
+                section="coding_memory_context",
+                scope=PromptAttachmentScope.TURN,
+            )
+        except ValueError:
+            return
+
     async def _auto_recall(self, query: str) -> tuple[Optional[str], int]:
         """自动召回相关记忆.
 

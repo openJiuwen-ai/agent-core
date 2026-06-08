@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import asyncio
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 
@@ -716,6 +717,19 @@ class ReActAgent(BaseAgent):
             "system_messages": final_system,
             "tools": ctx.inputs.tools if ctx.inputs.tools else None,
         }
+        prompt_attachment_manager = getattr(self, "prompt_attachment_manager", None)
+        make_window_mutator = getattr(prompt_attachment_manager, "make_window_mutator", None)
+        if callable(make_window_mutator):
+            session_id = (
+                ctx.session.get_session_id()
+                if ctx.session is not None
+                else ctx.context.session_id()
+            )
+            invoke_turn_id = ctx.extra.get("_invoke_turn_id") or f"turn_{uuid.uuid4().hex}"
+            ctx.extra["_invoke_turn_id"] = invoke_turn_id
+            context_window_kwargs["window_mutators"] = [
+                make_window_mutator(session_id, invoke_turn_id)
+            ]
         if enable_kv_release and supports_kv_release:
             context_window_kwargs["model"] = llm
 
@@ -1312,6 +1326,12 @@ class ReActAgent(BaseAgent):
         invoke_inputs = InvokeInputs(query=query, conversation_id=conversation_id)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
         ctx.extra["_streaming"] = kwargs.get("_streaming", False)
+        input_invoke_turn_id = inputs.get("_invoke_turn_id") if isinstance(inputs, dict) else None
+        ctx.extra["_invoke_turn_id"] = (
+            kwargs.get("_invoke_turn_id")
+            or input_invoke_turn_id
+            or f"turn_{uuid.uuid4().hex}"
+        )
         if isinstance(inputs, dict):
             ctx.extra["user_id"] = inputs.get("user_id", "")
             ctx.extra["run_kind"] = inputs.get("run_kind", "")

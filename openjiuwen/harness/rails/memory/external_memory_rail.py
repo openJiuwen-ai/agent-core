@@ -14,6 +14,10 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.core.memory.external.provider import MemoryProvider
 from openjiuwen.harness.prompts.sections import SectionName
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachmentKind,
+    PromptAttachmentScope,
+)
 from openjiuwen.harness.prompts.sections.external_memory import (
     build_external_memory_section,
 )
@@ -47,6 +51,7 @@ class ExternalMemoryRail(DeepAgentRail):
         self._initialized = False
         self._owned_tool_names: Set[str] = set()
         self.system_prompt_builder = None
+        self.attachment_manager = None
         # Per-invoke prefetch cache
         self._prefetch_cache: Optional[str] = None
         self._prefetch_invoke_id: Optional[int] = None
@@ -58,6 +63,7 @@ class ExternalMemoryRail(DeepAgentRail):
     def init(self, agent) -> None:
         super().init(agent)
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
+        self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
         self._register_provider_tools(agent)
         # Inject provider's static system prompt block
         if self.system_prompt_builder:
@@ -83,6 +89,7 @@ class ExternalMemoryRail(DeepAgentRail):
             self.system_prompt_builder.remove_section(SectionName.EXTERNAL_MEMORY)
             self.system_prompt_builder.remove_section(EXTERNAL_MEMORY_PREFETCH_SECTION)
             self.system_prompt_builder = None
+        self.attachment_manager = None
         
         # Async shutdown via LspRail pattern
         try:
@@ -126,11 +133,12 @@ class ExternalMemoryRail(DeepAgentRail):
                 logger.error(f"[ExternalMemoryRail] Provider initialize failed: {e}")
     
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        if not self._initialized or self.system_prompt_builder is None:
+        if not self._initialized:
             return
         
         # Remove old cached prefetch section
-        self.system_prompt_builder.remove_section(EXTERNAL_MEMORY_PREFETCH_SECTION)
+        if self.system_prompt_builder is not None:
+            self.system_prompt_builder.remove_section(EXTERNAL_MEMORY_PREFETCH_SECTION)
         
         # Check prefetch cache
         invoke_id = id(ctx)
@@ -159,14 +167,25 @@ class ExternalMemoryRail(DeepAgentRail):
         
         if raw_context:
             fenced = self._build_memory_context_block(raw_context)
-            lang = getattr(self.system_prompt_builder, "language", "cn")
-            from openjiuwen.core.single_agent.prompts.builder import PromptSection
-            section = PromptSection(
-                name=EXTERNAL_MEMORY_PREFETCH_SECTION,
-                content={lang: fenced},
-                priority=55,
-            )
-            self.system_prompt_builder.add_section(section)
+            if self.attachment_manager is None:
+                logger.warning(
+                    "[ExternalMemoryRail] prompt attachment manager is unavailable; skip prefetch attachment"
+                )
+                return
+            writer = self.attachment_manager.for_context(ctx)
+            try:
+                await writer.upsert_section(
+                    section=EXTERNAL_MEMORY_PREFETCH_SECTION,
+                    content=fenced,
+                    scope=PromptAttachmentScope.TURN,
+                    kind=PromptAttachmentKind.MEMORY,
+                    source="agent_core.external_memory.prefetch",
+                    priority=55,
+                    metadata={"provider": self._provider.name},
+                    content_kind="text/markdown",
+                )
+            except ValueError as exc:
+                logger.warning("[ExternalMemoryRail] skip prefetch prompt attachment: %s", exc)
     
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         if not self._initialized:

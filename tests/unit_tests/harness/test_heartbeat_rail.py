@@ -5,10 +5,7 @@
 # pylint: disable=protected-access
 from __future__ import annotations
 
-from unittest.mock import (
-    AsyncMock,
-    MagicMock,
-)
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -165,20 +162,21 @@ async def test_before_model_call_injects_heartbeat_section() -> None:
     inputs = InvokeInputs(query="", run_kind=RunKind.HEARTBEAT, run_context=run_context)
     ctx = _make_ctx(inputs=inputs)
     ctx.extra["run_kind"] = RunKind.HEARTBEAT
+    ctx.extra["_invoke_turn_id"] = "turn1"
 
     mock_builder = MagicMock()
+    mock_builder.language = "cn"
     rail.system_prompt_builder = mock_builder
-
-    mock_fs = MagicMock()
-    mock_read_result = MagicMock()
-    mock_read_result.code = 0
-    mock_read_result.data.content = "Test heartbeat content"
-    mock_fs.read_file = AsyncMock(return_value=mock_read_result)
-    rail.sys_operation.fs = MagicMock(return_value=mock_fs)
 
     await rail.before_model_call(ctx)
 
-    mock_builder.add_section.assert_called_once()
+    session_id = ctx.session.get_session_id()
+    items = await rail.attachment_manager.collect_for_turn(session_id, "turn1")
+    assert [item.id for item in items] == [f"turn.{session_id}.turn1.heartbeat"]
+    assert items[0].scope.value == "turn"
+    assert items[0].kind.value == "todo_reminder"
+    assert items[0].source == "agent_core.heartbeat"
+    assert "心跳检测" in (items[0].content or "")
 
 
 @pytest.mark.asyncio

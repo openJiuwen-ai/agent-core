@@ -15,6 +15,11 @@ from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachmentManager,
+    PromptAttachmentKind,
+    PromptAttachmentScope,
+)
 
 from ..controllers import ActionController, BaseController
 from .browser_tools import ensure_browser_runtime_client_patch
@@ -572,11 +577,13 @@ class BrowserRuntimeRail(AgentRail):
         progress_state = self._load_progress_state(session)
         if progress_state.is_empty():
             builder.remove_section(_BROWSER_PROGRESS_SECTION_NAME)
+            await self._clear_progress_attachment(ctx)
             return
 
         progress_context = BrowserService.build_progress_context(progress_state)
         if not progress_context:
             builder.remove_section(_BROWSER_PROGRESS_SECTION_NAME)
+            await self._clear_progress_attachment(ctx)
             return
 
         continuation_text_en = (
@@ -589,16 +596,57 @@ class BrowserRuntimeRail(AgentRail):
             "将此存储的浏览器进度用作延续上下文。"
             "除非恢复操作有此需求，否则请避免重复已完成的操作。"
         )
-        builder.add_section(
-            PromptSection(
-                name=_BROWSER_PROGRESS_SECTION_NAME,
-                content={
-                    "en": continuation_text_en,
-                    "cn": continuation_text_cn,
-                },
-                priority=83,
+        manager = getattr(ctx.agent, "prompt_attachment_manager", None)
+        if not isinstance(manager, PromptAttachmentManager):
+            builder.add_section(
+                PromptSection(
+                    name=_BROWSER_PROGRESS_SECTION_NAME,
+                    content={
+                        "en": continuation_text_en,
+                        "cn": continuation_text_cn,
+                    },
+                    priority=83,
+                )
             )
-        )
+            return
+
+        builder.remove_section(_BROWSER_PROGRESS_SECTION_NAME)
+        language = getattr(builder, "language", "cn")
+        continuation_text = continuation_text_cn if language == "cn" else continuation_text_en
+        await self._upsert_progress_attachment(ctx, manager, continuation_text)
+
+    async def _upsert_progress_attachment(
+        self,
+        ctx: AgentCallbackContext,
+        manager: PromptAttachmentManager,
+        content: str,
+    ) -> None:
+        writer = manager.for_context(ctx)
+        try:
+            await writer.upsert_section(
+                section=_BROWSER_PROGRESS_SECTION_NAME,
+                content=content,
+                scope=PromptAttachmentScope.TURN,
+                kind=PromptAttachmentKind.RUNTIME,
+                source="agent_core.browser_runtime",
+                priority=83,
+                content_kind="text/markdown",
+            )
+        except ValueError as exc:
+            logger.warning("[BrowserRuntimeRail] skip progress attachment: %s", exc)
+
+    async def _clear_progress_attachment(self, ctx: AgentCallbackContext) -> None:
+        manager = getattr(ctx.agent, "prompt_attachment_manager", None)
+        if not isinstance(manager, PromptAttachmentManager):
+            return
+        writer = manager.for_context(ctx)
+        try:
+            await writer.clear_section(
+                section=_BROWSER_PROGRESS_SECTION_NAME,
+                scope=PromptAttachmentScope.TURN,
+            )
+        except ValueError:
+            return
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         session = getattr(ctx, "session", None)

@@ -29,6 +29,10 @@ from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 from openjiuwen.harness.prompts.builder import PromptSection
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachmentKind,
+    PromptAttachmentScope,
+)
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.agent_mode import build_plan_mode_section
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -143,6 +147,7 @@ class AgentModeRail(DeepAgentRail):
         self._owned_task_tool_names: set[str] = set()
         self._tools: List[Tool] = []
         self.system_prompt_builder = None
+        self.attachment_manager = None
 
     def init(self, agent: "DeepAgent") -> None:
         """Register enter/exit tools and capture system_prompt_builder.
@@ -152,6 +157,7 @@ class AgentModeRail(DeepAgentRail):
         """
         self._agent = agent
         self.system_prompt_builder = agent.system_prompt_builder
+        self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
         language = self.system_prompt_builder.language
 
         self._tools = [
@@ -249,6 +255,8 @@ class AgentModeRail(DeepAgentRail):
                     f"[AgentModeRail] Failed to remove tool '{tool.name}': {exc}"
                 )
         self._tools = []
+        self.system_prompt_builder = None
+        self.attachment_manager = None
 
         if self._owns_task_tool and self._task_tools:
             self._unregister_task_tool(agent)
@@ -280,6 +288,19 @@ class AgentModeRail(DeepAgentRail):
         if plan_state.mode != "plan":
             # ---- normal mode ----
             self.system_prompt_builder.remove_section(SectionName.MODE_INSTRUCTIONS)
+            if self.attachment_manager is not None:
+                writer = self.attachment_manager.for_context(ctx)
+                try:
+                    await writer.clear_section(
+                        section=SectionName.MODE_INSTRUCTIONS,
+                        scope=PromptAttachmentScope.TURN,
+                    )
+                except ValueError as exc:
+                    logger.warning(
+                        "[AgentModeRail] skip clearing prompt attachment section=%s: %s",
+                        SectionName.MODE_INSTRUCTIONS,
+                        exc,
+                    )
             self._sync_task_tool_for_model_tool_inputs(ctx)
             if isinstance(ctx.inputs.tools, list):
                 ctx.inputs.tools = [
@@ -323,8 +344,27 @@ class AgentModeRail(DeepAgentRail):
                 session=session,
             )
 
-        # 1. Inject MODE_INSTRUCTIONS
-        self.system_prompt_builder.add_section(section)
+        # 1. Inject MODE_INSTRUCTIONS.
+        # Keep upstream's static note path in system prompt for KV-cache stability;
+        # only dynamic plan-file state is moved into prompt attachment.
+        if self._plan_mode_system_note is not None:
+            self.system_prompt_builder.add_section(section)
+        else:
+            self.system_prompt_builder.remove_section(SectionName.MODE_INSTRUCTIONS)
+
+        if self._plan_mode_system_note is None and self.attachment_manager is not None:
+            writer = self.attachment_manager.for_context(ctx)
+            try:
+                await writer.upsert_from_section(
+                    section=section,
+                    scope=PromptAttachmentScope.TURN,
+                    kind=PromptAttachmentKind.RUNTIME,
+                    source="agent_core.agent_mode.plan_mode",
+                    language=self.system_prompt_builder.language,
+                    content_kind="text/markdown",
+                )
+            except ValueError as exc:
+                logger.warning("[AgentModeRail] skip prompt attachment section=%s: %s", section.name, exc)
 
         # 2. Remove Todo/Session sections added by higher-priority rails
         self.system_prompt_builder.remove_section(SectionName.TODO)

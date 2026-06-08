@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import Mock, patch
 
+from openjiuwen.harness.prompts import PromptSection
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.prompts.sections.agent_mode import build_plan_mode_section
 from openjiuwen.harness.rails import AgentModeRail
 from openjiuwen.harness.schema.state import DeepAgentState
@@ -62,14 +64,15 @@ def _make_ctx(
     )
 
     ctx = SimpleNamespace(
-        session=SimpleNamespace(),
+        session=SimpleNamespace(session_id="sess1"),
         inputs=inputs,
-        extra={},
+        extra={"_invoke_turn_id": "turn1"},
     )
 
     rail = rail or AgentModeRail()
     rail._agent = agent
     rail.system_prompt_builder = _PromptBuilder()
+    rail.attachment_manager = PromptAttachmentManager()
     return rail, ctx, agent
 
 
@@ -193,7 +196,8 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         tools = [_ToolInfo("todo_create"), _ToolInfo("sessions_spawn"), _ToolInfo("read_file")]
         rail, ctx, _ = _make_ctx("noop", mode="plan", tools=tools)
 
-        with patch("openjiuwen.harness.rails.agent_mode_rail.build_plan_mode_section", return_value="MODE_SECTION"):
+        mode_section = PromptSection(name="mode_instructions", content={"en": "MODE_SECTION"}, priority=85)
+        with patch("openjiuwen.harness.rails.agent_mode_rail.build_plan_mode_section", return_value=mode_section):
             await rail.before_model_call(ctx)
 
         visible_tool_names = [t.name for t in ctx.inputs.tools]
@@ -201,7 +205,9 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         self.assertNotIn("sessions_spawn", visible_tool_names)
         self.assertIn("read_file", visible_tool_names)
 
-        self.assertIn("MODE_SECTION", rail.system_prompt_builder.added_sections)
+        items = await rail.attachment_manager.collect_for_turn("sess1", "turn1")
+        self.assertEqual([item.id for item in items], ["turn.sess1.turn1.mode_instructions"])
+        self.assertEqual(items[0].content, "MODE_SECTION")
 
     async def test_before_model_call_in_auto_mode_removes_mode_section(self) -> None:
         rail, ctx, _ = _make_ctx("noop", mode="auto", tools=[_ToolInfo("read_file")])
@@ -209,6 +215,19 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         await rail.before_model_call(ctx)
 
         self.assertGreaterEqual(len(rail.system_prompt_builder.removed_sections), 1)
+
+    async def test_before_model_call_in_auto_mode_clears_plan_prompt_attachment(self) -> None:
+        rail, ctx, agent = _make_ctx("noop", mode="plan", tools=[_ToolInfo("read_file")])
+        mode_section = PromptSection(name="mode_instructions", content={"en": "PLAN MODE"}, priority=85)
+        with patch("openjiuwen.harness.rails.agent_mode_rail.build_plan_mode_section", return_value=mode_section):
+            await rail.before_model_call(ctx)
+
+        self.assertIsNotNone(await rail.attachment_manager.get_by_id("turn.sess1.turn1.mode_instructions"))
+
+        agent.load_state.return_value.plan_mode.mode = "auto"
+        await rail.before_model_call(ctx)
+
+        self.assertIsNone(await rail.attachment_manager.get_by_id("turn.sess1.turn1.mode_instructions"))
 
     async def test_after_tool_call_register_unregister_task_tool_and_respect_skip(self) -> None:
         rail, ctx_enter, agent = _make_ctx("enter_plan_mode", mode="plan")
