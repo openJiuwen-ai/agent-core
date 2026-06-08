@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 from typing import Set
 
+from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
 )
@@ -60,6 +61,7 @@ class AutoHarnessExperienceRail(DeepAgentRail):
         self._experience_dir = experience_dir
         self._language = language
         self._owned_tool_names: Set[str] = set()
+        self._owned_tool_ids: Set[str] = set()
         self.system_prompt_builder = None
 
     def init(self, agent) -> None:
@@ -75,9 +77,17 @@ class AutoHarnessExperienceRail(DeepAgentRail):
         if hasattr(agent, "ability_manager"):
             ability_mgr = agent.ability_manager
             for tool_name in list(self._owned_tool_names):
-                # Mirror add_ability: removes the agent-qualified id from both
-                # this manager and the shared resource manager.
-                ability_mgr.remove_ability(tool_name)
+                ability_mgr.remove(tool_name)
+        for tool_id in list(self._owned_tool_ids):
+            if Runner.resource_mgr.get_tool(tool_id) is None:
+                continue
+            result = Runner.resource_mgr.remove_tool(tool_id)
+            if hasattr(result, "is_err") and result.is_err():
+                logger.warning(
+                    "Failed to remove experience tool: %s",
+                    tool_id,
+                )
+        self._owned_tool_ids.clear()
         self._owned_tool_names.clear()
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section(
@@ -104,15 +114,14 @@ class AutoHarnessExperienceRail(DeepAgentRail):
     def _register_experience_tool(self, agent) -> None:
         if not hasattr(agent, "ability_manager"):
             return
-        agent_id = getattr(getattr(agent, "card", None), "id", None)
         tool = ExperienceSearchTool(
             self._experience_dir,
-            agent_id=agent_id,
             language=self._language,
         )
-        # Unified registration: add_ability qualifies the stateful tool id to
-        # ``{name}_{owner_id}`` and binds it in the resource manager, so
-        # teardown_tools drops it at round-end (no manual id tracking / refresh).
-        result = agent.ability_manager.add_ability(tool.card, tool)
+        existing = Runner.resource_mgr.get_tool(tool.card.id)
+        if existing is None:
+            Runner.resource_mgr.add_tool(tool)
+            self._owned_tool_ids.add(tool.card.id)
+        result = agent.ability_manager.add(tool.card)
         if result.added:
             self._owned_tool_names.add(tool.card.name)

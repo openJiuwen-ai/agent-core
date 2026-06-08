@@ -27,12 +27,7 @@ tools:
 - `__init__.py` 不得包含 re-export
 - Tool class 必须无参构造，且自己创建 `ToolCard`
 - `ToolCard.id` 和 `ToolCard.name` 必须显式设置，推荐一致
-- `ToolCard.input_params` 必须符合 JSON Schema 规范：
-  - 必须显式设置，禁止省略或为空字典 `{}`、`None`
-  - 必须包含 `type: "object"` 字段，禁止 `type` 缺失或为 `null`
-  - 即使无参数也必须是 `{"type": "object", "properties": {}}`
-  - 验证方法：实例化 Tool 后检查 `tool.card.tool_info().parameters` 是否包含 `type: "object"`
-- skill 目录 `skills/<skill_name>/` 必须包含合法 `SKILL.md`
+- skill 目录必须包含合法 `SKILL.md`
 
 失败归因：
 - `manifest_invalid`
@@ -54,20 +49,11 @@ agent = DeepAgent(AgentCard(name="test_agent", description="test")).configure(
 loaded = await agent.load_harness_config(config_path)
 ```
 
-`loaded` 返回值格式（`list[str]`）：
-- `"rail:<ClassName>"` — 每个 rail 加载成功
-- `"tool:<ClassName>"` — 每个 tool 加载成功
-- `"skill_dir:<directory_path>"` — 每个 skill 目录路径
-
-示例：`["rail:MyRail", "tool:MyTool", "skill_dir:/path/to/skills/pptx"]`
-
 断言：
-- 如果存在 rails：每个 rail 返回 `"rail:<ClassName>"`
-- 如果存在 tools：
-  - 每个 tool 返回 `"tool:<ClassName>"`
-  - Tool 的 `ToolCard` 出现在 `agent.ability_manager.list()`
-- 如果存在 skills：skill 目录返回 `"skill_dir:<path>"`
-  - 验证方法：检查 `agent._registered_rails` 中存在 `SkillUseRail` 且其 `skills_dir` 包含声明的 skill 目录路径
+- 每个 rail 返回 `rail:<ClassName>`
+- 每个 tool 返回 `tool:<ClassName>`
+- Tool 的 `ToolCard.name` 出现在 `agent.ability_manager.list()`
+- Skill 目录被追加到现有或新建的 `SkillUseRail`
 
 这一层必须覆盖 `DeepAgent.load_harness_config()`，不能只调用 `load_runtime_rails()` / `load_runtime_tools()`。
 

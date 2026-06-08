@@ -439,7 +439,32 @@ class MetaVerifyStage(VerifyStage):
         self,
         ctx: TaskContext,
     ) -> AsyncIterator[Any]:
-        ci_result = await ctx.orchestrator.ci_gate.run("all")
+        try:
+            ci_result = await ctx.orchestrator.ci_gate.run("all")
+        except Exception as exc:
+            error = f"CI gate exception: {exc}"
+            ctx.task.status = TaskStatus.FAILED
+            yield StageResult(
+                status="failed",
+                artifacts={
+                    "verify_report": VerifyReportArtifact(
+                        ci_result={
+                            "passed": False,
+                            "gates": [],
+                            "errors": error,
+                        },
+                        error=error,
+                    ),
+                    "task_result": CycleResult(
+                        success=False,
+                        error=error,
+                        error_log=error,
+                    ),
+                },
+                messages=[f"CI 门禁异常: {error}"],
+                error=error,
+            )
+            return
         messages: list[str] = []
         for message in _iter_ci_gate_messages(ci_result):
             messages.append(message)

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -202,6 +203,42 @@ async def _collect_commit_facts(
     return facts
 
 
+async def _collect_existing_branch_commit_facts(
+    task: "OptimizationTask",
+    git: "GitOperations",
+    *,
+    preexisting_dirty_files: list[str],
+) -> "CommitFacts":
+    """Collect commit facts from current branch commits vs base."""
+    branch_files = await git.diff_name_only_against_base()
+    edited_files = [
+        path
+        for path in branch_files
+        if is_allowed_repo_edit_path(path)
+    ]
+    facts = CommitFacts(
+        branch_name=await git.current_branch(),
+        task_declared_files=list(task.files),
+        preexisting_dirty_files=list(preexisting_dirty_files),
+        current_dirty_files=[],
+        tracked_modified_files=[],
+        untracked_files=[],
+        edited_files=edited_files,
+        derived_test_files=[
+            path
+            for path in edited_files
+            if is_derived_test_file(task.files, path)
+        ],
+        legacy_related_test_files=[],
+        verify_related_files=[],
+        diff_stat=await git.diff_stat_against_base(),
+    )
+    facts.allowed_files = _derive_allowed_files(facts)
+    if not facts.allowed_files and edited_files:
+        facts.allowed_files = edited_files
+    return facts
+
+
 def _format_commit_failure(
     reason: str,
     *,
@@ -220,6 +257,185 @@ def _format_commit_failure(
             f"{last_commit_stat}"
         )
     return "\n".join(details)
+
+
+def _is_explicit_issue_fix(task: "OptimizationTask") -> bool:
+    text = "\n".join(
+        str(value or "")
+        for value in (
+            task.issue_ref,
+            task.topic,
+            task.description,
+        )
+    )
+    return bool(
+        re.search(
+            r"(?:fix-issue-|issue-|\bissue\s*#?|#)\s*\d+",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _extract_issue_target_symbols(task: "OptimizationTask") -> list[str]:
+    """Extract function/class names that an explicit issue calls out."""
+    if not _is_explicit_issue_fix(task):
+        return []
+    text = "\n".join(
+        str(value or "")
+        for value in (
+            task.topic,
+            task.description,
+            task.expected_effect,
+        )
+    )
+    symbols: list[str] = []
+    patterns = (
+        r"`([A-Za-z_][A-Za-z0-9_]{2,})\s*\(\s*\)`",
+        r"`([A-Za-z_][A-Za-z0-9_]{2,})`",
+        r"(?:函数|方法|接口|class|function|method)\s*[`“\"]?([A-Za-z_][A-Za-z0-9_]{2,})",
+    )
+    ignored = {
+        "issue",
+        "gitcode",
+        "auto",
+        "harness",
+        "jiuwenswarm",
+        "true",
+        "false",
+        "none",
+        "null",
+    }
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            symbol = match.group(1)
+            if symbol.lower() in ignored:
+                continue
+            if symbol not in symbols:
+                symbols.append(symbol)
+    return symbols[:8]
+
+
+async def _validate_issue_target_alignment(
+    *,
+    task: "OptimizationTask",
+    git: "GitOperations",
+    against_base: bool,
+) -> str:
+    """Ensure explicit issue-fix diffs hit symbols named by the issue."""
+    symbols = _extract_issue_target_symbols(task)
+    if not symbols:
+        return ""
+    diff_text = (
+        await git.diff_against_base()
+        if against_base
+        else await git.diff_against("HEAD")
+    )
+    if not diff_text.strip():
+        return ""
+    matched = [
+        symbol
+        for symbol in symbols
+        if re.search(rf"\b{re.escape(symbol)}\b", diff_text)
+    ]
+    if matched:
+        return ""
+    return (
+        "Issue target validation failed: final diff did not touch symbols "
+        f"explicitly named by the issue: {', '.join(symbols)}. "
+        "Do not reuse a similar branch/commit unless it changes the exact "
+        "function or method requested by the issue."
+    )
+
+
+def _build_deterministic_commit_message(
+    task: "OptimizationTask",
+    facts: "CommitFacts",
+) -> str:
+    """Build a stable commit message without asking the agent to run git."""
+    topic = (task.topic or "auto-harness task").strip()
+    title = topic
+    if not title.lower().startswith(("fix", "feat", "docs", "test", "refactor")):
+        title = f"fix(auto-harness): {title}"
+    title = " ".join(title.split())
+    if len(title) > 120:
+        title = title[:117].rstrip() + "..."
+
+    body_lines = [
+        "",
+        "Auto-Harness deterministic commit.",
+        "",
+        f"Task: {task.topic}",
+    ]
+    description = (task.description or "").strip()
+    if description:
+        body_lines.extend([
+            "",
+            "Description:",
+            description,
+        ])
+    if facts.allowed_files:
+        body_lines.extend([
+            "",
+            "Files:",
+            *[f"- {path}" for path in facts.allowed_files],
+        ])
+    return title + "\n".join(body_lines)
+
+
+async def _run_deterministic_commit(
+    *,
+    task: "OptimizationTask",
+    git: "GitOperations",
+    facts: "CommitFacts",
+) -> CommitRoundResult:
+    """Create the commit directly in the task worktree."""
+    if not facts.allowed_files:
+        status_text = await git.status_porcelain()
+        return CommitRoundResult(
+            ok=False,
+            reason="No allowed files to commit.",
+            status_text=status_text,
+            last_commit_stat="",
+        )
+
+    before_head = await git.current_head()
+    add_result = await git.add_paths(facts.allowed_files)
+    if not add_result.get("success"):
+        status_text = await git.status_porcelain()
+        return CommitRoundResult(
+            ok=False,
+            reason=(
+                "Failed to stage allowed files:\n"
+                f"{add_result.get('output', '')}"
+            ),
+            status_text=status_text,
+            last_commit_stat="",
+        )
+
+    message = _build_deterministic_commit_message(task, facts)
+    commit_result = await git.commit(message)
+    after_head = await git.current_head()
+    status_text = await git.status_porcelain()
+    latest_commit = ""
+    if commit_result.get("success") and after_head != before_head:
+        latest_commit = await git.show_last_commit_stat()
+        return CommitRoundResult(
+            ok=True,
+            reason="",
+            status_text=status_text,
+            last_commit_stat=latest_commit,
+        )
+
+    return CommitRoundResult(
+        ok=False,
+        reason=(
+            "Deterministic git commit did not create a new commit:\n"
+            f"{commit_result.get('output', '')}"
+        ),
+        status_text=status_text,
+        last_commit_stat="",
+    )
 
 
 async def _run_commit_round_stream(
@@ -309,59 +525,100 @@ class CommitStage(TaskStage):
             "检查提交范围",
             "提交变更",
         ]
-        commit_ok = False
-        reason = ""
-        status_text = ""
-        last_commit_stat = ""
-        async for event in _run_commit_round_stream(
-                commit_agent=ctx.runtime.commit_agent
-                or ctx.runtime.task_agent,
-                task=ctx.task,
-                git=ctx.orchestrator.git,
-                facts=facts,
-        ):
-            if isinstance(event, CommitRoundResult):
-                commit_ok = event.ok
-                reason = event.reason
-                status_text = event.status_text
-                last_commit_stat = event.last_commit_stat
-            else:
-                yield event
-        if not commit_ok:
-            messages.append(
-                "首次提交未成功:\n"
-                + _format_commit_failure(
-                    reason,
-                    status_text=status_text,
-                    last_commit_stat=last_commit_stat,
-                )
+        messages.append(
+            "自动提交文件: "
+            + (", ".join(facts.allowed_files) or "无")
+        )
+        alignment_error = await _validate_issue_target_alignment(
+            task=ctx.task,
+            git=ctx.orchestrator.git,
+            against_base=False,
+        )
+        if alignment_error:
+            ctx.task.status = TaskStatus.FAILED
+            result = CycleResult(
+                success=False,
+                error=alignment_error,
             )
-            refreshed_facts = await _collect_commit_facts(
+            yield StageResult(
+                status="failed",
+                artifacts={
+                    "commit_result": CommitArtifact(
+                        facts=facts,
+                        status_text=await ctx.orchestrator.git.status_porcelain(),
+                        branch_name=facts.branch_name,
+                        committed=False,
+                        error=alignment_error,
+                    ),
+                    "task_result": result,
+                },
+                messages=messages + [f"提交失败: {alignment_error}"],
+                error=alignment_error,
+            )
+            return
+        if not facts.allowed_files and await ctx.orchestrator.git.has_commits_against_base():
+            facts = await _collect_existing_branch_commit_facts(
                 ctx.task,
                 ctx.orchestrator.git,
-                ctx.runtime.edit_safety_rail,
                 preexisting_dirty_files=ctx.runtime.preexisting_dirty_files,
-                ci_result=verify_report.ci_result,
-                fix_errors=verify_report.fix_errors,
             )
-            async for event in _run_commit_round_stream(
-                    commit_agent=ctx.runtime.commit_agent
-                    or ctx.runtime.task_agent,
-                    task=ctx.task,
-                    git=ctx.orchestrator.git,
-                    facts=refreshed_facts,
-                    retry_reason=reason,
-                    retry_status=status_text,
-                    last_commit_stat=last_commit_stat,
-            ):
-                if isinstance(event, CommitRoundResult):
-                    commit_ok = event.ok
-                    reason = event.reason
-                    status_text = event.status_text
-                    last_commit_stat = event.last_commit_stat
-                else:
-                    yield event
-            facts = refreshed_facts
+            alignment_error = await _validate_issue_target_alignment(
+                task=ctx.task,
+                git=ctx.orchestrator.git,
+                against_base=True,
+            )
+            if alignment_error:
+                ctx.task.status = TaskStatus.FAILED
+                result = CycleResult(
+                    success=False,
+                    error=alignment_error,
+                )
+                yield StageResult(
+                    status="failed",
+                    artifacts={
+                        "commit_result": CommitArtifact(
+                            facts=facts,
+                            status_text=await ctx.orchestrator.git.status_porcelain(),
+                            branch_name=facts.branch_name,
+                            committed=False,
+                            error=alignment_error,
+                        ),
+                        "task_result": result,
+                    },
+                    messages=messages + [f"提交失败: {alignment_error}"],
+                    error=alignment_error,
+                )
+                return
+            status_text = await ctx.orchestrator.git.status_porcelain()
+            last_commit_stat = await ctx.orchestrator.git.show_last_commit_stat()
+            messages = [
+                "检查提交范围",
+                "未发现新的工作区 diff，复用当前分支已有提交",
+                "分支已有提交文件: "
+                + (", ".join(facts.allowed_files) or "无"),
+            ]
+            yield StageResult(
+                artifacts={
+                    "commit_result": CommitArtifact(
+                        facts=facts,
+                        status_text=status_text,
+                        last_commit_stat=last_commit_stat,
+                        branch_name=facts.branch_name,
+                        committed=True,
+                    )
+                },
+                messages=messages,
+            )
+            return
+        commit_result = await _run_deterministic_commit(
+            task=ctx.task,
+            git=ctx.orchestrator.git,
+            facts=facts,
+        )
+        commit_ok = commit_result.ok
+        reason = commit_result.reason
+        status_text = commit_result.status_text
+        last_commit_stat = commit_result.last_commit_stat
         if not commit_ok:
             formatted_error = _format_commit_failure(
                 reason,

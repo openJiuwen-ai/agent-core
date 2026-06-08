@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import time
 from datetime import datetime, timezone
@@ -72,6 +73,10 @@ def _build_implement_prompt(
         "立即停止并明确报告，不要尝试越界编辑。"
         "\n严禁执行 git add、git commit 或其他提交动作；"
         "提交只允许在后续独立 commit phase 中进行。"
+        "\n严禁执行 git push、创建 PR/MR、切换到其他分支、reset 或 checkout 当前任务分支；"
+        "这些动作只允许在后续独立 publish/commit phase 中进行。"
+        "\n实现阶段结束时必须让本次代码修改以未提交的工作区 diff 形式保留；"
+        "不要为了自检而提前提交，否则后续阶段会检测不到本轮改动并判定失败。"
     )
 
 
@@ -84,6 +89,27 @@ def _build_prompt_debug_stats(
         "lines": prompt.count("\n") + 1,
         "bytes": len(prompt.encode("utf-8")),
     }
+
+
+def _extract_issue_number_from_task(
+    task: OptimizationTask,
+) -> str:
+    """Extract a GitCode issue number from task fields."""
+    text = "\n".join(
+        str(value or "")
+        for value in (
+            task.topic,
+            task.description,
+            task.expected_effect,
+            getattr(task, "issue_ref", ""),
+        )
+    )
+    match = re.search(
+        r"(?:fix-issue-|issue-|\bissue\s*#?|#)\s*(\d+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1) if match else ""
 
 
 def _artifact_contract_hint(name: str) -> str:
@@ -422,9 +448,64 @@ class MetaImplementStage(ImplementStage):
             ),
         )
         if not edited_files:
+            if await ctx.orchestrator.git.has_commits_against_base():
+                message = (
+                    "实现阶段未产生新的工作区 diff；检测到当前任务分支"
+                    "已包含相对 base 的提交，将跳过新增实现并继续验证/发布。"
+                )
+                yield StageResult(
+                    artifacts={
+                        "code_change": CodeChangeArtifact(
+                            related=ctx.runtime.related,
+                            edited_files=[],
+                        )
+                    },
+                    messages=[message],
+                )
+                return
+            issue_number = _extract_issue_number_from_task(
+                ctx.task
+            )
+            existing_fix = (
+                await ctx.orchestrator.git.find_existing_issue_fix_ref(
+                    issue_number,
+                    allowed_files=list(ctx.task.files),
+                )
+                if issue_number
+                else {"success": False}
+            )
+            if existing_fix.get("success"):
+                pick_result = (
+                    await ctx.orchestrator.git.cherry_pick_ref_commits(
+                        str(existing_fix.get("ref") or "")
+                    )
+                )
+                if pick_result.get("success"):
+                    files = [
+                        path
+                        for path in await ctx.orchestrator.git.diff_name_only_against_base()
+                        if is_allowed_repo_edit_path(path)
+                    ]
+                    message = (
+                        "实现阶段未产生新的工作区 diff；已从已有修复分支 "
+                        f"{existing_fix.get('ref')} cherry-pick "
+                        f"{len(pick_result.get('commits') or [])} 个提交，"
+                        "继续验证/发布。"
+                    )
+                    yield StageResult(
+                        artifacts={
+                            "code_change": CodeChangeArtifact(
+                                related=ctx.runtime.related,
+                                edited_files=files,
+                            )
+                        },
+                        messages=[message],
+                    )
+                    return
             error = (
                 "Implement phase finished without any code edits. "
-                "No allowed repo file was changed according to git status/diff."
+                "No allowed repo file was changed according to git status/diff "
+                "or existing branch commits."
             )
             ctx.task.status = TaskStatus.FAILED
             yield StageResult(
