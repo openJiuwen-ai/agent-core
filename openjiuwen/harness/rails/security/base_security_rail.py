@@ -70,6 +70,7 @@ class SecurityInterrupt(SecurityDecision):
 
     request: InterruptRequest
     subject_id: str = ""
+    allow_auto_confirm: bool = True
 
 
 @dataclass
@@ -125,8 +126,10 @@ class BaseSecurityRail(AgentRail):
         request: InterruptRequest,
         *,
         subject_id: str = "",
+        allow_auto_confirm: bool = True,
     ) -> SecurityInterrupt:
-        return SecurityInterrupt(request=request, subject_id=subject_id)
+        request.allow_auto_confirm = allow_auto_confirm
+        return SecurityInterrupt(request=request, subject_id=subject_id, allow_auto_confirm=allow_auto_confirm)
 
     def alert(
         self,

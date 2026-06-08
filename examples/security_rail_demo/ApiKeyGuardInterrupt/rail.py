@@ -57,11 +57,19 @@ class ApikeyguardinterruptRail(BaseSecurityRail):
         - Interrupt if secret in args
         - Reject: skip tool, agent continues (can try other approach)
         - Approve: execute tool
+        - allow_auto_confirm=False: 
+          - Frontend will NOT show "总是允许" option
+          - auto_confirm_key should be empty string (not needed)
+          - payload_schema should NOT include "auto_confirm" property
 
     AFTER_TOOL_CALL: Check tool result for secrets
         - Interrupt if secret in result
         - Reject: skip tool, agent continues
         - Approve: continue with result
+        - allow_auto_confirm=True (default):
+          - Frontend will show "总是允许" option
+          - auto_confirm_key should be set to a stable key for auto-approval
+          - payload_schema can include "auto_confirm" property (optional)
     """
 
     priority = 89
@@ -137,25 +145,17 @@ class ApikeyguardinterruptRail(BaseSecurityRail):
         user_input = security_ctx.user_input
         if user_input is not None:
             approved = False
-            auto_confirm = False
 
             if isinstance(user_input, dict):
                 approved = user_input.get("approved", False)
-                auto_confirm = user_input.get("auto_confirm", False)
             elif hasattr(user_input, "approved"):
                 approved = user_input.approved
-                auto_confirm = getattr(user_input, "auto_confirm", False)
 
             if approved:
-                if auto_confirm:
-                    for detection_type in unconfirmed_types:
-                        key = f"apikeyguardinterrupt:{detection_type}:before"
-                        self._store_auto_confirm(security_ctx.callback_ctx, key)
+                # BEFORE_TOOL_CALL does not support auto_confirm (allow_auto_confirm=False)
                 return self.allow()
             else:
                 return self.reject(message="用户拒绝")
-
-        first_type_key = f"apikeyguardinterrupt:{unconfirmed_types[0]}:before"
 
         return self.interrupt(
             InterruptRequest(
@@ -165,13 +165,14 @@ class ApikeyguardinterruptRail(BaseSecurityRail):
                     "properties": {
                         "approved": {"type": "boolean"},
                         "feedback": {"type": "string"},
-                        "auto_confirm": {"type": "boolean", "description": "Remember approval for ALL detected types"},
                     },
                     "required": ["approved"],
                 },
-                auto_confirm_key=first_type_key,
+                auto_confirm_key="",  # 不支持自动确认时，key 应为空字符串
+                allow_auto_confirm=False,  # 前端不显示"总是允许"选项
             ),
             subject_id=tool_call_id,
+            allow_auto_confirm=False,
         )
 
     def _check_after(
@@ -245,6 +246,7 @@ class ApikeyguardinterruptRail(BaseSecurityRail):
                     "required": ["approved"],
                 },
                 auto_confirm_key=first_type_key,
+                allow_auto_confirm=True,
             ),
             subject_id=tool_call_id,
         )

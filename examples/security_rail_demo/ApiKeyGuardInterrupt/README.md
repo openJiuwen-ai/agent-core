@@ -86,6 +86,42 @@ Format: `apikeyguardinterrupt:{detection_type}:{event}`
 
 Detection type-based keys allow granular approval per secret category.
 
+## `allow_auto_confirm` Parameter
+
+Controls whether frontend displays "Always Allow" option for auto-approval.
+
+### Usage
+
+**When `allow_auto_confirm=True` (default):**
+- Frontend displays three options: `["本次允许", "总是允许", "拒绝"]`
+- User can select "Always Allow" to store auto-approval key
+- `auto_confirm_key` should be set to a stable key (e.g., `apikeyguardinterrupt:api_key_openai:before`)
+- `payload_schema` may include `"auto_confirm"` property
+
+**When `allow_auto_confirm=False`:**
+- Frontend only displays two options: `["本次允许", "拒绝"]`
+- No "Always Allow" option shown
+- `auto_confirm_key` should be empty string (not used)
+- `payload_schema` should NOT include `"auto_confirm"` property
+
+### Example in this Rail
+
+- **BEFORE_TOOL_CALL**: Uses `allow_auto_confirm=False`
+  - Higher security risk (arguments contain secrets)
+  - Requires explicit approval every time
+  - `auto_confirm_key=""` (empty)
+
+- **AFTER_TOOL_CALL**: Uses `allow_auto_confirm=True` (default)
+  - Lower security risk (result contains secrets)
+  - Allows user to remember decision
+  - `auto_confirm_key="apikeyguardinterrupt:{type}:after"`
+
+### Best Practices
+
+- Use `allow_auto_confirm=False` for high-risk operations that require explicit approval each time
+- Use `allow_auto_confirm=True` (default) for operations where user convenience is prioritized
+- When `allow_auto_confirm=False`, ensure `auto_confirm_key=""` and omit `"auto_confirm"` from payload_schema
+
 ## Flow Examples
 
 ### BEFORE Interrupt (arguments contain secret)

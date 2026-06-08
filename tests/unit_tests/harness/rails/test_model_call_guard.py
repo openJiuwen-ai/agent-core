@@ -897,6 +897,9 @@ auto_confirm_config={},
 
         assert isinstance(decision, SecurityInterrupt)
         assert "api_key_openai" in decision.request.message
+        assert decision.allow_auto_confirm is False
+        assert decision.request.allow_auto_confirm is False
+        assert decision.request.auto_confirm_key == ""
 
     @pytest.mark.asyncio
     async def test_after_interrupt_on_result_secret(self):
@@ -914,7 +917,7 @@ auto_confirm_config={},
                 tool_result=f"API_KEY={secret}",
                 tool_call=ToolCall(id="call_001", type="function", name="read_file", arguments="{}"),
             ),
-context=None,
+            context=None,
         )
 
         security_ctx = SecurityCheckContext(
@@ -928,6 +931,10 @@ context=None,
 
         assert isinstance(decision, SecurityInterrupt)
         assert "api_key_openai" in decision.request.message
+        assert decision.allow_auto_confirm is True
+        assert decision.request.allow_auto_confirm is True
+        assert decision.request.auto_confirm_key.startswith("apikeyguardinterrupt:")
+        assert decision.request.auto_confirm_key.endswith(":after")
 
     @pytest.mark.asyncio
     async def test_before_approve_executes_tool(self):
@@ -1349,8 +1356,85 @@ class TestToolRejectExample:
         )
         
         decision = await rail.run_security_check(security_ctx)
+
+        assert isinstance(decision, SecurityAllow)
+
+    @pytest.mark.asyncio
+    async def test_allow_auto_confirm_false_prevents_auto_confirm_storage(self):
+        """When allow_auto_confirm=False, auto_confirm should not be stored even if user provides it."""
+        from examples.security_rail_demo.ApiKeyGuardInterrupt.rail import ApikeyguardinterruptRail
+        
+        rail = ApikeyguardinterruptRail()
+        secret = "sk-abc123def456ghi789jkl"
+        
+        stored_state = {}
+        mock_session = type("MockSession", (), {
+            "get_state": lambda self, key: stored_state.get(key, {}),
+            "update_state": lambda self, state: stored_state.update(state),
+        })()
+        
+        ctx = AgentCallbackContext(
+            agent=object(),
+            inputs=ToolCallInputs(
+                tool_name="read_file",
+                tool_args=f'{{"path": "file_with_{secret}"}}',
+                tool_call=ToolCall(id="call_001", type="function", name="read_file", arguments="{}"),
+            ),
+            context=None,
+            session=mock_session,
+        )
+        
+        security_ctx = SecurityCheckContext(
+            callback_ctx=ctx,
+            event=AgentCallbackEvent.BEFORE_TOOL_CALL,
+            user_input={"approved": True, "auto_confirm": True},
+            auto_confirm_config={},
+        )
+        
+        decision = await rail.run_security_check(security_ctx)
+        await rail.apply_security_decision(security_ctx, decision)
         
         assert isinstance(decision, SecurityAllow)
+        assert stored_state == {}
+
+    @pytest.mark.asyncio
+    async def test_allow_auto_confirm_true_stores_auto_confirm(self):
+        """When allow_auto_confirm=True, auto_confirm should be stored when user provides it."""
+        from examples.security_rail_demo.ApiKeyGuardInterrupt.rail import ApikeyguardinterruptRail
+        
+        rail = ApikeyguardinterruptRail()
+        secret = "sk-abc123def456ghi789jkl"
+        
+        stored_state = {}
+        mock_session = type("MockSession", (), {
+            "get_state": lambda self, key: stored_state.get(key, {}),
+            "update_state": lambda self, state: stored_state.update(state),
+        })()
+        
+        ctx = AgentCallbackContext(
+            agent=object(),
+            inputs=ToolCallInputs(
+                tool_name="read_file",
+                tool_result=f"API_KEY={secret}",
+                tool_call=ToolCall(id="call_002", type="function", name="read_file", arguments="{}"),
+            ),
+            context=None,
+            session=mock_session,
+        )
+        
+        security_ctx = SecurityCheckContext(
+            callback_ctx=ctx,
+            event=AgentCallbackEvent.AFTER_TOOL_CALL,
+            user_input={"approved": True, "auto_confirm": True},
+            auto_confirm_config={},
+        )
+        
+        decision = await rail.run_security_check(security_ctx)
+        await rail.apply_security_decision(security_ctx, decision)
+        
+        assert isinstance(decision, SecurityAllow)
+        assert "__interrupt_auto_confirm__" in stored_state
+        assert any(key.startswith("apikeyguardinterrupt:") for key in stored_state["__interrupt_auto_confirm__"].keys())
 
     @pytest.mark.asyncio
     async def test_both_events_registered(self):

@@ -12,6 +12,7 @@ class InterruptRequest(BaseModel):
     payload_schema: dict = Field(default_factory=dict)
     auto_confirm_key: str = ""
     ui_options: list[dict] | None = None
+    allow_auto_confirm: bool = True
 
 
 class ToolCallInterruptRequest(InterruptRequest):
@@ -37,6 +38,7 @@ class ToolCallInterruptRequest(InterruptRequest):
             message=request.message,
             payload_schema=request.payload_schema,
             auto_confirm_key=request.auto_confirm_key,
+            allow_auto_confirm=request.allow_auto_confirm,
             tool_name=tool_call.name if hasattr(tool_call, 'name') else str(tool_call),
             tool_call_id=tool_call.id if hasattr(tool_call, 'id') else "",
             tool_args=tool_call.arguments if hasattr(tool_call, 'arguments') else None,
