@@ -52,6 +52,7 @@ def clear_search_env(monkeypatch):
     for key in (
         "FREE_SEARCH_DDG_ENABLED",
         "FREE_SEARCH_BING_ENABLED",
+        "WEB_PROXY_URL",
         "FREE_SEARCH_PROXY_URL",
         "NO_PROXY",
         "no_proxy",
@@ -268,6 +269,22 @@ def test_resolve_proxy_applies_configured_proxy(monkeypatch):
 def test_resolve_proxy_bypasses_no_proxy_hosts(monkeypatch):
     monkeypatch.setenv("FREE_SEARCH_PROXY_URL", "http://username:password@proxyhk.huawei.com:8080")
     assert _resolve_proxy("https://service.huawei.com/path") is None
+
+
+def test_resolve_proxy_bypasses_cidr_network(monkeypatch):
+    # NO_PROXY entries may be CIDR networks; IP-literal hosts inside them go direct.
+    monkeypatch.setenv("WEB_PROXY_URL", "http://gw.example.com:8080")
+    monkeypatch.setenv("NO_PROXY", "10.0.0.0/8")
+    assert _resolve_proxy("http://10.1.2.3/api") is None
+    assert _resolve_proxy("http://11.0.0.1/api") == "http://gw.example.com:8080"
+
+
+def test_web_proxy_url_precedence_and_legacy_fallback(monkeypatch):
+    # Legacy FREE_SEARCH_PROXY_URL still works; WEB_PROXY_URL wins when both set.
+    monkeypatch.setenv("FREE_SEARCH_PROXY_URL", "http://legacy.example.com:8080")
+    assert _resolve_proxy("https://example.com") == "http://legacy.example.com:8080"
+    monkeypatch.setenv("WEB_PROXY_URL", "http://new.example.com:8080")
+    assert _resolve_proxy("https://example.com") == "http://new.example.com:8080"
 
 
 # --------------------------------------------------------------------------- #
@@ -603,13 +620,14 @@ class _FakeSession:
         self._resp = resp
         self.last_kwargs: dict | None = None
 
-    def request(self, method, url, *, headers=None, json=None, proxy=None, timeout=None):
+    def request(self, method, url, *, headers=None, json=None, proxy=None, proxy_auth=None, timeout=None):
         self.last_kwargs = {
             "method": method,
             "url": url,
             "headers": headers,
             "json": json,
             "proxy": proxy,
+            "proxy_auth": proxy_auth,
             "timeout": timeout,
         }
         return _FakeReqCM(self._resp)
@@ -642,3 +660,19 @@ async def test_request_transport_contract(monkeypatch):
     assert session.last_kwargs["json"] == {"a": 1}
     assert session.last_kwargs["proxy"] is None
     assert isinstance(session.last_kwargs["timeout"], aiohttp.ClientTimeout)
+
+
+@pytest.mark.asyncio
+async def test_request_extracts_inline_proxy_auth(monkeypatch):
+    # aiohttp drops inline proxy credentials; _request must surface them as an
+    # explicit BasicAuth and strip the userinfo from the proxy URL it passes.
+    import aiohttp
+
+    from openjiuwen.harness.tools.web._http import _request
+
+    monkeypatch.setenv("WEB_PROXY_URL", "http://puser:ppass@gw.example.com:8080")
+    resp = _FakeRespFull(200, {"Content-Type": "text/html"}, [b"ok"], "https://example.com/x")
+    session = _FakeSession(resp)
+    await _request(session, "GET", "https://target.example.com", timeout_seconds=5)
+    assert session.last_kwargs["proxy"] == "http://gw.example.com:8080"
+    assert session.last_kwargs["proxy_auth"] == aiohttp.BasicAuth("puser", "ppass")

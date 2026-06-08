@@ -13,6 +13,7 @@ tool module stay focused on their own concern.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import os
 import re
 from html import unescape
@@ -33,6 +34,7 @@ _FREE_SEARCH_DEBUG_ENV = "FREE_SEARCH_DEBUG"
 _FREE_SEARCH_DEBUG_DIR_ENV = "FREE_SEARCH_DEBUG_DIR"
 _FREE_SEARCH_DDG_ENABLED_ENV = "FREE_SEARCH_DDG_ENABLED"
 _FREE_SEARCH_BING_ENABLED_ENV = "FREE_SEARCH_BING_ENABLED"
+_WEB_PROXY_URL_ENV = "WEB_PROXY_URL"
 _FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"
 _FREE_SEARCH_SSL_VERIFY_ENV = "FREE_SEARCH_SSL_VERIFY"
 _FREE_SEARCH_DDG_URL_ENV = "FREE_SEARCH_DDG_URL"
@@ -204,9 +206,18 @@ def _safe_env_choice(name: str, default: str, allowed: set[str]) -> str:
     return default
 
 
-def _get_free_search_proxy_url() -> str:
-    """Return the configured proxy URL used by web search/fetch tools."""
-    return str(os.environ.get(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
+def _get_web_proxy_url() -> str:
+    """Return the configured proxy URL used by all web tools.
+
+    Prefers ``WEB_PROXY_URL``; falls back to the legacy ``FREE_SEARCH_PROXY_URL``
+    so existing deployments keep working. The proxy applies to search and fetch
+    alike, not just free search.
+    """
+    return str(
+        os.environ.get(_WEB_PROXY_URL_ENV)
+        or os.environ.get(_FREE_SEARCH_PROXY_URL_ENV)
+        or ""
+    ).strip()
 
 
 def _free_search_ssl_verify() -> bool:
@@ -220,9 +231,18 @@ def _no_proxy_entries() -> list[str]:
     return [entry.strip().lower() for entry in configured.split(",") if entry.strip()]
 
 
-def _should_bypass_free_search_proxy(url: str) -> bool:
+def _host_in_cidr(hostname: str, entry: str) -> bool:
+    """Whether an IP-literal hostname falls inside a CIDR network entry."""
+    try:
+        network = ipaddress.ip_network(entry, strict=False)
+        return ipaddress.ip_address(hostname) in network
+    except ValueError:
+        return False
+
+
+def _should_bypass_proxy(url: str) -> bool:
     """Whether the configured proxy should be bypassed for this URL."""
-    proxy_url = _get_free_search_proxy_url()
+    proxy_url = _get_web_proxy_url()
     if not proxy_url:
         return True
     try:
@@ -234,6 +254,8 @@ def _should_bypass_free_search_proxy(url: str) -> bool:
     for entry in _no_proxy_entries():
         if entry == "*":
             return True
+        if "/" in entry and _host_in_cidr(hostname, entry):
+            return True
         if entry.startswith(".") and (hostname == entry[1:] or hostname.endswith(entry)):
             return True
         if hostname == entry or hostname.endswith(f".{entry}"):
@@ -243,8 +265,8 @@ def _should_bypass_free_search_proxy(url: str) -> bool:
 
 def _resolve_proxy(url: str) -> str | None:
     """Resolve the proxy URL to use for a request, or None to go direct."""
-    proxy_url = _get_free_search_proxy_url()
-    if not proxy_url or _should_bypass_free_search_proxy(url):
+    proxy_url = _get_web_proxy_url()
+    if not proxy_url or _should_bypass_proxy(url):
         return None
     return proxy_url
 

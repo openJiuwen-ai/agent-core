@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -69,6 +70,30 @@ async def _read_capped(resp: aiohttp.ClientResponse, max_bytes: int | None) -> t
     return bytes(buf), truncated
 
 
+def _split_proxy_credentials(proxy: str) -> tuple[str, aiohttp.BasicAuth | None]:
+    """Split inline credentials out of a proxy URL into an explicit BasicAuth.
+
+    aiohttp ignores ``user:pass@`` embedded in a proxy URL, so authenticated
+    proxies need the credentials passed separately. Returns the proxy URL with
+    its userinfo removed plus a BasicAuth (or None when no credentials present).
+
+    Args:
+        proxy: The proxy URL, optionally carrying ``user:pass@`` userinfo.
+
+    Returns:
+        A tuple of (proxy URL without userinfo, BasicAuth or None).
+    """
+    parts = urlsplit(proxy)
+    if not parts.username:
+        return proxy, None
+    auth = aiohttp.BasicAuth(unquote(parts.username), unquote(parts.password or ""))
+    host = parts.hostname or ""
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+    clean = urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
+    return clean, auth
+
+
 async def _do_request(
     session: aiohttp.ClientSession,
     method: str,
@@ -77,6 +102,7 @@ async def _do_request(
     headers: dict[str, str] | None,
     json_body: dict[str, Any] | None,
     proxy: str | None,
+    proxy_auth: aiohttp.BasicAuth | None,
     timeout: aiohttp.ClientTimeout,
     max_bytes: int | None,
 ) -> tuple[int, dict[str, str], bytes, str, bool]:
@@ -87,6 +113,7 @@ async def _do_request(
         headers=headers,
         json=json_body,
         proxy=proxy,
+        proxy_auth=proxy_auth,
         timeout=timeout,
     ) as resp:
         body, truncated = await _read_capped(resp, max_bytes)
@@ -120,6 +147,11 @@ async def _request(
     method_up = method.upper()
     proxy = _resolve_proxy(url)
     explicit_proxy = proxy is not None
+    proxy_auth: aiohttp.BasicAuth | None = None
+    if proxy is not None:
+        # aiohttp ignores inline credentials in the proxy URL; carry them in an
+        # explicit BasicAuth so authenticated proxies (corporate gateways) work.
+        proxy, proxy_auth = _split_proxy_credentials(proxy)
     timeout = aiohttp.ClientTimeout(
         total=timeout_seconds,
         sock_connect=min(timeout_seconds, _CONNECT_TIMEOUT_CAP),
@@ -133,6 +165,7 @@ async def _request(
             headers=headers,
             json_body=json_body,
             proxy=proxy,
+            proxy_auth=proxy_auth,
             timeout=timeout,
             max_bytes=max_bytes,
         )
@@ -147,6 +180,7 @@ async def _request(
                 headers=headers,
                 json_body=json_body,
                 proxy=None,
+                proxy_auth=None,
                 timeout=timeout,
                 max_bytes=max_bytes,
             )
