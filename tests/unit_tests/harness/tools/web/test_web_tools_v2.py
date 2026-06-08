@@ -472,6 +472,62 @@ async def test_fetch_byte_cap_truncation_surfaced(monkeypatch):
     assert "truncated: response exceeded byte limit" in result
 
 
+@pytest.mark.asyncio
+async def test_fetch_byte_cap_independent_of_max_chars(monkeypatch):
+    # A small max_chars must NOT shrink the wire-read byte ceiling: max_chars
+    # caps the extracted output text, while byte_cap only guards against OOM.
+    # Coupling them would truncate the input before main-text extraction runs.
+    recorder = _patch_request(
+        monkeypatch,
+        lambda method, url, body: _resp(
+            200, b"<html><body><p>body</p></body></html>", headers={"Content-Type": "text/html"}
+        ),
+    )
+    tool = WebFetchWebpageTool(language="cn")
+    await tool.invoke({"url": "https://example.com", "max_chars": 500})
+    assert recorder.calls[0]["max_bytes"] == 8_000_000
+
+
+@pytest.mark.asyncio
+async def test_fetch_byte_cap_env_override(monkeypatch):
+    # The hard ceiling stays configurable via the byte-cap env var.
+    monkeypatch.setenv("MCP_FETCH_WEBPAGE_MAX_BYTES", "1234567")
+    recorder = _patch_request(
+        monkeypatch,
+        lambda method, url, body: _resp(
+            200, b"<html><body><p>body</p></body></html>", headers={"Content-Type": "text/html"}
+        ),
+    )
+    tool = WebFetchWebpageTool(language="cn")
+    await tool.invoke({"url": "https://example.com"})
+    assert recorder.calls[0]["max_bytes"] == 1234567
+
+
+@pytest.mark.asyncio
+async def test_fetch_http_error_uses_fetch_scoped_message(monkeypatch):
+    # A 5xx (not 401/403/429) must surface a fetch-scoped error, never the
+    # web-search-engine wording borrowed from the search path.
+    _patch_request(
+        monkeypatch,
+        lambda method, url, body: _resp(500, b"upstream boom", headers={"Content-Type": "text/plain"}),
+    )
+    tool = WebFetchWebpageTool(language="cn")
+    result = await tool.invoke({"url": "https://example.com/x"})
+    assert "[ERROR]: failed to fetch webpage:" in result
+    assert "web page fetch failed" in result
+    assert "search engine" not in result
+
+
+def test_raise_fetch_http_error_code_and_threshold():
+    from openjiuwen.harness.tools.web.fetch_webpage import _raise_fetch_http_error
+
+    with pytest.raises(BaseError) as exc_info:
+        _raise_fetch_http_error("https://example.com/x", 500, b"boom")
+    assert exc_info.value.status == StatusCode.TOOL_WEB_FETCH_EXECUTION_ERROR
+    # status < 400 must not raise
+    _raise_fetch_http_error("https://example.com/x", 200, b"")
+
+
 def test_decode_response_text_prefers_non_mojibake():
     raw = "【杭州24小时天气查询】".encode("utf-8")
     decoded = _decode_response_text(raw, content_type="text/html")

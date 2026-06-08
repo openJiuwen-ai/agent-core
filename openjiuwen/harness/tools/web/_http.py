@@ -152,6 +152,32 @@ async def _request(
             )
 
 
+def _format_http_error_reason(status: int, body: bytes) -> str:
+    """Format an HTTP error reason that includes the response body.
+
+    Args:
+        status: HTTP status code.
+        body: Raw response body bytes.
+
+    Returns:
+        A reason string like ``"HTTP 404; response body: ..."``, or ``""`` when
+        ``status`` is below 400 (i.e. not an error). Centralizing this lets the
+        search path and the fetch path share one body-rendering rule while
+        raising their own scope-appropriate status codes.
+    """
+    if status < 400:
+        return ""
+    text = ""
+    try:
+        text = json.dumps(json.loads(body), ensure_ascii=False)
+    except (ValueError, TypeError):
+        text = (body.decode("utf-8", errors="replace") or "").strip()
+    reason = f"HTTP {status}"
+    if text:
+        reason = f"{reason}; response body: {text[:1000]}"
+    return reason
+
+
 def _raise_for_status_with_body(status: int, body: bytes, *, engine: str) -> None:
     """Raise a web-search engine error that includes the response body.
 
@@ -163,14 +189,7 @@ def _raise_for_status_with_body(status: int, body: bytes, *, engine: str) -> Non
     Raises:
         BaseError: ``TOOL_WEB_SEARCH_ENGINE_ERROR`` when status is >= 400.
     """
-    if status < 400:
+    reason = _format_http_error_reason(status, body)
+    if not reason:
         return
-    text = ""
-    try:
-        text = json.dumps(json.loads(body), ensure_ascii=False)
-    except (ValueError, TypeError):
-        text = (body.decode("utf-8", errors="replace") or "").strip()
-    reason = f"HTTP {status}"
-    if text:
-        reason = f"{reason}; response body: {text[:1000]}"
     raise build_error(StatusCode.TOOL_WEB_SEARCH_ENGINE_ERROR, engine=engine, reason=reason)

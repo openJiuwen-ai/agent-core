@@ -36,6 +36,26 @@ from openjiuwen.harness.tools.web._common import (
 from openjiuwen.harness.tools.web._decode import _decode_response_text
 
 
+def _raise_fetch_http_error(url: str, status: int, body: bytes) -> None:
+    """Raise a webpage-fetch error that includes the response body.
+
+    Scoped to webpage fetch (distinct from the web-search engine error) so the
+    surfaced message reads coherently instead of borrowing search semantics.
+
+    Args:
+        url: The page URL being fetched (surfaced in the error message).
+        status: HTTP status code.
+        body: Raw response body bytes.
+
+    Raises:
+        BaseError: ``TOOL_WEB_FETCH_EXECUTION_ERROR`` when status is >= 400.
+    """
+    reason = _http._format_http_error_reason(status, body)
+    if not reason:
+        return
+    raise build_error(StatusCode.TOOL_WEB_FETCH_EXECUTION_ERROR, url=url, reason=reason)
+
+
 class WebFetchWebpageTool(Tool):
     """Fetch webpage text content from URL. Returns status/title/plain text content."""
 
@@ -43,20 +63,21 @@ class WebFetchWebpageTool(Tool):
         super().__init__(build_tool_card("fetch_webpage", "WebFetchWebpageTool", language, agent_id=agent_id))
 
     @staticmethod
-    def _byte_cap(max_chars: int) -> int:
-        """Derive a response-body byte ceiling from the char cap.
+    def _byte_cap() -> int:
+        """Return the hard response-body byte ceiling (OOM guard).
 
-        The ``* 4`` covers UTF-8 multibyte and HTML markup overhead relative to
-        the final extracted characters; both are bounded by a hard ceiling so an
-        unbounded page cannot exhaust memory.
+        This bounds only the raw bytes read off the wire so an unbounded page
+        cannot exhaust memory. It is deliberately independent of ``max_chars``:
+        ``max_chars`` caps the *extracted* output text, which is produced after
+        main-text extraction strips script/style/markup. Coupling the byte
+        ceiling to ``max_chars`` would truncate the input before extraction
+        runs, dropping real body content on script/markup-heavy pages where the
+        article sits past the early bytes.
         """
-        hard = _safe_int(
+        return _safe_int(
             os.environ.get(_FETCH_WEBPAGE_MAX_BYTES_ENV, "") or _FETCH_WEBPAGE_DEFAULT_MAX_BYTES,
             _FETCH_WEBPAGE_DEFAULT_MAX_BYTES,
         )
-        if max_chars <= 0:
-            return hard
-        return min(max_chars * 4, hard)
 
     @staticmethod
     async def _fetch_via_jina_reader(
@@ -75,7 +96,7 @@ class WebFetchWebpageTool(Tool):
             timeout_seconds=timeout_seconds,
             max_bytes=byte_cap,
         )
-        _http._raise_for_status_with_body(status, body, engine="fetch_webpage")
+        _raise_fetch_http_error(url, status, body)
         content = _decode_response_text(body, content_type=headers.get("Content-Type", "")).strip()
         return {
             "url": url,
@@ -175,7 +196,7 @@ class WebFetchWebpageTool(Tool):
         )
         if status in {401, 403, 429}:
             return await WebFetchWebpageTool._fetch_via_jina_reader(session, url, timeout_seconds, byte_cap)
-        _http._raise_for_status_with_body(status, body, engine="fetch_webpage")
+        _raise_fetch_http_error(url, status, body)
 
         text = _decode_response_text(body, content_type=headers.get("Content-Type", ""))
         content_type = headers.get("Content-Type", "")
@@ -233,7 +254,7 @@ class WebFetchWebpageTool(Tool):
         if max_chars != 0:
             max_chars = max(500, min(max_chars, max_chars_cap))
         timeout_seconds = max(5, min(timeout_seconds, timeout_cap))
-        byte_cap = WebFetchWebpageTool._byte_cap(max_chars)
+        byte_cap = WebFetchWebpageTool._byte_cap()
 
         try:
             async with _http._new_session() as session:
