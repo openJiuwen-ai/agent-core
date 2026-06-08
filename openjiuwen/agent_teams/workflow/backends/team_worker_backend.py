@@ -32,10 +32,13 @@ override it without standing up a real LLM.
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, Callable, Sequence
 
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
+from openjiuwen.agent_teams.paths import team_home, independent_member_workspace
 from openjiuwen.agent_teams.tools.locales import make_translator
 from openjiuwen.agent_teams.workflow.backends.structured_output_tool import StructuredOutputTool
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
@@ -43,18 +46,6 @@ from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.core.common.logging import team_logger
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
-
-_SYS_PROMPT_SCHEMA = (
-    "You are a single-shot swarmflow worker. Read the task in the user message, "
-    "do the work, then call the `structured_output` tool EXACTLY ONCE with the "
-    "structured result conforming to its input schema. Do NOT write the result "
-    "as plain text — it is only captured through that tool call. After calling "
-    "structured_output, stop."
-)
-_SYS_PROMPT_FREE = (
-    "You are a single-shot swarmflow worker. Read the task in the user message, "
-    "do the work, and return the answer as your final message."
-)
 
 
 class TeamWorkerBackend(AgentBackend):
@@ -117,7 +108,7 @@ class TeamWorkerBackend(AgentBackend):
                 # (``structured_output_{worker_owner_id}``), so concurrent workers
                 # never collide and no per-call id is needed here.
                 submit_tool = StructuredOutputTool(schema_json, self._t)
-                await self._execute_worker(
+                text = await self._execute_worker(
                     prompt,
                     [submit_tool],
                     member_name=member_name,
@@ -129,6 +120,7 @@ class TeamWorkerBackend(AgentBackend):
                         f"worker '{member_name}' did not submit a structured result via structured_output"
                     )
                 return AgentResult(
+                    text=text,
                     structured=submit_tool.captured,
                     tokens=self._estimate_tokens(prompt, submit_tool.captured),
                 )
@@ -197,6 +189,8 @@ class TeamWorkerBackend(AgentBackend):
             )
 
         try:
+            worker_workspace = self._setup_worker_workspace(member_name)
+
             worker_spec = self._worker_base_spec.model_copy(
                 update={
                     "card": AgentCard(
@@ -206,11 +200,17 @@ class TeamWorkerBackend(AgentBackend):
                     ),
                     # Per-call model config when resolved, else inherit teammate's.
                     "model": model or self._worker_base_spec.model,
-                    "system_prompt": _SYS_PROMPT_SCHEMA if has_schema else _SYS_PROMPT_FREE,
+                    "system_prompt": (
+                        self._t("swarmflow_worker", key="schema")
+                        if has_schema
+                        else self._t("swarmflow_worker", key="free")
+                    ),
                     # Append the per-call structured_output instance; the base spec
                     # already carries teammate tools/skills. enable_task_loop /
                     # enable_task_planning are inherited (DeepAgent todo planning kept).
                     "tools": list(self._worker_base_spec.tools or []) + list(tools),
+                    # Worker gets its own workspace, not the teammate's.
+                    "workspace": worker_workspace,
                 }
             )
             worker_build_context = None
@@ -233,7 +233,13 @@ class TeamWorkerBackend(AgentBackend):
             raise BackendError(f"worker harness build failed for {member_name}: {e}") from e
 
         try:
-            result = await harness.run_once(prompt)
+            # When schema is required, append a reminder to the user prompt so
+            # the LLM is prompted three times (system / tool desc / user) to
+            # call structured_output.
+            user_prompt = prompt
+            if has_schema:
+                user_prompt = f"{prompt}\n\n{self._t('structured_output', key='reminder')}"
+            result = await harness.run_once(user_prompt)
         except Exception as e:
             team_logger.exception("worker harness run_once failed for %s", member_name)
             raise BackendError(f"worker harness run_once failed for {member_name}: {e}") from e
@@ -249,6 +255,63 @@ class TeamWorkerBackend(AgentBackend):
         if isinstance(result, dict):
             return str(result.get("output", ""))
         return str(result)
+
+    # ------------------------------------------------------------------
+    # Worker workspace setup
+    # ------------------------------------------------------------------
+
+    def _setup_worker_workspace(self, member_name: str) -> WorkspaceSpec:
+        """Compute, link, register, and mount the worker's independent workspace.
+
+        Mirrors the layout used by ``agent_configurator`` for stable_base
+        members: each worker gets its own workspace at
+        ``{agent_teams_home}/{team_name}/workspaces/{member}_workspace/``.
+        Also registers the path for team cleanup and mounts the team shared
+        workspace into the worker's workspace tree (``.team/{team_name}/``).
+
+        Returns:
+            A ``WorkspaceSpec`` with the worker's resolved root_path.
+        """
+        # Compute worker's independent workspace path.
+        ws_root = str(team_home(self._team_name) / "workspaces" / f"{member_name}_workspace")
+
+        if self._worker_base_spec.workspace is not None:
+            # Inherit language / stable_base from the base spec, only override root_path.
+            worker_workspace = self._worker_base_spec.workspace.model_copy(
+                update={"root_path": ws_root, "stable_base": True}
+            )
+        else:
+            # Base spec has no workspace — create a fresh one for this worker.
+            worker_workspace = WorkspaceSpec(
+                root_path=ws_root,
+                language=self._language,
+                stable_base=True,
+            )
+
+        # Symlink the independent member workspace (if it exists) into the
+        # team workspaces tree — same logic as agent_configurator.
+        base_dir = team_home(self._team_name) / "workspaces"
+        independent_ws = independent_member_workspace(member_name)
+        if independent_ws.is_dir() and not (base_dir / f"{member_name}_workspace").exists():
+            base_dir.mkdir(parents=True, exist_ok=True)
+            os.symlink(
+                str(independent_ws),
+                str(base_dir / f"{member_name}_workspace"),
+                target_is_directory=True,
+            )
+
+        # Register workspace for team cleanup — mirrors agent_configurator.
+        if self._team_backend is not None:
+            self._team_backend.register_cleanup_path(ws_root)
+
+        # Mount team workspace into worker workspace so it can access shared
+        # files via .team/{team_name}/ — mirrors agent_configurator.
+        from openjiuwen.agent_teams.rails.team_context import get_workspace_manager
+        workspace_manager = get_workspace_manager(self._build_context)
+        if workspace_manager is not None:
+            workspace_manager.mount_into_workspace(ws_root)
+
+        return worker_workspace
 
     # ------------------------------------------------------------------
     # Worker roster identity (best-effort)

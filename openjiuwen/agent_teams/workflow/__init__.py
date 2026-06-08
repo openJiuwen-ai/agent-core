@@ -31,7 +31,7 @@ from openjiuwen.agent_teams.workflow.backends import (
     StructuredOutputTool,
     TeamWorkerBackend,
 )
-from openjiuwen.agent_teams.workflow.engine import WorkflowProgressEvent, run_workflow
+from openjiuwen.agent_teams.workflow.engine import PhasePlan, WorkflowProgressEvent, run_workflow
 from openjiuwen.agent_teams.workflow.observer import WorkflowObserver
 from openjiuwen.agent_teams.workflow.runner import preprocess_swarmflow, run_swarmflow
 from openjiuwen.agent_teams.workflow.schema import (
@@ -46,6 +46,8 @@ __all__ = [
     "run_swarmflow",
     "preprocess_swarmflow",
     "run_workflow",
+    # types
+    "PhasePlan",
     # backends
     "AgentBackend",
     "AgentResult",

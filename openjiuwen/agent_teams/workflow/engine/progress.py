@@ -20,6 +20,20 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 
+@dataclass(frozen=True, slots=True)
+class PhasePlan:
+    """One phase entry from the script's META ``phases`` list.
+
+    The engine normalizes raw META phases (plain strings or dicts with
+    ``title`` / ``description``) into this uniform structure before emitting
+    ``WORKFLOW_STARTED``. Downstream consumers no longer need ``isinstance``
+    checks.
+    """
+
+    title: str
+    description: str | None = None
+
+
 class ProgressKind:
     """The ``kind`` discriminator on :class:`WorkflowProgressEvent`."""
 
@@ -61,7 +75,7 @@ class WorkflowProgressEvent:
     model: str | None = None
     outcome: str | None = None
     message: str | None = None
-    phases: list[Any] | None = None
+    phases: list[PhasePlan] | None = None
 
 
 #: Signature of ``Runtime.progress_sink``. Default is a no-op so the engine has

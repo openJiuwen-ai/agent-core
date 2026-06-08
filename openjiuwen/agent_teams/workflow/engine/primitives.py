@@ -39,6 +39,7 @@ import asyncio
 import inspect
 import json
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence, TypeVar, overload
 
 from .errors import WorkflowError
@@ -57,7 +58,23 @@ _rt: ContextVar = ContextVar("wf_runtime")
 _path: ContextVar[tuple] = ContextVar("wf_path", default=())
 _seq: ContextVar[dict | None] = ContextVar("wf_seq", default=None)
 
-_PREVIEW_LIMIT = 280
+
+@dataclass
+class _BackendCallResult:
+    """Result of a backend call attempt cycle — avoids unwieldy multi-tuple returns.
+
+    Attributes:
+        result:        The final, coerced result (str, pydantic model, dict, or None).
+        succeeded:     True if the backend call + coercion succeeded.
+        error_detail:  Short error description when ``succeeded`` is False.
+        raw_text:      The LLM's original text reply before coercion — used as
+                       ``outcome`` in ``AGENT_COMPLETED`` progress events.
+    """
+
+    result: Any = None
+    succeeded: bool = False
+    error_detail: str | None = None
+    raw_text: str | None = None
 
 
 def _task_id():
@@ -117,17 +134,26 @@ def _next_ordinal() -> int:
 
 
 def _preview(value: Any) -> str | None:
-    """A short, JSON-able preview of an agent result for progress events."""
+    """A text preview of an agent result for progress events.
+
+    For strings: returns the full text. For structured results (dicts,
+    pydantic models): renders a fixed preamble + complete JSON. No
+    truncation — the full data is provided to downstream consumers.
+    """
     if value is None:
         return None
     if isinstance(value, str):
-        s = value
-    else:
-        try:
-            s = json.dumps(value, ensure_ascii=False, default=str)
-        except Exception:
-            s = str(value)
-    return s if len(s) <= _PREVIEW_LIMIT else s[:_PREVIEW_LIMIT] + "…"
+        return value
+    # Structured result: preamble + complete JSON
+    preamble = "structured result: "
+    try:
+        if hasattr(value, "model_dump") and callable(value.model_dump):
+            body = json.dumps(value.model_dump(mode="json"), ensure_ascii=False, default=str)
+        else:
+            body = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        body = str(value)
+    return preamble + body
 
 
 def _emit_agent_started(rt, opts: dict, prompt: str) -> None:
@@ -142,13 +168,19 @@ def _emit_agent_started(rt, opts: dict, prompt: str) -> None:
     )
 
 
-def _emit_agent_completed(rt, opts: dict, result: Any) -> None:
+def _emit_agent_completed(rt, opts: dict, outcome_text: str | None) -> None:
+    """Emit an AGENT_COMPLETED progress event.
+
+    ``outcome_text`` is a human-readable summary of the agent's result —
+    the LLM's raw text reply (preferred), or a preamble + complete JSON
+    fallback when raw text is unavailable and the result is structured.
+    """
     rt.progress_sink(
         WorkflowProgressEvent(
             kind=ProgressKind.AGENT_COMPLETED,
             phase=opts.get("phase") or rt.current_phase,
             label=opts.get("label"),
-            outcome=_preview(result),
+            outcome=_preview(outcome_text),
         )
     )
 
@@ -227,7 +259,10 @@ async def agent(
     if cached is not None:  # resume hit — no semaphore, no backend
         rt.journal.use(ks, cached)
         result = _rehydrate(cached, model_cls)
-        _emit_agent_completed(rt, opts, result)
+        # Prefer stored raw_text; if absent (old journal), fall back to
+        # preamble + structured data via _preview()
+        outcome_text = cached.get("raw_text") or _preview(result)
+        _emit_agent_completed(rt, opts, outcome_text)
         return result
 
     if rt.spawn_count >= rt.spawn_limit:
@@ -240,26 +275,39 @@ async def agent(
 
     async with rt.sem:
         rt.spawn_count += 1
-        result, call_succeeded, error_detail = await _call_backend(
+        call_result = await _call_backend(
             rt, prompt, opts, json_schema, model_cls
         )
 
-    if not call_succeeded:
+    if not call_result.succeeded:
         attempts = rt.retries + 1
         label = opts.get("label") or "agent"
         msg = f"agent {label!r} failed after {attempts} attempts"
-        if error_detail:
-            msg = f"{msg}: {error_detail}"
+        if call_result.error_detail:
+            msg = f"{msg}: {call_result.error_detail}"
         _emit_agent_failed(rt, opts, msg)
         return None
 
-    rt.journal.use(ks, _make_record(ks, sig, opts, result, model_cls))
-    _emit_agent_completed(rt, opts, result)
-    return result
+    rt.journal.use(
+        ks,
+        _make_record(
+            _JournalRecordInput(
+                key=ks,
+                sig=sig,
+                opts=opts,
+                result=call_result.result,
+                model=model_cls,
+                raw_text=call_result.raw_text,
+            )
+        ),
+    )
+    outcome_text = call_result.raw_text or _preview(call_result.result)
+    _emit_agent_completed(rt, opts, outcome_text)
+    return call_result.result
 
 
-async def _call_backend(rt, prompt, opts, json_schema, model) -> tuple[Any, bool, str | None]:
-    """Call the backend with retries. Returns ``(result, succeeded, error_detail)``."""
+async def _call_backend(rt, prompt, opts, json_schema, model) -> _BackendCallResult:
+    """Call the backend with retries. Returns a ``_BackendCallResult``."""
     timeout = opts.get("timeout")
     attempts = rt.retries + 1
     last_err: Exception | None = None
@@ -281,10 +329,11 @@ async def _call_backend(rt, prompt, opts, json_schema, model) -> tuple[Any, bool
         if res.skipped:
             detail = "backend declined (skipped)"
             rt.log_sink(f"[wf] agent {label!r} skipped")
-            return None, False, detail
+            return _BackendCallResult(result=None, succeeded=False, error_detail=detail)
         if json_schema is not None:
             try:
-                return coerce(res.structured, json_schema, model), True, None
+                coerced = coerce(res.structured, json_schema, model)
+                return _BackendCallResult(result=coerced, succeeded=True, raw_text=res.text)
             except Exception as e:  # validation failure -> retry
                 last_err = e
                 rt.log_sink(
@@ -292,10 +341,10 @@ async def _call_backend(rt, prompt, opts, json_schema, model) -> tuple[Any, bool
                     f"validation failed: {str(e)}"
                 )
                 continue
-        return res.text, True, None
+        return _BackendCallResult(result=res.text, succeeded=True, raw_text=res.text)
     detail = str(last_err) if last_err else "unknown error"
     rt.log_sink(f"[wf] agent {label!r} failed after {attempts} attempts: {detail}")
-    return None, False, detail
+    return _BackendCallResult(result=None, succeeded=False, error_detail=detail)
 
 
 def _rehydrate(rec: dict, model) -> Any:
@@ -308,22 +357,33 @@ def _rehydrate(rec: dict, model) -> Any:
     return val
 
 
-def _make_record(ks: str, sig: str, opts: dict, result: Any, model) -> dict:
-    if result is None:
+@dataclass
+class _JournalRecordInput:
+    key: str
+    sig: str
+    opts: dict
+    result: Any
+    model: Any
+    raw_text: str | None = None
+
+
+def _make_record(spec: _JournalRecordInput) -> dict:
+    if spec.result is None:
         kind, payload = "null", None
-    elif model is not None and isinstance(result, model):
-        kind, payload = "model", result.model_dump(mode="json")
-    elif isinstance(result, str):
-        kind, payload = "str", result
+    elif spec.model is not None and isinstance(spec.result, spec.model):
+        kind, payload = "model", spec.result.model_dump(mode="json")
+    elif isinstance(spec.result, str):
+        kind, payload = "str", spec.result
     else:
-        kind, payload = "dict", result  # dict / list
+        kind, payload = "dict", spec.result  # dict / list
     return {
-        "key": ks,
-        "sig": sig,
-        "label": opts.get("label"),
-        "phase": opts.get("phase"),
+        "key": spec.key,
+        "sig": spec.sig,
+        "label": spec.opts.get("label"),
+        "phase": spec.opts.get("phase"),
         "kind": kind,
         "result": payload,
+        "raw_text": spec.raw_text,
     }
 
 

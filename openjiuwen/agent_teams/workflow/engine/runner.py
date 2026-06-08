@@ -22,10 +22,32 @@ from .backends.base import AgentBackend
 from .journal import Journal
 from .loader import load_workflow_source
 from .primitives import _fresh_holder, _invoke_loaded, _path, _rt, _seq
-from .progress import ProgressKind, ProgressSink, WorkflowProgressEvent, noop_progress_sink
+from .progress import PhasePlan, ProgressKind, ProgressSink, WorkflowProgressEvent, noop_progress_sink
 from .provider import ENGINE_PROVIDER
 from .runtime import Runtime
 from .seam import reset_provider, use_provider
+
+
+def _normalize_meta_phases(raw: list[Any] | None) -> list[PhasePlan] | None:
+    """Normalize raw META ``phases`` (strings / dicts) to ``list[PhasePlan]``.
+
+    Accepts the shapes that ``ast.literal_eval`` produces from a META dict:
+    plain strings (``"Search"``) or dicts with ``title`` / ``name`` and
+    optional ``description``.
+    """
+    if raw is None:
+        return None
+    result: list[PhasePlan] = []
+    for item in raw:
+        if isinstance(item, str):
+            result.append(PhasePlan(title=item))
+        elif isinstance(item, dict):
+            title = str(item.get("title") or "?")
+            desc = item.get("description")
+            result.append(PhasePlan(title=title, description=str(desc) if desc is not None else None))
+        else:
+            result.append(PhasePlan(title=str(item)))
+    return result
 
 
 def _silent(_message: str) -> None:
@@ -41,7 +63,8 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
     tok_p = _path.set(())
     tok_s = _seq.set(_fresh_holder())
     name = loaded.meta.get("name") if isinstance(loaded.meta, dict) else None
-    phases = loaded.meta.get("phases") if isinstance(loaded.meta, dict) else None
+    raw_phases = loaded.meta.get("phases") if isinstance(loaded.meta, dict) else None
+    phases = _normalize_meta_phases(raw_phases)
     try:
         rt.progress_sink(WorkflowProgressEvent(kind=ProgressKind.WORKFLOW_STARTED, message=name, phases=phases))
         result = await _invoke_loaded(loaded, rt.args)

@@ -209,4 +209,19 @@ STRINGS: dict[str, str] = {
     # structured_output._desc lives in descs/cn/structured_output.md (无固定参数，schema 动态)
     "swarmflow.script_path": "swarmflow 脚本文件路径（一个含 META 与 async def run(args) 的 Python 模块）。",
     "swarmflow.args": "传给脚本 run(args) 的可选参数值（如研究问题、目标路径）。",
+    "swarmflow_worker.schema": (
+        "你是一名单次执行的 swarmflow 工作节点。阅读用户消息中的任务，完成工作，"
+        "然后**必须**调用 `structured_output` 工具**恰好一次**，传入符合其输入 schema "
+        "的结构化结果。重要提示：`structured_output` 是**唯一**的结果提交方式——如果你"
+        "不调用它，任务被视为失败，你的文本输出将被丢弃。禁止将结果作为纯文本输出"
+        "——结果只能通过工具调用被捕获。调用 `structured_output` 后立即停止。"
+    ),
+    "swarmflow_worker.free": (
+        "你是一名单次执行的 swarmflow 工作节点。阅读用户消息中的任务，完成工作，"
+        "并将答案作为你的最终消息返回。"
+    ),
+    "structured_output.reminder": (
+        "【重要提醒】你必须通过调用 `structured_output` 工具来提交结果，不要把结果"
+        "写在文本中。这是唯一的结果提交方式，不调用该工具=任务失败。"
+    ),
 }

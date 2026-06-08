@@ -20,6 +20,7 @@ from openjiuwen.agent_teams.schema.events import (
     TeamEvent,
     WorkflowProgressTeamEvent,
 )
+from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan
 from openjiuwen.agent_teams.prompts.sections import TeamSectionName, build_team_static_sections
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.workflow.tool_swarmflow import SwarmflowTool
@@ -74,7 +75,7 @@ def _handler(role: TeamRole) -> tuple[WorkflowHandler, _FakeRound]:
 
 def _event(kind: str, *, phase: str | None = None, name: str | None = None,
            prompt: str | None = None, model: str | None = None,
-           phases: list[Any] | None = None, label: str | None = None,
+           phases: list[PhasePlan] | None = None, label: str | None = None,
            outcome: str | None = None, text: str | None = None) -> EventMessage:
     return EventMessage.from_event(
         WorkflowProgressTeamEvent(
@@ -174,23 +175,31 @@ def test_swarmflow_section_only_for_enabled_leader():
 
 def test_workflow_started_payload_carries_phases():
     """The workflow_started event payload includes the META phases plan."""
-    msg = _event("workflow_started", name="research", phases=["Search", "Analyze", "Report"])
+    msg = _event("workflow_started", name="research",
+                 phases=[PhasePlan(title="Search"), PhasePlan(title="Analyze"), PhasePlan(title="Report")])
     payload = msg.get_payload()
     assert isinstance(payload, WorkflowProgressTeamEvent)
-    assert payload.phases == ["Search", "Analyze", "Report"]
+    assert len(payload.phases) == 3
+    assert payload.phases[0].title == "Search"
+    assert payload.phases[1].title == "Analyze"
+    assert payload.phases[2].title == "Report"
 
 
 def test_workflow_started_payload_accepts_meta_dict_phases():
-    """META phases may be dicts with title/description — passed through for downstream normalization."""
+    """META phases are normalized to PhasePlan with title and description."""
     meta_phases = [
-        {"title": "发牌", "description": "分配身份"},
-        {"title": "游戏进行"},
-        "结算",
+        PhasePlan(title="发牌", description="分配身份"),
+        PhasePlan(title="游戏进行"),
+        PhasePlan(title="结算"),
     ]
     msg = _event("workflow_started", name="werewolf", phases=meta_phases)
     payload = msg.get_payload()
     assert isinstance(payload, WorkflowProgressTeamEvent)
-    assert payload.phases == meta_phases
+    assert len(payload.phases) == 3
+    assert payload.phases[0].title == "发牌"
+    assert payload.phases[0].description == "分配身份"
+    assert payload.phases[1].title == "游戏进行"
+    assert payload.phases[1].description is None
 
 
 def test_agent_started_payload_carries_prompt_and_model():

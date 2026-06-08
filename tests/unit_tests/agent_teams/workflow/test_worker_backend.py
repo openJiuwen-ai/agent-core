@@ -186,7 +186,7 @@ def test_execute_worker_derives_teammate_spec_without_team_tools(tmp_path, monke
     assert spec.enable_task_loop is True  # todo planning / task loop preserved
     assert spec.enable_task_planning is True
     assert spec.card.name == "wf-w-0"
-    assert "single-shot swarmflow worker" in (spec.system_prompt or "")
+    assert "swarmflow" in (spec.system_prompt or "")
     assert spec.tools == []  # no team tools
 
     # Schema path: the structured_output tool instance is appended to spec.tools.

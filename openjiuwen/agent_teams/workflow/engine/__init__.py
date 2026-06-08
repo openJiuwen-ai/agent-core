@@ -35,6 +35,7 @@ from .primitives import (
     workflow,
 )
 from .progress import (
+    PhasePlan,
     ProgressKind,
     ProgressSink,
     WorkflowProgressEvent,
@@ -68,6 +69,7 @@ __all__ = [
     "MockBackend",
     "SKIP",
     # progress observability
+    "PhasePlan",
     "ProgressKind",
     "ProgressSink",
     "WorkflowProgressEvent",

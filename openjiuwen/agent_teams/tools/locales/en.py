@@ -308,4 +308,22 @@ STRINGS: dict[str, str] = {
     # structured_output._desc lives in descs/en/structured_output.md (dynamic schema, no fixed params)
     "swarmflow.script_path": "Path to the swarmflow script file (a Python module with META and async def run(args)).",
     "swarmflow.args": "Optional argument value passed to the script's run(args) (e.g. a question, a target path).",
+    "swarmflow_worker.schema": (
+        "You are a single-shot swarmflow worker. Read the task in the user message, "
+        "do the work, then call the `structured_output` tool EXACTLY ONCE with the "
+        "structured result conforming to its input schema. IMPORTANT: `structured_output` "
+        "is the ONLY way to submit your result — if you do NOT call it, the task is "
+        "considered FAILED and your text output is discarded. Do NOT write the result "
+        "as plain text — it is only captured through the tool call. After calling "
+        "`structured_output`, stop immediately."
+    ),
+    "swarmflow_worker.free": (
+        "You are a single-shot swarmflow worker. Read the task in the user message, "
+        "do the work, and return the answer as your final message."
+    ),
+    "structured_output.reminder": (
+        "[IMPORTANT] You MUST submit your result by calling the `structured_output` tool. "
+        "Do NOT write the result in your text. This is the ONLY way to submit — "
+        "not calling the tool = task failure."
+    ),
 }
