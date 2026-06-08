@@ -17,7 +17,12 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
-from openjiuwen.agent_teams.workflow.engine import MockBackend, run_workflow
+from openjiuwen.agent_teams.workflow.engine import (
+    MockBackend,
+    ProgressKind,
+    WorkflowProgressEvent,
+    run_workflow,
+)
 from openjiuwen.agent_teams.workflow.observer import WorkflowObserver
 from openjiuwen.agent_teams.workflow.schema import WorkflowRun
 from openjiuwen.core.common.logging import team_logger
@@ -39,7 +44,10 @@ async def run_swarmflow(
     log_sink: Callable[[str], None] | None = None,
     model_resolver: Callable[[str], Any] | None = None,
     worker_base_spec: Any = None,
+    human_base_spec: Any = None,
     build_context: Any = None,
+    messager: Any = None,
+    session_id: str | None = None,
 ) -> Any:
     """Execute a swarmflow script with real LLM workers.
 
@@ -60,14 +68,41 @@ async def run_swarmflow(
         worker_base_spec: Base ``DeepAgentSpec`` each worker derives from (the
             team's teammate spec, or the leader spec) — gives workers
             teammate-equivalent capabilities without the team tools.
+        human_base_spec: Base ``DeepAgentSpec`` for human-session avatars (the
+            team's human_agent spec, or a fallback). ``None`` disables
+            ``human_session`` / ``human`` (they fail clearly when used).
         build_context: Optional ``BuildContext`` from the leader harness,
             forwarded to each worker's ``NativeHarness`` build. Runtime-only
             handles such as the owner-scoped worktree manager ride in
             ``build_context.extras``.
+        messager: The team messager, used by human sessions to receive a real
+            person's reply on the dedicated reply topic.
+        session_id: The current session id, used to build the human-reply topic.
 
     Returns:
         Whatever the script's ``run(args)`` returned.
     """
+    def _on_human_prompt(member_name: str, correlation_id: str, prompt: str) -> None:
+        """Surface a pending human turn as a progress event (leader narrates it)."""
+        observer.emit(
+            WorkflowProgressEvent(
+                kind=ProgressKind.HUMAN_PROMPT,
+                label=member_name,
+                prompt=prompt,
+                correlation_id=correlation_id,
+            )
+        )
+
+    def _on_human_replied(member_name: str, correlation_id: str) -> None:
+        """Signal that a pending human turn was answered."""
+        observer.emit(
+            WorkflowProgressEvent(
+                kind=ProgressKind.HUMAN_REPLIED,
+                label=member_name,
+                correlation_id=correlation_id,
+            )
+        )
+
     backend = TeamWorkerBackend(
         model=model,
         team_backend=team_backend,
@@ -75,7 +110,12 @@ async def run_swarmflow(
         language=language,
         model_resolver=model_resolver,
         worker_base_spec=worker_base_spec,
+        human_base_spec=human_base_spec,
         build_context=build_context,
+        messager=messager,
+        session_id=session_id,
+        on_human_prompt=_on_human_prompt,
+        on_human_replied=_on_human_replied,
     )
     return await run_workflow(
         script_path,

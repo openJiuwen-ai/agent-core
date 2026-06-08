@@ -87,6 +87,10 @@ class TeamWorkerBackend(AgentBackend):
         worker_base_spec: Any = None,
         human_base_spec: Any = None,
         build_context: Any = None,
+        messager: Any = None,
+        session_id: str | None = None,
+        on_human_prompt: Callable[[str, str, str], None] | None = None,
+        on_human_replied: Callable[[str, str], None] | None = None,
     ) -> None:
         self._model = model
         self._team_backend = team_backend
@@ -97,6 +101,10 @@ class TeamWorkerBackend(AgentBackend):
         self._worker_base_spec = worker_base_spec
         self._human_base_spec = human_base_spec
         self._build_context = build_context
+        self._messager = messager
+        self._session_id = session_id
+        self._on_human_prompt = on_human_prompt
+        self._on_human_replied = on_human_replied
         self._worktrees = SwarmflowWorkerWorktrees(team_name=team_name, build_context=build_context)
         self._t = make_translator(language if language in ("cn", "en") else "cn")
         self._counter = 0
@@ -162,6 +170,10 @@ class TeamWorkerBackend(AgentBackend):
                 model_resolver=self._model_resolver,
                 build_context=self._build_context,
                 t=self._t,
+                messager=self._messager,
+                session_id=self._session_id,
+                on_human_prompt=self._on_human_prompt,
+                on_human_replied=self._on_human_replied,
             )
         return self._session_mgr
 

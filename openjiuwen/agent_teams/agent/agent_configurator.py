@@ -562,6 +562,7 @@ class AgentConfigurator:
         # leader-only async ``swarmflow`` tool is gated on this being non-None.
         swarmflow_model_resolver: Optional[Callable[[str], Any]] = None
         swarmflow_worker_base_spec = None
+        swarmflow_human_base_spec = None
         if ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
             team_spec_for_models = ctx.team_spec
 
@@ -586,6 +587,10 @@ class AgentConfigurator:
             # straight from it has no team tools by construction.
             base_specs = spec.agents
             swarmflow_worker_base_spec = base_specs.get("teammate") or base_specs.get("leader")
+            # Human-session avatars derive from the human_agent spec; fall back to
+            # the worker base spec so human_session still works when no dedicated
+            # human_agent spec is configured (it just lacks human-tuned persona).
+            swarmflow_human_base_spec = base_specs.get("human_agent") or swarmflow_worker_base_spec
 
             # Workers also need the observability rail for agent spans.
             if swarmflow_worker_base_spec is not None:
@@ -605,6 +610,7 @@ class AgentConfigurator:
             on_teammate_created=self._on_teammate_created,
             swarmflow_model_resolver=swarmflow_model_resolver,
             swarmflow_worker_base_spec=swarmflow_worker_base_spec,
+            swarmflow_human_base_spec=swarmflow_human_base_spec,
             reliability_components=reliability_components,
             permissions_override=ctx.permissions_override,
             worktree_manager=self.worktree_manager,

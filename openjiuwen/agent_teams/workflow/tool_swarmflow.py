@@ -49,6 +49,7 @@ class SwarmflowTool(AsyncTool):
         team_name: str,
         model_resolver: WorkerModelResolver | None,
         worker_base_spec: Any = None,
+        human_base_spec: Any = None,
         t: Translator | None = None,
         language: str = "cn",
     ) -> None:
@@ -68,6 +69,7 @@ class SwarmflowTool(AsyncTool):
         self._team_name = team_name or "swarmflow"
         self._model_resolver = model_resolver
         self._worker_base_spec = worker_base_spec
+        self._human_base_spec = human_base_spec
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -131,6 +133,7 @@ class SwarmflowTool(AsyncTool):
                 outcome=progress.outcome,
                 text=progress.message,
                 phases=progress.phases,
+                correlation_id=progress.correlation_id,
             )
             message = EventMessage(
                 event_type=TeamEvent.WORKFLOW_PROGRESS,
@@ -155,7 +158,10 @@ class SwarmflowTool(AsyncTool):
             language=self._language,
             model_resolver=self._model_resolver,
             worker_base_spec=self._worker_base_spec,
+            human_base_spec=self._human_base_spec,
             build_context=getattr(self._parent_agent, "build_context", None),
+            messager=messager,
+            session_id=get_session_id(),
         )
         parts = [summarize_run(observer.run)]
         body = render_result_text(result)

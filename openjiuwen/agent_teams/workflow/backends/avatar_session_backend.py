@@ -111,6 +111,8 @@ class AvatarSessionManager:
         model_resolver: Any = None,
         build_context: Any = None,
         t: Translator | None = None,
+        messager: Any = None,
+        session_id: str | None = None,
         on_human_prompt: Callable[[str, str, str], None] | None = None,
         on_human_replied: Callable[[str, str], None] | None = None,
         human_timeout: float | None = None,
@@ -126,11 +128,16 @@ class AvatarSessionManager:
         self._counter = 0
         # Human turn rendezvous: correlation_id -> future awaiting the person's
         # raw reply. Instance-scoped (no process-global registry); cancelled on
-        # aclose. Outbound prompt / inbound-reply signals go through the callbacks.
+        # aclose. Outbound prompt signal goes through ``on_human_prompt``; the
+        # inbound reply arrives on the dedicated messager topic (subscribed lazily
+        # on the first human session) and is routed by ``_on_reply_event``.
         self._pending_human: dict[str, asyncio.Future] = {}
         self._on_human_prompt = on_human_prompt
         self._on_human_replied = on_human_replied
         self._human_timeout = human_timeout if human_timeout is not None else _DEFAULT_HUMAN_TIMEOUT
+        self._messager = messager
+        self._session_id = session_id
+        self._reply_topic_subscribed = False
 
     # ------------------------------------------------------------------
     # Engine session-backend surface (delegated from TeamWorkerBackend)
@@ -149,8 +156,38 @@ class AvatarSessionManager:
             member_name=member_name,
         )
         self._sessions[member_name] = state
+        if kind == "human":
+            await self._ensure_reply_subscription()
         await self._start_avatar(state, opts)
         return member_name
+
+    async def _ensure_reply_subscription(self) -> None:
+        """Subscribe (once) to the dedicated human-reply topic for this run.
+
+        Lazy — only a run that actually opens a human session subscribes; the
+        topic is run-scoped (session + team) and distinct from the team topic, so
+        it never collides with the leader's subscription on the same messager.
+        """
+        if self._reply_topic_subscribed or self._messager is None or self._session_id is None:
+            return
+        from openjiuwen.agent_teams.schema.events import swarmflow_human_reply_topic
+
+        topic = swarmflow_human_reply_topic(self._session_id, self._team_name)
+        await self._messager.subscribe(topic, self._on_reply_event)
+        self._reply_topic_subscribed = True
+
+    async def _on_reply_event(self, message: Any) -> None:
+        """Messager handler: route a ``WORKFLOW_HUMAN_REPLY`` to its pending turn."""
+        from openjiuwen.agent_teams.schema.events import TeamEvent
+
+        if getattr(message, "event_type", None) != TeamEvent.WORKFLOW_HUMAN_REPLY:
+            return
+        payload = getattr(message, "payload", None) or {}
+        corr = payload.get("correlation_id")
+        if corr is None:
+            return
+        answer = payload.get("answer")
+        self.submit_human_reply(corr, "" if answer is None else str(answer))
 
     async def send_turn(
         self,
@@ -186,11 +223,19 @@ class AvatarSessionManager:
             team_logger.debug("[swarmflow] session dispose failed for %s", session_id)
 
     async def aclose(self) -> None:
-        """Cancel pending human waits and dispose every open session (best-effort)."""
+        """Cancel pending human waits, unsubscribe, and dispose every session."""
         for fut in list(self._pending_human.values()):
             if not fut.done():
                 fut.cancel()
         self._pending_human.clear()
+        if self._reply_topic_subscribed and self._messager is not None and self._session_id is not None:
+            from openjiuwen.agent_teams.schema.events import swarmflow_human_reply_topic
+
+            try:
+                await self._messager.unsubscribe(swarmflow_human_reply_topic(self._session_id, self._team_name))
+            except Exception:
+                team_logger.debug("[swarmflow] human-reply unsubscribe failed")
+            self._reply_topic_subscribed = False
         for session_id in list(self._sessions.keys()):
             await self.close_session(session_id)
 

@@ -41,6 +41,16 @@ class TeamTopic(str, Enum):
         return f"session:{session_id}:team:{team_name}:{self.value}"
 
 
+def swarmflow_human_reply_topic(session_id: str, team_name: str) -> str:
+    """Topic for a real person's reply to a swarmflow human-session turn.
+
+    A dedicated channel (not the shared ``TeamTopic.TEAM``) so the swarmflow run's
+    reply subscriber never collides with the leader's team-event subscription on
+    the same messager.
+    """
+    return f"session:{session_id}:team:{team_name}:swarmflow_human_reply"
+
+
 class TeamEvent:
     """Team event types for cross-process communication
 
@@ -87,6 +97,8 @@ class TeamEvent:
 
     # Swarmflow orchestration progress (a swarmflow run feeding the spectator leader)
     WORKFLOW_PROGRESS = "workflow_progress"
+    # A real person's reply to a swarmflow human-session turn (routed in via interact)
+    WORKFLOW_HUMAN_REPLY = "workflow_human_reply"
 
     # Worktree events
     WORKTREE_CREATED = "worktree_created"
@@ -285,6 +297,9 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     text: Optional[str] = Field(default=None, description="Free narration text, on all kinds")
     phases: Optional[list[PhasePlan]] = Field(
         default=None, description="Static phase plan from META, on workflow_started"
+    )
+    correlation_id: Optional[str] = Field(
+        default=None, description="Pending human turn id, on human_prompt / human_replied"
     )
 
 
