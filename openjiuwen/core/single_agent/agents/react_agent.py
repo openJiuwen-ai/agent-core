@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import asyncio
+import json
 import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
@@ -68,8 +69,11 @@ from openjiuwen.core.single_agent.prompts.builder import (
     SystemPromptBuilder,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
+from openjiuwen.core.operator import StreamingToolExecutor
 
 _IDENTITY_SECTION = "identity"
+_STREAMING_TOOL_EXECUTOR_KEY = "_streaming_tool_executor"
 _SKILLS_SECTION = "skills"
 _IDENTITY_SECTION_PRIORITY = 10
 _SKILLS_SECTION_PRIORITY = 90
@@ -821,6 +825,23 @@ class ReActAgent(BaseAgent):
             return ai_message
 
         # Streaming path: accumulate chunks via __add__, write to session in real-time
+
+        # Clean up any leftover executor from a previous iteration before
+        # creating a new one (defensive — _execute_tool_call normally pops it).
+        await self._cleanup_streaming_executor(ctx)
+
+        agent_tag = getattr(getattr(self, "card", None), "id", "") or ""
+        executor = StreamingToolExecutor(
+            executor_fn=lambda tc: self.ability_manager.execute_single(
+                parent_ctx=ctx,
+                tool_call=tc,
+                session=session,
+                tag=agent_tag,
+            ),
+            tag=agent_tag,
+        )
+        ctx.extra[_STREAMING_TOOL_EXECUTOR_KEY] = executor
+
         accumulated_chunk = None
         chunk_index = 0
 
@@ -868,6 +889,14 @@ class ReActAgent(BaseAgent):
                     },
                 ))
                 chunk_index += 1
+            # 每个chunk结束时，判断是否构成完整tool_call
+            self._stream_schedule_ready_tool_calls(
+                executor, accumulated_chunk, finalize=False,
+            )
+        # 所有chuck结束时，做一次最终检查和去重（finalize=True）
+        self._stream_schedule_ready_tool_calls(
+            executor, accumulated_chunk, finalize=True,
+        )
 
         if accumulated_chunk is None:
             ai_message = AssistantMessage(content="", tool_calls=[])
@@ -917,6 +946,66 @@ class ReActAgent(BaseAgent):
             except BaseError as e:
                 logger.warning("Failed to render system message placeholder: %s", e)
 
+    @staticmethod
+    def _stream_schedule_ready_tool_calls(
+            executor: StreamingToolExecutor,
+            accumulated_chunk: Any,
+            *,
+            finalize: bool,
+    ) -> None:
+        """Schedule completed streaming tool_calls into the executor.
+
+        A tool_call in ``accumulated_chunk.tool_calls`` is treated as fully
+        formed once a later tool_call appears after it (the LLM has moved on);
+        on ``finalize=True`` (called once the stream ends) the last one is
+        also considered fully formed.
+
+        ``arguments`` is JSON-validated as a sanity check before scheduling.
+        Tools with malformed JSON mid-stream are skipped and will be picked up
+        by the post-stream fallback in ``_execute_tool_call``.
+        """
+        if accumulated_chunk is None:
+            return
+        tcs = accumulated_chunk.tool_calls or []
+        if not tcs:
+            return
+        boundary = len(tcs) if finalize else len(tcs) - 1
+        for tc in tcs[:boundary]:
+            if executor.is_added(tc):
+                continue
+            if tc.arguments:
+                try:
+                    json.loads(tc.arguments)
+                except (json.JSONDecodeError, TypeError):
+                    logger.debug(
+                        "Streaming tool_call %s args not yet valid JSON; "
+                        "deferring to post-stream execution.",
+                        tc.name,
+                    )
+                    continue
+            executor.add(tc)
+
+    async def _cleanup_streaming_executor(
+            self,
+            ctx: AgentCallbackContext,
+    ) -> None:
+        """Cancel and reap any leftover streaming executor on ``ctx``.
+
+        Idempotent: safe to call multiple times. Used both as a defensive
+        pre-step before creating a new executor in the next iteration, and in
+        ``_inner_invoke``'s ``finally`` to guarantee no task leaks.
+        """
+        executor: Optional[StreamingToolExecutor] = ctx.extra.pop(
+            _STREAMING_TOOL_EXECUTOR_KEY, None,
+        )
+        if executor is None:
+            return
+        executor.cancel_all()
+        try:
+            await executor.wait_all()
+        except BaseException as exc:
+            logger.debug("Streaming executor cleanup swallowed: %s", exc)
+
     async def _execute_tool_call(
             self,
             ctx: AgentCallbackContext,
@@ -924,10 +1013,15 @@ class ReActAgent(BaseAgent):
             session: Optional[Session],
             context: ModelContext,
     ) -> list:
-        """Execute tool calls in parallel and commit tool messages into context.
+        """Execute tool calls and commit tool messages into context.
+
+        When the streaming path pre-launched some tool calls via
+        ``StreamingToolExecutor``, results are reused (preserving order) and
+        any remaining tool_calls are scheduled before waiting. Otherwise
+        falls back to the original parallel ``ability_manager.execute``.
 
         Returns:
-            List of (tool_result, tool_message) tuples from ability_manager
+            List of (tool_result, tool_message) tuples
         """
         if not tool_calls:
             return []
@@ -935,7 +1029,24 @@ class ReActAgent(BaseAgent):
         for tool_call in tool_calls:
             logger.info(f"Executing tool: {tool_call.name} with args: {tool_call.arguments}")
 
-        results = await self.ability_manager.execute(ctx=ctx, tool_call=tool_calls, session=session)
+        executor: Optional[StreamingToolExecutor] = ctx.extra.pop(
+            _STREAMING_TOOL_EXECUTOR_KEY, None,
+        )
+
+        if executor is None:
+            # 如果stream执行器为空，降级到使用原先的并行执行器
+            logger.warning("No streaming_tool_executor, use origin executor instead")
+            results = await self.ability_manager.execute(
+                ctx=ctx, tool_call=tool_calls, session=session,
+            )
+        else:
+            for tc in tool_calls:
+                if not executor.is_added(tc):
+                    executor.add(tc)
+            ordered = await executor.wait_all()
+            results = self._consume_streaming_executor_results(
+                ctx=ctx, tool_calls=tool_calls, ordered=ordered,
+            )
 
         add_kwargs = {
             "system_messages": ctx.extra.get("_active_system_messages") or [],
@@ -952,6 +1063,61 @@ class ReActAgent(BaseAgent):
             await context.add_messages(multimodal_message, **add_kwargs)
 
         return results
+
+    @staticmethod
+    def _consume_streaming_executor_results(
+            ctx: AgentCallbackContext,
+            tool_calls: List,
+            ordered: List[Tuple[Any, Any]],
+    ) -> List[Tuple[Any, Optional[ToolMessage]]]:
+        """Convert StreamingToolExecutor output to ability_manager.execute format.
+
+        ``ordered`` is what ``StreamingToolExecutor.wait_all()`` returned:
+        ``[(tool_call, value), ...]`` where ``value`` is either the
+        ``execute_single`` 3-tuple ``(result, tool_msg, tool_ctx)`` or a
+        ``BaseException`` instance.
+
+        Also propagates ``force_finish`` from any tool_ctx back to the
+        parent ``ctx``, mirroring ``AbilityManager.execute``'s behavior.
+        """
+        final: List[Tuple[Any, Optional[ToolMessage]]] = []
+        propagated = False
+        ordered_by_index = {
+            (tc.id, tc.index): value for tc, value in ordered
+        }
+
+        for i, tc in enumerate(tool_calls):
+            value = ordered_by_index.get((tc.id, tc.index))
+
+            if isinstance(value, ToolInterruptException):
+                final.append((value, None))
+                continue
+
+            if isinstance(value, BaseException) or value is None:
+                err_msg = (
+                    f"Ability execution error: {value}" if value is not None
+                    else "Tool was not scheduled or cancelled"
+                )
+                logger.error(err_msg)
+                final.append((
+                    None,
+                    ToolMessage(
+                        content=err_msg,
+                        tool_call_id=tc.id,
+                        metadata={},
+                    ),
+                ))
+                continue
+
+            result, tool_msg, tool_ctx = value
+            if tool_ctx is not None and not propagated:
+                ff = tool_ctx.consume_force_finish()
+                if ff is not None:
+                    ctx.request_force_finish(ff.result)
+                    propagated = True
+            final.append((result, tool_msg))
+
+        return final
 
     @staticmethod
     def _build_multimodal_tool_result_messages(tool_result: Any) -> List[UserMessage]:
@@ -1594,6 +1760,7 @@ class ReActAgent(BaseAgent):
             # after_invoke rails have fired; return result (possibly adapted by rails via ctx.extra)
             return ctx.extra.get("invoke_result", invoke_inputs.result)
         finally:
+            await self._cleanup_streaming_executor(ctx)
             if need_cleanup:
                 await self.context_engine.save_contexts(session)
                 await session.post_run()

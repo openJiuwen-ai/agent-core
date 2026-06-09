@@ -497,7 +497,8 @@ class AbilityManager:
     ) -> List[Tuple[Any, ToolMessage]]:
         """Execute ability call(s) with per-tool rail hooks.
 
-        Get instance from Runner.resource_mgr by card info, execute and return
+        Get instance from Runner.resource_mgr by card info, execute and return.
+        Runs all tool calls concurrently via ``execute_single``.
 
         Args:
             ctx: Shared callback context for tool-call lifecycle
@@ -511,101 +512,125 @@ class AbilityManager:
         if not tool_calls:
             return []
 
-        # Each tool call gets an isolated callback context to avoid races
-        # between concurrent BEFORE/AFTER_TOOL_CALL hooks.
-        tool_contexts: List[AgentCallbackContext] = []
-        tasks = []
-        for single_tool_call in tool_calls:
-            tool_ctx = AgentCallbackContext(
-                agent=ctx.agent,
-                inputs=ToolCallInputs(
-                    tool_call=single_tool_call,
-                    tool_name=single_tool_call.name,
-                    tool_args=single_tool_call.arguments,
-                ),
-                config=ctx.config,
-                session=session,
-                context=ctx.context,
-                extra=ctx.extra,
-            )
-            # Propagate steering queue so after_tool_call
-            # rails can push_steering() on the same queue.
-            if ctx.steering_queue is not None:
-                tool_ctx.bind_steering_queue(
-                    ctx.steering_queue
+        # ``return_exceptions=True`` mirrors the original behaviour: a single
+        # tool raising (including BaseException subclasses like CancelledError
+        # that escape ``execute_single``'s ``except Exception``) must not
+        # cancel its sibling tools mid-flight.
+        gathered = await asyncio.gather(
+            *[
+                self.execute_single(ctx, tc, session, tag)
+                for tc in tool_calls
+            ],
+            return_exceptions=True,
+        )
+
+        triples: List[Tuple[Any, Optional[ToolMessage], Optional[AgentCallbackContext]]] = []
+        for i, item in enumerate(gathered):
+            if isinstance(item, BaseException):
+                logger.error(
+                    "execute_single raised unexpectedly for tool=%s: %r",
+                    tool_calls[i].name, item,
                 )
-            tool_contexts.append(tool_ctx)
-            tasks.append(
-                self._railed_execute_single_tool_call(
-                    ctx=tool_ctx,
-                    tool_call=single_tool_call,
-                    session=session,
-                    tag=tag,
-                )
-            )
-
-        # Execute all tool calls in parallel.
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Process results
-        final_results: List[Tuple[Any, ToolMessage]] = []
-        for i, result in enumerate(results):
-            tool_ctx = tool_contexts[i]
-            if isinstance(result, Exception):
-                # Handle exception
-                if isinstance(result, ToolInterruptException):
-                    final_results.append((result, None))
-                    continue
-
-                error_msg = f"Ability execution error: {str(result)}"
-                logger.error(error_msg)
-                tool_result = None
-                tool_message = None
-                if isinstance(tool_ctx.inputs, ToolCallInputs):
-                    tool_result = tool_ctx.inputs.tool_result
-                    tool_message = tool_ctx.inputs.tool_msg
-
-                if (
-                        tool_message is None
-                        and isinstance(result, AbilityExecutionError)
-                ):
-                    tool_message = result.tool_message
-
-                if tool_message is None:
-                    tool_message = ToolMessage(
-                        content=error_msg,
+                triples.append((
+                    None,
+                    ToolMessage(
+                        content=f"Ability execution error: {item}",
                         tool_call_id=tool_calls[i].id,
                         metadata={},
-                    )
+                    ),
+                    None,
+                ))
+            else:
+                triples.append(item)
 
-                final_results.append((tool_result, tool_message))
+        final_results: List[Tuple[Any, ToolMessage]] = [
+            (result, tool_msg) for result, tool_msg, _ in triples
+        ]
+
+        for _, _, tool_ctx in triples:
+            if tool_ctx is None:
                 continue
-
-            # AFTER_TOOL_CALL rails can rewrite tool_result/tool_msg in ctx.inputs.
-            if isinstance(tool_ctx.inputs, ToolCallInputs):
-                tool_result = (
-                    tool_ctx.inputs.tool_result
-                    if tool_ctx.inputs.tool_result is not None
-                    else result[0]
-                )
-                tool_msg = (
-                    tool_ctx.inputs.tool_msg
-                    if tool_ctx.inputs.tool_msg is not None
-                    else result[1]
-                )
-                final_results.append((tool_result, tool_msg))
-                continue
-
-            final_results.append(result)
-
-        # Propagate force_finish signal from any tool_ctx back to the parent ctx.
-        for tool_ctx in tool_contexts:
             ff = tool_ctx.consume_force_finish()
             if ff is not None:
                 ctx.request_force_finish(ff.result)
                 break
 
         return final_results
+
+    async def execute_single(
+            self,
+            parent_ctx: AgentCallbackContext,
+            tool_call: ToolCall,
+            session: Session,
+            tag=None,
+    ) -> Tuple[Any, Optional[ToolMessage], AgentCallbackContext]:
+        """Execute one tool call through the full rail lifecycle.
+
+        Builds an isolated ``AgentCallbackContext`` so BEFORE/AFTER_TOOL_CALL
+        rails do not race when multiple tool calls run concurrently, runs the
+        railed execution, and reconciles AFTER_TOOL_CALL rewrites of
+        ``tool_result`` / ``tool_msg``.
+
+        All known exceptions (including ``AbilityExecutionError`` and
+        ``ToolInterruptException``) are captured into the return value so the
+        caller can decide how to surface them.
+
+        The returned ``tool_ctx`` carries any ``force_finish`` signal that
+        rails may have raised. The caller is responsible for propagating
+        ``tool_ctx.consume_force_finish()`` back to its own context.
+        """
+        tool_ctx = AgentCallbackContext(
+            agent=parent_ctx.agent,
+            inputs=ToolCallInputs(
+                tool_call=tool_call,
+                tool_name=tool_call.name,
+                tool_args=tool_call.arguments,
+            ),
+            config=parent_ctx.config,
+            session=session,
+            context=parent_ctx.context,
+            extra=parent_ctx.extra,
+        )
+        if parent_ctx.steering_queue is not None:
+            tool_ctx.bind_steering_queue(parent_ctx.steering_queue)
+
+        try:
+            result, tool_msg = await self._railed_execute_single_tool_call(
+                ctx=tool_ctx,
+                tool_call=tool_call,
+                session=session,
+                tag=tag,
+            )
+        except ToolInterruptException as e:
+            return e, None, tool_ctx
+        except Exception as e:
+            error_msg = f"Ability execution error: {str(e)}"
+            logger.error(error_msg)
+            tool_result = None
+            tool_message: Optional[ToolMessage] = None
+            if isinstance(tool_ctx.inputs, ToolCallInputs):
+                tool_result = tool_ctx.inputs.tool_result
+                tool_message = tool_ctx.inputs.tool_msg
+
+            if tool_message is None and isinstance(e, AbilityExecutionError):
+                tool_message = e.tool_message
+
+            if tool_message is None:
+                tool_message = ToolMessage(
+                    content=error_msg,
+                    tool_call_id=tool_call.id,
+                    metadata={},
+                )
+            return tool_result, tool_message, tool_ctx
+
+        # AFTER_TOOL_CALL rails can rewrite tool_result/tool_msg via ctx.inputs.
+        if isinstance(tool_ctx.inputs, ToolCallInputs):
+            if tool_ctx.inputs.tool_result is not None:
+                result = tool_ctx.inputs.tool_result
+            if tool_ctx.inputs.tool_msg is not None:
+                tool_msg = tool_ctx.inputs.tool_msg
+
+        return result, tool_msg, tool_ctx
 
     @rail(
         before=AgentCallbackEvent.BEFORE_TOOL_CALL,
