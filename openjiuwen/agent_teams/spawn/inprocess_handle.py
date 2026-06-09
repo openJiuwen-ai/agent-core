@@ -24,6 +24,13 @@ class InProcessSpawnHandle:
     and are addressed via the messager). ``HumanAgentInbox`` uses it
     to feed user input straight into the human agent's DeepAgent
     without going through the message bus.
+
+    ``ready_event`` is set once the spawned agent's entire runtime
+    (NativeHarness, StreamController, tools, event bus) has completed
+    ``CoordinationKernel.start``.  Callers that need to ``deliver_input``
+    must await this event first so they don't race with the async
+    startup inside the spawned task.  Only applicable to in-process
+    handles; subprocess human-agents use the message bus instead.
     """
 
     process_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
@@ -31,6 +38,7 @@ class InProcessSpawnHandle:
     on_unhealthy: Optional[Callable[[], Any]] = field(default=None, repr=False)
     _shutdown_requested: bool = field(default=False, repr=False)
     agent_ref: Any = field(default=None, repr=False)
+    ready_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     # Reference to the chunk observer wired by SpawnManager that forwards
     # this teammate's stream chunks into the leader's stream_queue. Held
     # here so cleanup_teammate can detach it deterministically. Subprocess

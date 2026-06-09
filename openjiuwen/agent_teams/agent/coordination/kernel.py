@@ -188,6 +188,13 @@ class CoordinationKernel:
         if self._dispatcher is not None:
             self._dispatcher.team_completion.rearm()
         self._lifecycle_state = "running"
+        # Notify the spawn handle that the member runtime is fully
+        # ready (harness, stream controller, tools, event bus).  In-
+        # process spawns bind this callback to their handle's
+        # ready_event.set() so HumanAgentInbox can gate deliver_input
+        # on runtime readiness.
+        if host.on_runtime_ready is not None:
+            host.on_runtime_ready()
 
     async def pause(self) -> None:
         # Idempotent: ignore if not currently running. Pause is only a valid

@@ -473,7 +473,9 @@ class TeamRuntimeManager:
             return result
         if isinstance(payload, HumanAgentMessage):
             try:
-                if payload.target is not None:
+                if payload.target is None:
+                    await agent.auto_start_member(payload.sender)
+                else:
                     if payload.target in {"all", "*"}:
                         await agent.auto_start_all()
                     else:
@@ -482,6 +484,7 @@ class TeamRuntimeManager:
                     backend,
                     backend.message_manager,
                     agent_lookup=agent.lookup_human_agent_runtime,
+                    wait_agent_ready=agent.spawn_manager.wait_for_inprocess_ready,
                 )
                 return await inbox.send(
                     payload.body,

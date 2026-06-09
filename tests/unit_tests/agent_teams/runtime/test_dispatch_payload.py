@@ -59,6 +59,11 @@ def _make_agent(*, known_members: set[str] | None = None) -> MagicMock:
     avatar = AsyncMock(name="HumanAgentRuntime")
     agent.lookup_human_agent_runtime = AsyncMock(return_value=avatar)
     agent._avatar = avatar  # exposed for tests that want to assert on it
+    # SpawnManager.wait_for_inprocess_ready is an async gate; mock it
+    # to return True immediately so _drive_agent proceeds without
+    # waiting for a real ready_event.
+    agent.spawn_manager = MagicMock(name="SpawnManager")
+    agent.spawn_manager.wait_for_inprocess_ready = AsyncMock(return_value=True)
     return agent
 
 
@@ -125,7 +130,7 @@ async def test_operator_message_broadcasts_when_target_none():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_human_agent_message_drives_avatar_when_no_target():
-    """HumanAgentMessage with no target/mention drives the avatar's DeepAgent."""
+    """HumanAgentMessage with no target starts and drives the sender avatar."""
     agent = _make_agent()
     agent.team_backend.human_agent_names = AsyncMock(return_value={"human_alice"})
 
@@ -135,6 +140,7 @@ async def test_human_agent_message_drives_avatar_when_no_target():
     )
 
     assert result.ok
+    agent.auto_start_member.assert_awaited_once_with("human_alice")
     agent._avatar.deliver_input.assert_awaited_once_with("please summarise design.md")
     agent.team_backend.message_manager.send_message.assert_not_called()
 
