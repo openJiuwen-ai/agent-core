@@ -162,8 +162,15 @@ def _build_lsp_rail(params: dict[str, Any], context: Any) -> LspRail:
     return LspRail(InitializeOptions(cwd=inp.project_dir))
 
 
-class WebPaidSearchInput(ConstructionInput):
-    """Construction inputs for the paid web-search tool."""
+class WebToolInput(ConstructionInput):
+    """Construction inputs shared by the free / fetch / paid web tools.
+
+    Mirrors how jiuwenswarm constructs every web tool with both ``language``
+    and ``agent_id``: the agent card id (``member_card_id``) namespaces the
+    tool card id so each member owns a stable, deterministic web-tool id
+    instead of the random uuid fallback ``build_tool_card`` uses when no
+    ``agent_id`` is supplied.
+    """
 
     language: str = context_field(
         attr="language", default="cn", description="Member language code."
@@ -173,6 +180,34 @@ class WebPaidSearchInput(ConstructionInput):
         default=None,
         description="Agent card id used to namespace tool ids.",
     )
+
+
+def _build_web_free_search(params: dict[str, Any], context: Any) -> WebFreeSearchTool:
+    """Build the free web-search tool with member-scoped language / agent id.
+
+    Args:
+        params: Spec params (unused).
+        context: Per-member build context; supplies ``language`` / ``agent_id``.
+
+    Returns:
+        A ``WebFreeSearchTool`` namespaced by the member card id.
+    """
+    inp = WebToolInput.resolve(params, context)
+    return WebFreeSearchTool(language=inp.language, agent_id=inp.agent_id)
+
+
+def _build_web_fetch(params: dict[str, Any], context: Any) -> WebFetchWebpageTool:
+    """Build the web page fetch tool with member-scoped language / agent id.
+
+    Args:
+        params: Spec params (unused).
+        context: Per-member build context; supplies ``language`` / ``agent_id``.
+
+    Returns:
+        A ``WebFetchWebpageTool`` namespaced by the member card id.
+    """
+    inp = WebToolInput.resolve(params, context)
+    return WebFetchWebpageTool(language=inp.language, agent_id=inp.agent_id)
 
 
 def _build_web_paid_search(params: dict[str, Any], context: Any) -> list[Any]:
@@ -187,7 +222,7 @@ def _build_web_paid_search(params: dict[str, Any], context: Any) -> list[Any]:
     """
     if not is_paid_search_enabled():
         return []
-    inp = WebPaidSearchInput.resolve(params, context)
+    inp = WebToolInput.resolve(params, context)
     return [WebPaidSearchTool(language=inp.language, agent_id=inp.agent_id)]
 
 
@@ -361,19 +396,21 @@ harness_element(
     kind=ElementKind.TOOL,
     name=WEB_SEARCH,
     description="Free web search tool.",
-    builder=WebFreeSearchTool,
+    input_model=WebToolInput,
+    builder=_build_web_free_search,
 )
 harness_element(
     kind=ElementKind.TOOL,
     name=WEB_FETCH,
     description="Web page fetch tool.",
-    builder=WebFetchWebpageTool,
+    input_model=WebToolInput,
+    builder=_build_web_fetch,
 )
 harness_element(
     kind=ElementKind.TOOL,
     name=WEB_PAID_SEARCH,
     description="Paid web-search tool (built only when a paid-search key is set).",
-    input_model=WebPaidSearchInput,
+    input_model=WebToolInput,
     builder=_build_web_paid_search,
 )
 harness_element(
