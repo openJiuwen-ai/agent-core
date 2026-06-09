@@ -10,8 +10,24 @@ from openjiuwen.harness.prompts.sections.tools.base import (
 )
 
 DESCRIPTION: Dict[str, str] = {
-    "cn": "执行代码（Python 或 JavaScript）。",
-    "en": "Execute code (Python or JavaScript).",
+    "cn": (
+        "执行代码（Python 或 JavaScript）。\n\n"
+        "重要：本工具用于运行计算、数据处理、算法逻辑等代码。"
+        "对于文件类的读写操作（尤其涉及到大文件），尽量使用专用工具如：\n"
+        " - 读取文件：使用 read_file 工具\n"
+        " - 写入文件：使用 write_file 工具\n"
+        " - 编辑文件：使用 edit_file 工具\n"
+        "专用工具提供更好的安全性、权限控制和用户体验。"
+    ),
+    "en": (
+        "Execute code (Python or JavaScript).\n\n"
+        "IMPORTANT: This tool is for running computations, data processing, and algorithmic logic. "
+        "For file read/write operations (especially involving large files), prefer using dedicated tools such as:\n"
+        " - Read files: Use read_file tool\n"
+        " - Write files: Use write_file tool\n"
+        " - Edit files: Use edit_file tool\n"
+        "Dedicated tools provide better safety, permission control, and user experience."
+    ),
 }
 
 CODE_PARAMS: Dict[str, Dict[str, str]] = {
