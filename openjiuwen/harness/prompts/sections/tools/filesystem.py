@@ -23,8 +23,16 @@ READ_FILE_DESCRIPTION: Dict[str, str] = {
 }
 
 WRITE_FILE_DESCRIPTION: Dict[str, str] = {
-    "cn": "写入文件内容。如果文件已存在，将完全覆盖。",
-    "en": "Write file contents. Overwrites existing files only after a full read_file call.",
+    "cn": (
+        "写入文件内容。如果文件已存在，将完全覆盖。\n\n"
+        "大文件写入：不要一次性写入整份内容。先用本工具创建文件（content 仅含骨架或首段，保持短小），"
+        "再用 edit_file 分多次追加剩余内容。"
+    ),
+    "en": (
+        "Write file contents. Overwrites existing files only after a full read_file call.\n\n"
+        "Large files: do not put the entire content in one call. Create the file with a short "
+        "skeleton or first chunk, then append the rest in multiple edit_file calls."
+    ),
 }
 
 _LEGACY_EDIT_FILE_DESCRIPTION: Dict[str, str] = {
@@ -115,7 +123,13 @@ READ_FILE_PARAMS: Dict[str, Dict[str, str]] = {
 
 WRITE_FILE_PARAMS: Dict[str, Dict[str, str]] = {
     "file_path": {"cn": "要写入的文件路径", "en": "Absolute path of the file to write"},
-    "content": {"cn": "要写入的内容", "en": "Content to write"},
+    "content": {
+        "cn": "要写入的内容。大文件时仅传骨架或首段，其余用 edit_file 分块追加",
+        "en": (
+            "Content to write. For large files, pass only a skeleton or first chunk; "
+            "append the rest with edit_file in multiple calls"
+        ),
+    },
 }
 
 _LEGACY_EDIT_FILE_PARAMS: Dict[str, Dict[str, str]] = {
