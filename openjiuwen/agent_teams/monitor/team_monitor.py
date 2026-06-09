@@ -83,6 +83,7 @@ class TeamMonitor:
         self._team_agent = team_agent
         self._hide_dm = hide_dm
         self._event_queue: asyncio.Queue[MonitorEvent | None] = asyncio.Queue()
+        self._workflow_event_queue: asyncio.Queue[EventMessage | None] = asyncio.Queue()
         self._started = False
 
     @property
@@ -112,6 +113,7 @@ class TeamMonitor:
         self._team_agent.remove_event_listener(self._on_event)
         self._started = False
         self._event_queue.put_nowait(None)
+        self._workflow_event_queue.put_nowait(None)
         team_logger.info("TeamMonitor stopped for team {}", self._team_name)
 
     @contextlib.contextmanager
@@ -249,6 +251,21 @@ class TeamMonitor:
                 break
             yield event
 
+    async def workflow_events(self) -> AsyncIterator[object]:
+        """Async iterator that yields raw EventMessage instances for workflow_progress events.
+
+        Blocks until an event is available. Terminates when ``stop()``
+        is called (a ``None`` sentinel is placed in the queue).
+
+        Yields:
+            Raw EventMessage instances whose event_type is ``workflow_progress``.
+        """
+        while True:
+            event = await self._workflow_event_queue.get()
+            if event is None:
+                break
+            yield event
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -265,6 +282,10 @@ class TeamMonitor:
         Args:
             event: Internal EventMessage from the transport.
         """
+        raw_type = event.event_type
+        if raw_type and raw_type.startswith("workflow_"):
+            self._workflow_event_queue.put_nowait(event)
+            return
         monitor_event = MonitorEvent.from_event_message(event)
         if monitor_event is None:
             return

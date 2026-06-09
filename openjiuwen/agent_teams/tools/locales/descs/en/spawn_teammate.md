@@ -1,13 +1,12 @@
-Create a new team member with domain expertise. Members are long-lived entities attached to the team — task batches will keep changing, but a member's professional setup and working conventions stay stable and are reused across tasks.
+Create a new LLM teammate with domain expertise. Members are long-lived entities attached to the team — task batches will keep changing, but a member's professional setup and working conventions stay stable and are reused across tasks.
 
 | Parameter | Visibility | Usage |
 |---|---|---|
 | **member_name** | public | Unique semantic slug (e.g. `backend-dev-1`, DNS-label-style kebab-case); **must start with a lowercase letter; the rest may be lowercase letters, digits, or hyphen**; must not collide with any existing member |
 | **display_name** | public | Human-readable role label (e.g. "Backend Developer Expert") |
 | **desc** | public | Long-term role definition: professional background, core expertise, the domains this member owns, and the boundaries it does not own. **Do not put current-batch tasks here.** This field is injected into every other member's system prompt — never put private or sensitive content here |
-| **role_type** | internal | Optional; drives framework wiring, never rendered into any member's prompt text. `teammate` (default) = regular LLM teammate; `human_agent` = human collaborator driven via HumanAgentInbox |
-| **prompt** | **private** | Long-term working conventions, injected only into this member's own system prompt: stable working style, technical preferences, collaboration constraints. Hidden goals, internal constraints, or sensitive directives meant only for this member belong here. **Do not put current-batch tasks here.** Forbidden when `role_type='human_agent'` |
-| **model_name** | internal | Optional model suggestion (never enters any LLM context). Forbidden when `role_type='human_agent'` |
+| **prompt** | **private** | Long-term working conventions, injected only into this member's own system prompt: stable working style, technical preferences, collaboration constraints. Hidden goals, internal constraints, or sensitive directives meant only for this member belong here. **Do not put current-batch tasks here.** |
+| **model_name** | internal | Optional model suggestion (never enters any LLM context) |
 
 ## Information Visibility (read before writing each field)
 
@@ -19,13 +18,7 @@ Create a new team member with domain expertise. Members are long-lived entities 
   - Cross-team / cross-member confidential strategy or comparisons
 - Put "private guidance for this member only" and "boundaries only they need to know" into `prompt`. Keep `desc` to the **role identity every teammate must know**, so peers can route tasks and ask for help against it.
 
-## role_type usage
-
-- **`teammate` (default)**: regular LLM member; supply `desc` and `prompt`, optionally `model_name`. The framework starts a DeepAgent according to the model config.
-- **`human_agent`**: human member driven by the real user via HumanAgentInbox. **Rejects** `model_name` and `prompt` (managed by the framework template) — passing them raises an error immediately. Requires `TeamAgentSpec.enable_hitt=True` and the current `build_team` instance to leave HITT engaged. `desc` / `display_name` are still honoured for presentation and persisted persona.
-- **`external_cli`**: third-party CLI agent member (claudecode / codex / ...) whose brain is the CLI subprocess rather than a local LLM. Requires `cli_agent` (the CLI kind, e.g. `claude` / `codex`) and `desc` (the member persona); **rejects** `model_name` / `prompt`. `cli_agent` must match a static config pre-declared in `TeamAgentSpec.external_cli_agents` (launch command, working directory and team MCP tool injection all live there). The framework launches the CLI subprocess from that config and auto-injects the team collaboration tools (read_inbox / claim_task / send_message / ...).
-
-You must call build_team before calling spawn_member. Call order: build_team → create_task → spawn_member → send_message. spawn_member only creates the member record (status: UNSTARTED); on the first send_message call the system automatically starts every unstarted member. Call shutdown_member when the member is done. If member_name already exists, creation fails — pick a non-conflicting name.
+You must call build_team before calling spawn_teammate. Call order: build_team → create_task → spawn_teammate → send_message. spawn_teammate only creates the member record (status: UNSTARTED); on the first send_message call the system automatically starts every unstarted member. Call shutdown_member when the member is done. If member_name already exists, creation fails — pick a non-conflicting name.
 
 **Both desc and prompt describe long-term properties and must not be bound to specific tasks.** desc captures "who this role is, what it can do, which areas it owns" and is read by every teammate; prompt captures "what working conventions this role always follows" (code style, naming, collaboration habits, etc.) and is read only by the member themselves. Do not put any concrete task goal, task ID, task name, or to-do list into either field — that information is delivered per-task via create_task / send_message. Equally, do not write prompt as generic startup filler such as "start working" or "check the task list".
 

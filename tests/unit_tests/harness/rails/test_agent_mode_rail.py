@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import Mock, patch
 
+from openjiuwen.harness.prompts import PromptSection
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.prompts.sections.agent_mode import build_plan_mode_section
 from openjiuwen.harness.rails import AgentModeRail
 from openjiuwen.harness.schema.state import DeepAgentState
@@ -31,9 +33,20 @@ class _PromptBuilder:
         self.removed_sections.append(section_name)
 
 
-def _make_ctx(tool_name: str, *, mode: str = "plan", tool_args=None, tools=None):
+def _make_ctx(
+    tool_name: str,
+    *,
+    mode: str = "plan",
+    pre_plan_mode: str | None = None,
+    tool_args=None,
+    tools=None,
+    tool_result=None,
+    rail: AgentModeRail | None = None,
+):
     state = DeepAgentState()
     state.plan_mode.mode = mode
+    if pre_plan_mode is not None:
+        state.plan_mode.pre_plan_mode = pre_plan_mode
 
     agent = Mock()
     agent.load_state.return_value = state
@@ -45,20 +58,21 @@ def _make_ctx(tool_name: str, *, mode: str = "plan", tool_args=None, tools=None)
         tool_name=tool_name,
         tool_args=tool_args if tool_args is not None else {},
         tool_call=SimpleNamespace(id="tc_1"),
-        tool_result=None,
+        tool_result=tool_result,
         tool_msg=None,
         tools=tools if tools is not None else [],
     )
 
     ctx = SimpleNamespace(
-        session=SimpleNamespace(),
+        session=SimpleNamespace(session_id="sess1"),
         inputs=inputs,
-        extra={},
+        extra={"_invoke_turn_id": "turn1"},
     )
 
-    rail = AgentModeRail()
+    rail = rail or AgentModeRail()
     rail._agent = agent
     rail.system_prompt_builder = _PromptBuilder()
+    rail.attachment_manager = PromptAttachmentManager()
     return rail, ctx, agent
 
 
@@ -182,7 +196,8 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         tools = [_ToolInfo("todo_create"), _ToolInfo("sessions_spawn"), _ToolInfo("read_file")]
         rail, ctx, _ = _make_ctx("noop", mode="plan", tools=tools)
 
-        with patch("openjiuwen.harness.rails.agent_mode_rail.build_plan_mode_section", return_value="MODE_SECTION"):
+        mode_section = PromptSection(name="mode_instructions", content={"en": "MODE_SECTION"}, priority=85)
+        with patch("openjiuwen.harness.rails.agent_mode_rail.build_plan_mode_section", return_value=mode_section):
             await rail.before_model_call(ctx)
 
         visible_tool_names = [t.name for t in ctx.inputs.tools]
@@ -190,7 +205,9 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         self.assertNotIn("sessions_spawn", visible_tool_names)
         self.assertIn("read_file", visible_tool_names)
 
-        self.assertIn("MODE_SECTION", rail.system_prompt_builder.added_sections)
+        items = await rail.attachment_manager.collect_for_turn("sess1", "turn1")
+        self.assertEqual([item.id for item in items], ["turn.sess1.turn1.mode_instructions"])
+        self.assertEqual(items[0].content, "MODE_SECTION")
 
     async def test_before_model_call_in_auto_mode_removes_mode_section(self) -> None:
         rail, ctx, _ = _make_ctx("noop", mode="auto", tools=[_ToolInfo("read_file")])
@@ -198,6 +215,19 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         await rail.before_model_call(ctx)
 
         self.assertGreaterEqual(len(rail.system_prompt_builder.removed_sections), 1)
+
+    async def test_before_model_call_in_auto_mode_clears_plan_prompt_attachment(self) -> None:
+        rail, ctx, agent = _make_ctx("noop", mode="plan", tools=[_ToolInfo("read_file")])
+        mode_section = PromptSection(name="mode_instructions", content={"en": "PLAN MODE"}, priority=85)
+        with patch("openjiuwen.harness.rails.agent_mode_rail.build_plan_mode_section", return_value=mode_section):
+            await rail.before_model_call(ctx)
+
+        self.assertIsNotNone(await rail.attachment_manager.get_by_id("turn.sess1.turn1.mode_instructions"))
+
+        agent.load_state.return_value.plan_mode.mode = "auto"
+        await rail.before_model_call(ctx)
+
+        self.assertIsNone(await rail.attachment_manager.get_by_id("turn.sess1.turn1.mode_instructions"))
 
     async def test_after_tool_call_register_unregister_task_tool_and_respect_skip(self) -> None:
         rail, ctx_enter, agent = _make_ctx("enter_plan_mode", mode="plan")
@@ -223,3 +253,95 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         with patch.object(rail3, "_register_task_tool") as mock_register3:
             await rail3.after_tool_call(ctx_skip)
             mock_register3.assert_not_called()
+
+    async def test_after_tool_call_restores_mode_when_still_in_plan(self) -> None:
+        rail, ctx, agent = _make_ctx(
+            "exit_plan_mode",
+            mode="plan",
+            pre_plan_mode="normal",
+            tool_result={"status": "ok"},
+        )
+
+        await rail.after_tool_call(ctx)
+
+        agent.restore_mode_after_plan_exit.assert_called_once_with(ctx.session)
+
+    async def test_after_tool_call_skips_restore_when_not_in_plan_mode(self) -> None:
+        rail, ctx, agent = _make_ctx(
+            "exit_plan_mode",
+            mode="normal",
+            pre_plan_mode="normal",
+        )
+
+        await rail.after_tool_call(ctx)
+
+        agent.restore_mode_after_plan_exit.assert_not_called()
+
+    async def test_after_tool_call_skips_restore_after_successful_plan_exit(self) -> None:
+        rail, ctx, agent = _make_ctx(
+            "exit_plan_mode",
+            mode="normal",
+            pre_plan_mode=None,
+        )
+
+        await rail.after_tool_call(ctx)
+
+        agent.restore_mode_after_plan_exit.assert_not_called()
+
+    async def test_before_tool_call_rejects_non_git_write_operations_in_plan_mode(self) -> None:
+        for command in ("mkdir -p /tmp/foo", "touch /tmp/foo", "rm file.txt", "echo x > out.txt"):
+            with self.subTest(command=command):
+                rail, ctx, _ = _make_ctx(
+                    "bash",
+                    mode="plan",
+                    tool_args={"command": command},
+                )
+                await rail.before_tool_call(ctx)
+                self.assertTrue(ctx.extra.get("_skip_tool"))
+                self.assertIn("Write operations are blocked in plan mode", ctx.inputs.tool_result["error"])
+
+    async def test_before_tool_call_allows_read_only_bash_in_plan_mode(self) -> None:
+        rail, ctx, _ = _make_ctx(
+            "bash",
+            mode="plan",
+            tool_args={"command": "ls -la && git status"},
+        )
+        await rail.before_tool_call(ctx)
+        self.assertIsNone(ctx.extra.get("_skip_tool"))
+
+    async def test_allow_switch_mode_false_rejects_switch_mode_in_plan(self) -> None:
+        rail, ctx, _ = _make_ctx(
+            "switch_mode",
+            mode="plan",
+            rail=AgentModeRail(allow_switch_mode=False),
+        )
+        await rail.before_tool_call(ctx)
+        self.assertTrue(ctx.extra.get("_skip_tool"))
+        self.assertIn("not available in plan mode", ctx.inputs.tool_result["error"])
+
+    async def test_static_plan_note_uses_whitelist_and_hides_switch_mode(self) -> None:
+        tools = [
+            _ToolInfo("switch_mode"),
+            _ToolInfo("todo_create"),
+            _ToolInfo("read_file"),
+            _ToolInfo("non_whitelist_tool"),
+        ]
+        rail, ctx, _ = _make_ctx(
+            "noop",
+            mode="plan",
+            tools=tools,
+            rail=AgentModeRail(
+                allow_switch_mode=False,
+                plan_mode_system_note="Static plan note",
+            ),
+        )
+
+        await rail.before_model_call(ctx)
+
+        visible_tool_names = [t.name for t in ctx.inputs.tools]
+        self.assertNotIn("switch_mode", visible_tool_names)
+        self.assertNotIn("todo_create", visible_tool_names)
+        self.assertNotIn("non_whitelist_tool", visible_tool_names)
+        self.assertIn("read_file", visible_tool_names)
+        section = rail.system_prompt_builder.added_sections[-1]
+        self.assertEqual(section.content["en"], "Static plan note")

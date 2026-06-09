@@ -95,9 +95,15 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     不互相替代，也禁止用同一个工具按调用方角色分支。`send_message`
     是另一个三方共享的工具，但 human_agent 视角下的语义约束在 prompt
     层（见上一条），不在 `invoke()` 内。
-12. **`spawn_member` 的 `role_type='human_agent'` 在 HITT 关闭时必须在
-    工具边界拒绝**，配合给出明确指引（`enable_hitt=False`）；
-    `model_name` / `prompt` 与 `human_agent` 互斥也在工具边界报错。
+12. **每个 role_type 是独立 spawn 工具**（`spawn_teammate` /
+    `spawn_human_agent` / `spawn_bridge_agent` / `spawn_external_cli`），
+    schema 扁平、`invoke` 直线、无 role 分支。能力关闭时对应工具**根本不
+    注册**到 leader 工具集——`create_team_tools` 按 `hitt_enabled()` /
+    `bridge_enabled()` / `external_cli_kinds()` 门控；`invoke` 内保留同名
+    防御性检查作为运行时降级兜底并给出明确指引（如 `enable_hitt=False`）。
+    human 成员的 `model_name` / `prompt` 直接不在 `spawn_human_agent`
+    的 schema 中暴露（schema 即契约），无需运行时拒绝。`spawn_teammate`
+    始终注册。
     后端的能力门是工具显式校验，不是隐藏断言。
 13. **每个 `TeamTool.invoke` 必须返回 `ToolOutput`，永不抛**。工具内部
     `try / except` 捕获后端异常，落 `team_logger.error`，转成
@@ -140,10 +146,10 @@ def create_team_tools(
 | 参数 | 取值 | 行为 |
 |---|---|---|
 | `role` | `"leader"` / `"teammate"` / `"human_agent"` | 决定基础工具集——分别为 `LEADER_TOOLS` / `MEMBER_TOOLS` / `HUMAN_AGENT_TOOLS`。其它字符串当作 teammate 走（落入 else 分支）。新增角色必须显式补一个集合常量，不要靠 fall-through。 |
-| `agent_team` | `TeamBackend` | 后端句柄，所有写操作（`build_team` / `spawn_member` / 任务 / 消息）通过它走，不绕过去直接打数据库或 messager。 |
+| `agent_team` | `TeamBackend` | 后端句柄，所有写操作（`build_team` / `spawn_*` / 任务 / 消息）通过它走，不绕过去直接打数据库或 messager。 |
 | `teammate_mode` | `"build_mode"` / `"plan_mode"` | 仅 leader 角色相关：非 plan_mode 时把 `approve_plan` / `approve_tool` 从 allowed 集合里减掉。 |
 | `on_teammate_created` | `Callable[[str], Awaitable[None]]` | leader 用 `send_message` 时若发现成员未启动，自动 startup 的回调；不传则没有 auto-start 行为。teammate / human_agent 不消费这个回调。 |
-| `model_config_allocator` | `Callable[[str \| None], Allocation \| None]` | leader 的 `spawn_member` 调它选 model；不传则 spawn 出来的 teammate 无 allocation，由后端兜底。teammate 不消费。 |
+| `model_config_allocator` | `Callable[[str \| None], Allocation \| None]` | leader 的 `spawn_teammate` 调它选 model；不传则 spawn 出来的 teammate 无 allocation，由后端兜底。teammate 不消费。 |
 | `exclude_tools` | `set[str]` 或 `None` | **减法**——从该角色 allowed 集合里再减一遍。不存在于 allowed 的名字静默忽略（因为减法对空集是恒等）。 |
 | `lang` | `"cn"` / `"en"` | 选语言加载 `_desc`，缺省 `"cn"`。其它字符串走 cn 兜底（`make_translator` 内部 if/else）。 |
 
@@ -201,9 +207,9 @@ openjiuwen/agent_teams/tools/locales/
 
 ### 角色级工具集合
 
-| 集合常量 | 成员（commit 18823271 实测） |
+| 集合常量 | 成员 |
 |---|---|
-| `LEADER_ONLY_TOOLS` | `build_team`, `clean_team`, `spawn_member`, `shutdown_member`, `approve_plan`, `approve_tool`, `create_task`, `update_task`, `list_members` |
+| `LEADER_ONLY_TOOLS` | `build_team`, `clean_team`, `spawn_teammate`, `spawn_human_agent`, `spawn_bridge_agent`, `spawn_external_cli`, `shutdown_member`, `approve_plan`, `approve_tool`, `create_task`, `update_task`, `list_members` |
 | `MEMBER_ONLY_TOOLS` | `claim_task` |
 | `SHARED_TOOLS` | `view_task`, `send_message` |
 | `HUMAN_AGENT_TOOLS` | `view_task`, `member_complete_task`, `send_message` |

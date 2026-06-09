@@ -4,8 +4,13 @@
 from __future__ import annotations
 
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachmentKind,
+    PromptAttachmentScope,
+)
 from openjiuwen.harness.prompts.sections.workspace import build_workspace_section as _build_workspace
 from openjiuwen.harness.prompts.sections.context import build_context_section as _build_context, \
     build_tools_section
@@ -26,28 +31,63 @@ class ContextAssembleRail(DeepAgentRail):
     def __init__(self):
         super().__init__()
         self.system_prompt_builder = None
+        self.attachment_manager = None
         self._ability_manager = None
 
     def init(self, agent) -> None:
         """Capture references to system_prompt_builder and ability_manager."""
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
         self._ability_manager = getattr(agent, "ability_manager", None)
+        self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
 
     def uninit(self, agent) -> None:
         """Remove workspace, context, and tools sections from system prompt builder."""
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("workspace")
             self.system_prompt_builder.remove_section("context")
+            self.system_prompt_builder.remove_section("tools")
+            self.system_prompt_builder = None
+        self.attachment_manager = None
+
+    async def _upsert_attachment_section(self, writer, section, *, scope, kind, source) -> None:
+        try:
+            await writer.upsert_from_section(
+                section=section,
+                scope=scope,
+                kind=kind,
+                source=source,
+                language=self.system_prompt_builder.language,
+                content_kind="text/markdown",
+            )
+        except ValueError as exc:
+            logger.warning("[ContextAssembleRail] skip prompt attachment section=%s: %s", section.name, exc)
+
+    async def _clear_attachment_section(self, writer, section: str, scope: PromptAttachmentScope) -> None:
+        try:
+            await writer.clear_section(section=section, scope=scope)
+        except ValueError as exc:
+            logger.warning("[ContextAssembleRail] skip clearing prompt attachment section=%s: %s", section, exc)
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject workspace directory structure and context files into messages before model call."""
         if self.system_prompt_builder is None:
             return
         workspace = self.workspace
+        is_heartbeat = ctx.extra.get("run_kind") == RunKind.HEARTBEAT
 
         if workspace is None:
             self.system_prompt_builder.remove_section("workspace")
             self.system_prompt_builder.remove_section("context")
+            self.system_prompt_builder.remove_section("tools")
+            if self.attachment_manager is not None:
+                writer = self.attachment_manager.for_context(ctx)
+                await self._clear_attachment_section(
+                    writer,
+                    "context",
+                    PromptAttachmentScope.TURN if not is_heartbeat else PromptAttachmentScope.SESSION,
+                )
+                if not is_heartbeat:
+                    await self._clear_attachment_section(writer, "context", PromptAttachmentScope.SESSION)
             return
 
         lang = self.system_prompt_builder.language
@@ -57,7 +97,6 @@ class ContextAssembleRail(DeepAgentRail):
             lang,
         )
         tools_section = build_tools_section(self._ability_manager, lang)
-        is_heartbeat = ctx.extra.get("run_kind") == RunKind.HEARTBEAT
         context_section = await _build_context(
             self.sys_operation,
             workspace,
@@ -76,7 +115,28 @@ class ContextAssembleRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("tools")
 
         if context_section is not None:
-            self.system_prompt_builder.add_section(context_section)
+            self.system_prompt_builder.remove_section("context")
+            if self.attachment_manager is not None:
+                writer = self.attachment_manager.for_context(ctx)
+                if not is_heartbeat:
+                    await self._clear_attachment_section(writer, "context", PromptAttachmentScope.SESSION)
+                await self._upsert_attachment_section(
+                    writer,
+                    context_section,
+                    scope=PromptAttachmentScope.TURN if not is_heartbeat else PromptAttachmentScope.SESSION,
+                    kind=PromptAttachmentKind.FILE,
+                    source="agent_core.context_assemble.context",
+                )
+            else:
+                self.system_prompt_builder.add_section(context_section)
         else:
             self.system_prompt_builder.remove_section("context")
-
+            if self.attachment_manager is not None:
+                writer = self.attachment_manager.for_context(ctx)
+                await self._clear_attachment_section(
+                    writer,
+                    "context",
+                    PromptAttachmentScope.TURN if not is_heartbeat else PromptAttachmentScope.SESSION,
+                )
+                if not is_heartbeat:
+                    await self._clear_attachment_section(writer, "context", PromptAttachmentScope.SESSION)

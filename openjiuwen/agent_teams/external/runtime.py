@@ -18,8 +18,20 @@ surface, picked by the adapter's ``supports_stdin_injection``:
 
 In both cases the CLI's *actions* (messages, task ops) flow out-of-process
 through the team CLI/MCP tools, so the CLI's stdout stays internal and is
-not surfaced as team-stream chunks. Rail / memory / customizer hooks are
+not surfaced as team-stream chunks. Rail / memory hooks are
 no-ops (the configurator skips those features for external CLI members).
+
+Both flavours implement the :class:`MemberRuntime` interaction surface
+(``start`` / ``stop`` / ``outputs`` / ``send`` / ``abort`` / ``pause`` /
+``subscribe`` / ``state`` / ``session_id``) through the
+shared :class:`_CliRuntimeBase` adapter, which wraps each flavour's single-turn
+``_drive`` async generator: ``send`` starts a turn when IDLE (or steers /
+buffers a follow-up when RUNNING), ``outputs`` exposes the turn's narration
+chunks via a queue-backed iterator, and phase/round events are mapped onto the
+same ``HarnessState`` / round-kind vocabulary the team StreamController consumes
+from a NativeHarness. ``pause`` and immediate-abort *rollback* degrade to no-ops
+(a subprocess turn has no mid-round snapshot to restore); abort still stops the
+in-flight turn.
 """
 
 from __future__ import annotations
@@ -29,15 +41,25 @@ import contextlib
 import time
 import uuid
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
-from openjiuwen.agent_teams.agent.member_runtime import AgentCustomizer
 from openjiuwen.agent_teams.external.cli_agent.adapters import CliAgentAdapter
 from openjiuwen.agent_teams.external.cli_agent.injector import Injector
+from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
+from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.stream.base import OutputSchema
+
+# Harness-private event topics + namespace, mirroring NativeHarness so the team
+# StreamController can subscribe to a CLI runtime with the same
+# ``subscribe(on_state=, on_round=)`` contract. ``kind`` is one of started /
+# finished / aborted / failed (a CLI turn has no ``paused`` phase).
+_EVENT_STATE = "harness.state"
+_EVENT_ROUND = "harness.round"
+_EVENT_NAMESPACE = "cli_runtime"
 
 # Joins buffered mid-turn messages into a single follow-up prompt.
 _FOLLOWUP_SEP = "\n\n---\n\n"
@@ -100,23 +122,221 @@ async def _terminate(process: Optional[asyncio.subprocess.Process]) -> None:
 
 
 class _CliRuntimeBase(ABC):
-    """Shared :class:`MemberRuntime` surface for CLI-backed members."""
+    """Shared :class:`MemberRuntime` surface for CLI-backed members.
+
+    Adapts each flavour's single-turn ``_drive`` async generator into the
+    multi-round interaction surface the team StreamController drives: one turn
+    runs per IDLE ``send``, its narration chunks flow through a queue-backed
+    ``outputs`` iterator, and phase/round transitions fire on the same private
+    event bus a NativeHarness uses.
+    """
 
     def __init__(self, *, member_name: str, adapter: CliAgentAdapter):
         self._member_name = member_name
         self._adapter = adapter
+        # Lifecycle phase mapped onto the team's HarnessState vocabulary so the
+        # StreamController treats a CLI runtime exactly like a NativeHarness.
+        self._phase = HarnessState.IDLE
+        # Queue-backed output channel for the current run cycle; ``stop`` pushes
+        # the ``_END`` sentinel so ``outputs`` terminates. Recreated per start.
+        self._output_queue: asyncio.Queue = asyncio.Queue()
+        # Harness-private event bus; consumers subscribe via
+        # ``subscribe(on_state=, on_round=)``. Metrics/logging off — fired on the
+        # turn-driver hot path.
+        self._events = AsyncCallbackFramework(enable_metrics=False, enable_logging=False)
+        # The asyncio.Task driving the in-flight turn, or None when IDLE.
+        self._turn_task: Optional[asyncio.Task] = None
+        self._round_seq = 0
+        # Set by ``abort`` so the turn driver classifies its end as ``aborted``
+        # rather than ``finished``; reset when the next turn starts.
+        self._turn_aborted = False
 
-    async def run_streaming(self, inputs: dict[str, Any], *, session_id: Optional[str]) -> AsyncIterator[Any]:
-        """Drive one round, surfacing the CLI's narration as output chunks.
+    # ------------------------------------------------------------------
+    # MemberRuntime: lifecycle
+    # ------------------------------------------------------------------
 
-        Each narration line the CLI emits (assistant text / tool descriptors,
-        parsed by the adapter) is yielded as an ``OutputSchema`` so the team
-        stream tags it with this member and fans it out, mirroring an
-        in-process member. Team-visible *actions* still flow out of band
-        through the CLI's MCP tool calls; this only adds observability.
+    async def start(self, *, team_session: Optional[Any] = None) -> None:
+        """Prepare the runtime for one run cycle (the subprocess owns its session).
+
+        ``team_session`` is ignored: a CLI subprocess manages its own session,
+        so cross-cycle state lives in the subprocess, not a shared team session.
+        Resets the output channel + phase so a reused instance starts clean.
         """
-        async for chunk in self._drive(inputs):
-            yield chunk
+        _ = team_session
+        self._output_queue = asyncio.Queue()
+        self._turn_aborted = False
+        self._phase = HarnessState.IDLE
+
+    async def stop(self) -> None:
+        """Stop the in-flight turn, release the CLI transport, close outputs.
+
+        Idempotent. Marks the phase TERMINATED first so the turn driver, on its
+        abort-induced return, skips the trailing round/state events; then awaits
+        the turn task, releases the transport, and pushes ``_END`` so a consumer
+        iterating ``outputs`` terminates cleanly.
+        """
+        if self._phase is HarnessState.TERMINATED:
+            return
+        self._phase = HarnessState.TERMINATED
+        self._turn_aborted = True
+        await self._abort_turn()
+        task = self._turn_task
+        self._turn_task = None
+        if task is not None and not task.done():
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        await self.aclose()
+        self._output_queue.put_nowait(_END)
+        await self._events.unregister_namespace(_EVENT_NAMESPACE)
+
+    @property
+    def state(self) -> HarnessState:
+        """Return the current lifecycle phase."""
+        return self._phase
+
+    @property
+    def session_id(self) -> Optional[str]:
+        """Return None: a CLI subprocess owns its own session, not a team one."""
+        return None
+
+    # ------------------------------------------------------------------
+    # MemberRuntime: interaction
+    # ------------------------------------------------------------------
+
+    def outputs(self) -> AsyncIterator[Any]:
+        """Return a queue-backed iterator over the run cycle's narration chunks."""
+        return _OutputIterator(self._output_queue)
+
+    async def send(self, content: Any, *, immediate: bool = False) -> Any:
+        """Submit input: start a turn when IDLE, else steer / buffer a follow-up.
+
+        - IDLE: start a new turn driving ``content`` (transition RUNNING, fire
+          ``started``); the turn runs in a background task so ``send`` returns
+          without blocking, mirroring the NativeHarness supervisor.
+        - RUNNING + immediate: steer the in-flight turn (or buffer it for the
+          re-invoke flavour, which cannot steer).
+        - RUNNING + non-immediate: buffer as a follow-up handled after the turn.
+
+        Returns None (CLI runtimes have no monotonic sequence id to surface).
+        """
+        if self._phase is HarnessState.TERMINATED:
+            raise_error(
+                StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+                error_msg=f"external CLI member '{self._member_name}' runtime already stopped.",
+            )
+        text = content if isinstance(content, str) else str(content)
+        if self._phase is HarnessState.RUNNING:
+            if immediate:
+                await self.steer(text)
+            else:
+                await self.follow_up(text)
+            return None
+        round_id = self._next_round_id()
+        self._turn_aborted = False
+        await self._transition(HarnessState.RUNNING)
+        await self._emit_round("started", round_id)
+        self._turn_task = asyncio.create_task(
+            self._drive_turn(text, round_id),
+            name=f"cli_runtime_turn[{self._member_name}:{round_id}]",
+        )
+        return None
+
+    async def abort(self, *, immediate: bool = False) -> None:
+        """Stop the in-flight turn. ``immediate`` rollback degrades to a no-op.
+
+        A subprocess turn has no mid-round snapshot to roll back to, so both
+        graceful and immediate aborts simply signal the turn driver to stop;
+        the turn ends and the driver fires an ``aborted`` round event. The
+        ``immediate`` flag only documents intent here.
+        """
+        _ = immediate
+        if self._phase is not HarnessState.RUNNING:
+            return
+        self._turn_aborted = True
+        await self._abort_turn()
+
+    async def pause(self) -> None:
+        """No-op: a CLI subprocess turn cannot be paused and cleanly restarted."""
+        team_logger.debug("[{}] pause is a no-op for a CLI-backed runtime", self._member_name)
+        return None
+
+    async def subscribe(
+        self,
+        *,
+        on_state: Callable[..., Any] | None = None,
+        on_round: Callable[..., Any] | None = None,
+    ) -> None:
+        """Register optional phase/round callbacks (same contract as NativeHarness).
+
+        Both keyword-only and optional; only the non-None callbacks are
+        registered. ``on_state`` receives ``old`` / ``new`` / ``session_id``;
+        ``on_round`` receives ``kind`` / ``round_id`` / ``result`` (kwargs
+        narrowed to each callback's declared parameters).
+        """
+        if on_state is not None:
+            await self._events.register(_EVENT_STATE, on_state, namespace=_EVENT_NAMESPACE)
+        if on_round is not None:
+            await self._events.register(_EVENT_ROUND, on_round, namespace=_EVENT_NAMESPACE)
+
+    # ------------------------------------------------------------------
+    # Turn driving (single-turn ``_drive`` → multi-round surface)
+    # ------------------------------------------------------------------
+
+    async def _drive_turn(self, content: str, round_id: int) -> None:
+        """Drive one turn through ``_drive``, then fire its terminal round event.
+
+        Pumps each narration chunk into the output queue, then maps the turn's
+        outcome onto a round event (``failed`` on a crash, ``aborted`` when
+        ``abort`` signalled, else ``finished``) and settles back to IDLE — unless
+        ``stop`` already moved the phase to TERMINATED, in which case the trailing
+        events are suppressed.
+        """
+        error: Optional[BaseException] = None
+        # CancelledError is BaseException, never caught by ``except Exception`` —
+        # cancellation propagates while a crash is captured into ``error``.
+        try:
+            async for chunk in self._drive({"query": content}):
+                await self._output_queue.put(chunk)
+        except Exception as exc:  # noqa: BLE001 - reported via round event
+            error = exc
+            team_logger.exception("[{}] external cli turn crashed", self._member_name)
+        finally:
+            self._turn_task = None
+        if self._phase is HarnessState.TERMINATED:
+            return
+        if error is not None:
+            await self._emit_round("failed", round_id)
+        elif self._turn_aborted:
+            await self._emit_round("aborted", round_id)
+        else:
+            await self._emit_round("finished", round_id)
+        await self._transition(HarnessState.IDLE)
+
+    def _next_round_id(self) -> int:
+        """Return a monotonic round id for this runtime instance."""
+        self._round_seq += 1
+        return self._round_seq
+
+    async def _transition(self, new_phase: HarnessState) -> None:
+        """Update the phase and fire ``harness.state`` (no-op when unchanged)."""
+        old_phase = self._phase
+        if old_phase is new_phase:
+            return
+        self._phase = new_phase
+        await self._events.trigger(
+            _EVENT_STATE,
+            old=old_phase,
+            new=new_phase,
+            session_id=self.session_id,
+        )
+
+    async def _emit_round(self, kind: str, round_id: int) -> None:
+        """Fire ``harness.round`` for a round lifecycle transition."""
+        await self._events.trigger(_EVENT_ROUND, kind=kind, round_id=round_id, result=None)
+
+    # ------------------------------------------------------------------
+    # Per-flavour turn mechanics
+    # ------------------------------------------------------------------
 
     @abstractmethod
     async def _drive(self, inputs: dict[str, Any]) -> AsyncIterator[Any]:
@@ -136,8 +356,9 @@ class _CliRuntimeBase(ABC):
         """Deliver content to be handled after the current turn."""
 
     @abstractmethod
-    async def abort(self) -> None:
-        """Request the in-flight round to stop."""
+    async def _abort_turn(self) -> None:
+        """Signal the in-flight ``_drive`` to stop (flavour-specific). Idempotent."""
+        ...
 
     @abstractmethod
     async def aclose(self) -> None:
@@ -175,10 +396,6 @@ class _CliRuntimeBase(ABC):
 
     async def inject_member_memory(self, memory_manager: Any, query: str) -> None:
         """No-op: external CLI members do not use team memory injection."""
-        return None
-
-    def run_agent_customizer(self, customizer: AgentCustomizer) -> None:
-        """No-op: the agent_customizer hook targets a local DeepAgent."""
         return None
 
     @property
@@ -291,7 +508,7 @@ class ExternalCliRuntime(_CliRuntimeBase):
         """Inject content for the CLI to handle after the current turn."""
         await self._injector.write(self._adapter.format_input(content))
 
-    async def abort(self) -> None:
+    async def _abort_turn(self) -> None:
         """Stop the in-flight turn at the next output line (process survives)."""
         self._abort_requested = True
 
@@ -402,7 +619,7 @@ class ReinvokeCliRuntime(_CliRuntimeBase):
                     # subprocess so the turn task unwinds promptly instead of
                     # waiting out the watchdog, then await it (suppressing the
                     # induced error) before the close propagates.
-                    await self.abort()
+                    await self._abort_turn()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await turn_task
             # Normal path: await the turn so a spawn / run error propagates.
@@ -570,7 +787,7 @@ class ReinvokeCliRuntime(_CliRuntimeBase):
         """Buffer content for a follow-up re-invocation."""
         self._pending.append(content)
 
-    async def abort(self) -> None:
+    async def _abort_turn(self) -> None:
         """Preempt the in-flight turn: kill the current subprocess and stop.
 
         Sets the abort flag and immediately terminates the running subprocess

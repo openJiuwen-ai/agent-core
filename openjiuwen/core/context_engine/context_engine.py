@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import List, Dict, Optional, Tuple
+from typing import Awaitable, Callable, List, Dict, Optional, Tuple
 import asyncio
 import functools
 
@@ -12,7 +12,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import context_engine_logger, LogEventType
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.session.agent import Session
-from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
@@ -49,6 +49,20 @@ class ContextEngine:
         self._workspace = workspace
         self._sys_operation = sys_operation
         self._context_pool: Dict[str, ModelContext] = dict()
+        self._window_mutators: List[
+            Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]
+        ] = []
+
+    def register_window_mutator(
+            self,
+            mutator: Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]],
+    ) -> None:
+        """Register an instance-level final-window mutator."""
+        self._window_mutators.append(mutator)
+
+    def clear_window_mutators(self) -> None:
+        """Clear instance-level final-window mutators."""
+        self._window_mutators.clear()
 
     @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="context")
     async def create_context(
@@ -116,6 +130,7 @@ class ContextEngine:
             session_ref=session,
             workspace=self._workspace,
             sys_operation=self._sys_operation,
+            window_mutators=self._window_mutators,
         )
         self._load_state_from_session(context, session, history_messages)
         self._context_pool[full_context_id] = context

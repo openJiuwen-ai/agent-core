@@ -38,6 +38,7 @@ from openjiuwen.agent_teams.agent.coordination.handlers import (
     StaleTaskHandler,
     TaskBoardHandler,
     TeamCompletionHandler,
+    WorkflowHandler,
 )
 from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.schema.events import TeamEvent
@@ -149,9 +150,10 @@ class EventDispatcher:
     dispatcher so coordination events never enter the global
     ``Runner.callback_framework``.
 
-    The six scenario handlers are exposed as public attributes
+    The seven scenario handlers are exposed as public attributes
     (``lifecycle`` / ``member`` / ``message`` / ``task_board`` /
-    ``stale_task`` / ``team_completion``) for direct access in tests.
+    ``stale_task`` / ``team_completion`` / ``workflow``) for direct
+    access in tests.
     """
 
     def __init__(
@@ -179,6 +181,10 @@ class EventDispatcher:
         self.task_board = TaskBoardHandler(host, blueprint, infra, poll_ctrl)
         self.stale_task = StaleTaskHandler(host, blueprint, infra, poll_ctrl, stale_claim_throttle)
         self.team_completion = TeamCompletionHandler(host, blueprint, infra, poll_ctrl)
+        # Swarmflow spectator narration. Listens only for WORKFLOW_PROGRESS
+        # (a dedicated event_key, no fan-out overlap), so its registration
+        # position is not load-bearing.
+        self.workflow = WorkflowHandler(host, blueprint, infra, poll_ctrl)
 
         self._framework = AsyncCallbackFramework(
             enable_metrics=False,
@@ -194,14 +200,40 @@ class EventDispatcher:
         # fans out after StaleTaskHandler's: a stale sweep may deliver
         # input and make the leader non-idle, and the completion check
         # must see that before deciding the team is done.
-        for handler in (
+        handlers = [
             self.lifecycle,
             self.member,
             self.message,
             self.task_board,
             self.stale_task,
             self.team_completion,
-        ):
+            self.workflow,
+        ]
+        # The reliability handler (leader-side remediation + team-level
+        # ping-pong) mounts only when the team opts into the reliability
+        # framework. It is appended after team_completion but does not listen
+        # on POLL_TASK, so the completion ordering above is unaffected; on
+        # MESSAGE / BROADCAST it fans out after MessageHandler.
+        self.reliability = None
+        reliability_cfg = getattr(blueprint.spec, "reliability", None)
+        if reliability_cfg is not None and reliability_cfg.enabled:
+            from openjiuwen.agent_teams.reliability.factory import (
+                build_pingpong_detector,
+                build_remediation_policy,
+            )
+            from openjiuwen.agent_teams.reliability.handler import ReliabilityHandler
+
+            self.reliability = ReliabilityHandler(
+                host,
+                blueprint,
+                infra,
+                poll_ctrl,
+                policy=build_remediation_policy(reliability_cfg),
+                pingpong=build_pingpong_detector(reliability_cfg),
+            )
+            handlers.append(self.reliability)
+
+        for handler in handlers:
             for event_key, callback in handler.get_callbacks().items():
                 self._framework.register_sync(event_key, callback)
 

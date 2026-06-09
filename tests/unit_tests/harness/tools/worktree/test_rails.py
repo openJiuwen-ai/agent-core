@@ -52,14 +52,24 @@ class _StubCard:
 
 @dataclass
 class _StubAbilityManager:
+    owner_id: str | None = None
     added: list[Any] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
 
-    def add(self, card: Any) -> None:
+    def add(self, card: Any) -> Any:
         self.added.append(card)
+        return type("_AddResult", (), {"name": card.name, "added": True})()
 
     def remove(self, name: str) -> None:
         self.removed.append(name)
+
+    def add_ability(self, card: Any, resource: Any) -> Any:
+        if not card.stateless and self.owner_id:
+            card.id = f"{card.name}_{self.owner_id}"
+        return self.add(card)
+
+    def remove_ability(self, name: str) -> None:
+        self.remove(name)
 
 
 @dataclass
@@ -72,6 +82,9 @@ class _StubAgent:
     card: _StubCard = field(default_factory=_StubCard)
     ability_manager: _StubAbilityManager = field(default_factory=_StubAbilityManager)
     system_prompt_builder: _StubPromptBuilder = field(default_factory=_StubPromptBuilder)
+
+    def __post_init__(self) -> None:
+        self.ability_manager.owner_id = self.card.id
 
 
 # --- Tests --------------------------------------------------------------------
@@ -89,11 +102,7 @@ def test_worktree_rail_init_registers_two_tools_on_agent():
     rail = WorktreeRail()
     agent = _StubAgent()
 
-    with (
-        patch.object(WorktreeManager, "__init__", return_value=None) as mock_mgr,
-        patch("openjiuwen.harness.tools.worktree.rails.Runner") as mock_runner,
-    ):
-        mock_runner.resource_mgr.add_tool = MagicMock()
+    with patch.object(WorktreeManager, "__init__", return_value=None) as mock_mgr:
         rail.init(agent)
 
     assert mock_mgr.call_count == 1, "WorktreeManager should be built exactly once"
@@ -119,11 +128,7 @@ def test_worktree_rail_init_forwards_event_handler():
         captured["event_handler"] = event_handler
         captured["rails"] = list(rails or [])
 
-    with (
-        patch.object(WorktreeManager, "__init__", fake_init),
-        patch("openjiuwen.harness.tools.worktree.rails.Runner") as mock_runner,
-    ):
-        mock_runner.resource_mgr.add_tool = MagicMock()
+    with patch.object(WorktreeManager, "__init__", fake_init):
         rail.init(agent)
 
     assert captured["event_handler"] is handler
@@ -134,19 +139,11 @@ def test_worktree_rail_uninit_removes_tools_from_both_managers():
     rail = WorktreeRail()
     agent = _StubAgent()
 
-    with (
-        patch.object(WorktreeManager, "__init__", return_value=None),
-        patch("openjiuwen.harness.tools.worktree.rails.Runner") as mock_runner,
-    ):
-        mock_runner.resource_mgr.add_tool = MagicMock()
-        mock_runner.resource_mgr.remove_tool = MagicMock()
+    with patch.object(WorktreeManager, "__init__", return_value=None):
         rail.init(agent)
-        tool_ids = [getattr(t.card, "id", None) for t in rail._tools]
         rail.uninit(agent)
 
     assert sorted(agent.ability_manager.removed) == ["enter_worktree", "exit_worktree"]
-    removed_ids = [call.args[0] for call in mock_runner.resource_mgr.remove_tool.call_args_list]
-    assert sorted(removed_ids) == sorted(filter(None, tool_ids))
     assert rail.manager is None
     assert rail._tools == []
 
@@ -156,11 +153,7 @@ def test_worktree_rail_init_tool_cards_carry_agent_id():
     rail = WorktreeRail()
     agent = _StubAgent(card=_StubCard(id="agent-abc"))
 
-    with (
-        patch.object(WorktreeManager, "__init__", return_value=None),
-        patch("openjiuwen.harness.tools.worktree.rails.Runner") as mock_runner,
-    ):
-        mock_runner.resource_mgr.add_tool = MagicMock()
+    with patch.object(WorktreeManager, "__init__", return_value=None):
         rail.init(agent)
 
     assert all(isinstance(t, Tool) for t in rail._tools)

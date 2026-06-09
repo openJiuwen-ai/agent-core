@@ -592,12 +592,6 @@ class OpenAIModelClient(BaseModelClient):
             output_tokens = getattr(response.usage, 'completion_tokens', 0) or 0
             total_tokens = getattr(response.usage, 'total_tokens', 0) or 0
 
-            # Extract cached token information (OpenAI API may return in prompt_tokens_details)
-            cache_tokens = 0
-            prompt_tokens_details = getattr(response.usage, 'prompt_tokens_details', None)
-            if prompt_tokens_details:
-                cache_tokens = getattr(prompt_tokens_details, 'cached_tokens', 0) or 0
-
             # Extract cost information if available
             input_cost, output_cost, total_cost = self._extract_cost_info(response.usage)
 
@@ -606,7 +600,7 @@ class OpenAIModelClient(BaseModelClient):
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
-                cache_tokens=cache_tokens,
+                cache_tokens=self._extract_cache_tokens(response.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
                 total_cost=total_cost,
@@ -705,6 +699,7 @@ class OpenAIModelClient(BaseModelClient):
                 input_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
                 output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
                 total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
+                cache_tokens=self._extract_cache_tokens(chunk.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
                 total_cost=total_cost,

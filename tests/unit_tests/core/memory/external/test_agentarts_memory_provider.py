@@ -215,7 +215,8 @@ async def test_static_service_config_is_read_only_after_construction():
 
 
 def test_agentarts_extra_is_declared_in_pyproject():
-    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+    project_root = Path(__file__).resolve().parents[5]
+    pyproject = (project_root / "pyproject.toml").read_text(encoding="utf-8")
     assert 'agentarts = ["agentarts-sdk>=0.1.2,<0.2"]' in pyproject
 
 

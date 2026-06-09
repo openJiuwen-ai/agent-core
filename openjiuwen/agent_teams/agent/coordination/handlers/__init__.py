@@ -20,6 +20,7 @@ from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHa
 from openjiuwen.agent_teams.agent.coordination.handlers.stale_task import StaleTaskHandler
 from openjiuwen.agent_teams.agent.coordination.handlers.task_board import TaskBoardHandler
 from openjiuwen.agent_teams.agent.coordination.handlers.team_completion import TeamCompletionHandler
+from openjiuwen.agent_teams.agent.coordination.handlers.workflow import WorkflowHandler
 
 __all__ = [
     "AgentLifecycleHandler",
@@ -30,4 +31,5 @@ __all__ = [
     "StaleTaskHandler",
     "TaskBoardHandler",
     "TeamCompletionHandler",
+    "WorkflowHandler",
 ]

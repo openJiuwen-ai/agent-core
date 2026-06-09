@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import asyncio
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 
@@ -716,6 +717,19 @@ class ReActAgent(BaseAgent):
             "system_messages": final_system,
             "tools": ctx.inputs.tools if ctx.inputs.tools else None,
         }
+        prompt_attachment_manager = getattr(self, "prompt_attachment_manager", None)
+        make_window_mutator = getattr(prompt_attachment_manager, "make_window_mutator", None)
+        if callable(make_window_mutator):
+            session_id = (
+                ctx.session.get_session_id()
+                if ctx.session is not None
+                else ctx.context.session_id()
+            )
+            invoke_turn_id = ctx.extra.get("_invoke_turn_id") or f"turn_{uuid.uuid4().hex}"
+            ctx.extra["_invoke_turn_id"] = invoke_turn_id
+            context_window_kwargs["window_mutators"] = [
+                make_window_mutator(session_id, invoke_turn_id)
+            ]
         if enable_kv_release and supports_kv_release:
             context_window_kwargs["model"] = llm
 
@@ -1312,6 +1326,12 @@ class ReActAgent(BaseAgent):
         invoke_inputs = InvokeInputs(query=query, conversation_id=conversation_id)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
         ctx.extra["_streaming"] = kwargs.get("_streaming", False)
+        input_invoke_turn_id = inputs.get("_invoke_turn_id") if isinstance(inputs, dict) else None
+        ctx.extra["_invoke_turn_id"] = (
+            kwargs.get("_invoke_turn_id")
+            or input_invoke_turn_id
+            or f"turn_{uuid.uuid4().hex}"
+        )
         if isinstance(inputs, dict):
             ctx.extra["user_id"] = inputs.get("user_id", "")
             ctx.extra["run_kind"] = inputs.get("run_kind", "")
@@ -1378,6 +1398,16 @@ class ReActAgent(BaseAgent):
                 if invoke_inputs.result is None:
                     for iteration in range(start_iteration, self._config.max_iterations):
                         logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
+
+                        # Honor force_finish requests set at iteration boundary
+                        # (e.g. by rails on AFTER_REACT_ITERATION). This lets a
+                        # graceful abort take effect at the top of the next
+                        # iteration, after the previous one fully completes.
+                        boundary_finish = ctx.consume_force_finish()
+                        if boundary_finish:
+                            await self.context_engine.save_contexts(session)
+                            invoke_inputs.result = boundary_finish.result
+                            break
 
                         # Inject pending steering messages
                         # before the next model call.
@@ -1454,10 +1484,23 @@ class ReActAgent(BaseAgent):
                         if workflow_interrupt:
                             await self._commit_interrupt(workflow_interrupt, context, session, invoke_inputs)
                             break
+
+                        # Iteration fully succeeded (LLM + all tools + ToolMessages
+                        # all written). Fire AFTER_REACT_ITERATION so rails (e.g.
+                        # SnapshotRail) can capture a safe-state snapshot.
+                        await ctx.fire(AgentCallbackEvent.AFTER_REACT_ITERATION)
                     else:
+                        # The loop exhausted its iteration budget. Honor a
+                        # force_finish requested by the final iteration's
+                        # AFTER_REACT_ITERATION hook (e.g. graceful abort),
+                        # which has no next iteration-top to consume it.
+                        boundary_finish = ctx.consume_force_finish()
                         await self.context_engine.save_contexts(session)
-                        result = {"output": "Max iterations reached without completion", "result_type": "error"}
-                        invoke_inputs.result = result
+                        if boundary_finish is not None:
+                            invoke_inputs.result = boundary_finish.result
+                        else:
+                            result = {"output": "Max iterations reached without completion", "result_type": "error"}
+                            invoke_inputs.result = result
 
             # after_invoke rails have fired; return result (possibly adapted by rails via ctx.extra)
             return ctx.extra.get("invoke_result", invoke_inputs.result)

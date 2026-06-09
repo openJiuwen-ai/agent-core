@@ -61,8 +61,11 @@ async def inprocess_spawn(
     teammate = _TeamAgent(card)
     teammate.configure(spec, ctx)
 
-    query = initial_message or "Join the team and wait for your first assignment."
-    inputs: dict[str, Any] = {"query": query}
+    # Empty query means "no first round": the teammate comes up, subscribes,
+    # and idles until a real mailbox message arrives. Only a genuine
+    # first-start instruction drives an initial harness.send (gated in
+    # ``TeamAgent.invoke`` / ``stream``).
+    inputs: dict[str, Any] = {"query": initial_message or ""}
 
     member_name = ctx.member_name
 
@@ -95,6 +98,10 @@ async def inprocess_spawn(
         _task=task,
         agent_ref=teammate,
     )
+    # Wire the runtime-ready callback so CoordinationKernel.start()
+    # sets the handle's ready_event once the member's harness, stream
+    # controller, tools, and event bus are all up.
+    teammate.on_runtime_ready = handle.ready_event.set
     team_logger.info(
         "[inprocess] spawned teammate {} as task {}",
         member_name,

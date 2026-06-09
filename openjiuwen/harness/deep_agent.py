@@ -89,6 +89,12 @@ from openjiuwen.harness.prompts import (
 )
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.identity import build_identity_section
+from openjiuwen.harness.prompts.sections.prompt_attachments import (
+    build_prompt_attachments_section,
+)
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachmentManager,
+)
 from openjiuwen.harness.workspace.workspace import Workspace
 
 # Events bridged to the inner ReActAgent.
@@ -100,6 +106,10 @@ _BRIDGE_EVENTS = frozenset(
         AgentCallbackEvent.BEFORE_TOOL_CALL,
         AgentCallbackEvent.AFTER_TOOL_CALL,
         AgentCallbackEvent.ON_TOOL_EXCEPTION,
+        # Fired by the inner ReActAgent at each successful iteration end, so a
+        # rail registered via DeepAgent.register_rail must bridge to the inner
+        # agent (same callback-manager namespace) rather than the outer one.
+        AgentCallbackEvent.AFTER_REACT_ITERATION,
     }
 )
 
@@ -143,6 +153,7 @@ class DeepAgent(BaseAgent):
         self._bound_session_id: Optional[str] = None
         self._session_toolkit: SessionToolkit | None = None
         self._pending_harness_configs: List[str] = []
+        self.prompt_attachment_manager: PromptAttachmentManager = PromptAttachmentManager()
         super().__init__(card)
 
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
@@ -184,38 +195,19 @@ class DeepAgent(BaseAgent):
             return
         if Runner.resource_mgr.get_tool(card.id) is None:
             return
-        tags = Runner.resource_mgr.get_resource_tag(card.id) or []
-        if self.card.id in tags and len(tags) > 1:
-            result = Runner.resource_mgr.remove_resource_tag(
-                card.id,
-                self.card.id,
-                skip_if_tag_not_exists=True,
+        result = Runner.resource_mgr.remove_tool(card.id)
+        if result.is_err():
+            logger.warning(
+                "[DeepAgent] Failed to unregister tool during hot reload: %s",
+                result.msg(),
             )
-            if result.is_err():
-                logger.warning(
-                    "[DeepAgent] Failed to remove tool tag during hot reload: %s",
-                    result.msg(),
-                )
-            return
-        if self.card.id in tags or not tags:
-            result = Runner.resource_mgr.remove_tool(card.id)
-            if result.is_err():
-                logger.warning(
-                    "[DeepAgent] Failed to unregister tool during hot reload: %s",
-                    result.msg(),
-                )
 
     def _ensure_builtin_tool_resource(self, card: ToolCard, config: DeepAgentConfig) -> None:
         if card.name not in {"free_search", "paid_search"}:
             return
-        existing_tool = Runner.resource_mgr.get_tool(card.id)
-        if existing_tool is not None:
-            tag_result = Runner.resource_mgr.add_resource_tag(card.id, self.card.id)
-            if tag_result.is_err():
-                logger.warning(
-                    "[DeepAgent] Failed to tag existing free_search during hot reload: %s",
-                    tag_result.msg(),
-                )
+        # Builtin search tools are not shared across agents; a hit here means
+        # this agent already registered the same card on a prior reconfigure.
+        if Runner.resource_mgr.get_tool(card.id) is not None:
             return
 
         from openjiuwen.harness.tools import WebFreeSearchTool, WebPaidSearchTool
@@ -234,6 +226,7 @@ class DeepAgent(BaseAgent):
         self._deep_config = config
         if config.card is not None:
             self.card = config.card
+            self.ability_manager.set_owner_id(self.card.id)
 
         self._react_agent = self._create_react_agent()
         self._queue_pending_rails(config)
@@ -244,6 +237,7 @@ class DeepAgent(BaseAgent):
         self._deep_config = config
         if config.card is not None:
             self.card = config.card
+            self.ability_manager.set_owner_id(self.card.id)
 
         self._hot_reload_rails(config)
 
@@ -321,6 +315,7 @@ class DeepAgent(BaseAgent):
         if config.context_engine_config is not None:
             new_react_config.context_engine_config = config.context_engine_config
         self._react_agent.configure(new_react_config)
+        self._react_agent.prompt_attachment_manager = self.prompt_attachment_manager
         logger.info("[DeepAgent] Model configuration hot reloaded")
 
     def _hot_reload_tools(
@@ -387,6 +382,7 @@ class DeepAgent(BaseAgent):
             ))
         else:
             prompt_builder.add_section(build_identity_section(language))
+        prompt_builder.add_section(build_prompt_attachments_section(language))
         prompt = prompt_builder.build()
         new_react_config = self._react_agent.config.model_copy()
         new_react_config.prompt_template = [{"role": "system", "content": prompt}]
@@ -394,6 +390,7 @@ class DeepAgent(BaseAgent):
         self.system_prompt_builder = prompt_builder
         self._react_agent.prompt_builder = prompt_builder
         self._react_agent.system_prompt_builder = prompt_builder
+        self._react_agent.prompt_attachment_manager = self.prompt_attachment_manager
         logger.info("[DeepAgent] System prompt hot reloaded")
 
     def _sync_builder_to_active_rails(self) -> None:
@@ -739,6 +736,7 @@ class DeepAgent(BaseAgent):
             ))
         else:
             prompt_builder.add_section(build_identity_section(language))
+        prompt_builder.add_section(build_prompt_attachments_section(language))
         prompt = prompt_builder.build()
         react_config.prompt_template = [{"role": "system", "content": prompt}]
 
@@ -762,6 +760,7 @@ class DeepAgent(BaseAgent):
         self.system_prompt_builder = prompt_builder
         agent.prompt_builder = prompt_builder
         agent.system_prompt_builder = prompt_builder
+        agent.prompt_attachment_manager = self.prompt_attachment_manager
 
         # Share ability manager so tools registered on DeepAgent are visible inside.
         agent.ability_manager = self.ability_manager
@@ -1060,6 +1059,7 @@ class DeepAgent(BaseAgent):
         if isinstance(inputs, dict):
             query = inputs.get("query", "")
             conversation_id = inputs.get("conversation_id")
+            invoke_turn_id = inputs.get("_invoke_turn_id")
             run = inputs.get("run", {})
             run_kind = None
             run_context = None
@@ -1072,11 +1072,13 @@ class DeepAgent(BaseAgent):
         elif isinstance(inputs, str):
             query = inputs
             conversation_id = None
+            invoke_turn_id = None
             run_kind = None
             run_context = None
         elif isinstance(inputs, InteractiveInput):
             query = inputs
             conversation_id = None
+            invoke_turn_id = None
             run_kind = None
             run_context = None
         else:
@@ -1085,12 +1087,15 @@ class DeepAgent(BaseAgent):
                 error_msg="Input must be dict with 'query', str, or InteractiveInput.",
             )
 
-        return InvokeInputs(
+        invoke_inputs = InvokeInputs(
             query=query,
             conversation_id=conversation_id,
             run_kind=run_kind,
             run_context=run_context
         )
+        if invoke_turn_id:
+            setattr(invoke_inputs, "_invoke_turn_id", invoke_turn_id)
+        return invoke_inputs
 
     @staticmethod
     def _to_effective_inputs(invoke_inputs: InvokeInputs) -> Dict[str, Any]:
@@ -1098,6 +1103,9 @@ class DeepAgent(BaseAgent):
         effective_inputs: Dict[str, Any] = {"query": invoke_inputs.query}
         if invoke_inputs.conversation_id is not None:
             effective_inputs["conversation_id"] = invoke_inputs.conversation_id
+        invoke_turn_id = getattr(invoke_inputs, "_invoke_turn_id", None)
+        if invoke_turn_id:
+            effective_inputs["_invoke_turn_id"] = invoke_turn_id
         if invoke_inputs.run_kind is not None:
             effective_inputs["run_kind"] = invoke_inputs.run_kind
         if invoke_inputs.run_context is not None:
@@ -1153,6 +1161,14 @@ class DeepAgent(BaseAgent):
             ]
         self._pending_rails.append(rail)
         return self
+
+    def configured_rails(self) -> List[AgentRail]:
+        """Return all queued + registered rails (pending first, then registered).
+
+        Public accessor for hosts that need to copy a template agent's full rail
+        set without touching DeepAgent's internal rail lists directly.
+        """
+        return [*self._pending_rails, *self._registered_rails]
 
     def find_rails_by_type(self, rail_types: tuple[type, ...]) -> List[AgentRail]:
         """Return queued + registered rails matching any of the given types.

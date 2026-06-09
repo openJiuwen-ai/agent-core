@@ -5,6 +5,7 @@ import tempfile
 import shutil
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -13,6 +14,7 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.rails.memory.coding_memory_rail import CodingMemoryRail
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 
 
@@ -229,6 +231,7 @@ type: user
         mock_builder.remove_section = Mock()
         mock_builder.add_section = Mock()
         rail.system_prompt_builder = mock_builder
+        rail.attachment_manager = PromptAttachmentManager()
 
         # 设置已召回的内容
         rail._recalled_content = "### 测试记忆\n\n测试内容"
@@ -239,13 +242,16 @@ type: user
         mock_ctx.inputs = Mock()
         mock_ctx.inputs.is_cron = Mock(return_value=False)
         mock_ctx.inputs.is_heartbeat = Mock(return_value=False)
+        mock_ctx.session = SimpleNamespace(get_session_id=lambda: "sess1")
+        mock_ctx.extra = {"_invoke_turn_id": "turn1"}
 
         await rail.before_model_call(mock_ctx)
 
         # 验证注入了召回内容
         mock_builder.add_section.assert_called_once()
-        call_args = mock_builder.add_section.call_args[0][0]
-        assert "已加载的相关记忆" in call_args.content["cn"]
+        items = await rail.attachment_manager.collect_for_turn("sess1", "turn1")
+        assert [item.id for item in items] == ["turn.sess1.turn1.coding_memory_context"]
+        assert "已加载的相关记忆" in (items[0].content or "")
 
     def test_scenario_switching(self):
         """测试场景切换逻辑."""

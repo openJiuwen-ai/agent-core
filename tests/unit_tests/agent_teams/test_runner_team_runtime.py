@@ -363,10 +363,18 @@ async def test_runner_run_agent_team_streaming_with_stream_logger_writes_file(is
 
 
 @pytest.mark.asyncio
-async def test_team_harness_seeds_team_plan_mode_before_streaming(
+async def test_team_harness_seeds_team_plan_mode_on_start(
     isolated_checkpointer,
     tmp_path,
 ):
+    """Initial-plan-mode leader seeds plan mode on the child session at start.
+
+    Seeding moved out of the removed ``run_streaming`` into the start path
+    (``_seed_initial_plan_mode`` on the child session bound for the cycle), so
+    the test drives that seam directly with the real plan-mode state machine.
+    """
+    from unittest.mock import MagicMock
+
     from openjiuwen.agent_teams.harness import TeamHarness
     from openjiuwen.agent_teams.schema.team import TeamRole
     from openjiuwen.harness.factory import create_deep_agent
@@ -379,39 +387,29 @@ async def test_team_harness_seeds_team_plan_mode_before_streaming(
         enable_task_loop=True,
     )
     harness = TeamHarness(
+        MagicMock(name="DeepAgentSpec"),
+        None,
         deep_agent,
-        SimpleNamespace(),
         role=TeamRole.LEADER,
         member_name="team_leader",
         initial_plan_mode=True,
     )
     session_id = f"team_plan_seed_{uuid.uuid4().hex}"
     team_session = create_agent_team_session(session_id=session_id)
+    child = harness._make_child_session(team_session)
+    await child.pre_run()
 
-    async def fake_run_agent_streaming(agent, inputs, *, session, **_kwargs):
-        assert agent is deep_agent
-        assert inputs["query"] == "plan first"
-        state = deep_agent.load_state(session)
-        assert state.plan_mode.mode == "plan"
-        assert state.plan_mode.plan_slug is None
-        assert state.plan_mode.prompt_context is None
-        yield OutputSchema(type="message", index=1, payload={"event_type": "seeded"})
+    harness._seed_initial_plan_mode(child)
 
-    with patch.object(Runner, "run_agent_streaming", side_effect=fake_run_agent_streaming):
-        chunks = [
-            chunk
-            async for chunk in harness.run_streaming(
-                {"query": "plan first"},
-                session_id=session_id,
-                team_session=team_session,
-            )
-        ]
-
-    assert [chunk.payload["event_type"] for chunk in chunks] == ["seeded"]
+    state = deep_agent.load_state(child)
+    assert state.plan_mode.mode == "plan"
+    assert state.plan_mode.plan_slug is None
     await isolated_checkpointer.release(session_id)
 
 
 def test_team_harness_keeps_code_plan_prompt_when_not_team_plan(tmp_path):
+    from unittest.mock import MagicMock
+
     from openjiuwen.agent_teams.harness import TeamHarness
     from openjiuwen.agent_teams.schema.team import TeamRole
     from openjiuwen.harness.factory import create_deep_agent
@@ -433,8 +431,9 @@ def test_team_harness_keeps_code_plan_prompt_when_not_team_plan(tmp_path):
     )
 
     TeamHarness(
+        MagicMock(name="DeepAgentSpec"),
+        None,
         deep_agent,
-        SimpleNamespace(),
         role=TeamRole.LEADER,
         member_name="team_leader",
         initial_plan_mode=False,
@@ -450,21 +449,22 @@ def test_team_harness_keeps_code_plan_prompt_when_not_team_plan(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_team_harness_reenters_team_plan_mode_with_existing_plan_slug():
+async def test_team_harness_seeds_team_plan_mode_only_once():
+    """Initial plan-mode seeding is idempotent across run cycles.
+
+    ``_seed_initial_plan_mode`` switches to plan mode the first time only;
+    subsequent cycles (same harness instance) must not re-seed, preserving an
+    existing plan slug and not forcing the leader back into plan mode.
+    """
+    from unittest.mock import MagicMock
+
     from openjiuwen.agent_teams.harness import TeamHarness
     from openjiuwen.agent_teams.schema.team import TeamRole
 
     state = SimpleNamespace(
         plan_mode=SimpleNamespace(mode="normal", plan_slug="existing-plan")
     )
-    agent_session = SimpleNamespace(
-        pre_run=AsyncMock(),
-    )
-
-    class FakeTeamSession:
-        def create_agent_session(self, *, card=None, share_stream_writer=True):
-            assert share_stream_writer is False
-            return agent_session
+    agent_session = SimpleNamespace()
 
     class FakeDeepAgent:
         card = AgentCard(name="team_leader", description="leader persona")
@@ -481,69 +481,46 @@ async def test_team_harness_reenters_team_plan_mode_with_existing_plan_slug():
             self.switch_modes.append(mode)
             state.plan_mode.mode = mode
 
-        def save_state(self, session, next_state):
-            assert session is agent_session
-            assert next_state is state
-
     deep_agent = FakeDeepAgent()
     harness = TeamHarness(
+        MagicMock(name="DeepAgentSpec"),
+        None,
         deep_agent,
-        SimpleNamespace(),
         role=TeamRole.LEADER,
         member_name="team_leader",
         initial_plan_mode=True,
     )
 
-    stream_calls = 0
-
-    async def fake_run_agent_streaming(agent, inputs, *, session, **_kwargs):
-        nonlocal stream_calls
-        stream_calls += 1
-        assert agent is deep_agent
-        assert session is agent_session
-        assert state.plan_mode.plan_slug == "existing-plan"
-        if stream_calls == 1:
-            assert state.plan_mode.mode == "plan"
-            yield OutputSchema(type="message", index=1, payload={"event_type": "seeded"})
-        else:
-            assert state.plan_mode.mode == "normal"
-            yield OutputSchema(type="message", index=2, payload={"event_type": "continued"})
-
-    with patch.object(Runner, "run_agent_streaming", side_effect=fake_run_agent_streaming):
-        chunks = [
-            chunk
-            async for chunk in harness.run_streaming(
-                {"query": "plan again"},
-                session_id="team_plan_existing_slug",
-                team_session=FakeTeamSession(),
-            )
-        ]
-        state.plan_mode.mode = "normal"
-        chunks.extend(
-            [
-                chunk
-                async for chunk in harness.run_streaming(
-                    {"query": "start implementation"},
-                    session_id="team_plan_existing_slug",
-                    team_session=FakeTeamSession(),
-                )
-            ]
-        )
-
+    # First cycle seeds plan mode; the slug is left untouched.
+    harness._seed_initial_plan_mode(agent_session)
     assert deep_agent.switch_modes == ["plan"]
-    assert not hasattr(state.plan_mode, "prompt_context") or state.plan_mode.prompt_context is None
-    assert [chunk.payload["event_type"] for chunk in chunks] == ["seeded", "continued"]
+    assert state.plan_mode.plan_slug == "existing-plan"
+
+    # A later cycle re-enters normal mode; seeding must not force plan again.
+    state.plan_mode.mode = "normal"
+    harness._seed_initial_plan_mode(agent_session)
+    assert deep_agent.switch_modes == ["plan"]
+    assert state.plan_mode.mode == "normal"
 
 
 @pytest.mark.asyncio
 async def test_team_harness_child_stream_close_does_not_close_team_stream(isolated_checkpointer):
+    """The per-cycle child session is stream-isolated from the team session.
+
+    ``_make_child_session`` derives the child with ``share_stream_writer=False``,
+    so closing the child's stream (when the native cycle ends) must not close
+    the team session's stream — the team stream stays open for the run loop.
+    """
+    from unittest.mock import MagicMock
+
     from openjiuwen.agent_teams.harness import TeamHarness
     from openjiuwen.agent_teams.schema.team import TeamRole
 
     deep_agent = SimpleNamespace(card=AgentCard(id="leader", name="leader"))
     harness = TeamHarness(
+        MagicMock(name="DeepAgentSpec"),
+        None,
         deep_agent,
-        SimpleNamespace(),
         role=TeamRole.LEADER,
         member_name="leader",
     )
@@ -551,27 +528,17 @@ async def test_team_harness_child_stream_close_does_not_close_team_stream(isolat
     team_session = create_agent_team_session(session_id=session_id, team_id="stream_team")
     await team_session.pre_run(inputs={"query": "hello"})
 
-    async def fake_run_agent_streaming(agent, inputs, *, session, **_kwargs):
-        assert agent is deep_agent
-        await session.write_stream({"event_type": "child"})
-        await session.close_stream()
-        yield OutputSchema(type="message", index=1, payload={"event_type": "child_done"})
+    child = harness._make_child_session(team_session)
+    await child.pre_run()
+    # The native cycle would write + close the child stream at round/stop.
+    await child.write_stream({"event_type": "child"})
+    await child.close_stream()
 
-    with patch.object(Runner, "run_agent_streaming", side_effect=fake_run_agent_streaming):
-        chunks = [
-            chunk
-            async for chunk in harness.run_streaming(
-                {"query": "hello"},
-                session_id=session_id,
-                team_session=team_session,
-            )
-        ]
-
+    # The team stream is independent: still writable after the child closed.
     await team_session.write_stream({"event_type": "team_still_open"})
     await team_session.post_run()
     team_chunks = [chunk async for chunk in team_session.stream_iterator()]
 
-    assert [chunk.payload["event_type"] for chunk in chunks] == ["child_done"]
     assert any(chunk.payload.get("event_type") == "team_still_open" for chunk in team_chunks)
 
     await isolated_checkpointer.release(session_id)
@@ -584,7 +551,6 @@ async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
 
     session_id = f"cold_recover_{uuid.uuid4().hex}"
     spec = _runtime_spec("cold_recover_team")
-    spec.agent_customizer = lambda *_args, **_kwargs: None
     agent = FakeTeamAgent("cold_recover_team", stream_label="team.chunk")
 
     manager = TeamRuntimeManager()
@@ -610,7 +576,10 @@ async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
     # Call site: TeamAgent.recover_from_session(team_session, team_name, runtime_spec=spec)
     assert args[1] == "cold_recover_team"
     assert kwargs["runtime_spec"] is spec
-    assert agent.recover_calls == 1
+    # COLD_RECOVER recovers only the leader here; teammate recovery is owned by
+    # the leader's coordination.start (the activation is streamed right after),
+    # so the manager no longer eagerly calls recover_team.
+    assert agent.recover_calls == 0
 
 
 @pytest.mark.asyncio
@@ -884,52 +853,6 @@ async def test_runner_interact_pause_and_delete_agent_team_route_through_team_ru
 
 
 @pytest.mark.asyncio
-async def test_team_agent_cancelled_round_does_not_restart_follow_up():
-    # The cancel-skip logic lives on StreamController (where the round
-    # actually runs), so drive it directly instead of bypassing TeamAgent
-    # construction with private attribute injection.
-    from openjiuwen.agent_teams.agent.stream_controller import StreamController
-
-    async def _noop(*_a, **_kw):
-        return None
-
-    from unittest.mock import MagicMock
-
-    from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
-    from openjiuwen.agent_teams.agent.state import TeamAgentState
-    from openjiuwen.agent_teams.harness import TeamHarness, _MountedRails
-    from openjiuwen.agent_teams.schema.team import TeamRole
-
-    fake_deep_agent = SimpleNamespace(deep_config=None)
-    fake_rails = _MountedRails(team_tool=MagicMock(), team_policy=MagicMock())
-    fake_harness = TeamHarness(
-        fake_deep_agent,
-        fake_rails,
-        role=TeamRole.LEADER,
-        member_name="leader",
-    )
-    fake_blueprint = SimpleNamespace(member_name="leader")
-    sc = StreamController(
-        blueprint_getter=lambda: fake_blueprint,
-        state=TeamAgentState(),
-        resources=PrivateAgentResources(harness=fake_harness),
-        status_updater=_noop,
-        execution_updater=_noop,
-    )
-    sc.stream_queue = object()
-    sc.pending_inputs = ["follow-up"]
-    sc._execute_round = AsyncMock(side_effect=asyncio.CancelledError())
-    sc.start_round = AsyncMock()
-
-    with pytest.raises(asyncio.CancelledError):
-        await sc._run_one_round("cancelled")
-
-    assert sc.start_round.await_count == 0
-    assert sc.pending_inputs == ["follow-up"]
-    assert sc.agent_task is None
-
-
-@pytest.mark.asyncio
 async def test_team_agent_resume_for_new_session_rebinds_only_live_teammates():
     leader_card = AgentCard(id=f"leader_{uuid.uuid4().hex}", name="leader", description="leader")
     agent = TeamAgent(card=leader_card)
@@ -1127,111 +1050,8 @@ def test_team_agent_recover_from_session_builds_leader_member_handle():
     assert handle.member_name == "leader"
 
 
-def test_team_agent_recover_from_session_reinjects_runtime_spec_customizer():
-    """``runtime_spec.agent_customizer`` must replace the persisted spec's
-    customizer slot.
-
-    ``agent_customizer`` is ``Field(exclude=True)``, so the persisted bucket
-    never carries it. Without the runtime override, every cold recover would
-    silently disable platform adapter callbacks.
-    """
-    from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
-
-    session_id = f"recover_customizer_{uuid.uuid4().hex}"
-    session = create_agent_team_session(session_id=session_id, team_id="persistent_team")
-    write_team_namespace(
-        session,
-        "persistent_team",
-        {
-            "spec": {
-                "team_name": "persistent_team",
-                "agents": {
-                    "leader": {},
-                },
-            },
-            "context": {
-                "role": "leader",
-                "member_name": "leader",
-                "persona": "leader",
-                "team_spec": {
-                    "team_name": "persistent_team",
-                    "display_name": "persistent_team",
-                    "leader_member_name": "leader",
-                },
-                "messager_config": {},
-                "db_config": {},
-            },
-        },
-    )
-
-    customizer = lambda *_args, **_kwargs: None  # noqa: E731 — sentinel callable for identity check
-    runtime_spec = TeamAgentSpec.model_construct(team_name="persistent_team", agents={})
-    runtime_spec.agent_customizer = customizer
-
-    captured: dict[str, Any] = {}
-
-    def fake_configure(self, spec, context):
-        captured["spec"] = spec
-        captured["context"] = context
-        return self
-
-    with patch.object(TeamAgent, "configure", fake_configure):
-        agent = TeamAgent.recover_from_session(
-            session,
-            "persistent_team",
-            runtime_spec=runtime_spec,
-        )
-
-    assert captured["spec"].agent_customizer is customizer
-    assert agent.session_id == session_id
 
 
-def test_team_agent_recover_from_session_without_runtime_spec_keeps_customizer_none():
-    """Without ``runtime_spec`` the recovered spec keeps the persisted (None)
-    customizer slot.
-
-    Guards against accidental shadowing — the override path must only fire
-    when the caller explicitly supplies a runtime spec.
-    """
-    from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
-
-    session_id = f"recover_no_runtime_{uuid.uuid4().hex}"
-    session = create_agent_team_session(session_id=session_id, team_id="persistent_team")
-    write_team_namespace(
-        session,
-        "persistent_team",
-        {
-            "spec": {
-                "team_name": "persistent_team",
-                "agents": {
-                    "leader": {},
-                },
-            },
-            "context": {
-                "role": "leader",
-                "member_name": "leader",
-                "persona": "leader",
-                "team_spec": {
-                    "team_name": "persistent_team",
-                    "display_name": "persistent_team",
-                    "leader_member_name": "leader",
-                },
-                "messager_config": {},
-                "db_config": {},
-            },
-        },
-    )
-
-    captured: dict[str, Any] = {}
-
-    def fake_configure(self, spec, context):
-        captured["spec"] = spec
-        return self
-
-    with patch.object(TeamAgent, "configure", fake_configure):
-        TeamAgent.recover_from_session(session, "persistent_team")
-
-    assert captured["spec"].agent_customizer is None
 
 
 @pytest.mark.asyncio

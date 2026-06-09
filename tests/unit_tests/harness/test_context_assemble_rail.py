@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 import pytest
@@ -80,8 +81,13 @@ def _make_model_call_context(agent):
                 {"role": "user", "content": "test"}
             ]
         ),
-        session=None,
+        session=SimpleNamespace(get_session_id=lambda: "sess1"),
+        extra={"_invoke_turn_id": "turn1"},
     )
+
+
+async def _attachment(agent, item_id: str):
+    return await agent.prompt_attachment_manager.get_by_id(item_id, session_id="sess1")
 
 
 class _MockModelContext:
@@ -374,12 +380,13 @@ async def test_before_model_call_injects_sections(tmp_path: Path):
 
     builder = agent.system_prompt_builder
     ws = builder.get_section("workspace")
-    ctx_section = builder.get_section("context")
+    ctx_section = await _attachment(agent, "turn.sess1.turn1.context")
     assert ws is not None
     assert ctx_section is not None
+    assert not builder.has_section("context")
     assert "# 工作空间" in ws.render("cn")
-    assert "## AGENT.md" in ctx_section.render("cn")
-    assert "# 可用工具" not in ctx_section.render("cn")  # no tools
+    assert "## AGENT.md" in (ctx_section.content or "")
+    assert "# 可用工具" not in (ctx_section.content or "")  # no tools
 
 
 @pytest.mark.asyncio
@@ -405,11 +412,12 @@ async def test_before_model_call_heartbeat_uses_lightweight_context(tmp_path: Pa
 
     builder = agent.system_prompt_builder
     ws = builder.get_section("workspace")
-    ctx_section = builder.get_section("context")
+    ctx_section = await _attachment(agent, "session.sess1.context")
     assert ws is not None
     assert ctx_section is not None
+    assert not builder.has_section("context")
 
-    cn_content = ctx_section.render("cn")
+    cn_content = ctx_section.content or ""
     assert "## AGENT.md" in cn_content
     assert "# Agent Config" in cn_content
     assert "## SOUL.md" in cn_content
@@ -417,6 +425,37 @@ async def test_before_model_call_heartbeat_uses_lightweight_context(tmp_path: Pa
     assert "# Heartbeat Tasks" in cn_content
     assert "# Today" not in cn_content
     assert "## daily_memory/" not in cn_content
+
+
+@pytest.mark.asyncio
+async def test_before_model_call_normal_turn_clears_heartbeat_context_attachment(tmp_path: Path):
+    """Normal turns should not keep SESSION context written by heartbeat runs."""
+    sys_operation = _make_sys_operation(tmp_path)
+    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config\nreal body")
+    await sys_operation.fs().write_file(f"{tmp_path}/HEARTBEAT.md", "# Heartbeat Tasks\nreal body")
+
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+    await agent.ensure_initialized()
+
+    rail = ContextAssembleRail()
+    await agent.register_rail(rail)
+
+    heartbeat_ctx = _make_model_call_context(agent)
+    heartbeat_ctx.extra["run_kind"] = RunKind.HEARTBEAT
+    await rail.before_invoke(heartbeat_ctx)
+    await rail.before_model_call(heartbeat_ctx)
+    heartbeat_attachment = await _attachment(agent, "session.sess1.context")
+    assert heartbeat_attachment is not None
+    assert "# Heartbeat Tasks" in (heartbeat_attachment.content or "")
+
+    normal_ctx = _make_model_call_context(agent)
+    normal_ctx.extra["_invoke_turn_id"] = "turn2"
+    await rail.before_invoke(normal_ctx)
+    await rail.before_model_call(normal_ctx)
+
+    assert await _attachment(agent, "session.sess1.context") is None
+    assert await _attachment(agent, "turn.sess1.turn2.context") is not None
 
 
 @pytest.mark.asyncio
@@ -435,12 +474,13 @@ async def test_before_model_call_removes_sections_when_workspace_is_none(tmp_pat
 
     builder = agent.system_prompt_builder
     assert builder.has_section("workspace")
-    assert builder.has_section("context")
+    assert await _attachment(agent, "turn.sess1.turn1.context") is not None
 
     rail.workspace = None
     await rail.before_model_call(ctx)
     assert not builder.has_section("workspace")
     assert not builder.has_section("context")
+    assert await _attachment(agent, "turn.sess1.turn1.context") is None
 
 
 @pytest.mark.asyncio
@@ -600,6 +640,7 @@ async def test_before_model_call_adds_tools_section(tmp_path: Path):
     builder = agent.system_prompt_builder
     tools_section = builder.get_section("tools")
     assert tools_section is not None
+    assert "test_tool" in tools_section.render("cn")
 
 
 @pytest.mark.asyncio
@@ -659,6 +700,7 @@ async def test_before_model_call_with_chinese_language(tmp_path: Path):
     builder = agent.system_prompt_builder
     ws = builder.get_section("workspace")
     assert ws is not None
+    assert builder.has_section("workspace")
     assert "# 工作空间" in ws.render("cn")
 
 
@@ -682,4 +724,5 @@ async def test_before_model_call_with_english_language(tmp_path: Path):
     builder = agent.system_prompt_builder
     ws = builder.get_section("workspace")
     assert ws is not None
+    assert builder.has_section("workspace")
     assert "# Workspace" in ws.render("en")

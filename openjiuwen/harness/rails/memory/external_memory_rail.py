@@ -10,11 +10,14 @@ from typing import Optional, Set
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.foundation.tool.function.function import LocalFunction
-from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.core.memory.external.provider import MemoryProvider
 from openjiuwen.harness.prompts.sections import SectionName
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachmentKind,
+    PromptAttachmentScope,
+)
 from openjiuwen.harness.prompts.sections.external_memory import (
     build_external_memory_section,
 )
@@ -47,8 +50,8 @@ class ExternalMemoryRail(DeepAgentRail):
         self._session_id = session_id
         self._initialized = False
         self._owned_tool_names: Set[str] = set()
-        self._owned_tool_ids: Set[str] = set()
         self.system_prompt_builder = None
+        self.attachment_manager = None
         # Per-invoke prefetch cache
         self._prefetch_cache: Optional[str] = None
         self._prefetch_invoke_id: Optional[int] = None
@@ -60,6 +63,7 @@ class ExternalMemoryRail(DeepAgentRail):
     def init(self, agent) -> None:
         super().init(agent)
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
+        self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
         self._register_provider_tools(agent)
         # Inject provider's static system prompt block
         if self.system_prompt_builder:
@@ -75,18 +79,9 @@ class ExternalMemoryRail(DeepAgentRail):
         if hasattr(agent, "ability_manager"):
             for tool_name in list(self._owned_tool_names):
                 try:
-                    agent.ability_manager.remove(tool_name)
+                    agent.ability_manager.remove_ability(tool_name)
                 except Exception as exc:
                     logger.warning(f"[ExternalMemoryRail] remove tool '{tool_name}' failed: {exc}")
-        for tool_id in list(self._owned_tool_ids):
-            try:
-                Runner.resource_mgr.remove_tool(tool_id)
-            except Exception as exc:
-                logger.warning(
-                    f"[ExternalMemoryRail] Failed to remove tool '{tool_id}' "
-                    f"from resource_mgr: {exc}"
-                )
-        self._owned_tool_ids.clear()
         self._owned_tool_names.clear()
         
         # Remove prompt sections
@@ -94,6 +89,7 @@ class ExternalMemoryRail(DeepAgentRail):
             self.system_prompt_builder.remove_section(SectionName.EXTERNAL_MEMORY)
             self.system_prompt_builder.remove_section(EXTERNAL_MEMORY_PREFETCH_SECTION)
             self.system_prompt_builder = None
+        self.attachment_manager = None
         
         # Async shutdown via LspRail pattern
         try:
@@ -137,11 +133,12 @@ class ExternalMemoryRail(DeepAgentRail):
                 logger.error(f"[ExternalMemoryRail] Provider initialize failed: {e}")
     
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        if not self._initialized or self.system_prompt_builder is None:
+        if not self._initialized:
             return
         
         # Remove old cached prefetch section
-        self.system_prompt_builder.remove_section(EXTERNAL_MEMORY_PREFETCH_SECTION)
+        if self.system_prompt_builder is not None:
+            self.system_prompt_builder.remove_section(EXTERNAL_MEMORY_PREFETCH_SECTION)
         
         # Check prefetch cache
         invoke_id = id(ctx)
@@ -170,14 +167,25 @@ class ExternalMemoryRail(DeepAgentRail):
         
         if raw_context:
             fenced = self._build_memory_context_block(raw_context)
-            lang = getattr(self.system_prompt_builder, "language", "cn")
-            from openjiuwen.core.single_agent.prompts.builder import PromptSection
-            section = PromptSection(
-                name=EXTERNAL_MEMORY_PREFETCH_SECTION,
-                content={lang: fenced},
-                priority=55,
-            )
-            self.system_prompt_builder.add_section(section)
+            if self.attachment_manager is None:
+                logger.warning(
+                    "[ExternalMemoryRail] prompt attachment manager is unavailable; skip prefetch attachment"
+                )
+                return
+            writer = self.attachment_manager.for_context(ctx)
+            try:
+                await writer.upsert_section(
+                    section=EXTERNAL_MEMORY_PREFETCH_SECTION,
+                    content=fenced,
+                    scope=PromptAttachmentScope.TURN,
+                    kind=PromptAttachmentKind.MEMORY,
+                    source="agent_core.external_memory.prefetch",
+                    priority=55,
+                    metadata={"provider": self._provider.name},
+                    content_kind="text/markdown",
+                )
+            except ValueError as exc:
+                logger.warning("[ExternalMemoryRail] skip prefetch prompt attachment: %s", exc)
     
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         if not self._initialized:
@@ -262,16 +270,8 @@ class ExternalMemoryRail(DeepAgentRail):
                         return {"result": result_str}
                 
                 local_func = LocalFunction(card=tool_card, func=_tool_func)
-                
-                existing = Runner.resource_mgr.get_tool(tool_id)
-                if existing is None:
-                    add_result = Runner.resource_mgr.add_tool(local_func)
-                    if add_result.is_err():
-                        logger.warning(f"[ExternalMemoryRail] add_tool failed: {add_result.msg()}")
-                        continue
-                    self._owned_tool_ids.add(tool_id)
-                
-                result = agent.ability_manager.add(tool_card)
+
+                result = agent.ability_manager.add_ability(tool_card, local_func)
                 if result.added:
                     self._owned_tool_names.add(tool_name)
                     logger.info(f"[ExternalMemoryRail] Registered tool: {tool_name}")
