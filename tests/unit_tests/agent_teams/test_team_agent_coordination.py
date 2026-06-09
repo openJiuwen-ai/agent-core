@@ -137,6 +137,33 @@ def _make_human_agent(member_name: str = "human_alice") -> TeamAgent:
     return agent
 
 
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_interact_on_unstarted_avatar_enqueues_user_input():
+    """Driving a spawned-but-unstarted avatar enqueues USER_INPUT safely.
+
+    Regression: the ``$<name>`` drive used to call ``deliver_input`` →
+    ``harness.send`` directly from the leader's coroutine. When the avatar
+    was spawned but its run cycle had not yet started its harness (e.g. the
+    leader's initial routed input), that raised "NativeHarness not started".
+    Routing the drive through the avatar's own coordination (``interact`` →
+    USER_INPUT) must not touch the harness — it only enqueues, and the
+    avatar's loop consumes it after ``coordination.start`` starts the harness.
+    """
+    agent = _make_human_agent("human_alice")
+    bus = agent.coordination_loop
+    # Configured but coordination never started → harness not started.
+    assert bus is not None
+    assert bus.is_running is False
+
+    # Must not raise (the old reach-in raised on the unstarted harness).
+    await agent.interact("please summarise design.md")
+
+    queued = await asyncio.wait_for(bus._event_queue.get(), timeout=1.0)
+    assert queued.event_type == InnerEventType.USER_INPUT
+    assert queued.payload["content"] == "please summarise design.md"
+
+
 @pytest.mark.level0
 def test_coordination_loop_created_on_configure():
     """configure() creates a EventBus."""
