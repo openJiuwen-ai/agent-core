@@ -41,36 +41,28 @@ async def _sm_skip_ack_after_tool(ctx: "AgentCallbackContext") -> None:
 
 
 DEFAULT_SESSION_MEMORY_TEMPLATE = """# Session Title
-_A short and distinctive 5-10 word descriptive title for the session. Super info dense, no filler_
+_A short and distinctive 5-10 word descriptive title for the session. Super info dense, no filler._
 
 # Current State
 _What is actively being worked on right now? Pending tasks not yet completed. Immediate next steps._
 
-# Task specification
-_What did the user ask to build? Any design decisions or other explanatory context_
+# Task Brief
+_User request; deliverable type (Word/PPT/Excel/PDF/email/meeting notes); format, style, length, audience, deadline; confirmed plan._
 
-# Files and Functions
-_What are the important files? In short, what do they contain and why are they relevant?_
+# Files and Sources
+_Input files, references, attachments; generated output paths and versions; purpose and status of each._
 
-# Workflow
-_What bash commands are usually run and in what order? How to interpret their output if not obvious?_
+# Processing Progress
+_Skills/tools used and stage progress; outline/draft/data status; items awaiting user confirmation._
 
-# Errors & Corrections
-_Errors encountered and how they were fixed.
-What did the user correct? What approaches failed and should not be tried again?_
+# Issues and Corrections
+_Errors, retries, user corrections; approaches proven ineffective._
 
-# Codebase and System Documentation
-_What are the important system components? How do they work/fit together?_
+# Key Deliverables
+_Final or interim outputs: file paths, summaries, tables, conclusions, email drafts; preserve user-confirmed content in full._
 
-# Learnings
-_What has worked well? What has not? What to avoid? Do not duplicate items from other sections_
-
-# Key results
-_If the user asked a specific output such as an answer to a question,
-a table, or other document, repeat the exact result here_
-
-# Worklog
-_Step by step, what was attempted, done? Very terse summary for each step_
+# Work Log
+_Chronological terse log of key actions for quick resumption._
 """
 
 
@@ -109,10 +101,11 @@ _section descriptions_ within each existing section
 to add. Do not add filler content like "No info yet", just leave sections
 blank/unedited if appropriate.
 - Write DETAILED, INFO-DENSE content for each section - include specifics
-like file paths, function names, error messages, exact commands,
-technical details, etc.
-- For "Key results", include the complete, exact output the user requested (e.g., full table, full answer, etc.)
-- Do not include information that's already in the CLAUDE.md files included in the context
+like file paths, document names, skill stages, tool outputs, commands, 
+error messages, and deliverable summaries as relevant, etc.
+- For "Key Deliverables", include the complete output the user requested (e.g., full table, 
+outline, file path, email draft, etc.)
+- Do not include information that's already in the session_context.md files included in the context
 - Keep each section under ~${MAX_SECTION_LENGTH} tokens/words - if a
 section is approaching this limit, condense it by cycling out less
 important details while preserving the most critical information
@@ -177,10 +170,11 @@ _section descriptions_ within each existing section
 to add. Do not add filler content like "No info yet", just leave sections
 blank/unedited if appropriate.
 - Write DETAILED, INFO-DENSE content for each section - include specifics
-like file paths, function names, error messages, exact commands,
-technical details, etc.
-- For "Key results", include the complete, exact output the user requested (e.g., full table, full answer, etc.)
-- Do not include information that's already in the CLAUDE.md files included in the context
+like file paths, document names, skill stages, tool outputs, commands, 
+error messages, and deliverable summaries as relevant, etc.
+- For "Key Deliverables", include the complete output the user requested (e.g., full table, 
+outline, file path, email draft, etc.)
+- Do not include information that's already in the session_context.md files included in the context
 - Keep each section under ~${MAX_SECTION_LENGTH} tokens/words - if a
 section is approaching this limit, condense it by cycling out less
 important details while preserving the most critical information
@@ -542,6 +536,59 @@ class SessionMemoryUpdateAgent:
             if len(lines) >= 3 and lines[-1].strip() == "```":
                 normalized = "\n".join(lines[1:-1]).strip()
         return normalized
+
+
+def _is_session_memory_section_description_line(line: str) -> bool:
+    stripped = line.strip()
+    return len(stripped) > 2 and stripped.startswith("_") and stripped.endswith("_")
+
+
+def _strip_empty_session_memory_sections(content: str) -> str:
+    """Drop sections that have no body content below the header and italic description."""
+    lines = content.splitlines()
+    sections: List[Dict[str, Any]] = []
+    preamble: List[str] = []
+    current: Dict[str, Any] | None = None
+
+    for line in lines:
+        if line.startswith("# "):
+            if current is not None:
+                sections.append(current)
+            current = {"header": line, "description": None, "body_lines": []}
+            continue
+        if current is None:
+            preamble.append(line)
+            continue
+        if current["description"] is None and _is_session_memory_section_description_line(line):
+            current["description"] = line
+        else:
+            current["body_lines"].append(line)
+
+    if current is not None:
+        sections.append(current)
+
+    kept_sections = [sec for sec in sections if "\n".join(sec["body_lines"]).strip()]
+
+    rendered_sections = []
+    for sec in kept_sections:
+        section_lines = [sec["header"]]
+        if sec["description"] is not None:
+            section_lines.append(sec["description"])
+        body = "\n".join(sec["body_lines"]).strip()
+        if body:
+            section_lines.append(body)
+        rendered_sections.append("\n".join(section_lines))
+
+    result_parts: List[str] = []
+    preamble_text = "\n".join(preamble).strip()
+    if preamble_text:
+        result_parts.append(preamble_text)
+    if rendered_sections:
+        result_parts.append("\n\n".join(rendered_sections))
+
+    if not result_parts:
+        return ""
+    return "\n\n".join(result_parts).strip() + "\n"
 
 
 def _build_session_memory_runtime(
@@ -1158,6 +1205,8 @@ class SessionMemoryManager:
     def _commit_pending_session_memory(pending_path: Path, active_path: Path) -> None:
         if not pending_path.exists():
             raise RuntimeError(f"Pending session memory does not exist: {pending_path}")
+        stripped = _strip_empty_session_memory_sections(pending_path.read_text(encoding="utf-8"))
+        pending_path.write_text(stripped, encoding="utf-8")
         pending_path.replace(active_path)
 
     @staticmethod
