@@ -51,13 +51,6 @@ AgentLookup = Callable[[str], Awaitable[Optional["TeamAgent"]]]
 runtime. Returns ``None`` when no live runtime is bound to that
 member (cold start, before spawn, or after shutdown)."""
 
-AgentReadyWaiter = Callable[[str], Awaitable[bool]]
-"""Wait until an in-process member's runtime is fully ready.
-
-Called before ``deliver_input`` so the direct-avatar path does not
-race with the async harness startup inside the spawned task.  Returns
-``True`` on success, ``False`` on timeout / no handle."""
-
 
 OnInbound = Callable[[HumanAgentInboundEvent], Awaitable[None]]
 """Callback fired when the runtime detects an inbound team-side
@@ -96,12 +89,6 @@ class HumanAgentInbox:
       Required for the LLM-driven path; ``None`` falls back to a
       ``DeliverResult.failure("agent_unavailable")`` so the caller
       learns the avatar is not running yet.
-    * ``wait_agent_ready(sender) -> bool`` — async gate that waits
-      until the in-process avatar's runtime (harness, stream
-      controller, tools, event bus) is fully started before
-      ``deliver_input``.  Without this gate, ``harness.send`` races
-      with the async ``NativeHarness.start`` inside the spawned task
-      and triggers "NativeHarness not started. Call start() first."
     * ``on_inbound(HumanAgentInboundEvent)`` — passed through to the
       runtime that wires team→user notifications. ``HumanAgentInbox``
       itself does not call it; ``TeamRuntimeManager`` subscribes to
@@ -114,13 +101,11 @@ class HumanAgentInbox:
         message_manager: "TeamMessageManager",
         *,
         agent_lookup: Optional[AgentLookup] = None,
-        wait_agent_ready: Optional[AgentReadyWaiter] = None,
         on_inbound: Optional[OnInbound] = None,
     ):
         self._team = team
         self._mm = message_manager
         self._agent_lookup = agent_lookup
-        self._wait_agent_ready = wait_agent_ready
         self._on_inbound = on_inbound
 
     @property
@@ -236,20 +221,6 @@ class HumanAgentInbox:
                 sender,
             )
             return DeliverResult.failure("agent_unavailable")
-        # Wait for the in-process avatar's runtime to become fully
-        # ready before resolving the agent and delivering input.  This
-        # prevents the "NativeHarness not started. Call start() first."
-        # race where auto_start_member spawns an asyncio.Task that
-        # runs NativeHarness.start() asynchronously, but _drive_agent
-        # calls deliver_input → harness.send before that start completes.
-        if self._wait_agent_ready is not None:
-            ready = await self._wait_agent_ready(sender)
-            if not ready:
-                team_logger.warning(
-                    "HumanAgentInbox: human agent %s runtime not ready within timeout",
-                    sender,
-                )
-                return DeliverResult.failure("harness_not_ready")
         agent = await self._agent_lookup(sender)
         if agent is None:
             team_logger.warning("HumanAgentInbox: human agent %s has no live runtime", sender)
@@ -260,7 +231,6 @@ class HumanAgentInbox:
 
 __all__ = [
     "AgentLookup",
-    "AgentReadyWaiter",
     "HumanAgentInbox",
     "HumanAgentInboundEvent",
     "HumanAgentNotEnabledError",
