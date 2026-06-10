@@ -4,8 +4,8 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any, Iterable, List, Optional, Set
 
 from openjiuwen.core.common.logging import logger
@@ -459,6 +459,7 @@ class BaseSecurityRail(AgentRail):
             return
         try:
             message_id = ""
+            
             if ctx.context is not None:
                 messages = ctx.context.get_messages(size=1, with_history=False)
                 if messages:
@@ -468,8 +469,10 @@ class BaseSecurityRail(AgentRail):
                         message_id = metadata.get("context_message_id", "") or ""
             
             if not message_id:
-                import uuid
                 message_id = str(uuid.uuid4())
+            
+            from openjiuwen.core.runner import get_request_id
+            request_id = get_request_id()
             
             await ctx.session.write_stream(
                 OutputSchema(
@@ -477,10 +480,16 @@ class BaseSecurityRail(AgentRail):
                     index=0,
                     payload={
                         "session_id": getattr(ctx.session, 'session_id', "") or "",
+                        "request_id": request_id,
                         "message": message,
                         "message_id": message_id,
                     },
                 )
+            )
+            logger.info(
+                "[BaseSecurityRail] Sent chat.retract: session_id=%s request_id=%s",
+                getattr(ctx.session, 'session_id', ""),
+                request_id,
             )
         except Exception:
             logger.debug(
