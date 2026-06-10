@@ -162,7 +162,6 @@ async def test_before_model_call_injects_heartbeat_section() -> None:
     inputs = InvokeInputs(query="", run_kind=RunKind.HEARTBEAT, run_context=run_context)
     ctx = _make_ctx(inputs=inputs)
     ctx.extra["run_kind"] = RunKind.HEARTBEAT
-    ctx.extra["_invoke_turn_id"] = "turn1"
 
     mock_builder = MagicMock()
     mock_builder.language = "cn"
@@ -171,9 +170,8 @@ async def test_before_model_call_injects_heartbeat_section() -> None:
     await rail.before_model_call(ctx)
 
     session_id = ctx.session.get_session_id()
-    items = await rail.attachment_manager.collect_for_turn(session_id, "turn1")
-    assert [item.id for item in items] == [f"turn.{session_id}.turn1.heartbeat"]
-    assert items[0].scope.value == "turn"
+    items = await rail.attachment_manager.collect_for_session(session_id)
+    assert [item.id for item in items] == [f"session.{session_id}.heartbeat"]
     assert items[0].kind.value == "todo_reminder"
     assert items[0].source == "agent_core.heartbeat"
     assert "心跳检测" in (items[0].content or "")

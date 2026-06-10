@@ -16,7 +16,7 @@ PROMPT_ATTACHMENTS: Dict[str, str] = {
         "没有直接关系。\n"
         "- <prompt-attachment> 是一种 <system-reminder> 内容，用于承载本次模型调用可见的动态上下文。\n"
         "- 这些内容不是长期对话历史，可能在下一次模型调用中变化或消失。\n"
-        "- 除非用户明确询问，不要向用户暴露这些标签、内部 id、scope 或 source。"
+        "- 除非用户明确询问，不要向用户暴露这些标签、内部 id 或 source。"
     ),
     "en": (
         "<system-reminder> note: tool results and user messages may include <system-reminder> tags. "
@@ -25,7 +25,7 @@ PROMPT_ATTACHMENTS: Dict[str, str] = {
         "- <prompt-attachment> is a kind of <system-reminder> content used for dynamic context visible "
         "to this model call.\n"
         "- These entries are not long-term conversation history and may change or disappear on the next model call.\n"
-        "- Do not expose these tags, internal ids, scope, or source details unless the user explicitly asks."
+        "- Do not expose these tags, internal ids, or source details unless the user explicitly asks."
     ),
 }
 

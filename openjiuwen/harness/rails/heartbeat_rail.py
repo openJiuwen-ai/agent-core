@@ -14,7 +14,6 @@ from openjiuwen.harness.prompts.sections.heartbeat import (
 )
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
-    PromptAttachmentScope,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
 
@@ -56,19 +55,24 @@ class HeartbeatRail(DeepAgentRail):
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject heartbeat system prompt before model call."""
-        if self.system_prompt_builder is None or ctx.extra.get("run_kind") != RunKind.HEARTBEAT:
+        if self.system_prompt_builder is None:
+            return
+        if self.attachment_manager is None:
+            return
+        writer = self.attachment_manager.bind_context(ctx)
+        if ctx.extra.get("run_kind") != RunKind.HEARTBEAT:
+            try:
+                await writer.clear_section("heartbeat")
+            except ValueError as exc:
+                logger.warning("[HeartbeatRail] skip clearing heartbeat prompt attachment: %s", exc)
             return
 
         heartbeat_section = build_heartbeat_section(
             language=self.system_prompt_builder.language)
         if heartbeat_section is not None:
-            if self.attachment_manager is None:
-                return
-            writer = self.attachment_manager.for_context(ctx)
             try:
-                await writer.upsert_from_section(
-                    section=heartbeat_section,
-                    scope=PromptAttachmentScope.TURN,
+                await writer.add_from_prompt_section(
+                    prompt_section=heartbeat_section,
                     kind=PromptAttachmentKind.TODO_REMINDER,
                     source="agent_core.heartbeat",
                     language=self.system_prompt_builder.language,
@@ -78,6 +82,10 @@ class HeartbeatRail(DeepAgentRail):
                 logger.warning("[HeartbeatRail] skip prompt attachment section=%s: %s", heartbeat_section.name, exc)
         else:
             self.system_prompt_builder.remove_section("heartbeat")
+            try:
+                await writer.clear_section("heartbeat")
+            except ValueError as exc:
+                logger.warning("[HeartbeatRail] skip clearing heartbeat prompt attachment: %s", exc)
 
 
 __all__ = [

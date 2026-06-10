@@ -29,7 +29,7 @@ def _make_ctx() -> SimpleNamespace:
     return SimpleNamespace(
         session=SimpleNamespace(session_id="sess1"),
         inputs=None,
-        extra={"_invoke_turn_id": "turn1"},
+        extra={},
     )
 
 
@@ -49,7 +49,7 @@ async def test_memory_policy_uses_system_section_for_normal_invokes() -> None:
 
     assert rail.system_prompt_builder.removed_sections == ["memory"]
     assert [section.name for section in rail.system_prompt_builder.added_sections] == ["memory"]
-    assert await rail.attachment_manager.collect_for_turn("sess1", "turn1") == []
+    assert await rail.attachment_manager.collect_for_session("sess1") == []
 
 
 @pytest.mark.asyncio
@@ -60,6 +60,6 @@ async def test_memory_policy_uses_attachment_for_read_only_invokes() -> None:
 
     assert rail.system_prompt_builder.removed_sections == ["memory"]
     assert rail.system_prompt_builder.added_sections == []
-    items = await rail.attachment_manager.collect_for_turn("sess1", "turn1")
-    assert [item.id for item in items] == ["turn.sess1.turn1.memory"]
+    items = await rail.attachment_manager.collect_for_session("sess1")
+    assert [item.id for item in items] == ["session.sess1.memory"]
     assert items[0].source == "agent_core.memory.policy"

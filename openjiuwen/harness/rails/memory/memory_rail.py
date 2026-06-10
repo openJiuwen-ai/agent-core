@@ -16,7 +16,6 @@ from openjiuwen.core.memory.lite.memory_tools import (
 )
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
-    PromptAttachmentScope,
 )
 from openjiuwen.harness.prompts.sections.memory import build_memory_section
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -131,10 +130,7 @@ class MemoryRail(DeepAgentRail):
             self.system_prompt_builder.add_section(memory_section)
             if self.attachment_manager is not None:
                 try:
-                    await self.attachment_manager.for_context(ctx).clear_section(
-                        section="memory",
-                        scope=PromptAttachmentScope.TURN,
-                    )
+                    await self.attachment_manager.bind_context(ctx).clear_section("memory")
                 except ValueError as exc:
                     logger.warning("[MemoryRail] skip clearing memory prompt attachment: %s", exc)
             return
@@ -142,11 +138,10 @@ class MemoryRail(DeepAgentRail):
         if self.attachment_manager is None:
             self.system_prompt_builder.add_section(memory_section)
             return
-        writer = self.attachment_manager.for_context(ctx)
+        writer = self.attachment_manager.bind_context(ctx)
         try:
-            await writer.upsert_from_section(
-                section=memory_section,
-                scope=PromptAttachmentScope.TURN,
+            await writer.add_from_prompt_section(
+                prompt_section=memory_section,
                 kind=PromptAttachmentKind.MEMORY,
                 source="agent_core.memory.policy",
                 language=self.system_prompt_builder.language,

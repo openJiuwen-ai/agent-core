@@ -285,7 +285,7 @@ async def test_after_invoke_skips_empty_assistant_output():
 
 
 @pytest.mark.asyncio
-async def test_external_memory_prefetch_goes_to_turn_prompt_attachment_not_system_section():
+async def test_external_memory_prefetch_goes_to_prompt_attachment_not_system_section():
     provider = MockMemoryProvider()
     rail = ExternalMemoryRail(provider)
     agent = MockAgent()
@@ -293,7 +293,6 @@ async def test_external_memory_prefetch_goes_to_turn_prompt_attachment_not_syste
     ctx = MockCallbackContext(MockInputs(query="what did we decide?"))
     ctx.agent = agent
     ctx.session = MockSession()
-    ctx.extra["_invoke_turn_id"] = "turn1"
 
     rail._initialized = True
     rail.system_prompt_builder = prompt_builder
@@ -303,11 +302,10 @@ async def test_external_memory_prefetch_goes_to_turn_prompt_attachment_not_syste
 
     assert "external_memory_prefetch" in prompt_builder.removed_sections
     assert prompt_builder.added_sections == []
-    items = await agent.prompt_attachment_manager.collect_for_turn("sess1", "turn1")
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
     assert [item.id for item in items] == [
-        "turn.sess1.turn1.external_memory_prefetch"
+        "session.sess1.external_memory_prefetch"
     ]
-    assert items[0].scope.value == "turn"
     assert items[0].kind.value == "memory"
     assert items[0].source == "agent_core.external_memory.prefetch"
     assert "Memory context for: what did we decide?" in (items[0].content or "")

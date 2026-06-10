@@ -725,10 +725,8 @@ class ReActAgent(BaseAgent):
                 if ctx.session is not None
                 else ctx.context.session_id()
             )
-            invoke_turn_id = ctx.extra.get("_invoke_turn_id") or f"turn_{uuid.uuid4().hex}"
-            ctx.extra["_invoke_turn_id"] = invoke_turn_id
             context_window_kwargs["window_mutators"] = [
-                make_window_mutator(session_id, invoke_turn_id)
+                make_window_mutator(session_id)
             ]
         if enable_kv_release and supports_kv_release:
             context_window_kwargs["model"] = llm
@@ -1326,12 +1324,6 @@ class ReActAgent(BaseAgent):
         invoke_inputs = InvokeInputs(query=query, conversation_id=conversation_id)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
         ctx.extra["_streaming"] = kwargs.get("_streaming", False)
-        input_invoke_turn_id = inputs.get("_invoke_turn_id") if isinstance(inputs, dict) else None
-        ctx.extra["_invoke_turn_id"] = (
-            kwargs.get("_invoke_turn_id")
-            or input_invoke_turn_id
-            or f"turn_{uuid.uuid4().hex}"
-        )
         if isinstance(inputs, dict):
             ctx.extra["user_id"] = inputs.get("user_id", "")
             ctx.extra["run_kind"] = inputs.get("run_kind", "")

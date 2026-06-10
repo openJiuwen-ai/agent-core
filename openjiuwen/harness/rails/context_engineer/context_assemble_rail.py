@@ -9,7 +9,6 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
-    PromptAttachmentScope,
 )
 from openjiuwen.harness.prompts.sections.workspace import build_workspace_section as _build_workspace
 from openjiuwen.harness.prompts.sections.context import build_context_section as _build_context, \
@@ -49,11 +48,10 @@ class ContextAssembleRail(DeepAgentRail):
             self.system_prompt_builder = None
         self.attachment_manager = None
 
-    async def _upsert_attachment_section(self, writer, section, *, scope, kind, source) -> None:
+    async def _upsert_attachment_section(self, writer, section, *, kind, source) -> None:
         try:
-            await writer.upsert_from_section(
-                section=section,
-                scope=scope,
+            await writer.add_from_prompt_section(
+                prompt_section=section,
                 kind=kind,
                 source=source,
                 language=self.system_prompt_builder.language,
@@ -62,9 +60,9 @@ class ContextAssembleRail(DeepAgentRail):
         except ValueError as exc:
             logger.warning("[ContextAssembleRail] skip prompt attachment section=%s: %s", section.name, exc)
 
-    async def _clear_attachment_section(self, writer, section: str, scope: PromptAttachmentScope) -> None:
+    async def _clear_attachment_section(self, writer, section: str) -> None:
         try:
-            await writer.clear_section(section=section, scope=scope)
+            await writer.clear_section(section)
         except ValueError as exc:
             logger.warning("[ContextAssembleRail] skip clearing prompt attachment section=%s: %s", section, exc)
 
@@ -80,14 +78,8 @@ class ContextAssembleRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("context")
             self.system_prompt_builder.remove_section("tools")
             if self.attachment_manager is not None:
-                writer = self.attachment_manager.for_context(ctx)
-                await self._clear_attachment_section(
-                    writer,
-                    "context",
-                    PromptAttachmentScope.TURN if not is_heartbeat else PromptAttachmentScope.SESSION,
-                )
-                if not is_heartbeat:
-                    await self._clear_attachment_section(writer, "context", PromptAttachmentScope.SESSION)
+                writer = self.attachment_manager.bind_context(ctx)
+                await self._clear_attachment_section(writer, "context")
             return
 
         lang = self.system_prompt_builder.language
@@ -117,13 +109,10 @@ class ContextAssembleRail(DeepAgentRail):
         if context_section is not None:
             self.system_prompt_builder.remove_section("context")
             if self.attachment_manager is not None:
-                writer = self.attachment_manager.for_context(ctx)
-                if not is_heartbeat:
-                    await self._clear_attachment_section(writer, "context", PromptAttachmentScope.SESSION)
+                writer = self.attachment_manager.bind_context(ctx)
                 await self._upsert_attachment_section(
                     writer,
                     context_section,
-                    scope=PromptAttachmentScope.TURN if not is_heartbeat else PromptAttachmentScope.SESSION,
                     kind=PromptAttachmentKind.FILE,
                     source="agent_core.context_assemble.context",
                 )
@@ -132,11 +121,5 @@ class ContextAssembleRail(DeepAgentRail):
         else:
             self.system_prompt_builder.remove_section("context")
             if self.attachment_manager is not None:
-                writer = self.attachment_manager.for_context(ctx)
-                await self._clear_attachment_section(
-                    writer,
-                    "context",
-                    PromptAttachmentScope.TURN if not is_heartbeat else PromptAttachmentScope.SESSION,
-                )
-                if not is_heartbeat:
-                    await self._clear_attachment_section(writer, "context", PromptAttachmentScope.SESSION)
+                writer = self.attachment_manager.bind_context(ctx)
+                await self._clear_attachment_section(writer, "context")

@@ -1059,7 +1059,6 @@ class DeepAgent(BaseAgent):
         if isinstance(inputs, dict):
             query = inputs.get("query", "")
             conversation_id = inputs.get("conversation_id")
-            invoke_turn_id = inputs.get("_invoke_turn_id")
             run = inputs.get("run", {})
             run_kind = None
             run_context = None
@@ -1072,13 +1071,11 @@ class DeepAgent(BaseAgent):
         elif isinstance(inputs, str):
             query = inputs
             conversation_id = None
-            invoke_turn_id = None
             run_kind = None
             run_context = None
         elif isinstance(inputs, InteractiveInput):
             query = inputs
             conversation_id = None
-            invoke_turn_id = None
             run_kind = None
             run_context = None
         else:
@@ -1093,8 +1090,6 @@ class DeepAgent(BaseAgent):
             run_kind=run_kind,
             run_context=run_context
         )
-        if invoke_turn_id:
-            setattr(invoke_inputs, "_invoke_turn_id", invoke_turn_id)
         return invoke_inputs
 
     @staticmethod
@@ -1103,9 +1098,6 @@ class DeepAgent(BaseAgent):
         effective_inputs: Dict[str, Any] = {"query": invoke_inputs.query}
         if invoke_inputs.conversation_id is not None:
             effective_inputs["conversation_id"] = invoke_inputs.conversation_id
-        invoke_turn_id = getattr(invoke_inputs, "_invoke_turn_id", None)
-        if invoke_turn_id:
-            effective_inputs["_invoke_turn_id"] = invoke_turn_id
         if invoke_inputs.run_kind is not None:
             effective_inputs["run_kind"] = invoke_inputs.run_kind
         if invoke_inputs.run_context is not None:

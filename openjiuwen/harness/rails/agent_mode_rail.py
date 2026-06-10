@@ -31,7 +31,6 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCal
 from openjiuwen.harness.prompts.builder import PromptSection
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
-    PromptAttachmentScope,
 )
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.agent_mode import build_plan_mode_section
@@ -289,12 +288,9 @@ class AgentModeRail(DeepAgentRail):
             # ---- normal mode ----
             self.system_prompt_builder.remove_section(SectionName.MODE_INSTRUCTIONS)
             if self.attachment_manager is not None:
-                writer = self.attachment_manager.for_context(ctx)
+                writer = self.attachment_manager.bind_context(ctx)
                 try:
-                    await writer.clear_section(
-                        section=SectionName.MODE_INSTRUCTIONS,
-                        scope=PromptAttachmentScope.TURN,
-                    )
+                    await writer.clear_section(SectionName.MODE_INSTRUCTIONS)
                 except ValueError as exc:
                     logger.warning(
                         "[AgentModeRail] skip clearing prompt attachment section=%s: %s",
@@ -353,11 +349,10 @@ class AgentModeRail(DeepAgentRail):
             self.system_prompt_builder.remove_section(SectionName.MODE_INSTRUCTIONS)
 
         if self._plan_mode_system_note is None and self.attachment_manager is not None:
-            writer = self.attachment_manager.for_context(ctx)
+            writer = self.attachment_manager.bind_context(ctx)
             try:
-                await writer.upsert_from_section(
-                    section=section,
-                    scope=PromptAttachmentScope.TURN,
+                await writer.add_from_prompt_section(
+                    prompt_section=section,
                     kind=PromptAttachmentKind.RUNTIME,
                     source="agent_core.agent_mode.plan_mode",
                     language=self.system_prompt_builder.language,
