@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from openjiuwen.agent_evolving.optimizer import BaseOptimizer
 from openjiuwen.agent_evolving.signal.base import EvolutionSignal
@@ -36,7 +36,7 @@ class SingleDimUpdater:
         trajectories: List[Trajectory],
         signals: List[EvolutionSignal],
         config: Dict[str, Any],
-    ) -> Dict[tuple[str, str], Any]:
+    ) -> Union[Dict[tuple[str, str], Any], List[Dict[tuple[str, str], Any]]]:
         """Signal-first entry: write trajectories, run backward, and return updates."""
         for traj in trajectories:
             self._opt.add_trajectory(traj)
@@ -45,7 +45,7 @@ class SingleDimUpdater:
 
     async def update(
         self, trajectories: List[Trajectory], evaluated_cases: List[Any], config: Dict[str, Any]
-    ) -> Dict[tuple[str, str], Any]:
+    ) -> Union[Dict[tuple[str, str], Any], List[Dict[tuple[str, str], Any]]]:
         """Offline compatibility adapter that converts evaluated cases to signals."""
         score_threshold = config.get("score_threshold")
         signals = []
@@ -55,11 +55,10 @@ class SingleDimUpdater:
                 signals.append(signal)
         return await self.process(trajectories, signals, config)
 
-    @staticmethod
-    def get_state() -> Dict[str, Any]:
-        # Current: BaseOptimizer has no stable recoverable state; return empty for now
-        return {}
+    def get_state(self) -> Dict[str, Any]:
+        """Delegate to the internal optimizer."""
+        return self._opt.get_state()
 
-    @staticmethod
-    def load_state(state: Dict[str, Any]) -> None:
-        return None
+    def load_state(self, state: Dict[str, Any]) -> None:
+        """Delegate to the internal optimizer."""
+        self._opt.load_state(state)

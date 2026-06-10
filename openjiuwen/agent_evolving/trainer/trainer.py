@@ -199,6 +199,10 @@ class Trainer:
             updated = asyncio.run(self._updater.update(trajectories, evaluated, config=kwargs))
 
             if isinstance(updated, list):
+                if val_cases is None or not val_cases.get_cases():
+                    raise ValueError(
+                        "val_cases must be non-empty when updater returns candidate updates"
+                    )
                 val_score, val_evaluated = self._select_best_candidate_on_val(
                     agent=agent,
                     operators=operators,

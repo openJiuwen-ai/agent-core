@@ -18,6 +18,8 @@ PENDING_CHANGE_EFFECT: Final[Literal["pending_change"]] = "pending_change"
 REJECT_ACTION: Final[Literal["reject"]] = "reject"
 REPLACE_MODE: Final[Literal["replace"]] = "replace"
 RETRY_ACTION: Final[Literal["retry"]] = "retry"
+SKILL_CONTENT_TARGET: Final[Literal["skill_content"]] = "skill_content"
+SKILL_DOCUMENT_DOMAIN: Final[Literal["skill_document"]] = "skill_document"
 SKILL_EXPERIENCE_ENTRY: Final[Literal["skill_experience_entry"]] = "skill_experience_entry"
 STATE_EFFECT: Final[Literal["state"]] = "state"
 TOOL_FAILURE_SIGNAL: Final[Literal["tool_failure"]] = "tool_failure"
@@ -51,6 +53,8 @@ __all__ = [
     "REJECT_ACTION",
     "REPLACE_MODE",
     "RETRY_ACTION",
+    "SKILL_CONTENT_TARGET",
+    "SKILL_DOCUMENT_DOMAIN",
     "SKILL_EXPERIENCE_ENTRY",
     "STATE_EFFECT",
     "TOOL_FAILURE_SIGNAL",

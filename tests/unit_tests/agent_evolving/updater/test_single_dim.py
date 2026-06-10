@@ -102,15 +102,20 @@ class TestSingleDimUpdater:
 
     @staticmethod
     def test_get_state_returns_empty_dict():
-        """get_state() returns empty dict (BaseOptimizer has no stable state)."""
-        updater = make_single_dim_updater()
+        """get_state() delegates to optimizer and returns its state."""
+        mock_optimizer = make_mock_optimizer()
+        mock_optimizer.get_state.return_value = {}
+        updater = SingleDimUpdater(optimizer=mock_optimizer)
         assert updater.get_state() == {}
+        mock_optimizer.get_state.assert_called_once()
 
     @staticmethod
     def test_load_state_is_noop():
-        """load_state() is a no-op."""
-        updater = make_single_dim_updater()
+        """load_state() delegates to optimizer."""
+        mock_optimizer = make_mock_optimizer()
+        updater = SingleDimUpdater(optimizer=mock_optimizer)
         updater.load_state({"key": "value"})
+        mock_optimizer.load_state.assert_called_once_with({"key": "value"})
 
     @staticmethod
     def test_update_preserves_trajectory_order():

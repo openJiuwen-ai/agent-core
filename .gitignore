@@ -72,6 +72,11 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+# AI-generated documentation
+docs/spec/
+docs/plan/
+docs/handoff/
+
 # PyBuilder
 .pybuilder/
 target/

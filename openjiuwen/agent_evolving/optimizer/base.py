@@ -10,7 +10,7 @@ TextualParameter: Gradient container for operator_id.
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from openjiuwen.agent_evolving.trajectory.types import Trajectory
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -126,7 +126,7 @@ class BaseOptimizer:
                 StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR, error_msg=f"{str(e)}", cause=e
             ) from e
 
-    def step(self) -> Dict[tuple[str, str], Any]:
+    def step(self) -> Union[Dict[tuple[str, str], Any], List[Dict[tuple[str, str], Any]]]:
         """Execute _step() and return update mappings; applied uniformly by Trainer.apply_updates."""
         self._validate_parameters()
         try:
@@ -144,8 +144,17 @@ class BaseOptimizer:
         pass
 
     @abstractmethod
-    def _step(self) -> Dict[tuple[str, str], Any]:
+    def _step(self) -> Union[Dict[tuple[str, str], Any], List[Dict[tuple[str, str], Any]]]:
         """Subclass implements: generates updates based on gradients written during backward."""
+        pass
+
+    def get_state(self) -> Dict[str, Any]:
+        """Serializable optimizer state. Override in subclasses that have state."""
+        _ = self._parameters  # hook: subclasses override to return real state
+        return {}
+
+    def load_state(self, state: Dict[str, Any]) -> None:
+        """Restore optimizer state. Override in subclasses that have state."""
         pass
 
     def parameters(self) -> Dict[str, "TextualParameter"]:
