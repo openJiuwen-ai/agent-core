@@ -459,7 +459,8 @@ class SessionModelContext(ModelContext):
             )
             context_messages = self._message_buffer.get_back()
             round_index = ContextUtils.find_last_n_dialogue_round(context_messages, dialogue_round)
-            context_messages = context_messages[round_index:]
+            if round_index >= 0: 
+                context_messages = context_messages[round_index:]
         else:
             context_messages = self._message_buffer.get_back()
 
