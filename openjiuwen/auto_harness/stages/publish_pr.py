@@ -11,6 +11,9 @@ from typing import Any, AsyncIterator
 from openjiuwen.auto_harness.agents import (
     create_pr_draft_agent,
 )
+from openjiuwen.auto_harness.infra.gitcode_pr_template import (
+    fetch_pr_template,
+)
 from openjiuwen.auto_harness.infra.parsers import (
     extract_text,
     parse_pr_draft_with_error,
@@ -93,7 +96,7 @@ def _build_pr_draft_query(
             "\n\n上一次 PR draft 校验失败原因:\n"
             f"{validation_error}\n\n"
             "上一次输出如下，请修正为合法的完整 GitCode 模板，"
-            "不要重复输出简化版格式，也不要省略 HTML 注释和标准 checklist：\n"
+            "不要重复输出简化版格式，也不要省略 HTML 注释、章节标题和 checklist：\n"
             f"{previous_output or '无'}\n"
         )
     return (
@@ -119,6 +122,7 @@ async def _generate_pr_draft_attempt(
     facts: CommitFacts,
     ci_result: dict[str, Any],
     last_commit_stat: str,
+    pr_template: str,
     validation_error: str = "",
     previous_output: str = "",
 ) -> AsyncIterator[Any]:
@@ -126,6 +130,7 @@ async def _generate_pr_draft_attempt(
         ctx.orchestrator.config,
         workspace_override=ctx.runtime.wt_path,
         extra_rails=ctx.orchestrator.stream_rails or None,
+        pr_template=pr_template,
     )
     output = ""
     async for chunk in agent.stream(
@@ -203,6 +208,9 @@ class PublishPRStage(TaskStage):
         messages: list[str] = []
         pr_draft = PullRequestDraft()
         if _should_create_pr(ctx):
+            pr_template = await fetch_pr_template(
+                ctx.orchestrator.config
+            )
             draft_error = ""
             previous_output = ""
             for attempt in range(1, _PR_DRAFT_MAX_ATTEMPTS + 1):
@@ -217,6 +225,7 @@ class PublishPRStage(TaskStage):
                     facts=commit_result.facts,
                     ci_result=verify_report.ci_result,
                     last_commit_stat=commit_result.last_commit_stat,
+                    pr_template=pr_template,
                     validation_error=draft_error,
                     previous_output=previous_output,
                 ):

@@ -61,6 +61,7 @@ dependencies = [
     "alembic>=1.13.1",
     "anyio>=4.0.0",
     "loguru>=0.7.3",
+    "gitcode-api>=1.2.20",
 ]
 
 # A2A: required for `openjiuwen.remote_clients` / `openjiuwen.server_adapters` A2A entry

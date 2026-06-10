@@ -438,6 +438,32 @@ def test_create_pr_draft_agent_uses_communicate_skill_only():
     assert captured.get("tools") is None
 
 
+def test_create_pr_draft_agent_system_prompt_contains_pr_template():
+    """PR draft agent system prompt should embed the supplied GitCode template."""
+    captured = {}
+    mocked_template = "MOCK-GITCODE-PR-TEMPLATE\n/kind <label>\n**What does this PR do / why do we need it**:"
+
+    def _fake_create_deep_agent(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    with patch(
+        "openjiuwen.auto_harness.agents.factory.create_deep_agent",
+        side_effect=_fake_create_deep_agent,
+    ):
+        create_pr_draft_agent(
+            AutoHarnessConfig(
+                model=MagicMock(),
+                workspace="/repo/default",
+            ),
+            pr_template=mocked_template,
+        )
+
+    system_prompt = captured["system_prompt"]
+    assert mocked_template in system_prompt
+    assert "PR body 必须严格等于下面模板的填充版本" in system_prompt
+
+
 def test_create_auto_harness_agent_no_tool_tracker_without_injection():
     """不传 extra_rails 时 factory 不应包含 ToolTrackingRail。"""
     captured = {}

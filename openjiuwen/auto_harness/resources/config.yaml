@@ -14,6 +14,9 @@
 # 可选：session pipeline。auto 按目标信号选择，meta/extended 强制指定。
 # pipeline: "auto"
 
+# 可选：Agent 提示词与 PR 模版语言。支持 "cn"（中文）或 "en"（英文），默认 "cn"。
+# language: "cn"
+
 # 可选：自定义 skills 目录，会与框架内置 skills 合并。
 # skills_dirs:
 #   - "/path/to/my-skills"

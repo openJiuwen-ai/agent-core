@@ -1369,6 +1369,18 @@ wheels = [
 ]
 
 [[package]]
+name = "gitcode-api"
+version = "1.2.20"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+dependencies = [
+    { name = "httpx" },
+]
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/d9/2b/a1a95fd3f38f85aeabcc43bf761079ee875c4e11081b2f3bc1517e2a43e9/gitcode_api-1.2.20.tar.gz", hash = "sha256:d9f6736b60ac5f661a43d65420b8f6dc7863ed3653a2e90ab9dff1ea3f393732" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/ab/9c/0a7cfa75e9bdddd65c005a33c9c11a867b3ef57cfb67c744cf323a9e185f/gitcode_api-1.2.20-py3-none-any.whl", hash = "sha256:907bde636a79ced22f6bcb1a1442bbebae87923c7ae17e2f9dafa134cd944718" },
+]
+
+[[package]]
 name = "google-api-core"
 version = "2.30.0"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
@@ -2680,6 +2692,7 @@ dependencies = [
     { name = "docx2txt" },
     { name = "fastmcp" },
     { name = "filelock" },
+    { name = "gitcode-api" },
     { name = "json-repair" },
     { name = "loguru" },
     { name = "mcp" },
@@ -2883,6 +2896,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'online-rl'", specifier = ">=0.100" },
     { name = "fastmcp", specifier = ">=2.14.2,<3.0" },
     { name = "filelock", specifier = ">=3.20.1" },
+    { name = "gitcode-api", specifier = ">=1.2.20" },
     { name = "httpx", marker = "extra == 'online-rl'", specifier = ">=0.24" },
     { name = "json-repair", specifier = ">=0.55.0" },
     { name = "loguru", specifier = ">=0.7.3" },
