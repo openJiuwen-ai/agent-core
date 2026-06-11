@@ -8,6 +8,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 from a2a.client import ClientConfig, ClientFactory
 from a2a.types import AgentCard, SendMessageRequest, StreamResponse, CancelTaskRequest
 
+from openjiuwen.core.controller.schema.task import TaskStatus
 from openjiuwen.extensions.a2a.a2a_transformer import A2ATransformer
 from openjiuwen.core.single_agent.schema.agent_result import AgentResult
 
@@ -18,15 +19,11 @@ class A2AClient:
     def __init__(
         self,
         card: Optional[AgentCard] = None,
-        polling: bool = False,
     ):
         self.card = card
-        self.polling = polling
 
         try:
-            config = ClientConfig()
-            config.polling = polling
-            factory = ClientFactory(config)
+            factory = ClientFactory(ClientConfig())
             self.client = factory.create(self.card)
         except Exception as exc:
             raise RuntimeError(f"Failed to create A2A client: {exc}") from exc
@@ -48,15 +45,35 @@ class A2AClient:
             return result
         return result.model_copy(update={"sessionId": session_id})
 
+    @staticmethod
+    def _merge_agent_results(base: AgentResult, update: AgentResult) -> AgentResult:
+        artifacts = [*base.artifacts, *update.artifacts]
+        metadata = {**base.metadata, **update.metadata}
+        session_id = update.sessionId or base.sessionId
+        task_id = update.task_id or base.task_id
+        status = update.status if update.status not in (None, TaskStatus.UNKNOWN) else base.status
+        return base.model_copy(
+            update={
+                "task_id": task_id,
+                "sessionId": session_id,
+                "status": status,
+                "artifacts": artifacts,
+                "metadata": metadata,
+            }
+        )
+
     async def invoke(self, inputs: Dict[str, Any]) -> AgentResult:
         request = A2ATransformer.to_a2a_request(inputs)
         session_id = self._resolve_session_id(inputs)
+        aggregate = AgentResult()
         event_stream = self._send_message(request)
         async with aclosing(event_stream):
-            first_event = await anext(event_stream, None)
-            if first_event is not None:
-                return self._with_session_id(A2ATransformer.from_a2a_response(first_event), session_id)
-        return self._with_session_id(AgentResult(), session_id)
+            async for event in event_stream:
+                aggregate = self._merge_agent_results(
+                    aggregate,
+                    A2ATransformer.from_a2a_response(event),
+                )
+        return self._with_session_id(aggregate, session_id)
 
     async def stream(self, inputs: Dict[str, Any]) -> AsyncGenerator[AgentResult, None]:
         request = A2ATransformer.to_a2a_request(inputs)
