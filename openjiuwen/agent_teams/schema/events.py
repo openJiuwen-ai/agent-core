@@ -272,13 +272,17 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
                                        "agent_started / agent_completed / agent_failed / "
                                        "workflow_completed / workflow_failed / "
                                        "log / ...")
+    run_id: Optional[str] = Field(
+        default=None, description="Unique run identifier, set by SwarmflowTool for all events of one run"
+    )
     workflow_name: Optional[str] = Field(default=None, description="The swarmflow script's META name")
+    description: Optional[str] = Field(default=None, description="The swarmflow script's META description")
     phase: Optional[str] = Field(default=None, description="Current phase title, when applicable")
     label: Optional[str] = Field(default=None, description="Agent call label, on agent_* kinds")
     prompt: Optional[str] = Field(default=None, description="Rendered agent prompt, on agent_started")
     model: Optional[str] = Field(default=None, description="Model hint for the agent call, on agent_started")
     outcome: Optional[str] = Field(default=None, description="Short result preview, on agent_completed")
-    text: Optional[str] = Field(default=None, description="Free narration text, on log kind")
+    text: Optional[str] = Field(default=None, description="Free narration text, on all kinds")
     phases: Optional[list[PhasePlan]] = Field(
         default=None, description="Static phase plan from META, on workflow_started"
     )

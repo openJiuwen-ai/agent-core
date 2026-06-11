@@ -69,7 +69,7 @@ def build_workflow_run_from_events(events: list[WorkflowProgressEvent]) -> Workf
 
     for ev in events:
         if ev.kind == ProgressKind.WORKFLOW_STARTED:
-            run.name = ev.message
+            run.name = ev.name
         elif ev.kind == ProgressKind.WORKFLOW_COMPLETED:
             run.status = "completed"
         elif ev.kind == ProgressKind.WORKFLOW_FAILED:
