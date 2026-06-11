@@ -201,10 +201,33 @@ class FileTrajectoryStore:
 
     @staticmethod
     def _trajectory_to_dict(trajectory: Trajectory) -> dict:
-        """Convert Trajectory to dict."""
+        """Convert Trajectory to dict with safe serialization."""
         from dataclasses import asdict
 
-        return asdict(trajectory)
+        data = asdict(trajectory)
+        return FileTrajectoryStore._sanitize_for_json(data)
+
+    @staticmethod
+    def _sanitize_for_json(obj: Any) -> Any:
+        """Recursively convert non-JSON-serializable objects to JSON-safe values."""
+        if isinstance(obj, dict):
+            return {k: FileTrajectoryStore._sanitize_for_json(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [FileTrajectoryStore._sanitize_for_json(item) for item in obj]
+        elif isinstance(obj, (str, int, float, bool, type(None))):
+            return obj
+        elif hasattr(obj, "model_dump"):
+            # Pydantic models
+            return FileTrajectoryStore._sanitize_for_json(obj.model_dump())
+        elif hasattr(obj, "__dict__"):
+            # Custom objects - convert to dict
+            return FileTrajectoryStore._sanitize_for_json(obj.__dict__)
+        elif hasattr(obj, "isoformat"):
+            # datetime-like objects
+            return obj.isoformat()
+        else:
+            # Fallback: convert to string
+            return str(obj)
 
     @staticmethod
     def _dict_to_trajectory(data: dict) -> Optional[Trajectory]:
