@@ -482,7 +482,7 @@ class WebFreeSearchTool(Tool):
     ) -> list[dict[str, str]]:
         """Search the DuckDuckGo HTML endpoint and parse results."""
         url = _duckduckgo_search_url(query)
-        status, headers, body, _final_url, _truncated = await _http._request(
+        status, headers, body, _final_url, _truncated = await _http.request(
             session,
             "GET",
             url,
@@ -513,14 +513,14 @@ class WebFreeSearchTool(Tool):
     ) -> list[dict[str, str]]:
         """Search DuckDuckGo via the jina.ai proxy and parse markdown results."""
         url = f"https://r.jina.ai/http://duckduckgo.com/html/?q={quote_plus(query)}"
-        status, headers, body, _final_url, _truncated = await _http._request(
+        status, headers, body, _final_url, _truncated = await _http.request(
             session,
             "GET",
             url,
             headers=_search_request_headers(query),
             timeout_seconds=timeout_seconds,
         )
-        _http._raise_for_status_with_body(status, body, engine="duckduckgo-jina")
+        _http.raise_for_status_with_body(status, body, engine="duckduckgo-jina")
         text = _decode_response_text(body, content_type=headers.get("Content-Type", "")) or ""
 
         matches = re.findall(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)", text, flags=re.IGNORECASE)
@@ -560,14 +560,14 @@ class WebFreeSearchTool(Tool):
         else:
             url = f"https://www.bing.com/search?q={quote_plus(query)}&setlang=en-US&mkt=en-US&cc=US"
 
-        status, headers, body, _final_url, _truncated = await _http._request(
+        status, headers, body, _final_url, _truncated = await _http.request(
             session,
             "GET",
             url,
             headers=_search_request_headers(query),
             timeout_seconds=timeout_seconds,
         )
-        _http._raise_for_status_with_body(status, body, engine="bing")
+        _http.raise_for_status_with_body(status, body, engine="bing")
         html = _decode_response_text(body, content_type=headers.get("Content-Type", ""))
         soup = _parse_html(html)
         results_area = _extract_bing_results_area(soup)
@@ -857,7 +857,7 @@ class WebFreeSearchTool(Tool):
         max_results = max(1, min(max_results, 20))
         timeout_seconds = max(5, min(timeout_seconds, 60))
         try:
-            async with _http._new_session() as session:
+            async with _http.new_session() as session:
                 engine_used, rows = await WebFreeSearchTool._search_free(
                     session, query, max_results, timeout_seconds
                 )

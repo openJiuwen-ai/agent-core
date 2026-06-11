@@ -50,7 +50,7 @@ def _raise_fetch_http_error(url: str, status: int, body: bytes) -> None:
     Raises:
         BaseError: ``TOOL_WEB_FETCH_EXECUTION_ERROR`` when status is >= 400.
     """
-    reason = _http._format_http_error_reason(status, body)
+    reason = _http.format_http_error_reason(status, body)
     if not reason:
         return
     raise build_error(StatusCode.TOOL_WEB_FETCH_EXECUTION_ERROR, url=url, reason=reason)
@@ -88,7 +88,7 @@ class WebFetchWebpageTool(Tool):
     ) -> dict[str, Any]:
         """Fetch webpage content via the jina.ai reader proxy."""
         reader_url = f"https://r.jina.ai/{url}"
-        status, headers, body, _final_url, truncated = await _http._request(
+        status, headers, body, _final_url, truncated = await _http.request(
             session,
             "GET",
             reader_url,
@@ -186,7 +186,7 @@ class WebFetchWebpageTool(Tool):
         byte_cap: int,
     ) -> dict[str, Any]:
         """Fetch webpage content, falling back to the jina.ai reader on 401/403/429."""
-        status, headers, body, final_url, truncated = await _http._request(
+        status, headers, body, final_url, truncated = await _http.request(
             session,
             "GET",
             url,
@@ -257,7 +257,7 @@ class WebFetchWebpageTool(Tool):
         byte_cap = WebFetchWebpageTool._byte_cap()
 
         try:
-            async with _http._new_session() as session:
+            async with _http.new_session() as session:
                 data = await WebFetchWebpageTool._fetch_webpage(session, url, timeout_seconds, byte_cap)
         except Exception as exc:  # noqa: BLE001
             return f"[ERROR]: failed to fetch webpage: {exc}"

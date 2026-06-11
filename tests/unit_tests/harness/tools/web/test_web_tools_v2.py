@@ -18,7 +18,7 @@ from openjiuwen.harness.tools.web._common import _resolve_proxy
 from openjiuwen.harness.tools.web._decode import _decode_response_text
 from openjiuwen.harness.tools.web._http import _read_capped
 
-_REQUEST_PATCH_TARGET = "openjiuwen.harness.tools.web._http._request"
+_REQUEST_PATCH_TARGET = "openjiuwen.harness.tools.web._http.request"
 
 
 def _resp(status=200, body=b"", headers=None, final_url="https://example.com", truncated=False):
@@ -637,7 +637,7 @@ class _FakeSession:
 async def test_request_transport_contract(monkeypatch):
     import aiohttp
 
-    from openjiuwen.harness.tools.web._http import _request
+    from openjiuwen.harness.tools.web._http import request as _request
 
     resp = _FakeRespFull(200, {"Content-Type": "text/html"}, [b"hello"], "https://final.example/x")
     session = _FakeSession(resp)
@@ -668,7 +668,7 @@ async def test_request_extracts_inline_proxy_auth(monkeypatch):
     # explicit BasicAuth and strip the userinfo from the proxy URL it passes.
     import aiohttp
 
-    from openjiuwen.harness.tools.web._http import _request
+    from openjiuwen.harness.tools.web._http import request as _request
 
     monkeypatch.setenv("WEB_PROXY_URL", "http://puser:ppass@gw.example.com:8080")
     resp = _FakeRespFull(200, {"Content-Type": "text/html"}, [b"ok"], "https://example.com/x")

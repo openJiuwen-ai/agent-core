@@ -3,7 +3,7 @@
 
 """Async HTTP transport for the web tools package (aiohttp based).
 
-A single ``_request`` coroutine replaces the original synchronous
+A single ``request`` coroutine replaces the original synchronous
 ``_http_request``. It handles proxy resolution, TLS verification, a capped
 streaming read (so an oversized body cannot exhaust memory), and a
 trust_env=False retry that mirrors the original ProxyError fallback.
@@ -40,7 +40,7 @@ def _make_connector() -> aiohttp.TCPConnector:
 
 
 @asynccontextmanager
-async def _new_session() -> AsyncIterator[aiohttp.ClientSession]:
+async def new_session() -> AsyncIterator[aiohttp.ClientSession]:
     """Yield a per-invoke aiohttp session.
 
     ``trust_env=True`` makes aiohttp honor ``HTTP(S)_PROXY``/``NO_PROXY`` when
@@ -120,7 +120,7 @@ async def _do_request(
         return resp.status, dict(resp.headers), body, str(resp.url), truncated
 
 
-async def _request(
+async def request(
     session: aiohttp.ClientSession,
     method: str,
     url: str,
@@ -186,7 +186,7 @@ async def _request(
             )
 
 
-def _format_http_error_reason(status: int, body: bytes) -> str:
+def format_http_error_reason(status: int, body: bytes) -> str:
     """Format an HTTP error reason that includes the response body.
 
     Args:
@@ -212,7 +212,7 @@ def _format_http_error_reason(status: int, body: bytes) -> str:
     return reason
 
 
-def _raise_for_status_with_body(status: int, body: bytes, *, engine: str) -> None:
+def raise_for_status_with_body(status: int, body: bytes, *, engine: str) -> None:
     """Raise a web-search engine error that includes the response body.
 
     Args:
@@ -223,7 +223,7 @@ def _raise_for_status_with_body(status: int, body: bytes, *, engine: str) -> Non
     Raises:
         BaseError: ``TOOL_WEB_SEARCH_ENGINE_ERROR`` when status is >= 400.
     """
-    reason = _format_http_error_reason(status, body)
+    reason = format_http_error_reason(status, body)
     if not reason:
         return
     raise build_error(StatusCode.TOOL_WEB_SEARCH_ENGINE_ERROR, engine=engine, reason=reason)

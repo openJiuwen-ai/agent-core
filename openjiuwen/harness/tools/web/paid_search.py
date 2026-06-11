@@ -61,7 +61,7 @@ class WebPaidSearchTool(Tool):
             "stream": False,
             "reasoning_effort": "low",
         }
-        status, _headers, body, _final_url, _truncated = await _http._request(
+        status, _headers, body, _final_url, _truncated = await _http.request(
             session,
             "POST",
             "https://deepsearch.jina.ai/v1/chat/completions",
@@ -69,7 +69,7 @@ class WebPaidSearchTool(Tool):
             json_body=payload,
             timeout_seconds=timeout_seconds,
         )
-        _http._raise_for_status_with_body(status, body, engine="jina")
+        _http.raise_for_status_with_body(status, body, engine="jina")
         data = json.loads(body)
 
         answer = ""
@@ -145,7 +145,7 @@ class WebPaidSearchTool(Tool):
         if not bocha_key:
             raise build_error(StatusCode.TOOL_WEB_API_KEY_NOT_SET, key_name="BOCHA_API_KEY")
 
-        status, _headers, body, _final_url, _truncated = await _http._request(
+        status, _headers, body, _final_url, _truncated = await _http.request(
             session,
             "POST",
             os.environ.get("BOCHA_API_URL", "https://api.bocha.cn/v1/web-search"),
@@ -153,7 +153,7 @@ class WebPaidSearchTool(Tool):
             json_body={"query": query, "summary": True, "count": max_results},
             timeout_seconds=timeout_seconds,
         )
-        _http._raise_for_status_with_body(status, body, engine="bocha")
+        _http.raise_for_status_with_body(status, body, engine="bocha")
         data = json.loads(body)
         return {
             "provider": "bocha",
@@ -174,7 +174,7 @@ class WebPaidSearchTool(Tool):
             raise build_error(StatusCode.TOOL_WEB_API_KEY_NOT_SET, key_name="SERPER_API_KEY")
 
         headers = {"X-API-KEY": serper_key, "Content-Type": "application/json"}
-        status, _headers, body, _final_url, _truncated = await _http._request(
+        status, _headers, body, _final_url, _truncated = await _http.request(
             session,
             "POST",
             "https://google.serper.dev/search",
@@ -183,7 +183,7 @@ class WebPaidSearchTool(Tool):
             timeout_seconds=timeout_seconds,
         )
         if status == 400:
-            status, _headers, body, _final_url, _truncated = await _http._request(
+            status, _headers, body, _final_url, _truncated = await _http.request(
                 session,
                 "POST",
                 "https://google.serper.dev/search",
@@ -191,7 +191,7 @@ class WebPaidSearchTool(Tool):
                 json_body={"q": query},
                 timeout_seconds=timeout_seconds,
             )
-        _http._raise_for_status_with_body(status, body, engine="serper")
+        _http.raise_for_status_with_body(status, body, engine="serper")
         data = json.loads(body)
         urls: list[str] = []
         organic = data.get("organic", [])
@@ -242,7 +242,7 @@ class WebPaidSearchTool(Tool):
             "temperature": 0.2,
             "stream": False,
         }
-        status, _headers, body, _final_url, _truncated = await _http._request(
+        status, _headers, body, _final_url, _truncated = await _http.request(
             session,
             "POST",
             os.environ.get("PPLX_API_URL", "https://api.perplexity.ai/chat/completions"),
@@ -250,7 +250,7 @@ class WebPaidSearchTool(Tool):
             json_body=payload,
             timeout_seconds=timeout_seconds,
         )
-        _http._raise_for_status_with_body(status, body, engine="perplexity")
+        _http.raise_for_status_with_body(status, body, engine="perplexity")
         data = json.loads(body)
 
         answer = ""
@@ -305,7 +305,7 @@ class WebPaidSearchTool(Tool):
             order = [provider]
 
         errors: list[str] = []
-        async with _http._new_session() as session:
+        async with _http.new_session() as session:
             runners = {
                 "bocha": lambda: WebPaidSearchTool._bocha_search(session, query, max_results, timeout_seconds),
                 "jina": lambda: WebPaidSearchTool._jina_search(session, query, timeout_seconds),
