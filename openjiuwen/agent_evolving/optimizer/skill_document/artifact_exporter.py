@@ -125,6 +125,7 @@ class ArtifactExporter:
                 {
                     "source_type": getattr(p, "source_type", ""),
                     "failure_summary": getattr(p, "failure_summary", ""),
+                    "operator_id": getattr(p, "operator_id", ""),
                     "reasoning": getattr(patch_obj, "reasoning", ""),
                     "edits": [
                         {
@@ -142,7 +143,7 @@ class ArtifactExporter:
             {"epoch": epoch, "step": step, "acc_round": acc_round, "patches": serialized},
         )
 
-    def export_merged_patch(self, epoch: int, step: int, patch: Any) -> None:
+    def export_merged_patch(self, epoch: int, step: int, patch: Any, *, operator_id: str = "") -> None:
         """Write merged patch from aggregate phase."""
         step_dir = self._step_dir(epoch, step)
         if not step_dir:
@@ -151,6 +152,7 @@ class ArtifactExporter:
         data = {
             "epoch": epoch,
             "step": step,
+            "operator_id": operator_id,
             "reasoning": getattr(patch, "reasoning", ""),
             "edits": [
                 {
@@ -161,7 +163,8 @@ class ArtifactExporter:
                 for e in getattr(patch, "edits", [])
             ],
         }
-        self._write_json(step_dir / "merged_patch.json", data)
+        filename = f"merged_patch_{operator_id}.json" if operator_id else "merged_patch.json"
+        self._write_json(step_dir / filename, data)
 
     def export_selected_edits(
         self,
@@ -170,6 +173,8 @@ class ArtifactExporter:
         edits: list,
         rejected: list,
         budget: int,
+        *,
+        operator_id: str = "",
     ) -> None:
         """Write selected edits from ranking phase."""
         step_dir = self._step_dir(epoch, step)
@@ -179,6 +184,7 @@ class ArtifactExporter:
         data = {
             "epoch": epoch,
             "step": step,
+            "operator_id": operator_id,
             "budget": budget,
             "selected_count": len(edits),
             "edits": [
@@ -192,14 +198,21 @@ class ArtifactExporter:
             ],
             "rejected": rejected,
         }
-        self._write_json(step_dir / "selected_edits.json", data)
+        filename = f"selected_edits_{operator_id}.json" if operator_id else "selected_edits.json"
+        self._write_json(step_dir / filename, data)
 
-    def export_skill_snapshot(self, epoch: int, step: int, skill_content: str, tag: str) -> None:
+    def export_skill_snapshot(
+        self, epoch: int, step: int, skill_content: str, tag: str, *, operator_id: str = "",
+    ) -> None:
         """Write skill document snapshot (before/after)."""
         epoch_dir = self._epoch_dir(epoch)
         if not epoch_dir:
             return
-        (epoch_dir / f"skill_{tag}.md").write_text(skill_content, encoding="utf-8")
+        if operator_id:
+            filename = f"skill_{tag}_{operator_id}.md"
+        else:
+            filename = f"skill_{tag}.md"
+        (epoch_dir / filename).write_text(skill_content, encoding="utf-8")
 
     def export_gate_result(
         self,

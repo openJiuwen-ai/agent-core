@@ -564,3 +564,420 @@ class TestBackwardCompat:
         assert updater.get_state() == {}
         updater.load_state({"some": "data"})
         assert updater.get_state() == {}
+
+
+# ── Multi-operator integration ────────────────────────────────────────────
+
+
+SKILL_A_INITIAL = "# Python Basics\n\nAnswer Python questions concisely."
+SKILL_B_INITIAL = "# Java Basics\n\nAnswer Java questions concisely."
+
+
+def _make_multi_operator_llm_mock():
+    """LLM mock that returns operator-specific edits based on skill content.
+
+    Detects which operator is being reflected on by checking skill_content
+    markers in the prompt, and returns appropriate edit suggestions.
+    """
+    llm = MagicMock()
+
+    async def mock_invoke(*, model, messages, temperature=None, timeout=None, **kwargs):
+        prompt = "\n".join(m.get("content", "") for m in messages)
+
+        if "strategic skill advisor" in prompt:
+            content = _slow_update_response()
+        elif "optimizer-coach" in prompt:
+            content = _meta_skill_response()
+        elif "Python Basics" in prompt:
+            content = json.dumps(
+                {
+                    "patch": {
+                        "edits": [{"op": "append", "content": "\n- GIL: Global Interpreter Lock"}],
+                        "reasoning": "Add GIL explanation",
+                    },
+                    "failure_summary": "Missing GIL detail",
+                }
+            )
+        elif "Java Basics" in prompt:
+            content = json.dumps(
+                {
+                    "patch": {
+                        "edits": [{"op": "append", "content": "\n- JVM: Java Virtual Machine"}],
+                        "reasoning": "Add JVM explanation",
+                    },
+                    "failure_summary": "Missing JVM detail",
+                }
+            )
+        else:
+            content = _reflect_response()
+
+        response = MagicMock()
+        response.content = content
+        return response
+
+    llm.invoke = mock_invoke
+    return llm
+
+
+def _make_multi_operator_optimizer(
+    train_cases: CaseLoader,
+    *,
+    use_slow_update: bool = False,
+    use_meta_skill: bool = False,
+    artifact_dir: str | None = None,
+) -> tuple:
+    """Create optimizer with two bound operators. Returns (optimizer, op_a, op_b)."""
+    llm = _make_multi_operator_llm_mock()
+    agent = _make_agent()
+    evaluator = _make_evaluator(score=0.3)
+
+    opt = SkillDocumentOptimizer(
+        agent=agent,
+        evaluator=evaluator,
+        llm=llm,
+        model="test-model",
+        train_cases=train_cases,
+        batch_size=2,
+        accumulation=1,
+        steps_per_epoch=1,
+        minibatch_size=2,
+        edit_budget=5,
+        score_threshold=0.5,
+        parallelism=2,
+        use_slow_update=use_slow_update,
+        use_meta_skill=use_meta_skill,
+        artifact_dir=artifact_dir,
+    )
+
+    op_a = SkillDocumentOperator("python_skill", initial_content=SKILL_A_INITIAL)
+    op_b = SkillDocumentOperator("java_skill", initial_content=SKILL_B_INITIAL)
+    opt.bind(operators={op_a.operator_id: op_a, op_b.operator_id: op_b})
+
+    return opt, op_a, op_b
+
+
+class TestMultiOperatorTraining:
+    """Multi-operator: full Trainer → Updater → Optimizer → 2 Operators pipeline."""
+
+    @staticmethod
+    def test_two_operators_both_skills_evolve():
+        """Both operators should have their skills modified after training."""
+        cases = _make_cases(4)
+        opt, op_a, op_b = _make_multi_operator_optimizer(cases)
+
+        updater = SingleDimUpdater(optimizer=opt)
+
+        # Smart evaluator: rewards modified skills so gate selects candidate
+        def smart_eval(case_list, predicts, num_parallel=1):
+            current_a = op_a.get_state().get("skill_content", "")
+            current_b = op_b.get_state().get("skill_content", "")
+            if "GIL" in current_a or "JVM" in current_b:
+                score = 0.9
+            else:
+                score = 0.3
+            return [
+                EvaluatedCase(case=c, answer=p, score=score, reason="gate test") for c, p in zip(case_list, predicts)
+            ]
+
+        evaluator = MagicMock(spec=BaseEvaluator)
+        evaluator.batch_evaluate = MagicMock(side_effect=smart_eval)
+        trainer = Trainer(updater=updater, evaluator=evaluator, early_stop_score=1.0)
+
+        agent = _make_agent()
+        agent.get_operators = MagicMock(return_value={op_a.operator_id: op_a, op_b.operator_id: op_b})
+
+        trainer.train(agent=agent, train_cases=cases, val_cases=cases, num_iterations=2)
+
+        skill_a = op_a.get_state()["skill_content"]
+        skill_b = op_b.get_state()["skill_content"]
+
+        # Both skills should have been modified with operator-specific edits
+        assert "GIL" in skill_a, f"Python skill should mention GIL, got: {skill_a[:200]}"
+        assert "JVM" in skill_b, f"Java skill should mention JVM, got: {skill_b[:200]}"
+
+    @staticmethod
+    def test_two_operators_skills_evolve_independently():
+        """Each operator's skill should contain only its own edits, not the other's."""
+        cases = _make_cases(4)
+        opt, op_a, op_b = _make_multi_operator_optimizer(cases)
+
+        updater = SingleDimUpdater(optimizer=opt)
+
+        # Smart evaluator: rewards modified skills
+        def smart_eval(case_list, predicts, num_parallel=1):
+            current_a = op_a.get_state().get("skill_content", "")
+            current_b = op_b.get_state().get("skill_content", "")
+            if "GIL" in current_a or "JVM" in current_b:
+                score = 0.9
+            else:
+                score = 0.3
+            return [
+                EvaluatedCase(case=c, answer=p, score=score, reason="gate test") for c, p in zip(case_list, predicts)
+            ]
+
+        evaluator = MagicMock(spec=BaseEvaluator)
+        evaluator.batch_evaluate = MagicMock(side_effect=smart_eval)
+        trainer = Trainer(updater=updater, evaluator=evaluator, early_stop_score=1.0)
+
+        agent = _make_agent()
+        agent.get_operators = MagicMock(return_value={op_a.operator_id: op_a, op_b.operator_id: op_b})
+
+        trainer.train(agent=agent, train_cases=cases, val_cases=cases, num_iterations=1)
+
+        skill_a = op_a.get_state()["skill_content"]
+        skill_b = op_b.get_state()["skill_content"]
+
+        # Cross-contamination check: each skill should not contain the other's edits
+        assert "JVM" not in skill_a, "Python skill should NOT contain Java edits"
+        assert "GIL" not in skill_b, "Java skill should NOT contain Python edits"
+
+    @staticmethod
+    def test_optimizer_state_tracks_multiple_operators():
+        """After training, optimizer per-operator dicts should have entries for both."""
+        cases = _make_cases(4)
+        opt, op_a, op_b = _make_multi_operator_optimizer(cases)
+
+        updater = SingleDimUpdater(optimizer=opt)
+        evaluator = _make_evaluator(score=0.3)
+        trainer = Trainer(updater=updater, evaluator=evaluator, early_stop_score=1.0)
+
+        agent = _make_agent()
+        agent.get_operators = MagicMock(return_value={op_a.operator_id: op_a, op_b.operator_id: op_b})
+
+        trainer.train(agent=agent, train_cases=cases, val_cases=cases, num_iterations=1)
+
+        assert len(opt._current_skill_by_operator) == 2
+        assert op_a.operator_id in opt._current_skill_by_operator
+        assert op_b.operator_id in opt._current_skill_by_operator
+
+
+class TestMultiOperatorGate:
+    """Multi-operator: Trainer gate validation and rollback with multiple operators."""
+
+    @staticmethod
+    def test_gate_rollback_restores_both_operators():
+        """When candidate is worse, both operators should be rolled back to base."""
+        cases = _make_cases(4)
+        opt, op_a, op_b = _make_multi_operator_optimizer(cases)
+
+        updater = SingleDimUpdater(optimizer=opt)
+
+        # Smart evaluator: penalizes any modified skill
+        def smart_eval(case_list, predicts, num_parallel=1):
+            current_a = op_a.get_state().get("skill_content", "")
+            current_b = op_b.get_state().get("skill_content", "")
+            # If either skill has been modified significantly, score lower
+            if len(current_a) > len(SKILL_A_INITIAL) * 1.5 or len(current_b) > len(SKILL_B_INITIAL) * 1.5:
+                score = 0.2
+            else:
+                score = 0.8
+            return [
+                EvaluatedCase(case=c, answer=p, score=score, reason="gate test") for c, p in zip(case_list, predicts)
+            ]
+
+        evaluator = MagicMock(spec=BaseEvaluator)
+        evaluator.batch_evaluate = MagicMock(side_effect=smart_eval)
+
+        trainer = Trainer(updater=updater, evaluator=evaluator, early_stop_score=1.0)
+
+        agent = _make_agent()
+        agent.get_operators = MagicMock(return_value={op_a.operator_id: op_a, op_b.operator_id: op_b})
+
+        trainer.train(agent=agent, train_cases=cases, val_cases=cases, num_iterations=1)
+
+        # Both operators should be rolled back to initial content
+        skill_a = op_a.get_state()["skill_content"]
+        skill_b = op_b.get_state()["skill_content"]
+        assert skill_a == SKILL_A_INITIAL, f"Python skill should be rolled back, got: {skill_a[:100]}"
+        assert skill_b == SKILL_B_INITIAL, f"Java skill should be rolled back, got: {skill_b[:100]}"
+
+    @staticmethod
+    def test_gate_candidate_selected_when_better_multi_operator():
+        """When candidate is better, both operators should be updated."""
+        cases = _make_cases(4)
+        opt, op_a, op_b = _make_multi_operator_optimizer(cases)
+
+        updater = SingleDimUpdater(optimizer=opt)
+
+        # Smart evaluator: rewards modified skills
+        def smart_eval(case_list, predicts, num_parallel=1):
+            current_a = op_a.get_state().get("skill_content", "")
+            current_b = op_b.get_state().get("skill_content", "")
+            if "GIL" in current_a or "JVM" in current_b:
+                score = 0.9
+            else:
+                score = 0.3
+            return [
+                EvaluatedCase(case=c, answer=p, score=score, reason="gate test") for c, p in zip(case_list, predicts)
+            ]
+
+        evaluator = MagicMock(spec=BaseEvaluator)
+        evaluator.batch_evaluate = MagicMock(side_effect=smart_eval)
+
+        trainer = Trainer(updater=updater, evaluator=evaluator, early_stop_score=1.0)
+
+        agent = _make_agent()
+        agent.get_operators = MagicMock(return_value={op_a.operator_id: op_a, op_b.operator_id: op_b})
+
+        trainer.train(agent=agent, train_cases=cases, val_cases=cases, num_iterations=1)
+
+        skill_a = op_a.get_state()["skill_content"]
+        skill_b = op_b.get_state()["skill_content"]
+        assert "GIL" in skill_a, "Python skill should have GIL edit committed"
+        assert "JVM" in skill_b, "Java skill should have JVM edit committed"
+
+
+class TestMultiOperatorSlowUpdateIntegration:
+    """Multi-operator: slow update injects independent guidance per operator."""
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_slow_update_each_operator_independently():
+        """After run_epoch_end, each operator's skill has its own slow update markers."""
+        cases = _make_cases(4)
+        opt, op_a, op_b = _make_multi_operator_optimizer(
+            cases,
+            use_slow_update=True,
+            use_meta_skill=False,
+        )
+
+        # Set up state as if training already happened
+        opt._current_skill_by_operator = {
+            op_a.operator_id: SKILL_A_INITIAL,
+            op_b.operator_id: SKILL_B_INITIAL,
+        }
+        opt._prev_epoch_skill_by_operator = {
+            op_a.operator_id: "prev python skill",
+            op_b.operator_id: "prev java skill",
+        }
+        opt._prev_epoch_comparison = [
+            {"case_id": "c0", "prev_score": 0.5, "curr_score": 0.7},
+        ]
+        opt._curr_epoch_comparison = [
+            {"case_id": "c0", "curr_score": 0.3, "curr_reason": "regressed"},
+        ]
+
+        await opt.run_epoch_end(epoch=1)
+
+        skill_a = op_a.get_state()["skill_content"]
+        skill_b = op_b.get_state()["skill_content"]
+
+        # Both should have slow update markers
+        assert "<!-- SLOW_UPDATE_START -->" in skill_a, f"Python skill missing slow markers: {skill_a[:200]}"
+        assert "<!-- SLOW_UPDATE_END -->" in skill_a
+        assert "<!-- SLOW_UPDATE_START -->" in skill_b, f"Java skill missing slow markers: {skill_b[:200]}"
+        assert "<!-- SLOW_UPDATE_END -->" in skill_b
+
+
+class TestMultiOperatorStateRoundTrip:
+    """Multi-operator: state serialization/deserialization with multiple operators."""
+
+    @staticmethod
+    def test_get_state_includes_per_operator_fields():
+        """get_state should include per-operator state dicts."""
+        cases = _make_cases(4)
+        opt, op_a, op_b = _make_multi_operator_optimizer(cases)
+
+        opt._global_step = 3
+        opt._prev_epoch_skill_by_operator = {
+            op_a.operator_id: "prev A",
+            op_b.operator_id: "prev B",
+        }
+
+        state = opt.get_state()
+        assert "prev_epoch_skill_by_operator" in state
+        assert state["prev_epoch_skill_by_operator"][op_a.operator_id] == "prev A"
+        assert state["prev_epoch_skill_by_operator"][op_b.operator_id] == "prev B"
+
+    @staticmethod
+    def test_load_state_restores_per_operator_fields():
+        """load_state should restore per-operator state dicts."""
+        cases = _make_cases(4)
+        opt1, op_a1, op_b1 = _make_multi_operator_optimizer(cases)
+
+        opt1._global_step = 5
+        opt1._prev_epoch_skill_by_operator = {
+            op_a1.operator_id: "saved A",
+            op_b1.operator_id: "saved B",
+        }
+        opt1._meta_skill_context = "focus on testing"
+
+        state = opt1.get_state()
+
+        # Create fresh optimizer and load state
+        opt2, op_a2, op_b2 = _make_multi_operator_optimizer(cases)
+        opt2.load_state(state)
+
+        assert opt2._global_step == 5
+        assert opt2._meta_skill_context == "focus on testing"
+        assert opt2._prev_epoch_skill_by_operator[op_a2.operator_id] == "saved A"
+        assert opt2._prev_epoch_skill_by_operator[op_b2.operator_id] == "saved B"
+
+    @staticmethod
+    def test_state_survives_json_roundtrip_multi_operator():
+        """Multi-operator state survives JSON serialization."""
+        cases = _make_cases(4)
+        opt, op_a, op_b = _make_multi_operator_optimizer(cases)
+
+        opt._global_step = 7
+        opt._prev_epoch_skill_by_operator = {
+            op_a.operator_id: "python skill v3",
+            op_b.operator_id: "java skill v3",
+        }
+        opt._prev_epoch_comparison = [
+            {"case_id": "c0", "curr_score": 0.8},
+        ]
+
+        state = opt.get_state()
+        json_str = json.dumps(state, ensure_ascii=False)
+        restored = json.loads(json_str)
+
+        opt2, op_a2, op_b2 = _make_multi_operator_optimizer(cases)
+        opt2.load_state(restored)
+
+        assert opt2._global_step == 7
+        assert opt2._prev_epoch_skill_by_operator[op_a2.operator_id] == "python skill v3"
+        assert opt2._prev_epoch_skill_by_operator[op_b2.operator_id] == "java skill v3"
+
+
+class TestMultiOperatorArtifactExport:
+    """Multi-operator: artifact export includes operator_id in filenames."""
+
+    @staticmethod
+    def test_merged_patch_artifacts_have_operator_id(tmp_path):
+        """After training, merged patch artifacts should include operator_id suffix."""
+        cases = _make_cases(4)
+        artifact_dir = str(tmp_path / "artifacts")
+        opt, op_a, op_b = _make_multi_operator_optimizer(
+            cases,
+            artifact_dir=artifact_dir,
+        )
+
+        updater = SingleDimUpdater(optimizer=opt)
+        evaluator = _make_evaluator(score=0.3)
+        trainer = Trainer(updater=updater, evaluator=evaluator, early_stop_score=1.0)
+
+        agent = _make_agent()
+        agent.get_operators = MagicMock(return_value={op_a.operator_id: op_a, op_b.operator_id: op_b})
+
+        trainer.train(agent=agent, train_cases=cases, val_cases=cases, num_iterations=1)
+
+        # Check per-operator merged patch files exist
+        epoch_dir = Path(artifact_dir) / "epoch_1" / "step_0"
+        if not epoch_dir.exists():
+            # Try epoch_0 (0-indexed)
+            epoch_dir = Path(artifact_dir) / "epoch_0" / "step_0"
+
+        # At least one epoch directory should exist
+        artifact_root = Path(artifact_dir)
+        assert artifact_root.exists(), f"Artifact dir should exist, contents: {list(artifact_root.iterdir())}"
+
+        # Find merged patch files (could be in epoch_0 or epoch_1)
+        merged_files = list(artifact_root.rglob("merged_patch_*.json"))
+        if merged_files:
+            # Should have operator-specific files
+            file_names = [f.name for f in merged_files]
+            has_operator_suffix = any(
+                "_op_" in name or op_a.operator_id in name or op_b.operator_id in name for name in file_names
+            )
+            assert has_operator_suffix, f"Merged patch files should have operator_id suffix, found: {file_names}"

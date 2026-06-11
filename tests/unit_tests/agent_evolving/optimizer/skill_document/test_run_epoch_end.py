@@ -37,6 +37,15 @@ def _make_optimizer_with_operator(skill_content: str = "initial skill", **overri
     return opt
 
 
+def _skill_with_slow_marker(content: str) -> str:
+    return (
+        f"{content}\n"
+        "<!-- SLOW_UPDATE_START -->\n"
+        "old guidance\n"
+        "<!-- SLOW_UPDATE_END -->\n"
+    )
+
+
 class TestRunEpochEnd:
     @staticmethod
     @pytest.mark.asyncio
@@ -256,6 +265,48 @@ class TestRunSlowUpdate:
         # Skill unchanged on parse failure
         assert opt._current_skill_content == "skill content"
 
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_multi_operator_updates_each_operator_skill_independently():
+        opt = _make_optimizer(use_slow_update=True, use_meta_skill=False)
+        op_a = SkillDocumentOperator("skill_a", initial_content=_skill_with_slow_marker("skill A"))
+        op_b = SkillDocumentOperator("skill_b", initial_content=_skill_with_slow_marker("skill B"))
+        opt.bind(operators={op_a.operator_id: op_a, op_b.operator_id: op_b})
+        opt._current_skill_by_operator = {
+            op_a.operator_id: op_a.get_state()["skill_content"],
+            op_b.operator_id: op_b.get_state()["skill_content"],
+        }
+        opt._prev_epoch_skill_by_operator = {
+            op_a.operator_id: "prev A",
+            op_b.operator_id: "prev B",
+        }
+        opt._prev_epoch_comparison = [
+            {"case_id": "c0", "prev_score": 0.5, "curr_score": 0.7},
+        ]
+        opt._curr_epoch_comparison = [
+            {"case_id": "c0", "curr_score": 0.3, "curr_reason": "regressed"},
+        ]
+
+        async def slow_update(*_, curr_skill, **__):
+            label = "A" if "skill A" in curr_skill else "B"
+            return SlowUpdateResult(
+                reasoning="",
+                slow_update_content=f"guidance {label}",
+                action="success",
+            )
+
+        with patch(
+            "openjiuwen.agent_evolving.optimizer.skill_document.slow_update.run_slow_update",
+            new_callable=AsyncMock,
+            side_effect=slow_update,
+        ):
+            await opt._run_slow_update(epoch=1)
+
+        assert "guidance A" in op_a.get_state()["skill_content"]
+        assert "guidance B" in op_b.get_state()["skill_content"]
+        assert "guidance B" not in op_a.get_state()["skill_content"]
+        assert "guidance A" not in op_b.get_state()["skill_content"]
+
 
 class TestRunMetaSkill:
     @staticmethod
@@ -301,3 +352,32 @@ class TestRunMetaSkill:
             await opt._run_meta_skill(epoch=1)
 
         assert opt._meta_skill_context == ""
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_multi_operator_meta_skill_uses_all_operator_skills():
+        opt = _make_optimizer_with_operator("skill")
+        opt._prev_epoch_skill = ""
+        opt._prev_epoch_skill_by_operator = {
+            "op_a": "previous skill A",
+            "op_b": "previous skill B",
+        }
+        opt._current_skill_by_operator = {
+            "op_a": "current skill A",
+            "op_b": "current skill B",
+        }
+        opt._prev_epoch_comparison = [{"case_id": "c0", "curr_score": 0.5}]
+
+        with patch(
+            "openjiuwen.agent_evolving.optimizer.skill_document.meta_skill.run_meta_skill",
+            new_callable=AsyncMock,
+            return_value="multi operator memory",
+        ) as mock_run:
+            await opt._run_meta_skill(epoch=1)
+
+        kwargs = mock_run.await_args.kwargs
+        assert "previous skill A" in kwargs["prev_skill"]
+        assert "previous skill B" in kwargs["prev_skill"]
+        assert "current skill A" in kwargs["curr_skill"]
+        assert "current skill B" in kwargs["curr_skill"]
+        assert opt._meta_skill_context == "multi operator memory"

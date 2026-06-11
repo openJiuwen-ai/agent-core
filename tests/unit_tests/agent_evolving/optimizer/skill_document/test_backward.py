@@ -1,9 +1,8 @@
 # coding: utf-8
 """Tests for the _backward epoch orchestrator and step buffer helpers."""
 
-import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -166,6 +165,7 @@ class TestBackward:
 
         op = next(iter(opt._operators.values()))
         assert op.get_state()["skill_content"] == "unchanged skill"
+        assert opt._ranked_patch == Patch(edits=[], reasoning="no edits")
 
     @staticmethod
     @pytest.mark.asyncio

@@ -4,13 +4,16 @@
 
 import pytest
 
+from openjiuwen.agent_evolving.dataset import Case, EvaluatedCase
 from openjiuwen.agent_evolving.optimizer.skill_document.types import (
+    AttributedBatch,
     Edit,
     EditOp,
     Patch,
     RawPatch,
     SlowUpdateResult,
 )
+from openjiuwen.agent_evolving.trajectory.types import Trajectory
 from openjiuwen.agent_evolving.protocols import (
     SKILL_CONTENT_TARGET,
     SKILL_DOCUMENT_DOMAIN,
@@ -91,6 +94,22 @@ class TestRawPatch:
         assert rp.failure_summary == ""
 
     @staticmethod
+    def test_operator_id_default():
+        rp = RawPatch(patch=Patch(edits=[]), source_type="failure")
+        assert rp.operator_id == ""
+
+    @staticmethod
+    def test_operator_id_set():
+        rp = RawPatch(patch=Patch(edits=[]), source_type="failure", operator_id="op_a")
+        assert rp.operator_id == "op_a"
+
+    @staticmethod
+    def test_operator_id_frozen():
+        rp = RawPatch(patch=Patch(edits=[]), source_type="failure", operator_id="op_a")
+        with pytest.raises(AttributeError):
+            setattr(rp, "operator_id", "op_b")
+
+    @staticmethod
     def test_all_fields():
         p = Patch(edits=[Edit(op="append", content="x")], reasoning="r")
         rp = RawPatch(patch=p, source_type="success", batch_size=5, failure_summary="none")
@@ -98,6 +117,37 @@ class TestRawPatch:
         assert rp.source_type == "success"
         assert rp.batch_size == 5
         assert rp.failure_summary == "none"
+
+
+class TestAttributedBatch:
+    """AttributedBatch frozen dataclass."""
+
+    @staticmethod
+    def test_construction():
+        case = Case(inputs={"q": "a"}, label={"a": "b"})
+        ec = EvaluatedCase(case=case)
+        traj = Trajectory(execution_id="exec-1", steps=[])
+        batch = AttributedBatch(
+            operator_id="op_a",
+            failures=[(traj, ec, case)],
+            successes=[],
+        )
+        assert batch.operator_id == "op_a"
+        assert len(batch.failures) == 1
+        assert batch.successes == []
+
+    @staticmethod
+    def test_frozen():
+        batch = AttributedBatch(operator_id="op_a", failures=[], successes=[])
+        with pytest.raises(AttributeError):
+            setattr(batch, "operator_id", "op_b")
+
+    @staticmethod
+    def test_empty_batches():
+        batch = AttributedBatch(operator_id="op_x", failures=[], successes=[])
+        assert batch.operator_id == "op_x"
+        assert batch.failures == []
+        assert batch.successes == []
 
 
 class TestSlowUpdateResult:

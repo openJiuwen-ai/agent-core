@@ -257,3 +257,5 @@ images/
 *.txt
 *.bin
 *.sqlite3
+# Local ADR documents (not committed)
+docs/adr/

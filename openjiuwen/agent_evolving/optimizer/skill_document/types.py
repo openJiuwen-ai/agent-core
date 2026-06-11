@@ -5,7 +5,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_evolving.dataset import Case, EvaluatedCase
+    from openjiuwen.agent_evolving.trajectory.types import Trajectory
 
 EditOp = Literal["append", "insert_after", "replace", "delete"]
 
@@ -37,6 +41,16 @@ class RawPatch:
     source_type: str
     batch_size: int = 0
     failure_summary: str = ""
+    operator_id: str = ""
+
+
+@dataclass(frozen=True)
+class AttributedBatch:
+    """Failure/success batch attributed to a single operator."""
+
+    operator_id: str
+    failures: list[tuple[Trajectory, EvaluatedCase, Case]]
+    successes: list[tuple[Trajectory, EvaluatedCase, Case]]
 
 
 @dataclass(frozen=True)
@@ -49,6 +63,7 @@ class SlowUpdateResult:
 
 
 __all__ = [
+    "AttributedBatch",
     "Edit",
     "EditOp",
     "Patch",
