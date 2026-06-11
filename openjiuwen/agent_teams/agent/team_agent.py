@@ -66,12 +66,6 @@ class TeamAgent(BaseAgent):
         super().__init__(card)
         self._configurator = AgentConfigurator(card)
         self._state = TeamAgentState()
-        # Callback invoked by CoordinationKernel.start() once the runtime
-        # (NativeHarness, StreamController, tools, event bus) is fully
-        # ready.  In-process spawns bind this to their handle's
-        # ready_event.set() so HumanAgentInbox can gate deliver_input
-        # on harness readiness.
-        self.on_runtime_ready: Optional[Any] = None
 
         self._spawn_manager = SpawnManager(
             state=self._state,

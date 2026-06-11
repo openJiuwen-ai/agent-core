@@ -37,11 +37,11 @@ _BUILTIN_TOOL_GROUPS: Dict[str, Tuple[str, List[str], bool]] = {
     "shell": ("openjiuwen.harness.tools.shell", ["BashTool"], True),
     "code": ("openjiuwen.harness.tools.code", ["CodeTool"], True),
     "web_search": (
-        "openjiuwen.harness.tools.web_tools",
+        "openjiuwen.harness.tools",
         ["WebFreeSearchTool", "WebPaidSearchTool"],
         False,
     ),
-    "web_fetch": ("openjiuwen.harness.tools.web_tools", ["WebFetchWebpageTool"], False),
+    "web_fetch": ("openjiuwen.harness.tools", ["WebFetchWebpageTool"], False),
 }
 
 _BUILTIN_RAIL_REGISTRY: Dict[str, str] = {
