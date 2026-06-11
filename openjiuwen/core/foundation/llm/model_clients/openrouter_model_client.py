@@ -44,3 +44,7 @@ class OpenRouterModelClient(OpenAIModelClient):
                     continue
                 effective[key] = str(value)
         return effective
+
+    @staticmethod
+    def _extract_reasoning_content(msg_or_delta: Any) -> Optional[str]:
+        return getattr(msg_or_delta, 'reasoning', None) or getattr(msg_or_delta, 'reasoning_content', None)

@@ -544,6 +544,10 @@ class OpenAIModelClient(BaseModelClient):
 
                 yield chunk_with_parser
 
+    @staticmethod
+    def _extract_reasoning_content(msg_or_delta: Any) -> Optional[str]:
+        return getattr(msg_or_delta, 'reasoning_content', None)
+
     async def _parse_response(
             self,
             response: Any,
@@ -581,8 +585,7 @@ class OpenAIModelClient(BaseModelClient):
                 )
                 tool_calls.append(tool_call)
 
-        # Get reasoning_content (if exists)
-        reasoning_content = getattr(message, 'reasoning_content', None)
+        reasoning_content = self._extract_reasoning_content(message)
 
         # Build UsageMetadata, use returned data to populate UsageMetadata attribute fields as much as possible
         usage_metadata = None
@@ -726,7 +729,7 @@ class OpenAIModelClient(BaseModelClient):
 
         # Extract content
         content = getattr(delta, 'content', None) or ""
-        reasoning_content = getattr(delta, 'reasoning_content', None)
+        reasoning_content = self._extract_reasoning_content(delta)
 
         # Parse tool_calls delta
         tool_calls = []
