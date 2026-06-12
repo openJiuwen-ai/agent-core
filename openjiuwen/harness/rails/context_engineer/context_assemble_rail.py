@@ -6,14 +6,29 @@ from __future__ import annotations
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.harness.rails.base import DeepAgentRail
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
 )
 from openjiuwen.harness.prompts.sections.workspace import build_workspace_section as _build_workspace
-from openjiuwen.harness.prompts.sections.context import build_context_section as _build_context, \
-    build_tools_section
+from openjiuwen.harness.prompts.sections.context import (
+    build_context_file_sections,
+    build_tools_section,
+)
 
+
+_SYSTEM_CONTEXT_SECTIONS = frozenset({
+    "context.agent",
+    "context.soul",
+    "context.identity",
+    "context.user",
+})
+
+_ATTACHMENT_CONTEXT_SECTIONS = frozenset({
+    "context.heartbeat",
+})
+
+_ALL_SPLIT_CONTEXT_SECTIONS = _SYSTEM_CONTEXT_SECTIONS | _ATTACHMENT_CONTEXT_SECTIONS
 
 
 class ContextAssembleRail(DeepAgentRail):
@@ -44,16 +59,18 @@ class ContextAssembleRail(DeepAgentRail):
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("workspace")
             self.system_prompt_builder.remove_section("context")
+            for section in _ALL_SPLIT_CONTEXT_SECTIONS:
+                self.system_prompt_builder.remove_section(section)
             self.system_prompt_builder.remove_section("tools")
             self.system_prompt_builder = None
         self.attachment_manager = None
 
-    async def _upsert_attachment_section(self, writer, section, *, kind, source) -> None:
+    async def _upsert_attachment_section(self, writer, section, *, kind) -> None:
         try:
             await writer.add_from_prompt_section(
                 prompt_section=section,
                 kind=kind,
-                source=source,
+                source="agent_core.context_assemble_rail",
                 language=self.system_prompt_builder.language,
                 content_kind="text/markdown",
             )
@@ -70,16 +87,23 @@ class ContextAssembleRail(DeepAgentRail):
         """Inject workspace directory structure and context files into messages before model call."""
         if self.system_prompt_builder is None:
             return
+        writer = None
+        if self.attachment_manager is None:
+            logger.warning("[ContextAssembleRail] prompt attachment manager is unavailable; skip attachment sections")
+        else:
+            writer = self.attachment_manager.bind_context(ctx)
         workspace = self.workspace
-        is_heartbeat = ctx.extra.get("run_kind") == RunKind.HEARTBEAT
 
         if workspace is None:
             self.system_prompt_builder.remove_section("workspace")
             self.system_prompt_builder.remove_section("context")
+            for section in _ALL_SPLIT_CONTEXT_SECTIONS:
+                self.system_prompt_builder.remove_section(section)
             self.system_prompt_builder.remove_section("tools")
-            if self.attachment_manager is not None:
-                writer = self.attachment_manager.bind_context(ctx)
+            if writer is not None:
                 await self._clear_attachment_section(writer, "context")
+                for section in _ATTACHMENT_CONTEXT_SECTIONS:
+                    await self._clear_attachment_section(writer, section)
             return
 
         lang = self.system_prompt_builder.language
@@ -89,11 +113,10 @@ class ContextAssembleRail(DeepAgentRail):
             lang,
         )
         tools_section = build_tools_section(self._ability_manager, lang)
-        context_section = await _build_context(
+        context_sections = await build_context_file_sections(
             self.sys_operation,
             workspace,
             lang,
-            include_daily_memory=not is_heartbeat,
         )
 
         if workspace_section is not None:
@@ -106,20 +129,26 @@ class ContextAssembleRail(DeepAgentRail):
         else:
             self.system_prompt_builder.remove_section("tools")
 
-        if context_section is not None:
-            self.system_prompt_builder.remove_section("context")
-            if self.attachment_manager is not None:
-                writer = self.attachment_manager.bind_context(ctx)
-                await self._upsert_attachment_section(
-                    writer,
-                    context_section,
-                    kind=PromptAttachmentKind.FILE,
-                    source="agent_core.context_assemble.context",
-                )
+        self.system_prompt_builder.remove_section("context")
+        if writer is not None:
+            await self._clear_attachment_section(writer, "context")
+
+        for section_name in _SYSTEM_CONTEXT_SECTIONS:
+            section = context_sections.get(section_name)
+            if section is not None:
+                self.system_prompt_builder.add_section(section)
             else:
-                self.system_prompt_builder.add_section(context_section)
-        else:
-            self.system_prompt_builder.remove_section("context")
-            if self.attachment_manager is not None:
-                writer = self.attachment_manager.bind_context(ctx)
-                await self._clear_attachment_section(writer, "context")
+                self.system_prompt_builder.remove_section(section_name)
+
+        for section_name in _ATTACHMENT_CONTEXT_SECTIONS:
+            section = context_sections.get(section_name)
+            if section is not None:
+                if writer is not None:
+                    await self._upsert_attachment_section(
+                        writer,
+                        section,
+                        kind=PromptAttachmentKind.FILE
+                    )
+            else:
+                if writer is not None:
+                    await self._clear_attachment_section(writer, section_name)

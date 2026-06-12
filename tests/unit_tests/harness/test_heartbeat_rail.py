@@ -173,7 +173,7 @@ async def test_before_model_call_injects_heartbeat_section() -> None:
     items = await rail.attachment_manager.collect_for_session(session_id)
     assert [item.id for item in items] == [f"session.{session_id}.heartbeat"]
     assert items[0].kind.value == "todo_reminder"
-    assert items[0].source == "agent_core.heartbeat"
+    assert items[0].source == "agent_core.heartbeat_rail"
     assert "心跳检测" in (items[0].content or "")
 
 

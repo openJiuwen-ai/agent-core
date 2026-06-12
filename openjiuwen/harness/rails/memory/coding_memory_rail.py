@@ -364,7 +364,7 @@ class CodingMemoryRail(DeepAgentRail):
                 section="coding_memory_context",
                 content=content,
                 kind=PromptAttachmentKind.MEMORY,
-                source="agent_core.coding_memory",
+                source="agent_core.coding_memory_rail",
                 priority=85,
                 content_kind="text/markdown",
             )

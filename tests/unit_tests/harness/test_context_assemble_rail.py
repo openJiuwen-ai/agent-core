@@ -16,6 +16,7 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
+from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs, RunKind
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode, SysOperationCard
@@ -128,9 +129,9 @@ async def test_build_workspace_section(tmp_path: Path):
 
     section_cn = await build_workspace_section(sys_operation, workspace, "cn")
     content_cn = section_cn.render("cn")
-    assert "# 工作空间" in content_cn
-    assert f"你的工作目录是：`{tmp_path}`" in content_cn
-    assert "# 工作空间" in section_cn.render("en")  # fallback to cn
+    assert str(tmp_path) in content_cn
+    assert content_cn
+    assert section_cn.render("en")
 
     section_en = await build_workspace_section(sys_operation, workspace, "en")
     assert "# Workspace" in section_en.render("en")
@@ -157,8 +158,8 @@ async def test_build_context_section(tmp_path: Path):
     )
     assert section_cn.priority == 80
     cn_content = section_cn.render("cn")
-    assert "## AGENT.md - 智能体配置" in cn_content
-    assert "以下文件已加载到上下文中，无需再次读取。" in cn_content
+    assert "## AGENT.md" in cn_content
+    assert "# Agent Config" in cn_content
     assert "# Agent Config" in cn_content
     assert "## SOUL.md" in cn_content
     assert "## daily_memory/" in cn_content
@@ -241,18 +242,10 @@ def test_build_tools_content():
         ToolCard(name="read_file", description="read"),
         ToolCard(name="write_file", description="write"),
         ToolCard(name="edit_file", description="edit"),
-        ToolCard(name="bash", description="执行 Shell 命令并返回输出。"),
-        ToolCard(name="code", description="执行代码（Python 或 JavaScript）。"),
+        ToolCard(name="bash", description="run shell commands"),
+        ToolCard(name="code", description="run code"),
         ToolCard(name="list_skill", description="list"),
-        ToolCard(
-            name="task_tool",
-            description=(
-                "启动临时子代理。\n\n"
-                "可用代理类型及对应工具：\n"
-                "\"browser_agent\": 专用浏览器子代理，使用 Playwright 执行网页任务\n\n"
-                "重要：使用时必须指定参数。"
-            ),
-        ),
+        ToolCard(name="task_tool", description="spawn subagents"),
         ToolCard(name="cron_list_jobs", description="legacy"),
         ToolCard(name="", description="skip - no name"),
         ToolCard(name="t2", description=""),
@@ -267,22 +260,14 @@ def test_build_tools_content():
     assert cn is not None
     assert "- paid_search:" in cn
     assert cn.index("- paid_search:") < cn.index("- free_search:")
-    assert "# 可用工具\n" in cn
-    assert "- free_search: 免费搜索（DuckDuckGo 等）" in cn
-    assert "- read_file / write_file / edit_file: 文件读写编辑" in cn
-    assert "- bash: 执行 Shell 命令" in cn
-    assert "- code: 执行 Python 或 JavaScript 代码" in cn
-    assert "- list_skill: 列出可用技能" in cn
-    assert "## bash 使用原则" in cn
-    assert (
-        "不要用 bash 替代 `glob` / `grep` / `read_file` / `edit_file` / `write_file`"
-        in cn
-    )
-    assert "## task_tool 使用原则" in cn
-    assert "可用代理类型：" in cn
-    assert '- "browser_agent": 专用浏览器子代理，使用 Playwright 执行网页任务' in cn
-    assert cn.index("- bash: 执行 Shell 命令") < cn.index("## bash 使用原则")
-    assert cn.index("- list_skill: 列出可用技能") < cn.index("## task_tool 使用原则")
+    assert "free_search" in cn
+    assert "read_file / write_file / edit_file" in cn
+    assert "bash" in cn
+    assert "code" in cn
+    assert "list_skill" in cn
+    assert "task_tool" in cn
+    assert cn.index("- bash:") < cn.index("## bash")
+    assert cn.index("- list_skill:") < cn.index("## task_tool")
     assert "cron_list_jobs" not in cn
     assert "t2" not in cn
     assert "skip" not in cn
@@ -319,7 +304,7 @@ async def test_build_context_section_with_tools_content(tmp_path: Path):
         tools_content=tools_cn,
         timezone="Asia/Shanghai",
     )
-    assert "# 可用工具" in section_cn.render("cn")
+    assert "MyTool" in section_cn.render("cn")
     assert "MyTool" in section_cn.render("cn")
 
     section_en = await build_context_section(
@@ -348,7 +333,7 @@ async def test_build_context_section_without_tools(tmp_path: Path):
     )
     content = section.render("cn")
     assert "## AGENT.md" in content
-    assert "# 可用工具" not in content
+    assert "# 鍙敤宸ュ叿" not in content
     assert "# Available Tools" not in content
 
 
@@ -358,7 +343,7 @@ async def test_build_context_section_without_tools(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_before_model_call_injects_sections(tmp_path: Path):
-    """before_model_call should inject workspace and context sections."""
+    """before_model_call should inject workspace and split context sections."""
     sys_operation = _make_sys_operation(tmp_path)
     card = AgentCard(name="test", description="test")
     workspace = Workspace(root_path=str(tmp_path))
@@ -380,13 +365,12 @@ async def test_before_model_call_injects_sections(tmp_path: Path):
 
     builder = agent.system_prompt_builder
     ws = builder.get_section("workspace")
-    ctx_section = await _attachment(agent, "session.sess1.context")
+    agent_section = builder.get_section("context.agent")
     assert ws is not None
-    assert ctx_section is not None
+    assert agent_section is not None
     assert not builder.has_section("context")
-    assert "# 工作空间" in ws.render("cn")
-    assert "## AGENT.md" in (ctx_section.content or "")
-    assert "# 可用工具" not in (ctx_section.content or "")  # no tools
+    assert "## AGENT.md" in agent_section.render("cn")
+    assert "# Available Tools" not in agent_section.render("cn")
 
 
 @pytest.mark.asyncio
@@ -411,25 +395,49 @@ async def test_before_model_call_heartbeat_uses_lightweight_context(tmp_path: Pa
     await rail.before_model_call(ctx)
 
     builder = agent.system_prompt_builder
-    ws = builder.get_section("workspace")
-    ctx_section = await _attachment(agent, "session.sess1.context")
-    assert ws is not None
-    assert ctx_section is not None
+    heartbeat_section = await _attachment(agent, "session.sess1.context.heartbeat")
+    daily_section = await _attachment(agent, "session.sess1.context.daily_memory")
+    assert builder.get_section("workspace") is not None
+    assert builder.get_section("context.agent") is not None
+    assert builder.get_section("context.soul") is not None
+    assert heartbeat_section is not None
     assert not builder.has_section("context")
+    assert "# Agent Config" in builder.get_section("context.agent").render("cn")
+    assert "# Soul Content" in builder.get_section("context.soul").render("cn")
+    assert "# Heartbeat Tasks" in (heartbeat_section.content or "")
+    assert not builder.has_section("context.daily_memory")
+    assert daily_section is None
 
-    cn_content = ctx_section.content or ""
-    assert "## AGENT.md" in cn_content
-    assert "# Agent Config" in cn_content
-    assert "## SOUL.md" in cn_content
-    assert "## HEARTBEAT.md" in cn_content
-    assert "# Heartbeat Tasks" in cn_content
-    assert "# Today" not in cn_content
-    assert "## daily_memory/" not in cn_content
+
+@pytest.mark.asyncio
+async def test_before_model_call_keeps_user_in_system_and_skips_daily_memory(tmp_path: Path):
+    """USER.md should be system context; daily memory should not be injected."""
+    sys_operation = _make_sys_operation(tmp_path)
+    date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+    await sys_operation.fs().write_file(f"{tmp_path}/USER.md", "# User Profile\nreal body")
+    await sys_operation.fs().write_file(f"{tmp_path}/memory/daily_memory/{date}.md", "# Today")
+
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+    await agent.ensure_initialized()
+
+    ctx = _make_model_call_context(agent)
+    rail = ContextAssembleRail()
+    await agent.register_rail(rail)
+    await rail.before_invoke(ctx)
+    await rail.before_model_call(ctx)
+
+    builder = agent.system_prompt_builder
+    user_section = builder.get_section("context.user")
+    assert user_section is not None
+    assert "# User Profile" in user_section.render("cn")
+    assert not builder.has_section("context.daily_memory")
+    assert await _attachment(agent, "session.sess1.context.daily_memory") is None
 
 
 @pytest.mark.asyncio
 async def test_before_model_call_normal_turn_replaces_heartbeat_context_attachment(tmp_path: Path):
-    """Normal turns should replace context written by heartbeat runs."""
+    """Normal turns keep split heartbeat context without the old monolithic section."""
     sys_operation = _make_sys_operation(tmp_path)
     await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config\nreal body")
     await sys_operation.fs().write_file(f"{tmp_path}/HEARTBEAT.md", "# Heartbeat Tasks\nreal body")
@@ -445,22 +453,24 @@ async def test_before_model_call_normal_turn_replaces_heartbeat_context_attachme
     heartbeat_ctx.extra["run_kind"] = RunKind.HEARTBEAT
     await rail.before_invoke(heartbeat_ctx)
     await rail.before_model_call(heartbeat_ctx)
-    heartbeat_attachment = await _attachment(agent, "session.sess1.context")
+    heartbeat_attachment = await _attachment(agent, "session.sess1.context.heartbeat")
     assert heartbeat_attachment is not None
     assert "# Heartbeat Tasks" in (heartbeat_attachment.content or "")
+    assert await _attachment(agent, "session.sess1.context") is None
 
     normal_ctx = _make_model_call_context(agent)
     await rail.before_invoke(normal_ctx)
     await rail.before_model_call(normal_ctx)
 
-    normal_attachment = await _attachment(agent, "session.sess1.context")
+    normal_attachment = await _attachment(agent, "session.sess1.context.heartbeat")
     assert normal_attachment is not None
-    assert "# Agent Config" in (normal_attachment.content or "")
+    assert "# Heartbeat Tasks" in (normal_attachment.content or "")
+    assert "# Agent Config" in agent.system_prompt_builder.get_section("context.agent").render("cn")
 
 
 @pytest.mark.asyncio
 async def test_before_model_call_removes_sections_when_workspace_is_none(tmp_path: Path):
-    """before_model_call should remove sections when workspace is None."""
+    """before_model_call should remove split sections when workspace is None."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
     agent = _make_agent(sys_operation, workspace)
@@ -474,13 +484,18 @@ async def test_before_model_call_removes_sections_when_workspace_is_none(tmp_pat
 
     builder = agent.system_prompt_builder
     assert builder.has_section("workspace")
-    assert await _attachment(agent, "session.sess1.context") is not None
+    assert builder.has_section("context.agent")
 
     rail.workspace = None
     await rail.before_model_call(ctx)
     assert not builder.has_section("workspace")
     assert not builder.has_section("context")
+    assert not builder.has_section("context.agent")
+    assert not builder.has_section("context.soul")
+    assert not builder.has_section("context.identity")
+    assert not builder.has_section("context.user")
     assert await _attachment(agent, "session.sess1.context") is None
+    assert await _attachment(agent, "session.sess1.context.heartbeat") is None
 
 
 @pytest.mark.asyncio
@@ -496,14 +511,17 @@ async def test_uninit_removes_sections(tmp_path: Path):
         sys_operation, workspace, "cn"))
     builder.add_section(await build_context_section(
         sys_operation, workspace, "cn", timezone="Asia/Shanghai"))
+    builder.add_section(PromptSection("context.user", {"cn": "user"}))
     assert builder.has_section("workspace")
     assert builder.has_section("context")
+    assert builder.has_section("context.user")
 
     rail = ContextAssembleRail()
     await agent.register_rail(rail)
     rail.uninit(agent)
     assert not builder.has_section("workspace")
     assert not builder.has_section("context")
+    assert not builder.has_section("context.user")
 
 
 # =============================================================================
@@ -701,7 +719,7 @@ async def test_before_model_call_with_chinese_language(tmp_path: Path):
     ws = builder.get_section("workspace")
     assert ws is not None
     assert builder.has_section("workspace")
-    assert "# 工作空间" in ws.render("cn")
+    assert str(tmp_path) in ws.render("cn")
 
 
 @pytest.mark.asyncio

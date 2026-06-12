@@ -23,6 +23,14 @@ from openjiuwen.harness.prompts.sections import SectionName
 if TYPE_CHECKING:
     from openjiuwen.harness.prompts.builder import PromptSection
 
+CONTEXT_SECTION_BY_FILE = {
+    "AGENT.md": "context.agent",
+    "SOUL.md": "context.soul",
+    "HEARTBEAT.md": "context.heartbeat",
+    "USER.md": "context.user",
+    "IDENTITY.md": "context.identity",
+}
+
 
 # ---------------------------------------------------------------------------
 # Template detection
@@ -256,6 +264,65 @@ async def build_context_section(
     return PromptSection(
         name=SectionName.CONTEXT,
         content={language: content},
+        priority=80,
+    )
+
+
+async def build_context_file_sections(
+        sys_operation,
+        workspace,
+        language: str = "cn",
+) -> dict[str, "PromptSection"]:
+    """Build one PromptSection per configured context file.
+
+    Each section is named by ``CONTEXT_SECTION_BY_FILE`` so stable files can
+    live in the system prompt while dynamic files can remain attachments.
+    """
+    from openjiuwen.harness.prompts.builder import PromptSection
+
+    if workspace is None:
+        return {}
+
+    titles = CONTEXT_FILE_TITLES.get(language, CONTEXT_FILE_TITLES["cn"])
+    sections: dict[str, PromptSection] = {}
+    for file_key in CONTEXT_FILES:
+        section_name = CONTEXT_SECTION_BY_FILE.get(file_key)
+        if not section_name:
+            continue
+        content = await _read_context_file(sys_operation, workspace, file_key)
+        if content is None:
+            continue
+        title = titles.get(file_key, f"## {file_key}")
+        sections[section_name] = PromptSection(
+            name=section_name,
+            content={language: f"{title}\n\n{content}\n"},
+            priority=80,
+        )
+    return sections
+
+
+async def build_daily_memory_context_section(
+        sys_operation,
+        workspace,
+        language: str = "cn",
+        timezone: Optional[str] = None,
+) -> Optional["PromptSection"]:
+    """Build the split daily-memory context section."""
+    from openjiuwen.harness.prompts.builder import PromptSection
+
+    if workspace is None:
+        return None
+
+    daily_content = await _read_daily_memory(sys_operation, workspace, timezone)
+    if not daily_content:
+        return None
+
+    daily_title_tpl = DAILY_MEMORY_TITLE.get(language, DAILY_MEMORY_TITLE["cn"])
+    date = _format_date(timezone or "Asia/Shanghai")
+    title = daily_title_tpl.format(date=date)
+    return PromptSection(
+        name="context.daily_memory",
+        content={language: f"{title}\n\n{daily_content}\n"},
         priority=80,
     )
 

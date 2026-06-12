@@ -12,6 +12,7 @@ from openjiuwen.core.single_agent.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserAgentRuntime, BrowserRuntimeRail
 from openjiuwen.harness.tools.browser_move.playwright_runtime.service import MAX_ITERATION_MESSAGE
 from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail
 from openjiuwen.core.single_agent.rail.base import InvokeInputs, ToolCallInputs
 
@@ -112,7 +113,7 @@ def test_before_invoke_persists_current_query_for_continuation() -> None:
     assert session.get_state("__browser_subagent_last_task__") == "open example.com"
 
 
-def test_before_model_call_injects_progress_sections() -> None:
+def test_before_model_call_skips_dynamic_progress_without_attachment_manager() -> None:
     runtime = MagicMock(spec=BrowserAgentRuntime)
     runtime.service = MagicMock()
     runtime.service._progress_by_session = {}
@@ -142,9 +143,49 @@ def test_before_model_call_injects_progress_sections() -> None:
     _run(rail.before_model_call(ctx))
 
     prompt = builder.build()
-    assert "Known progress for continuation" in prompt
-    assert "Opened home page" in prompt
     assert "<browser_progress>{...}</browser_progress>" in prompt
+    assert "Opened home page" not in prompt
+    assert not builder.has_section("browser_progress_continuation")
+
+
+def test_before_model_call_injects_progress_attachment() -> None:
+    runtime = MagicMock(spec=BrowserAgentRuntime)
+    runtime.service = MagicMock()
+    runtime.service._progress_by_session = {}
+    builder = SystemPromptBuilder(language="en")
+    session = _FakeSession()
+    session.update_state(
+        {
+            "__browser_subagent_progress_state__": {
+                "status": "partial",
+                "completed_steps": ["Opened home page"],
+                "remaining_steps": ["Submit the form"],
+                "next_step": "Fill the last required field",
+                "completion_evidence": [],
+                "missing_requirements": ["Need the user email"],
+                "recent_tool_steps": ["browser_navigate: https://example.com"],
+                "last_page": {"url": "https://example.com", "title": "Example"},
+                "last_screenshot": None,
+                "last_worker_final": "Waiting on the email field",
+            }
+        }
+    )
+    agent = MagicMock()
+    agent.system_prompt_builder = builder
+    agent.prompt_attachment_manager = PromptAttachmentManager()
+    ctx = AgentCallbackContext(agent=agent, session=session, inputs=InvokeInputs(query="continue"))
+    rail = BrowserRuntimeRail(runtime)
+
+    _run(rail.before_model_call(ctx))
+
+    prompt = builder.build()
+    assert "<browser_progress>{...}</browser_progress>" in prompt
+    assert "Opened home page" not in prompt
+    assert not builder.has_section("browser_progress_continuation")
+    items = _run(agent.prompt_attachment_manager.collect_for_session("browser-session"))
+    assert len(items) == 1
+    assert items[0].section == "browser_progress_continuation"
+    assert "Opened home page" in (items[0].content or "")
 
 
 def test_after_tool_call_records_browser_tool_progress() -> None:

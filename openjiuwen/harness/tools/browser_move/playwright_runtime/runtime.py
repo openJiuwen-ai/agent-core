@@ -597,15 +597,10 @@ class BrowserRuntimeRail(AgentRail):
         )
         manager = getattr(ctx.agent, "prompt_attachment_manager", None)
         if not isinstance(manager, PromptAttachmentManager):
-            builder.add_section(
-                PromptSection(
-                    name=_BROWSER_PROGRESS_SECTION_NAME,
-                    content={
-                        "en": continuation_text_en,
-                        "cn": continuation_text_cn,
-                    },
-                    priority=83,
-                )
+            builder.remove_section(_BROWSER_PROGRESS_SECTION_NAME)
+            logger.warning(
+                "[BrowserRuntimeRail] prompt attachment manager unavailable; "
+                "skip browser progress continuation attachment"
             )
             return
 

@@ -3,7 +3,6 @@
 """In-memory prompt attachment management for DeepAgent prompt assembly."""
 from __future__ import annotations
 
-import copy
 import hashlib
 import html
 import json
@@ -525,39 +524,18 @@ class PromptAttachmentManager:
             )
         return rendered
 
+    @staticmethod
     def inject_messages(
-        self,
         messages: list[BaseMessage],
         rendered_prompt_attachments: str,
     ) -> list[BaseMessage]:
-        """Append rendered prompt attachment text to the last user message copy."""
+        """Append rendered prompt attachment text as a standalone user message."""
 
         if not rendered_prompt_attachments:
             return list(messages)
 
         new_messages = list(messages)
-        for index in range(len(new_messages) - 1, -1, -1):
-            message = new_messages[index]
-            if not isinstance(message, UserMessage) and getattr(message, "role", None) != "user":
-                continue
-            content = getattr(message, "content", "")
-            replacement = copy.deepcopy(message)
-            if isinstance(content, str):
-                replacement.content = (
-                    f"{content}\n\n{rendered_prompt_attachments}" if content else rendered_prompt_attachments
-                )
-            elif isinstance(content, list):
-                replacement.content = self._inject_into_content_blocks(content, rendered_prompt_attachments)
-            else:
-                logger.warning(
-                    "[PromptAttachmentManager] unsupported user message content kind for prompt attachment injection: "
-                    f"{type(content).__name__}"
-                )
-                return new_messages
-            new_messages[index] = replacement
-            return new_messages
-
-        logger.warning("[PromptAttachmentManager] no user message found for prompt attachment injection")
+        new_messages.append(UserMessage(content=rendered_prompt_attachments))
         return new_messages
 
     def make_window_mutator(self, session_id: str) -> WindowMutator:
@@ -680,31 +658,6 @@ class PromptAttachmentManager:
         has_filter = any(value is not None for value in (session_id, section, kind, source))
         if not has_filter and not allow_all:
             raise ValueError("destructive prompt attachment operation requires at least one filter")
-
-    @staticmethod
-    def _inject_into_content_blocks(
-        content: list[str | dict[str, Any]],
-        rendered_prompt_attachments: str,
-    ) -> list[str | dict[str, Any]]:
-        blocks = copy.deepcopy(content)
-        for index in range(len(blocks) - 1, -1, -1):
-            block = blocks[index]
-            if isinstance(block, str):
-                blocks[index] = f"{block}\n\n{rendered_prompt_attachments}" if block else rendered_prompt_attachments
-                return blocks
-            if not isinstance(block, dict):
-                continue
-            if block.get("kind") == "text":
-                text = str(block.get("text", ""))
-                block["text"] = f"{text}\n\n{rendered_prompt_attachments}" if text else rendered_prompt_attachments
-                return blocks
-            if block.get("type") == "text":
-                text = str(block.get("text", ""))
-                block["text"] = f"{text}\n\n{rendered_prompt_attachments}" if text else rendered_prompt_attachments
-                return blocks
-        blocks.append({"type": "text", "text": rendered_prompt_attachments})
-        return blocks
-
 
 __all__ = [
     "PromptAttachment",

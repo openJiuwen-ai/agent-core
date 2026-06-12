@@ -74,7 +74,7 @@ class HeartbeatRail(DeepAgentRail):
                 await writer.add_from_prompt_section(
                     prompt_section=heartbeat_section,
                     kind=PromptAttachmentKind.TODO_REMINDER,
-                    source="agent_core.heartbeat",
+                    source="agent_core.heartbeat_rail",
                     language=self.system_prompt_builder.language,
                     content_kind="text/markdown",
                 )

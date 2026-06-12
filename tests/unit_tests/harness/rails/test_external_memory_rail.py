@@ -307,5 +307,5 @@ async def test_external_memory_prefetch_goes_to_prompt_attachment_not_system_sec
         "session.sess1.external_memory_prefetch"
     ]
     assert items[0].kind.value == "memory"
-    assert items[0].source == "agent_core.external_memory.prefetch"
+    assert items[0].source == "agent_core.external_memory_rail"
     assert "Memory context for: what did we decide?" in (items[0].content or "")

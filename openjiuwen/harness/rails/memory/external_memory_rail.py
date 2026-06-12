@@ -181,7 +181,7 @@ class ExternalMemoryRail(DeepAgentRail):
                     section=EXTERNAL_MEMORY_PREFETCH_SECTION,
                     content=fenced,
                     kind=PromptAttachmentKind.MEMORY,
-                    source="agent_core.external_memory.prefetch",
+                    source="agent_core.external_memory_rail",
                     priority=55,
                     metadata={"provider": self._provider.name},
                     content_kind="text/markdown",

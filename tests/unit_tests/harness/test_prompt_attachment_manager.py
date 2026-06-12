@@ -61,7 +61,10 @@ async def test_prompt_attachment_manager_collect_render_inject_and_update():
     original = [SystemMessage(content="sys"), UserMessage(content="query")]
     injected = manager.inject_messages(original, rendered)
     assert original[-1].content == "query"
-    assert injected[-1].content.startswith("query\n\n<system-reminder>")
+    assert len(injected) == len(original) + 1
+    assert injected[-2].content == "query"
+    assert isinstance(injected[-1], UserMessage)
+    assert injected[-1].content.startswith("<system-reminder>")
 
     updated = await manager.update_by_id(runtime.id, PromptAttachmentUpdate(content="updated runtime"))
     assert updated.content == "updated runtime"
@@ -273,7 +276,7 @@ def test_prompt_attachment_manager_render_escapes_xml():
     assert "&lt;raw&gt;&amp;value" in rendered
 
 
-def test_prompt_attachment_manager_injects_into_type_text_content_blocks():
+def test_prompt_attachment_manager_appends_attachment_message_after_multimodal_user_message():
     manager = PromptAttachmentManager()
     original = [
         UserMessage(content=[
@@ -285,12 +288,12 @@ def test_prompt_attachment_manager_injects_into_type_text_content_blocks():
     injected = manager.inject_messages(original, "<system-reminder>attached</system-reminder>")
 
     assert original[-1].content[0]["text"] == "query"
-    assert injected[-1].content[0]["type"] == "text"
-    assert injected[-1].content[0]["text"] == "query\n\n<system-reminder>attached</system-reminder>"
-    assert all(block.get("kind") != "text" for block in injected[-1].content if isinstance(block, dict))
+    assert injected[-2].content == original[-1].content
+    assert isinstance(injected[-1], UserMessage)
+    assert injected[-1].content == "<system-reminder>attached</system-reminder>"
 
 
-def test_prompt_attachment_manager_appends_type_text_block_for_image_only_content():
+def test_prompt_attachment_manager_appends_attachment_message_after_image_only_user_message():
     manager = PromptAttachmentManager()
     original = [
         UserMessage(content=[
@@ -300,10 +303,9 @@ def test_prompt_attachment_manager_appends_type_text_block_for_image_only_conten
 
     injected = manager.inject_messages(original, "<system-reminder>attached</system-reminder>")
 
-    assert injected[-1].content[-1] == {
-        "type": "text",
-        "text": "<system-reminder>attached</system-reminder>",
-    }
+    assert injected[-2].content == original[-1].content
+    assert isinstance(injected[-1], UserMessage)
+    assert injected[-1].content == "<system-reminder>attached</system-reminder>"
 
 
 def test_prompt_attachments_section_explains_system_reminder_tags():

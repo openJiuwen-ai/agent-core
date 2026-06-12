@@ -354,7 +354,7 @@ class AgentModeRail(DeepAgentRail):
                 await writer.add_from_prompt_section(
                     prompt_section=section,
                     kind=PromptAttachmentKind.RUNTIME,
-                    source="agent_core.agent_mode.plan_mode",
+                    source="agent_core.agent_mode_rail",
                     language=self.system_prompt_builder.language,
                     content_kind="text/markdown",
                 )
