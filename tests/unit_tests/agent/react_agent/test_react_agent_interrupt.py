@@ -182,7 +182,7 @@ class TestInvokeInterruptResume(unittest.IsolatedAsyncioTestCase):
         interrupted_output = WorkflowOutput(result=None, state=WorkflowExecutionState.INPUT_REQUIRED)
         call_count = {"n": 0}
 
-        async def fake_execute(ctx, tool_call, session):
+        async def fake_execute(ctx, tool_call, session, parallel_tool_calls=True):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return [(interrupted_output, _tool_msg("c1"))]
@@ -224,7 +224,7 @@ class TestInvokeInterruptResume(unittest.IsolatedAsyncioTestCase):
         interrupted_output = WorkflowOutput(result=None, state=WorkflowExecutionState.INPUT_REQUIRED)
         execute_calls = []
 
-        async def fake_execute(ctx, tool_call, session):
+        async def fake_execute(ctx, tool_call, session, parallel_tool_calls=True):
             execute_calls.append([tc.id for tc in tool_call])
             if len(execute_calls) == 1:
                 return [(interrupted_output, _tool_msg("c1")), (interrupted_output, _tool_msg("c2"))]

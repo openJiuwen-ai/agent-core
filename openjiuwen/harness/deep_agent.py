@@ -723,6 +723,8 @@ class DeepAgent(BaseAgent):
             react_config.context_engine_config = cfg.context_engine_config
         react_config.workspace = cfg.workspace
 
+        react_config.parallel_tool_calls = cfg.parallel_tool_calls
+
         language = resolve_language(cfg.language)
         mode = resolve_mode(cfg.prompt_mode)
         prompt_builder = SystemPromptBuilder(language=language, mode=mode)
@@ -979,6 +981,7 @@ class DeepAgent(BaseAgent):
             "enable_async_subagent": False,
             "add_general_purpose_agent": False,
             "enable_plan_mode": spec.enable_plan_mode,
+            "parallel_tool_calls": spec.parallel_tool_calls,
             "restrict_to_work_dir": spec.restrict_to_work_dir or self._deep_config.restrict_to_work_dir,
         }
 

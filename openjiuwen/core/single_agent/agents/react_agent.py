@@ -211,6 +211,11 @@ class ReActAgentConfig(BaseModel):
 
     workspace: Optional[Any] = Field(default=None, description="Workspace instance for filesystem operations")
 
+    parallel_tool_calls: bool = Field(
+        default=True,
+        description="Whether to execute tool calls in parallel (as opposed to in sequence)",
+    )
+
     def configure_model(self, model_name: str) -> 'ReActAgentConfig':
         """Configure model name
 
@@ -401,6 +406,13 @@ class ReActAgentConfig(BaseModel):
             processors: List[Tuple[str, BaseModel]]
     ) -> 'ReActAgentConfig':
         self.context_processors = processors
+        return self
+
+    def configure_parallel_tool_calls(
+            self,
+            parallel_tool_calls: bool
+    ) -> 'ReActAgentConfig':
+        self.parallel_tool_calls = parallel_tool_calls
         return self
 
 
@@ -894,7 +906,12 @@ class ReActAgent(BaseAgent):
         for tool_call in tool_calls:
             logger.info(f"Executing tool: {tool_call.name} with args: {tool_call.arguments}")
 
-        results = await self.ability_manager.execute(ctx=ctx, tool_call=tool_calls, session=session)
+        results = await self.ability_manager.execute(
+            ctx=ctx, 
+            tool_call=tool_calls, 
+            session=session,
+            parallel_tool_calls=self._config.parallel_tool_calls,
+        )
 
         for tool_result, tool_message in results:
             if tool_message is not None:

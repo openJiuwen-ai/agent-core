@@ -617,6 +617,7 @@ class AbilityManager:
             ctx: AgentCallbackContext,
             tool_call: Union[ToolCall, List[ToolCall]],
             session: Session,
+            parallel_tool_calls: bool = True,
             tag=None
     ) -> List[Tuple[Any, ToolMessage]]:
         """Execute ability call(s) with per-tool rail hooks.
@@ -668,8 +669,18 @@ class AbilityManager:
                 )
             )
 
-        # Execute all tool calls in parallel.
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = []
+        if parallel_tool_calls:
+            # Execute all tool calls in parallel.
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            # Execute all tool calls in sequence.
+            for task in tasks:
+                try:
+                    result = await task
+                except Exception as e:
+                    result = e
+                results.append(result)
 
         # Process results
         final_results: List[Tuple[Any, ToolMessage]] = []
