@@ -43,6 +43,7 @@ from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.schema.config import AudioModelConfig, VisionModelConfig
 from openjiuwen.harness.tools import (
+    AudioMetadataTool,
     WebFetchWebpageTool,
     WebFreeSearchTool,
     WebPaidSearchTool,
@@ -282,39 +283,41 @@ class AudioToolsInput(ConstructionInput):
     )
     audio_model_config: dict[str, Any] = param_field(
         default_factory=dict,
-        description="AudioModelConfig kwargs; empty keeps only audio_metadata.",
+        description="AudioModelConfig kwargs; empty keeps audio_metadata only.",
     )
 
 
 def _build_audio_tool_group(params: dict[str, Any], context: Any) -> list[Any]:
     """Build the audio tool group from a supplied AudioModelConfig.
 
-    When a dedicated audio model is configured but the full config is incomplete,
-    only ``audio_metadata`` is kept (mirrors the legacy degraded fallback).
+    ``audio_metadata`` does not need a large model, so it is always available.
+    Speech transcription and audio question-answering are added only when a
+    complete audio model config is supplied.
 
     Args:
         params: Spec params carrying ``dedicated`` and ``audio_model_config``.
         context: Per-member build context; supplies ``language`` / ``agent_id``.
 
     Returns:
-        The audio tools (full set, metadata-only, or empty).
+        The audio tools: metadata-only without model config, full set with one.
     """
     inp = AudioToolsInput.resolve(params, context)
-    if not inp.dedicated:
-        return []
-    config = (
-        AudioModelConfig(**inp.audio_model_config) if inp.audio_model_config else None
-    )
-    tools = list(
+    if not inp.dedicated or not inp.audio_model_config:
+        return [
+            AudioMetadataTool(
+                language=inp.language,
+                audio_model_config=AudioModelConfig(),
+                agent_id=inp.agent_id,
+            )
+        ]
+    config = AudioModelConfig(**inp.audio_model_config)
+    return list(
         create_audio_tools(
             language=inp.language,
             audio_model_config=config,
             agent_id=inp.agent_id,
         )
     )
-    if config is None:
-        return [tool for tool in tools if tool.card.name == "audio_metadata"]
-    return tools
 
 
 harness_element(
