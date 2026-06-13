@@ -24,12 +24,12 @@ from openjiuwen.agent_evolving.optimizer.skill_call.experience_draft_parser impo
     parse_experience_drafts_with_error,
 )
 from openjiuwen.agent_evolving.optimizer.skill_call.templates import (
-    SKILL_EXPERIENCE_GENERATE_PROMPT,
     JSON_FIX_PROMPT,
     JSON_FIX_PROMPT_STRICT,
+    SKILL_EXPERIENCE_GENERATE_PROMPT,
 )
-from openjiuwen.agent_evolving.signal.base import EvolutionSignal
 from openjiuwen.agent_evolving.protocols import EXPERIENCES_TARGET
+from openjiuwen.agent_evolving.signal.base import EvolutionSignal
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
@@ -38,7 +38,7 @@ from openjiuwen.core.foundation.llm.model import Model
 # Initial score mapping by signal type
 INITIAL_SCORE_BY_SIGNAL = {
     "execution_failure": 0.65,
-    "user_correction": 0.70,
+    "user_intent": 0.70,
     "script_artifact": 0.60,
     "conversation_review": 0.50,
 }

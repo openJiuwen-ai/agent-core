@@ -86,7 +86,7 @@ def _bind_team_runtime(rail: TeamSkillRail) -> None:
     rail._manager = ExperienceManager(
         store=rail._store,
         scorer=getattr(rail, "_scorer", None),
-        kind="team-skill",
+        subject_kind="team-skill",
         language=getattr(rail._generator, "language", getattr(rail._generator, "_language", "cn")),
         skill_ops=rail._experience_skill_ops,
         pending_approval_snapshots=rail._pending_record_snapshots,
@@ -1307,9 +1307,7 @@ async def test_team_handle_evolution_from_signals_emits_no_records_outcome():
 
         assert result.status == "no_evolution_no_records"
         events = await rail.drain_pending_host_events()
-        outcomes = [
-            event for event in events if event.payload.get("evolution_meta", {}).get("event_kind") == "outcome"
-        ]
+        outcomes = [event for event in events if event.payload.get("evolution_meta", {}).get("event_kind") == "outcome"]
         assert outcomes
         assert outcomes[-1].payload["evolution_meta"]["status"] == "no_evolution_no_records"
         assert outcomes[-1].payload["evolution_meta"]["rail_kind"] == "team"
@@ -1356,9 +1354,7 @@ async def test_team_handle_evolution_emits_persistence_failed_without_auto_appro
         assert result.request is failed_request
         rail._approval_runtime.finalize_staged_evolution_request.assert_not_awaited()
         events = await rail.drain_pending_host_events()
-        outcomes = [
-            event for event in events if event.payload.get("evolution_meta", {}).get("event_kind") == "outcome"
-        ]
+        outcomes = [event for event in events if event.payload.get("evolution_meta", {}).get("event_kind") == "outcome"]
         assert outcomes
         assert outcomes[-1].payload["evolution_meta"]["status"] == "persistence_failed"
         assert outcomes[-1].payload["evolution_meta"]["stage"] == "failed"
@@ -1408,9 +1404,7 @@ async def test_team_run_evolution_does_not_report_persistence_failed_as_ready():
         )
 
         events = await rail.drain_pending_host_events()
-        outcomes = [
-            event for event in events if event.payload.get("evolution_meta", {}).get("event_kind") == "outcome"
-        ]
+        outcomes = [event for event in events if event.payload.get("evolution_meta", {}).get("event_kind") == "outcome"]
         progress_contents = [
             event.payload["content"]
             for event in events
@@ -2391,7 +2385,7 @@ async def test_on_approve_record_uses_rebound_pending_snapshot_store():
 
         await rail.on_approve_record(request.request_id)
 
-        rail._store.append_record.assert_awaited_once_with("team-skill-a", record)
+        rail._store.append_record.assert_awaited_once_with("team-skill-a", record, subject_kind="swarm-skill")
         assert request.request_id not in rebound_snapshots
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -2442,7 +2436,7 @@ async def test_on_approve_record_uses_rebound_snapshot_store_after_snapshot_dict
 
     await rail.on_approve_record(request.request_id)
 
-    rail.store.append_record.assert_awaited_once_with("team-skill-a", record)
+    rail.store.append_record.assert_awaited_once_with("team-skill-a", record, subject_kind="swarm-skill")
     assert request.request_id not in rail._pending_record_snapshots
 
 
@@ -2468,7 +2462,7 @@ async def test_request_simplify_stages_governance_and_returns_approval():
         rail._manager = ExperienceManager(
             store=mock_store,
             scorer=rail._scorer,
-            kind="team-skill",
+            subject_kind="team-skill",
             pending_approval_snapshots=rail._pending_record_snapshots,
             pending_governance=rail._pending_governance,
         )
@@ -2503,7 +2497,7 @@ async def test_request_simplify_returns_empty_result_when_no_records():
         rail._manager = ExperienceManager(
             store=mock_store,
             scorer=rail._scorer,
-            kind="team-skill",
+            subject_kind="team-skill",
             pending_approval_snapshots=rail._pending_record_snapshots,
             pending_governance=rail._pending_governance,
         )
@@ -2534,7 +2528,7 @@ async def test_request_simplify_returns_empty_result_when_no_actions():
         rail._manager = ExperienceManager(
             store=mock_store,
             scorer=rail._scorer,
-            kind="team-skill",
+            subject_kind="team-skill",
             pending_approval_snapshots=rail._pending_record_snapshots,
             pending_governance=rail._pending_governance,
         )
@@ -2594,7 +2588,7 @@ async def test_request_rebuild_returns_none_when_no_skill():
         rail._manager = ExperienceManager(
             store=mock_store,
             scorer=MagicMock(),
-            kind="team-skill",
+            subject_kind="team-skill",
             language="cn",
         )
         rail._pending_governance = {}
@@ -2648,7 +2642,7 @@ async def test_request_rebuild_archives_before_building_prompt():
         rail._manager = ExperienceManager(
             store=mock_store,
             scorer=rail._scorer,
-            kind="team-skill",
+            subject_kind="team-skill",
             language="cn",
             skill_ops=rail._experience_skill_ops,
             pending_approval_snapshots=rail._pending_record_snapshots,
@@ -2658,15 +2652,15 @@ async def test_request_rebuild_archives_before_building_prompt():
 
         result = await rail.request_rebuild("test-team-skill", user_intent="优化协作流程")
 
-        mock_store.archive_skill_body.assert_called_once_with("test-team-skill")
-        mock_store.archive_evolutions.assert_called_once_with("test-team-skill")
-        mock_store.clear_evolutions.assert_called_once_with("test-team-skill")
+        mock_store.archive_skill_body.assert_called_once_with("test-team-skill", subject_kind="swarm-skill")
+        mock_store.archive_evolutions.assert_called_once_with("test-team-skill", subject_kind="swarm-skill")
+        mock_store.clear_evolutions.assert_called_once_with("test-team-skill", subject_kind="swarm-skill")
         assert result is not None
         assert "Collaboration" in result
         assert "test collaboration experience" in result
         assert "Workflow" not in result
         assert "0.50" in result or "0.5" in result
-        assert "teamskill-creator" in result.lower()
+        assert "swarmskill-creator" in result.lower()
         assert "已归档" in result or "archived" in result.lower()
 
 
@@ -2701,7 +2695,7 @@ async def test_request_rebuild_continues_on_archive_failure():
         rail._manager = ExperienceManager(
             store=mock_store,
             scorer=rail._scorer,
-            kind="team-skill",
+            subject_kind="team-skill",
             language="cn",
             skill_ops=rail._experience_skill_ops,
             pending_approval_snapshots=rail._pending_record_snapshots,
@@ -2712,7 +2706,7 @@ async def test_request_rebuild_continues_on_archive_failure():
         result = await rail.request_rebuild("test-team-skill")
 
         assert result is not None
-        mock_store.load_full_evolution_log.assert_called_once_with("test-team-skill")
+        mock_store.load_full_evolution_log.assert_called_once_with("test-team-skill", subject_kind="swarm-skill")
         mock_store.clear_evolutions.assert_not_called()
 
 

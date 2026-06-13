@@ -57,7 +57,7 @@ def _make_rail(tmp_path, *, auto_scan: bool = True, auto_save: bool = True, disa
     rail._manager = ExperienceManager(
         store=rail._evolution_store,
         scorer=rail._scorer,
-        kind="skill",
+        subject_kind="skill",
         language=rail._language,
         skill_ops=rail._skill_ops,
         pending_approval_snapshots=rail._pending_approval_snapshots,
@@ -775,7 +775,7 @@ async def test_on_approve_partial_failure_retains_pending_change(tmp_path):
     # Host retries: now the remaining record succeeds
     rail._evolution_store.append_record = AsyncMock()
     await rail.on_approve(request_id)
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_2)
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_2, subject_kind="skill")
     assert request_id not in rail._pending_approval_snapshots
 
 
@@ -803,7 +803,7 @@ async def test_on_approve_full_failure_then_retry_succeeds(tmp_path):
     # Host retries: now append succeeds
     rail._evolution_store.append_record = AsyncMock()
     await rail.on_approve(request_id)
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record)
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record, subject_kind="skill")
     assert request_id not in rail._pending_approval_snapshots
 
 
@@ -830,12 +830,12 @@ async def test_concurrent_approval_batches_are_independent(tmp_path):
 
     # Approving the first prompt should write only record_a
     await rail.on_approve(req1)
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_a)
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_a, subject_kind="skill")
     rail._evolution_store.append_record.reset_mock()
 
     # Approving the second prompt should write only record_b
     await rail.on_approve(req2)
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_b)
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_b, subject_kind="skill")
 
 
 @pytest.mark.asyncio
@@ -855,7 +855,7 @@ async def test_on_approve_only_flushes_snapshot_records(tmp_path):
     later_request = _stage_approval_request(rail, "skill-a", [pending_later])
     await rail.on_approve(request_id)
 
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", approved)
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", approved, subject_kind="skill")
     assert later_request.request_id in rail._pending_approval_snapshots
     assert request_id not in rail._pending_approval_snapshots
 
@@ -2173,7 +2173,7 @@ async def test_on_approve_uses_rebound_pending_snapshot_store(tmp_path):
 
     await rail.on_approve(request.request_id)
 
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record)
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record, subject_kind="skill")
     assert request.request_id not in rebound_snapshots
 
 
@@ -2313,9 +2313,9 @@ async def test_request_rebuild_archives_before_building_prompt(tmp_path):
     result = await rail.request_rebuild("test-skill", user_intent="优化技能")
 
     # Archive operations should be called BEFORE prompt is built
-    rail._evolution_store.archive_skill_body.assert_called_once_with("test-skill")
-    rail._evolution_store.archive_evolutions.assert_called_once_with("test-skill")
-    rail._evolution_store.clear_evolutions.assert_called_once_with("test-skill")
+    rail._evolution_store.archive_skill_body.assert_called_once_with("test-skill", subject_kind="skill")
+    rail._evolution_store.archive_evolutions.assert_called_once_with("test-skill", subject_kind="skill")
+    rail._evolution_store.clear_evolutions.assert_called_once_with("test-skill", subject_kind="skill")
 
     # Should return prompt (not None)
     assert result is not None
@@ -2366,7 +2366,7 @@ async def test_request_rebuild_filters_low_score_records(tmp_path):
     assert "good experience" in result
     # Low score record should be filtered out
     assert "bad experience" not in result
-    rail._evolution_store.clear_evolutions.assert_called_once_with("test-skill")
+    rail._evolution_store.clear_evolutions.assert_called_once_with("test-skill", subject_kind="skill")
 
 
 @pytest.mark.asyncio
@@ -2388,7 +2388,7 @@ async def test_request_rebuild_continues_on_archive_failure(tmp_path):
 
     # Should still return prompt even if archive failed
     assert result is not None
-    rail._evolution_store.load_full_evolution_log.assert_called_once_with("test-skill")
+    rail._evolution_store.load_full_evolution_log.assert_called_once_with("test-skill", subject_kind="skill")
     rail._evolution_store.clear_evolutions.assert_not_called()
 
 

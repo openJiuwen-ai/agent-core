@@ -164,7 +164,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         self._manager = ExperienceManager(
             store=self._evolution_store,
             scorer=self._scorer,
-            kind="skill",
+            subject_kind="skill",
             language=self._language,
             skill_ops=self._skill_ops,
             pending_approval_snapshots=self._pending_approval_snapshots,

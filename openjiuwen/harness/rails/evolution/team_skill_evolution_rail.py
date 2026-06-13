@@ -226,7 +226,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
         self._manager = ExperienceManager(
             store=self._store,
             scorer=self._scorer,
-            kind="team-skill",
+            subject_kind="team-skill",
             language=language,
             skill_ops=self._experience_skill_ops,
             pending_approval_snapshots=self._pending_approval_snapshots,
