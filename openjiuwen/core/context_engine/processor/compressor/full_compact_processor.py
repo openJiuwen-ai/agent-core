@@ -26,6 +26,7 @@ from openjiuwen.core.context_engine.processor.compressor.util import (
     build_plan_mode_reinjected_content,
     build_task_status_reinjected_content,
     build_skill_reinjected_content,
+    build_todo_reinjected_content,
 )
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
@@ -172,6 +173,7 @@ class FullCompactProcessorConfig(BaseModel):
     messages_to_keep: int = Field(default=10, ge=0)
     keep_tool_message_pairs: bool = Field(default=True)
     state_snapshot_max_chars: int = Field(default=4000, gt=0)
+    reinject_todos: bool = Field(default=True)
     reinject_recent_skills: int = Field(default=3, ge=0)
     reinject_file_tool_names: List[str] = Field(default=["read_file", "write_file", "edit_file", "glob", "grep"])
     reinject_tool_result_hint_names: List[str] = Field(default=["read_file", "write_file", "edit_file", "glob", "grep"])
@@ -232,6 +234,11 @@ class FullCompactProcessor(ContextProcessor):
             name="plan_mode",
             label="PLAN_MODE",
             builder=build_plan_mode_reinjected_content,
+        )
+        self._state_reinjector.register_builder(
+            name="todos",
+            label="TODOS",
+            builder=build_todo_reinjected_content,
         )
         self._model: Model | None = None
         if config.model is not None and config.model_client is not None:
@@ -400,7 +407,7 @@ class FullCompactProcessor(ContextProcessor):
             logger.warning("[FullCompact] full_compact summary generation returned empty content")
             return None
 
-        reinject_builder_names = ["plan", "plan_mode", "skills", "task_status"]
+        reinject_builder_names = self._reinject_builder_names()
         attempts = [
             {"messages_to_keep": self._messages_to_keep, "reinject_state": True},
             {"messages_to_keep": self._messages_to_keep, "reinject_state": False},
@@ -564,6 +571,12 @@ class FullCompactProcessor(ContextProcessor):
             )
         )
         return candidate_messages, session_memory_message
+
+    def _reinject_builder_names(self) -> List[str]:
+        names = ["plan", "plan_mode", "skills", "task_status"]
+        if self.config.reinject_todos:
+            names.append("todos")
+        return names
 
     def _split_messages_at_compaction_boundary(
         self,

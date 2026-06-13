@@ -134,10 +134,12 @@ class FileLockManager:
             file_path: Path to file to unlock
         """
         async with self._global_lock:
-            if file_path in self._locks:
-                lock = self._locks[file_path]
+            if file_path not in self._locks:
+                return
+            lock = self._locks[file_path]
+            if lock.locked():
                 lock.release()
-                del self._locks[file_path]
+            del self._locks[file_path]
 
 
 _global_lock_manager = FileLockManager()
@@ -163,10 +165,34 @@ class TodoTool(Tool):
         super().__init__(card)
         self.workspace = workspace if workspace else "./"
         self.fs = operation.fs()
-        self._file = os.path.join(self.workspace, "./session_id/todo.json")
 
-    async def load_todos(self) -> List[TodoItem]:
+    def file_path_for_session(self, session_id: str) -> str:
+        return os.path.join(self.workspace, f"./{session_id}/todo.json")
+
+    def _resolve_file_path(
+        self,
+        session: Optional[Session] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
+        resolved_id: Optional[str] = None
+        if session_id:
+            resolved_id = session_id
+        elif session is not None:
+            getter = getattr(session, "get_session_id", None)
+            if callable(getter):
+                resolved_id = getter()
+        if not resolved_id:
+            raise build_error(
+                StatusCode.TOOL_TODOS_INVOKE_FAILED,
+                reason="session is required for todo file operations",
+            )
+        return self.file_path_for_session(resolved_id)
+
+    async def load_todos(self, file_path: str) -> List[TodoItem]:
         """Load todo items from session-specific JSON file
+
+        Args:
+            file_path: Absolute or workspace-relative path to todo.json
 
         Returns:
             List of TodoItem instances loaded from file
@@ -174,16 +200,16 @@ class TodoTool(Tool):
         Raises:
             ToolError: If file loading/parsing fails
         """
-        await _global_lock_manager.acquire_lock(self._file)
+        await _global_lock_manager.acquire_lock(file_path)
         try:
-            file_path = os.path.abspath(self._file)
-            if not os.path.isfile(file_path):
+            abs_path = os.path.abspath(file_path)
+            if not os.path.isfile(abs_path):
                 raise build_error(
                     StatusCode.TOOL_TODOS_LOAD_FAILED,
-                    reason=f"Todo file not found: {file_path}"
+                    reason=f"Todo file not found: {abs_path}"
                 )
 
-            read_res = await self.fs.read_file(self._file, mode="text")
+            read_res = await self.fs.read_file(file_path, mode="text")
             if read_res.code != 0:
                 raise build_error(
                     StatusCode.TOOL_TODOS_LOAD_FAILED,
@@ -203,22 +229,23 @@ class TodoTool(Tool):
                 reason=f"Failed to load todo list: {str(e)}"
             ) from e
         finally:
-            await _global_lock_manager.release_lock(self._file)
+            await _global_lock_manager.release_lock(file_path)
 
-    async def save_todos(self, todos: List[TodoItem]):
+    async def save_todos(self, todos: List[TodoItem], file_path: str):
         """Save todo items to session-specific JSON file
 
         Args:
             todos: List of TodoItem instances to persist
+            file_path: Absolute or workspace-relative path to todo.json
 
         Raises:
             ToolError: If file writing fails
         """
-        await _global_lock_manager.acquire_lock(self._file)
+        await _global_lock_manager.acquire_lock(file_path)
         try:
             data = [todo.to_dict() for todo in todos]
             json_content = json.dumps(data, ensure_ascii=False, indent=2)
-            write_res = await self.fs.write_file(self._file, json_content, mode="text")
+            write_res = await self.fs.write_file(file_path, json_content, mode="text")
             if write_res.code == 0:
                 tool_logger.info(
                     "Successfully saved todo items",
@@ -244,16 +271,7 @@ class TodoTool(Tool):
                 reason=f"Failed to save todo list: {str(e)}"
             ) from e
         finally:
-            await _global_lock_manager.release_lock(self._file)
-
-    def set_file(self, session_id: str):
-        """Set file to session-specific JSON file
-
-        Args:
-            session_id: Unique identifier of the session id, used as the JSON file name
-        """
-        if session_id:
-            self._file = os.path.join(self.workspace, f"./{session_id}/todo.json")
+            await _global_lock_manager.release_lock(file_path)
 
 
 class TodoCreateTool(TodoTool):
@@ -289,14 +307,13 @@ class TodoCreateTool(TodoTool):
             ToolError: If invalid parameters or operation fails
         """
         session = kwargs.get("session", None)
-        if session and isinstance(session, Session) and session.get_session_id() not in self._file:
-            self.set_file(session.get_session_id())
+        file_path = self._resolve_file_path(session, kwargs.get("session_id"))
 
         results = dict()
         try:
             tasks_str = inputs.get("tasks")
             if tasks_str and isinstance(tasks_str, str):
-                results["message"] = await self._create_from_string(tasks_str)
+                results["message"] = await self._create_from_string(tasks_str, file_path)
                 return results
 
             raise build_error(
@@ -358,7 +375,7 @@ class TodoCreateTool(TodoTool):
         )
         return parsed_tasks
 
-    async def _create_from_string(self, tasks_str: str) -> str:
+    async def _create_from_string(self, tasks_str: str, file_path: str) -> str:
         """Create todo items from string of task descriptions
 
         Args:
@@ -392,7 +409,7 @@ class TodoCreateTool(TodoTool):
                 reason=f"No valid task content provided - all parsed tasks were empty"
             )
 
-        await self.save_todos(new_todos)
+        await self.save_todos(new_todos, file_path)
         tool_logger.info(
             "Created todo items from simplified string",
             event_type=LogEventType.TOOL_CALL_END
@@ -438,13 +455,12 @@ class TodoListTool(TodoTool):
             ToolError: If no todos exist or operation fails
         """
         session = kwargs.get("session", None)
-        if session and isinstance(session, Session) and session.get_session_id() not in self._file:
-            self.set_file(session.get_session_id())
+        file_path = self._resolve_file_path(session, kwargs.get("session_id"))
 
         results = dict()
 
         try:
-            current_todos = await self.load_todos()
+            current_todos = await self.load_todos(file_path)
             results["message"] = await self._list_todos(current_todos)
             return results
 
@@ -565,19 +581,18 @@ class TodoModifyTool(TodoTool):
             ToolError: If invalid parameters or operation fails
         """
         session = kwargs.get("session", None)
-        if session and isinstance(session, Session) and session.get_session_id() not in self._file:
-            self.set_file(session.get_session_id())
+        file_path = self._resolve_file_path(session, kwargs.get("session_id"))
+        action = inputs.get("action")
 
         results = dict()
         try:
-            action = inputs.get("action")
             if not action:
                 raise build_error(
                     StatusCode.TOOL_TODOS_VALIDATION_INVALID,
                     reason="Invalid input: 'action' field is required"
                 )
 
-            current_todos = await self.load_todos()
+            current_todos = await self.load_todos(file_path)
 
             if action == "delete":
                 ids = inputs.get("ids")
@@ -586,7 +601,7 @@ class TodoModifyTool(TodoTool):
                         StatusCode.TOOL_TODOS_VALIDATION_INVALID,
                         reason="Invalid input for delete action: 'ids' must be a non-empty list of task IDs (strings)"
                     )
-                results["message"] = await self._delete_todos(ids, current_todos)
+                results["message"] = await self._delete_todos(ids, current_todos, file_path)
 
             elif action == "cancel":
                 ids = inputs.get("ids")
@@ -595,29 +610,33 @@ class TodoModifyTool(TodoTool):
                         StatusCode.TOOL_TODOS_VALIDATION_INVALID,
                         reason="Invalid input for cancel action: 'ids' must be a non-empty list of task IDs (strings)"
                     )
-                results["message"] = await self._cancel_todos(ids, current_todos)
+                results["message"] = await self._cancel_todos(ids, current_todos, file_path)
 
             elif action == "update":
                 todos_data = inputs.get("todos")
-                results["message"] = await self._update_todos(todos_data, current_todos)
+                results["message"] = await self._update_todos(todos_data, current_todos, file_path)
 
             elif action == "append":
                 todos_data = inputs.get("todos")
-                results["message"] = await self._append_todos(todos_data, current_todos)
+                results["message"] = await self._append_todos(todos_data, current_todos, file_path)
 
             elif action == "insert_after":
                 todo_data = inputs.get("todo_data")
                 self._validate_todo_data_structure(todo_data)
                 target_id = todo_data["target_id"]
                 insert_todos = todo_data["items"]
-                results["message"] = await self._insert_after_todos(target_id, insert_todos, current_todos)
+                results["message"] = await self._insert_after_todos(
+                    target_id, insert_todos, current_todos, file_path
+                )
 
             elif action == "insert_before":
                 todo_data = inputs.get("todo_data")
                 self._validate_todo_data_structure(todo_data)
                 target_id = todo_data["target_id"]
                 insert_todos = todo_data["items"]
-                results["message"] = await self._insert_before_todos(target_id, insert_todos, current_todos)
+                results["message"] = await self._insert_before_todos(
+                    target_id, insert_todos, current_todos, file_path
+                )
 
             else:
                 raise build_error(
@@ -891,7 +910,7 @@ class TodoModifyTool(TodoTool):
             updatedAt=now
         )
 
-    async def _delete_todos(self, ids: List[str], current_todos: List[TodoItem]) -> str:
+    async def _delete_todos(self, ids: List[str], current_todos: List[TodoItem], file_path: str) -> str:
         """Batch delete todo items by ID
 
         Args:
@@ -922,7 +941,7 @@ class TodoModifyTool(TodoTool):
             )
             return f"No tasks deleted: None of the provided IDs ({', '.join(ids)}) were found"
 
-        await self.save_todos(remaining_todos)
+        await self.save_todos(remaining_todos, file_path)
 
         result_msg = f"Successfully deleted {deleted_count} task(s) (IDs: {', '.join(delete_ids)})"
         tool_logger.info(
@@ -931,7 +950,7 @@ class TodoModifyTool(TodoTool):
         )
         return result_msg
 
-    async def _cancel_todos(self, ids: List[str], current_todos: List[TodoItem]) -> str:
+    async def _cancel_todos(self, ids: List[str], current_todos: List[TodoItem], file_path: str) -> str:
         """Batch cancel todo items by ID
 
         Args:
@@ -962,7 +981,7 @@ class TodoModifyTool(TodoTool):
             )
             return f"No tasks cancelled: None of the provided IDs ({', '.join(ids)}) were found"
 
-        await self.save_todos(current_todos)
+        await self.save_todos(current_todos, file_path)
 
         result_msg = f"Successfully cancelled {cancelled_count} task(s) (IDs: {', '.join(cancelled_ids)})"
         tool_logger.info(
@@ -971,7 +990,9 @@ class TodoModifyTool(TodoTool):
         )
         return result_msg
 
-    async def _update_todos(self, todos_data: List[Dict], current_todos: List[TodoItem]) -> str:
+    async def _update_todos(
+        self, todos_data: List[Dict], current_todos: List[TodoItem], file_path: str
+    ) -> str:
         """Batch update todo items.
 
         Args:
@@ -1036,7 +1057,7 @@ class TodoModifyTool(TodoTool):
 
         # Validate single IN_PROGRESS constraint after updates
         self._validate_single_in_progress(current_todos)
-        await self.save_todos(current_todos)
+        await self.save_todos(current_todos, file_path)
 
         if errors:
             result_msg = f"Updated {updated_count} task(s). {len(errors)} item(s) failed: {'; '.join(errors)}"
@@ -1048,7 +1069,9 @@ class TodoModifyTool(TodoTool):
         )
         return result_msg
 
-    async def _append_todos(self, todos_data: List[Dict], current_todos: List[TodoItem]) -> str:
+    async def _append_todos(
+        self, todos_data: List[Dict], current_todos: List[TodoItem], file_path: str
+    ) -> str:
         """Append new todo items to the end of the list
 
         Args:
@@ -1076,7 +1099,7 @@ class TodoModifyTool(TodoTool):
 
         # Validate single IN_PROGRESS constraint after updates
         self._validate_single_in_progress(current_todos)
-        await self.save_todos(current_todos)
+        await self.save_todos(current_todos, file_path)
 
         result_msg = f"Successfully append {len(todos_data)} task(s)"
         tool_logger.info(
@@ -1086,7 +1109,7 @@ class TodoModifyTool(TodoTool):
         return result_msg
 
     async def _insert_after_todos(self, target_id: str, insert_todos_data: List[Dict],
-                                  current_todos: List[TodoItem]) -> str:
+                                  current_todos: List[TodoItem], file_path: str) -> str:
         """Insert new todo items after the specified target task
 
         Args:
@@ -1134,7 +1157,7 @@ class TodoModifyTool(TodoTool):
         # Validate single IN_PROGRESS constraint
         self._validate_single_in_progress(updated_todos)
 
-        await self.save_todos(updated_todos)
+        await self.save_todos(updated_todos, file_path)
 
         result_msg = f"Successfully inserted {len(insert_todos)} task(s) after target task, id: '{target_id}'"
         tool_logger.info(
@@ -1144,7 +1167,7 @@ class TodoModifyTool(TodoTool):
         return result_msg
 
     async def _insert_before_todos(self, target_id: str, insert_todos_data: List[Dict],
-                                   current_todos: List[TodoItem]) -> str:
+                                   current_todos: List[TodoItem], file_path: str) -> str:
         """Insert new todo items before the specified target task
 
         Args:
@@ -1192,7 +1215,7 @@ class TodoModifyTool(TodoTool):
         # Validate single IN_PROGRESS constraint
         self._validate_single_in_progress(updated_todos)
 
-        await self.save_todos(updated_todos)
+        await self.save_todos(updated_todos, file_path)
 
         result_msg = f"Successfully inserted {len(insert_todos)} task(s) before target task, id: '{target_id}'"
         tool_logger.info(

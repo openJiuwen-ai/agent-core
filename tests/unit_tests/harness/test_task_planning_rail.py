@@ -29,10 +29,12 @@ from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.prompts.sections.todo import (
     build_progress_reminder_user_prompt,
+    build_todo_advance_reminder_user_prompt,
     build_todo_system_prompt, build_todo_section,
 )
 from openjiuwen.harness.rails.task_planning_rail import (
     TaskPlanningRail,
+    resolve_task_planning_rail_kwargs,
 )
 from openjiuwen.harness.schema.config import (
     DeepAgentConfig,
@@ -387,13 +389,10 @@ async def test_before_model_call_adds_section() -> None:
 
 @pytest.mark.asyncio
 async def test_before_model_call_without_prompt_builder() -> None:
-    """before_model_call returns early when agent has no prompt_builder."""
+    """before_model_call returns early when system_prompt_builder is None."""
     rail = _make_rail()
-    agent = _make_agent(workspace="/tmp/ws")
-    rail.init(agent)
-
     ctx = _make_ctx()
-    ctx.agent = agent
+    ctx.agent = _make_agent(workspace="/tmp/ws")
 
     await rail.before_model_call(ctx)
 
@@ -402,8 +401,8 @@ async def test_before_model_call_without_prompt_builder() -> None:
 # after_tool_call progress reminder tests
 # ================================================================
 @pytest.mark.asyncio
-async def test_after_tool_call_injects_progress_reminder() -> None:
-    """after_tool_call injects progress reminder at interval."""
+async def test_after_tool_call_schedules_progress_reminder() -> None:
+    """after_tool_call schedules reminder; injection happens in before_model_call."""
     rail = _make_rail()
     rail.enable_progress_repeat = True
     rail.list_tool_call_interval = 1
@@ -428,10 +427,79 @@ async def test_after_tool_call_injects_progress_reminder() -> None:
     await rail.after_tool_call(ctx)
 
     assert rail._tool_call_counts["test-session-id"] == 1
+    assert "test-session-id" in rail._pending_progress_reminder
+    ctx.context.set_messages.assert_not_called()
+
+    await rail.before_model_call(ctx)
+
     ctx.context.set_messages.assert_called_once()
     messages = ctx.context.set_messages.call_args[0][0]
     assert len(messages) == 1
     assert isinstance(messages[0], UserMessage)
+    assert messages[0].metadata.get("todo_progress_reminder") is True
+    assert messages[0].metadata.get("todo_session_id") == "test-session-id"
+    assert "[TODO · session=test-session-id]" in messages[0].content
+    assert "test-session-id" not in rail._pending_progress_reminder
+
+
+@pytest.mark.asyncio
+async def test_progress_reminder_idempotent_single_copy() -> None:
+    """Injecting again removes the previous reminder for the same session."""
+    rail = _make_rail()
+    rail.enable_progress_repeat = True
+    rail.list_tool_call_interval = 1
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.context = MagicMock()
+    ctx.session = MagicMock()
+    ctx.session.get_session_id.return_value = "test-session-id"
+
+    existing = UserMessage(
+        content="[TODO · session=test-session-id]\nold",
+        metadata={"todo_progress_reminder": True, "todo_session_id": "test-session-id"},
+    )
+    ctx.context.get_messages.return_value = [UserMessage(content="keep"), existing]
+
+    rail._pending_progress_reminder["test-session-id"] = "new reminder body"
+
+    await rail.before_model_call(ctx)
+
+    messages = ctx.context.set_messages.call_args[0][0]
+    assert len(messages) == 2
+    assert messages[0].content == "keep"
+    assert messages[1].metadata.get("todo_session_id") == "test-session-id"
+    assert "new reminder body" in messages[1].content
+    assert "old" not in messages[1].content
+
+
+@pytest.mark.asyncio
+async def test_progress_reminder_does_not_remove_other_session() -> None:
+    """Progress reminder cleanup is scoped to the current session_id."""
+    rail = _make_rail()
+    rail.enable_progress_repeat = True
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.context = MagicMock()
+    ctx.session = MagicMock()
+    ctx.session.get_session_id.return_value = "session-a"
+
+    other = UserMessage(
+        content="[TODO · session=session-b]\nother",
+        metadata={"todo_progress_reminder": True, "todo_session_id": "session-b"},
+    )
+    ctx.context.get_messages.return_value = [other]
+    rail._pending_progress_reminder["session-a"] = "reminder for a"
+
+    await rail.before_model_call(ctx)
+
+    messages = ctx.context.set_messages.call_args[0][0]
+    assert len(messages) == 2
+    assert messages[0] is other
+    assert messages[1].metadata.get("todo_session_id") == "session-a"
 
 
 @pytest.mark.asyncio
@@ -500,7 +568,8 @@ async def test_after_tool_call_custom_interval() -> None:
     ctx.session.get_session_id.return_value = "test-session-id"
 
     todos = _make_todos([
-        ("task-a", TodoStatus.PENDING),
+        ("task-a", TodoStatus.IN_PROGRESS),
+        ("task-b", TodoStatus.PENDING),
     ])
     tool = rail._find_todo_tool()
     assert tool is not None
@@ -509,9 +578,13 @@ async def test_after_tool_call_custom_interval() -> None:
     await rail.after_tool_call(ctx)
     await rail.after_tool_call(ctx)
     assert rail._tool_call_counts[ctx.session.get_session_id()] == 2
+    ctx.context.set_messages.assert_not_called()
 
     await rail.after_tool_call(ctx)
     assert rail._tool_call_counts[ctx.session.get_session_id()] == 3
+    assert ctx.session.get_session_id() in rail._pending_progress_reminder
+
+    await rail.before_model_call(ctx)
     ctx.context.set_messages.assert_called_once()
 
 
@@ -611,22 +684,238 @@ def test_to_todo_status_mapping() -> None:
 # ================================================================
 
 
+def test_has_pending_without_in_progress() -> None:
+    rail = _make_rail()
+    gap_todos = _make_todos([
+        ("done", TodoStatus.COMPLETED),
+        ("next", TodoStatus.PENDING),
+    ])
+    assert rail._has_pending_without_in_progress(gap_todos) is True
+
+    ok_todos = _make_todos([
+        ("done", TodoStatus.COMPLETED),
+        ("current", TodoStatus.IN_PROGRESS),
+    ])
+    assert rail._has_pending_without_in_progress(ok_todos) is False
+
+
+@pytest.mark.asyncio
+async def test_advance_reminder_scheduled_when_gap_exists() -> None:
+    """Gap state schedules advance reminder without enable_progress_repeat."""
+    rail = _make_rail()
+    rail.enable_progress_repeat = False
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.inputs = ToolCallInputs(tool_name="todo_modify")
+    ctx.context = MagicMock()
+    ctx.context.get_messages.return_value = []
+    ctx.session = MagicMock()
+    ctx.session.get_session_id.return_value = "gap-session"
+
+    todos = _make_todos([
+        ("done", TodoStatus.COMPLETED),
+        ("next", TodoStatus.PENDING),
+    ])
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=todos)
+
+    await rail.after_tool_call(ctx)
+
+    assert "gap-session" in rail._pending_advance_reminder
+    assert "in_progress" in rail._pending_advance_reminder["gap-session"].lower()
+
+    await rail.before_model_call(ctx)
+
+    messages = ctx.context.set_messages.call_args[0][0]
+    assert len(messages) == 1
+    assert "pending" in messages[0].content.lower() or "待办" in messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_progress_repeat_skipped_when_advance_reminder_scheduled() -> None:
+    """Gap advance reminder takes precedence; progress repeat does not run."""
+    rail = _make_rail()
+    rail.enable_progress_repeat = True
+    rail.list_tool_call_interval = 1
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.context = MagicMock()
+    ctx.context.get_messages.return_value = []
+    ctx.session = MagicMock()
+    ctx.session.get_session_id.return_value = "gap-session"
+
+    todos = _make_todos([
+        ("done", TodoStatus.COMPLETED),
+        ("next", TodoStatus.PENDING),
+    ])
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=todos)
+    rail._pending_progress_reminder["gap-session"] = "stale progress"
+
+    ctx.inputs = ToolCallInputs(tool_name="todo_modify")
+    await rail.after_tool_call(ctx)
+
+    assert "gap-session" in rail._pending_advance_reminder
+    assert "gap-session" not in rail._pending_progress_reminder
+
+    ctx.inputs = ToolCallInputs(tool_name="bash")
+    await rail.after_tool_call(ctx)
+
+    assert "gap-session" in rail._pending_advance_reminder
+    assert "gap-session" not in rail._pending_progress_reminder
+    assert "gap-session" not in rail._tool_call_counts
+
+
+@pytest.mark.asyncio
+async def test_advance_reminder_not_scheduled_on_non_todo_tool() -> None:
+    """Non-todo tools must not load todos for advance reminder (parallel gather safety)."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.inputs = ToolCallInputs(tool_name="web_search")
+    ctx.session = MagicMock()
+    ctx.session.get_session_id.return_value = "search-session"
+
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=_make_todos([
+        ("done", TodoStatus.COMPLETED),
+        ("next", TodoStatus.PENDING),
+    ]))
+
+    await rail.after_tool_call(ctx)
+
+    tool.load_todos.assert_not_called()
+    assert "search-session" not in rail._pending_advance_reminder
+
+
+@pytest.mark.asyncio
+async def test_advance_reminder_not_scheduled_when_in_progress_exists() -> None:
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.inputs = ToolCallInputs(tool_name="todo_modify")
+    ctx.context = MagicMock()
+    ctx.session = MagicMock()
+    ctx.session.get_session_id.return_value = "ok-session"
+
+    todos = _make_todos([
+        ("current", TodoStatus.IN_PROGRESS),
+        ("next", TodoStatus.PENDING),
+    ])
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=todos)
+
+    await rail.after_tool_call(ctx)
+
+    assert "ok-session" not in rail._pending_advance_reminder
+
+
+@pytest.mark.asyncio
+async def test_advance_reminder_cleared_when_gap_resolved() -> None:
+    """Stale advance reminder is removed once in_progress exists."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.inputs = ToolCallInputs(tool_name="todo_modify")
+    ctx.context = MagicMock()
+    ctx.context.get_messages.return_value = []
+    ctx.session = MagicMock()
+    ctx.session.get_session_id.return_value = "recover-session"
+
+    tool = rail._find_todo_tool()
+    assert tool is not None
+
+    gap_todos = _make_todos([
+        ("done", TodoStatus.COMPLETED),
+        ("next", TodoStatus.PENDING),
+    ])
+    tool.load_todos = AsyncMock(return_value=gap_todos)
+    await rail.after_tool_call(ctx)
+    assert "recover-session" in rail._pending_advance_reminder
+
+    ok_todos = _make_todos([
+        ("current", TodoStatus.IN_PROGRESS),
+        ("next", TodoStatus.PENDING),
+    ])
+    tool.load_todos = AsyncMock(return_value=ok_todos)
+    await rail.after_tool_call(ctx)
+    assert "recover-session" not in rail._pending_advance_reminder
+
+    await rail.before_model_call(ctx)
+    ctx.context.set_messages.assert_not_called()
+
+
+def test_build_todo_advance_reminder_user_prompt_english() -> None:
+    prompt = build_todo_advance_reminder_user_prompt(
+        language="en",
+        tasks="id: x |status: pending |content: step-2",
+    )
+    assert "no task is in_progress" in prompt.lower()
+    assert "step-2" in prompt
+
+
+def test_build_todo_advance_reminder_user_prompt_chinese() -> None:
+    prompt = build_todo_advance_reminder_user_prompt(
+        language="cn",
+        tasks="id: x |status: pending |content: 步骤二",
+    )
+    assert "没有 in_progress" in prompt
+    assert "步骤二" in prompt
+
+
 def test_enable_progress_repeat_default() -> None:
-    """Default enable_progress_repeat is False."""
+    """Default enable_progress_repeat is True."""
     rail = TaskPlanningRail()
-    assert rail.enable_progress_repeat is False
-
-
-def test_enable_progress_repeat_true() -> None:
-    """Can set enable_progress_repeat to True."""
-    rail = TaskPlanningRail(enable_progress_repeat=True)
     assert rail.enable_progress_repeat is True
+
+
+def test_enable_progress_repeat_false() -> None:
+    """Can disable enable_progress_repeat explicitly."""
+    rail = TaskPlanningRail(enable_progress_repeat=False)
+    assert rail.enable_progress_repeat is False
 
 
 def test_list_tool_call_interval_default() -> None:
     """Default list_tool_call_interval is 20."""
     rail = TaskPlanningRail()
     assert rail.list_tool_call_interval == 20
+
+
+def test_resolve_task_planning_rail_kwargs() -> None:
+    """resolve_task_planning_rail_kwargs reads react.task_planning."""
+    assert resolve_task_planning_rail_kwargs(None) == {}
+    assert resolve_task_planning_rail_kwargs({}) == {}
+    kwargs = resolve_task_planning_rail_kwargs({
+        "task_planning": {
+            "enable_progress_repeat": True,
+            "list_tool_call_interval": 5,
+        },
+    })
+    assert kwargs == {
+        "enable_progress_repeat": True,
+        "list_tool_call_interval": 5,
+    }
+    partial = resolve_task_planning_rail_kwargs({
+        "task_planning": {"enable_progress_repeat": True},
+    })
+    assert partial == {
+        "enable_progress_repeat": True,
+        "list_tool_call_interval": 20,
+    }
 
 
 def test_build_todo_system_prompt_chinese() -> None:

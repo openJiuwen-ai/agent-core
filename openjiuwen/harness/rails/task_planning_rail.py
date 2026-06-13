@@ -4,18 +4,23 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.core.foundation.llm.schema.message import UserMessage
+from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
+    ToolCallInputs,
 )
 from openjiuwen.harness.prompts.sections.todo import (
     build_progress_reminder_user_prompt,
+    build_todo_advance_reminder_user_prompt,
     build_todo_section,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -31,6 +36,43 @@ from openjiuwen.harness.tools.todo import (
     create_todos_tool,
 )
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
+from openjiuwen.core.context_engine.processor.compressor.util import shorten_session_label
+
+_TODO_PROGRESS_REMINDER_KEY = "todo_progress_reminder"
+_TODO_SESSION_ID_KEY = "todo_session_id"
+_TODO_TOOL_NAMES = frozenset({
+    "todo_create", "todo_start", "todo_complete", "todo_complete_batch",
+    "todo_insert", "todo_remove", "todo_modify", "todo_list",
+})
+
+
+class TaskPlanningRailConfig(BaseModel):
+    """``react.task_planning`` yaml section."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enable_progress_repeat: bool = True
+    list_tool_call_interval: int = Field(default=20, ge=1)
+
+
+def resolve_task_planning_rail_kwargs(
+    react_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build ``TaskPlanningRail`` constructor kwargs from ``react.task_planning`` config."""
+    if not isinstance(react_config, dict):
+        return {}
+    raw = react_config.get("task_planning")
+    if not isinstance(raw, dict):
+        return {}
+    return TaskPlanningRailConfig.model_validate(raw).model_dump()
+
+
+def _is_progress_reminder_for_session(message: BaseMessage, session_id: str) -> bool:
+    metadata = getattr(message, "metadata", None) or {}
+    return (
+        metadata.get(_TODO_PROGRESS_REMINDER_KEY) is True
+        and metadata.get(_TODO_SESSION_ID_KEY) == session_id
+    )
 
 
 class TaskPlanningRail(DeepAgentRail):
@@ -48,7 +90,7 @@ class TaskPlanningRail(DeepAgentRail):
 
     def __init__(
         self,
-        enable_progress_repeat: bool = False,
+        enable_progress_repeat: bool = True,
         list_tool_call_interval: int = 20,
     ) -> None:
         """Initialize TaskPlanningRail.
@@ -62,6 +104,8 @@ class TaskPlanningRail(DeepAgentRail):
         self.enable_progress_repeat = enable_progress_repeat
         self.list_tool_call_interval = list_tool_call_interval
         self._tool_call_counts = {}
+        self._pending_progress_reminder: Dict[str, str] = {}
+        self._pending_advance_reminder: Dict[str, str] = {}
         self.system_prompt_builder = None
 
     def init(self, agent) -> None:
@@ -146,32 +190,51 @@ class TaskPlanningRail(DeepAgentRail):
         if self.system_prompt_builder is None:
             return
 
-        task_planning_section = build_todo_section(language=self.system_prompt_builder.language)
+        task_planning_section = build_todo_section(
+            language=self.system_prompt_builder.language
+        )
         if task_planning_section is not None:
             self.system_prompt_builder.add_section(task_planning_section)
         else:
             self.system_prompt_builder.remove_section(SectionName.TODO)
 
+        await self._inject_pending_progress_reminder(ctx)
+
     async def after_tool_call(
         self, ctx: AgentCallbackContext
     ) -> None:
-        """Add progress reminder prompt after tool call.
+        """Schedule reminders for the next model call.
 
-        Every N tool calls (configurable via tool_call_interval), adds a user
-        message prompting the model to review current task progress using
-        todo_list tool.
+        Advance reminder (gap: pending without in_progress) runs only after
+        todo tools to avoid parallel non-todo after chains contending on
+        ``todo.json`` file locks.
+
+        Progress repeat (optional) counts all tool calls; every N calls it
+        loads todos and stores a user reminder for ``before_model_call``.
 
         Args:
             ctx: Agent callback context containing inputs and messages.
         """
-        if not self.enable_progress_repeat or not ctx.session or not ctx.context:
+        if ctx.session is None:
+            return
+
+        tool_name = ""
+        if isinstance(ctx.inputs, ToolCallInputs):
+            tool_name = ctx.inputs.tool_name or ""
+        if tool_name in _TODO_TOOL_NAMES:
+            await self._maybe_schedule_advance_reminder(ctx)
+
+        session_id = ctx.session.get_session_id()
+        if session_id in self._pending_advance_reminder:
+            return
+
+        if not self.enable_progress_repeat:
             return
 
         tool = self._find_todo_tool()
         if tool is None:
             return
 
-        session_id = ctx.session.get_session_id()
         if session_id not in self._tool_call_counts:
             self._tool_call_counts[session_id] = 0
 
@@ -179,26 +242,7 @@ class TaskPlanningRail(DeepAgentRail):
         if self._tool_call_counts[session_id] % self.list_tool_call_interval != 0:
             return
 
-        tool.set_file(session_id)
-
-        try:
-            todos = await tool.load_todos()
-        except Exception:
-            logger.debug("TaskPlanningRail: after tool call load todos failed")
-            return
-
-        if not todos:
-            return
-
-        tasks, in_progress_task = self._format_task_content(todos)
-        prompt = build_progress_reminder_user_prompt(
-            language=self.system_prompt_builder.language,
-            tasks=tasks,
-            in_progress_task=in_progress_task,
-        )
-        messages = ctx.context.get_messages()
-        messages.append(UserMessage(content=prompt))
-        ctx.context.set_messages(messages)
+        await self._schedule_progress_reminder(ctx, session_id, tool)
 
     async def after_invoke(
         self, ctx: AgentCallbackContext
@@ -209,6 +253,8 @@ class TaskPlanningRail(DeepAgentRail):
         session_id = ctx.session.get_session_id()
         if session_id in self._tool_call_counts:
             del self._tool_call_counts[session_id]
+        self._pending_progress_reminder.pop(session_id, None)
+        self._pending_advance_reminder.pop(session_id, None)
 
     async def after_task_iteration(
         self, ctx: AgentCallbackContext
@@ -246,10 +292,10 @@ class TaskPlanningRail(DeepAgentRail):
             return
 
         session_id = ctx.session.get_session_id()
-        tool.set_file(session_id)
+        file_path = tool.file_path_for_session(session_id)
 
         try:
-            todos = await tool.load_todos()
+            todos = await tool.load_todos(file_path)
         except Exception:
             logger.debug(
                 "TaskPlanningRail: no todos to bridge"
@@ -317,10 +363,10 @@ class TaskPlanningRail(DeepAgentRail):
             return
 
         session_id = ctx.session.get_session_id()
-        tool.set_file(session_id)
+        file_path = tool.file_path_for_session(session_id)
 
         try:
-            todos = await tool.load_todos()
+            todos = await tool.load_todos(file_path)
         except Exception:
             logger.debug(
                 "TaskPlanningRail: no todos for sync"
@@ -349,7 +395,7 @@ class TaskPlanningRail(DeepAgentRail):
         if not changed:
             return
 
-        await tool.save_todos(todos)
+        await tool.save_todos(todos, file_path)
         logger.info(
             "TaskPlanningRail: synced %d todos from TaskPlan",
             len(todos),
@@ -365,6 +411,34 @@ class TaskPlanningRail(DeepAgentRail):
         if status == TaskStatus.FAILED:
             return TodoStatus.CANCELLED
         return TodoStatus.COMPLETED
+
+    async def _inject_pending_progress_reminder(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Inject a deferred progress reminder after tool results are in context."""
+        if not ctx.session or not ctx.context:
+            return
+
+        session_id = ctx.session.get_session_id()
+        prompt = self._pending_advance_reminder.pop(session_id, None)
+        if not prompt:
+            prompt = self._pending_progress_reminder.pop(session_id, None)
+        if not prompt:
+            return
+
+        session_label = shorten_session_label(session_id)
+        content = f"[TODO · session={session_label}]\n{prompt}"
+        metadata = {
+            _TODO_PROGRESS_REMINDER_KEY: True,
+            _TODO_SESSION_ID_KEY: session_id,
+        }
+        messages = [
+            message
+            for message in ctx.context.get_messages()
+            if not _is_progress_reminder_for_session(message, session_id)
+        ]
+        messages.append(UserMessage(content=content, metadata=metadata))
+        ctx.context.set_messages(messages)
 
     def _find_todo_tool(self) -> Optional[TodoTool]:
         """Return the first TodoTool in self.tools."""
@@ -396,7 +470,80 @@ class TaskPlanningRail(DeepAgentRail):
 
         return "\n".join(todos_str), in_progress_str
 
+    @staticmethod
+    def _has_pending_without_in_progress(todos: List[TodoItem]) -> bool:
+        has_pending = any(t.status == TodoStatus.PENDING for t in todos)
+        has_in_progress = any(t.status == TodoStatus.IN_PROGRESS for t in todos)
+        return has_pending and not has_in_progress
+
+    async def _load_session_todos(
+        self,
+        session_id: str,
+        tool: TodoTool,
+    ) -> List[TodoItem]:
+        file_path = tool.file_path_for_session(session_id)
+        try:
+            return await tool.load_todos(file_path)
+        except Exception:
+            logger.debug("TaskPlanningRail: after tool call load todos failed")
+            return []
+
+    async def _maybe_schedule_advance_reminder(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        tool = self._find_todo_tool()
+        if tool is None or self.system_prompt_builder is None:
+            return
+
+        session_id = ctx.session.get_session_id()
+        todos = await self._load_session_todos(session_id, tool)
+        if not todos:
+            self._pending_advance_reminder.pop(session_id, None)
+            return
+
+        if not self._has_pending_without_in_progress(todos):
+            self._pending_advance_reminder.pop(session_id, None)
+            return
+
+        tasks, _ = self._format_task_content(todos)
+        language = self.system_prompt_builder.language
+        prompt = build_todo_advance_reminder_user_prompt(
+            language=language,
+            tasks=tasks,
+        )
+        self._pending_advance_reminder[session_id] = prompt
+        self._pending_progress_reminder.pop(session_id, None)
+
+    async def _schedule_progress_reminder(
+        self,
+        ctx: AgentCallbackContext,
+        session_id: str,
+        tool: TodoTool,
+    ) -> None:
+        todos = await self._load_session_todos(session_id, tool)
+        if not todos:
+            return
+
+        if self._has_pending_without_in_progress(todos):
+            return
+
+        tasks, in_progress_task = self._format_task_content(todos)
+        prompt = build_progress_reminder_user_prompt(
+            language=self.system_prompt_builder.language,
+            tasks=tasks,
+            in_progress_task=in_progress_task,
+        )
+        self._pending_progress_reminder[session_id] = prompt
+        logger.debug(
+            "TaskPlanningRail: scheduled progress reminder session_id=%s "
+            "tool_call_count=%d",
+            session_id,
+            self._tool_call_counts[session_id],
+        )
+
 
 __all__ = [
     "TaskPlanningRail",
+    "TaskPlanningRailConfig",
+    "resolve_task_planning_rail_kwargs",
 ]

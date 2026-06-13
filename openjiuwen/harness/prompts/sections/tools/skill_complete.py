@@ -14,6 +14,7 @@ DESCRIPTION: Dict[str, str] = {
         "标记某个技能已完成，并释放该技能下已加载的所有 SKILL.md / 引用文件正文。"
         "完成该技能的全部步骤、并且不再需要回看该技能正文时，立即调用本工具，"
         "比仅用自然语言宣告完成更优先。"
+        "本工具不更新 todo，修改 todo 请用 todo_modify。"
         "若之后又需要使用该技能，请重新调用 skill_tool 加载。"
         "本期不支持只释放部分 reference 文件——一次调用会释放该 skill 下全部已加载正文。"
     ),
@@ -21,6 +22,7 @@ DESCRIPTION: Dict[str, str] = {
         "Mark a skill as complete and release every loaded SKILL.md / reference body for that skill. "
         "Call this immediately after finishing all steps of a skill and no longer needing to consult its body; "
         "it takes priority over a plain natural-language 'I'm done'. "
+        "This tool does not update todos — use todo_modify to modify todos. "
         "If you later need the skill again, re-call skill_tool. "
         "This release is all-or-nothing per skill: partial reference retention is not supported in this iteration."
     ),

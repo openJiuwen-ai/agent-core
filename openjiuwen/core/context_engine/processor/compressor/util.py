@@ -6,7 +6,15 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+FULL_COMPACT_TODO_REINJECT_KEY = "full_compact_todo_reinject"
+TODO_WORKSPACE_NODE = "todo"
+# Pending list lines: keep compact when many items are reinjected.
+_TODO_REINJECT_PENDING_CONTENT_MAX_CHARS = 80
+# In-progress line: align with skill section/snippet preview caps (200 chars).
+_TODO_REINJECT_IN_PROGRESS_CONTENT_MAX_CHARS = 200
 
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     group_completed_api_rounds as group_completed_api_round_ranges,
@@ -142,6 +150,127 @@ def build_task_status_reinjected_content(
     if stop_reason:
         lines.append(f"- Last recorded stop reason: {stop_reason}.")
     return processor.truncate_state_text("\n".join(lines))
+
+
+def shorten_session_label(session_id: str) -> str:
+    normalized = (session_id or "").strip()
+    if not normalized:
+        return "unknown"
+    if len(normalized) <= 32:
+        return normalized
+    if "_" in normalized:
+        tail = normalized.rsplit("_", 1)[-1]
+        if tail:
+            return tail
+    return normalized[-32:]
+
+
+def resolve_todo_json_path(context: Any) -> Optional[Path]:
+    workspace = getattr(context, "_workspace", None)
+    get_node_path = getattr(workspace, "get_node_path", None) if workspace is not None else None
+    if not callable(get_node_path):
+        return None
+    try:
+        todo_dir = get_node_path(TODO_WORKSPACE_NODE)
+        session_id = str(context.session_id() or "")
+    except Exception:
+        return None
+    if todo_dir is None or not session_id:
+        return None
+    return Path(todo_dir) / session_id / "todo.json"
+
+
+def load_todo_dicts_from_path(path: Path) -> List[Dict[str, Any]]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    return []
+
+
+def _truncate_reinject_text(text: str, max_chars: int) -> str:
+    normalized = str(text or "")
+    if len(normalized) <= max_chars:
+        return normalized
+    return f"{normalized[:max_chars]}..."
+
+
+def format_todo_reinject_body(items: List[Dict[str, Any]]) -> str:
+    pending_lines: List[str] = []
+    in_progress_content = ""
+    completed_count = 0
+    cancelled_count = 0
+
+    for item in items:
+        status = str(item.get("status", "")).lower()
+        todo_id = str(item.get("id", ""))
+        content = str(item.get("content", ""))
+        short_id = todo_id[:8] if len(todo_id) > 8 else todo_id
+        if status == "in_progress":
+            in_progress_content = _truncate_reinject_text(
+                content,
+                _TODO_REINJECT_IN_PROGRESS_CONTENT_MAX_CHARS,
+            )
+        elif status == "pending":
+            preview = _truncate_reinject_text(
+                content,
+                _TODO_REINJECT_PENDING_CONTENT_MAX_CHARS,
+            )
+            pending_lines.append(f"- {short_id} · {preview}")
+        elif status == "completed":
+            completed_count += 1
+        elif status == "cancelled":
+            cancelled_count += 1
+
+    if not in_progress_content and not pending_lines:
+        return ""
+
+    lines: List[str] = []
+    if in_progress_content:
+        lines.append(f"进行中: {in_progress_content}")
+    if pending_lines:
+        lines.append(f"待办({len(pending_lines)}):")
+        lines.extend(pending_lines)
+    lines.append(f"已完成 {completed_count} 项 | 已取消 {cancelled_count} 项")
+    return "\n".join(lines)
+
+
+def build_todo_reinjected_content(
+    processor: Any,
+    *,
+    context: Any,
+    messages: List[BaseMessage],
+    messages_to_keep: List[BaseMessage],
+) -> List[UserMessage]:
+    """Reinject active todo snapshot from todo.json (lighter than skill round replay)."""
+    _ = messages, messages_to_keep
+    if not processor.config.reinject_todos:
+        return []
+
+    todo_path = resolve_todo_json_path(context)
+    if todo_path is None or not todo_path.is_file():
+        return []
+
+    body = format_todo_reinject_body(load_todo_dicts_from_path(todo_path))
+    if not body:
+        return []
+
+    session_id = str(context.session_id() or "")
+    session_label = shorten_session_label(session_id)
+    label = f"TODOS · session={session_label}"
+    return [
+        UserMessage(
+            content=(
+                f"{processor.config.state_marker}\n[{label}]\n"
+                f"{processor.truncate_state_text(body)}"
+            ),
+            metadata={
+                FULL_COMPACT_TODO_REINJECT_KEY: True,
+            },
+        )
+    ]
 
 
 def build_plan_mode_reinjected_content(
