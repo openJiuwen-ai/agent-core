@@ -59,6 +59,9 @@ class MemberDao:
                 because that matches the overwhelmingly common spawn
                 path. HITT callers must pass
                 ``role=TeamRole.HUMAN_AGENT.value`` explicitly.
+            options: JSON object for extensible member configuration.
+                Current shape: ``{"model_ref": {...}, "worktree": {...},
+                "permissions_override": {...}}``.
         """
         async with self._sessions.write() as session:
             try:

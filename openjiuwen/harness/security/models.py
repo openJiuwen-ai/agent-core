@@ -61,6 +61,17 @@ class PermissionConfirmResponse:
     auto_confirm: bool = False
 
 
+@dataclass(frozen=True)
+class TeamPermissionConfirmResponse(PermissionConfirmResponse):
+    """Team-mode confirmation response with ``decided_by`` tracking.
+
+    ``decided_by`` records who made the approval decision (e.g. ``"leader"``).
+    It is not exposed to the LLM — it is set internally by
+    ``TeamPermissionRail._parse_confirm_payload``.
+    """
+    decided_by: str | None = None
+
+
 class ApprovalOverrideEntry(TypedDict, total=False):
     """``permissions.approval_overrides`` 中单条用户/CLI 覆盖。
 
@@ -134,4 +145,5 @@ __all__ = [
     "PermissionLevel",
     "PermissionResult",
     "PermissionsSection",
+    "TeamPermissionConfirmResponse",
 ]

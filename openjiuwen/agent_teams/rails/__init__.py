@@ -11,14 +11,21 @@ Layout:
   team coordination tools onto the agent's ability manager.
 - ``tool_approval_rail``: ``TeamToolApprovalRail`` — leader-mediated
   approval gate for teammate tool calls.
+- ``team_permission_rail``: ``TeamPermissionRail`` + ``TeamApprovalOrchestrator`` —
+  team-mode permission guardrail with leader-mediated ASK resolution and
+  session-scoped auto-confirm.
 - ``team_plan_mode_rail``: ``TeamPlanModeRail`` — team.plan leader
   prompt overlay for the generic plan-mode mechanics.
 """
 
 from __future__ import annotations
 
-from openjiuwen.agent_teams.rails.team_policy_rail import TeamPolicyRail
+from openjiuwen.agent_teams.rails.team_permission_rail import (
+    TeamApprovalOrchestrator,
+    TeamPermissionRail,
+)
 from openjiuwen.agent_teams.rails.team_plan_mode_rail import TeamPlanModeRail
+from openjiuwen.agent_teams.rails.team_policy_rail import TeamPolicyRail
 from openjiuwen.agent_teams.rails.team_tool_rail import (
     TeamToolRail,
     qualify_team_tool_ids,
@@ -26,8 +33,10 @@ from openjiuwen.agent_teams.rails.team_tool_rail import (
 from openjiuwen.agent_teams.rails.tool_approval_rail import TeamToolApprovalRail
 
 __all__ = [
-    "TeamPolicyRail",
+    "TeamApprovalOrchestrator",
+    "TeamPermissionRail",
     "TeamPlanModeRail",
+    "TeamPolicyRail",
     "TeamToolApprovalRail",
     "TeamToolRail",
     "qualify_team_tool_ids",

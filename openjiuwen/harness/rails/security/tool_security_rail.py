@@ -149,12 +149,27 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     @staticmethod
     def _should_store_auto_confirm(
         *,
+        approved: bool,
         auto_confirm: bool,
         session: Any,
         auto_confirm_key: str,
         persisted: bool,
     ) -> bool:
-        return bool(auto_confirm and session is not None and auto_confirm_key and not persisted)
+        """Whether to store auto-confirm in session state.
+
+        Bug fix: previously did not check ``approved``, causing
+        ``approved=False + auto_confirm=True`` to still write session
+        auto-confirm — a rejection should not be remembered as "always allowed".
+        """
+        return bool(approved and auto_confirm and session is not None and auto_confirm_key and not persisted)
+
+    def should_persist_to_disk(self) -> bool:
+        """Whether ``_persist_allow_always`` is allowed to write config to disk.
+
+        Subclasses may override to disable disk persistence (e.g. when
+        approvals are session-scoped rather than permanent).
+        """
+        return True
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         tool_name = ctx.inputs.tool_name
@@ -350,10 +365,18 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 self.update_config(fresh)
             else:
                 self._engine.update_config(self._static_config)
-            result = await self._engine.check_permission(
-                tool_name=normalized_name,
-                tool_args=tool_args,
-            )
+            try:
+                result = await self._engine.check_permission(
+                    tool_name=normalized_name,
+                    tool_args=tool_args,
+                )
+            except Exception:
+                logger.error(
+                    "[PermissionEngine] permission.rail.check_failed tool=%s normalized=%s",
+                    tool_name,
+                    normalized_name,
+                )
+                raise
 
             if result.permission == PermissionLevel.ALLOW:
                 logger.info(
@@ -410,13 +433,15 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     confirm_payload = ext_out
                     persisted = False
                     if confirm_payload.approved and confirm_payload.auto_confirm:
-                        persisted = self._persist_allow_always(normalized_name, tool_args)
+                        if self.should_persist_to_disk():
+                            persisted = self._persist_allow_always(normalized_name, tool_args)
                     logger.info(
                         "[PermissionEngine] permission.persist.result tool=%s confirm_path=hosted persisted=%s",
                         tool_name,
                         persisted,
                     )
                     if self._should_store_auto_confirm(
+                        approved=confirm_payload.approved,
                         auto_confirm=confirm_payload.auto_confirm,
                         session=ctx.session,
                         auto_confirm_key=auto_confirm_key,
@@ -452,6 +477,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return self.interrupt(InterruptRequest(
                 message=message,
                 payload_schema=ConfirmPayload.to_schema(),
+                silent=not self.should_emit_interrupt_output(),
             ))
 
         logger.info("[PermissionEngine] permission.rail.user_response tool=%s", tool_name)
@@ -465,11 +491,13 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return self.interrupt(InterruptRequest(
                 message=message,
                 payload_schema=ConfirmPayload.to_schema(),
+                silent=not self.should_emit_interrupt_output(),
             ))
 
         persisted = False
         if payload.approved and payload.auto_confirm:
-            persisted = self._persist_allow_always(normalized_name, tool_args)
+            if self.should_persist_to_disk():
+                persisted = self._persist_allow_always(normalized_name, tool_args)
             logger.info(
                 "[PermissionEngine] permission.persist.result tool=%s confirm_path=%s persisted=%s",
                 tool_name,
@@ -478,6 +506,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             )
 
         if self._should_store_auto_confirm(
+            approved=payload.approved,
             auto_confirm=payload.auto_confirm,
             session=ctx.session,
             auto_confirm_key=auto_confirm_key,
@@ -550,6 +579,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
     def _confirm_path_label(self) -> str:
         return "hosted" if self._host.request_permission_confirmation is not None else "interrupt"
+
+    def should_emit_interrupt_output(self) -> bool:
+        """Return whether ASK interrupts should emit user-visible output."""
+        return True
 
     @staticmethod
     def _is_auto_confirmed(auto_confirm_config: Optional[dict], tool_name: str) -> bool:

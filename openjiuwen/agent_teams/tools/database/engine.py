@@ -208,6 +208,62 @@ def _ensure_team_member_options_column(sync_conn) -> None:
     team_logger.info("Migrated legacy team_member table: dropped model_ref_json column")
 
 
+def _ensure_message_protocol_column(sync_conn) -> None:
+    """Backfill the ``protocol`` column on pre-existing per-session message tables.
+
+    ``SQLModel.metadata.create_all`` only creates tables that don't exist;
+    it never alters live tables.  Per-session message tables created before
+    the ``protocol`` column was introduced therefore lack it after upgrading.
+    Probe each message table and run ``ALTER TABLE ... ADD COLUMN`` with a
+    default of ``"plain"`` so legacy rows retain their original semantics.
+    """
+    inspector = inspect(sync_conn)
+    for table_name in inspector.get_table_names():
+        if not table_name.startswith("team_message_"):
+            continue
+        columns = {col["name"] for col in inspector.get_columns(table_name)}
+        if "protocol" in columns:
+            continue
+        sync_conn.exec_driver_sql(
+            f"ALTER TABLE {table_name} ADD COLUMN protocol TEXT NOT NULL DEFAULT 'plain'"
+        )
+        team_logger.info(
+            "Migrated legacy message table %s: added protocol column",
+            table_name,
+        )
+
+
+def _ensure_team_member_options_column(sync_conn) -> None:
+    """Ensure TeamMember.options exists and backfill it from legacy columns."""
+    inspector = inspect(sync_conn)
+    if "team_member" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("team_member")}
+    if "options" not in columns:
+        sync_conn.exec_driver_sql("ALTER TABLE team_member ADD COLUMN options TEXT")
+        team_logger.info("Migrated legacy team_member table: added options column")
+
+    if "model_ref_json" not in columns:
+        return
+
+    from openjiuwen.agent_teams.tools.member_options import merge_legacy_member_options
+
+    rows = sync_conn.exec_driver_sql(
+        "SELECT member_name, team_name, options, model_ref_json FROM team_member"
+    ).mappings()
+    for row in rows:
+        merged = merge_legacy_member_options(
+            options=row.get("options"),
+            model_ref_json=row.get("model_ref_json"),
+        )
+        if merged == row.get("options"):
+            continue
+        sync_conn.exec_driver_sql(
+            "UPDATE team_member SET options = ? WHERE member_name = ? AND team_name = ?",
+            (merged, row["member_name"], row["team_name"]),
+        )
+
+
 async def initialize_engine(
     config: DatabaseConfig,
 ) -> tuple[AsyncEngine, async_sessionmaker]:
@@ -379,6 +435,7 @@ async def create_cur_session_tables(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
         for model in (task_model, dep_model, message_model, read_status_model):
             await conn.run_sync(model.__table__.create, checkfirst=True)
+        await conn.run_sync(_ensure_message_protocol_column)
 
     team_logger.info("Session tables ready for session %s", session_id)
 

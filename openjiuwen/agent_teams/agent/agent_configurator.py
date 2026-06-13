@@ -466,6 +466,7 @@ class AgentConfigurator:
                     "exclude_tools": exclude,
                     "qualify_ids": spec.spawn_mode == "inprocess",
                     "team_name": resolved_team_name,
+                    "team_permissions_enabled": spec.enable_permissions,
                 },
             ),
             RailSpec(
@@ -489,7 +490,9 @@ class AgentConfigurator:
         is_coordinated_teammate = ctx.role == TeamRole.TEAMMATE and ctx.team_spec
         approval_tools = agent_spec.approval_required_tools or []
         can_request_approval = is_coordinated_teammate and self.team_backend and self.messager
-        if can_request_approval and approval_tools:
+        # When team permissions are enabled the platform-mounted
+        # TeamPermissionRail replaces TeamToolApprovalRail.
+        if can_request_approval and approval_tools and not spec.enable_permissions:
             team_rail_specs.append(
                 RailSpec(
                     type=TEAM_TOOL_APPROVAL,
@@ -609,6 +612,7 @@ class AgentConfigurator:
             swarmflow_model_resolver=swarmflow_model_resolver,
             swarmflow_worker_base_spec=swarmflow_worker_base_spec,
             reliability_components=reliability_components,
+            permissions_override=ctx.permissions_override,
         )
 
         # Fold the team rails into the spec rails (after the user rails, to keep

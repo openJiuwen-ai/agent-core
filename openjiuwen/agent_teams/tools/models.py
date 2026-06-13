@@ -78,7 +78,8 @@ class TeamMember(SQLModel, table=True):
 
     Current shape:
     ``{"model_ref": {"model_name": str, "model_index": int},
-    "worktree": {"isolation": str, "path": str}}``.
+    "worktree": {"isolation": str, "path": str},
+    "permissions_override": {"bash": "deny", ...}}``.
     """
     # Set on roster mutations only (create_member).  Status / execution
     # status updates intentionally do NOT bump this column because they
@@ -133,6 +134,10 @@ class TeamMessageBase(SQLModel):
     content: str = Field(nullable=False)
     timestamp: int = Field(sa_type=BigInteger, nullable=False, index=True)
     broadcast: bool = Field(nullable=False, index=True)
+    protocol: str = Field(default="plain", nullable=False)
+    """Message format: ``"plain"`` for normal text, ``"json"`` for structured
+    payloads (e.g. approval results).  Used by mailbox drain to selectively
+    admit interrupt-resolving messages while deferring others."""
     # Read state for direct (point-to-point) messages only.  Broadcast rows
     # carry NULL here because per-recipient read state for broadcasts lives
     # in MessageReadStatus (high-water mark by timestamp); a single bool on

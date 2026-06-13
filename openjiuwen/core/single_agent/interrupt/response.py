@@ -14,6 +14,14 @@ class InterruptRequest(BaseModel):
     auto_confirm_key: str = ""
     ui_options: list[dict] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    silent: bool = Field(
+        default=False,
+        description=(
+            "When True, the interrupt suspends the agent but does not produce "
+            "a user-visible __interaction__ output. Used when approval is "
+            "routed through an internal channel."
+        ),
+    )
 
 
 class ToolCallInterruptRequest(InterruptRequest):

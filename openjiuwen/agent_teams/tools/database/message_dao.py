@@ -47,6 +47,7 @@ class MessageDao:
         to_member_name: Optional[str] = None,
         broadcast: bool = False,
         is_read: bool = False,
+        protocol: str = "plain",
     ) -> bool:
         """Create a new team message.
 
@@ -56,6 +57,8 @@ class MessageDao:
                 the HITT human_agent) as already read so mailbox polling
                 does not keep re-firing on them. Ignored for broadcasts,
                 whose per-member read state lives in MessageReadStatus.
+            protocol: Message format — ``"plain"`` for normal text,
+                ``"json"`` for structured payloads (e.g. approval results).
         """
         message_model = _get_message_model()
 
@@ -70,6 +73,7 @@ class MessageDao:
                         content=content,
                         timestamp=get_current_time(),
                         broadcast=broadcast,
+                        protocol=protocol,
                         is_read=None if broadcast else is_read,
                     )
                     session.add(message)

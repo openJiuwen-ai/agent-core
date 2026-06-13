@@ -33,6 +33,14 @@ class TeamMemberOptions(BaseModel):
 
     model_ref: MemberModelRef | None = None
     worktree: MemberWorktreeOptions | None = None
+    permissions_override: dict[str, str] | None = None
+    """Per-member permission narrowing — flat ``{tool_name: level_string}`` dict.
+
+    A flat ``{tool_name: level_string}`` dict — e.g.
+    ``{"bash": "deny", "write_file": "ask"}``.  Set by
+    ``spawn_teammate.permissions`` at creation time.  ``None`` when
+    no override was specified.
+    """
 
 
 def load_member_options(raw: str | None) -> TeamMemberOptions:
@@ -98,6 +106,7 @@ def build_member_options(
     model_ref: Mapping[str, Any] | None = None,
     worktree_isolation: str | None = None,
     worktree_path: str | None = None,
+    permissions_override: dict[str, str] | None = None,
 ) -> str | None:
     """Build a TeamMember.options JSON string for new writes."""
     parsed = TeamMemberOptions()
@@ -107,6 +116,8 @@ def build_member_options(
             isolation=worktree_isolation,
             path=worktree_path,
         )
+    if permissions_override:
+        parsed.permissions_override = permissions_override
     return dump_member_options(parsed)
 
 
@@ -125,6 +136,17 @@ def set_member_worktree_options(
     return dump_member_options(parsed)
 
 
+def set_member_permissions_override(
+    raw_options: str | None,
+    *,
+    permissions_override: dict[str, str] | None,
+) -> str | None:
+    """Replace the permissions_override section inside a TeamMember.options JSON string."""
+    parsed = load_member_options(raw_options)
+    parsed.permissions_override = permissions_override
+    return dump_member_options(parsed)
+
+
 def get_member_options(record: object) -> TeamMemberOptions:
     """Read options from a DB-like record."""
     return load_member_options(_record_value(record, "options"))
@@ -138,6 +160,16 @@ def get_member_model_ref(record: object) -> MemberModelRef | None:
 def get_member_worktree(record: object) -> MemberWorktreeOptions | None:
     """Return the member's worktree options from options."""
     return get_member_options(record).worktree
+
+
+def get_member_permissions_override(record: object) -> dict[str, str] | None:
+    """Return the member's permissions override from options.
+
+    A flat ``{tool_name: level_string}`` dict — e.g.
+    ``{"bash": "deny", "write_file": "ask"}``.  ``None`` when no
+    override was specified at spawn time.
+    """
+    return get_member_options(record).permissions_override
 
 
 def _record_value(record: object, key: str) -> Any:
