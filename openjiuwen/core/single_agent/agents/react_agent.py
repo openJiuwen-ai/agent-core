@@ -198,8 +198,8 @@ class ReActAgentConfig(BaseModel):
 
     context_engine_config: ContextEngineConfig = Field(
         default=ContextEngineConfig(
-            max_context_message_num=200,
-            default_window_round_num=10
+            max_context_message_num=None,
+            default_window_round_num=None
         ),
         description="Context engine configuration"
     )
@@ -279,8 +279,8 @@ class ReActAgentConfig(BaseModel):
 
     def configure_context_engine(
             self,
-            max_context_message_num: Optional[int] = 200,
-            default_window_round_num: Optional[int] = 10,
+            max_context_message_num: Optional[int] = None,
+            default_window_round_num: Optional[int] = None,
             enable_reload: bool = False,
             enable_kv_cache_release: bool = False,
     ) -> 'ReActAgentConfig':

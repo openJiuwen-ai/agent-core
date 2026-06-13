@@ -8,6 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from openjiuwen.harness.prompts.sections.memory import build_memory_section
 from openjiuwen.harness.rails.memory.memory_rail import MemoryRail
 
 
@@ -57,3 +58,15 @@ async def test_memory_policy_uses_system_section_for_read_only_invokes() -> None
 
     assert rail.system_prompt_builder.removed_sections == ["memory"]
     assert [section.name for section in rail.system_prompt_builder.added_sections] == ["memory"]
+
+
+def test_memory_policy_is_static_for_read_only_flag() -> None:
+    normal = build_memory_section(language="en", read_only=False, is_proactive=True).render("en")
+    read_only = build_memory_section(language="en", read_only=True, is_proactive=True).render("en")
+    passive = build_memory_section(language="en", read_only=False, is_proactive=False).render("en")
+
+    assert normal == read_only
+    assert "{today_date}" not in normal
+    assert "YYYY-MM-DD.md" in normal
+    assert "scheduled task or heartbeat task" in normal
+    assert "scheduled task or heartbeat task" not in passive

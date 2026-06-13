@@ -158,17 +158,29 @@ async def test_build_context_section(tmp_path: Path):
     )
     assert section_cn.priority == 80
     cn_content = section_cn.render("cn")
-    assert "## AGENT.md" in cn_content
-    assert "# Agent Config" in cn_content
+    assert "## AGENT.md - 智能体配置" in cn_content
+    assert "以下文件已加载到上下文中，无需再次读取。" in cn_content
     assert "# Agent Config" in cn_content
     assert "## SOUL.md" in cn_content
-    assert "## daily_memory/" in cn_content
+    assert "# Today" not in cn_content
+    assert "## daily_memory/" not in cn_content
+    assert "read_memory" in cn_content
+    assert "memory_search" in cn_content
+    assert "memory/daily_memory/YYYY-MM-DD.md" in cn_content
+    await sys_operation.fs().write_file(f"{tmp_path}/memory/daily_memory/{date}.md", "# Changed Today")
+    section_cn_after_memory_write = await build_context_section(
+        sys_operation, workspace, "cn", timezone="Asia/Shanghai"
+    )
+    assert section_cn_after_memory_write.render("cn") == cn_content
     section_en = await build_context_section(
         sys_operation, workspace, "en", timezone="Asia/Shanghai"
     )
     en_content = section_en.render("en")
     assert "## AGENT.md - Agent Configuration" in en_content
     assert "already loaded into context" in en_content
+    assert "# Today" not in en_content
+    assert "Daily memory is not automatically injected" in en_content
+    assert "memory/daily_memory/YYYY-MM-DD.md" in en_content
 
 
 @pytest.mark.asyncio
@@ -177,7 +189,7 @@ async def test_build_context_section_returns_none_when_workspace_is_none():
 
 
 @pytest.mark.asyncio
-async def test_build_context_section_skips_empty_daily_memory_dir(tmp_path: Path):
+async def test_build_context_section_includes_stable_daily_memory_guidance_with_empty_dir(tmp_path: Path):
     sys_operation = _make_sys_operation(tmp_path)
     await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config\nreal body")
     (tmp_path / "memory" / "daily_memory").mkdir(parents=True, exist_ok=True)
@@ -189,10 +201,12 @@ async def test_build_context_section_skips_empty_daily_memory_dir(tmp_path: Path
     cn_content = section_cn.render("cn")
     assert "# Agent Config" in cn_content
     assert "## daily_memory/" not in cn_content
+    assert "read_memory" in cn_content
+    assert "memory_search" in cn_content
 
 
 @pytest.mark.asyncio
-async def test_build_context_section_skips_when_today_daily_memory_missing(tmp_path: Path):
+async def test_build_context_section_never_reads_daily_memory_files(tmp_path: Path):
     sys_operation = _make_sys_operation(tmp_path)
     await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config\nreal body")
     await sys_operation.fs().write_file(f"{tmp_path}/memory/daily_memory/2026-04-02.md", "# Yesterday")
@@ -205,11 +219,12 @@ async def test_build_context_section_skips_when_today_daily_memory_missing(tmp_p
     assert "# Agent Config" in cn_content
     assert "# Yesterday" not in cn_content
     assert "## daily_memory/" not in cn_content
+    assert "memory/daily_memory/YYYY-MM-DD.md" in cn_content
 
 
 @pytest.mark.asyncio
 async def test_build_context_section_can_exclude_daily_memory(tmp_path: Path):
-    """build_context_section can skip today's daily memory for lightweight runs."""
+    """build_context_section can skip daily-memory guidance for lightweight runs."""
     sys_operation = _make_sys_operation(tmp_path)
     date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
     await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config\nreal body")
@@ -227,6 +242,8 @@ async def test_build_context_section_can_exclude_daily_memory(tmp_path: Path):
     assert "# Agent Config" in cn_content
     assert "# Today" not in cn_content
     assert "## daily_memory/" not in cn_content
+    assert "read_memory" not in cn_content
+    assert "memory_search" not in cn_content
 
 
 # =============================================================================
@@ -304,7 +321,7 @@ async def test_build_context_section_with_tools_content(tmp_path: Path):
         tools_content=tools_cn,
         timezone="Asia/Shanghai",
     )
-    assert "MyTool" in section_cn.render("cn")
+    assert "# 可用工具" in section_cn.render("cn")
     assert "MyTool" in section_cn.render("cn")
 
     section_en = await build_context_section(
@@ -333,7 +350,7 @@ async def test_build_context_section_without_tools(tmp_path: Path):
     )
     content = section.render("cn")
     assert "## AGENT.md" in content
-    assert "# 鍙敤宸ュ叿" not in content
+    assert "# 可用工具" not in content
     assert "# Available Tools" not in content
 
 
@@ -343,7 +360,7 @@ async def test_build_context_section_without_tools(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_before_model_call_injects_sections(tmp_path: Path):
-    """before_model_call should inject workspace and split context sections."""
+    """before_model_call should inject workspace and context sections."""
     sys_operation = _make_sys_operation(tmp_path)
     card = AgentCard(name="test", description="test")
     workspace = Workspace(root_path=str(tmp_path))
@@ -366,11 +383,16 @@ async def test_before_model_call_injects_sections(tmp_path: Path):
     builder = agent.system_prompt_builder
     ws = builder.get_section("workspace")
     agent_section = builder.get_section("context.agent")
+    soul_section = builder.get_section("context.soul")
     assert ws is not None
     assert agent_section is not None
+    assert soul_section is not None
     assert not builder.has_section("context")
+    assert "# 工作空间" in ws.render("cn")
     assert "## AGENT.md" in agent_section.render("cn")
-    assert "# Available Tools" not in agent_section.render("cn")
+    assert "## SOUL.md" in soul_section.render("cn")
+    assert await _attachment(agent, "session.sess1.context") is None
+    assert await _attachment(agent, "session.sess1.context.daily_memory") is None
 
 
 @pytest.mark.asyncio
@@ -437,7 +459,7 @@ async def test_before_model_call_keeps_user_in_system_and_skips_daily_memory(tmp
 
 @pytest.mark.asyncio
 async def test_before_model_call_normal_turn_replaces_heartbeat_context_attachment(tmp_path: Path):
-    """Normal turns keep split heartbeat context without the old monolithic section."""
+    """Normal turns should replace context written by heartbeat runs."""
     sys_operation = _make_sys_operation(tmp_path)
     await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config\nreal body")
     await sys_operation.fs().write_file(f"{tmp_path}/HEARTBEAT.md", "# Heartbeat Tasks\nreal body")
