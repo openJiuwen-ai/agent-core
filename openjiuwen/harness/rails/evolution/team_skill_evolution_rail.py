@@ -18,16 +18,11 @@ from pathlib import Path
 from typing import Any, Optional, Union
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
-from openjiuwen.agent_evolving.experience import (
-    ExperienceTracker,
-    OnlineEvolutionOrchestrator,
-)
 from openjiuwen.agent_evolving.experience.scorer import (
     EVALUATE_LLM_POLICY,
     SIMPLIFY_LLM_POLICY,
     ExperienceScorer,
 )
-from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
 from openjiuwen.agent_evolving.experience.types import (
     ONLINE_EVOLUTION_OUTCOME_STATUSES,
     ExperienceApprovalRequest,
@@ -56,11 +51,9 @@ from openjiuwen.agent_evolving.trajectory import (
     TrajectorySource,
     TrajectoryStore,
 )
-from openjiuwen.agent_evolving.updater import SingleDimUpdater
 from openjiuwen.agent_evolving.utils import infer_skill_from_texts, parse_top_level_frontmatter
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
-from openjiuwen.core.operator.skill_call import SkillExperienceOperator
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 from openjiuwen.harness.rails.evolution.approval_events import (
@@ -75,7 +68,11 @@ from openjiuwen.harness.rails.evolution.contracts import (
     EvolutionSnapshot,
     SimplifyRequestResult,
 )
-from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
+from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionTriggerPoint
+from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
+from openjiuwen.harness.rails.evolution.review.materials import build_swarm_review_scoped_materials
+from openjiuwen.harness.rails.evolution.skill_evolution_rail import EvolutionReviewScopeBuilder, SkillEvolutionRail
+from openjiuwen.agent_evolving.prompts.sections import build_team_evolution_protocol_section
 
 _TEAM_USER_REQUEST_LLM_POLICY = LLMInvokePolicy(
     attempt_timeout_secs=60,
@@ -132,7 +129,7 @@ def infer_team_skill_from_trajectory(
     )
 
 
-class TeamSkillEvolutionRail(EvolutionRail):
+class TeamSkillEvolutionRail(SkillEvolutionRail):
     """Team skill evolution rail — counterpart of SkillEvolutionRail.
 
     SkillEvolutionRail handles 1D skill experience records;
@@ -145,6 +142,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
     _DEFAULT_MEMBER_ROLE = "leader"
     _SKILL_MD_RE = re.compile(r"[/\\]([^/\\]+)[/\\]SKILL\.md", re.IGNORECASE)
     _EXPERIENCE_RECORD_HEADING_RE = re.compile(r"#+\s*\[([A-Za-z0-9_-]+)\]")
+    _subject_kind_default: str = "swarm-skill"
 
     def __init__(
         self,
@@ -154,12 +152,12 @@ class TeamSkillEvolutionRail(EvolutionRail):
         model: str,
         language: str = "cn",
         trajectory_store: Optional[TrajectoryStore] = None,
-        team_trajectory_store: Optional[TrajectoryStore] = None,
         trajectory_source: Optional[TrajectorySource] = None,
         trajectory_sink: Optional[TrajectorySink] = None,
         member_role: Optional[str] = None,
         auto_scan: bool = True,
         auto_save: bool = False,
+        review_runtime: EvolutionReviewRuntime,
         async_evolution: bool = True,
         max_concurrent_evolution: int = 1,
         team_id: Optional[str] = None,
@@ -176,42 +174,34 @@ class TeamSkillEvolutionRail(EvolutionRail):
         if eval_interval < 1:
             raise ValueError("eval_interval must be >= 1")
 
+        self._record_llm_policy = record_llm_policy
+        self._user_request_llm_policy = user_request_llm_policy
+        self._trajectory_issue_llm_policy = trajectory_issue_llm_policy
+
         super().__init__(
+            skills_dir,
+            llm=llm,
+            model=model,
+            auto_scan=auto_scan,
+            auto_save=auto_save,
+            review_runtime=review_runtime,
+            language=language,
+            subject_kind="swarm-skill",
             trajectory_store=trajectory_store,
-            team_trajectory_store=team_trajectory_store,
+            eval_interval=eval_interval,
+            evolution_total_timeout_secs=evolution_total_timeout_secs,
+            generate_records_llm_policy=record_llm_policy,
+            evaluate_llm_policy=evaluate_llm_policy,
+            simplify_llm_policy=simplify_llm_policy,
+            disabled_skills=disabled_skills,
             evolution_trigger=EvolutionTriggerPoint.AFTER_INVOKE,
             async_evolution=async_evolution,
             max_concurrent_evolution=max_concurrent_evolution,
-            disabled_skills=disabled_skills,
         )
-        self._store = EvolutionStore(skills_dir)
-        debug_dir = str(self._store.base_dirs[0].parent / "_debug")
-        self._generator = TeamSkillExperienceOptimizer(
-            llm,
-            model,
-            language,
-            debug_dir=debug_dir,
-            record_llm_policy=record_llm_policy,
-            evolution_store=self._store,
-        )
-        self._scorer = ExperienceScorer(
-            llm,
-            model,
-            language,
-            evaluate_llm_policy=evaluate_llm_policy,
-            simplify_llm_policy=simplify_llm_policy,
-        )
-        self._auto_scan = auto_scan
-        self._auto_save = auto_save
-        self._user_request_llm_policy = user_request_llm_policy
-        self._trajectory_issue_llm_policy = trajectory_issue_llm_policy
-        self._evolution_total_timeout_secs = evolution_total_timeout_secs
         self._max_concurrent_evolution = max_concurrent_evolution
-        self._eval_interval = eval_interval
-
-        self._pending_approval_snapshots: dict[str, PendingChange] = {}
-        self._pending_governance: dict[str, dict[str, Any]] = {}
-        self._experience_skill_ops: dict[str, SkillExperienceOperator] = {}
+        self._store = self._evolution_store
+        self._generator = self._evolver
+        self._experience_skill_ops = self._skill_ops
         self._passive_evolution_pending = False
         self._host_completion_pending_session_id: Optional[str] = None
         self._team_id = team_id
@@ -223,28 +213,6 @@ class TeamSkillEvolutionRail(EvolutionRail):
                 member_role=member_role,
             )
         self._trajectories_dir = trajectories_dir
-        self._manager = ExperienceManager(
-            store=self._store,
-            scorer=self._scorer,
-            subject_kind="team-skill",
-            language=language,
-            skill_ops=self._experience_skill_ops,
-            pending_approval_snapshots=self._pending_approval_snapshots,
-            pending_governance=self._pending_governance,
-        )
-        self._approval_runtime = EvolutionApprovalRuntime(
-            manager=self._manager,
-            pending_approval_snapshots=self._pending_approval_snapshots,
-        )
-        self._online_updater = SingleDimUpdater(self._generator)
-        self._online_orchestrator = OnlineEvolutionOrchestrator(
-            store=self._store,
-            updater=self._online_updater,
-            manager=self._manager,
-            skill_ops=self._experience_skill_ops,
-            request_id_prefix="team_skill_evolve",
-            stage_source="team_skill_experience_updater",
-        )
         self._team_signal_detector = TeamSignalDetector(
             llm=llm,
             model=model,
@@ -252,12 +220,6 @@ class TeamSkillEvolutionRail(EvolutionRail):
             trajectory_issue_llm_policy=trajectory_issue_llm_policy,
             user_intent_llm_policy=user_request_llm_policy,
         )
-        self._experience_tracker = ExperienceTracker(
-            store=self._store,
-            scorer=self._scorer,
-            eval_interval=self._eval_interval,
-        )
-
         logger.info(
             "[TeamSkillEvolutionRail] initialized: skills_dir=%s, model=%s, auto_save=%s, team_id=%s",
             skills_dir,
@@ -265,6 +227,54 @@ class TeamSkillEvolutionRail(EvolutionRail):
             auto_save,
             team_id,
         )
+
+    def _make_evolution_store(self, skills_dir: Union[str, list[str]]) -> EvolutionStore:
+        """Build and alias the team/swarm skill evolution store."""
+        store = EvolutionStore(skills_dir)
+        self._store = store
+        return store
+
+    def _make_skill_optimizer(
+        self,
+        llm: Model,
+        model: str,
+        language: str,
+        *,
+        generate_records_llm_policy: LLMInvokePolicy,
+    ) -> TeamSkillExperienceOptimizer:
+        """Build the team/swarm optimizer used by the shared online pipeline."""
+        del generate_records_llm_policy
+        debug_dir = str(self._store.base_dirs[0].parent / "_debug")
+        return TeamSkillExperienceOptimizer(
+            llm,
+            model,
+            language,
+            debug_dir=debug_dir,
+            record_llm_policy=self._record_llm_policy,
+            evolution_store=self._store,
+        )
+
+    def _make_review_scope_builder(self) -> EvolutionReviewScopeBuilder:
+        """Build the active review material builder for team/swarm subjects."""
+        return EvolutionReviewScopeBuilder(
+            trajectory_provider=lambda: self._build_swarm_review_trajectory(),
+            materials_builder=build_swarm_review_scoped_materials,
+        )
+
+    def _online_request_id_prefix(self) -> str | None:
+        """Return the team/swarm request id prefix for passive evolution."""
+        return "team_skill_evolve"
+
+    def _online_stage_source(self) -> str:
+        """Return the team/swarm stage source for generated experiences."""
+        return "team_skill_experience_updater"
+
+    def _build_swarm_review_trajectory(self) -> Trajectory | None:
+        """Build the team-aggregated trajectory exposed to the restricted review agent."""
+        trajectory = self._build_trajectory()
+        if trajectory is None:
+            return None
+        return self._aggregate_team_trajectory(trajectory)
 
     def set_trajectory_source(self, source: Optional[TrajectorySource]) -> None:
         """Bind this rail to a runtime team trajectory source."""
@@ -318,6 +328,16 @@ class TeamSkillEvolutionRail(EvolutionRail):
             self._team_signal_detector = detector
         return detector
 
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        """Inject common and team-specific evolution protocol sections."""
+        await super().before_model_call(ctx)
+        builder = getattr(getattr(ctx, "inputs", None), "system_prompt_builder", None)
+        if builder is None:
+            builder = getattr(getattr(ctx, "agent", None), "system_prompt_builder", None)
+        if builder is not None:
+            language = str(getattr(builder, "language", "") or self._language)
+            builder.add_section(build_team_evolution_protocol_section(language))
+
     @property
     def record_llm_policy(self) -> LLMInvokePolicy:
         """Get the configured experience record generation policy."""
@@ -368,7 +388,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
 
     @auto_save.setter
     def auto_save(self, value: bool) -> None:
-        self._auto_save = value
+        self._auto_save = bool(value)
 
     @property
     def approval_runtime(self) -> EvolutionApprovalRuntime:
@@ -417,6 +437,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
     async def _on_before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Reset invoke-local passive completion state on each invoke boundary."""
         self._passive_evolution_pending = False
+        self._skip_auto_scan_this_invoke = False
 
     async def _snapshot_for_evolution(
         self,
@@ -430,9 +451,9 @@ class TeamSkillEvolutionRail(EvolutionRail):
             return EvolutionSnapshot(
                 trajectory=trajectory,
                 messages=[],
-                skill_name="team-skill",
+                skill_name=self.subject_kind,
             ).to_legacy_dict()
-        snapshot = await super()._snapshot_for_evolution(trajectory, ctx)
+        snapshot = await self.build_base_evolution_snapshot(trajectory, ctx)
         if snapshot is None:
             return None
         base_snapshot = EvolutionSnapshot.from_legacy_dict(snapshot)
@@ -441,7 +462,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
         team_snapshot = EvolutionSnapshot(
             trajectory=base_snapshot.trajectory,
             messages=list(base_snapshot.messages),
-            skill_name="team-skill",
+            skill_name=self.subject_kind,
         ).to_legacy_dict()
         team_snapshot["presented_entries"] = presented_entries
         return team_snapshot
@@ -455,6 +476,8 @@ class TeamSkillEvolutionRail(EvolutionRail):
         await self._record_presented_experience_detail(ctx, inputs)
 
         if not self._auto_scan:
+            return
+        if self.builder is None:
             return
 
         if inputs.tool_name != "view_task":
@@ -481,6 +504,9 @@ class TeamSkillEvolutionRail(EvolutionRail):
         ctx: AgentCallbackContext,
     ) -> bool:
         """Trigger passive evolution only if this invoke has observed team completion."""
+        if self._skip_auto_scan_this_invoke:
+            logger.info("[TeamSkillEvolutionRail] active evolution activity detected, skip passive auto_scan")
+            return False
         return self._auto_scan and (
             self._passive_evolution_pending
             or self._host_completion_pending_session_id == self._current_builder_session_id()
@@ -829,6 +855,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
         """
         followup_text = await self._manager.request_rebuild(
             skill_name,
+            subject=self._subject_payload(skill_name),
             user_intent=user_intent,
             min_score=min_score,
         )
@@ -845,106 +872,11 @@ class TeamSkillEvolutionRail(EvolutionRail):
         *,
         auto_approve: bool = False,
     ) -> EvolutionRequestResult:
-        """User-triggered evolution entry point.
-
-        Allows user to explicitly provide improvement suggestions for a team skill,
-        and is the only user-driven team-skill evolution path.
-
-        Args:
-            skill_name: Target team skill name.
-            user_intent: User's explicit improvement suggestion.
-            auto_approve: If True, records are stored directly without approval.
-                          If False (default), records are staged for user approval.
-
-        Returns:
-            Structured result containing request_id, records, and optional approval event.
-
-        Example:
-            result = await rail.request_user_evolution(
-                "research-team",
-                "增加 reviewer 角色，限制 research 时间不超过 10 分钟"
-            )
-        """
+        """Build a host-delivered active evolution prompt for a team/swarm skill."""
+        del auto_approve
         if not self._is_active_request_subject(skill_name):
             return EvolutionRequestResult(skill_name=skill_name)
-
-        # Get current trajectory (from builder or use minimal placeholder)
-        trajectory = self._build_trajectory()
-        if trajectory is None:
-            trajectory = Trajectory(
-                execution_id="user_triggered",
-                session_id="user_triggered",
-                source="user_triggered",
-                steps=[],
-            )
-        trajectory = self._aggregate_team_trajectory(trajectory)
-        messages = self._collect_messages_from_trajectory(trajectory) if trajectory.steps else []
-
-        signals = (
-            await self._detect_active_request_signals(skill_name=skill_name, trajectory=trajectory)
-            if trajectory.steps
-            else []
-        )
-
-        if user_intent:
-            self._append_unique_signal(
-                signals,
-                make_team_user_intent_signal(
-                    skill_name=skill_name,
-                    user_intent=user_intent,
-                ),
-            )
-
-        if not signals:
-            logger.info(
-                "[TeamSkillEvolutionRail] request_user_evolution: no evidence or user intent for '%s'",
-                skill_name,
-            )
-            return EvolutionRequestResult(skill_name=skill_name)
-
-        if not messages and user_intent:
-            messages = [{"role": "user", "content": user_intent}]
-
-        online_result = await self._handle_evolution_from_signals_with_result(
-            skill_name=skill_name,
-            trajectory=trajectory,
-            signals=signals,
-            auto_approve=auto_approve,
-            user_query=user_intent,
-            messages=messages,
-            emit_host_events=False,
-        )
-        request = request_for_online_evolution_result(online_result)
-
-        if request is None:
-            logger.info(
-                "[TeamSkillEvolutionRail] request_user_evolution: no records generated for '%s'",
-                skill_name,
-            )
-            return EvolutionRequestResult(
-                skill_name=skill_name,
-                status=online_result.status,
-                message=online_result.message,
-            )
-
-        proposal = getattr(request, "proposal", None)
-        records = list(getattr(proposal, "records", []) or [])
-        approval_event = None
-        if not auto_approve:
-            approval_event = self._build_record_approval_event(
-                skill_name,
-                request,
-                proposal=proposal,
-            )
-        return EvolutionRequestResult(
-            skill_name=skill_name,
-            request_id=request.request_id,
-            approval_event=approval_event,
-            records=records,
-            auto_approved=auto_approve,
-            status=online_result.status,
-            message=online_result.message,
-        )
+        return await super().request_user_evolution(skill_name, user_intent)
 
     async def _detect_active_request_signals(
         self,
@@ -983,21 +915,12 @@ class TeamSkillEvolutionRail(EvolutionRail):
         signals.append(signal)
 
     def _is_active_request_subject(self, skill_name: str) -> bool:
-        """Return whether a requested team-skill subject is eligible for active evolution."""
+        """Return whether a requested subject exists for active evolution."""
         try:
-            if not self._store.skill_exists(skill_name):
-                return False
+            return bool(self._store.skill_exists(skill_name))
         except Exception:
             logger.debug("[TeamSkillEvolutionRail] could not validate skill existence for '%s'", skill_name)
             return False
-
-        try:
-            skill_dir = self._store.resolve_skill_dir(skill_name)
-        except Exception:
-            return True
-        if isinstance(skill_dir, (str, Path)):
-            return self._is_team_skill(skill_name)
-        return True
 
     # ===== Private helpers =====
 

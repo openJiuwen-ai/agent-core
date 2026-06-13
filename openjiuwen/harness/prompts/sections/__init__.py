@@ -25,3 +25,5 @@ class SectionName:
     EXTERNAL_MEMORY = "external_memory"
     COMPLETION_SIGNAL = "completion_signal"
     VERIFICATION_CONTRACT = "verification_contract"
+    EVOLUTION_PROTOCOL = "evolution_protocol"
+    EVOLUTION_TEAM_PROTOCOL = "evolution_team_protocol"

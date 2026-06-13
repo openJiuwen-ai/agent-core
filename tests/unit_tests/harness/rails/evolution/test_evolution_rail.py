@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, List
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import patch
@@ -14,8 +15,10 @@ from openjiuwen.agent_evolving.trajectory import (
     InMemoryTrajectoryStore,
     LLMCallDetail,
     Trajectory,
+    TrajectoryBuilder,
     TrajectoryStep,
 )
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -345,6 +348,94 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
 
         self.assertEqual(evolution_calls, ["evolution"])
 
+    async def test_after_tool_call_extension_point_runs_without_builder(self):
+        """Tool-call hooks should run even when trajectory recording is unavailable."""
+        call_log: List[str] = []
+
+        class HookOnlyRail(EvolutionRail):
+            async def _on_after_tool_call(self, ctx):
+                call_log.append(ctx.inputs.tool_name)
+
+        rail = HookOnlyRail(trajectory_store=self.store, async_evolution=False)
+
+        ctx = self._create_ctx(
+            AgentCallbackEvent.AFTER_TOOL_CALL,
+            ToolCallInputs(tool_name="test_tool", tool_args={}, tool_result="done"),
+        )
+        await rail.after_tool_call(ctx)
+
+        self.assertEqual(call_log, ["test_tool"])
+        self.assertIsNone(rail._build_trajectory())
+
+    async def test_online_tool_step_records_tool_call_id_and_parent_llm_ref(self):
+        rail = EvolutionRail(async_evolution=False)
+        rail._builder = TrajectoryBuilder(session_id="session-1", source="online")
+        agent = SimpleNamespace(card=SimpleNamespace(id="agent-1"), config=SimpleNamespace(model="m"))
+
+        await rail.after_model_call(
+            AgentCallbackContext(
+                agent=agent,
+                inputs=ModelCallInputs(
+                    messages=[{"role": "user", "content": "read file"}],
+                    response={"role": "assistant", "content": "", "tool_calls": [{"id": "call_read_1"}]},
+                ),
+            )
+        )
+        await rail.after_tool_call(
+            AgentCallbackContext(
+                agent=agent,
+                inputs=ToolCallInputs(
+                    tool_name="read_file",
+                    tool_args={"file_path": "a.txt"},
+                    tool_result={"success": True},
+                    tool_call=ToolCall(id="call_read_1", type="function", name="read_file", arguments="{}"),
+                ),
+            )
+        )
+
+        trajectory = rail._build_trajectory()
+        assert trajectory.steps[1].detail.tool_call_id == "call_read_1"
+        assert trajectory.steps[1].meta["parent_llm_call"] == "llm_0001"
+
+    async def test_online_tool_step_uses_matching_tool_call_id_for_parent_ref(self):
+        rail = EvolutionRail(async_evolution=False)
+        rail._builder = TrajectoryBuilder(session_id="session-1", source="online")
+        agent = SimpleNamespace(card=SimpleNamespace(id="agent-1"), config=SimpleNamespace(model="m"))
+
+        await rail.after_model_call(
+            AgentCallbackContext(
+                agent=agent,
+                inputs=ModelCallInputs(
+                    messages=[{"role": "user", "content": "read file"}],
+                    response={"role": "assistant", "content": "", "tool_calls": [{"id": "call_read_1"}]},
+                ),
+            )
+        )
+        await rail.after_model_call(
+            AgentCallbackContext(
+                agent=agent,
+                inputs=ModelCallInputs(
+                    messages=[{"role": "user", "content": "unrelated followup"}],
+                    response={"role": "assistant", "content": "no tool here"},
+                ),
+            )
+        )
+        await rail.after_tool_call(
+            AgentCallbackContext(
+                agent=agent,
+                inputs=ToolCallInputs(
+                    tool_name="read_file",
+                    tool_args={"file_path": "a.txt"},
+                    tool_result={"success": True},
+                    tool_call=ToolCall(id="call_read_1", type="function", name="read_file", arguments="{}"),
+                ),
+            )
+        )
+
+        trajectory = rail._build_trajectory()
+        assert trajectory.steps[2].detail.tool_call_id == "call_read_1"
+        assert trajectory.steps[2].meta["parent_llm_call"] == "llm_0001"
+
     async def test_after_evolution_triggered_hook_runs_after_trigger(self):
         """Subclasses can observe successful trigger scheduling after evolution starts."""
         call_log: List[str] = []
@@ -412,7 +503,7 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         joined = "\n".join(debug_messages)
         self.assertIn("[EvolutionRail] created trajectory builder session_id=session-logs", joined)
         self.assertIn("[EvolutionRail] reusing trajectory builder session_id=session-logs", joined)
-        self.assertIn("[EvolutionRail] after_tool_call skipped because trajectory builder is empty", joined)
+        self.assertIn("[EvolutionRail] after_tool_call trajectory recording skipped because builder is empty", joined)
 
     async def test_no_op_without_builder(self):
         """Test that hooks are no-op when builder is not initialized."""
