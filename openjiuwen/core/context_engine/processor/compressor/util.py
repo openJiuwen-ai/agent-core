@@ -9,6 +9,16 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.context_engine.processor.compressor.reinjection import (
+    StateReinjector as FullCompactStateReinjector,
+    build_file_reinjected_content,
+    build_plan_mode_reinjected_content,
+    build_plan_reinjected_content,
+    build_skill_reinjected_content,
+    build_task_status_reinjected_content,
+    build_todo_reinjected_content,
+    build_tool_result_hint_reinjected_content,
+)
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     group_completed_api_rounds as group_completed_api_round_ranges,
 )
@@ -20,161 +30,6 @@ class ReinjectedStateBuilderSpec:
     name: str
     label: str
     builder: Callable[..., Any]
-
-
-class FullCompactStateReinjector:
-    def __init__(self) -> None:
-        self._builders: List[ReinjectedStateBuilderSpec] = []
-
-    def register_builder(
-        self,
-        *,
-        name: str,
-        label: str,
-        builder: Callable[..., Any],
-    ) -> None:
-        spec = ReinjectedStateBuilderSpec(name=name, label=label, builder=builder)
-        for index, existing in enumerate(self._builders):
-            if existing.name == name:
-                self._builders[index] = spec
-                return
-        self._builders.append(spec)
-
-    def iter_builders(self) -> Tuple[ReinjectedStateBuilderSpec, ...]:
-        return tuple(self._builders)
-
-
-def build_plan_reinjected_content(
-    processor: Any,
-    *,
-    context: Any,
-    messages: List[BaseMessage],
-    messages_to_keep: List[BaseMessage],
-) -> str:
-    _ = processor, context, messages, messages_to_keep
-    return ""
-
-
-def build_skill_reinjected_content(
-    processor: Any,
-    *,
-    context: Any,
-    messages: List[BaseMessage],
-    messages_to_keep: List[BaseMessage],
-) -> List[UserMessage]:
-    _ = context
-    keep_signatures = {message_signature(message) for message in messages_to_keep}
-    selected_rounds: List[List[BaseMessage]] = []
-    seen_round_signatures: set[tuple[str, ...]] = set()
-
-    for round_messages in reversed(group_completed_api_rounds(messages)):
-        round_signatures = tuple(message_signature(message) for message in round_messages)
-        if round_signatures in seen_round_signatures:
-            continue
-        if any(signature in keep_signatures for signature in round_signatures):
-            continue
-        if not round_contains_skill_read(round_messages):
-            continue
-        selected_rounds.append([message.model_copy(deep=True) for message in round_messages])
-        seen_round_signatures.add(round_signatures)
-        if len(selected_rounds) >= processor.advanced_config.reinject_recent_skills:
-            break
-
-    selected_rounds.reverse()
-    reinjected_messages: List[UserMessage] = []
-    for round_messages in selected_rounds:
-        serialized_round = "\n".join(
-            f"role={message.role}, content={message_to_text(message)}" for message in round_messages
-        )
-        reinjected_messages.append(
-            UserMessage(
-                content=(
-                    f"{processor.state_marker}\n[SKILLS]\n{processor.truncate_state_text(serialized_round)}"
-                )
-            )
-        )
-    return reinjected_messages
-
-
-def build_file_reinjected_content(
-    processor: Any,
-    *,
-    context: Any,
-    messages: List[BaseMessage],
-    messages_to_keep: List[BaseMessage],
-) -> str:
-    _ = processor, context, messages, messages_to_keep
-    return ""
-
-
-def build_task_status_reinjected_content(
-    processor: Any,
-    *,
-    context: Any,
-    messages: List[BaseMessage],
-    messages_to_keep: List[BaseMessage],
-) -> str:
-    _ = messages, messages_to_keep
-    session_state = context.get_session_ref().get_state()
-    try:
-        iteration = int(session_state.get("task_state", {}).get("iteration") or 0)
-    except Exception:
-        iteration = 0
-    try:
-        pending_follow_ups = list(session_state.get("task_state", {}).get("pending_follow_ups") or [])
-    except Exception:
-        pending_follow_ups = []
-
-    stop_condition_state = (
-        session_state.get("task_state", {}).get("stop_condition_state", {})
-        if isinstance(session_state.get("task_state", {}), dict)
-        else None
-    )
-    stop_reason = stop_condition_state.get("stop_reason") if isinstance(stop_condition_state, dict) else None
-
-    if not iteration and not pending_follow_ups and not stop_reason:
-        return ""
-
-    lines = [
-        "Current task-loop status for this session:",
-        f"- Completed outer-loop rounds: {iteration}.",
-        f"- Pending follow-up queries: {len(pending_follow_ups)}.",
-    ]
-    if stop_reason:
-        lines.append(f"- Last recorded stop reason: {stop_reason}.")
-    return processor.truncate_state_text("\n".join(lines))
-
-
-def build_plan_mode_reinjected_content(
-    processor: Any,
-    *,
-    context: Any,
-    messages: List[BaseMessage],
-    messages_to_keep: List[BaseMessage],
-) -> str:
-    _ = messages, messages_to_keep
-    session_state = context.get_session_ref().get_state()
-
-    try:
-        plan_mode = session_state.get("plan_mode", {})
-    except Exception:
-        plan_mode = None
-    if not isinstance(plan_mode, dict):
-        return ""
-
-    mode = plan_mode.get("mode", "auto")
-    pre_plan_mode = plan_mode.get("pre_plan_mode", "")
-    plan_slug = plan_mode.get("plan_slug", "")
-
-    lines = [
-        "Current plan-mode status for this session:",
-        f"- Active mode: {mode}.",
-    ]
-    if pre_plan_mode:
-        lines.append(f"- Previous mode before entering plan mode: {pre_plan_mode}.")
-    if plan_slug:
-        lines.append(f"- Active plan identifier: {plan_slug}.")
-    return processor.truncate_state_text("\n".join(lines))
 
 
 def is_skill_file_path(file_path: str) -> bool:

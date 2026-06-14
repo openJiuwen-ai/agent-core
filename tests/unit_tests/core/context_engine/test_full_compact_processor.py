@@ -529,6 +529,97 @@ class TestFullCompactProcessor:
 
         assert [type(message) for message in reinjected] == [UserMessage]
 
+    def test_build_reinjected_state_messages_includes_recent_read_file_content(self):
+        from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import FullCompactProcessor
+
+        processor = FullCompactProcessor(
+            FullCompactProcessorConfig(
+                reinject_read_file_max_files=2,
+                reinject_read_file_max_chars_per_file=1000,
+                reinject_read_file_total_chars=2000,
+            )
+        )
+        source_messages = [
+            UserMessage(content="read a file"),
+            AssistantMessage(
+                content="",
+                tool_calls=[
+                    create_tool_call(
+                        "tc-file",
+                        "read_file",
+                        '{"file_path": "/repo/src/app.py", "offset": 1, "limit": 20}',
+                    )
+                ],
+            ),
+            ToolMessage(
+                content='{"content":"def main():\\n    return 1\\n","file_path":"/repo/src/app.py","line_count":2}',
+                tool_call_id="tc-file",
+            ),
+        ]
+
+        reinjected = processor.build_reinjected_state_messages(
+            context=MagicMock(),
+            source_messages=source_messages,
+            messages_to_keep=[],
+            summary_message=UserMessage(content="summary"),
+            boundary_message=SystemMessage(content="boundary"),
+            builder_names=["read_file"],
+        )
+
+        assert len(reinjected) == 1
+        assert "[READ_FILE]" in reinjected[0].content
+        assert "Recently read file: /repo/src/app.py" in reinjected[0].content
+        assert "Partial read: true" in reinjected[0].content
+        assert "def main():" in reinjected[0].content
+
+    @pytest.mark.asyncio
+    async def test_forked_compression_executor_builds_request_from_main_agent_prefix(self):
+        from openjiuwen.core.context_engine.processor.compressor.forked.executor import (
+            ForkedCompressionExecutor,
+            ForkedCompressionRequest,
+        )
+
+        model = MagicMock()
+        model.invoke = AsyncMock(return_value=AssistantMessage(content="<summary>ok</summary>"))
+        executor = ForkedCompressionExecutor(model=model)
+        request = ForkedCompressionRequest(
+            prompt="compact now",
+            system_messages=[SystemMessage(content="system")],
+            context_messages=[
+                UserMessage(content="u1"),
+                AssistantMessage(content="a1"),
+                UserMessage(content="current user"),
+            ],
+            tools=["tool-schema"],
+            exclude_recent_messages=1,
+        )
+
+        result = await executor.invoke(request)
+
+        assert result.content == "<summary>ok</summary>"
+        assert result.response.content == "<summary>ok</summary>"
+        assert result.usage is None
+        invoked_messages = model.invoke.await_args.kwargs["messages"]
+        assert [message.content for message in invoked_messages] == ["system", "u1", "a1", "compact now"]
+        assert model.invoke.await_args.kwargs["tools"] == ["tool-schema"]
+
+    def test_full_compact_registers_reinjection_extension_points(self):
+        from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import FullCompactProcessor
+
+        processor = FullCompactProcessor(FullCompactProcessorConfig())
+
+        builder_names = {spec.name for spec in processor._state_reinjector.iter_builders()}  # type: ignore[attr-defined]
+
+        assert {
+            "plan",
+            "plan_mode",
+            "skills",
+            "task_status",
+            "read_file",
+            "tool_result_hint",
+            "todo",
+        }.issubset(builder_names)
+
     def test_session_memory_manager_select_unsummarized_messages_prefers_message_id(self):
         from openjiuwen.core.context_engine.context.session_memory_manager import (
             SessionMemoryManager,

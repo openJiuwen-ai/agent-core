@@ -20,11 +20,20 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
 )
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
+from openjiuwen.core.context_engine.processor.compressor.forked import (
+    ForkedCompressionExecutor,
+    ForkedCompressionRequest,
+)
+from openjiuwen.core.context_engine.processor.compressor.reinjection import ReinjectContext
 from openjiuwen.core.context_engine.processor.compressor.util import (
     FullCompactStateReinjector,
+    build_file_reinjected_content,
     build_plan_mode_reinjected_content,
+    build_plan_reinjected_content,
     build_task_status_reinjected_content,
     build_skill_reinjected_content,
+    build_todo_reinjected_content,
+    build_tool_result_hint_reinjected_content,
 )
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
@@ -162,6 +171,15 @@ following this structure and ensuring precision and thoroughness in your respons
 )
 
 
+def _load_prompt_file(name: str, fallback: str) -> str:
+    prompt_path = Path(__file__).resolve().parent / "prompts" / name
+    try:
+        content = prompt_path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return fallback
+    return content or fallback
+
+
 FULL_COMPACT_BOUNDARY_MARKER = "[FULL_COMPACT_BOUNDARY]"
 FULL_COMPACT_STATE_MARKER = "[FULL_COMPACT_STATE]"
 SESSION_MEMORY_BOUNDARY_MARKER = "[SESSION_MEMORY_BOUNDARY]"
@@ -228,6 +246,9 @@ class FullCompactProcessorConfig(BaseModel):
         default=["read_file", "write_file", "edit_file", "glob", "grep"],
         description="Tool names eligible for compact tool-result hints.",
     )
+    reinject_read_file_max_files: int = Field(default=5, ge=0)
+    reinject_read_file_max_chars_per_file: int = Field(default=15000, gt=0)
+    reinject_read_file_total_chars: int = Field(default=50000, gt=0)
 
     # Advanced marker and prompt text settings.
     marker: str = Field(default=FULL_COMPACT_BOUNDARY_MARKER)
@@ -260,6 +281,11 @@ class FullCompactProcessor(ContextProcessor):
         self._session_memory_intro = config.session_memory_intro
         self._state_reinjector = FullCompactStateReinjector()
         self._state_reinjector.register_builder(
+            name="plan",
+            label="PLAN",
+            builder=build_plan_reinjected_content,
+        )
+        self._state_reinjector.register_builder(
             name="skills",
             label="SKILLS",
             builder=build_skill_reinjected_content,
@@ -274,9 +300,26 @@ class FullCompactProcessor(ContextProcessor):
             label="PLAN_MODE",
             builder=build_plan_mode_reinjected_content,
         )
+        self._state_reinjector.register_builder(
+            name="read_file",
+            label="READ_FILE",
+            builder=build_file_reinjected_content,
+        )
+        self._state_reinjector.register_builder(
+            name="tool_result_hint",
+            label="TOOL_RESULT_HINT",
+            builder=build_tool_result_hint_reinjected_content,
+        )
+        self._state_reinjector.register_builder(
+            name="todo",
+            label="TODO",
+            builder=build_todo_reinjected_content,
+        )
         self._model: Model | None = None
+        self._forked_executor: ForkedCompressionExecutor | None = None
         if config.model is not None and config.model_client is not None:
             self._model = Model(config.model_client, config.model)
+            self._forked_executor = ForkedCompressionExecutor(self._model)
 
     @property
     def config(self) -> FullCompactProcessorConfig:
@@ -428,7 +471,15 @@ class FullCompactProcessor(ContextProcessor):
                 messages_to_keep=messages_to_keep,
                 summary_message=summary_message,
                 boundary_message=boundary,
-                builder_names=["plan", "plan_mode", "skills", "task_status"],
+                builder_names=[
+                    "plan",
+                    "plan_mode",
+                    "skills",
+                    "task_status",
+                    "read_file",
+                    "tool_result_hint",
+                    "todo",
+                ],
             )
         )
         return new_context_messages, summary
@@ -506,12 +557,20 @@ class FullCompactProcessor(ContextProcessor):
         if self._model is None:
             return self._build_fallback_summary(messages)
 
-        prompt_messages = [
-            SystemMessage(content=BASE_COMPACT_PROMPT),
-            UserMessage(content=self._serialize_messages(messages)),
-        ]
+        prompt = (
+            _load_prompt_file("full_compact.txt", BASE_COMPACT_PROMPT)
+            + "\n\n[Conversation]\n"
+            + self._serialize_messages(messages)
+        )
         try:
-            response = await self._model.invoke(messages=prompt_messages, tools=None)
+            executor = self._forked_executor or ForkedCompressionExecutor(self._model)
+            response = await executor.invoke(
+                ForkedCompressionRequest(
+                    prompt=prompt,
+                    context_messages=[],
+                    tools=None,
+                )
+            )
             self._record_compression_usage(response)
             content = (response.content or "").strip()
             if not content:
@@ -776,23 +835,26 @@ class FullCompactProcessor(ContextProcessor):
         if not candidate_messages:
             return []
 
-        active_builder_names = set(builder_names) if builder_names is not None else None
-        state_messages: List[BaseMessage] = []
-        for builder_spec in self._state_reinjector.iter_builders():
-            if active_builder_names is not None and builder_spec.name not in active_builder_names:
-                continue
-            content = builder_spec.builder(
-                self,
-                context=context,
-                messages=candidate_messages,
-                messages_to_keep=messages_to_keep,
-            )
-            if isinstance(content, list):
-                state_messages.extend(content)
-                continue
-            if content:
-                state_messages.append(self._make_state_message(builder_spec.label, content))
-        return state_messages
+        session_state: dict[str, Any] = {}
+        try:
+            session = context.get_session_ref()
+            if session is not None and hasattr(session, "get_state"):
+                state = session.get_state()
+                if isinstance(state, dict):
+                    session_state = state
+        except Exception:
+            session_state = {}
+        reinject_context = ReinjectContext(
+            session_state=session_state,
+            source_messages=candidate_messages,
+            messages_to_keep=messages_to_keep,
+            workspace_root=context.workspace_dir() if hasattr(context, "workspace_dir") else None,
+            config=self.config,
+            state_marker=self._state_marker,
+            truncate=self.truncate_state_text,
+            context=context,
+        )
+        return self._state_reinjector.build_messages(reinject_context, only=builder_names)
 
     def _make_state_message(self, label: str, content: str) -> UserMessage:
         compact_content = self.truncate_state_text(content)

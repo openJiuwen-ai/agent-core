@@ -15,6 +15,7 @@ from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextProcessor, ContextEvent
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.processor.offloader.rules import RuleCompressionPipeline
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
 
@@ -63,6 +64,21 @@ class MessageOffloaderConfig(BaseModel):
     keep_last_round: bool = Field(default=True)
     """If True, the most recent user-assistant round is always preserved even if it would otherwise be offloaded."""
 
+    rule_compression_ratio: float = Field(default=0.2, gt=0.0, lt=1.0)
+    """Single-message threshold ratio for deterministic rule compression."""
+
+    rule_compression_context_window_tokens: int | None = Field(default=None, gt=0)
+    """Optional context window token budget used to derive the 20% rule-compression threshold."""
+
+    rule_compression_ttl_seconds: int = Field(default=300, ge=0)
+    """Minimum interval before the same message may be re-evaluated by the rule pipeline."""
+
+    rule_truncate_head_tokens: int = Field(default=2000, gt=0)
+    """Approximate head tokens retained when rule-compressed content remains oversized."""
+
+    rule_truncate_tail_tokens: int = Field(default=2000, gt=0)
+    """Approximate tail tokens retained when rule-compressed content remains oversized."""
+
 
 OMIT_STRING = "..."
 
@@ -72,6 +88,7 @@ class MessageOffloader(ContextProcessor):
     def __init__(self, config: MessageOffloaderConfig):
         super().__init__(config)
         self._validate_config()
+        self._rule_pipeline = RuleCompressionPipeline()
 
     async def on_add_messages(
             self,
@@ -97,6 +114,8 @@ class MessageOffloader(ContextProcessor):
     ) -> bool:
         config = self.config
         all_messages = context.get_messages() + messages_to_add
+        if self._has_rule_compression_candidate(messages_to_add, context):
+            return True
         message_size = len(all_messages)
         if config.messages_to_keep and message_size <= config.messages_to_keep:
             return False
@@ -122,6 +141,9 @@ class MessageOffloader(ContextProcessor):
             return True
         return False
 
+    def _has_rule_compression_candidate(self, messages: List[BaseMessage], context: ModelContext) -> bool:
+        return self._rule_pipeline.has_candidate(messages, context, self.config)
+
     async def _offload_large_messages(
             self,
             messages: List[BaseMessage],
@@ -134,15 +156,29 @@ class MessageOffloader(ContextProcessor):
         event = ContextEvent(event_type=self.processor_type())
         for idx in range(offload_range - 1, -1, -1):
             msg = processed_messages[idx]
-            if not self._should_offload_message(msg, processed_messages, context):
+            if not self._should_consider_message(msg, processed_messages):
                 continue
-            offload_msg = await self._offload_message(msg, context, **kwargs)
-            processed_messages = ContextUtils.replace_messages(
-                processed_messages, [offload_msg], idx, idx
-            )
+            replacement = await self._process_large_message(msg, processed_messages, context, **kwargs)
+            if replacement is None:
+                continue
+            processed_messages = ContextUtils.replace_messages(processed_messages, [replacement], idx, idx)
             event.messages_to_modify.append(idx)
 
         return event, processed_messages
+
+    async def _process_large_message(
+            self,
+            message: BaseMessage,
+            context_messages: List[BaseMessage],
+            context: ModelContext,
+            **kwargs
+    ) -> BaseMessage | None:
+        processed = self._apply_rule_compression_if_needed(message, context)
+        if self._should_offload_message(processed, context_messages, context):
+            return await self._offload_message(processed, context, original_message=message, **kwargs)
+        if processed is not message:
+            return processed
+        return None
 
     async def _offload_message(
             self,
@@ -150,15 +186,19 @@ class MessageOffloader(ContextProcessor):
             context: ModelContext,
             **kwargs
     ) -> BaseMessage:
-        trimmed_content = message.content[:self.config.trim_size] + OMIT_STRING
+        if self._is_rule_compressed_message(message):
+            trimmed_content = message.content
+        else:
+            trimmed_content = message.content[:self.config.trim_size] + OMIT_STRING
         extra_fields = message.model_dump()
+        original_message = kwargs.pop("original_message", message)
         extra_fields.pop("role", None)
         extra_fields.pop("content", None)
         offload_handle, offload_path = self._new_offload_handle_and_path(context)
         offload_message = await self.offload_messages(
             role=message.role,
             content=trimmed_content,
-            messages=[message],
+            messages=[original_message],
             context=context,
             offload_handle=offload_handle,
             offload_path=offload_path,
@@ -166,6 +206,11 @@ class MessageOffloader(ContextProcessor):
             **kwargs
         )
         return offload_message
+
+    @staticmethod
+    def _is_rule_compressed_message(message: BaseMessage) -> bool:
+        metadata = getattr(message, "metadata", None) or {}
+        return bool(metadata.get("rule_compressed_at"))
 
     def _new_offload_handle_and_path(self, context: ModelContext) -> tuple[str, str | None]:
         offload_handle = uuid.uuid4().hex
@@ -217,9 +262,26 @@ class MessageOffloader(ContextProcessor):
     def _has_offload_candidate(self, messages: List[BaseMessage], context: ModelContext) -> bool:
         offload_range = self._get_offload_range(messages)
         for idx in range(offload_range - 1, -1, -1):
-            if self._should_offload_message(messages[idx], messages, context):
+            if self._should_consider_message(messages[idx], messages):
                 return True
         return False
+
+    def _should_consider_message(
+        self,
+        message: BaseMessage,
+        context_messages: List[BaseMessage],
+    ) -> bool:
+        if message.role not in self.config.offload_message_type:
+            return False
+        if not isinstance(getattr(message, "content", None), str):
+            return False
+        if len(message.content) <= self.config.large_message_threshold:
+            return False
+        if isinstance(message, OffloadMixin):
+            return False
+        if self._is_protected_tool_message(message, context_messages):
+            return False
+        return True
 
     def _should_offload_message(
         self,
@@ -238,6 +300,29 @@ class MessageOffloader(ContextProcessor):
         if self._is_protected_tool_message(message, context_messages):
             return False
         return True
+
+    def _apply_rule_compression_if_needed(self, message: BaseMessage, context: ModelContext) -> BaseMessage:
+        return self._rule_pipeline.compress_if_needed(message, context, self.config)
+
+    def _rule_compression_threshold(self, context: ModelContext) -> int:
+        _ = context
+        return self._rule_pipeline.threshold(self.config)
+
+    def _estimate_content_tokens(self, content: str, context: ModelContext) -> int:
+        return self._estimate_text_tokens(content, context)
+
+    @staticmethod
+    def _estimate_text_tokens(content: str, context: ModelContext) -> int:
+        return RuleCompressionPipeline.estimate_text_tokens(content, context)
+
+    def _truncate_head_tail_by_tokens(
+        self,
+        content: str,
+        head_tokens: int,
+        tail_tokens: int,
+        context: ModelContext,
+    ) -> str:
+        return self._rule_pipeline.truncate_head_tail_by_tokens(content, head_tokens, tail_tokens, context)
 
     def _is_protected_tool_message(
         self,

@@ -695,3 +695,44 @@ class TestMessageOffloader:
         tool_msg = result[2]
         assert not isinstance(tool_msg, OffloadMixin)
         assert tool_msg.content == long_content
+
+    @pytest.mark.asyncio
+    async def test_rule_compresses_large_tool_message_before_offload(self):
+        """Large tool results are deterministically compressed before the original is offloaded."""
+        config = MessageOffloaderConfig(
+            messages_threshold=100,
+            tokens_threshold=100000,
+            large_message_threshold=10,
+            trim_size=5,
+            offload_message_type=["tool"],
+            keep_last_round=False,
+            rule_compression_context_window_tokens=120,
+            rule_compression_ratio=0.2,
+        )
+        ctx = await create_context_with_offloader(config)
+        content = "\n".join(f"src/app.py:{idx}: match {idx}" for idx in range(1, 60))
+
+        await ctx.add_messages([ToolMessage(content=content, tool_call_id="tc-search")])
+
+        result = ctx.get_messages()
+        assert len(result) == 1
+        assert isinstance(result[0], OffloadMixin)
+        assert "[... and" in result[0].content
+        assert result[0].tool_call_id == "tc-search"
+        reloaded = await ctx.reloader_tool().invoke(
+            dict(offload_handle=result[0].offload_handle, offload_type="in_memory")
+        )
+        assert "src/app.py:59: match 59" in reloaded
+
+    def test_message_offloader_owns_rule_compression_pipeline(self):
+        from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloader
+        from openjiuwen.core.context_engine.processor.offloader.rules import RuleCompressionPipeline
+
+        offloader = MessageOffloader(
+            MessageOffloaderConfig(
+                large_message_threshold=10,
+                trim_size=5,
+            )
+        )
+
+        assert isinstance(offloader._rule_pipeline, RuleCompressionPipeline)  # type: ignore[attr-defined]
