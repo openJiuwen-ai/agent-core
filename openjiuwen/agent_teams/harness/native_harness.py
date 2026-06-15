@@ -980,6 +980,22 @@ class NativeHarness(DeepAgent):
             # timed-out round has no answer to show. Only stream genuine round
             # results (normal answers / HITL / workflow interrupts) so harness
             # output matches a plain DeepAgent run.
+            if isinstance(result, dict) and result.get("error") == "completion_timeout":
+                # The harness gave up waiting, but the TaskScheduler task may
+                # still be running (e.g. a slow API call).  Cancel it now so
+                # it doesn't linger as a zombie that concurrently writes to the
+                # context buffer when the next round starts, causing
+                # interleaved messages and 400 errors.
+                controller = self.loop_controller
+                if controller is not None and controller.task_scheduler is not None:
+                    try:
+                        await controller.task_scheduler.cancel_task(active.task_id)
+                    except Exception:
+                        logger.exception(
+                            "[NativeHarness] cancel_task failed after "
+                            "completion_timeout, round_id=%s",
+                            active.round_id,
+                        )
             if not (isinstance(result, dict) and result.get("error")):
                 await self._write_round_result_to_stream(result, self._session)
         except asyncio.CancelledError:
