@@ -28,6 +28,7 @@ from openjiuwen.core.single_agent.interrupt.state import (
     ToolInterruptionState,
     RESUME_START_ITERATION_KEY, INTERRUPT_AUTO_CONFIRM_KEY,
 )
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 
 
@@ -330,7 +331,10 @@ class ToolInterruptHandler:
 
         if tools_to_execute:
             execute_tool_call = resume_ctx.execute_tool_call
-            results = await execute_tool_call(ctx, tools_to_execute, session, context)
+            async with AbilityManager.tool_batch_scope(session):
+                results = await execute_tool_call(
+                    ctx, tools_to_execute, session, context,
+                )
         else:
             results = []
 

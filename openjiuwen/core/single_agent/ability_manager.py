@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import List, Any, Union, Optional, Tuple, Dict
+from typing import List, Any, Union, Optional, Tuple, Dict, ClassVar
 from pydantic import BaseModel
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -29,6 +30,7 @@ from openjiuwen.core.workflow import WorkflowCard
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
+from openjiuwen.core.single_agent.tool_batch_concurrency import ToolBatchConcurrencyController
 
 # Ability type definition
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
@@ -91,12 +93,85 @@ class AbilityManager:
     - Execute ability calls (get instances from ResourceManager)
     """
 
+    _tool_batch_concurrency: ClassVar[Optional[ToolBatchConcurrencyController]] = None
+
     def __init__(self):
         self._tools: Dict[str, ToolCard] = {}
         self._workflows: Dict[str, WorkflowCard] = {}
         self._agents: Dict[str, AgentCard] = {}
         self._mcp_servers: Dict[str, McpServerConfig] = {}
         self._context_engine = None
+
+    @classmethod
+    def configure_tool_batch_concurrency(
+        cls,
+        controller: Optional[ToolBatchConcurrencyController],
+    ) -> None:
+        """Register batch-scoped tool concurrency controller (optional, host-provided).
+
+        Registering a controller does **not** limit all ``execute_single`` calls.
+        Callers must enter ``tool_batch_scope`` (e.g. ReAct iteration or resume
+        paths) so ``run_with_slot`` sees an active batch context.
+
+        Thread-unsafe: call once at startup on the agent asyncio event loop.
+        """
+        cls._tool_batch_concurrency = controller
+
+    @classmethod
+    @asynccontextmanager
+    async def tool_batch_scope(cls, session: Optional[Session]):
+        """Re-entrant batch scope for one model-response tool batch.
+
+        Required for policy limits to apply: ``run_with_slot`` is a no-op when
+        no batch context is active (scope-outside ``execute_single`` is unlimited).
+        """
+        ctrl = cls._tool_batch_concurrency
+        if ctrl is None:
+            yield
+            return
+        async with ctrl.batch_scope(session_id=cls._session_label(session)):
+            yield
+
+    @staticmethod
+    def _session_label(session: Optional[Session]) -> str:
+        """Resolve a session id string for batch-scope logging.
+
+        Fallback order matches jiuwenclaw agent Session (``get_session_id``),
+        workflow sessions (``session_id()``), then generic attributes.
+        """
+        if session is None:
+            return "-"
+
+        sid_getter = getattr(session, "get_session_id", None)
+        if callable(sid_getter):
+            try:
+                value = sid_getter()
+                if value:
+                    return str(value)
+            except Exception as exc:
+                logger.debug(
+                    "Failed to read session id via get_session_id(): %s",
+                    exc,
+                )
+
+        sid_attr = getattr(session, "session_id", None)
+        if callable(sid_attr):
+            try:
+                value = sid_attr()
+                if value:
+                    return str(value)
+            except Exception as exc:
+                logger.debug(
+                    "Failed to read session id via session_id(): %s",
+                    exc,
+                )
+        elif sid_attr:
+            return str(sid_attr)
+
+        sid = getattr(session, "id", None)
+        if sid:
+            return str(sid)
+        return "-"
 
     @staticmethod
     def _build_tool_message_content(result: Any) -> str:
@@ -594,13 +669,20 @@ class AbilityManager:
         if parent_ctx.steering_queue is not None:
             tool_ctx.bind_steering_queue(parent_ctx.steering_queue)
 
-        try:
-            result, tool_msg = await self._railed_execute_single_tool_call(
+        async def _run_railed() -> Tuple[Any, ToolMessage]:
+            return await self._railed_execute_single_tool_call(
                 ctx=tool_ctx,
                 tool_call=tool_call,
                 session=session,
                 tag=tag,
             )
+
+        controller = AbilityManager._tool_batch_concurrency
+        try:
+            if controller is not None:
+                result, tool_msg = await controller.run_with_slot(tool_call, _run_railed)
+            else:
+                result, tool_msg = await _run_railed()
         except ToolInterruptException as e:
             return e, None, tool_ctx
         except Exception as e:

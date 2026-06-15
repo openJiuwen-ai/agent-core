@@ -50,6 +50,7 @@ from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.interrupt.handler import ToolInterruptHandler, ResumeContext
 from openjiuwen.core.single_agent.interrupt.state import (
     BaseInterruptionState,
@@ -1398,7 +1399,10 @@ class ReActAgent(BaseAgent):
             tc_copy.arguments = entry.collected_input
             all_tool_calls.append(tc_copy)
 
-        results = await self._execute_tool_call(ctx, all_tool_calls, session, context)
+        async with AbilityManager.tool_batch_scope(session):
+            results = await self._execute_tool_call(
+                ctx, all_tool_calls, session, context,
+            )
         workflow_interrupt = self._after_execute_tool_call(
             results, all_tool_calls, resume_ai_message, resume_iteration,
             original_query=interruption_state.original_query,
@@ -1667,91 +1671,98 @@ class ReActAgent(BaseAgent):
                             _session_id,
                             iteration + 1,
                         )
-                        ai_message = await self._call_model(
-                            ctx,
-                            context,
-                            tools,
-                        )
-                        logger.debug(
-                            "[ReActAgent] model_call done session_id=%s iteration=%s "
-                            "elapsed_ms=%.1f has_tool_calls=%s",
-                            _session_id,
-                            iteration + 1,
-                            (time.perf_counter() - _model_start) * 1000,
-                            bool(ai_message and getattr(ai_message, "tool_calls", None)),
-                        )
+                        async with AbilityManager.tool_batch_scope(session):
+                            ai_message = await self._call_model(
+                                ctx,
+                                context,
+                                tools,
+                            )
+                            logger.debug(
+                                "[ReActAgent] model_call done session_id=%s iteration=%s "
+                                "elapsed_ms=%.1f has_tool_calls=%s",
+                                _session_id,
+                                iteration + 1,
+                                (time.perf_counter() - _model_start) * 1000,
+                                bool(ai_message and getattr(ai_message, "tool_calls", None)),
+                            )
 
-                        finish = ctx.consume_force_finish()
-                        if finish:
-                            await self.context_engine.save_contexts(session)
-                            invoke_inputs.result = finish.result
-                            break
+                            finish = ctx.consume_force_finish()
+                            if finish:
+                                await self.context_engine.save_contexts(session)
+                                invoke_inputs.result = finish.result
+                                break
 
-                        await context.add_messages(
-                            AssistantMessage(
-                                content=ai_message.content,
-                                tool_calls=ai_message.tool_calls,
-                                reasoning_content=getattr(ai_message, "reasoning_content", None),
-                                usage_metadata=ai_message.usage_metadata,
-                            ),
-                            system_messages=ctx.extra.get("_active_system_messages") or [],
-                            tools=ctx.extra.get("_active_tools") or [],
-                        )
+                            await context.add_messages(
+                                AssistantMessage(
+                                    content=ai_message.content,
+                                    tool_calls=ai_message.tool_calls,
+                                    reasoning_content=getattr(ai_message, "reasoning_content", None),
+                                    usage_metadata=ai_message.usage_metadata,
+                                ),
+                                system_messages=ctx.extra.get("_active_system_messages") or [],
+                                tools=ctx.extra.get("_active_tools") or [],
+                            )
 
-                        if not ai_message.tool_calls:
-                            # If steering arrived while the
-                            # model was generating, continue
-                            # the loop so the next iteration
-                            # drains and injects it.
-                            if ctx.has_pending_steering():
-                                continue
-                            await self.context_engine.save_contexts(session)
-                            result = {"output": ai_message.content, "result_type": "answer"}
-                            invoke_inputs.result = result
-                            break
+                            if not ai_message.tool_calls:
+                                # If steering arrived while the
+                                # model was generating, continue
+                                # the loop so the next iteration
+                                # drains and injects it.
+                                if ctx.has_pending_steering():
+                                    continue
+                                await self.context_engine.save_contexts(session)
+                                result = {"output": ai_message.content, "result_type": "answer"}
+                                invoke_inputs.result = result
+                                break
 
-                        _tool_names = [
-                            getattr(tc, "name", "") for tc in ai_message.tool_calls
-                        ]
-                        _tools_start = time.perf_counter()
-                        logger.debug(
-                            "[ReActAgent] tool_call start session_id=%s iteration=%s tools=%s",
-                            _session_id,
-                            iteration + 1,
-                            _tool_names,
-                        )
-                        results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
-                        logger.debug(
-                            "[ReActAgent] tool_call done session_id=%s iteration=%s tools=%s "
-                            "elapsed_ms=%.1f continuing_loop",
-                            _session_id,
-                            iteration + 1,
-                            _tool_names,
-                            (time.perf_counter() - _tools_start) * 1000,
-                        )
+                            _tool_names = [
+                                getattr(tc, "name", "") for tc in ai_message.tool_calls
+                            ]
+                            _tools_start = time.perf_counter()
+                            logger.debug(
+                                "[ReActAgent] tool_call start session_id=%s iteration=%s tools=%s",
+                                _session_id,
+                                iteration + 1,
+                                _tool_names,
+                            )
+                            results = await self._execute_tool_call(
+                                ctx, ai_message.tool_calls, session, context,
+                            )
+                            logger.debug(
+                                "[ReActAgent] tool_call done session_id=%s iteration=%s tools=%s "
+                                "elapsed_ms=%.1f continuing_loop",
+                                _session_id,
+                                iteration + 1,
+                                _tool_names,
+                                (time.perf_counter() - _tools_start) * 1000,
+                            )
 
-                        finish = ctx.consume_force_finish()
-                        if finish:
-                            await self.context_engine.save_contexts(session)
-                            invoke_inputs.result = finish.result
-                            break
+                            finish = ctx.consume_force_finish()
+                            if finish:
+                                await self.context_engine.save_contexts(session)
+                                invoke_inputs.result = finish.result
+                                break
 
-                        hitl_interrupt, sub_agent_outputs = self._after_execute_tool_call_for_hitl(
-                            results, ai_message.tool_calls, ai_message, iteration,
-                            original_query=ctx.extra.get("_original_query", ""),
-                        )
-                        if hitl_interrupt:
-                            await self._commit_interrupt(hitl_interrupt, context, session, invoke_inputs,
-                                                         sub_agent_outputs)
-                            break
+                            hitl_interrupt, sub_agent_outputs = self._after_execute_tool_call_for_hitl(
+                                results, ai_message.tool_calls, ai_message, iteration,
+                                original_query=ctx.extra.get("_original_query", ""),
+                            )
+                            if hitl_interrupt:
+                                await self._commit_interrupt(
+                                    hitl_interrupt, context, session, invoke_inputs,
+                                    sub_agent_outputs,
+                                )
+                                break
 
-                        workflow_interrupt = self._after_execute_tool_call(
-                            results, ai_message.tool_calls, ai_message, iteration,
-                            original_query=ctx.extra.get("_original_query", ""),
-                        )
-                        if workflow_interrupt:
-                            await self._commit_interrupt(workflow_interrupt, context, session, invoke_inputs)
-                            break
+                            workflow_interrupt = self._after_execute_tool_call(
+                                results, ai_message.tool_calls, ai_message, iteration,
+                                original_query=ctx.extra.get("_original_query", ""),
+                            )
+                            if workflow_interrupt:
+                                await self._commit_interrupt(
+                                    workflow_interrupt, context, session, invoke_inputs,
+                                )
+                                break
                     else:
                         await self.context_engine.save_contexts(session)
                         result = {"output": "Max iterations reached without completion", "result_type": "error"}
