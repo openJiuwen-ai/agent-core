@@ -706,6 +706,22 @@ class AbilityManager:
 
                 error_msg = f"Ability execution error: {str(result)}"
                 logger.error(error_msg)
+
+                # Trigger TOOL_CALL_ERROR event for observability
+                # This only affects telemetry collection, not business logic
+                try:
+                    from openjiuwen.core.runner import Runner
+                    from openjiuwen.core.runner.callback.events import ToolCallEvents
+                    tc = tool_calls[i]
+                    await Runner.callback_framework.trigger(
+                        ToolCallEvents.TOOL_CALL_ERROR,
+                        tool_name=tc.name,
+                        tool_id=tc.id,
+                        error=result,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to trigger TOOL_CALL_ERROR event: {e}")
+
                 tool_result = None
                 tool_message = None
                 if isinstance(tool_ctx.inputs, ToolCallInputs):

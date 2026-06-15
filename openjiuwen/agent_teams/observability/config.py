@@ -34,3 +34,6 @@ class ObservabilityConfig(BaseModel):
     redact_completions: bool = False
     attribute_value_max_length: int = 8192
     export_timeout_ms: int = 5000
+    # Langfuse authentication (for OTLP export via Langfuse OTLP endpoint)
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
