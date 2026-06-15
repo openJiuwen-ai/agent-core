@@ -871,6 +871,76 @@ class SessionMemoryManager:
             self.config.model_client = model_client_config
         self._update_agent.bind_model_defaults(model_config, model_client_config)
 
+    async def force_schedule_update(
+        self,
+        ctx: AgentCallbackContext,
+        *,
+        workspace,
+    ) -> None:
+        """Force schedule a session memory update, bypassing token/tool-call thresholds.
+
+        Intended for the context-overflow recovery chain: when an LLM call
+        fails with a 413 / context-length-exceeded error, we must capture
+        key context into session memory *before* compacting, even if the
+        normal trigger thresholds have not been reached.
+
+        Note: This schedules an async background task and does **not** await
+        its completion.  The FullCompact triggered by the recovery rail will
+        read session-memory files; if the background write has not finished
+        by then, FullCompact falls back to its own LLM-generated summary.
+        In practice the background task typically completes before the retry
+        reaches ``before_model_call → get_context_window``.
+        """
+        if workspace is None or ctx.session is None:
+            return
+
+        session_id = ctx.session.get_session_id()
+        task = self._tasks.get(session_id)
+        if task is not None and not task.done():
+            logger.info(
+                "[SessionMemory] skip force schedule: task already running session_id=%s",
+                session_id,
+            )
+            return
+
+        context_window = self.collect_context_window(ctx)
+        completed_context_window = self._truncate_context_window_to_completed_api_round(context_window)
+        notes_path = self._get_session_memory_path(workspace, session_id)
+        pending_notes_path = self._get_pending_session_memory_path(notes_path)
+        runtime_update = {
+            "session_id": session_id,
+            "memory_path": str(notes_path),
+            "pending_memory_path": str(pending_notes_path),
+        }
+        update_session_memory_runtime(ctx.session, runtime_update)
+
+        is_incremental = False
+        update_context_window = completed_context_window
+        if self.config.incremental_mode:
+            incremental_result = self._select_incremental_context(completed_context_window, ctx.session)
+            if incremental_result is not None:
+                is_incremental = incremental_result["is_incremental"]
+                update_context_window = incremental_result["context_window"]
+
+        runtime = get_session_memory_runtime(ctx.session)
+        runtime["is_extracting"] = True
+        update_session_memory_runtime(ctx.session, runtime)
+        logger.info(
+            "[SessionMemory] FORCE schedule update session_id=%s notes_path=%s messages=%s incremental=%s",
+            session_id,
+            notes_path,
+            len(update_context_window.context_messages),
+            is_incremental,
+        )
+
+        bg_task = asyncio.create_task(
+            self._update_background(ctx, workspace, update_context_window, is_incremental=is_incremental),
+            name=f"session-memory-force-{session_id}",
+        )
+        self._task_owners[session_id] = (ctx.session, ctx.context)
+        bg_task.add_done_callback(lambda done: self._on_task_done(session_id, done))
+        self._tasks[session_id] = bg_task
+
     async def maybe_schedule_update(
         self,
         ctx: AgentCallbackContext,

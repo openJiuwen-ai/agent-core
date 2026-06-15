@@ -276,10 +276,18 @@ class ContextEngine:
         @functools.wraps(processor_class)
         def register_processor_class(processor_class: type[ContextProcessor]):
             cls._PROCESSOR_MAP[processor_class.processor_type()] = processor_class
+            context_engine_logger.info(
+                "[ContextEngine] Registered processor: type=%s class=%s",
+                processor_class.processor_type(), processor_class.__name__,
+            )
             return processor_class
         return register_processor_class
 
     def _create_processor(self, processor_type: str, config: BaseModel):
+        context_engine_logger.info(
+            "[ContextEngine] _create_processor: type=%s available_types=%s",
+            processor_type, list(self._PROCESSOR_MAP.keys()),
+        )
         processor_class = self._PROCESSOR_MAP.get(processor_type)
         if not processor_class:
             raise build_error(

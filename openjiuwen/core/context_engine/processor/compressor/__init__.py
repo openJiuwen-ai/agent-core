@@ -19,6 +19,10 @@ from openjiuwen.core.context_engine.processor.compressor.round_level_compressor 
     RoundLevelCompressor,
     RoundLevelCompressorConfig,
 )
+from openjiuwen.core.context_engine.processor.compressor.tool_result_dedup_processor import (
+    ToolResultDedupProcessor,
+    ToolResultDedupConfig,
+)
 
 __all__ = [
     "CurrentRoundCompressor",
@@ -32,4 +36,6 @@ __all__ = [
     "ToolCompactOverride",
     "RoundLevelCompressor",
     "RoundLevelCompressorConfig",
+    "ToolResultDedupProcessor",
+    "ToolResultDedupConfig",
 ]

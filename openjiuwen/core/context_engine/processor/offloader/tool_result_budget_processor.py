@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from typing import Any, Dict, List, Literal, Tuple
 
 from pydantic import BaseModel, Field
@@ -23,9 +24,27 @@ from openjiuwen.core.context_engine.processor._protected import (
 from openjiuwen.core.context_engine.observability import write_context_trace
 from openjiuwen.core.context_engine.schema.messages import OffloadToolMessage
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
+from openjiuwen.core.common.logging import logger
 
 PERSISTED_OUTPUT_TAG = "<persisted-output>"
 PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
+
+
+class BudgetDensityProfile(BaseModel):
+    """Density profile for ToolResultBudgetProcessor: tools + budget_multiplier."""
+
+    tools: list[str] = Field(default_factory=list)
+    budget_multiplier: float = Field(default=1.0, gt=0)
+
+
+def get_budget_density(tool_name: str, profiles: dict[str, BudgetDensityProfile] | None = None) -> dict | None:
+    """Look up a tool's budget density profile by name."""
+    if not profiles:
+        return None
+    for density, profile in profiles.items():
+        if tool_name in profile.tools:
+            return {**profile.model_dump(), "density": density}
+    return None
 
 
 class ToolResultBudgetProcessorConfig(BaseModel):
@@ -38,6 +57,8 @@ class ToolResultBudgetProcessorConfig(BaseModel):
     offload_message_type: list[Literal["tool"]] = Field(default=["tool"])
     messages_threshold: int | None = Field(default=None, gt=0)
     messages_to_keep: int | None = Field(default=None, gt=0)
+    adaptive_per_tool_budget: bool = Field(default=False, description="Enable per-tool density adaptive budget")
+    density_profiles: dict[str, BudgetDensityProfile] = Field(default_factory=dict)
 
 
 @ContextEngine.register_processor()
@@ -168,6 +189,89 @@ class ToolResultBudgetProcessor(MessageOffloader):
 
         return _ContextUtils.estimate_tokens(content)
 
+    def _density_adjusted_size(self, raw_size: int, tool_name: str | None) -> float:
+        """Return message size adjusted by the tool's information density.
+
+        When adaptive_per_tool_budget is enabled, low-density tools (verbose
+        output like bash) get a smaller denominator, so their effective size
+        is larger, and they are offloaded first. High-density tools (compact
+        output like search) are preserved longer.
+
+        Args:
+            raw_size: The pre-computed token size of the message.
+            tool_name: The tool name to look up density for.
+        """
+        if self.config.adaptive_per_tool_budget and tool_name:
+            density = get_budget_density(tool_name, profiles=self.config.density_profiles)
+            if density is not None:
+                adjusted = raw_size / density["budget_multiplier"]
+                logger.info(
+                    "[ToolResultBudget] density sort: tool=%s, density=%s, multiplier=%.2f, raw_size=%d, adjusted=%.1f",
+                    tool_name, density["density"], density["budget_multiplier"], raw_size, adjusted,
+                )
+                return adjusted
+        return float(raw_size)
+
+    def _allocate_per_tool_budget(
+        self,
+        messages: List[BaseMessage],
+        start_idx: int,
+        end_idx: int,
+        context: ModelContext,
+    ) -> dict[str, int] | None:
+        """Allocate per-tool token budget when adaptive_per_tool_budget is enabled.
+
+        Returns a dict mapping tool_name → token budget, or None when the
+        feature is disabled (meaning the global tokens_threshold applies to
+        all tools equally).
+
+        The allocation is proportional to each tool's density-adjusted
+        weight: low-density tools get a *smaller* share of the total budget
+        (so they are squeezed earlier), while high-density tools get a
+        *larger* share.
+        """
+        if not self.config.adaptive_per_tool_budget:
+            return None
+
+        per_tool_raw_size: dict[str, int] = defaultdict(int)
+        for idx in range(start_idx, end_idx + 1):
+            msg = messages[idx]
+            if isinstance(msg, ToolMessage) and not self._is_already_offloaded(msg):
+                tool_name = ContextUtils.resolve_tool_name_from_message(msg, messages)
+                if tool_name:
+                    per_tool_raw_size[tool_name] += self._message_size(msg, context)
+
+        if not per_tool_raw_size:
+            return None
+
+        # Compute density-adjusted weight for each tool.
+        # High-density → larger weight → larger budget share.
+        # Low-density  → smaller weight → smaller budget share (squeezed first).
+        per_tool_weight: dict[str, float] = {}
+        for name, raw_size in per_tool_raw_size.items():
+            density = get_budget_density(name, profiles=self.config.density_profiles)
+            multiplier = density["budget_multiplier"] if density else 1.0
+            # weight = raw_size * multiplier: high-density tools amplify their claim
+            per_tool_weight[name] = raw_size * multiplier
+
+        total_weight = sum(per_tool_weight.values())
+        total_budget = self.config.tokens_threshold
+
+        allocated = {
+            name: max(1, int(total_budget * weight / total_weight))
+            for name, weight in per_tool_weight.items()
+        }
+
+        details = []
+        for name, budget in allocated.items():
+            raw = per_tool_raw_size.get(name, 0)
+            density = get_budget_density(name, profiles=self.config.density_profiles)
+            d_label = density["density"] if density else "default"
+            details.append(f"{name}({d_label}): {raw}→{budget}")
+        logger.info("[ToolResultBudget] Budget allocated: total=%d, per_tool=[%s]", total_budget, ", ".join(details))
+
+        return allocated
+
     async def _shrink_round_to_budget(
         self,
         messages: List[BaseMessage],
@@ -178,11 +282,49 @@ class ToolResultBudgetProcessor(MessageOffloader):
         modified_indices: List[int] = []
         changed = False
 
+        per_tool_budget = self._allocate_per_tool_budget(messages, start_idx, end_idx, context)
+
+        if per_tool_budget is not None:
+            # adaptive mode: shrink each tool within its own budget first
+            for tool_name, budget in per_tool_budget.items():
+                tool_total = 0
+                tool_indices: List[int] = []
+                for idx in range(start_idx, end_idx + 1):
+                    msg = messages[idx]
+                    parse_name = ContextUtils.resolve_tool_name_from_message(msg, messages)
+                    if isinstance(msg, ToolMessage) and parse_name == tool_name:
+                        tool_total += self._message_size(msg, context)
+                        tool_indices.append(idx)
+                if tool_total <= budget:
+                    continue
+                # Offload this tool's largest results until within budget
+                candidates = [(idx, self._message_size(messages[idx], context)) for idx in tool_indices
+                              if self._should_offload_message(messages[idx], messages, context)]
+                # density-adjusted sort; low-density tools offloaded first
+                candidates.sort(
+                    key=lambda item: self._density_adjusted_size(item[1], tool_name),
+                    reverse=True,
+                )
+                while tool_total > budget and candidates:
+                    target_idx, target_size = candidates.pop(0)
+                    offloaded = await self._offload_tool_message(messages[target_idx], context)
+                    messages[target_idx] = offloaded
+                    modified_indices.append(target_idx)
+                    tool_total -= target_size
+                    changed = True
+
+        # Global budget check: if total still exceeds threshold, offload globally
         while self._round_tool_result_size(messages, start_idx, end_idx, context) > self.config.tokens_threshold:
             candidates = self._collect_round_candidates(messages, start_idx, end_idx, context)
             if not candidates:
                 break
-            candidates.sort(key=lambda item: item[1], reverse=True)
+            # density-adjusted sort using pre-computed sizes; low-density tools offloaded first
+            candidates.sort(
+                key=lambda item: self._density_adjusted_size(
+                    item[1], ContextUtils.resolve_tool_name_from_message(messages[item[0]], messages)
+                ),
+                reverse=True,
+            )
             target_idx, _ = candidates[0]
             offloaded = await self._offload_tool_message(messages[target_idx], context)
             messages[target_idx] = offloaded

@@ -14,6 +14,7 @@ from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.observability import write_context_trace
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
+from openjiuwen.core.common.logging import logger
 
 
 class ToolCompactOverride(BaseModel):
@@ -29,6 +30,13 @@ class ToolCompactOverride(BaseModel):
     trigger_threshold: Optional[int] = Field(default=None, ge=0)
     keep_recent_per_tool: Optional[int] = Field(default=None, ge=0)
     cleared_marker: Optional[str] = Field(default=None)
+
+
+class MicroCompactDensityProfile(BaseModel):
+    """Density profile for MicroCompactProcessor: tools + keep_recent_per_tool."""
+
+    tools: list[str] = Field(default_factory=list)
+    keep_recent_per_tool: int = Field(default=15, ge=0)
 
 
 class MicroCompactProcessorConfig(BaseModel):
@@ -48,6 +56,8 @@ class MicroCompactProcessorConfig(BaseModel):
     keep_recent_per_tool: int = Field(default=15, ge=0)
     cleared_marker: str = Field(default="[Old tool result content cleared]")
     per_tool_overrides: dict[str, ToolCompactOverride] = Field(default_factory=dict)
+    adaptive_per_tool_budget: bool = Field(default=False, description="Enable per-tool density adaptive budget")
+    density_profiles: dict[str, MicroCompactDensityProfile] = Field(default_factory=dict)
 
 
 # Tools whose output structurally repeats most of the prior plan/result on every
@@ -58,6 +68,20 @@ class MicroCompactProcessorConfig(BaseModel):
 _FORCED_TOOL_OVERRIDES: dict[str, ToolCompactOverride] = {
     "skill_step": ToolCompactOverride(trigger_threshold=0, keep_recent_per_tool=1),
 }
+
+
+def get_tool_density(tool_name: str, profiles: dict[str, MicroCompactDensityProfile] | None = None) -> dict | None:
+    """Look up a tool's density profile by name for MicroCompactProcessor."""
+    if not profiles:
+        return None
+    for density, profile in profiles.items():
+        if tool_name in profile.tools:
+            return {**profile.model_dump(), "density": density}
+    return None
+
+
+# Backward compatibility alias (now empty; density profiles come from config.yaml)
+TOOL_DENSITY_PROFILES: dict[str, dict] = {}
 
 
 @ContextEngine.register_processor()
@@ -129,24 +153,58 @@ class MicroCompactProcessor(ContextProcessor):
     def _resolve_for(self, tool_name: str | None) -> Tuple[int, int, str]:
         """Return (trigger_threshold, keep_recent_per_tool, cleared_marker) for ``tool_name``.
 
-        Lookup order: ``_FORCED_TOOL_OVERRIDES`` (non-overridable), then
-        ``per_tool_overrides`` from user config (field-level, missing fields
-        fall back to globals), then global defaults.
+        Lookup order:
+        1. ``_FORCED_TOOL_OVERRIDES`` (non-overridable)
+        2. density profile (if adaptive_per_tool_budget enabled)
+        3. ``per_tool_overrides`` from user config (field-level, missing fields
+           fall back to density config or globals)
+        4. Global defaults
         """
-        ov = _FORCED_TOOL_OVERRIDES.get(tool_name) if tool_name else None
-        if ov is None:
-            ov = self._config.per_tool_overrides.get(tool_name) if tool_name else None
-        if ov is None:
+        cfg = self._config
+        forced = _FORCED_TOOL_OVERRIDES.get(tool_name) if tool_name else None
+        user_ov = cfg.per_tool_overrides.get(tool_name) if tool_name else None
+
+        if forced is not None:
             return (
-                self._config.trigger_threshold,
-                self._config.keep_recent_per_tool,
-                self._config.cleared_marker,
+                forced.trigger_threshold if forced.trigger_threshold is not None else cfg.trigger_threshold,
+                forced.keep_recent_per_tool if forced.keep_recent_per_tool is not None else cfg.keep_recent_per_tool,
+                forced.cleared_marker if forced.cleared_marker is not None else cfg.cleared_marker,
             )
-        return (
-            ov.trigger_threshold if ov.trigger_threshold is not None else self._config.trigger_threshold,
-            ov.keep_recent_per_tool if ov.keep_recent_per_tool is not None else self._config.keep_recent_per_tool,
-            ov.cleared_marker if ov.cleared_marker is not None else self._config.cleared_marker,
-        )
+
+        density_cfg = get_tool_density(tool_name, profiles=cfg.density_profiles) \
+            if tool_name and cfg.adaptive_per_tool_budget else None
+        if density_cfg is not None:
+            density_keep = density_cfg["keep_recent_per_tool"]
+            logger.info(
+                "[MicroCompact] density profile applied: tool=%s, density=%s, keep_recent_per_tool=%d (global=%d)",
+                tool_name, density_cfg["density"], density_keep, cfg.keep_recent_per_tool,
+            )
+            # Density profile only provides keep_recent_per_tool; trigger_threshold and
+            # cleared_marker are NOT overridden by density — they fall through to global
+            # defaults (or user override if present).  When a user override coexists
+            # with a density profile, the user override takes precedence; any field
+            # the user left as None falls back to the density value (for keep) or
+            # global default (for trigger/marker).
+            if user_ov is not None:
+                return (
+                    user_ov.trigger_threshold if user_ov.trigger_threshold is not None else cfg.trigger_threshold,
+                    user_ov.keep_recent_per_tool if user_ov.keep_recent_per_tool is not None else density_keep,
+                    user_ov.cleared_marker if user_ov.cleared_marker is not None else cfg.cleared_marker,
+                )
+            return (
+                cfg.trigger_threshold,
+                density_keep,
+                cfg.cleared_marker,
+            )
+
+        if user_ov is not None:
+            return (
+                user_ov.trigger_threshold if user_ov.trigger_threshold is not None else cfg.trigger_threshold,
+                user_ov.keep_recent_per_tool if user_ov.keep_recent_per_tool is not None else cfg.keep_recent_per_tool,
+                user_ov.cleared_marker if user_ov.cleared_marker is not None else cfg.cleared_marker,
+            )
+
+        return cfg.trigger_threshold, cfg.keep_recent_per_tool, cfg.cleared_marker
 
     def _collect_compactable_indices_by_tool(
         self,

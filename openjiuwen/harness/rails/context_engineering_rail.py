@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from openjiuwen.core.context_engine import (
     MessageSummaryOffloaderConfig, DialogueCompressorConfig,
     CurrentRoundCompressorConfig, FullCompactProcessorConfig, MicroCompactProcessorConfig,
-    ToolResultBudgetProcessorConfig,
+    ToolResultBudgetProcessorConfig, ToolResultDedupConfig,
 )
 from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
     RoundLevelCompressorConfig,
@@ -18,6 +18,7 @@ from openjiuwen.core.context_engine.processor.compressor.round_level_compressor 
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.foundation.llm import ModelRequestConfig
+from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.prompts.sections.workspace import build_workspace_section as _build_workspace
 from openjiuwen.harness.prompts.sections.context import build_context_section as _build_context, \
     build_tools_section
@@ -92,6 +93,15 @@ class ContextEngineeringRail(DeepAgentRail):
             self._session_memory_config = session_memory
         if self._session_memory_config is not None:
             self._session_memory_mgr = SessionMemoryManager(self._session_memory_config)
+
+    def get_session_memory_mgr(self) -> SessionMemoryManager | None:
+        return self._session_memory_mgr
+
+    def session_memory_enabled(self) -> bool:
+        return self._session_memory_enabled
+
+    def get_workspace(self) -> Workspace | None:
+        return self.workspace
 
     @staticmethod
     def _merge_config_with_overrides(
@@ -206,6 +216,11 @@ class ContextEngineeringRail(DeepAgentRail):
                 (
                     "MicroCompactProcessor",
                     MicroCompactProcessorConfig(
+                    ),
+                ),
+                (
+                    "ToolResultDedupProcessor",
+                    ToolResultDedupConfig(
                     ),
                 ),
                 (

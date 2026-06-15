@@ -42,6 +42,10 @@ from openjiuwen.core.context_engine.processor.compressor.full_compact_processor 
     FullCompactProcessor,
     FullCompactProcessorConfig,
 )
+from openjiuwen.core.context_engine.processor.compressor.tool_result_dedup_processor import (
+    ToolResultDedupProcessor,
+    ToolResultDedupConfig,
+)
 
 # context base classes
 _CORE_CLASSES = [
@@ -86,6 +90,9 @@ _PROCESSORS_CLASSES = [
     # full compact processor
     "FullCompactProcessor",
     "FullCompactProcessorConfig",
+    # tool result dedup processor (S8)
+    "ToolResultDedupProcessor",
+    "ToolResultDedupConfig",
 ]
 
 

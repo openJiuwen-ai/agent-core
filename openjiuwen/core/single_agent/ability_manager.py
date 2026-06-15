@@ -619,8 +619,11 @@ class AbilityManager:
                 tool_message = ToolMessage(
                     content=error_msg,
                     tool_call_id=tool_call.id,
-                    metadata={},
+                    metadata={"is_error": True},
                 )
+            else:
+                if isinstance(tool_message, ToolMessage) and not tool_message.metadata.get("is_error"):
+                    tool_message.metadata["is_error"] = True
             return tool_result, tool_message, tool_ctx
 
         # AFTER_TOOL_CALL rails can rewrite tool_result/tool_msg via ctx.inputs.

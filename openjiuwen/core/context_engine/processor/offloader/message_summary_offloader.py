@@ -26,14 +26,25 @@ from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 
 # Keywords used to detect "context overflow" errors from LLM responses
 # Different providers use different error formats, so we use string matching for unified detection
-# Examples: OpenAI says "maximum context length", Anthropic says "prompt is too long"
+# Examples: OpenAI says "maximum context length", Anthropic says "prompt is too long",
+# Huawei/domestic models say "prompt length N must less than maximum input length M"
 CONTEXT_OVERFLOW_KEYWORDS = (
-    "context length",  # Context length (common in OpenAI/Azure)
+    # --- Compound keywords (exact provider-specific phrases) ---
+    "context length",  # OpenAI/Azure: "maximum context length"
     "token limit",  # Token limit
-    "too long",  # Too long (common in Anthropic)
-    "exceeds",  # Exceeds
-    "maximum context",  # Maximum context
-    "context window",  # Context window (common in local models)
+    "too long",  # Anthropic: "prompt is too long"
+    "exceeds",  # "exceeds the maximum"
+    "maximum context",  # OpenAI: "maximum context length"
+    "context window",  # Local models: "context window size"
+    # --- HTTP status codes and structured error codes ---
+    "413",  # HTTP 413 Request Entity Too Large
+    "request_too_large",  # Azure standard error code
+    "context_length_exceeded",  # OpenAI standard error code
+    "input too long",  # Anthropic newer format
+    # --- Atomic keywords (cover "prompt length ... maximum input length" pattern) ---
+    "prompt length",  # Huawei/domestic: "prompt length N must less than"
+    "input length",  # Huawei/domestic: "maximum input length"
+    "maximum input",  # Huawei/domestic: "maximum input length"
 )
 
 TRUNCATED_MARKER = "...[TRUNCATED]..."

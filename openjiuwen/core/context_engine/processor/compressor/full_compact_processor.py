@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.context_engine.base import ModelContext, ContextWindow
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     find_last_completed_api_round_end,
@@ -219,6 +219,7 @@ class FullCompactProcessor(ContextProcessor):
         self._session_memory_enabled = config.session_memory_enabled
         self._session_memory_marker = config.session_memory_marker
         self._session_memory_intro = config.session_memory_intro
+        self._force_compact: bool = False
         self._state_reinjector = FullCompactStateReinjector()
         self._state_reinjector.register_builder(
             name="skills",
@@ -247,6 +248,25 @@ class FullCompactProcessor(ContextProcessor):
     @property
     def config(self) -> FullCompactProcessorConfig:
         return self._config
+
+    def set_force_compact(self, value: bool = True) -> None:
+        """Set the force_compact flag for the next GET-path trigger check.
+
+        When True, :meth:`trigger_get_context_window` will bypass all
+        checks (``trigger_total_tokens``, ``_api_round``) and return
+        ``True`` unconditionally.  The flag is automatically reset after
+        one use.  The ADD path (``trigger_add_messages``) is **not**
+        affected — force_compact only makes sense on the GET path which
+        is what ``_railed_model_call`` uses during retry.
+
+        This is a **fallback** mechanism for the context-overflow recovery
+        chain: when an LLM call fails because the context actually exceeded
+        the model's limit, the preventive compression threshold was not
+        sufficient.  Setting this flag forces FullCompact to run on the next
+        ``get_context_window`` call regardless of any threshold or round
+        boundary — the context *must* be shrunk before retrying.
+        """
+        self._force_compact = value
 
     async def trigger_add_messages(
         self,
@@ -313,13 +333,119 @@ class FullCompactProcessor(ContextProcessor):
             self._invalidate_session_memory_anchor(context)
         return event, []
 
+    # ------------------------------------------------------------------
+    # get_context_window path (used during _railed_model_call retry)
+    # ------------------------------------------------------------------
+
+    async def trigger_get_context_window(
+        self,
+        context: ModelContext,
+        context_window: ContextWindow,
+        **kwargs: Any,
+    ) -> bool:
+        """Return True if FullCompact should run on the GET path.
+
+        The GET path is used when ``_railed_model_call`` calls
+        ``get_context_window()`` during a retry after a context-overflow
+        error.  The ``force_compact`` flag (set by
+        ``ContextOverflowRecoveryRail``) causes an unconditional trigger,
+        bypassing both ``_api_round`` and ``trigger_total_tokens``.
+        """
+        if self._force_compact:
+            logger.info("[FullCompact] force_compact flag set on GET path, bypassing all trigger checks")
+            self._force_compact = False
+            return True
+        return False
+
+    async def on_get_context_window(
+        self,
+        context: ModelContext,
+        context_window: ContextWindow,
+        **kwargs: Any,
+    ) -> Tuple[ContextEvent | None, ContextWindow]:
+        """Execute FullCompact on the GET path.
+
+        Delegates to the same ``_build_replacement_messages`` used by the
+        ADD path so that the compression logic is identical.  Passes
+        ``force=True`` so that a replacement is accepted even if it still
+        exceeds ``trigger_total_tokens`` — any reduction is better than
+        none when the context has actually overflowed.
+        """
+        system_messages = list(context_window.system_messages or [])
+        tools = context_window.tools or []
+        all_messages = list(context_window.context_messages or [])
+
+        write_context_trace(
+            "context.processor.full_compact.before",
+            {
+                "processor": self.processor_type(),
+                "context_id": context.context_id(),
+                "session_id": context.session_id(),
+                "trigger_total_tokens": self.config.trigger_total_tokens,
+                "message_count_before": len(all_messages),
+            },
+        )
+
+        event, new_context_messages, session_memory_message = await self._build_replacement_messages(
+            context,
+            all_messages,
+            system_messages,
+            tools,
+            force=True,
+        )
+        if new_context_messages is None:
+            logger.warning("[FullCompact] on_get_context_window: force_compact produced no replacement")
+            return None, context_window
+
+        context.set_messages(new_context_messages)
+        logger.info(
+            "[FullCompact] on_get_context_window: force_compact succeeded, "
+            "messages_before=%d messages_after=%d replacement_kind=%s",
+            len(all_messages), len(new_context_messages),
+            "session_memory" if session_memory_message is not None else "full_compact",
+        )
+
+        if session_memory_message is None:
+            self._invalidate_session_memory_anchor(context)
+
+        new_window = ContextWindow(
+            system_messages=system_messages,
+            context_messages=new_context_messages,
+            tools=tools,
+        )
+        write_context_trace(
+            "context.processor.full_compact.after",
+            {
+                "processor": self.processor_type(),
+                "context_id": context.context_id(),
+                "session_id": context.session_id(),
+                "replacement_kind": "session_memory" if session_memory_message is not None else "full_compact",
+                "message_count_after": len(new_context_messages),
+            },
+        )
+        return event, new_window
+
     async def _build_replacement_messages(
         self,
         context: ModelContext,
         all_messages: List[BaseMessage],
         system_messages: List[BaseMessage],
         tools: List[Any],
+        *,
+        force: bool = False,
     ) -> Tuple[ContextEvent | None, Optional[List[BaseMessage]], Optional[UserMessage]]:
+        """Build replacement messages for FullCompact.
+
+        Args:
+            context: The model context.
+            all_messages: All current context messages.
+            system_messages: System messages for token counting.
+            tools: Tool definitions for token counting.
+            force: When True (force_compact / recovery chain), accept a
+                replacement even if it still exceeds ``trigger_total_tokens``.
+                Any reduction is better than none when the context has
+                actually overflowed the model's limit.
+        """
         threshold = self._trigger_total_tokens
         boundary_index = self._find_last_compaction_boundary_index(all_messages)
         prefix, active_messages = self._split_messages_at_compaction_boundary(
@@ -344,8 +470,10 @@ class FullCompactProcessor(ContextProcessor):
                 context,
                 use_baseline=False,
             )
-            if session_memory_tokens <= threshold:
-                logger.info("[FullCompact] using session_memory replacement")
+            if session_memory_tokens <= threshold or force:
+                logger.info(
+                    "[FullCompact] using session_memory replacement (force=%s)", force,
+                )
                 return (
                     ContextEvent(
                         event_type=self.processor_type(),
@@ -367,9 +495,13 @@ class FullCompactProcessor(ContextProcessor):
             threshold=threshold,
         )
         if new_context_messages is None:
-            logger.warning(
-                "[FullCompact] all replacement attempts exceeded threshold; keeping original buffer"
-            )
+            if force:
+                logger.warning(
+                    "[FullCompact] all replacement attempts exceeded threshold; "
+                    "returning original buffer unchanged (force=True but no reduction possible)"
+                )
+            else:
+                logger.warning("[FullCompact] all replacement attempts exceeded threshold; keeping original buffer")
             return None, None, None
         logger.info(
             "[FullCompact] using full_compact replacement output_messages=%s",
