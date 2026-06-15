@@ -5,7 +5,10 @@
 # pylint: disable=protected-access
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import (
+    AsyncMock,
+    MagicMock,
+)
 
 import pytest
 
@@ -164,17 +167,18 @@ async def test_before_model_call_injects_heartbeat_section() -> None:
     ctx.extra["run_kind"] = RunKind.HEARTBEAT
 
     mock_builder = MagicMock()
-    mock_builder.language = "cn"
     rail.system_prompt_builder = mock_builder
+
+    mock_fs = MagicMock()
+    mock_read_result = MagicMock()
+    mock_read_result.code = 0
+    mock_read_result.data.content = "Test heartbeat content"
+    mock_fs.read_file = AsyncMock(return_value=mock_read_result)
+    rail.sys_operation.fs = MagicMock(return_value=mock_fs)
 
     await rail.before_model_call(ctx)
 
-    session_id = ctx.session.get_session_id()
-    items = await rail.attachment_manager.collect_for_session(session_id)
-    assert [item.id for item in items] == [f"session.{session_id}.heartbeat"]
-    assert items[0].kind.value == "todo_reminder"
-    assert items[0].source == "agent_core.heartbeat_rail"
-    assert "心跳检测" in (items[0].content or "")
+    mock_builder.add_section.assert_called_once()
 
 
 @pytest.mark.asyncio

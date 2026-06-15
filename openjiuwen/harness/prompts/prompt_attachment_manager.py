@@ -28,6 +28,7 @@ class PromptAttachmentKind(str, Enum):
     MEMORY = "memory"
     FILE = "file"
     TOOL = "tool"
+    SKILL = "skill"
     DIAGNOSTIC = "diagnostic"
     TODO_REMINDER = "todo_reminder"
     WORKSPACE_DELTA = "workspace_delta"

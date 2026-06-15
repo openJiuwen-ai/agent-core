@@ -21,6 +21,7 @@ from openjiuwen.core.sys_operation import (
 )
 from openjiuwen.harness import Workspace
 from openjiuwen.harness.factory import create_deep_agent
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.prompts.builder import PromptSection, SystemPromptBuilder
 from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
 from openjiuwen.harness.tools import ListSkillTool
@@ -51,6 +52,14 @@ class _TrackingSkillUseRail(SkillUseRail):
     async def _load_skill(self, skill_dir, update_at):
         self.load_calls.append(skill_dir.name)
         return await super()._load_skill(skill_dir, update_at)
+
+
+class _DummySession:
+    def __init__(self, session_id: str):
+        self._session_id = session_id
+
+    def get_session_id(self) -> str:
+        return self._session_id
 
 
 def _write_skill(
@@ -142,7 +151,7 @@ async def test_skill_rail_all_mode_loads_skills_on_before_invoke(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_skill_rail_all_mode_injects_skill_prompt(tmp_path: Path):
-    """All mode should add skills section to builder before model call."""
+    """All mode should add concrete skill list to builder before model call."""
     skills_root = tmp_path / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
 
@@ -175,7 +184,6 @@ async def test_skill_rail_all_mode_injects_skill_prompt(tmp_path: Path):
     await skill_rail.before_invoke(ctx)
     await skill_rail.before_model_call(ctx)
 
-    # Skills are added to the builder; build() produces the final system prompt.
     content = builder.build()
 
     assert "Base system prompt." in content
@@ -184,6 +192,50 @@ async def test_skill_rail_all_mode_injects_skill_prompt(tmp_path: Path):
     assert "Parse invoice pdf files" in content
     assert "Write xlsx reports" in content
     assert "list_skill" not in content
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_injects_no_skill_prompt_as_attachment_when_available(tmp_path: Path):
+    """All mode should move only the no-skill fallback to prompt attachment."""
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+
+    sys_operation = _make_sys_operation(tmp_path)
+    skill_rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=True,
+    )
+    skill_rail.set_workspace(Workspace(root_path=str(tmp_path)))
+    skill_rail.set_sys_operation(sys_operation)
+    skill_rail.attachment_manager = PromptAttachmentManager()
+
+    builder = SystemPromptBuilder()
+    builder.add_section(PromptSection(
+        name="identity",
+        content={"cn": "Base system prompt.", "en": "Base system prompt."},
+    ))
+    skill_rail.system_prompt_builder = builder
+
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=ModelCallInputs(tools=[]),
+        session=_DummySession("sess-skill-attachment"),
+    )
+
+    await skill_rail.before_invoke(ctx)
+    await skill_rail.before_model_call(ctx)
+
+    content = builder.build()
+    assert "Base system prompt." in content
+    assert "当前任务没有选择任何技能" not in content
+
+    items = await skill_rail.attachment_manager.collect_for_session("sess-skill-attachment")
+    assert [item.section for item in items] == ["skills"]
+    assert items[0].kind.value == "skill"
+    assert items[0].source == "agent_core.skill_use_rail"
+    assert "当前任务没有选择任何技能" in (items[0].content or "")
+    assert "SKILL.md" in (items[0].content or "")
 
 
 @pytest.mark.asyncio
@@ -371,11 +423,10 @@ async def test_auto_list_prompt_is_injected_without_preselecting_skills(tmp_path
     await skill_rail.before_invoke(ctx)
     await skill_rail.before_model_call(ctx)
 
-    # Skills section is added to the builder; build() produces the final prompt.
     content = builder.build()
     assert "Base system prompt." in content
-    assert "list_skill" in content
     assert "invoice-parser" not in content
+    assert "list_skill" in content
     assert "read_file" in content
     assert "code" in content
     assert "bash" in content
