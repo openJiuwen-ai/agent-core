@@ -295,6 +295,15 @@ class InMemoryTeamDatabase:
     async def get_team(self, team_name: str) -> Optional[Team]:
         return self._teams.get(team_name)
 
+    async def team_exists(self, team_name: str) -> bool:
+        """Check whether a team row exists in the in-memory store.
+
+        Mirrors ``TeamDao.team_exists`` for drop-in API parity so callers
+        like ``_inspect_session`` can use ``db.team.team_exists`` without
+        branching on the storage backend.
+        """
+        return team_name in self._teams
+
     async def delete_team(self, team_name: str) -> bool:
         """Delete a team and cascade-purge its members, tasks, and messages."""
         async with self._lock:
