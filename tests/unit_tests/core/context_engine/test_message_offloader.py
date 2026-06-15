@@ -724,6 +724,38 @@ class TestMessageOffloader:
         )
         assert "src/app.py:59: match 59" in reloaded
 
+    @pytest.mark.asyncio
+    async def test_ttl_expired_rule_compression_sweeps_old_tools_without_threshold(self):
+        config = MessageOffloaderConfig(
+            messages_threshold=100,
+            tokens_threshold=100000,
+            large_message_threshold=10000,
+            trim_size=5,
+            offload_message_type=["tool"],
+            keep_last_round=False,
+            rule_compression_context_window_tokens=300,
+            rule_compression_ratio=0.5,
+            rule_compression_expired_ratio=0.1,
+            rule_compression_ttl_seconds=10,
+            rule_compression_ttl_keep_recent_messages=1,
+        )
+        ctx = await create_context_with_offloader(config)
+        processor = ctx._processors[0]  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        old_short_tool = ToolMessage(content="short", tool_call_id="tc-short")
+
+        await ctx.add_messages([old_short_tool])
+        assert "rule_compression_pass" not in (ctx.get_messages()[0].metadata or {})
+
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)  # type: ignore[attr-defined]
+        await ctx.add_messages([UserMessage(content="trigger ttl sweep"), ToolMessage(content="recent", tool_call_id="tc-recent")])
+
+        messages = ctx.get_messages()
+        assert messages[0].metadata["rule_compression_pass"] == "ttl"
+        assert messages[0].metadata["rule_compression_threshold"] == 30
+        assert messages[0].content == "short"
+        assert "rule_compression_pass" not in (messages[-1].metadata or {})
+
     def test_message_offloader_owns_rule_compression_pipeline(self):
         from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloader
         from openjiuwen.core.context_engine.processor.offloader.rules import RuleCompressionPipeline
@@ -736,3 +768,10 @@ class TestMessageOffloader:
         )
 
         assert isinstance(offloader._rule_pipeline, RuleCompressionPipeline)  # type: ignore[attr-defined]
+
+    def test_rule_content_router_is_public_rule_router_name(self):
+        from openjiuwen.core.context_engine.processor.offloader.rules import RuleContentRouter
+
+        router = RuleContentRouter()
+
+        assert router.detect("src/app.py:1:match").value == "SEARCH_RESULTS"

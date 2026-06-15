@@ -603,6 +603,47 @@ class TestFullCompactProcessor:
         assert [message.content for message in invoked_messages] == ["system", "u1", "a1", "compact now"]
         assert model.invoke.await_args.kwargs["tools"] == ["tool-schema"]
 
+    @pytest.mark.asyncio
+    async def test_forked_compression_executor_builds_request_from_context_window_and_trims_tail(self):
+        from openjiuwen.core.context_engine.base import ContextWindow
+        from openjiuwen.core.context_engine.processor.compressor.forked.executor import (
+            ForkedCompressionExecutor,
+            ForkedCompressionRequest,
+        )
+        from openjiuwen.core.foundation.tool.schema import ToolInfo
+
+        model = MagicMock()
+        model.invoke = AsyncMock(return_value=AssistantMessage(content="<summary>ok</summary>"))
+        executor = ForkedCompressionExecutor(model=model)
+        window = ContextWindow(
+            system_messages=[SystemMessage(content="agent system"), SystemMessage(content="tool policy")],
+            context_messages=[
+                UserMessage(content="u1"),
+                AssistantMessage(content="a1"),
+                UserMessage(content="current user"),
+                AssistantMessage(content="current assistant"),
+            ],
+            tools=[ToolInfo(name="tool-a"), ToolInfo(name="tool-b")],
+        )
+
+        result = await executor.invoke(
+            ForkedCompressionRequest.from_context_window(
+                prompt="compact prefix",
+                context_window=window,
+                exclude_recent_messages=2,
+            )
+        )
+
+        assert result.content == "<summary>ok</summary>"
+        assert [message.content for message in model.invoke.await_args.kwargs["messages"]] == [
+            "agent system",
+            "tool policy",
+            "u1",
+            "a1",
+            "compact prefix",
+        ]
+        assert [tool.name for tool in model.invoke.await_args.kwargs["tools"]] == ["tool-a", "tool-b"]
+
     def test_full_compact_registers_reinjection_extension_points(self):
         from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import FullCompactProcessor
 

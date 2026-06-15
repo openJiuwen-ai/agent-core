@@ -34,7 +34,7 @@ class RuleCompressionResult:
     modified: bool
 
 
-class ContentRouter:
+class RuleContentRouter:
     """Deterministic, dependency-light compression for oversized tool results."""
 
     _SEARCH_LINE_RE = re.compile(r"^.+?:\d+[:\-].+$")
@@ -274,3 +274,6 @@ class _HTMLTextExtractor(HTMLParser):
     def handle_data(self, data: str) -> None:
         if not self._skip_depth and data.strip():
             self._parts.append(data.strip())
+
+
+ContentRouter = RuleContentRouter

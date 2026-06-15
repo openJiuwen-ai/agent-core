@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage, UserMessage
+from openjiuwen.core.context_engine.base import ContextWindow
+from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
 
 
 @dataclass(frozen=True)
@@ -14,6 +15,24 @@ class ForkedCompressionRequest:
     tools: list[Any] | None = None
     exclude_recent_messages: int = 0
     output_parser: Any = None
+
+    @classmethod
+    def from_context_window(
+        cls,
+        *,
+        prompt: str,
+        context_window: ContextWindow,
+        exclude_recent_messages: int = 0,
+        output_parser: Any = None,
+    ) -> "ForkedCompressionRequest":
+        return cls(
+            prompt=prompt,
+            system_messages=list(context_window.system_messages or []),
+            context_messages=list(context_window.context_messages or []),
+            tools=list(context_window.tools or []),
+            exclude_recent_messages=exclude_recent_messages,
+            output_parser=output_parser,
+        )
 
 
 @dataclass(frozen=True)

@@ -4,7 +4,7 @@ import time
 from typing import Any, Callable
 
 from openjiuwen.core.context_engine.base import ModelContext
-from openjiuwen.core.context_engine.processor.offloader.rules.router import ContentRouter, RuleContext
+from openjiuwen.core.context_engine.processor.offloader.rules.router import RuleContentRouter, RuleContext
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
 
 
@@ -13,11 +13,14 @@ class RuleCompressionPipeline:
 
     def __init__(
         self,
-        router: ContentRouter | None = None,
+        router: RuleContentRouter | None = None,
         time_func: Callable[[], float] = time.time,
     ) -> None:
-        self._router = router or ContentRouter()
+        self._router = router or RuleContentRouter()
         self._time_func = time_func
+
+    def current_time(self) -> float:
+        return self._time_func()
 
     def has_candidate(self, messages: list[BaseMessage], context: ModelContext, config: Any) -> bool:
         threshold = self.threshold(config)
@@ -28,19 +31,30 @@ class RuleCompressionPipeline:
                 return True
         return False
 
-    def compress_if_needed(self, message: BaseMessage, context: ModelContext, config: Any) -> BaseMessage:
+    def compress_if_needed(
+        self,
+        message: BaseMessage,
+        context: ModelContext,
+        config: Any,
+        *,
+        threshold_ratio: float | None = None,
+        force: bool = False,
+        pass_name: str = "add",
+        truncate_head_tokens: int | None = None,
+        truncate_tail_tokens: int | None = None,
+    ) -> BaseMessage:
         if not isinstance(message, ToolMessage) or not isinstance(message.content, str):
             return message
 
-        now = self._time_func()
+        now = self.current_time()
         metadata = dict(getattr(message, "metadata", None) or {})
         last_processed = float(metadata.get("rule_compressed_at") or 0)
-        if last_processed and getattr(config, "rule_compression_ttl_seconds", 0):
+        if not force and last_processed and getattr(config, "rule_compression_ttl_seconds", 0):
             if now - last_processed < config.rule_compression_ttl_seconds:
                 return message
 
-        threshold = self.threshold(config)
-        if self.estimate_text_tokens(message.content, context) <= threshold:
+        threshold = self.threshold(config, threshold_ratio=threshold_ratio)
+        if not force and self.estimate_text_tokens(message.content, context) <= threshold:
             return message
 
         result = self._router.compress(
@@ -56,8 +70,8 @@ class RuleCompressionPipeline:
         if self.estimate_text_tokens(content, context) > threshold:
             content = self.truncate_head_tail_by_tokens(
                 content,
-                config.rule_truncate_head_tokens,
-                config.rule_truncate_tail_tokens,
+                truncate_head_tokens if truncate_head_tokens is not None else config.rule_truncate_head_tokens,
+                truncate_tail_tokens if truncate_tail_tokens is not None else config.rule_truncate_tail_tokens,
                 context,
             )
             modified = content != message.content
@@ -69,14 +83,17 @@ class RuleCompressionPipeline:
                 "rule_compressed_at": now,
                 "rule_compression_type": result.content_type.value,
                 "rule_compression_modified": modified,
+                "rule_compression_threshold": threshold,
+                "rule_compression_pass": pass_name,
             }
         )
         return message.model_copy(update={"content": content, "metadata": metadata})
 
     @staticmethod
-    def threshold(config: Any) -> int:
+    def threshold(config: Any, threshold_ratio: float | None = None) -> int:
         window_tokens = config.rule_compression_context_window_tokens or config.tokens_threshold
-        return max(int(window_tokens * config.rule_compression_ratio), 1)
+        ratio = config.rule_compression_ratio if threshold_ratio is None else threshold_ratio
+        return max(int(window_tokens * ratio), 1)
 
     @staticmethod
     def estimate_text_tokens(content: str, context: ModelContext) -> int:

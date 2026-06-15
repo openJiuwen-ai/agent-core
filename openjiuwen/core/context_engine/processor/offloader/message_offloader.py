@@ -4,6 +4,7 @@
 import fnmatch
 import json
 import os
+import re
 import uuid
 from typing import List, Dict, Any, Literal, Tuple, Optional
 from pydantic import BaseModel, Field
@@ -67,11 +68,17 @@ class MessageOffloaderConfig(BaseModel):
     rule_compression_ratio: float = Field(default=0.2, gt=0.0, lt=1.0)
     """Single-message threshold ratio for deterministic rule compression."""
 
+    rule_compression_expired_ratio: float = Field(default=0.1, gt=0.0, lt=1.0)
+    """Stricter threshold ratio used when TTL-expired rule-compressed messages are reprocessed."""
+
     rule_compression_context_window_tokens: int | None = Field(default=None, gt=0)
     """Optional context window token budget used to derive the 20% rule-compression threshold."""
 
     rule_compression_ttl_seconds: int = Field(default=300, ge=0)
     """Minimum interval before the same message may be re-evaluated by the rule pipeline."""
+
+    rule_compression_ttl_keep_recent_messages: int = Field(default=8, ge=0)
+    """Number of most-recent messages skipped by TTL rule-compression sweeps."""
 
     rule_truncate_head_tokens: int = Field(default=2000, gt=0)
     """Approximate head tokens retained when rule-compressed content remains oversized."""
@@ -89,6 +96,8 @@ class MessageOffloader(ContextProcessor):
         super().__init__(config)
         self._validate_config()
         self._rule_pipeline = RuleCompressionPipeline()
+        self._last_rule_compression_ttl_sweep_at_by_context: dict[str, float] = {}
+        self._pending_rule_compression_ttl_sweep_contexts: set[str] = set()
 
     async def on_add_messages(
             self,
@@ -115,6 +124,8 @@ class MessageOffloader(ContextProcessor):
         config = self.config
         all_messages = context.get_messages() + messages_to_add
         if self._has_rule_compression_candidate(messages_to_add, context):
+            return True
+        if self._should_trigger_context_ttl_sweep(context):
             return True
         message_size = len(all_messages)
         if config.messages_to_keep and message_size <= config.messages_to_keep:
@@ -154,6 +165,18 @@ class MessageOffloader(ContextProcessor):
         offload_range = self._get_offload_range(messages)
 
         event = ContextEvent(event_type=self.processor_type())
+        ttl_sweep_active = self._consume_context_ttl_sweep(context)
+        for idx, msg in enumerate(processed_messages):
+            if not self._should_process_ttl_message(idx, msg, processed_messages, ttl_sweep_active):
+                continue
+            replacement = await self._process_ttl_message(msg, context)
+            if replacement is None:
+                continue
+            processed_messages = ContextUtils.replace_messages(processed_messages, [replacement], idx, idx)
+            event.messages_to_modify.append(idx)
+        if ttl_sweep_active:
+            self._mark_context_ttl_sweep_complete(context)
+
         for idx in range(offload_range - 1, -1, -1):
             msg = processed_messages[idx]
             if not self._should_consider_message(msg, processed_messages):
@@ -303,6 +326,135 @@ class MessageOffloader(ContextProcessor):
 
     def _apply_rule_compression_if_needed(self, message: BaseMessage, context: ModelContext) -> BaseMessage:
         return self._rule_pipeline.compress_if_needed(message, context, self.config)
+
+    def _should_trigger_context_ttl_sweep(self, context: ModelContext) -> bool:
+        ttl_seconds = int(getattr(self.config, "rule_compression_ttl_seconds", 0) or 0)
+        if ttl_seconds <= 0:
+            return False
+        key = self._context_ttl_key(context)
+        now = self._rule_pipeline.current_time()
+        last_sweep_at = self._last_rule_compression_ttl_sweep_at_by_context.get(key)
+        if last_sweep_at is None:
+            self._last_rule_compression_ttl_sweep_at_by_context[key] = now
+            return False
+        if now - last_sweep_at < ttl_seconds:
+            return False
+        self._pending_rule_compression_ttl_sweep_contexts.add(key)
+        return True
+
+    def _consume_context_ttl_sweep(self, context: ModelContext) -> bool:
+        key = self._context_ttl_key(context)
+        if key in self._pending_rule_compression_ttl_sweep_contexts:
+            self._pending_rule_compression_ttl_sweep_contexts.discard(key)
+            return True
+        return self._should_trigger_context_ttl_sweep(context)
+
+    def _mark_context_ttl_sweep_complete(self, context: ModelContext) -> None:
+        key = self._context_ttl_key(context)
+        self._last_rule_compression_ttl_sweep_at_by_context[key] = self._rule_pipeline.current_time()
+        self._pending_rule_compression_ttl_sweep_contexts.discard(key)
+
+    @staticmethod
+    def _context_ttl_key(context: ModelContext) -> str:
+        try:
+            session_id = context.session_id()
+        except Exception:
+            session_id = "unknown_session"
+        try:
+            context_id = context.context_id()
+        except Exception:
+            context_id = str(id(context))
+        return f"{session_id}:{context_id}"
+
+    def _should_process_ttl_message(
+        self,
+        index: int,
+        message: BaseMessage,
+        context_messages: List[BaseMessage],
+        ttl_sweep_active: bool,
+    ) -> bool:
+        keep_recent = int(getattr(self.config, "rule_compression_ttl_keep_recent_messages", 0) or 0)
+        if self._is_ttl_recent_index(index, len(context_messages), keep_recent):
+            return False
+        if not isinstance(message, ToolMessage):
+            return False
+        if isinstance(message, OffloadMixin):
+            return False
+        if not isinstance(getattr(message, "content", None), str):
+            return False
+        if self._is_protected_tool_message(message, context_messages):
+            return False
+        return ttl_sweep_active
+
+    @staticmethod
+    def _is_ttl_recent_index(index: int, message_count: int, keep_recent: int) -> bool:
+        return keep_recent > 0 and index >= max(message_count - keep_recent, 0)
+
+    async def _process_ttl_message(self, message: BaseMessage, context: ModelContext) -> BaseMessage | None:
+        if self._is_rule_compressed_message(message):
+            message = self._mark_ttl_offload_metadata(message)
+            return await self._offload_message(message, context, original_message=message)
+        return self._compress_ttl_message(message, context)
+
+    def _mark_ttl_offload_metadata(self, message: BaseMessage) -> BaseMessage:
+        metadata = dict(getattr(message, "metadata", None) or {})
+        metadata.update(
+            {
+                "rule_compressed_at": self._rule_pipeline.current_time(),
+                "rule_compression_pass": "ttl",
+                "rule_compression_ttl_offloaded": True,
+            }
+        )
+        return message.model_copy(update={"metadata": metadata})
+
+    def _compress_ttl_message(self, message: BaseMessage, context: ModelContext) -> BaseMessage | None:
+        if not isinstance(message, ToolMessage) or not isinstance(getattr(message, "content", None), str):
+            return None
+
+        visible_content, offload_marker = self._split_offload_marker(message.content)
+        threshold = self._rule_pipeline.threshold(
+            self.config,
+            threshold_ratio=self.config.rule_compression_expired_ratio,
+        )
+        head_tokens = max(threshold // 2, 1)
+        tail_tokens = max(threshold - head_tokens, 0)
+        candidate = message.model_copy(update={"content": visible_content})
+        processed = self._rule_pipeline.compress_if_needed(
+            candidate,
+            context,
+            self.config,
+            threshold_ratio=self.config.rule_compression_expired_ratio,
+            force=True,
+            pass_name="ttl",
+            truncate_head_tokens=head_tokens,
+            truncate_tail_tokens=tail_tokens,
+        )
+        if processed is candidate:
+            refreshed = self._refresh_expired_rule_metadata(candidate, threshold)
+            if offload_marker:
+                refreshed = refreshed.model_copy(update={"content": f"{refreshed.content}{offload_marker}"})
+            return refreshed
+        if offload_marker:
+            processed = processed.model_copy(update={"content": f"{processed.content}{offload_marker}"})
+        return processed
+
+    def _refresh_expired_rule_metadata(self, message: BaseMessage, threshold: int) -> BaseMessage:
+        metadata = dict(getattr(message, "metadata", None) or {})
+        metadata.update(
+            {
+                "rule_compressed_at": self._rule_pipeline.current_time(),
+                "rule_compression_threshold": threshold,
+                "rule_compression_pass": "ttl",
+            }
+        )
+        return message.model_copy(update={"metadata": metadata})
+
+    @staticmethod
+    def _split_offload_marker(content: str) -> tuple[str, str]:
+        match = re.search(r"\[\[OFFLOAD: [^\]]+\]\]\s*$", content)
+        if not match:
+            return content, ""
+        return content[: match.start()], match.group(0)
 
     def _rule_compression_threshold(self, context: ModelContext) -> int:
         _ = context
