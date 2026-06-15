@@ -628,7 +628,7 @@ class TestImplementStageHelpers(
     async def test_start_fix_loop_emits_progress_messages(
         self,
     ):
-        task, queue, done = _start_fix_loop(
+        task, queue, done, _last_ci = _start_fix_loop(
             config=AutoHarnessConfig(),
             task=OptimizationTask(topic="fix lint"),
             agent=None,
@@ -659,7 +659,7 @@ class TestImplementStageHelpers(
     async def test_start_fix_loop_omits_warning_summary_in_fix_target(
         self,
     ):
-        task, queue, done = _start_fix_loop(
+        task, queue, done, _last_ci = _start_fix_loop(
             config=AutoHarnessConfig(),
             task=OptimizationTask(topic="fix pytest failure"),
             agent=None,

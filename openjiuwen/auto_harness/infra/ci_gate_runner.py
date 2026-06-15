@@ -619,7 +619,7 @@ class CIGateRunner:
         for v in in_range:
             code = v.get("code", "")
             msg = v.get("message", "")
-            filepath = v.get("filename", "")
+            filepath = str(v.get("filename", "")).replace("\\", "/")
             line_num = v.get("location", {}).get("row", "")
             col = v.get("location", {}).get("column", "")
             lines.append(
@@ -660,7 +660,7 @@ class CIGateRunner:
         for v in in_range:
             symbol = v.get("symbol", "")
             msg = v.get("message", "")
-            filepath = v.get("path", "")
+            filepath = str(v.get("path", "")).replace("\\", "/")
             line_num = v.get("line", "")
             msg_id = v.get("message-id", "")
             lines.append(
@@ -685,14 +685,18 @@ class CIGateRunner:
             m = pattern.match(line)
             if not m:
                 continue
-            filepath, line_num_str = m.group(1), m.group(2)
+            raw_path, line_num_str = m.group(1), m.group(2)
             line_num = int(line_num_str)
+            filepath = raw_path
             if repo_relative_fn:
                 filepath = repo_relative_fn(filepath)
             allowed = line_ranges.get(filepath)
             if allowed is None or line_num not in allowed:
                 continue
-            in_range.append(line)
+            normalized_path = raw_path.replace("\\", "/")
+            in_range.append(
+                line.replace(raw_path, normalized_path, 1)
+            )
 
         if not in_range:
             return False, ""
@@ -718,14 +722,18 @@ class CIGateRunner:
             if not m:
                 # Skip summary lines like "Found N errors"
                 continue
-            filepath, line_num_str = m.group(1), m.group(2)
+            raw_path, line_num_str = m.group(1), m.group(2)
             line_num = int(line_num_str)
+            filepath = raw_path
             if repo_relative_fn:
                 filepath = repo_relative_fn(filepath)
             allowed = line_ranges.get(filepath)
             if allowed is None or line_num not in allowed:
                 continue
-            in_range.append(line)
+            normalized_path = raw_path.replace("\\", "/")
+            in_range.append(
+                line.replace(raw_path, normalized_path, 1)
+            )
 
         if not in_range:
             return False, ""
@@ -756,9 +764,11 @@ class CIGateRunner:
                 continue
             overlap = allowed.intersection(fmt_lines)
             if overlap:
+                norm_filepath = filepath.replace("\\", "/")
                 # Some format changes hit changed lines — report it
                 in_range_lines.append(
-                    f"{filepath}: formatting differs on changed lines "
+                    f"{norm_filepath}: "
+                    f"formatting differs on changed lines "
                     f"{sorted(overlap)}"
                 )
 
