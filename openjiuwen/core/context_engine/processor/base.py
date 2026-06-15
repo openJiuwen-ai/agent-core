@@ -19,6 +19,9 @@ from openjiuwen.core.sys_operation import SysOperation
 _PROCESSOR_TYPE_ATTR: str = "__processor_type"
 _OFFLOAD_MESSAGE_HANDLE: str = "[[OFFLOAD: handle={handle}, type={type}]]"
 _OFFLOAD_MESSAGE_HANDLE_WITH_PATH: str = "[[OFFLOAD: type={type}, path={path}]]"
+_OFFLOAD_MESSAGE_HANDLE_WITH_PATH_AND_HANDLE: str = (
+    "[[OFFLOAD: handle={handle}, type={type}, path={path}]]"
+)
 
 
 class MetaContextProcessor(type):
@@ -258,8 +261,10 @@ class ContextProcessor(metaclass=MetaContextProcessor):
             **kwargs
     ) -> Optional[BaseMessage]:
         if offload_path:
-            content = content + _OFFLOAD_MESSAGE_HANDLE_WITH_PATH.format(
-                type="filesystem", path=offload_path
+            content = content + _OFFLOAD_MESSAGE_HANDLE_WITH_PATH_AND_HANDLE.format(
+                handle=offload_handle,
+                type="filesystem",
+                path=offload_path,
             )
         else:
             content = content + _OFFLOAD_MESSAGE_HANDLE.format(

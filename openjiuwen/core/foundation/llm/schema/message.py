@@ -4,6 +4,7 @@
 from typing import Union, List, Optional, Any, Dict
 from pydantic import BaseModel, Field, model_validator
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 
 
@@ -112,3 +113,24 @@ class SystemMessage(BaseMessage):
 class ToolMessage(BaseMessage):
     role: str = "tool"
     tool_call_id: str
+
+
+_MESSAGE_CLASSES_BY_ROLE: dict[str, type[BaseMessage]] = {
+    "user": UserMessage,
+    "assistant": AssistantMessage,
+    "system": SystemMessage,
+    "tool": ToolMessage,
+}
+
+
+def message_from_dict(data: dict[str, Any]) -> BaseMessage:
+    """Deserialize a persisted message dict into the concrete message type."""
+    role = str(data.get("role", ""))
+    message_cls = _MESSAGE_CLASSES_BY_ROLE.get(role)
+    if message_cls is None:
+        logger.warning(
+            "[message_from_dict] unknown role=%r, falling back to BaseMessage",
+            role,
+        )
+        message_cls = BaseMessage
+    return message_cls.model_validate(data)

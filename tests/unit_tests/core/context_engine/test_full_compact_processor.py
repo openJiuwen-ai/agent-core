@@ -692,3 +692,49 @@ class TestFullCompactContextWindowAccounting:
         )
         assert result is not None
         assert calls[0] == 2
+
+
+class TestFullCompactQAArtifactManager:
+    def test_qa_artifact_manager_binds_model_from_processor_config(self):
+        from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+            FullCompactProcessor,
+        )
+        from openjiuwen.core.context_engine.qa_artifact import QAArtifactConfig
+        from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+
+        model_config = ModelRequestConfig(model="glm-test")
+        model_client = ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="test-key",
+            api_base="http://test-base",
+            verify_ssl=False,
+        )
+        processor = FullCompactProcessor(
+            FullCompactProcessorConfig(
+                qa_artifact=QAArtifactConfig(enabled=True),
+                model=model_config,
+                model_client=model_client,
+            )
+        )
+
+        mgr = processor.qa_artifact_manager
+        assert mgr is not None
+        update_agent = mgr._overview._sm._update_agent
+        assert update_agent._config.model is not None
+        assert update_agent._config.model.model_name == "glm-test"
+        assert update_agent._config.model_client is model_client
+        assert mgr._catalog._model is not None
+
+    def test_qa_artifact_manager_without_model_stays_unbound(self):
+        from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+            FullCompactProcessor,
+        )
+        from openjiuwen.core.context_engine.qa_artifact import QAArtifactConfig
+
+        processor = FullCompactProcessor(
+            FullCompactProcessorConfig(qa_artifact=QAArtifactConfig(enabled=True))
+        )
+        mgr = processor.qa_artifact_manager
+        assert mgr is not None
+        assert mgr._overview._sm._update_agent._config.model is None
+        assert mgr._catalog._model is None

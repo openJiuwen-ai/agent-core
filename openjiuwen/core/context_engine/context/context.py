@@ -16,6 +16,7 @@ from openjiuwen.core.context_engine.base import ModelContext, ContextWindow, Con
 from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
 from openjiuwen.core.context_engine.context.kv_cache_manager import KVCacheManager
 from openjiuwen.core.context_engine.observability import write_context_trace, snapshot_messages
+from openjiuwen.core.context_engine.qa_artifact.schema import IrreducibleContextError
 from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import ContextEvents
 from openjiuwen.core.context_engine.active_skill_bodies import (
@@ -199,6 +200,8 @@ class SessionModelContext(ModelContext):
                             "incoming_after": snapshot_messages(messages_to_add),
                         },
                     )
+            except IrreducibleContextError:
+                raise
             except Exception as e:
                 logger.warning(
                     f"Failed to process ADD messages by using processor {processor.processor_type()},"
@@ -242,7 +245,14 @@ class SessionModelContext(ModelContext):
     async def clear_messages(self, with_history: bool = True):
         self.pop_messages(len(self), with_history=with_history)
         self._offload_message_buffer = OffloadMessageBuffer()
-        return
+        self._restore_offload_buffer_settings()
+
+    def _restore_offload_buffer_settings(self) -> None:
+        self._offload_message_buffer.set_sys_operation(self._sys_operation)
+        self._offload_message_buffer.set_workspace_info(
+            self._workspace.root_path if self._workspace else "",
+            self._session_id,
+        )
 
     @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="window")
     async def get_context_window(
@@ -313,6 +323,8 @@ class SessionModelContext(ModelContext):
                             },
                         },
                     )
+            except IrreducibleContextError:
+                raise
             except Exception as e:
                 logger.warning(
                     f"Failed to process GET messages by using processor {processor.processor_type()},"
@@ -532,3 +544,4 @@ class SessionModelContext(ModelContext):
             for _, msg_list in offload_messages.items():
                 self._validate_and_init_messages(msg_list)
             self._offload_message_buffer = OffloadMessageBuffer(offload_messages)
+        self._restore_offload_buffer_settings()

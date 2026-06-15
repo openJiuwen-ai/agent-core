@@ -1239,8 +1239,50 @@ class SessionMemoryManager:
             self._set_runtime_state(session, runtime)
 
     @staticmethod
+    def notes_path_for(workspace, session_id: str, unit: str | None = None) -> Path:
+        """Per-session notes (unit=None) or per-QA overview (unit=qa_id)."""
+        base = Path(workspace.root_path) / "context" / f"{session_id}_context" / "session_memory"
+        if unit is None:
+            return base / "session_context.md"
+        return base / f"{unit}.md"
+
+    async def generate_overview_for_qa(
+        self,
+        ctx: Any,
+        *,
+        workspace: Any,
+        qa_id: str,
+        messages: List[BaseMessage],
+        pending_path: Path,
+        active_path: Path,
+    ) -> None:
+        """Full (non-incremental) per-QA overview; atomic commit pending → active."""
+        _ = workspace
+        inherited_messages = list(getattr(getattr(ctx, "inputs", None), "messages", None) or [])
+        self._update_agent.set_inherited_system_prompt(build_system_prompt_text(inherited_messages))
+
+        current_notes = self._read_or_init_session_memory(active_path)
+        self._prepare_pending_session_memory(active_path, pending_path, current_notes)
+
+        await self._update_agent.invoke(
+            context_messages=messages,
+            notes_path=pending_path,
+            current_notes=current_notes,
+            is_incremental=False,
+        )
+
+        if pending_path.exists():
+            self._commit_pending_session_memory(pending_path, active_path)
+        logger.info(
+            "[SessionMemory] qa overview committed qa_id=%s path=%s messages=%s",
+            qa_id,
+            active_path,
+            len(messages),
+        )
+
+    @staticmethod
     def _get_session_memory_path(workspace, session_id: str) -> Path:
-        return Path(workspace.root_path) / "context" / f"{session_id}_context" / "session_memory" / "session_context.md"
+        return SessionMemoryManager.notes_path_for(workspace, session_id, unit=None)
 
     @staticmethod
     def _get_pending_session_memory_path(path: Path) -> Path:

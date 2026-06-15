@@ -14,6 +14,13 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext
+from openjiuwen.core.context_engine.qa_artifact.lifecycle import (
+    cancel_qa_artifact_tasks_for_session,
+)
+from openjiuwen.core.context_engine.qa_block.freezer_lifecycle import (
+    cancel_qa_block_freeze_tasks_for_session,
+)
+from openjiuwen.core.context_engine.qa_block.history_buffer import HistoryQABuffer
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.runner.callback import trigger, lazy_callback_framework as _fw
@@ -47,6 +54,7 @@ class ContextEngine:
         self._workspace = workspace
         self._sys_operation = sys_operation
         self._context_pool: Dict[str, ModelContext] = dict()
+        self._history_qa_buffers: Dict[str, HistoryQABuffer] = dict()
 
     @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="context")
     async def create_context(
@@ -86,6 +94,7 @@ class ContextEngine:
         if full_context_id in self._context_pool:
             context = self._context_pool.get(full_context_id)
             setattr(context, "_session_ref", session)
+            setattr(context, "_context_engine", self)
             self._load_state_from_session(context, session, history_messages)
             return context
 
@@ -109,6 +118,7 @@ class ContextEngine:
             sys_operation=self._sys_operation,
         )
         setattr(context, "_session_ref", session)
+        setattr(context, "_context_engine", self)
         self._load_state_from_session(context, session, history_messages)
         self._context_pool[full_context_id] = context
         return context
@@ -131,6 +141,70 @@ class ContextEngine:
         context_id = self._process_context_id(context_id)
         full_context_id = f"{session_id}_{context_id}"
         return self._context_pool.get(full_context_id, None)
+
+    def get_history_qa_buffer(
+            self,
+            session_id: str,
+            context_id: str = "default_context_id",
+            *,
+            max_blocks: int = 3,
+    ) -> HistoryQABuffer:
+        """Return the in-process hot cache for completed QA L0 blocks (not checkpointed)."""
+        context_id = self._process_context_id(context_id)
+        buffer_key = f"{session_id}_{context_id}"
+        buffer = self._history_qa_buffers.get(buffer_key)
+        if buffer is None:
+            buffer = HistoryQABuffer(max_blocks=max_blocks)
+            self._history_qa_buffers[buffer_key] = buffer
+            context_engine_logger.info(
+                "Created history QA buffer",
+                event_type=LogEventType.CONTEXT_RETRIEVE,
+                metadata={
+                    "session_id": session_id,
+                    "context_id": context_id,
+                    "max_blocks": max_blocks,
+                },
+            )
+        return buffer
+
+    def _clear_history_qa_buffers(
+            self,
+            *,
+            session_id: str | None = None,
+            context_id: str | None = None,
+    ) -> None:
+        if session_id is None and context_id is None:
+            cleared = len(self._history_qa_buffers)
+            self._history_qa_buffers.clear()
+            if cleared:
+                context_engine_logger.info(
+                    "Cleared all history QA buffers",
+                    event_type=LogEventType.CONTEXT_CLEAR,
+                    metadata={"cleared_count": cleared},
+                )
+            return
+
+        if context_id is not None and session_id is not None:
+            context_id = self._process_context_id(context_id)
+            buffer_key = f"{session_id}_{context_id}"
+            if self._history_qa_buffers.pop(buffer_key, None) is not None:
+                context_engine_logger.info(
+                    "Cleared history QA buffer",
+                    event_type=LogEventType.CONTEXT_CLEAR,
+                    metadata={"session_id": session_id, "context_id": context_id},
+                )
+            return
+
+        prefix = f"{session_id}_"
+        keys = [key for key in self._history_qa_buffers if key.startswith(prefix)]
+        for key in keys:
+            del self._history_qa_buffers[key]
+        if keys:
+            context_engine_logger.info(
+                "Cleared session history QA buffers",
+                event_type=LogEventType.CONTEXT_CLEAR,
+                metadata={"session_id": session_id, "cleared_count": len(keys)},
+            )
 
     async def clear_context(
             self,
@@ -161,6 +235,9 @@ class ContextEngine:
         if session_id is None:
             cleared_count = len(self._context_pool)
             self._context_pool.clear()
+            self._clear_history_qa_buffers()
+            await cancel_qa_artifact_tasks_for_session(None)
+            await cancel_qa_block_freeze_tasks_for_session(None)
             await trigger(ContextEvents.CONTEXT_CLEARED,
                        context_id=context_id, session_id=session_id,
                        cleared_count=cleared_count)
@@ -173,6 +250,9 @@ class ContextEngine:
             ]
 
             if not delete_context_list:
+                self._clear_history_qa_buffers(session_id=session_id)
+                await cancel_qa_artifact_tasks_for_session(session_id)
+                await cancel_qa_block_freeze_tasks_for_session(session_id)
                 context_engine_logger.warning(
                     "Delete context failed, session does not exist",
                     event_type=LogEventType.CONTEXT_CLEAR,
@@ -183,6 +263,9 @@ class ContextEngine:
             for context_id in delete_context_list:
                 full_context_id = f"{session_id}_{context_id}"
                 del self._context_pool[full_context_id]
+            self._clear_history_qa_buffers(session_id=session_id)
+            await cancel_qa_artifact_tasks_for_session(session_id)
+            await cancel_qa_block_freeze_tasks_for_session(session_id)
             await trigger(ContextEvents.CONTEXT_CLEARED,
                        context_id=context_id, session_id=session_id,
                        cleared_count=len(delete_context_list))
@@ -199,6 +282,9 @@ class ContextEngine:
             return
 
         del self._context_pool[full_context_id]
+        self._clear_history_qa_buffers(session_id=session_id, context_id=context_id)
+        await cancel_qa_artifact_tasks_for_session(session_id)
+        await cancel_qa_block_freeze_tasks_for_session(session_id)
         await trigger(ContextEvents.CONTEXT_CLEARED,
                    context_id=context_id, session_id=session_id)
 

@@ -498,15 +498,17 @@ class ReActAgent(BaseAgent):
             from openjiuwen.core.runner import Runner
             sys_operation = Runner.resource_mgr.get_sys_operation(config.sys_operation_id)
 
-        # Update context_engine if context window limit changed
-        if old_config.context_engine_config != config.context_engine_config:
+        if (
+            old_config.context_engine_config != config.context_engine_config
+            or old_config.sys_operation_id != config.sys_operation_id
+            or old_config.workspace != config.workspace
+        ):
             self.context_engine = ContextEngine(
                 config.context_engine_config,
                 workspace=config.workspace,
                 sys_operation=sys_operation,
             )
             self._ability_manager.set_context_engine(self.context_engine)
-        # Reset sys operation id if changed
         if old_config.sys_operation_id != config.sys_operation_id:
             self.lazy_init_skill()
 
