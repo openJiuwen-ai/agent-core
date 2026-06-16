@@ -12,13 +12,13 @@ import pytest
 from openjiuwen.core.controller.modules.event_handler import (
     EventHandlerInput,
 )
+from openjiuwen.core.controller.schema.dataframe import (
+    TextDataFrame,
+)
 from openjiuwen.core.controller.schema.event import (
     InputEvent,
     TaskFailedEvent,
     TaskInteractionEvent,
-)
-from openjiuwen.core.controller.schema.dataframe import (
-    TextDataFrame,
 )
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
@@ -27,20 +27,20 @@ from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
 )
 from openjiuwen.harness.deep_agent import DeepAgent
-from openjiuwen.harness.task_loop.task_loop_event_handler import (
-    TaskLoopEventHandler,
-)
-from openjiuwen.harness.task_loop.task_loop_event_executor import (
-    DEEP_TASK_TYPE,
+from openjiuwen.harness.schema.config import (
+    DeepAgentConfig,
 )
 from openjiuwen.harness.task_loop.loop_coordinator import (
     LoopCoordinator,
 )
-from openjiuwen.harness.schema.config import (
-    DeepAgentConfig,
-)
 from openjiuwen.harness.task_loop.loop_queues import (
     LoopQueues,
+)
+from openjiuwen.harness.task_loop.task_loop_event_executor import (
+    DEEP_TASK_TYPE,
+)
+from openjiuwen.harness.task_loop.task_loop_event_handler import (
+    TaskLoopEventHandler,
 )
 
 
@@ -370,3 +370,22 @@ async def test_handle_input_waits_for_completion() \
 
     assert completed is True
     assert result["output"] == "waited"
+
+
+@pytest.mark.asyncio
+async def test_wait_completion_propagates_cancelled_error() -> None:
+    """Cancelling the waiter must not convert cancellation into a normal result."""
+    agent = _make_agent()
+    handler = TaskLoopEventHandler(agent)
+    handler.prepare_round()
+
+    wait_task = asyncio.create_task(
+        handler.wait_completion(timeout=30.0)
+    )
+    await asyncio.sleep(0)
+
+    wait_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await wait_task
+
+    assert handler.last_result == {"error": "cancelled"}
