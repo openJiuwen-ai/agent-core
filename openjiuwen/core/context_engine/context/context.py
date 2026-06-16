@@ -88,6 +88,7 @@ class SessionModelContext(ModelContext):
         )
         self._processor_lock = asyncio.Lock()
         self._active_compression_in_progress = False
+        self._last_context_window_access_at: float | None = None
         self._kv_cache_manager = KVCacheManager(session_id) if config.enable_kv_cache_release else None
         self._offload_message_buffer = OffloadMessageBuffer()
         self._offload_message_buffer.set_sys_operation(sys_operation)
@@ -130,6 +131,19 @@ class SessionModelContext(ModelContext):
 
     def context_id(self) -> str:
         return self._context_id
+
+    def last_context_window_access_at(self) -> float | None:
+        return self._last_context_window_access_at
+
+    def set_last_context_window_access_at(self, timestamp: float) -> None:
+        self._last_context_window_access_at = timestamp
+
+    def context_window_tokens(self) -> int:
+        return ContextUtils.resolve_context_max(
+            model_name=self._model_name,
+            fallback_context_window_tokens=self._context_window_tokens,
+            model_context_window_tokens=self._model_context_window_tokens,
+        )
 
     def workspace_dir(self) -> str:
         if self._workspace:
@@ -790,6 +804,7 @@ class SessionModelContext(ModelContext):
         return {
             "messages": self._message_buffer.get_back(),
             "offload_messages": self._offload_message_buffer.get_all(),
+            "last_context_window_access_at": self._last_context_window_access_at,
         }
 
     def load_state(self, state: Dict[str, Any]):
@@ -798,6 +813,10 @@ class SessionModelContext(ModelContext):
         ContextUtils.validate_messages(messages)
         messages = ContextUtils.ensure_context_message_ids(messages)
         self._message_buffer.rebulid(messages)
+        last_access_at = context_state.get("last_context_window_access_at")
+        self._last_context_window_access_at = (
+            float(last_access_at) if isinstance(last_access_at, (int, float)) else None
+        )
         offload_messages = context_state.get("offload_messages")
         self._offload_message_buffer = OffloadMessageBuffer()
         if offload_messages:

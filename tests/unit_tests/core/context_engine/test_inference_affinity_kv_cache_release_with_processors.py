@@ -17,10 +17,7 @@ or KVCacheManager logic in isolation; see test_react_agent_kv_cache_release.py a
 test_kv_cache_manager.py.
 """
 
-import asyncio
-import json
 import logging
-import re
 from typing import List
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -31,6 +28,7 @@ from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
     MessageOffloaderConfig,
 )
+from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import UserMessage, ToolMessage, AssistantMessage
 from openjiuwen.core.foundation.llm.inference_affinity_model import InferenceAffinityModel
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
@@ -173,33 +171,34 @@ async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_r
     engine_config = ContextEngineConfig(
         enable_kv_cache_release=True,
         default_window_message_num=100,
+        context_window_tokens=100,
     )
     engine = ContextEngine(engine_config)
 
-    # Configure MessageOffloader to trigger on 3+ messages
-    # This will cause offloading when we add new messages later
-    offloader_cfg = MessageOffloaderConfig(
-        messages_threshold=3,  # Trigger when message count exceeds 3
-        tokens_threshold=100000,
-        large_message_threshold=50,  # Messages > 50 chars are "large"
-        trim_size=10,
-        offload_message_type=["tool"],  # Only offload tool messages
-        keep_last_round=False,
-    )
+    offloader_cfg = MessageOffloaderConfig(ttl_seconds=10)
 
     # Set up test environment
     affinity_model = _build_mock_inference_affinity_model()
     agent_session = create_agent_session()
     session_id = agent_session.get_session_id()
 
-    # Create initial messages with a large tool message
-    # The tool message exceeds large_message_threshold (100 > 50)
-    large_tool_content = "X" * 100
-    initial_messages: List = [
-        UserMessage(content="u0"),
-        ToolMessage(content=large_tool_content, tool_call_id="t1"),
-        AssistantMessage(content="a0"),
-    ]
+    initial_messages: List = [UserMessage(content="u0")]
+    for index, character in enumerate(("X", "Y", "Z"), start=1):
+        initial_messages.extend(
+            [
+                AssistantMessage(
+                    content="",
+                    tool_calls=[{
+                        "id": f"t{index}",
+                        "name": "read",
+                        "type": "function",
+                        "arguments": "{}",
+                    }],
+                ),
+                ToolMessage(content=character * 55, tool_call_id=f"t{index}"),
+                AssistantMessage(content=f"a{index}"),
+            ]
+        )
 
     # Create context with MessageOffloader processor
     context = await engine.create_context(
@@ -210,7 +209,8 @@ async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_r
         token_counter=None,
     )
 
-    # Initial model invocation to establish KV cache state
+    processor = context._processors[0]
+    processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
     ctx_before = await context.get_context_window(model=affinity_model)
     messages_for_model = ctx_before.get_messages()
     await affinity_model.invoke(
@@ -224,13 +224,7 @@ async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_r
     caplog.clear()
     release_call_details.clear()
 
-    # Add new messages - this will trigger MessageOffloader
-    # Total messages: 3 initial + 2 new = 5, which exceeds threshold of 3
-    await context.add_messages([
-        UserMessage(content="Follow up question"),
-        AssistantMessage(content="Follow up answer"),
-    ])
-
+    processor._rule_pipeline._time_func = MagicMock(return_value=120.0)
     ctx_after = await context.get_context_window(model=affinity_model)
 
     # === Verification Phase ===
@@ -238,7 +232,7 @@ async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_r
     # 1. Verify MessageOffloader was triggered
     offload_logs = [
         record for record in caplog.records
-        if "MessageOffloader triggered" in record.message
+        if "trigger context processor MessageOffloader on GET" in record.message
     ]
     assert len(offload_logs) > 0, (
         f"Expected MessageOffloader triggered log not found. All logs:\n{caplog.text}"
@@ -290,17 +284,15 @@ async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_r
         f"Expected cache_salt '{session_id}', but got '{cache_salt}'"
     )
 
-    # 8. Verify tool message was actually offloaded
-    # After offloading, tool message should be replaced or truncated
+    # 8. Verify oversized tool messages were offloaded by the TTL sweep.
     tool_messages_after = [
         m for m in ctx_after.get_messages()
         if "tool" in m.role.lower()
     ]
     if tool_messages_after:
         tool_msg = tool_messages_after[0]
-        assert "OFFLOAD" in str(tool_msg.content) or len(tool_msg.content) < len(large_tool_content), (
-            f"Expected tool message to be offloaded, but got: {tool_msg.content}"
-        )
+        assert isinstance(tool_msg, OffloadMixin)
+        assert "[[OFFLOAD:" in tool_msg.content
 
 
 @pytest.mark.asyncio
@@ -371,7 +363,7 @@ async def test_inference_affinity_kv_cache_no_release_without_modification(mock_
         UserMessage(content="How are you?"),
     ])
 
-    ctx_after = await context.get_context_window(model=affinity_model)
+    await context.get_context_window(model=affinity_model)
 
     # === Verification Phase ===
 

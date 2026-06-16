@@ -244,7 +244,7 @@ class TestContextEngine:
 
     @pytest.mark.asyncio
     async def test_create_context_with_registered_processor(self, engine, session):
-        config = MessageOffloaderConfig(tokens_threshold=1000, large_message_threshold=500)
+        config = MessageOffloaderConfig()
         context = await engine.create_context(
             context_id="ctx",
             session=session,
@@ -278,7 +278,7 @@ class TestContextEngine:
             "_create_processor",
             side_effect=build_error(
                 StatusCode.CONTEXT_EXECUTION_ERROR,
-                msg=f"init processor type 'MessageOffloader' failed",
+                msg="init processor type 'MessageOffloader' failed",
             )
         ):
             with pytest.raises(BaseError) as exc_info:

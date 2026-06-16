@@ -1,777 +1,277 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from unittest.mock import MagicMock
-from typing import List
 
 import pytest
+from pydantic import ValidationError
 
-from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
     MessageOffloaderConfig,
-    OMIT_STRING,
 )
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
-from openjiuwen.core.foundation.llm import (
-    UserMessage,
-    AssistantMessage,
-    ToolMessage,
-    ToolCall,
-)
-from openjiuwen.core.session.agent import Session
-from tests.unit_tests.core.context_engine._stream_state_helpers import (
-    assert_context_state_pair,
-    capture_context_compression_states,
-)
+from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
 
 
-def create_tool_call_list(ids: List[str]) -> List[ToolCall]:
-    return [ToolCall(id=tc, name="test-tool", type="function", arguments="") for tc in ids]
-
-
-async def create_context_with_offloader(
-    offloader_config: MessageOffloaderConfig,
-    history_messages=None,
-    token_counter=None,
-    session=None,
+async def create_context(
+    config: MessageOffloaderConfig | None = None,
+    *,
+    context_window_tokens: int = 100,
+    default_window_message_num: int = 100,
 ):
-    """Create context with MessageOffloader via ContextEngine.create_context."""
-    engine = ContextEngine(ContextEngineConfig(default_window_message_num=100))
+    engine = ContextEngine(
+        ContextEngineConfig(
+            context_window_tokens=context_window_tokens,
+            default_window_message_num=default_window_message_num,
+        )
+    )
     return await engine.create_context(
         "test_ctx",
-        session,
-        history_messages=history_messages or [],
-        processors=[("MessageOffloader", offloader_config)],
-        token_counter=token_counter,
+        processors=[("MessageOffloader", config or MessageOffloaderConfig())],
     )
 
 
-class TestMessageOffloader:
-    """MessageOffloader unit tests: all cases pass MessageOffloader via create_context."""
-
-    # ---------- Config validation: invalid config causes create_context to fail ----------
-    @pytest.mark.asyncio
-    async def test_invalid_config_trim_size_ge_large_message_threshold_raises(self):
-        config = MessageOffloaderConfig(
-            trim_size=500,
-            large_message_threshold=500,
-        )
-        with pytest.raises(BaseError):
-            await create_context_with_offloader(config)
-
-    @pytest.mark.asyncio
-    async def test_invalid_config_trim_size_gt_large_message_threshold_raises(self):
-        config = MessageOffloaderConfig(
-            trim_size=600,
-            large_message_threshold=500,
-        )
-        with pytest.raises(BaseError):
-            await create_context_with_offloader(config)
-
-    @pytest.mark.asyncio
-    async def test_invalid_config_messages_to_keep_ge_threshold_raises(self):
-        config = MessageOffloaderConfig(
-            messages_to_keep=20,
-            messages_threshold=20,
-        )
-        with pytest.raises(BaseError):
-            await create_context_with_offloader(config)
-
-    @pytest.mark.asyncio
-    async def test_invalid_config_messages_to_keep_gt_threshold_raises(self):
-        config = MessageOffloaderConfig(
-            messages_to_keep=25,
-            messages_threshold=20,
-        )
-        with pytest.raises(BaseError):
-            await create_context_with_offloader(config)
-
-    @pytest.mark.asyncio
-    async def test_valid_config_creates_context_successfully(self):
-        config = MessageOffloaderConfig(
-            messages_to_keep=10,
-            messages_threshold=20,
-            large_message_threshold=500,
-            trim_size=100,
-        )
-        ctx = await create_context_with_offloader(config)
-        assert ctx is not None
-        assert len(ctx) == 0
-
-    # ---------- messages_to_keep: no offload when below threshold ----------
-    @pytest.mark.asyncio
-    async def test_below_messages_to_keep_no_offload(self):
-        config = MessageOffloaderConfig(
-            messages_threshold=20,
-            messages_to_keep=10,
-            large_message_threshold=10,
-            trim_size=5,
-            offload_message_type=["tool"],
-            keep_last_round=False,
-        )
-        ctx = await create_context_with_offloader(config)
-        msgs = [UserMessage(content="a")] * 5
-        await ctx.add_messages(msgs)
-        result = ctx.get_messages()
-        assert len(result) == 5
-        assert not any(isinstance(m, OffloadMixin) for m in result)
-
-    # ---------- messages_threshold: offload triggered when exceeded ----------
-    @pytest.mark.asyncio
-    async def test_above_messages_threshold_triggers_offload(self):
-        config = MessageOffloaderConfig(
-            messages_threshold=4,
-            tokens_threshold=100000,
-            large_message_threshold=30,
-            trim_size=10,
-            offload_message_type=["tool"],
-            messages_to_keep=None,
-            keep_last_round=False,
-        )
-        ctx = await create_context_with_offloader(config)
-        msgs = [
-            UserMessage(content="u1"),
-            ToolMessage(content="x" * 100, tool_call_id="tc-1"),
-            UserMessage(content="u2"),
-            UserMessage(content="u3"),
-        ]
-        await ctx.add_messages(msgs)
-        result = ctx.get_messages()
-        assert len(result) == 4
-        offloaded = [m for m in result if isinstance(m, OffloadMixin)]
-        assert len(offloaded) == 0
-
-        await ctx.add_messages(UserMessage(content="u4"))
-        result = ctx.get_messages()
-        assert len(result) == 5
-        offloaded = [m for m in result if isinstance(m, OffloadMixin)]
-        assert len(offloaded) == 1
-        reloaded = await ctx.reloader_tool().invoke(
-            dict(offload_handle=offloaded[0].offload_handle, offload_type="in_memory")
-        )
-        assert "x" * 100 in reloaded
-
-    @pytest.mark.asyncio
-    async def test_streams_state_when_offload_processor_triggers(self):
-        session = Session(session_id="message-offloader-stream-session")
-        config = MessageOffloaderConfig(
-            messages_threshold=1,
-            tokens_threshold=100000,
-            large_message_threshold=30,
-            trim_size=10,
-            offload_message_type=["tool"],
-            messages_to_keep=None,
-            keep_last_round=False,
-        )
-        ctx = await create_context_with_offloader(config, session=session)
-
-        _, states = await capture_context_compression_states(
-            session,
-            lambda: ctx.add_messages([
-                ToolMessage(content="x" * 100, tool_call_id="tc-stream"),
-                UserMessage(content="trigger"),
-            ]),
-        )
-
-        assert_context_state_pair(states, processor_type="MessageOffloader")
-        assert "modified 1 messages" in states[1].summary
-
-    # ---------- tokens_threshold: offload triggered when token count exceeded ----------
-    @pytest.mark.asyncio
-    async def test_above_tokens_threshold_triggers_offload(self):
-        mock_counter = MagicMock()
-        mock_counter.count_messages = MagicMock(return_value=200)
-        config = MessageOffloaderConfig(
-            messages_threshold=100,
-            tokens_threshold=50,
-            large_message_threshold=10,
-            trim_size=5,
-            offload_message_type=["tool"],
-            messages_to_keep=None,
-            keep_last_round=False,
-        )
-        ctx = await create_context_with_offloader(config, token_counter=mock_counter)
-        msgs = [
-            UserMessage(content="u"),
-            ToolMessage(content="x" * 20, tool_call_id="tc-1"),
-        ]
-        await ctx.add_messages(msgs)
-        result = ctx.get_messages()
-        offloaded = [m for m in result if isinstance(m, OffloadMixin)]
-        assert len(offloaded) >= 1
-        assert offloaded[0].content[:5] + OMIT_STRING in offloaded[0].content
-
-    # ---------- offload_message_type: only offload configured roles ----------
-    @pytest.mark.asyncio
-    async def test_offload_only_configured_roles(self):
-        config = MessageOffloaderConfig(
-            messages_threshold=2,
-            large_message_threshold=20,
-            trim_size=8,
-            offload_message_type=["user", "assistant"],
-            messages_to_keep=None,
-            keep_last_round=False,
-        )
-        ctx = await create_context_with_offloader(config)
-        msgs = [
-            UserMessage(content="U" * 50),
-            AssistantMessage(content="A" * 50),
-            ToolMessage(content="T" * 50, tool_call_id="tc-1"),
-        ]
-        await ctx.add_messages(msgs)
-        result = ctx.get_messages()
-        assert isinstance(result[0], OffloadMixin)
-        assert isinstance(result[1], OffloadMixin)
-        assert isinstance(result[2], ToolMessage)
-        assert result[2].content == "T" * 50
-
-    # ---------- large_message_threshold: short messages are not offloaded ----------
-    @pytest.mark.asyncio
-    async def test_short_messages_not_offloaded(self):
-        config = MessageOffloaderConfig(
-            messages_threshold=3,
-            large_message_threshold=100,
-            trim_size=10,
-            offload_message_type=["tool"],
-            messages_to_keep=None,
-            keep_last_round=False,
-        )
-        ctx = await create_context_with_offloader(config)
-        msgs = [
-            ToolMessage(content="short", tool_call_id="tc-1"),
-            UserMessage(content="u"),
-        ]
-        await ctx.add_messages(msgs)
-        result = ctx.get_messages()
-        assert result[0].content == "short"
-        assert not isinstance(result[0], OffloadMixin)
-
-    # ---------- messages_to_keep: preserves most recent N messages ----------
-    @pytest.mark.asyncio
-    async def test_messages_to_keep_preserves_recent(self):
-        config = MessageOffloaderConfig(
-            messages_threshold=10,
-            large_message_threshold=10,
-            trim_size=5,
-            offload_message_type=["tool"],
-            messages_to_keep=3,
-            keep_last_round=False,
-        )
-        ctx = await create_context_with_offloader(config)
-        tools = [ToolMessage(content="x" * 50, tool_call_id=f"tc-{i}") for i in range(5)]
-        await ctx.add_messages(tools)
-        result = ctx.get_messages()
-        assert len(result) == 5
-        offloaded = [m for m in result if isinstance(m, OffloadMixin)]
-        assert len(offloaded) <= 2
-
-    # ---------- keep_last_round: preserves final assistant of last round ----------
-    @pytest.mark.asyncio
-    async def test_keep_last_round_preserves_final_assistant(self):
-        config = MessageOffloaderConfig(
-            messages_threshold=2,
-            large_message_threshold=10,
-            trim_size=5,
-            offload_message_type=["tool"],
-            messages_to_keep=None,
-            keep_last_round=True,
-        )
-        ctx = await create_context_with_offloader(config)
-        msgs = [
-            UserMessage(content="u1"),
-            AssistantMessage(content="a1", tool_calls=create_tool_call_list(["tc-1"])),
-            ToolMessage(content="x" * 50, tool_call_id="tc-1"),
-            AssistantMessage(content="a2-final"),
-        ]
-        await ctx.add_messages(msgs)
-        result = ctx.get_messages()
-        final_assistant = next(m for m in result if m.content == "a2-final")
-        assert not isinstance(final_assistant, OffloadMixin)
-
-    # ---------- trim_size: content is trimmed after offload ----------
-    @pytest.mark.asyncio
-    async def test_offload_trims_content(self):
-        config = MessageOffloaderConfig(
-            messages_threshold=1,
-            large_message_threshold=30,
-            trim_size=10,
-            offload_message_type=["tool"],
-            messages_to_keep=None,
-            keep_last_round=False,
-        )
-        ctx = await create_context_with_offloader(config)
-        long_content = "a" * 200
-        msgs = [
-            UserMessage(content="u"),
-            ToolMessage(content=long_content, tool_call_id="tc-1"),
-        ]
-        await ctx.add_messages(msgs)
-        result = ctx.get_messages()
-        offload_msg = result[1]
-        assert isinstance(offload_msg, OffloadMixin)
-        assert offload_msg.content.startswith("a" * 10)
-        assert "[[OFFLOAD:" in offload_msg.content
-        reloaded = await ctx.reloader_tool().invoke(
-            dict(offload_handle=offload_msg.offload_handle, offload_type="in_memory")
-        )
-        assert long_content in reloaded
-
-    # ---------- tool_call_id is preserved ----------
-    @pytest.mark.asyncio
-    async def test_offload_preserves_tool_call_id(self):
-        config = MessageOffloaderConfig(
-            messages_threshold=1,
-            large_message_threshold=10,
-            trim_size=5,
-            offload_message_type=["tool"],
-            messages_to_keep=None,
-            keep_last_round=False,
-        )
-        ctx = await create_context_with_offloader(config)
-        full_content = "Very long tool response: " + "x" * 100
-        msgs = [
-            UserMessage(content="u"),
-            ToolMessage(content=full_content, tool_call_id="critical-tc-123"),
-        ]
-        await ctx.add_messages(msgs)
-        result = ctx.get_messages()
-        offload_msg = result[1]
-        assert offload_msg.tool_call_id == "critical-tc-123"
-        reloaded = await ctx.reloader_tool().invoke(
-            dict(offload_handle=offload_msg.offload_handle, offload_type="in_memory")
-        )
-        assert "Very long tool response" in reloaded
-
-    # ========== Complex end-to-end functional tests ==========
-
-    @pytest.mark.asyncio
-    async def test_full_flow_add_messages_triggers_offload(self):
-        """Full flow: add_messages triggers offload, content can be reloaded."""
-        config = MessageOffloaderConfig(
-            messages_threshold=4,
-            tokens_threshold=100000,
-            large_message_threshold=40,
-            trim_size=15,
-            offload_message_type=["tool", "user"],
-            messages_to_keep=2,
-            keep_last_round=True,
-        )
-        ctx = await create_context_with_offloader(config)
-        msgs = [
-            UserMessage(content="u1"),
-            AssistantMessage(content="a1", tool_calls=create_tool_call_list(["tc-1"])),
-            ToolMessage(content="T" * 80, tool_call_id="tc-1"),
-            AssistantMessage(content="a2"),
-            UserMessage(content="U" * 80),
-        ]
-        await ctx.add_messages(msgs)
-        result = ctx.get_messages()
-        assert len(result) == 5
-        offloaded = [m for m in result if isinstance(m, OffloadMixin)]
-        assert len(offloaded) >= 1
-        for m in offloaded:
-            reloaded = await ctx.reloader_tool().invoke(
-                dict(offload_handle=m.offload_handle, offload_type="in_memory")
+def _tool_call(call_id: str, name: str, arguments: str = "{}") -> AssistantMessage:
+    return AssistantMessage(
+        content="calling tool",
+        tool_calls=[
+            ToolCall(
+                id=call_id,
+                name=name,
+                type="function",
+                arguments=arguments,
             )
-            assert len(reloaded) > 0
+        ],
+    )
+
+
+class TestMessageOffloaderConfig:
+    def test_only_exposes_ttl_and_protected_tools(self):
+        assert set(MessageOffloaderConfig.model_fields) == {
+            "ttl_seconds",
+            "protected_tool_names",
+        }
+
+    @pytest.mark.parametrize(
+        "removed_field",
+        [
+            "messages_threshold",
+            "tokens_threshold",
+            "large_message_threshold",
+            "trim_size",
+            "messages_to_keep",
+            "keep_last_round",
+            "offload_message_type",
+            "rule_compression_ratio",
+            "rule_compression_expired_ratio",
+            "rule_compression_context_window_tokens",
+            "rule_compression_ttl_keep_recent_messages",
+            "rule_truncate_head_tokens",
+            "rule_truncate_tail_tokens",
+        ],
+    )
+    def test_rejects_removed_configuration(self, removed_field):
+        with pytest.raises(ValidationError):
+            MessageOffloaderConfig(**{removed_field: 1})
+
+
+class TestMessageOffloaderAddTrigger:
+    @pytest.mark.asyncio
+    async def test_does_not_trigger_at_exactly_twenty_percent_character_capacity(self):
+        context = await create_context(context_window_tokens=100)
+
+        await context.add_messages(ToolMessage(content="x" * 60, tool_call_id="tc-boundary"))
+
+        message = context.get_messages()[0]
+        assert message.content == "x" * 60
+        assert not isinstance(message, OffloadMixin)
 
     @pytest.mark.asyncio
-    async def test_multi_round_dialogue_offload_old_keep_recent(self):
-        """Multi-round dialogue: old tools offloaded, last round final assistant preserved."""
-        config = MessageOffloaderConfig(
-            messages_threshold=10,
-            large_message_threshold=30,
-            trim_size=10,
-            offload_message_type=["tool"],
-            messages_to_keep=8,
-            keep_last_round=True,
-        )
-        ctx = await create_context_with_offloader(config)
-        rounds = []
-        for r in range(3):
-            rounds.append([
-                UserMessage(content=f"user-round-{r}"),
-                AssistantMessage(content=f"ai-{r}", tool_calls=create_tool_call_list([f"tc-{r}"])),
-                ToolMessage(content="LONG_TOOL_RESPONSE " * 5, tool_call_id=f"tc-{r}"),
-                AssistantMessage(content=f"ai-final-{r}"),
-            ])
-        all_msgs = [m for r in rounds for m in r]
-        await ctx.add_messages(all_msgs)
-        result = ctx.get_messages()
-        assert len(result) == 12
-        last_final = next(m for m in result if m.content == "ai-final-2")
-        assert not isinstance(last_final, OffloadMixin)
-        offloaded_tools = [m for m in result if isinstance(m, OffloadMixin)]
-        assert len(offloaded_tools) >= 1
-        reloaded = await ctx.reloader_tool().invoke(
-            dict(offload_handle=offloaded_tools[0].offload_handle, offload_type="in_memory")
-        )
-        assert "LONG_TOOL_RESPONSE" in reloaded
+    async def test_triggers_above_twenty_percent_character_capacity(self):
+        context = await create_context(context_window_tokens=100)
 
-    # ========== protected_tool_names: tool protection tests ==========
+        await context.add_messages(ToolMessage(content="x" * 61, tool_call_id="tc-large"))
+
+        message = context.get_messages()[0]
+        assert isinstance(message, OffloadMixin)
+        reloaded = await context.reloader_tool().invoke(
+            {
+                "offload_handle": message.offload_handle,
+                "offload_type": message.offload_type,
+            }
+        )
+        assert "x" * 61 in reloaded
 
     @pytest.mark.asyncio
-    async def test_protected_tool_by_name_not_offloaded(self):
-        """Tool messages from protected tool names are never offloaded."""
-        config = MessageOffloaderConfig(
-            messages_threshold=2,
-            large_message_threshold=10,
-            trim_size=5,
-            offload_message_type=["tool"],
-            messages_to_keep=None,
-            keep_last_round=False,
-            protected_tool_names=["reload_original_context_messages"],
-        )
-        ctx = await create_context_with_offloader(config)
-        long_content = "X" * 200
-        msgs = [
-            UserMessage(content="u"),
-            AssistantMessage(
-                content="a",
-                tool_calls=[ToolCall(
-                    id="tc-reload",
-                    name="reload_original_context_messages",
-                    type="function",
-                    arguments="{}"
-                )]
-            ),
-            ToolMessage(content=long_content, tool_call_id="tc-reload"),
-        ]
-        await ctx.add_messages(msgs)
-        result = ctx.get_messages()
-        tool_msg = result[2]
-        assert not isinstance(tool_msg, OffloadMixin)
-        assert tool_msg.content == long_content
+    async def test_rule_compression_can_keep_message_inline(self):
+        context = await create_context(context_window_tokens=100)
+        content = "\n".join(["same line"] * 20)
+
+        await context.add_messages(ToolMessage(content=content, tool_call_id="tc-repeat"))
+
+        message = context.get_messages()[0]
+        assert not isinstance(message, OffloadMixin)
+        assert message.content == "same line"
+        assert message.metadata["rule_compression_pass"] == "add"
 
     @pytest.mark.asyncio
-    async def test_unprotected_tool_is_offloaded(self):
-        """Tool messages from unprotected tools are offloaded when large."""
-        config = MessageOffloaderConfig(
-            messages_threshold=2,
-            large_message_threshold=10,
-            trim_size=5,
-            offload_message_type=["tool"],
-            messages_to_keep=None,
-            keep_last_round=False,
-            protected_tool_names=["reload_original_context_messages"],
-        )
-        ctx = await create_context_with_offloader(config)
-        long_content = "X" * 200
-        msgs = [
-            UserMessage(content="u"),
-            AssistantMessage(content="a", tool_calls=create_tool_call_list(["tc-other"])),
-            ToolMessage(content=long_content, tool_call_id="tc-other"),
-        ]
-        await ctx.add_messages(msgs)
-        result = ctx.get_messages()
-        tool_msg = result[2]
-        assert isinstance(tool_msg, OffloadMixin)
-        assert tool_msg.content.startswith("X" * 5)
+    async def test_non_tool_messages_do_not_trigger_offload(self):
+        context = await create_context(context_window_tokens=100)
+
+        await context.add_messages(UserMessage(content="u" * 300))
+
+        message = context.get_messages()[0]
+        assert message.content == "u" * 300
+        assert not isinstance(message, OffloadMixin)
 
     @pytest.mark.asyncio
-    async def test_protected_tool_with_pattern_matches(self):
-        """Tool messages are protected when tool_name:pattern format matches args."""
-        config = MessageOffloaderConfig(
-            messages_threshold=2,
-            large_message_threshold=10,
-            trim_size=5,
-            offload_message_type=["tool"],
-            messages_to_keep=None,
-            keep_last_round=False,
-            protected_tool_names=["view_file:*.md"],
+    async def test_protected_tool_is_not_processed(self):
+        context = await create_context(context_window_tokens=100)
+        await context.add_messages(
+            [
+                _tool_call("tc-reload", "reload_original_context_messages"),
+                ToolMessage(content="x" * 100, tool_call_id="tc-reload"),
+            ]
         )
-        ctx = await create_context_with_offloader(config)
-        long_content = "X" * 200
-        msgs = [
-            UserMessage(content="u"),
-            AssistantMessage(
-                content="a",
-                tool_calls=[ToolCall(
-                    id="tc-1",
-                    name="view_file",
-                    type="function",
-                    arguments='{"path": "README.md"}'
-                )]
-            ),
-            ToolMessage(content=long_content, tool_call_id="tc-1"),
-        ]
-        await ctx.add_messages(msgs)
-        result = ctx.get_messages()
-        tool_msg = result[2]
-        assert not isinstance(tool_msg, OffloadMixin)
-        assert tool_msg.content == long_content
 
+        message = context.get_messages()[1]
+        assert message.content == "x" * 100
+        assert not isinstance(message, OffloadMixin)
+
+
+class TestMessageOffloaderTtl:
     @pytest.mark.asyncio
-    async def test_protected_tool_with_pattern_not_matches(self):
-        """Tool messages are offloaded when tool_name matches but pattern does not."""
-        config = MessageOffloaderConfig(
-            messages_threshold=2,
-            large_message_threshold=10,
-            trim_size=5,
-            offload_message_type=["tool"],
-            messages_to_keep=None,
-            keep_last_round=False,
-            protected_tool_names=["read_file:*USER.md"],
-        )
-        ctx = await create_context_with_offloader(config)
-        long_content = "X" * 200
-        msgs = [
-            UserMessage(content="u"),
-            AssistantMessage(
-                content="a",
-                tool_calls=[ToolCall(
-                    id="tc-data",
-                    name="read_file",
-                    type="function",
-                    arguments='{"path": "data.txt"}'
-                )]
-            ),
-            ToolMessage(content=long_content, tool_call_id="tc-data"),
-        ]
-        await ctx.add_messages(msgs)
-        result = ctx.get_messages()
-        tool_msg = result[2]
-        assert isinstance(tool_msg, OffloadMixin)
-
-    @pytest.mark.asyncio
-    async def test_protected_tool_with_wildcard_pattern(self):
-        """fnmatch wildcard patterns (* and ?) work for argument matching."""
-        config = MessageOffloaderConfig(
-            messages_threshold=2,
-            large_message_threshold=10,
-            trim_size=5,
-            offload_message_type=["tool"],
-            messages_to_keep=None,
-            keep_last_round=False,
-            protected_tool_names=["read:path/to/*.py"],
-        )
-        ctx = await create_context_with_offloader(config)
-        long_content = "X" * 200
-
-        # Matching path should be protected
-        msgs_match = [
-            UserMessage(content="u"),
-            AssistantMessage(
-                content="a",
-                tool_calls=[ToolCall(
-                    id="tc-1",
-                    name="read",
-                    type="function",
-                    arguments='{"path": "path/to/main.py"}'
-                )]
-            ),
-            ToolMessage(content=long_content, tool_call_id="tc-1"),
-        ]
-        await ctx.add_messages(msgs_match)
-        result = ctx.get_messages()
-        tool_msg = result[2]
-        assert not isinstance(tool_msg, OffloadMixin)
-
-    @pytest.mark.asyncio
-    async def test_protected_tool_with_question_mark_pattern(self):
-        """Question mark (?) wildcard matches single character."""
-        config = MessageOffloaderConfig(
-            messages_threshold=2,
-            large_message_threshold=10,
-            trim_size=5,
-            offload_message_type=["tool"],
-            messages_to_keep=None,
-            keep_last_round=False,
-            protected_tool_names=["read:file?.txt"],
-        )
-        ctx = await create_context_with_offloader(config)
-        long_content = "X" * 200
-
-        # "file1.txt" matches "file?.txt"
-        msgs_match = [
-            UserMessage(content="u"),
-            AssistantMessage(
-                content="a",
-                tool_calls=[ToolCall(
-                    id="tc-1",
-                    name="read",
-                    type="function",
-                    arguments='{"path": "file1.txt"}'
-                )]
-            ),
-            ToolMessage(content=long_content, tool_call_id="tc-1"),
-        ]
-        await ctx.add_messages(msgs_match)
-        result = ctx.get_messages()
-        tool_msg = result[2]
-        assert not isinstance(tool_msg, OffloadMixin)
-
-        # "file12.txt" does NOT match "file?.txt"
-        msgs_no_match = [
-            UserMessage(content="u2"),
-            AssistantMessage(
-                content="a2",
-                tool_calls=[ToolCall(
-                    id="tc-2",
-                    name="read",
-                    type="function",
-                    arguments='{"path": "file12.txt"}'
-                )]
-            ),
-            ToolMessage(content=long_content, tool_call_id="tc-2"),
-        ]
-        await ctx.add_messages(msgs_no_match)
-        result = ctx.get_messages()
-        tool_msg = result[5]
-        assert isinstance(tool_msg, OffloadMixin)
-
-    @pytest.mark.asyncio
-    async def test_multiple_protected_patterns(self):
-        """Multiple protected patterns can be configured together."""
-        config = MessageOffloaderConfig(
-            messages_threshold=2,
-            large_message_threshold=10,
-            trim_size=5,
-            offload_message_type=["tool"],
-            messages_to_keep=None,
-            keep_last_round=False,
-            protected_tool_names=[
-                "reload_original_context_messages",
-                "view_file:*.md",
-                "read:*.py",
-            ],
-        )
-        ctx = await create_context_with_offloader(config)
-        long_content = "X" * 200
-
-        # Test reload_original_context_messages is protected (exact match)
-        msgs_reload = [
-            UserMessage(content="u"),
-            AssistantMessage(
-                content="a",
-                tool_calls=[ToolCall(
-                    id="tc-reload",
-                    name="reload_original_context_messages",
-                    type="function",
-                    arguments="{}"
-                )]
-            ),
-            ToolMessage(content=long_content, tool_call_id="tc-reload"),
-        ]
-        await ctx.add_messages(msgs_reload)
-        result = ctx.get_messages()
-        assert not isinstance(result[2], OffloadMixin)
-
-    @pytest.mark.asyncio
-    async def test_dict_tool_call_format(self):
-        """Tool calls as dict format are handled correctly for pattern matching."""
-        config = MessageOffloaderConfig(
-            messages_threshold=2,
-            large_message_threshold=10,
-            trim_size=5,
-            offload_message_type=["tool"],
-            messages_to_keep=None,
-            keep_last_round=False,
-            protected_tool_names=["read_file:*.json"],
-        )
-        ctx = await create_context_with_offloader(config)
-        long_content = "X" * 200
-
-        # dict format tool_call
-        msgs = [
-            UserMessage(content="u"),
-            AssistantMessage(
-                content="a",
-                tool_calls=[{
-                    "id": "tc-1",
-                    "name": "read_file",
-                    "type": "function",
-                    "function": {
-                        "name": "read_file",
-                        "arguments": '{"path": "config.json"}'
-                    }
-                }]
-            ),
-            ToolMessage(content=long_content, tool_call_id="tc-1"),
-        ]
-        await ctx.add_messages(msgs)
-        result = ctx.get_messages()
-        tool_msg = result[2]
-        assert not isinstance(tool_msg, OffloadMixin)
-        assert tool_msg.content == long_content
-
-    @pytest.mark.asyncio
-    async def test_rule_compresses_large_tool_message_before_offload(self):
-        """Large tool results are deterministically compressed before the original is offloaded."""
-        config = MessageOffloaderConfig(
-            messages_threshold=100,
-            tokens_threshold=100000,
-            large_message_threshold=10,
-            trim_size=5,
-            offload_message_type=["tool"],
-            keep_last_round=False,
-            rule_compression_context_window_tokens=120,
-            rule_compression_ratio=0.2,
-        )
-        ctx = await create_context_with_offloader(config)
-        content = "\n".join(f"src/app.py:{idx}: match {idx}" for idx in range(1, 60))
-
-        await ctx.add_messages([ToolMessage(content=content, tool_call_id="tc-search")])
-
-        result = ctx.get_messages()
-        assert len(result) == 1
-        assert isinstance(result[0], OffloadMixin)
-        assert "[... and" in result[0].content
-        assert result[0].tool_call_id == "tc-search"
-        reloaded = await ctx.reloader_tool().invoke(
-            dict(offload_handle=result[0].offload_handle, offload_type="in_memory")
-        )
-        assert "src/app.py:59: match 59" in reloaded
-
-    @pytest.mark.asyncio
-    async def test_ttl_expired_rule_compression_sweeps_old_tools_without_threshold(self):
-        config = MessageOffloaderConfig(
-            messages_threshold=100,
-            tokens_threshold=100000,
-            large_message_threshold=10000,
-            trim_size=5,
-            offload_message_type=["tool"],
-            keep_last_round=False,
-            rule_compression_context_window_tokens=300,
-            rule_compression_ratio=0.5,
-            rule_compression_expired_ratio=0.1,
-            rule_compression_ttl_seconds=10,
-            rule_compression_ttl_keep_recent_messages=1,
-        )
-        ctx = await create_context_with_offloader(config)
-        processor = ctx._processors[0]  # type: ignore[attr-defined]
+    async def test_ttl_requires_idle_timeout_and_half_context_occupancy(self):
+        context = await create_context(MessageOffloaderConfig(ttl_seconds=10))
+        processor = context._processors[0]  # type: ignore[attr-defined]
         processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
-        old_short_tool = ToolMessage(content="short", tool_call_id="tc-short")
+        messages = [
+            ToolMessage(content=character * 55, tool_call_id=f"tc-{character}")
+            for character in ("a", "b", "c")
+        ]
+        await context.add_messages(messages)
 
-        await ctx.add_messages([old_short_tool])
-        assert "rule_compression_pass" not in (ctx.get_messages()[0].metadata or {})
+        await context.get_context_window()
+        processor._rule_pipeline._time_func = MagicMock(return_value=105.0)  # type: ignore[attr-defined]
+        await context.get_context_window()
+        assert all(not message.metadata.get("rule_compressed_at") for message in context.get_messages())
 
         processor._rule_pipeline._time_func = MagicMock(return_value=120.0)  # type: ignore[attr-defined]
-        await ctx.add_messages([UserMessage(content="trigger ttl sweep"), ToolMessage(content="recent", tool_call_id="tc-recent")])
+        await context.get_context_window()
 
-        messages = ctx.get_messages()
-        assert messages[0].metadata["rule_compression_pass"] == "ttl"
-        assert messages[0].metadata["rule_compression_threshold"] == 30
-        assert messages[0].content == "short"
-        assert "rule_compression_pass" not in (messages[-1].metadata or {})
+        assert all(isinstance(message, OffloadMixin) for message in context.get_messages())
 
-    def test_message_offloader_owns_rule_compression_pipeline(self):
-        from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloader
-        from openjiuwen.core.context_engine.processor.offloader.rules import RuleCompressionPipeline
-
-        offloader = MessageOffloader(
-            MessageOffloaderConfig(
-                large_message_threshold=10,
-                trim_size=5,
-            )
+    @pytest.mark.asyncio
+    async def test_ttl_skips_context_below_half_capacity(self):
+        context = await create_context(MessageOffloaderConfig(ttl_seconds=10))
+        processor = context._processors[0]  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        await context.add_messages(
+            [
+                ToolMessage(content="a" * 40, tool_call_id="tc-a"),
+                ToolMessage(content="b" * 40, tool_call_id="tc-b"),
+            ]
         )
+        await context.get_context_window()
 
-        assert isinstance(offloader._rule_pipeline, RuleCompressionPipeline)  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)  # type: ignore[attr-defined]
+        await context.get_context_window()
 
-    def test_rule_content_router_is_public_rule_router_name(self):
-        from openjiuwen.core.context_engine.processor.offloader.rules import RuleContentRouter
+        assert all(not message.metadata.get("rule_compressed_at") for message in context.get_messages())
 
-        router = RuleContentRouter()
+    @pytest.mark.asyncio
+    async def test_ttl_traverses_full_model_context_not_only_returned_window(self):
+        context = await create_context(
+            MessageOffloaderConfig(ttl_seconds=10),
+            default_window_message_num=1,
+        )
+        processor = context._processors[0]  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        await context.add_messages(
+            [
+                ToolMessage(content=character * 55, tool_call_id=f"tc-{character}")
+                for character in ("a", "b", "c")
+            ]
+        )
+        await context.get_context_window()
 
-        assert router.detect("src/app.py:1:match").value == "SEARCH_RESULTS"
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)  # type: ignore[attr-defined]
+        window = await context.get_context_window()
+
+        assert len(window.context_messages) <= 1
+        assert all(isinstance(message, OffloadMixin) for message in context.get_messages())
+
+    @pytest.mark.asyncio
+    async def test_ttl_skips_messages_that_were_already_rule_compressed(self):
+        context = await create_context(MessageOffloaderConfig(ttl_seconds=10))
+        processor = context._processors[0]  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        await context.add_messages(
+            [UserMessage(content="context filler " * 12)]
+            + [
+                ToolMessage(
+                    content="\n".join([f"same {character}"] * 12),
+                    tool_call_id=f"tc-{character}",
+                )
+                for character in ("a", "b", "c")
+            ]
+        )
+        await context.get_context_window()
+        tool_messages = [message for message in context.get_messages() if message.role == "tool"]
+        contents_before_ttl = [message.content for message in tool_messages]
+        timestamps_before_ttl = [
+            message.metadata["rule_compressed_at"] for message in tool_messages
+        ]
+        router_compress = processor._rule_pipeline._router.compress  # type: ignore[attr-defined]
+        processor._rule_pipeline._router.compress = MagicMock(wraps=router_compress)  # type: ignore[attr-defined]
+
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)  # type: ignore[attr-defined]
+        await context.get_context_window()
+
+        tool_messages = [message for message in context.get_messages() if message.role == "tool"]
+        assert all(not isinstance(message, OffloadMixin) for message in tool_messages)
+        assert [message.content for message in tool_messages] == contents_before_ttl
+        assert [
+            message.metadata["rule_compressed_at"] for message in tool_messages
+        ] == timestamps_before_ttl
+        processor._rule_pipeline._router.compress.assert_not_called()  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_ttl_offloads_message_when_rule_compression_still_exceeds_budget(self):
+        context = await create_context(MessageOffloaderConfig(ttl_seconds=10))
+        processor = context._processors[0]  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        content = "\n".join(f"unique {index}" for index in range(5))
+        await context.add_messages(
+            [
+                UserMessage(content="context filler " * 8),
+                ToolMessage(content=content, tool_call_id="tc-large"),
+            ]
+        )
+        await context.get_context_window()
+
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)  # type: ignore[attr-defined]
+        await context.get_context_window()
+
+        message = context.get_messages()[1]
+        assert isinstance(message, OffloadMixin)
+        reloaded = await context.reloader_tool().invoke(
+            {
+                "offload_handle": message.offload_handle,
+                "offload_type": message.offload_type,
+            }
+        )
+        assert "unique 0" in reloaded
+        assert "unique 4" in reloaded
+
+    @pytest.mark.asyncio
+    async def test_context_window_access_time_is_saved_and_restored(self):
+        context = await create_context(MessageOffloaderConfig(ttl_seconds=10))
+        processor = context._processors[0]  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        await context.get_context_window()
+
+        restored = await create_context(MessageOffloaderConfig(ttl_seconds=10))
+        restored.load_state({"test_ctx": context.save_state()})
+
+        assert restored.last_context_window_access_at() == 100.0

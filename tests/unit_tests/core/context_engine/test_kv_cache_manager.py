@@ -131,30 +131,33 @@ class TestKVCacheManager:
         # Create ContextEngine with kv_cache enabled
         engine_config = ContextEngineConfig(
             enable_kv_cache_release=True,
-            default_window_message_num=100
+            default_window_message_num=100,
+            context_window_tokens=100,
         )
         engine = ContextEngine(engine_config)
 
-        # MessageOffloader config - low thresholds to trigger offload
-        offloader_config = MessageOffloaderConfig(
-            messages_threshold=3,
-            tokens_threshold=100000,
-            large_message_threshold=50,  # Messages longer than 50 chars will be offloaded
-            trim_size=10,  # Keep first 10 chars when offloading
-            offload_message_type=["tool"],
-            keep_last_round=False,
-        )
+        offloader_config = MessageOffloaderConfig(ttl_seconds=10)
 
         # Create mock model for release tracking
         fake_model = _FakeInferenceAffinityModel(model_name="test-model")
 
-        # Initial messages with a large tool message (will be offloaded later)
-        original_tool_content = "A" * 100  # Large content that exceeds large_message_threshold
-        initial_messages = [
-            UserMessage(content="u0"),
-            ToolMessage(content=original_tool_content, tool_call_id="t1"),
-            AssistantMessage(content="a0"),
-        ]
+        initial_messages = [UserMessage(content="u0")]
+        for index, character in enumerate(("A", "B", "C"), start=1):
+            initial_messages.extend(
+                [
+                    AssistantMessage(
+                        content="",
+                        tool_calls=[{
+                            "id": f"t{index}",
+                            "name": "read",
+                            "type": "function",
+                            "arguments": "{}",
+                        }],
+                    ),
+                    ToolMessage(content=character * 55, tool_call_id=f"t{index}"),
+                    AssistantMessage(content=f"a{index}"),
+                ]
+            )
 
         # Create context with offloader
         context = await engine.create_context(
@@ -165,19 +168,13 @@ class TestKVCacheManager:
             token_counter=None,
         )
 
-        # First get_context_window - snapshots the window, no release should happen
-        window1 = await context.get_context_window(model=fake_model)
+        processor = context._processors[0]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
+        await context.get_context_window(model=fake_model)
         assert fake_model.release_calls == [], "First get_context_window should not trigger release"
 
-        # Add new messages to trigger offload (exceeds messages_threshold)
-        # This will cause MessageOffloader to offload the large tool message
-        await context.add_messages([
-            UserMessage(content="Follow up question"),
-            AssistantMessage(content="Follow up answer"),
-        ])
-
-        # Second get_context_window - should detect message change and trigger release
-        window2 = await context.get_context_window(model=fake_model)
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)
+        await context.get_context_window(model=fake_model)
 
         # Verify release was called due to context change from offload
         assert len(fake_model.release_calls) == 1, \
@@ -254,7 +251,7 @@ class TestKVCacheManager:
             )
 
             # First get_context_window only snapshots the uncompressed window.
-            window1 = await context.get_context_window(model=fake_model)
+            await context.get_context_window(model=fake_model)
             assert fake_model.release_calls == [], "First get_context_window should not trigger release"
 
             await context.add_messages([
@@ -268,7 +265,7 @@ class TestKVCacheManager:
             assert any("DIALOGUE_MEMORY_BLOCK" in getattr(message, "content", "") for message in compressed_messages)
 
             # Second get_context_window - should detect message change and trigger release
-            window2 = await context.get_context_window(model=fake_model)
+            await context.get_context_window(model=fake_model)
 
             # Verify release was called due to context change from compression
             assert len(fake_model.release_calls) == 1, \

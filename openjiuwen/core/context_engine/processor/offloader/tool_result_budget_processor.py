@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Literal, Tuple
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent
@@ -84,6 +84,15 @@ class ToolResultBudgetProcessor(MessageOffloader):
     @property
     def config(self) -> ToolResultBudgetProcessorConfig:
         return self._config
+
+    async def trigger_get_context_window(
+        self,
+        context: ModelContext,
+        context_window: ContextWindow,
+        **kwargs: Any,
+    ) -> bool:
+        _ = context, context_window, kwargs
+        return False
 
     async def trigger_add_messages(
         self,
@@ -244,7 +253,7 @@ class ToolResultBudgetProcessor(MessageOffloader):
         allowlist = set(self.config.tool_name_allowlist or [])
         if not allowlist:
             return False
-        tool_name = self._resolve_tool_name_from_message(message, context_messages)
+        tool_name = ContextUtils.resolve_tool_name_from_message(message, context_messages)
         return bool(tool_name and tool_name in allowlist)
 
     @staticmethod
