@@ -34,7 +34,10 @@ from openjiuwen.agent_teams.workflow.backends._member_spec import (
     derive_member_build_context,
     derive_member_spec,
 )
-from openjiuwen.agent_teams.workflow.backends.structured_output_tool import StructuredOutputTool
+from openjiuwen.agent_teams.workflow.backends.structured_output_tool import (
+    StructuredOutputFinishRail,
+    StructuredOutputTool,
+)
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.core.common.logging import team_logger
@@ -289,6 +292,9 @@ class AvatarSessionManager:
                 member_name=state.member_name,
                 build_context=build_context,
             )
+            # End each schema turn's round as soon as structured_output is
+            # captured (added before start so it registers with the harness).
+            harness.add_rail(StructuredOutputFinishRail())
             # Cold start: the harness creates and owns its child session, so
             # DeepAgentState / context persist across this session's turns.
             await harness.start()

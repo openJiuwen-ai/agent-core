@@ -39,7 +39,10 @@ from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
 from openjiuwen.agent_teams.tools.locales import make_translator
 from openjiuwen.agent_teams.workspace_layout import ensure_team_member_workspace_link
-from openjiuwen.agent_teams.workflow.backends.structured_output_tool import StructuredOutputTool
+from openjiuwen.agent_teams.workflow.backends.structured_output_tool import (
+    StructuredOutputFinishRail,
+    StructuredOutputTool,
+)
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.agent_teams.workflow.worktree import SwarmflowWorkerWorktrees
@@ -295,6 +298,10 @@ class TeamWorkerBackend(AgentBackend):
                 member_name=member_name,
                 build_context=worker_build_context,
             )
+            if has_schema:
+                # End the round as soon as structured_output is captured, so the
+                # model can't loop re-calling it (the ack carries no stop signal).
+                harness.add_rail(StructuredOutputFinishRail())
         except Exception as e:
             team_logger.exception("worker harness build failed for %s", member_name)
             raise BackendError(f"worker harness build failed for {member_name}: {e}") from e

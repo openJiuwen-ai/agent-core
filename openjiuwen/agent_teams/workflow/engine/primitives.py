@@ -57,6 +57,16 @@ M = TypeVar("M", bound="BaseModel")
 _rt: ContextVar = ContextVar("wf_runtime")
 _path: ContextVar[tuple] = ContextVar("wf_path", default=())
 _seq: ContextVar[dict | None] = ContextVar("wf_seq", default=None)
+# Nesting depth of the *current execution path* (how many ``workflow()`` frames
+# this call chain is inside). A ContextVar — not a shared Runtime counter — so it
+# is copied per asyncio Task: parallel()/pipeline() branches each inherit the
+# parent depth and advance their OWN copy, which lets sibling ``workflow()`` calls
+# run concurrently while still capping genuine recursion (a sub-workflow calling
+# ``workflow()`` again runs in the same Task, so it sees the incremented depth).
+_wf_depth: ContextVar[int] = ContextVar("wf_depth", default=0)
+# Max nesting of ``workflow()`` calls along one path. 1 = a script may call a
+# sub-workflow, but that sub-workflow may not call another (recursion guard).
+_MAX_WORKFLOW_DEPTH = 1
 
 
 @dataclass
@@ -705,30 +715,41 @@ HumanSession = AgentSession
 
 
 @overload
-async def human(prompt: str, *, schema: type[M], options: dict | None = ...) -> "M | None":
+async def human(
+    prompt: str, *, schema: type[M],
+    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
+) -> "M | None":
     """Overload: ``schema=<pydantic model>`` narrows the answer to that model."""
     ...
 
 
 @overload
-async def human(prompt: str, *, schema: dict, options: dict | None = ...) -> "dict | None":
+async def human(
+    prompt: str, *, schema: dict,
+    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
+) -> "dict | None":
     """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
     ...
 
 
 @overload
-async def human(prompt: str, *, schema: None = ..., options: dict | None = ...) -> "str | None":
+async def human(
+    prompt: str, *, schema: None = ...,
+    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
+) -> "str | None":
     """Overload: no ``schema`` returns the person's answer as raw text."""
     ...
 
 
-async def human(prompt, *, schema=None, options=None):
+async def human(prompt, *, schema=None, label=None, phase=None, options=None):
     """One-shot human turn: ask a person once, return their (typed) answer.
 
     Sugar over an ephemeral :func:`human_session` opened, asked once, and closed —
-    use :func:`human_session` when you need multiple turns with memory.
+    use :func:`human_session` when you need multiple turns with memory. ``label`` /
+    ``phase`` mirror :func:`agent` / :func:`human_session`: they name the turn in
+    progress events and the deterministic human correlation id.
     """
-    s = AgentSession(_human=True)
+    s = AgentSession(_human=True, label=label, phase=phase)
     try:
         return await s.send(prompt, schema=schema, options=options)
     finally:
@@ -850,15 +871,26 @@ budget = _Budget()
 
 # ─────────────────────── inline sub-workflow ───────────────────────
 async def workflow(name_or_path: str, args: Any = None) -> Any:
+    """Run a sub-workflow inline and return its ``run()`` result.
+
+    Safe to fan out concurrently via ``parallel`` / ``pipeline``: depth is tracked
+    per execution path (a ContextVar copied per Task), so concurrent sibling
+    ``workflow()`` calls each get their own depth budget and all run. Only genuine
+    recursion — a sub-workflow's ``run()`` calling ``workflow()`` again on the same
+    path — is capped at ``_MAX_WORKFLOW_DEPTH`` (returns ``None``, logged).
+    """
     rt = _rt.get()
-    if rt.wf_depth >= 1:
-        rt.log_sink("[wf] nested workflow depth > 1 not allowed; skipping")
+    depth = _wf_depth.get()
+    if depth >= _MAX_WORKFLOW_DEPTH:
+        rt.log_sink(
+            f"[wf] nested workflow depth > {_MAX_WORKFLOW_DEPTH} not allowed; skipping"
+        )
         return None
     from .loader import load_workflow_source  # lazy: avoid import cycle
 
     loaded = load_workflow_source(name_or_path)
     k = _next_ordinal()
-    rt.wf_depth += 1
+    tok_d = _wf_depth.set(depth + 1)
     tok_p = _path.set(_path.get() + (("wf", k, loaded.meta.get("name", str(name_or_path))),))
     tok_s = _seq.set(_fresh_holder())
     try:
@@ -866,7 +898,7 @@ async def workflow(name_or_path: str, args: Any = None) -> Any:
     finally:
         _seq.reset(tok_s)
         _path.reset(tok_p)
-        rt.wf_depth -= 1
+        _wf_depth.reset(tok_d)
 
 
 # ─────────────────────── list helpers (JS idioms) ───────────────────────

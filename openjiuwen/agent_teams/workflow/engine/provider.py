@@ -88,8 +88,16 @@ class EngineProvider:
             label=label, phase=phase, instructions=instructions, options=options
         )
 
-    async def human(self, prompt: str, *, schema: Any = None, options: dict | None = None) -> Any:
-        return await _p.human(prompt, schema=schema, options=options)
+    async def human(
+        self,
+        prompt: str,
+        *,
+        schema: Any = None,
+        label: str | None = None,
+        phase: str | None = None,
+        options: dict | None = None,
+    ) -> Any:
+        return await _p.human(prompt, schema=schema, label=label, phase=phase, options=options)
 
     @property
     def budget(self) -> Any:

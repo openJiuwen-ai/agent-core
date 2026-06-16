@@ -170,26 +170,44 @@ def human_session(
 
 
 @overload
-async def human(prompt: str, *, schema: type[M], options: dict | None = ...) -> "M | None":
+async def human(
+    prompt: str, *, schema: type[M],
+    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
+) -> "M | None":
     """Overload: ``schema=<pydantic model>`` narrows the answer to that model."""
     ...
 
 
 @overload
-async def human(prompt: str, *, schema: dict, options: dict | None = ...) -> "dict | None":
+async def human(
+    prompt: str, *, schema: dict,
+    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
+) -> "dict | None":
     """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
     ...
 
 
 @overload
-async def human(prompt: str, *, schema: None = ..., options: dict | None = ...) -> "str | None":
+async def human(
+    prompt: str, *, schema: None = ...,
+    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
+) -> "str | None":
     """Overload: no ``schema`` returns the person's answer as raw text."""
     ...
 
 
-async def human(prompt: str, *, schema: Any = None, options: dict | None = None) -> Any:
+async def human(
+    prompt: str,
+    *,
+    schema: Any = None,
+    label: str | None = None,
+    phase: str | None = None,
+    options: dict | None = None,
+) -> Any:
     """One-shot human turn. Delegates to the current provider."""
-    return await current_provider().human(prompt, schema=schema, options=options)
+    return await current_provider().human(
+        prompt, schema=schema, label=label, phase=phase, options=options
+    )
 
 
 class _BudgetProxy:

@@ -705,6 +705,20 @@ class NativeHarness(DeepAgent):
     # Event handlers (single-writer, serialized by supervisor)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _ack(fut: "asyncio.Future | None", value: Any) -> None:
+        """Resolve a command's ack future unless the caller already abandoned it.
+
+        During teardown the awaiting coroutine (e.g. an async-tool completion
+        injection cancelled by :meth:`stop`) may have cancelled its ack future
+        before the supervisor dequeues the command. Setting a result on an
+        already-done future raises ``InvalidStateError`` and crashes the
+        supervisor, so skip it — nobody is waiting. Mirrors the ``not ack.done()``
+        guard already used on the error path.
+        """
+        if fut is not None and not fut.done():
+            fut.set_result(value)
+
     async def _on_send(self, cmd: _CmdSend) -> None:
         """Route a send according to current phase."""
         seq = self._st.next_seq()
@@ -737,24 +751,24 @@ class NativeHarness(DeepAgent):
             active = self._start_round(merged)
             await self._transition(HarnessState.RUNNING)
             await self._emit_round("started", active.round_id)
-        cmd.ack.set_result(seq)
+        self._ack(cmd.ack, seq)
 
     async def _on_abort(self, cmd: _CmdAbort) -> None:
         """Handle graceful or immediate abort."""
         phase = self._st.phase
         if phase is HarnessState.IDLE:
-            cmd.ack.set_result(None)
+            self._ack(cmd.ack, None)
             return
         if phase is HarnessState.PAUSED:
             self._st.paused_query = None
             await self._transition(HarnessState.IDLE)
-            cmd.ack.set_result(None)
+            self._ack(cmd.ack, None)
             return
 
         active = self._st.active
         if active is None:
             await self._transition(HarnessState.IDLE)
-            cmd.ack.set_result(None)
+            self._ack(cmd.ack, None)
             return
 
         if cmd.immediate:
@@ -775,18 +789,18 @@ class NativeHarness(DeepAgent):
             coordinator = self.loop_coordinator
             if coordinator is not None:
                 coordinator.request_abort()
-        cmd.ack.set_result(None)
+        self._ack(cmd.ack, None)
 
     async def _on_pause(self, cmd: _CmdPause) -> None:
         """Cancel current round, roll back to its pre-round baseline, cache query."""
         if self._st.phase is not HarnessState.RUNNING:
-            cmd.ack.set_result(None)
+            self._ack(cmd.ack, None)
             return
 
         active = self._st.active
         if active is None:
             await self._transition(HarnessState.PAUSED)
-            cmd.ack.set_result(None)
+            self._ack(cmd.ack, None)
             return
 
         # A resume round (InteractiveInput query) cannot be re-merged onto cached
@@ -803,7 +817,7 @@ class NativeHarness(DeepAgent):
         self._st.active = None
         self._st.paused_query = cached_query
         await self._transition(HarnessState.PAUSED)
-        cmd.ack.set_result(None)
+        self._ack(cmd.ack, None)
 
     async def _on_round_done(self, cmd: _CmdRoundFinished) -> None:
         """Round finished naturally; reuse DeepAgent's multi-round decision.
@@ -893,7 +907,7 @@ class NativeHarness(DeepAgent):
             self._st.active = None
         self._st.paused_query = None
         await self._transition(HarnessState.TERMINATED)
-        cmd.ack.set_result(None)
+        self._ack(cmd.ack, None)
 
     # ------------------------------------------------------------------
     # Round driver (organised for stage-2 _RoundDriver extraction)

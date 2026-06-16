@@ -48,7 +48,6 @@ class Runtime:
     spawn_count: int = 0
     tokens_spent: int = 0
     current_phase: str | None = None
-    wf_depth: int = 0
     warned_concurrent_scope: bool = False  # one-shot guard for the raw-gather warning
     warned_concurrent_session: bool = False  # one-shot guard for overlapping session sends
 

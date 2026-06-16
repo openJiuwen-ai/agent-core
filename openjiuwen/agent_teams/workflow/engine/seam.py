@@ -91,7 +91,15 @@ class Provider(Protocol):
         """Open a stateful, multi-turn human session (returns an ``AgentSession``)."""
         ...
 
-    async def human(self, prompt: str, *, schema: Any = ..., options: dict | None = ...) -> Any:
+    async def human(
+        self,
+        prompt: str,
+        *,
+        schema: Any = ...,
+        label: str | None = ...,
+        phase: str | None = ...,
+        options: dict | None = ...,
+    ) -> Any:
         """One-shot human turn: ask a person once and return the (typed) answer."""
         ...
 

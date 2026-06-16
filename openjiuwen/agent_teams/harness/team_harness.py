@@ -390,6 +390,17 @@ class TeamHarness:
         if self._native is not None:
             self._native.ability_manager.remove_ability(name)
 
+    def add_rail(self, rail: Any) -> None:
+        """Queue an extra rail on the native brain (registered on next invoke/start).
+
+        Mirrors :meth:`add_tool` for behavioural constraints — e.g. swarmflow
+        mounts a rail that force-finishes a round once ``structured_output`` is
+        captured. Must be called before the round/turn that should honour it
+        (queued into the native's pending rails, registered at init).
+        """
+        if self._native is not None:
+            self._native.add_rail(rail)
+
     def register_member_tools(self, memory_manager: Any) -> None:
         """Register the team memory toolkit on the underlying agent."""
         if self._native is not None:
