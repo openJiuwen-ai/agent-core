@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from openjiuwen.agent_teams import paths
 from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
 from openjiuwen.agent_teams.workflow.engine import (
     MockBackend,
@@ -23,13 +24,48 @@ from openjiuwen.agent_teams.workflow.engine import (
     WorkflowProgressEvent,
     run_workflow,
 )
+from openjiuwen.agent_teams.workflow.engine.loader import load_workflow_meta
 from openjiuwen.agent_teams.workflow.observer import WorkflowObserver
 from openjiuwen.agent_teams.workflow.schema import WorkflowRun
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
 
 
 def _team_log_sink(message: str) -> None:
     team_logger.warning("{}", message)
+
+
+def _resolve_journal_path(script_path: str, team_name: str, session_id: str | None) -> str:
+    """Compute the resume-journal path for a swarmflow run.
+
+    Reads the workflow name from the script ``META`` (required) and maps it
+    to the per-team, per-session journal file. Both ``resume`` and
+    ``journal_path`` use this single path, so a re-run of the same workflow
+    in the same session replays the prior run (cache-hit short-circuit).
+
+    Args:
+        script_path: Path to the swarmflow script.
+        team_name: Team identifier.
+        session_id: Current session id; falls back to ``"default"`` when empty.
+
+    Returns:
+        Absolute journal file path as a string.
+
+    Raises:
+        BaseError: If the script ``META`` declares no ``name``.
+    """
+    meta = load_workflow_meta(script_path)
+    name = meta.get("name")
+    if not name:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="swarmflow script META requires a 'name' to persist its resume journal",
+        )
+    sid = session_id or "default"
+    journal = paths.workflow_journal_path(team_name, sid, name)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    return str(journal)
 
 
 async def run_swarmflow(
@@ -117,12 +153,15 @@ async def run_swarmflow(
         on_human_prompt=_on_human_prompt,
         on_human_replied=_on_human_replied,
     )
+    journal_path = _resolve_journal_path(script_path, team_name, session_id)
     return await run_workflow(
         script_path,
         args=args,
         backend=backend,
         progress_sink=observer.emit,
         log_sink=log_sink or _team_log_sink,
+        resume=journal_path,
+        journal_path=journal_path,
     )
 
 
