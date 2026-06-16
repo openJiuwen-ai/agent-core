@@ -25,7 +25,7 @@ workflow/
 │   └── structured_output_tool.py # StructuredOutputTool：worker / 会话 schema turn 调它产出结构化结果（i18n 描述走 tools/locales）
 ├── schema.py            # 4 层 WorkflowRun → PhaseRecord → AgentActivity{prompt,activity,outcome}
 ├── observer.py          # WorkflowObserver：累积 4 层 + 可选 on_event 回调（republish team 事件）；to_frontend stub
-├── runner.py            # run_swarmflow（真实 worker）/ preprocess_swarmflow（MockBackend 预演）
+├── runner.py            # run_swarmflow（真实 worker，接 resume journal 落盘）/ preprocess_swarmflow（MockBackend 预演，不落 journal）
 └── tool_swarmflow.py    # SwarmflowTool：leader 工具，NativeHarness 异步工具框架的第一个实现（AsyncTool 子类，启动即闭合 + 完成回灌）
 ```
 
@@ -44,3 +44,4 @@ workflow/
 - 进度事件类型 `WORKFLOW_PROGRESS` / `WorkflowProgressTeamEvent` 在 `schema/events.py`；leader 播报由 `agent/coordination/handlers/workflow.py:WorkflowHandler` 消费。
 - `TeamRole.WORKER` 在 `schema/team.py`；`enable_swarmflow` 在 `schema/blueprint.py`；leader 子模式提示词在 `prompts/{cn,en}/leader_swarmflow.md`（经 `sections.build_team_swarmflow_section` 注入）。
 - `SwarmflowTool` 是 `harness/async_tools.py` 框架的第一个实现：持 `parent_agent`(NativeHarness) 引用，后台执行 + 完成/失败回灌全部走框架（NativeHarness 的 `launch_async_tool` + `send`），**不经 TeamAgent**。worker model 解析（`model_resolver`）、`messager`、`team_backend` 等 team 资源由装配（`agent_configurator` → `BuildContext.extras` → `TeamToolRail` → `create_team_tools`）注入工具。详见 `harness/AGENTS.md`、`F_35` / `S_20`。
+- swarmflow resume journal 落盘路径由 `paths.py` 统一管理（`workflow_journal_path` → `{team_home}/sessions/{session_id}/workflows/{workflow_name}/journal.jsonl`）；`run_swarmflow` 用 `load_workflow_meta`（脚本 `META["name"]` 必填）算路径，`resume`/`journal_path` 指向同一文件实现重放，`preprocess_swarmflow` 不落盘。详见 `F_38` / `S_18`。

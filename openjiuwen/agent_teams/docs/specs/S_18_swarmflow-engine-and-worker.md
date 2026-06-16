@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `workflow/`（engine / backends / observer / schema / runner / tool_swarmflow）、`schema/team.py`、`schema/events.py`、`schema/blueprint.py`、`agent/team_agent.py`、`agent/coordination/handlers/workflow.py`、`rails/team_policy_rail.py`、`prompts/sections.py` |
 | 最近一次修订日期 | 2026-06-22 |
-| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_39_swarmflow-agent-worktree-isolation.md` |
+| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md` |
 
 ## 范围 / 边界
 
@@ -18,6 +18,7 @@
 - 结构化输出工具（`StructuredOutputTool`）协议。
 - 进度事件分类（`WORKFLOW_PROGRESS`）与 leader 旁观播报路径。
 - 4 层 `WorkflowRun` 数据模型。
+- resume journal 的落盘路径与 `run_swarmflow` 接线契约。
 - 错误边界（引擎错误 vs 仓库 `StatusCode`）。
 
 **不管：**
@@ -53,6 +54,25 @@
    后续集成。`agent()` 返回值保持 worker 原始输出，不附加 worktree path / branch；
    后续集成阶段由明确的 merge agent 基于真实仓库的 git 状态、`git worktree list`、
    分支和提交信息完成提交、合并和冲突处理。
+
+## Resume Journal 持久化（`run_swarmflow`）
+
+引擎 `run_workflow` 暴露 `resume`（读旧）/ `journal_path`（写新）两个入参（content-addressed
+journal，`engine/journal.py`，JSONL 格式）。集成层 `run_swarmflow` 把两者指向**同一**文件，
+使同一 `(team, session, workflow)` 的再次运行命中缓存、跳过未变的 agent 调用。
+
+- **落盘路径**（单一真相源 `paths.py`）：
+  `{team_home}/sessions/{session_id}/workflows/{workflow_name}/journal.jsonl`。
+  `session_id` / `workflow_name` 经 `_safe_segment` sanitize（`[^A-Za-z0-9_.-]` 折成 `_`、
+  strip 首尾分隔符）防目录穿越；`session_id` 为空回退 `"default"`。`Journal.save` 不建父目录，
+  故 `run_swarmflow` 先 `mkdir(parents=True)`。
+- **workflow_name 必填**：由脚本 `META["name"]` 提供，经 `load_workflow_meta`（纯 AST 取 META，
+  **不** importlib 导入脚本）在调 `run_workflow` 前读取；缺失 →
+  `raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID)`。
+- **resume = journal_path 同路径**：首跑文件不存在 → 空 prior（冷启动）；跑完 `save` 写入；
+  次跑命中 → cache-hit 短路。`preprocess_swarmflow`（MockBackend 预演）**不**落 journal。
+
+详见 `F_38`。
 
 ## 有状态会话契约（`agent_session` / `human_session` / `human`）
 
