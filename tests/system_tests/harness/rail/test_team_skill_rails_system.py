@@ -169,6 +169,16 @@ async def test_team_skill_rail_generates_and_persists_patch_after_completion(tmp
         _ctx(
             agent,
             ToolCallInputs(
+                tool_name="send_message",
+                tool_args={"to_member_name": "researcher"},
+                tool_result="Error: researcher handoff failed because output format was missing",
+            ),
+        )
+    )
+    await rail.after_tool_call(
+        _ctx(
+            agent,
+            ToolCallInputs(
                 tool_name="view_task",
                 tool_args={},
                 tool_result="task-a completed\ntask-b completed",

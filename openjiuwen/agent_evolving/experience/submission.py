@@ -169,7 +169,8 @@ class ExperienceSubmissionService:
         normalized_subject = self._normalize_subject(prepared.subject)
         skill_name = normalized_subject.name
         subject_kind = normalized_subject.kind
-        records = [_build_record_from_evolve_item(item, source=source) for item in prepared.experience_drafts]
+        record_source = getattr(prepared, "record_source", None) or source
+        records = [_build_record_from_evolve_item(item, source=record_source) for item in prepared.experience_drafts]
         pending = make_pending_change(
             skill_name,
             records,

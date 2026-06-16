@@ -70,6 +70,7 @@ class EvolutionProposalSelection:
     selected_proposal_ids: tuple[str, ...]
     proposals: tuple[EvolutionProposalDetail, ...]
     experience_drafts: tuple[dict[str, Any], ...]
+    record_source: str | None = None
 
 
 class EvolutionReviewRuntime:
@@ -264,6 +265,7 @@ class EvolutionReviewRuntime:
             selected_proposal_ids=tuple(ids),
             proposals=tuple(resolved_proposals),
             experience_drafts=tuple(drafts),
+            record_source="user_intent" if scope.user_intent.strip() else "agent_inferred",
         )
 
     @staticmethod

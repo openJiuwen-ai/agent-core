@@ -232,8 +232,8 @@ class SubmitEvolutionReviewResultTool(_EvolutionReviewTool):
                     "enum": ["recommend_evolve", "no_evolution"],
                     "description": _text(
                         self._language,
-                        cn="当前 scope subject 的审查结论。",
-                        en="Review conclusion for the scoped subject.",
+                        cn="当前演进目标的审查结论。",
+                        en="Review conclusion for the current evolution target.",
                     ),
                 },
                 "evidence_refs": {
@@ -559,8 +559,8 @@ class EvolutionReviewReadTrajectoryStepsTool(_EvolutionReviewTool):
                     "type": "array",
                     "description": _text(
                         self._language,
-                        cn="来自当前 scoped review materials 的 trajectory ref。",
-                        en="Trajectory refs from the scoped review materials.",
+                        cn="当前审查可读取的任务记录 ref。",
+                        en="Task-record refs available to the current review.",
                     ),
                     "items": {"type": "string"},
                 },

@@ -60,7 +60,6 @@ from openjiuwen.harness.rails.evolution.approval_events import (
 from openjiuwen.harness.rails.evolution.approval_runtime import EvolutionApprovalRuntime
 from openjiuwen.harness.rails.evolution.commands import (
     build_evolve_review_command_prompt,
-    build_rebuild_command_prompt,
     build_simplify_command_prompt,
 )
 from openjiuwen.harness.rails.evolution.contracts import (
@@ -83,6 +82,44 @@ from openjiuwen.agent_evolving.tools import create_main_evolution_tools
 _MAX_PROCESSED_SIGNAL_KEYS = 500
 _DEFAULT_EVOLUTION_TOTAL_TIMEOUT_SECS = 600.0
 _NON_REGULAR_SKILL_KINDS = {"team-skill", "swarm-skill"}
+_FUZZY_REVIEW_PROMPT_CN = (
+    "请检查近期上下文是否有可复用 Skill 经验线索；这不是处理本次错误的请求。\n"
+    "当用户纠正上一轮 agent 的执行步骤、顺序、确认条件或交付流程时，"
+    "先判定为高优先级可复用流程线索；该反馈可作为演进候选，但不表示必然演进。\n"
+    "只有问题可归入已使用或可从近期任务上下文推断的相关 Skill、可归因到 Skill "
+    "指令缺口、改法可复用且非重复时，才算可演进机会。\n"
+    "执行失败本身不作为本次处理对象；\n"
+    "它可作为判断 Skill 是否缺少 precheck、fallback、verification 或排错指引的线索。\n"
+    "当用户用“你应该/应该先/先...再.../确认后再.../不要直接...”等规则化表达，"
+    "且内容是可复用工作流或可复用执行规则，先确认该建议是否要沉淀为相关 "
+    "Skill 经验。\n"
+    "一次性偏好、不可复用、已有经验覆盖或无法归入相关 Skill 场景时，不要询问演进。\n"
+    "没有可演进机会时，不要打扰用户；如果你需要回复本次自检，"
+    "只能说：本次技能演进自检未发现需要更新的 Skill。\n"
+    "有可演进机会时，用一句话询问：这条反馈可以沉淀为以后处理同类任务时的"
+    "流程经验，是否需要我记录到相关 Skill？\n"
+    "用户确认后，才使用 prepare_skill_evolution、evolve_review_task、evolve_skill_experiences。\n"
+    "不要直接编辑 Skill 文件；未确认时不要提交演进变更。"
+)
+_FUZZY_REVIEW_PROMPT_EN = """Check recent context for reusable Skill lessons; this is not a request to handle the
+current error.
+When the user corrects prior-agent execution steps, order, confirmation gates, or delivery flow,
+it is a high-priority reusable workflow clue (not a mandatory evolution signal).
+Treat something as an evolution opportunity only when it is linked to a used or inferable Skill context from recent
+task context, attribution to a Skill-guidance gap, reusable guidance, and no duplicate coverage.
+Use concrete execution failures only as evidence when deciding whether the Skill lacks precheck, fallback,
+verification, or troubleshooting guidance.
+If the user gives reusable rule-style guidance (for example “you should”, “should first”, “do X then Y”,
+“confirm before doing”, or “do not do this directly”) and it is about a reusable workflow or execution
+rule, first confirm whether to distill it as a Skill experience (related Skill).
+Do not ask to evolve for one-off preferences, non-reusable feedback, duplicate coverage, or feedback that cannot
+fit any related Skill context.
+If there is no evolution opportunity, do not bother the user; if you need to respond to this self-check, only say:
+This skill evolution self-check did not find any Skill that needs updating.
+If there is an evolution opportunity, ask this sentence in one line: This feedback can be distilled into a workflow
+lesson for similar future tasks. Should I record it in the related Skill?
+Only after user confirmation, use prepare_skill_evolution, evolve_review_task, and evolve_skill_experiences.
+Do not edit Skill files directly, and do not submit evolution changes before confirmation."""
 
 
 class EvolutionReviewScopeBuilder:
@@ -144,11 +181,14 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
         evaluate_llm_policy: LLMInvokePolicy = EVALUATE_LLM_POLICY,
         simplify_llm_policy: LLMInvokePolicy = SIMPLIFY_LLM_POLICY,
+        review_agent_max_iterations: int = 10,
         sharing_config: Optional[Dict[str, Any]] = None,
         disabled_skills: Optional[Union[str, List[str]]] = None,
         evolution_trigger: EvolutionTriggerPoint = EvolutionTriggerPoint.AFTER_INVOKE,
         async_evolution: bool = True,
         max_concurrent_evolution: int = 1,
+        fuzzy_review: bool = True,
+        fuzzy_review_interval: int = 5,
     ) -> None:
         """Initialize SkillEvolutionRail.
 
@@ -166,9 +206,15 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             sharing_config: Optional cross-user sharing settings (enabled, hub_path, etc.)
             disabled_skills: Optional deny-list of skill names excluded from self-optimization.
                 Supports a single skill name (str) or multiple names (list[str]).
+            fuzzy_review: Whether to periodically enqueue active fuzzy review self-check follow-ups.
+            fuzzy_review_interval: Number of non-follow-up task iterations between fuzzy review checks.
         """
         if eval_interval < 1:
             raise ValueError("eval_interval must be >= 1")
+        if fuzzy_review_interval < 1:
+            raise ValueError("fuzzy_review_interval must be >= 1")
+        if review_agent_max_iterations < 1:
+            raise ValueError("review_agent_max_iterations must be >= 1")
 
         super().__init__(
             trajectory_store=trajectory_store,
@@ -211,6 +257,10 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         self._evolution_tools: list[Any] = []
         self._agent: Any | None = None
         self._skip_auto_scan_this_invoke = False
+        self._fuzzy_review = bool(fuzzy_review)
+        self._fuzzy_review_interval = fuzzy_review_interval
+        self._fuzzy_review_non_followup_count = 0
+        self._review_agent_max_iterations = review_agent_max_iterations
         self._manager = self._make_experience_manager()
         self._approval_runtime = EvolutionApprovalRuntime(
             manager=self._manager,
@@ -379,6 +429,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 store=self._evolution_store,
                 model=None,
                 language=self._language,
+                max_iterations=self._review_agent_max_iterations,
                 agent_id=agent_id,
             ),
         )
@@ -502,6 +553,30 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         """Reset per-invoke active evolution state."""
         self._skip_auto_scan_this_invoke = False
 
+    async def _on_after_task_iteration(self, ctx: AgentCallbackContext) -> None:
+        """Periodically enqueue a fuzzy active-review self-check follow-up."""
+        if not self._fuzzy_review:
+            return
+        inputs = getattr(ctx, "inputs", None)
+        if getattr(inputs, "is_follow_up", False):
+            return
+        self._fuzzy_review_non_followup_count += 1
+        if self._fuzzy_review_non_followup_count < self._fuzzy_review_interval:
+            return
+        self._fuzzy_review_non_followup_count = 0
+
+        agent = getattr(ctx, "agent", None)
+        controller = getattr(agent, "_loop_controller", None)
+        if controller is None:
+            logger.warning("[SkillEvolutionRail] fuzzy review follow-up dropped: no TaskLoopController available")
+            return
+
+        controller.enqueue_follow_up(self._build_fuzzy_review_followup_prompt())
+
+    def _build_fuzzy_review_followup_prompt(self) -> str:
+        """Build the active fuzzy review self-check follow-up prompt."""
+        return _FUZZY_REVIEW_PROMPT_EN if self._language == "en" else _FUZZY_REVIEW_PROMPT_CN
+
     @property
     def auto_save(self) -> bool:
         """Whether auto-save is enabled."""
@@ -549,7 +624,16 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
 
     @auto_scan.setter
     def auto_scan(self, value: bool) -> None:
-        self._auto_scan = value
+        self._auto_scan = bool(value)
+
+    @property
+    def fuzzy_review(self) -> bool:
+        """Whether active fuzzy-review follow-ups are enabled."""
+        return self._fuzzy_review
+
+    @fuzzy_review.setter
+    def fuzzy_review(self, value: bool) -> None:
+        self._fuzzy_review = bool(value)
 
     def set_sys_operation(self, sys_operation: SysOperation) -> None:
         """Set sys_operation for both EvolutionRail and EvolutionStore."""
@@ -574,7 +658,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             builder = getattr(getattr(ctx, "agent", None), "system_prompt_builder", None)
         if builder is not None:
             language = str(getattr(builder, "language", "") or self._language)
-            builder.add_section(build_evolution_protocol_section(language))
+            builder.add_section(build_evolution_protocol_section(language, fuzzy_review=self._fuzzy_review))
 
     async def record_presented_experiences(
         self,
@@ -798,7 +882,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             True if a user evolution follow-up prompt was created.
         """
         user_intent = self._legacy_user_intent(user_query=user_query, signals=signals, messages=messages)
-        result = await self.request_user_evolution(skill_name, user_intent)
+        result = await self._build_user_evolution_request(skill_name, user_intent)
         return result.has_changes
 
     @staticmethod
@@ -820,15 +904,12 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 return content
         return ""
 
-    async def request_user_evolution(
+    async def _build_user_evolution_request(
         self,
         skill_name: str,
         user_intent: str = "",
-        *,
-        max_index_records: int = 20,
     ) -> EvolutionRequestResult:
         """Build a host-delivered active evolution prompt that requires restricted review first."""
-        del max_index_records
         self._ensure_evolve_review_task_available()
         subject = self._active_review_subject(skill_name)
         if subject is None:
@@ -837,6 +918,75 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             skill_name=skill_name,
             mode="agent_prompt",
             followup_prompt=self._build_active_review_prompt(subject=subject, user_intent=user_intent),
+        )
+
+    async def request_user_evolution(
+        self,
+        skill_name: str,
+        user_intent: str = "",
+        *,
+        auto_approve: bool | None = None,
+        max_index_records: int | None = None,
+    ) -> EvolutionRequestResult:
+        """Compatibility wrapper for active-review user evolution requests.
+
+        Parameters are intentionally lenient to preserve call sites that still
+        pass legacy flags. Current active-review behavior is unchanged and
+        driven by :meth:`_build_user_evolution_request`.
+        """
+        del auto_approve
+        del max_index_records
+        return await self._build_user_evolution_request(skill_name, user_intent)
+
+    async def request_simplify(
+        self,
+        skill_name: str,
+        user_intent: str | None = None,
+        *,
+        mode: str = "agent_prompt",
+        max_index_records: int = 100,
+    ) -> SimplifyRequestResult:
+        """Build a host-delivered simplify command prompt."""
+        if mode != "agent_prompt":
+            raise ValueError("regular Skill request_simplify only supports mode='agent_prompt'")
+        subject = self._subject_payload(skill_name)
+        index = await self._manager.experience_query_service.list_experiences(
+            subject,
+            min_score=None,
+            limit=max_index_records,
+            cursor=None,
+            target=None,
+            section=None,
+            query=None,
+            sort="score_desc",
+        )
+        return SimplifyRequestResult(
+            skill_name=skill_name,
+            mode="agent_prompt",
+            followup_prompt=build_simplify_command_prompt(
+                subject=subject,
+                user_intent=user_intent,
+                full_index=index,
+                index_complete=not bool(index.get("has_more")),
+                language=self._language,
+            ),
+        )
+
+    async def request_rebuild(
+        self,
+        skill_name: str,
+        user_intent: str | None = None,
+        min_score: float = 0.5,
+        max_context_records: int = 40,
+        max_context_chars: int = 20000,
+    ) -> Optional[str]:
+        """Compatibility wrapper for rebuild prompt generation."""
+        return await self._manager.request_rebuild(
+            skill_name,
+            user_intent=user_intent,
+            min_score=min_score,
+            max_context_records=max_context_records,
+            max_context_chars=max_context_chars,
         )
 
     def _active_review_subject(self, skill_name: str) -> dict[str, Any] | None:
@@ -1331,39 +1481,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
 
     # ── Governance commands (shared by 1D and team skills) ──
 
-    async def request_simplify(
-        self,
-        skill_name: str,
-        user_intent: Optional[str] = None,
-        *,
-        mode: str = "agent_prompt",
-        max_index_records: int = 100,
-    ) -> SimplifyRequestResult:
-        """Build a host-delivered simplify command prompt."""
-        if mode != "agent_prompt":
-            raise ValueError("regular Skill request_simplify only supports mode='agent_prompt'")
-        index = await self._manager.experience_query_service.list_experiences(
-            self._subject_payload(skill_name),
-            min_score=None,
-            limit=max_index_records,
-            cursor=None,
-            target=None,
-            section=None,
-            query=None,
-            sort="score_desc",
-        )
-        return SimplifyRequestResult(
-            skill_name=skill_name,
-            mode="agent_prompt",
-            followup_prompt=build_simplify_command_prompt(
-                subject=self._subject_payload(skill_name),
-                user_intent=user_intent,
-                full_index=index,
-                index_complete=not bool(index.get("has_more")),
-                language=self._language,
-            ),
-        )
-
     async def on_approve_simplify(self, request_id: str) -> Dict[str, int]:
         """Execute a previously staged simplify proposal."""
         result = await self._manager.approve_simplify(request_id)
@@ -1400,51 +1517,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             query=query,
             sort=sort,
         )
-
-    async def request_rebuild(
-        self,
-        skill_name: str,
-        user_intent: Optional[str] = None,
-        min_score: float = 0.5,
-        max_context_records: int = 40,
-        max_context_chars: int = 20000,
-    ) -> Optional[str]:
-        """Build a rebuild prompt for skill.
-
-        Archive old version FIRST, then return prompt containing filtered
-        evolution records. The caller (slash command handler or host) injects
-        this prompt into agent loop, and agent executes skill-creator to
-        generate new SKILL.md.
-
-        Args:
-            skill_name: Name of the skill to rebuild.
-            user_intent: Optional user-specified optimization direction.
-            min_score: Minimum score threshold for evolution records to include.
-                Default 0.5 filters out low-quality experiences.
-
-        Returns the followup prompt text on success, None if skill not found.
-        """
-        rebuild_context = await self._manager.rebuild_service.prepare_rebuild_context(
-            self._subject_payload(skill_name),
-            user_intent=user_intent,
-            min_score=min_score,
-            max_context_records=max_context_records,
-            max_context_chars=max_context_chars,
-        )
-        if rebuild_context is None:
-            return None
-        followup_text = build_rebuild_command_prompt(
-            subject=self._subject_payload(skill_name),
-            user_intent=user_intent,
-            rebuild_context=rebuild_context,
-            language=self._language,
-        )
-        logger.info(
-            "[SkillEvolutionRail] rebuild prompt built for skill=%s, min_score=%.2f",
-            skill_name,
-            min_score,
-        )
-        return followup_text
 
     async def rollback_skill(self, skill_name: str, version: Optional[str] = None) -> bool:
         """Rollback skill to an archived version (no approval required)."""

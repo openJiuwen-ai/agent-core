@@ -192,7 +192,7 @@ def test_review_tools_declare_required_input_schemas():
     assert list_props["tool_name"]["type"] == "string"
     assert list_props["has_error"]["type"] == "boolean"
     assert schemas["read_trajectory_steps"]["required"] == ["evolution_review_ref", "refs"]
-    assert "trajectory ref" in schemas["read_trajectory_steps"]["properties"]["refs"]["description"]
+    assert schemas["read_trajectory_steps"]["properties"]["refs"]["description"]
     submit_required = schemas["submit_evolution_review"]["required"]
     assert submit_required == [
         "evolution_review_ref",
@@ -203,13 +203,20 @@ def test_review_tools_declare_required_input_schemas():
     ]
     submit_schema = schemas["submit_evolution_review"]
     assert "proposals" in submit_schema["properties"]
+    assert "source" not in submit_schema["properties"]
+    assert "record_source" not in submit_schema["properties"]
     assert submit_schema["properties"]["proposals"]["maxItems"] == 3
+    proposal_properties = submit_schema["properties"]["proposals"]["items"]["properties"]
+    assert "source" not in proposal_properties
+    assert "record_source" not in proposal_properties
     proposal_required = submit_schema["properties"]["proposals"]["items"]["required"]
     assert proposal_required == ["proposal_id", "experience"]
-    assert "proposal_id" in submit_schema["properties"]["proposals"]["items"]["properties"]
-    experience_required = submit_schema["properties"]["proposals"]["items"]["properties"]["experience"]["required"]
+    assert "proposal_id" in proposal_properties
+    experience_required = proposal_properties["experience"]["required"]
     assert experience_required == ["summary", "content"]
-    experience_properties = submit_schema["properties"]["proposals"]["items"]["properties"]["experience"]["properties"]
+    experience_properties = proposal_properties["experience"]["properties"]
+    assert "source" not in experience_properties
+    assert "record_source" not in experience_properties
     assert experience_properties["target"]["enum"] == list(EVOLUTION_TARGET_VALUES)
     assert set(experience_properties["section"]["enum"]) == set(VALID_SECTIONS)
     assert "可选值" in experience_properties["section"]["description"]
@@ -227,7 +234,7 @@ def test_review_tools_declare_english_parameter_constraints():
     schemas = {tool.card.name: tool.card.input_params for tool in tools}
 
     refs_description = schemas["read_trajectory_steps"]["properties"]["refs"]["description"]
-    assert refs_description == "Trajectory refs from the scoped review materials."
+    assert refs_description == "Task-record refs available to the current review."
     experience_properties = schemas["submit_evolution_review"]["properties"]["proposals"]["items"]["properties"][
         "experience"
     ]["properties"]

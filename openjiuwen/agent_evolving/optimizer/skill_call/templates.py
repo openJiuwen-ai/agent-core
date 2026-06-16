@@ -594,7 +594,7 @@ Output JSON only."""
 TRAJECTORY_PATCH_PROMPT = {"cn": TRAJECTORY_PATCH_PROMPT_CN, "en": TRAJECTORY_PATCH_PROMPT_EN}
 
 TEAM_EXPERIENCE_GENERATE_PROMPT_CN = """\
-你是 Team Skill 优化专家。请根据团队技能内容、执行轨迹、显式用户改进意图和已有经验，生成可复用的 team evolution records。
+你是 Team Skill 优化专家。请根据规则信号、团队技能内容、相关执行轨迹和已有经验，生成可复用的 team evolution records。
 
 ## 输出格式（最重要）
 你的回复必须是一个合法的 JSON 数组，不要任何其他内容。
@@ -621,10 +621,12 @@ TEAM_EXPERIENCE_GENERATE_PROMPT_CN = """\
 ## 已有 script 经验
 {existing_script_summary}
 
-## 用户优化方向
+## 用户优化方向（仅主动 review 时可能存在）
 {user_query}
 
 ## 决策原则
+- 只基于「信号」中暴露的确定性 execution_failure 或 script_artifact 生成经验
+- 「轨迹摘要」只能用于补充同一失败链路或脚本资产的直接上下文，不要从模糊协作质量、角色表现或一般流程偏差中推断新问题
 - 只沉淀 team skill 本身可复用的协作、角色、约束、工作流、排障或脚本经验
 - 环境、权限、网络、模型偶发现象通常应 skip 为 irrelevant
 - 不要重复已有经验；若有增量，可输出 merge_target
@@ -664,7 +666,7 @@ TEAM_EXPERIENCE_GENERATE_PROMPT_CN = """\
 """
 
 TEAM_EXPERIENCE_GENERATE_PROMPT_EN = """\
-You are a Team Skill optimization expert. Based on the current team skill, execution trajectory, explicit user intent, and accumulated experience, generate reusable team evolution records.
+You are a Team Skill optimization expert. Based on rule signals, the current team skill, relevant execution trajectory, and accumulated experience, generate reusable team evolution records.
 
 ## Output Format (MOST IMPORTANT)
 Your response must be a valid JSON array and nothing else.
@@ -691,10 +693,12 @@ Your response must be a valid JSON array and nothing else.
 ## Existing script experiences
 {existing_script_summary}
 
-## User optimization direction
+## User optimization direction (only present for active review)
 {user_query}
 
 ## Decision Rules
+- Generate experiences only from deterministic `execution_failure` or `script_artifact` entries exposed in "Signals"
+- Use "Trajectory Summary" only to add direct context for the same failure chain or script asset; do not infer new problems from ambiguous collaboration quality, role performance, or general workflow drift
 - Only capture reusable collaboration, role, constraint, workflow, troubleshooting, or script knowledge that belongs to the team skill itself
 - Environment, permission, network, and random model issues should usually be skipped as irrelevant
 - Do not duplicate existing records; use merge_target when there is clear incremental value

@@ -36,7 +36,7 @@ def _subject_schema(language: str) -> dict[str, Any]:
     name_description = _text(language, cn="演进对象名称。", en="Evolution subject name.")
     return {
         "type": "object",
-        "description": _text(language, cn="演进对象封装。", en="Evolution subject envelope."),
+        "description": _text(language, cn="演进目标对象。", en="Evolution target object."),
         "properties": {
             "kind": {
                 "type": "string",
@@ -46,14 +46,6 @@ def _subject_schema(language: str) -> dict[str, Any]:
             "name": {
                 "type": "string",
                 "description": name_description,
-            },
-            "scope": {
-                "type": "object",
-                "description": _text(
-                    language,
-                    cn="预留给未来角色或成员作用域。",
-                    en="Reserved for future role/member scope.",
-                ),
             },
         },
         "required": ["kind", "name"],
@@ -66,7 +58,7 @@ def build_evolution_subject_schema(language: str = "cn") -> dict[str, Any]:
 
 
 class PrepareSkillEvolutionReviewMetadataProvider(ToolMetadataProvider):
-    """Metadata for preparing a restricted evolution review scope."""
+    """Metadata for preparing an evolution review."""
 
     def get_name(self) -> str:
         return "prepare_skill_evolution"
@@ -74,10 +66,10 @@ class PrepareSkillEvolutionReviewMetadataProvider(ToolMetadataProvider):
     def get_description(self, language: str = "cn") -> str:
         if language == "en":
             return (
-                "Create a restricted Skill evolution review ref before drafting new experiences. "
+                "Create a Skill evolution review ref before drafting new experiences. "
                 "Use this after the user agrees to evolve a skill from ambiguous feedback."
             )
-        return "在起草新经验前创建受限技能演进 review ref；用于用户同意将模糊反馈沉淀为 skill 演进后。"
+        return "在起草新经验前创建技能演进 review ref；用于用户同意将模糊反馈沉淀为 skill 演进后。"
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return {
@@ -106,15 +98,15 @@ class PrepareSkillEvolutionReviewMetadataProvider(ToolMetadataProvider):
 
 
 class EvolveReviewTaskMetadataProvider(ToolMetadataProvider):
-    """Metadata for launching the restricted evolution review subagent."""
+    """Metadata for launching the evolution review subagent."""
 
     def get_name(self) -> str:
         return "evolve_review_task"
 
     def get_description(self, language: str = "cn") -> str:
         if language == "en":
-            return "Launch the restricted evolution_reviewer subagent for a prepared evolution_review_ref."
-        return "为已准备的 evolution_review_ref 启动受限 evolution_reviewer subagent。"
+            return "Launch the evolution_reviewer subagent for a prepared evolution_review_ref."
+        return "为已准备的 evolution_review_ref 启动 evolution_reviewer subagent。"
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return {

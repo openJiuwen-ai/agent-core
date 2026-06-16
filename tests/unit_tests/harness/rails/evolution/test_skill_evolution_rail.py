@@ -31,10 +31,20 @@ from openjiuwen.agent_evolving.signal import (
 from openjiuwen.agent_evolving.trajectory.types import LLMCallDetail, ToolCallDetail, Trajectory, TrajectoryStep
 from openjiuwen.agent_evolving.types import ApplyResult
 from openjiuwen.core.foundation.llm import SystemMessage
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ModelCallInputs, ToolCallInputs
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    InvokeInputs,
+    ModelCallInputs,
+    TaskIterationInputs,
+    ToolCallInputs,
+)
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails.evolution.approval_runtime import EvolutionApprovalRuntime
+from openjiuwen.harness.rails.evolution.contracts import (
+    EvolutionRequestResult,
+    SimplifyRequestResult,
+)
 from openjiuwen.harness.rails.evolution.review.materials import build_review_scoped_materials
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import (
@@ -55,6 +65,9 @@ def _make_rail(
     auto_save: bool = True,
     disabled_skills=None,
     language: str = "cn",
+    review_agent_max_iterations: int = 10,
+    fuzzy_review: bool = True,
+    fuzzy_review_interval: int = 5,
 ) -> SkillEvolutionRail:
     rail = SkillEvolutionRail(
         skills_dir=str(tmp_path / "skills"),
@@ -65,6 +78,9 @@ def _make_rail(
         review_runtime=_default_review_runtime(),
         language=language,
         disabled_skills=disabled_skills,
+        review_agent_max_iterations=review_agent_max_iterations,
+        fuzzy_review=fuzzy_review,
+        fuzzy_review_interval=fuzzy_review_interval,
     )
     rail._evolution_store = Mock()
     rail._evolution_store.read_skill_content = AsyncMock(return_value="# skill")
@@ -308,8 +324,18 @@ def test_properties_and_clear_processed_signals(tmp_path):
     rail.clear_processed_signals()
 
     assert rail.auto_scan is False
+    assert rail.fuzzy_review is True
     assert rail.auto_save is False
     assert rail.processed_signal_keys == set()
+
+    rail.fuzzy_review = False
+
+    assert rail.auto_scan is False
+    assert rail.fuzzy_review is False
+
+    rail.fuzzy_review = True
+
+    assert rail.fuzzy_review is True
 
 
 def test_auto_save_defaults_false_and_setter_still_updates(tmp_path):
@@ -504,8 +530,58 @@ def test_skill_rail_init_registers_evolve_review_task_without_subagent_rail(tmp_
     assert [config.agent_card.name for config in agent.deep_config.subagents] == ["evolution_reviewer"]
 
 
+def test_skill_rail_init_registers_review_agent_with_default_max_iterations(tmp_path):
+    rail = _make_rail(tmp_path)
+    agent = SimpleNamespace(
+        card=SimpleNamespace(id="agent-1"),
+        deep_config=SimpleNamespace(subagents=[]),
+        ability_manager=SimpleNamespace(add=Mock(), remove=Mock()),
+        find_rails_by_type=_find_rails_by_type(),
+        _registered_rails=[],
+    )
+
+    with patch("openjiuwen.core.runner.Runner.resource_mgr.add_tool"):
+        rail.init(agent)
+
+    configured = next(
+        config
+        for config in agent.deep_config.subagents
+        if getattr(config.agent_card, "name", None) == "evolution_reviewer"
+    )
+    assert getattr(configured, "max_iterations", None) == 10
+
+
+def test_skill_rail_init_registers_review_agent_with_custom_max_iterations(tmp_path):
+    rail = _make_rail(tmp_path, fuzzy_review_interval=5, review_agent_max_iterations=7)
+    agent = SimpleNamespace(
+        card=SimpleNamespace(id="agent-1"),
+        deep_config=SimpleNamespace(subagents=[]),
+        ability_manager=SimpleNamespace(add=Mock(), remove=Mock()),
+        find_rails_by_type=_find_rails_by_type(),
+        _registered_rails=[],
+    )
+
+    with patch("openjiuwen.core.runner.Runner.resource_mgr.add_tool"):
+        rail.init(agent)
+
+    configured = next(
+        config
+        for config in agent.deep_config.subagents
+        if getattr(config.agent_card, "name", None) == "evolution_reviewer"
+    )
+    assert getattr(configured, "max_iterations", None) == 7
+
+
+def test_skill_rail_invalid_review_agent_max_iterations_rejected(tmp_path):
+    with pytest.raises(ValueError, match="review_agent_max_iterations must be >= 1"):
+        _make_rail(
+            tmp_path,
+            fuzzy_review_interval=5,
+            review_agent_max_iterations=0,
+        )
+
 @pytest.mark.asyncio
-async def test_request_user_evolution_requires_registered_evolve_review_task_after_init(tmp_path):
+async def test_build_user_evolution_request_requires_registered_evolve_review_task_after_init(tmp_path):
     rail = _make_rail(tmp_path)
     agent = SimpleNamespace(
         card=SimpleNamespace(id="agent-1"),
@@ -522,7 +598,7 @@ async def test_request_user_evolution_requires_registered_evolve_review_task_aft
         rail.init(agent)
 
     with pytest.raises(RuntimeError, match="requires evolve_review_task"):
-        await rail.request_user_evolution("skill-a", "capture parser lesson")
+        await rail._build_user_evolution_request("skill-a", "capture parser lesson")
 
 
 @pytest.mark.asyncio
@@ -558,12 +634,12 @@ async def test_evolve_review_task_uses_fixed_evolution_reviewer_subagent(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_request_user_evolution_returns_followup_prompt_not_records(tmp_path):
+async def test_build_user_evolution_request_returns_followup_prompt_not_records(tmp_path):
     rail = _make_rail(tmp_path)
     rail._handle_evolution_from_signals = AsyncMock()
     rail._manager.experience_query_service.list_experiences = AsyncMock()
 
-    result = await rail.request_user_evolution("skill-a", "capture parser lesson")
+    result = await rail._build_user_evolution_request("skill-a", "capture parser lesson")
 
     assert result.mode == "agent_prompt"
     assert result.followup_prompt is not None
@@ -597,7 +673,7 @@ def test_subject_payload_reads_actual_skill_kind(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_request_user_evolution_uses_actual_swarm_skill_kind(tmp_path):
+async def test_build_user_evolution_request_uses_actual_swarm_skill_kind(tmp_path):
     skills_dir = tmp_path / "skills"
     skill_dir = skills_dir / "swarm-skill"
     skill_dir.mkdir(parents=True)
@@ -605,7 +681,7 @@ async def test_request_user_evolution_uses_actual_swarm_skill_kind(tmp_path):
     rail = _make_rail(tmp_path)
     rail._evolution_store = EvolutionStore(str(skills_dir))
 
-    result = await rail.request_user_evolution("swarm-skill", "capture swarm lesson")
+    result = await rail._build_user_evolution_request("swarm-skill", "capture swarm lesson")
 
     assert result.mode == "agent_prompt"
     assert result.followup_prompt is not None
@@ -613,13 +689,13 @@ async def test_request_user_evolution_uses_actual_swarm_skill_kind(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_request_user_evolution_resolver_failure_falls_back_to_skill_kind(tmp_path):
+async def test_build_user_evolution_request_resolver_failure_falls_back_to_skill_kind(tmp_path):
     rail = _make_rail(tmp_path)
     store = MagicMock()
     store.resolve_subject_payload.side_effect = RuntimeError("bad frontmatter")
     rail._evolution_store = store
 
-    result = await rail.request_user_evolution("skill-a", "capture lesson")
+    result = await rail._build_user_evolution_request("skill-a", "capture lesson")
 
     assert result.mode == "agent_prompt"
     assert result.followup_prompt is not None
@@ -731,7 +807,7 @@ def test_build_review_scoped_materials_tool_detail_is_bounded():
 
 
 @pytest.mark.asyncio
-async def test_request_user_evolution_defers_scope_creation_to_prepare_tool(tmp_path):
+async def test_build_user_evolution_request_defers_scope_creation_to_prepare_tool(tmp_path):
     rail = _make_rail(tmp_path)
     rail._ensure_evolve_review_task_available = Mock()
     trajectory = Trajectory(
@@ -748,7 +824,7 @@ async def test_request_user_evolution_defers_scope_creation_to_prepare_tool(tmp_
     )
     rail._build_trajectory = Mock(return_value=trajectory)
 
-    result = await rail.request_user_evolution("skill-a", "capture parser failure")
+    result = await rail._build_user_evolution_request("skill-a", "capture parser failure")
 
     assert result.followup_prompt is not None
     assert rail._review_runtime._scopes_by_ref == {}
@@ -798,39 +874,6 @@ async def test_list_experiences_uses_query_service_not_agent_tool(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_request_rebuild_stays_host_api(tmp_path):
-    rail = _make_rail(tmp_path)
-    rail._manager.rebuild_service.prepare_rebuild_context = AsyncMock(
-        return_value={
-            "subject": {"kind": "skill", "name": "skill-a"},
-            "records": [
-                {
-                    "record_id": "ev_2",
-                    "summary": "Prefer strict validation.",
-                    "target": "body",
-                    "section": "Troubleshooting",
-                    "score": 0.9,
-                    "updated_at": "2026-01-01T00:00:00Z",
-                    "content": "Always validate inputs strictly.",
-                }
-            ],
-            "overflow_index": {"items": []},
-        }
-    )
-
-    result = await rail.request_rebuild("skill-a", user_intent="make it stricter", min_score=0.7)
-
-    assert result
-    rail._manager.rebuild_service.prepare_rebuild_context.assert_awaited_once_with(
-        {"kind": "skill", "name": "skill-a"},
-        user_intent="make it stricter",
-        min_score=0.7,
-        max_context_records=40,
-        max_context_chars=20000,
-    )
-
-
-@pytest.mark.asyncio
 async def test_evolution_protocol_section_is_injected_without_command_parsing(tmp_path):
     rail = _make_rail(tmp_path)
     builder = SystemPromptBuilder(language="cn")
@@ -863,6 +906,100 @@ async def test_evolution_protocol_section_supports_english(tmp_path):
     assert section.name == SectionName.EVOLUTION_PROTOCOL
 
 
+def _make_task_iteration_ctx(*, agent=None, is_follow_up: bool = False) -> AgentCallbackContext:
+    return AgentCallbackContext(
+        agent=agent,
+        inputs=TaskIterationInputs(
+            iteration=1,
+            loop_event=SimpleNamespace(),
+            conversation_id="conv-1",
+            query="run",
+            is_follow_up=is_follow_up,
+        ),
+        session=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_fuzzy_review_enqueues_every_interval_for_non_followup_iterations(tmp_path):
+    rail = _make_rail(tmp_path, fuzzy_review_interval=5)
+    controller = Mock()
+    controller.enqueue_follow_up = Mock()
+    agent = SimpleNamespace(_loop_controller=controller)
+    ctx = _make_task_iteration_ctx(agent=agent)
+
+    for _ in range(4):
+        await rail._on_after_task_iteration(ctx)
+    controller.enqueue_follow_up.assert_not_called()
+    assert rail._fuzzy_review_non_followup_count == 4
+
+    await rail._on_after_task_iteration(ctx)
+    controller.enqueue_follow_up.assert_called_once()
+    assert rail._fuzzy_review_non_followup_count == 0
+
+    for _ in range(4):
+        await rail._on_after_task_iteration(ctx)
+    assert controller.enqueue_follow_up.call_count == 1
+    assert rail._fuzzy_review_non_followup_count == 4
+
+    await rail._on_after_task_iteration(ctx)
+    assert controller.enqueue_follow_up.call_count == 2
+    assert rail._fuzzy_review_non_followup_count == 0
+
+
+@pytest.mark.asyncio
+async def test_fuzzy_review_followup_iteration_does_not_count_or_recurse(tmp_path):
+    rail = _make_rail(tmp_path, fuzzy_review_interval=1)
+    controller = Mock()
+    controller.enqueue_follow_up = Mock()
+    agent = SimpleNamespace(_loop_controller=controller)
+
+    await rail._on_after_task_iteration(_make_task_iteration_ctx(agent=agent, is_follow_up=True))
+    await rail._on_after_task_iteration(_make_task_iteration_ctx(agent=agent))
+
+    controller.enqueue_follow_up.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_fuzzy_review_can_be_disabled(tmp_path):
+    rail = _make_rail(tmp_path, fuzzy_review=False, fuzzy_review_interval=1)
+    controller = Mock()
+    controller.enqueue_follow_up = Mock()
+    agent = SimpleNamespace(_loop_controller=controller)
+
+    await rail._on_after_task_iteration(_make_task_iteration_ctx(agent=agent))
+
+    controller.enqueue_follow_up.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fuzzy_review_without_task_loop_controller_drops_followup(tmp_path):
+    rail = _make_rail(tmp_path, fuzzy_review_interval=1)
+    ctx = _make_task_iteration_ctx(agent=SimpleNamespace())
+
+    await rail._on_after_task_iteration(ctx)
+
+    assert rail._fuzzy_review_non_followup_count == 0
+
+
+def test_fuzzy_review_interval_must_be_positive(tmp_path):
+    with pytest.raises(ValueError, match="fuzzy_review_interval"):
+        _make_rail(tmp_path, fuzzy_review_interval=0)
+
+
+@pytest.mark.asyncio
+async def test_evolution_protocol_section_omits_fuzzy_review_when_disabled(tmp_path):
+    rail = _make_rail(tmp_path, fuzzy_review=False)
+    builder = SystemPromptBuilder(language="en")
+    agent = SimpleNamespace(system_prompt_builder=builder)
+    ctx = AgentCallbackContext(agent=agent, inputs=ModelCallInputs(messages=[]))
+
+    await rail.before_model_call(ctx)
+
+    section = builder.get_section(SectionName.EVOLUTION_PROTOCOL)
+    assert section is not None
+
+
 @pytest.mark.asyncio
 async def test_on_approve_simplify_delegates_to_manager(tmp_path):
     rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
@@ -878,36 +1015,6 @@ async def test_on_approve_simplify_delegates_to_manager(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_request_simplify_returns_followup_prompt_not_staged_actions(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
-    rail._manager.request_simplify = AsyncMock()
-    rail._manager.experience_query_service.list_experiences = AsyncMock(
-        return_value={
-            "items": [{"record_id": "ev_1", "summary": "Still useful", "score": 0.9}],
-            "has_more": False,
-        }
-    )
-
-    result = await rail.request_simplify("skill-a", user_intent="trim duplicates")
-
-    assert result.mode == "agent_prompt"
-    assert result.followup_prompt is not None
-    assert result.request_id is None
-    assert result.approval_event is None
-    assert result.actions == []
-    assert rail._pending_host_events == []
-    rail._manager.request_simplify.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_request_simplify_rejects_scorer_mode(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
-
-    with pytest.raises(ValueError, match="mode='agent_prompt'"):
-        await rail.request_simplify("skill-a", mode="scorer_actions")
-
-
-@pytest.mark.asyncio
 async def test_on_reject_simplify_delegates_to_manager(tmp_path):
     rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
     rail._pending_governance["req-2"] = {"skill_name": "skill-a"}
@@ -916,6 +1023,98 @@ async def test_on_reject_simplify_delegates_to_manager(tmp_path):
         await rail.on_reject_simplify("req-2")
 
     reject_simplify.assert_awaited_once_with("req-2")
+
+
+@pytest.mark.asyncio
+async def test_request_user_evolution_wrapper_delegates_to_internal_builder(tmp_path):
+    rail = _make_rail(tmp_path)
+    expected = EvolutionRequestResult(
+        skill_name="skill-a",
+        mode="agent_prompt",
+        followup_prompt="review this skill",
+        request_id="request-id",
+    )
+
+    with patch.object(
+        rail,
+        "_build_user_evolution_request",
+        AsyncMock(return_value=expected),
+    ) as build_request:
+        result = await rail.request_user_evolution(
+            "skill-a",
+            "improve parser fallback",
+            auto_approve=True,
+            max_index_records=20,
+        )
+
+    build_request.assert_awaited_once_with("skill-a", "improve parser fallback")
+    assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_request_simplify_returns_followup_prompt_not_staged_actions(tmp_path):
+    rail = _make_rail(tmp_path)
+    rail._manager.request_simplify = AsyncMock()
+    rail._manager.experience_query_service.list_experiences = AsyncMock(
+        return_value={"items": [{"id": "exp-1"}], "has_more": False},
+    )
+
+    result = await rail.request_simplify(
+        "skill-a",
+        "reduce noise",
+        mode="agent_prompt",
+        max_index_records=7,
+    )
+
+    rail._manager.request_simplify.assert_not_awaited()
+    rail._manager.experience_query_service.list_experiences.assert_awaited_once()
+    assert rail._manager.experience_query_service.list_experiences.await_args.args[0] == {
+        "kind": "skill",
+        "name": "skill-a",
+    }
+    assert rail._manager.experience_query_service.list_experiences.await_args.kwargs["limit"] == 7
+    assert isinstance(result, SimplifyRequestResult)
+    assert result.mode == "agent_prompt"
+    assert result.followup_prompt is not None
+    assert "simplify_skill_experiences" in result.followup_prompt
+    assert result.request_id is None
+    assert result.approval_event is None
+    assert result.actions == []
+
+
+@pytest.mark.asyncio
+async def test_request_simplify_rejects_non_agent_prompt_mode(tmp_path):
+    rail = _make_rail(tmp_path)
+
+    with pytest.raises(ValueError, match="mode='agent_prompt'"):
+        await rail.request_simplify("skill-a", mode="scorer_actions")
+
+
+@pytest.mark.asyncio
+async def test_request_rebuild_delegates_to_manager_with_params(tmp_path):
+    rail = _make_rail(tmp_path)
+
+    with patch.object(
+        rail._manager,
+        "request_rebuild",
+        AsyncMock(return_value="simplify command"),
+    ) as request_rebuild:
+        result = await rail.request_rebuild(
+            "skill-a",
+            "refine records",
+            0.55,
+            max_context_records=19,
+            max_context_chars=12345,
+        )
+
+    request_rebuild.assert_awaited_once_with(
+        "skill-a",
+        user_intent="refine records",
+        min_score=0.55,
+        max_context_records=19,
+        max_context_chars=12345,
+    )
+    assert result == "simplify command"
 
 
 # =============================================================================
@@ -2668,29 +2867,6 @@ async def test_create_skill_succeeds_for_new_skill(tmp_path):
     assert "A fresh skill" in content
 
 
-# =============================================================================
-# User-triggered evolution public API tests
-# =============================================================================
-
-
-@pytest.mark.asyncio
-async def test_request_user_evolution_ignores_legacy_index_limit(tmp_path):
-    rail = _make_rail(tmp_path, auto_save=False)
-    rail._manager.experience_query_service.list_experiences = AsyncMock()
-
-    result = await rail.request_user_evolution("skill-a", "save directly", max_index_records=7)
-
-    assert result.followup_prompt is not None
-    rail._manager.experience_query_service.list_experiences.assert_not_awaited()
-
-
-def test_request_user_evolution_rejects_auto_approve_argument(tmp_path):
-    rail = _make_rail(tmp_path, auto_save=False)
-
-    with pytest.raises(TypeError, match="auto_approve"):
-        rail.request_user_evolution("skill-a", "nothing useful", auto_approve=True)
-
-
 @pytest.mark.asyncio
 async def test_approve_record_and_reject_record_aliases(tmp_path):
     rail = _make_rail(tmp_path, auto_save=False)
@@ -2836,101 +3012,6 @@ def test_skill_rewriter_exports_removed():
     assert not hasattr(skill_call, "SkillRewriter")
     assert not hasattr(skill_call, "SkillRewriteResult")
 
-
-# ---------------------------------------------------------------------------
-# request_rebuild tests (archive-first approach)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_request_rebuild_archives_before_building_prompt(tmp_path):
-    """request_rebuild should archive old version BEFORE building the prompt."""
-
-    rail = _make_rail(tmp_path)
-
-    mock_record = _make_record("test-skill", content="test experience")
-    mock_record.score = 0.8
-
-    rail._evolution_store.skill_exists = Mock(return_value=True)
-    rail._evolution_store.archive_skill_body = AsyncMock(return_value="SKILL.v20260426_172600.md")
-    rail._evolution_store.archive_evolutions = AsyncMock(return_value="evolutions.v20260426_172600.json")
-    rail._evolution_store.clear_evolutions = AsyncMock()
-    rail._evolution_store.load_full_evolution_log = AsyncMock(return_value=Mock(entries=[mock_record]))
-
-    result = await rail.request_rebuild("test-skill", user_intent="优化技能")
-
-    # Archive operations should be called BEFORE prompt is built
-    rail._evolution_store.archive_skill_body.assert_called_once_with("test-skill", subject_kind="skill")
-    rail._evolution_store.archive_evolutions.assert_called_once_with("test-skill", subject_kind="skill")
-    rail._evolution_store.clear_evolutions.assert_called_once_with("test-skill", subject_kind="skill")
-
-    # Should return prompt (not None)
-    assert result
-
-
-@pytest.mark.asyncio
-async def test_request_rebuild_returns_none_when_skill_not_found(tmp_path):
-    """request_rebuild should return None when skill doesn't exist."""
-    rail = _make_rail(tmp_path)
-
-    rail._evolution_store.skill_exists = Mock(return_value=False)
-
-    result = await rail.request_rebuild("nonexistent-skill")
-
-    assert result is None
-    rail._evolution_store.archive_skill_body.assert_not_called()
-    rail._evolution_store.archive_evolutions.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_request_rebuild_filters_low_score_records(tmp_path):
-    """request_rebuild should filter out records with score below min_score."""
-
-    rail = _make_rail(tmp_path)
-
-    high_record = _make_record("test-skill", content="good experience")
-    high_record.score = 0.8
-
-    low_record = _make_record("test-skill", content="bad experience")
-    low_record.score = 0.3
-
-    rail._evolution_store.skill_exists = Mock(return_value=True)
-    rail._evolution_store.archive_skill_body = AsyncMock(return_value="SKILL.v1.md")
-    rail._evolution_store.archive_evolutions = AsyncMock(return_value="evolutions.v1.json")
-    rail._evolution_store.clear_evolutions = AsyncMock()
-    rail._evolution_store.load_full_evolution_log = AsyncMock(return_value=Mock(entries=[high_record, low_record]))
-
-    result = await rail.request_rebuild("test-skill", min_score=0.5)
-
-    assert result is not None
-    # High score record should be included
-    assert "good experience" in result
-    # Low score record should be filtered out
-    assert "bad experience" not in result
-    rail._evolution_store.clear_evolutions.assert_called_once_with("test-skill", subject_kind="skill")
-
-
-@pytest.mark.asyncio
-async def test_request_rebuild_continues_on_archive_failure(tmp_path):
-    """request_rebuild should continue even if archive fails."""
-
-    rail = _make_rail(tmp_path)
-
-    high_record = _make_record("test-skill", content="test content")
-    high_record.score = 0.7
-
-    rail._evolution_store.skill_exists = Mock(return_value=True)
-    rail._evolution_store.archive_skill_body = AsyncMock(side_effect=RuntimeError("disk full"))
-    rail._evolution_store.archive_evolutions = AsyncMock(return_value=None)
-    rail._evolution_store.clear_evolutions = AsyncMock()
-    rail._evolution_store.load_full_evolution_log = AsyncMock(return_value=Mock(entries=[high_record]))
-
-    result = await rail.request_rebuild("test-skill")
-
-    # Should still return prompt even if archive failed
-    assert result is not None
-    rail._evolution_store.load_full_evolution_log.assert_called_once_with("test-skill", subject_kind="skill")
-    rail._evolution_store.clear_evolutions.assert_not_called()
 
 
 # =============================================================================
