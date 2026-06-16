@@ -140,12 +140,15 @@ class ExampleOptimizer(BaseOptimizer):
         sampled_examples = []
         if error_cases:
             num_error_examples = min(num_examples, len(error_cases))
-            sampled_examples.extend(random.sample(error_cases, num_error_examples))
+            if num_error_examples > 0:
+                sampled_examples.extend(random.sample(error_cases, num_error_examples))
 
         if len(sampled_examples) < num_examples:
             num_remaining_examples = num_examples - len(sampled_examples)
             remaining_examples = [ex for ex in dataset if ex not in sampled_examples]
-            sampled_examples.extend(random.sample(remaining_examples, num_remaining_examples))
+            safe_remaining_sample = min(num_remaining_examples, len(remaining_examples))
+            if safe_remaining_sample > 0:
+                sampled_examples.extend(random.sample(remaining_examples, safe_remaining_sample))
         else:
             sampled_examples = random.sample(sampled_examples, num_examples)
 
@@ -159,7 +162,10 @@ class ExampleOptimizer(BaseOptimizer):
         num_examples_to_fill = num_to_select - len(selected_examples)
         remaining_cases = [case.case for case in evaluated_cases
                            if case.case_id not in [case.case_id for case in selected_examples]]
-        return selected_examples + random.sample(remaining_cases, num_examples_to_fill)
+        safe_sample_size = min(num_examples_to_fill, len(remaining_cases))
+        if safe_sample_size <= 0:
+            return selected_examples
+        return selected_examples + random.sample(remaining_cases, safe_sample_size)
 
     def _select_best_examples(self,
                               system_prompt: PromptTemplate,
@@ -212,7 +218,7 @@ class ExampleOptimizer(BaseOptimizer):
         examples = [eval_case.case for eval_case in error_cases]
         if len(examples) > TuneConstant.DEFAULT_MAX_NUM_SAMPLE_ERROR_CASES:
             examples = random.sample(
-                error_cases,
+                examples,
                 TuneConstant.DEFAULT_MAX_NUM_SAMPLE_ERROR_CASES
             )
             return examples
