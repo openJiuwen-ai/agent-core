@@ -7,7 +7,11 @@
 from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails.evolution import (
+    configure_skill_evolution,
+    configure_skill_evolution_runtime,
+    unconfigure_skill_evolution,
     ContextEvolutionRail,
+    EvolutionInterruptRail,
     EvolutionRail,
     EvolutionTriggerPoint,
     SkillEvolutionRail,
@@ -66,6 +70,7 @@ __all__ = [
     "ContextEvolutionRail",
     "DeepAgentRail",
     "EvolutionRail",
+    "EvolutionInterruptRail",
     "EvolutionTriggerPoint",
     "ExternalMemoryRail",
     "HeartbeatRail",
@@ -93,6 +98,9 @@ __all__ = [
     "TeamSkillCreateRail",
     "TeamSkillEvolutionRail",
     "TeamSkillRail",
+    "configure_skill_evolution",
+    "configure_skill_evolution_runtime",
+    "unconfigure_skill_evolution",
     "TrajectoryRail",
     "VerificationContractRail",
     "VerificationRail",

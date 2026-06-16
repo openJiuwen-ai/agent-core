@@ -9,6 +9,7 @@ import os
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Optional,
 )
 
@@ -51,7 +52,6 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
     from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
-    from openjiuwen.agent_teams.rails import FirstIterationGate
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
@@ -63,7 +63,7 @@ def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     # BRIDGE_AGENT entries are bridge-to-remote declarations — neither
     # is a signal to flip the team away from "default". A roster of
     # ordinary predefined teammates derives "hybrid": the leader keeps
-    # its spawn_member tool so the roster can still grow at runtime.
+    # its spawn_* tools so the roster can still grow at runtime.
     # Lock it down by setting an explicit "predefined" team_mode.
     avatar_roles = {TeamRole.HUMAN_AGENT, TeamRole.BRIDGE_AGENT}
     non_avatar_predefined = [m for m in spec.predefined_members if m.role_type not in avatar_roles]
@@ -175,14 +175,6 @@ class AgentConfigurator:
     @memory_manager.setter
     def memory_manager(self, value: Optional["TeamMemoryManager"]) -> None:
         self._resources.memory_manager = value
-
-    @property
-    def first_iter_gate(self) -> Optional["FirstIterationGate"]:
-        return self._resources.first_iter_gate
-
-    @first_iter_gate.setter
-    def first_iter_gate(self, value: Optional["FirstIterationGate"]) -> None:
-        self._resources.first_iter_gate = value
 
     @property
     def model_allocator(self) -> Optional["ModelAllocator"]:
@@ -315,7 +307,7 @@ class AgentConfigurator:
         The default path builds a ``TeamHarness`` over DeepAgent. When
         ``member_runtime`` is supplied (e.g. an ``ExternalCliRuntime`` for an
         external CLI member), it is adopted as-is and the DeepAgent / rail /
-        memory / customizer setup is skipped — coordination still drives it
+        memory setup is skipped — coordination still drives it
         through the same :class:`MemberRuntime` surface.
         """
         if member_runtime is not None:
@@ -372,101 +364,212 @@ class AgentConfigurator:
             team_workspace_mount = f".team/{resolved_team_name}/"
             team_workspace_path = self.workspace_manager.workspace_path
 
-        from openjiuwen.agent_teams.rails import TeamPolicyRail, TeamToolRail
+        # Decide which team rails this member gets, as declarative RailSpecs.
+        # Live handles ride on the build context's extras (injected below); only
+        # serializable static config goes in params. Decisions that depend on
+        # team config (predefined roster, plan-mode, reliability gating) stay
+        # here; "can it build" gates (a missing handle) live in the factories.
+        from openjiuwen.agent_teams.rails.elements import (
+            TEAM_PLAN_MODE,
+            TEAM_POLICY,
+            TEAM_RELIABILITY,
+            TEAM_TOOL,
+            TEAM_TOOL_APPROVAL,
+            TEAM_WORKSPACE,
+        )
+        from openjiuwen.agent_teams.rails.registration import (
+            ensure_harness_elements_registered,
+        )
+        from openjiuwen.agent_teams.rails.team_context import inject_team_handles
+        from openjiuwen.agent_teams.schema.build_context import BuildContext
+        from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
 
-        exclude = {"spawn_member"} if _resolve_team_mode(spec) == "predefined" else None
-        team_tool_rail = TeamToolRail(
-            team_backend=self.team_backend,
-            role=ctx.role.value,
-            teammate_mode=teammate_mode,
-            lifecycle=spec.lifecycle,
-            language=resolved_language,
-            on_teammate_created=self._on_teammate_created,
-            model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
-            exclude_tools=exclude,
-            workspace_manager=self.workspace_manager,
-            worktree_manager=self.worktree_manager,
-            qualify_ids=spec.spawn_mode == "inprocess",
-            team_name=resolved_team_name,
-            member_name=member_name or "",
+        ensure_harness_elements_registered()
+
+        # Observability rail spec — shared by all agents (members + swarmflow workers).
+        # The provider checks is_initialized() — no-op when disabled.
+        observability_rail_spec = RailSpec(type="core.observability")
+
+        # Predefined teams pin their roster — strip every dynamic spawn tool
+        # (one per role_type) from the leader's tool set.
+        exclude = (
+            ["spawn_teammate", "spawn_human_agent", "spawn_bridge_agent", "spawn_external_cli"]
+            if _resolve_team_mode(spec) == "predefined"
+            else []
         )
 
-        team_policy_rail = TeamPolicyRail(
-            role=ctx.role,
-            persona=ctx.persona,
-            member_name=member_name,
-            lifecycle=spec.lifecycle,
-            teammate_mode=teammate_mode,
-            language=resolved_language,
-            team_mode=_resolve_team_mode(spec),
-            base_prompt=agent_spec.system_prompt,
-            team_workspace_mount=team_workspace_mount,
-            team_workspace_path=team_workspace_path,
-            team_backend=self.team_backend,
-            expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
-        )
-
-        # Human agents have no autonomous task loop and no mailbox poll
-        # cycle — their input arrives through HumanAgentInbox, and team
-        # messages addressed to them are passed through to the external
-        # user. Skipping FirstIterationGate keeps
-        # ``enqueue_mailbox_after_first_iteration`` a no-op for them.
-        first_iter_gate = None
-        if ctx.role != TeamRole.HUMAN_AGENT:
-            from openjiuwen.agent_teams.rails import FirstIterationGate
-
-            first_iter_gate = FirstIterationGate()
-            self.first_iter_gate = first_iter_gate
-
-        team_workspace_rail = None
+        team_rail_specs: list[RailSpec] = [
+            RailSpec(
+                type=TEAM_TOOL,
+                params={
+                    "teammate_mode": teammate_mode,
+                    "lifecycle": spec.lifecycle,
+                    "exclude_tools": exclude,
+                    "qualify_ids": spec.spawn_mode == "inprocess",
+                    "team_name": resolved_team_name,
+                },
+            ),
+            RailSpec(
+                type=TEAM_POLICY,
+                params={
+                    "persona": ctx.persona or "",
+                    "lifecycle": spec.lifecycle,
+                    "teammate_mode": teammate_mode,
+                    "team_mode": _resolve_team_mode(spec),
+                    "base_prompt": agent_spec.system_prompt,
+                    "team_workspace_mount": team_workspace_mount,
+                    "team_workspace_path": team_workspace_path,
+                    "expose_human_agents_to_teammates": spec.expose_human_agents_to_teammates,
+                    "enable_swarmflow": spec.enable_swarmflow,
+                },
+            ),
+        ]
         if self.workspace_manager:
-            from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail
+            team_rail_specs.append(RailSpec(type=TEAM_WORKSPACE, params={}))
 
-            team_workspace_rail = TeamWorkspaceRail(self.workspace_manager, member_name or "")
-
-        tool_approval_rail = None
         is_coordinated_teammate = ctx.role == TeamRole.TEAMMATE and ctx.team_spec
-        if is_coordinated_teammate and self.team_backend and self.messager:
-            from openjiuwen.agent_teams.rails import TeamToolApprovalRail
+        approval_tools = agent_spec.approval_required_tools or []
+        can_request_approval = is_coordinated_teammate and self.team_backend and self.messager
+        if can_request_approval and approval_tools:
+            team_rail_specs.append(
+                RailSpec(
+                    type=TEAM_TOOL_APPROVAL,
+                    params={
+                        "team_name": ctx.team_spec.team_name,
+                        "leader_member_name": ctx.team_spec.leader_member_name or "",
+                        "tool_names": list(approval_tools),
+                    },
+                ),
+            )
 
-            approval_tools = agent_spec.approval_required_tools or []
-            if approval_tools:
-                tool_approval_rail = TeamToolApprovalRail(
-                    team_name=ctx.team_spec.team_name,
-                    member_name=member_name or "",
-                    db=self.team_backend.db,
-                    messager=self.messager,
-                    leader_member_name=ctx.team_spec.leader_member_name or "",
-                    tool_names=approval_tools,
-                )
-
-        team_plan_mode_rail = None
         is_team_plan_leader = ctx.role == TeamRole.LEADER and is_team_plan_enabled(spec)
         if is_team_plan_leader:
-            from openjiuwen.agent_teams.rails import TeamPlanModeRail
+            team_rail_specs.append(RailSpec(type=TEAM_PLAN_MODE, params={}))
 
-            team_plan_mode_rail = TeamPlanModeRail(language=resolved_language)
+        reliability_cfg = spec.reliability
+        reliability_components = None
+        if reliability_cfg and reliability_cfg.enabled and member_name:
+            role_value = ctx.role.value
+            is_leader = role_value == "leader"
+            # Leader uses a LocalAnomalyReporter (no messager needed); teammates
+            # need one for the cross-process EventAnomalyReporter.
+            if role_value in reliability_cfg.monitor_roles and (is_leader or self.messager):
+                from openjiuwen.agent_teams.reliability.factory import (
+                    build_reliability_components,
+                )
+
+                # Build the stateful core once here (single writer of extras) and
+                # inject it below; each native rebuild wraps it in a fresh rail so
+                # detector windows / the leader sink survive across run cycles.
+                reliability_components = build_reliability_components(
+                    reliability_cfg,
+                    member_name=member_name,
+                    messager=self.messager,
+                    team_name=resolved_team_name,
+                    sender_id=member_name,
+                    is_leader=is_leader,
+                )
+                team_rail_specs.append(
+                    RailSpec(
+                        type=TEAM_RELIABILITY,
+                        params={
+                            "reliability_cfg": reliability_cfg.model_dump(),
+                            "team_name": resolved_team_name,
+                            "sender_id": member_name,
+                            "is_leader": is_leader,
+                        },
+                    ),
+                )
+
+        # Build the per-member context that carries the team live handles in
+        # extras. With a platform-supplied build_context, derive a per-member
+        # view and decouple its extras (so members never share handles /
+        # caches); otherwise synthesize a minimal context.
+        if spec.build_context is not None:
+            member_build_context = spec.build_context.derive(
+                member_name=member_name,
+                role=ctx.role.value,
+                language=resolved_language,
+                member_card_id=self._card.id,
+            )
+            member_build_context.extras = dict(member_build_context.extras)
+        else:
+            member_build_context = BuildContext(
+                language=resolved_language,
+                member_name=member_name,
+                role=ctx.role.value,
+                member_card_id=self._card.id,
+            )
+        # Swarmflow worker-model resolver (leader + enable_swarmflow only). A
+        # positional pool lookup by ``agent(model=...)`` name hint; None when the
+        # team spec is absent so the worker falls back to the leader's model. The
+        # leader-only async ``swarmflow`` tool is gated on this being non-None.
+        swarmflow_model_resolver: Optional[Callable[[str], Any]] = None
+        swarmflow_worker_base_spec = None
+        if ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
+            team_spec_for_models = ctx.team_spec
+
+            def swarmflow_model_resolver(model_name: str, _spec=team_spec_for_models) -> Any:
+                """Resolve an ``agent(model=...)`` name hint to a worker ``TeamModelConfig``.
+
+                Returns a model *config* (not a built ``Model``): swarmflow workers
+                go through the spec build path, where ``DeepAgentSpec.model`` is a
+                ``TeamModelConfig`` resolved at construction. ``None`` falls back to
+                the worker base spec's own model.
+                """
+                if _spec is None:
+                    return None
+                from openjiuwen.agent_teams.models.allocator import resolve_member_model
+
+                return resolve_member_model(_spec, model_name=model_name, model_index=None)
+
+            # Workers are "a teammate without team tools": derive each worker from
+            # the team's teammate spec (or the leader spec when no teammate exists).
+            # The raw agents[...] spec carries teammate capabilities but NOT the
+            # team rails (those are injected here, per member), so a worker built
+            # straight from it has no team tools by construction.
+            base_specs = spec.agents
+            swarmflow_worker_base_spec = base_specs.get("teammate") or base_specs.get("leader")
+
+            # Workers also need the observability rail for agent spans.
+            if swarmflow_worker_base_spec is not None:
+                swarmflow_worker_base_spec = swarmflow_worker_base_spec.model_copy(
+                    update={
+                        "rails": list(swarmflow_worker_base_spec.rails or [])
+                                 + [observability_rail_spec],
+                    },
+                )
+
+        inject_team_handles(
+            member_build_context.extras,
+            team_backend=self.team_backend,
+            workspace_manager=self.workspace_manager,
+            worktree_manager=self.worktree_manager,
+            model_allocator=self.model_allocator,
+            messager=self.messager,
+            on_teammate_created=self._on_teammate_created,
+            swarmflow_model_resolver=swarmflow_model_resolver,
+            swarmflow_worker_base_spec=swarmflow_worker_base_spec,
+            reliability_components=reliability_components,
+        )
+
+        # Fold the team rails into the spec rails (after the user rails, to keep
+        # the init order consistent with the legacy mount order).
+        team_rail_specs.append(observability_rail_spec)
+        build_spec = build_spec.model_copy(
+            update={"rails": list(build_spec.rails or []) + team_rail_specs},
+        )
 
         self.harness = TeamHarness.build(
             agent_spec=build_spec,
             role=ctx.role,
             member_name=member_name,
-            team_tool_rail=team_tool_rail,
-            team_policy_rail=team_policy_rail,
-            first_iter_gate=first_iter_gate,
-            team_workspace_rail=team_workspace_rail,
-            tool_approval_rail=tool_approval_rail,
-            team_plan_mode_rail=team_plan_mode_rail,
             initial_plan_mode=is_team_plan_leader,
+            build_context=member_build_context,
         )
 
         # Team memory manager (only when explicitly enabled in the spec).
-        # Construction must happen before agent_customizer so platform
-        # adapters that touch memory tools can see them.
         self.memory_manager = self._build_memory_manager(spec, ctx, agent_spec, resolved_language, member_name)
-
-        if spec.agent_customizer:
-            self.harness.run_agent_customizer(spec.agent_customizer)
 
         return self.harness
 

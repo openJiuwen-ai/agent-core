@@ -15,7 +15,7 @@ independent service out of band.
 from __future__ import annotations
 
 import os
-from typing import Mapping
+from typing import Literal, Mapping
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -41,6 +41,19 @@ class TeamJoinDescriptor(BaseModel):
             team must already have a registered member row under this name.
         role: Member role driving op-surface filtering. ``"teammate"``
             (default) or ``"leader"``.
+        scope: External-access scenario this connection serves — orthogonal
+            to ``role`` (which is a team role).
+            ``"member"`` = a spawned third-party CLI acting as a first-class
+            team member; it gets the native teammate tool set (the real
+            ``view_task`` / ``claim_task`` / ``send_message`` team tools) so it
+            is indistinguishable from an in-process teammate, and its team
+            system prompt is injected directly at spawn time (so the MCP
+            server exposes no extra instructions).
+            ``"operator"`` (default) = an external, non-member interface that
+            operates/controls the team via tools (the broad operator tool set
+            + workflow instructions). The team-member spawn path sets
+            ``"member"``; manually provisioned operator descriptors keep the
+            default.
         language: Team runtime language (``"cn"`` or ``"en"``) used to render
             inbound message / task-board text consistently with in-process
             members.
@@ -57,6 +70,7 @@ class TeamJoinDescriptor(BaseModel):
     team_name: str
     member_name: str
     role: str = "teammate"
+    scope: Literal["operator", "member"] = "operator"
     language: str = "cn"
     db_config: DatabaseConfig | MemoryDatabaseConfig = Field(default_factory=DatabaseConfig)
     transport_config: MessagerTransportConfig = Field(default_factory=MessagerTransportConfig)

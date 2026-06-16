@@ -61,6 +61,23 @@ from openjiuwen.core.sys_operation.sandbox.providers.base_provider import (
 from openjiuwen.core.sys_operation.sandbox.sandbox_registry import SandboxRegistry
 
 
+def _invoke_lifecycle_hook(
+    hook: Optional[Callable[[str, dict], None]],
+    event_name: str,
+    context: dict,
+) -> None:
+    """Invoke lifecycle hook in strict mode; passes a shallow copy of context."""
+    if hook is None:
+        return
+    if not callable(hook):
+        logger.warning(
+            "[jiuwenbox] lifecycle_hook is not callable (got %s), skip event %s",
+            type(hook).__name__, event_name,
+        )
+        return
+    hook(event_name, dict(context))
+
+
 def _build_fs_error_result(execution: str, error_msg: str, result_cls: Any, data: Any = None):
     return build_operation_error_result(
         error_type=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
@@ -211,18 +228,12 @@ def _raise_for_status(response: httpx.Response) -> None:
     raise httpx.HTTPStatusError(message, request=response.request, response=response)
 
 
-# jiuwenbox server 端 ``SandboxNotFoundError`` 的 ``error`` 字段恒为
-# ``"Sandbox '<id>' not found"``; 其他 404 (例如 ``File not found: <path>``)
-# 不应触发沙箱重建。 用前缀 + ``not found`` 双匹配, 大小写不敏感, 抗未来微调。
+# Match jiuwenbox "Sandbox '<id>' not found" 404 only; not file/dir 404s.
 _SANDBOX_NOT_FOUND_RE = re.compile(r"^\s*Sandbox\b.*\bnot found\b", re.IGNORECASE)
 
 
 def _is_sandbox_not_found_error(exc: BaseException) -> bool:
-    """``True`` 当且仅当 ``exc`` 是 jiuwenbox 服务端报「沙箱不存在」的 404.
-
-    与「文件不存在 / 目录不存在」等 404 严格区分; 后者会原样 reraise 而不
-    触发上层自动重建路径。
-    """
+    """Return True if exc is a jiuwenbox sandbox-not-found 404."""
     if not isinstance(exc, httpx.HTTPStatusError):
         return False
     resp = exc.response
@@ -267,24 +278,7 @@ class _JiuwenBoxClient:
         idle_timeout: Optional[int] = None,
         idle_check_interval: Optional[int] = None,
     ) -> None:
-        """``PUT /api/v1/timeout`` —— 配置 jiuwenbox server 的 idle reaper 策略.
-
-        jiuwenbox 的空闲沙箱回收由 ``SandboxManager.policy.timeout`` (root policy)
-        驱动, 而非 per-sandbox policy 的 ``timeout`` 子段 (后者仅供 ``GET
-        /policies/{id}`` 配置回显, 不影响 reaping 行为)。 因此要让客户端配置的
-        ``idle_ttl_seconds`` / ``idle_check_interval`` 真正生效, 必须显式调用
-        ``PUT /api/v1/timeout``。
-
-        本接口走 ``UpdateTimeoutRequest`` 的 partial update 语义:
-        ``model_dump(exclude_unset=True)`` 决定哪些字段实际生效 —— 只有 body
-        里出现的字段会被写回 server, 没传的字段保留之前的值。 因此:
-
-        - 两个参数都为 ``None`` 时直接 no-op (不发请求, 不破坏服务端默认值).
-        - 任一非 ``None`` 时只把非 ``None`` 的字段塞进 body; ``idle_check_
-          interval=None`` 不会被强制写成 null (server 端会拒绝 ``null``).
-        - ``idle_timeout=0`` / 负数透传给 server, 由 ``TimeoutPolicy`` 统一
-          归一化为 ``None`` (即"禁用 reaper")。
-        """
+        """PUT /api/v1/timeout with partial update semantics; no-op when both args are None."""
         body: dict[str, Any] = {}
         if idle_timeout is not None:
             body["idle_timeout"] = idle_timeout
@@ -296,19 +290,7 @@ class _JiuwenBoxClient:
         _raise_for_status(response)
 
     def delete_sandbox(self, sandbox_id: str) -> None:
-        """``DELETE /api/v1/sandboxes/{sandbox_id}``; 204 视为成功, 404 当作幂等成功。
-
-        ``force_recreate_jiuwenbox_sandbox`` 会在创建新 sandbox 后主动调用本方法
-        把旧 sandbox 从 jiuwenbox server 上回收, 避免每次 ``/sandbox files
-        allow|deny`` 都让服务端的活跃 sandbox 数 +1 (jiuwenbox 端**没有**
-        idle-TTL 自动清理: 见 ``sandbox_manager.py`` 注释"sandbox registry 视为
-        ephemeral across restarts", 只在进程重启时才丢弃 sandbox 描述符)。
-
-        404 也吞掉是因为正常的并发清理路径 (例如 server 重启 + 老 ID 提前过期,
-        或两条 ``/sandbox files``命令在短时间内串行触发了两次 force_recreate)
-        会让我们尝试删除一个 server 已经不认识的 ID, 这种情况等价于"我们想要
-        的最终状态已达成", 不应当成错误向上传播。
-        """
+        """DELETE /api/v1/sandboxes/{id}; treat 204 and 404 as success."""
         if not sandbox_id:
             return
         response = self._client.delete(f"/api/v1/sandboxes/{sandbox_id}")
@@ -430,21 +412,14 @@ class _JiuwenBoxClient:
                 include_dirs=True,
             )
         except httpx.HTTPStatusError as exc:
-            # 「沙箱不存在」的 404 必须重新抛出, 让上层 retry 包装感知;
-            # 仅「文件 / 目录不存在」的 404 才视为 "path 不存在", 返回 False。
+            # Re-raise sandbox-not-found 404 for retry wrapper; other 404s mean path missing.
             if exc.response.status_code == 404 and not _is_sandbox_not_found_error(exc):
                 return False
             raise
         return any(item.get("path") == sandbox_path for item in items)
 
     def close(self) -> None:
-        """关闭底层 httpx.Client, 释放连接池。
-
-        提供给一次性创建的临时 client (例如 ``force_recreate_jiuwenbox_sandbox``
-        里那个独立创建的 client) 显式 cleanup 用; 已经在 ``with`` block 中使用
-        时无需直接调用本方法。 close 失败时静默吞掉, 因为这通常发生在进程退出
-        路径上, 抛错只会扰乱上层的 finally / error reporting。
-        """
+        """Close the underlying httpx client; swallows errors on shutdown."""
         try:
             self._client.close()
         except Exception:  # noqa: BLE001
@@ -457,19 +432,14 @@ class _JiuwenBoxClient:
         self.close()
 
 
-# ─── 沙箱丢失自动重建参数 ─────────────────────────────────────────────────
-# 远端 jiuwenbox 重启 / 沙箱被回收时, 所有 fs / shell / code op 会收到
-# 「Sandbox '<id>' not found」404; 包装层 ``_execute_with_sandbox_retry``
-# 会自动 force_recreate + 重试。 重试次数与退避间隔在这里集中常量化:
-# - ``JIUWENBOX_SANDBOX_RECREATE_RETRIES`` 环境变量覆盖默认值; 非法 / 缺失
-#   回落 ``_DEFAULT_SANDBOX_RECREATE_RETRIES``; 显式 0 = 禁用重试。
-# - 退避间隔目前固定 1.0 秒, 本期不对外暴露。
+# ── Sandbox-lost auto-recreate settings ──
+# JIUWENBOX_SANDBOX_RECREATE_RETRIES overrides default; 0 disables retries.
 _DEFAULT_SANDBOX_RECREATE_RETRIES = 3
 _SANDBOX_RECREATE_RETRY_SLEEP_SECONDS = 1.0
 
 
 def _resolve_recreate_retries() -> int:
-    """读 ``JIUWENBOX_SANDBOX_RECREATE_RETRIES``; 非法 / 缺失回落默认, ``0`` 禁用重试."""
+    """Read JIUWENBOX_SANDBOX_RECREATE_RETRIES; invalid/missing falls back to default."""
     raw = os.environ.get("JIUWENBOX_SANDBOX_RECREATE_RETRIES")
     if raw is None or raw.strip() == "":
         return _DEFAULT_SANDBOX_RECREATE_RETRIES
@@ -477,7 +447,7 @@ def _resolve_recreate_retries() -> int:
         value = int(raw)
     except (TypeError, ValueError):
         logger.warning(
-            "[jiuwenbox] JIUWENBOX_SANDBOX_RECREATE_RETRIES=%r 非法, 回落默认 %d",
+            "[jiuwenbox] JIUWENBOX_SANDBOX_RECREATE_RETRIES=%r invalid, falling back to default %d",
             raw, _DEFAULT_SANDBOX_RECREATE_RETRIES,
         )
         return _DEFAULT_SANDBOX_RECREATE_RETRIES
@@ -490,18 +460,14 @@ _T = TypeVar("_T")
 class _JiuwenBoxProviderMixin:
     _shared_lock = threading.Lock()
     _shared_sandbox_ids: Dict[str, str] = {}
-    # 类级 asyncio.Lock, 串行化沙箱重建; 防止 N 个 op 同时撞 "Sandbox not found"
-    # 时各自发起一次 ``create_sandbox``。 ``asyncio.Lock`` 需绑定 event loop,
-    # 所以走 lazy init; 初始化本身用 ``_recreate_lock_init`` (threading.Lock)
-    # 保护以兼容多线程首次访问的竞争。
+    # Cache base_url -> lifecycle_hook captured at create time, so teardown
+    # (delete_jiuwenbox_sandbox) can fire delete hooks without being passed them.
+    _lifecycle_hooks: ClassVar[Dict[str, Callable[[str, dict], None]]] = {}
+    # Lazy class-level asyncio.Lock serializes sandbox recreate under concurrent ops.
     _recreate_lock: ClassVar[Optional[asyncio.Lock]] = None
     _recreate_lock_init: ClassVar[threading.Lock] = threading.Lock()
 
-    # ``_configure_server_idle_timeout`` 里用来跨实例去重 ``PUT /api/v1/timeout``
-    # 的进程内缓存: 同一个 ``base_url`` 上一次成功 PUT 过的 (idle_timeout,
-    # idle_check_interval) 二元组。 后续 PUT 撞同样的值时跳过, 避免给
-    # jiuwenbox server 带来 stop+start reaper 的额外延迟 (服务端虽然已经做了
-    # 短路, 客户端再省一次 HTTP RTT 仍然划算)。
+    # Dedupe PUT /api/v1/timeout per base_url across provider instances.
     _idle_timeout_cache: ClassVar[Dict[str, Tuple[Optional[int], Optional[int]]]] = {}
     _idle_timeout_cache_lock: ClassVar[threading.Lock] = threading.Lock()
 
@@ -513,7 +479,6 @@ class _JiuwenBoxProviderMixin:
         self._client = None
         self._sandbox_id = (
             _endpoint_value(endpoint, config, "sandbox_id")
-            or _endpoint_value(endpoint, config, "id")
             or os.environ.get("JIUWENBOX_SANDBOX_ID")
         )
         self._timeout_seconds = int(getattr(config, "timeout_seconds", 30) or 30)
@@ -579,18 +544,13 @@ class _JiuwenBoxProviderMixin:
         value = extra_params.get("sandbox_id")
         return value if isinstance(value, str) and value else None
 
+    def _lifecycle_hook(self) -> Optional[Callable[[str, dict], None]]:
+        """Return lifecycle_hook from launcher extra_params, or None."""
+        hook = self._launcher_extra_params().get("lifecycle_hook")
+        return hook if callable(hook) else None
+
     def _idle_timeout_from_launcher(self) -> Tuple[Optional[int], Optional[int]]:
-        """从 ``launcher_config`` 读取 ``idle_ttl_seconds`` / ``idle_check_interval``.
-
-        返回 ``(idle_timeout, idle_check_interval)`` 二元组; 缺失项为 ``None``。
-
-        - ``idle_ttl_seconds`` 是 ``SandboxLauncherConfig`` 的通用字段, 直接从
-          ``launcher_config`` 上读。
-        - ``idle_check_interval`` 是 jiuwenbox 私有的 reaper 轮询间隔, 故走
-          ``launcher_config.extra_params["idle_check_interval"]`` (由
-          ``create_sandbox_sysop_card`` 在显式给值时塞入), 避免给通用 schema
-          加 jiuwenbox-only 的字段。 缺失或非整数视为 ``None``。
-        """
+        """Return (idle_timeout, idle_check_interval) from launcher config."""
         launcher_config = (
             getattr(self.config, "launcher_config", None)
             if self.config is not None
@@ -601,8 +561,7 @@ class _JiuwenBoxProviderMixin:
         raw_check = extra_params.get("idle_check_interval") if isinstance(extra_params, dict) else None
         idle_check_interval: Optional[int]
         if isinstance(raw_check, bool):
-            # bool 是 int 子类, 隐式落进 idle_check_interval 几乎肯定是配置误写;
-            # 显式拒掉而不是悄悄当 1 / 0 用。
+            # Reject bool; bool is a subclass of int.
             idle_check_interval = None
         elif isinstance(raw_check, int):
             idle_check_interval = raw_check
@@ -613,22 +572,7 @@ class _JiuwenBoxProviderMixin:
         return idle_timeout, idle_check_interval
 
     def _configure_server_idle_timeout(self) -> None:
-        """``PUT /api/v1/timeout`` 把 ``launcher_config`` 上的空闲驱逐配置写回 jiuwenbox.
-
-        该接口影响的是 jiuwenbox 全局根 policy (``SandboxManager.policy.timeout``),
-        因此每次首创建沙箱前调用一次即可让本进程后续所有沙箱共享同一份空闲淘汰
-        策略。 两个值都为 ``None`` 时 no-op (不动 server 默认状态)。
-
-        去重: 用类级 ``_idle_timeout_cache`` 按 ``base_url`` 记录上一次成功写入
-        的二元组, 命中即跳过本次 PUT。 多个 provider 实例 (fs / shell / code)
-        同进程并存时, 只有第一次需要真发请求, 后续都走缓存; 服务端虽然也做了
-        幂等短路 (``update_timeout_policy`` 比对 ``new_timeout == self.policy.
-        timeout``), 但能省一次 HTTP RTT 总归更好。
-
-        失败仅记 warning 且不写缓存, 不抛 —— 主动空闲淘汰只是辅助 hygiene, 不应
-        让一次配置写失败把整个沙箱创建链路一起拖垮 (用户至少要能跑起来 sandbox);
-        失败不写缓存是为了下一次 ``_get_sandbox_id`` 还能再 retry 一遍。
-        """
+        """Write idle reaper settings to jiuwenbox root policy; failures are logged only."""
         idle_timeout, idle_check_interval = self._idle_timeout_from_launcher()
         if idle_timeout is None and idle_check_interval is None:
             return
@@ -663,37 +607,35 @@ class _JiuwenBoxProviderMixin:
 
     @classmethod
     def register_shared_sandbox_id(cls, shared_key: str, sandbox_id: str) -> None:
-        """把 ``shared_key -> sandbox_id`` 写入跨实例共享缓存。
-
-        ``force_recreate_jiuwenbox_sandbox`` 在新建沙箱成功后通过本方法把新
-        ID 写回 ``_shared_sandbox_ids``, 让同一进程里其他 provider 实例 (fs /
-        shell / code) 的下一次 ``_get_sandbox_id`` 直接命中新 ID, 不需要再走
-        ``create_sandbox`` 网络往返。 内部已加 ``_shared_lock`` 保护并发写,
-        外部不必再持锁。
-
-        把这一步封装成公共 classmethod 而不是让外部直接 ``with cls._shared_
-        lock: cls._shared_sandbox_ids[k] = v`` 是为了:
-        - 集中加锁逻辑, 防止将来扩展共享缓存语义 (如 LRU / TTL) 时漏改
-          调用点; 
-        - 满足 G.CLS.11: 类外不应访问 ``_shared_lock`` /
-          ``_shared_sandbox_ids`` 这类受保护成员。
-        """
+        """Register sandbox_id in the cross-instance shared cache under shared_key."""
         with cls._shared_lock:
             cls._shared_sandbox_ids[shared_key] = sandbox_id
 
     @classmethod
+    def register_lifecycle_hook(
+        cls, base_url: str, hook: Optional[Callable[[str, dict], None]]
+    ) -> None:
+        """Cache the lifecycle hook for base_url so teardown can reuse it."""
+        if hook is None:
+            return
+        with cls._shared_lock:
+            cls._lifecycle_hooks[base_url.rstrip("/")] = hook
+
+    @classmethod
+    def pop_lifecycle_hook(cls, base_url: str) -> Optional[Callable[[str, dict], None]]:
+        """Pop the cached lifecycle hook for base_url (None if absent)."""
+        with cls._shared_lock:
+            return cls._lifecycle_hooks.pop(base_url.rstrip("/"), None)
+
+    @classmethod
+    def cached_base_urls(cls) -> list[str]:
+        """Return base_urls that currently hold cached sandbox IDs."""
+        with cls._shared_lock:
+            return list({key.split("|", 1)[0] for key in cls._shared_sandbox_ids})
+
+    @classmethod
     def clear_shared_sandbox(cls, base_url: str) -> list[str]:
-        """从进程内 ``_shared_sandbox_ids`` 移除 ``base_url`` 下的所有缓存项。
-
-        Returns:
-            被移除的 sandbox_id 列表 (按移除顺序), 去重后保留——``force_recreate_
-            jiuwenbox_sandbox`` 拿到这份列表后会对 jiuwenbox server 主动发
-            ``DELETE /api/v1/sandboxes/{id}`` 把旧 sandbox 回收掉, 避免每次
-            ``/sandbox files allow|deny`` 都让服务端的活跃 sandbox 数 +1。
-
-            历史调用方 (测试 fixture 等) 没有给返回值赋值, 这里保留 list[str]
-            类型不会破坏它们: Python 调用端丢弃返回值是合法的。
-        """
+        """Remove all cached sandbox IDs for base_url."""
         shared_key = base_url.rstrip("/")
         removed: list[str] = []
         with cls._shared_lock:
@@ -711,11 +653,7 @@ class _JiuwenBoxProviderMixin:
         env_sandbox_id = os.environ.get("JIUWENBOX_SANDBOX_ID")
         if env_sandbox_id and self._sandbox_id != env_sandbox_id:
             self._sandbox_id = env_sandbox_id
-        # 关键: 每次都重新读 launcher.extra_params["sandbox_id"]。
-        # ``force_recreate_jiuwenbox_sandbox`` (热更新路径) 仅 mutate
-        # ``extra_params``、不重建 provider 实例; 如果这里只在 ``None`` 时读,
-        # 老 sandbox_id 会一直锁在 ``self._sandbox_id`` 上, 直到 jiuwenbox
-        # 把它 DELETE 掉之后, 后续 exec 会全部撞 "Sandbox not found"。
+        # Re-read launcher.extra_params["sandbox_id"] each call (hot-update mutates extra_params).
         extra_sandbox_id = self._sandbox_id_from_launcher_extra_params()
         if extra_sandbox_id and extra_sandbox_id != self._sandbox_id:
             self._sandbox_id = extra_sandbox_id
@@ -724,15 +662,20 @@ class _JiuwenBoxProviderMixin:
             if isinstance(endpoint_sandbox_id, str) and endpoint_sandbox_id:
                 self._sandbox_id = endpoint_sandbox_id
         if self._sandbox_id is None:
+            lifecycle_hook = self._lifecycle_hook()
             shared_key = self._shared_scope_key()
+            self.register_lifecycle_hook(
+                _endpoint_value(self.endpoint, self.config, "base_url"), lifecycle_hook
+            )
             with self._shared_lock:
                 self._sandbox_id = self._shared_sandbox_ids.get(shared_key)
                 newly_created = False
                 if self._sandbox_id is None:
-                    # 先把 idle reaper 配置 (``idle_ttl_seconds`` /
-                    # ``idle_check_interval``) 写到 server 根 policy, 再建沙箱。
-                    # jiuwenbox 的 reaper 只看根 policy, per-sandbox policy
-                    # 的 timeout 字段不生效, 因此必须显式 ``PUT /timeout``。
+                    # before_create under _shared_lock before first lazy create.
+                    _invoke_lifecycle_hook(
+                        lifecycle_hook, "before_create", {"reason": "initial"},
+                    )
+                    # PUT root idle policy before create (reaper ignores per-sandbox timeout).
                     self._configure_server_idle_timeout()
                     self._sandbox_id = self._get_client().create_sandbox(
                         **self._sandbox_create_options_from_launcher_extra_params(),
@@ -740,12 +683,18 @@ class _JiuwenBoxProviderMixin:
                     newly_created = True
                 self._shared_sandbox_ids[shared_key] = self._sandbox_id
                 self._launcher_extra_params(create=True)["sandbox_id"] = self._sandbox_id
-            # 仅当本进程刚创建沙箱时, 同步上传 preserve_files (copy 模式)。
+            # Sync upload preserve_files only when this process just created the sandbox.
             if newly_created:
-                _upload_preserve_files_best_effort(
+                _try_upload_preserve_files(
                     self._get_client(),
                     self._sandbox_id,
                     self._launcher_extra_params().get("preserve_files_upload"),
+                )
+                # after_create after preserve_files upload completes.
+                _invoke_lifecycle_hook(
+                    lifecycle_hook,
+                    "after_create",
+                    {"reason": "initial", "sandbox_id": self._sandbox_id},
                 )
         else:
             shared_key = self._shared_scope_key()
@@ -756,13 +705,7 @@ class _JiuwenBoxProviderMixin:
 
     @classmethod
     def _get_recreate_lock(cls) -> asyncio.Lock:
-        """Lazy-init 的类级 ``asyncio.Lock``; 用 threading.Lock 兜底首次访问竞争.
-
-        ``asyncio.Lock`` 必须在有 running event loop 时构造 (旧版 Python 行为);
-        而首次访问可能并发于多个线程 (fs / shell / code provider 同进程内被不同
-        协程调度), 因此用 ``_recreate_lock_init`` 作为 fast-double-checked
-        sentinel, 确保只 new 一个 ``asyncio.Lock``。
-        """
+        """Return lazy-init class-level asyncio.Lock guarded by threading.Lock."""
         if cls._recreate_lock is None:
             with cls._recreate_lock_init:
                 if cls._recreate_lock is None:
@@ -770,18 +713,7 @@ class _JiuwenBoxProviderMixin:
         return cls._recreate_lock
 
     async def _execute_with_sandbox_retry(self, op: Callable[[str], _T]) -> _T:
-        """跑 ``op(sandbox_id)``; 若命中「沙箱不存在」404, 最多循环 N 次 (env 覆盖, 默认 3)
-        重建 + 重试, 每轮 ``sleep(1s)``。
-
-        循环语义:
-        - 总尝试次数 = ``1 (initial) + max_retries`` (initial 在 attempt=0 直接跑;
-          后续 attempt=1..N 每次先 ``sleep`` 再 ``_recreate_sandbox_after_loss``,
-          然后用新 id 再跑一次 ``op``)。
-        - 重建本身抛异常 (网络挂了 / server 还没起来) → 记 warning 后 continue
-          进入下一轮重试; 用尽 N 次仍 404 时, 抛出最后一次的 ``HTTPStatusError``。
-        - 非沙箱 404 (例如 ``File not found: /foo``) 立刻 reraise, 不进入重试分支。
-        - ``N=0`` 退化为「跑一次, 不重试」。
-        """
+        """Run op with auto sandbox recreate on sandbox-not-found 404."""
         max_retries = _resolve_recreate_retries()
         last_exc: Optional[httpx.HTTPStatusError] = None
         stale_sandbox_id = self._get_sandbox_id()
@@ -791,7 +723,7 @@ class _JiuwenBoxProviderMixin:
             else:
                 await asyncio.sleep(_SANDBOX_RECREATE_RETRY_SLEEP_SECONDS)
                 logger.info(
-                    "[jiuwenbox] sandbox-not-found 自动重建 attempt %d/%d (stale=%s)",
+                    "[jiuwenbox] sandbox-not-found auto-recreate attempt %d/%d (stale=%s)",
                     attempt, max_retries, stale_sandbox_id,
                 )
                 try:
@@ -799,10 +731,9 @@ class _JiuwenBoxProviderMixin:
                         stale_sandbox_id=stale_sandbox_id,
                     )
                 except Exception as exc:  # noqa: BLE001
-                    # 重建本身失败 (网络挂了 / server 还没起来): 记 warning, 进
-                    # 入下一轮; 不直接抛, 因为下一轮 sleep 后服务可能已恢复。
+                    # Recreate failed; retry after sleep.
                     logger.warning(
-                        "[jiuwenbox] 重建沙箱失败 (attempt %d/%d): %s",
+                        "[jiuwenbox] sandbox recreate failed (attempt %d/%d): %s",
                         attempt, max_retries, exc,
                     )
                     continue
@@ -812,21 +743,16 @@ class _JiuwenBoxProviderMixin:
                 if not _is_sandbox_not_found_error(exc):
                     raise
                 last_exc = exc
-                # 把当前刚拿到的 id 也作为 stale, 下一轮 force_recreate 时一起 DELETE
+                # Track current id as stale for the next force_recreate.
                 stale_sandbox_id = sandbox_id
                 logger.warning(
-                    "[jiuwenbox] sandbox %s 不存在 (attempt %d/%d)",
+                    "[jiuwenbox] sandbox %s not found (attempt %d/%d)",
                     sandbox_id, attempt, max_retries,
                 )
         raise last_exc
 
     async def _recreate_sandbox_after_loss(self, *, stale_sandbox_id: str) -> str:
-        """串行化重建沙箱, 并把新 id 写回 ``launcher.extra_params`` + ``self._sandbox_id``.
-
-        双检逻辑: 进锁后先看 ``launcher.extra_params["sandbox_id"]`` 与
-        ``_shared_sandbox_ids[shared_key]`` 是否已被其他协程更新到非 stale id;
-        若已更新, 直接复用, 避免重复 ``create_sandbox`` HTTP 调用。
-        """
+        """Recreate sandbox under lock; double-check launcher/cache before creating."""
         base_url = _endpoint_value(self.endpoint, self.config, "base_url")
         if not base_url:
             raise ValueError("jiuwenbox provider requires endpoint.base_url")
@@ -837,10 +763,10 @@ class _JiuwenBoxProviderMixin:
         )
 
         async with self._get_recreate_lock():
-            # 双检 1: launcher.extra_params 是不是已经被另一个协程更新过了
+            # Double-check launcher.extra_params
             current = self._sandbox_id_from_launcher_extra_params()
             shared_key = self._shared_scope_key()
-            # 双检 2: shared cache 是不是已经有新 id 了
+            # Double-check shared cache
             with self._shared_lock:
                 cached = self._shared_sandbox_ids.get(shared_key)
             for candidate in (current, cached):
@@ -854,20 +780,20 @@ class _JiuwenBoxProviderMixin:
                 timeout_seconds=float(self._timeout_seconds),
                 preserve_files_upload=preserve_files_upload,
                 extra_stale_sandbox_ids=[stale_sandbox_id],
+                lifecycle_hook=self._lifecycle_hook(),
+                reason="sandbox_lost",
             )
-            # force_recreate 内部已 ``register_shared_sandbox_id`` + 删旧, 这里
-            # 只需同步本实例的 ``_sandbox_id`` 与 launcher.extra_params。
+            # Sync local _sandbox_id after force_recreate.
             self._sandbox_id = new_id
             self._launcher_extra_params(create=True)["sandbox_id"] = new_id
             return new_id
 
 
 def clear_jiuwenbox_shared_sandbox(base_url: str) -> list[str]:
-    """Pop ``base_url`` 下的全部 sandbox cache; 返回被 pop 的 sandbox_id 列表。
+    """Clear in-process sandbox cache for base_url.
 
-    返回值是给 ``force_recreate_jiuwenbox_sandbox`` 走"先清缓存、后回收远端
-    sandbox"的链路用的; 历史调用方 (测试 fixture / 失败兜底) 不依赖返回值,
-    可以继续无感丢弃。
+    Returns:
+        Removed sandbox_id list (deduplicated).
     """
     return _JiuwenBoxProviderMixin.clear_shared_sandbox(base_url)
 
@@ -875,13 +801,7 @@ def clear_jiuwenbox_shared_sandbox(base_url: str) -> list[str]:
 def _iter_host_files_for_upload(
     upload_entries: Any,
 ) -> List[Tuple[str, str]]:
-    """根据 ``preserve_files_upload`` 展开 host 实际可上传的 (host_path, sandbox_path) 对.
-
-    - ``kind == "file"``: 仅当 host 文件存在时返回。
-    - ``kind == "directory"``: 递归枚举目录下所有常规文件; sandbox_path 按相对
-      路径拼接。子条目缺失静默跳过。
-    - 非法/空条目静默跳过。
-    """
+    """Expand preserve_files_upload into (host_path, sandbox_path) pairs."""
     pairs: list[tuple[str, str]] = []
     if not isinstance(upload_entries, list):
         return pairs
@@ -922,11 +842,7 @@ async def _upload_preserve_files(
     sandbox_id: str,
     upload_entries: Any,
 ) -> int:
-    """异步上传 ``preserve_files_upload`` 列表到指定 sandbox.
-
-    Returns:
-        实际成功上传的文件数量 (失败的项会记 warning, 不抛异常)。
-    """
+    """Upload preserve_files entries to sandbox; return count of successful uploads."""
     pairs = _iter_host_files_for_upload(upload_entries)
     if not pairs:
         return 0
@@ -968,7 +884,7 @@ def _upload_preserve_files_sync(
     sandbox_id: str,
     upload_entries: Any,
 ) -> int:
-    """同步版 ``_upload_preserve_files`` (在非 async 上下文调用)."""
+    """Sync variant of _upload_preserve_files."""
     pairs = _iter_host_files_for_upload(upload_entries)
     if not pairs:
         return 0
@@ -1002,26 +918,22 @@ def _upload_preserve_files_sync(
     return uploaded
 
 
-def _upload_preserve_files_best_effort(
+def _try_upload_preserve_files(
     client: "_JiuwenBoxClient",
     sandbox_id: str,
     upload_entries: Any,
 ) -> int:
-    """根据当前是否处于事件循环线程, 选择同步/异步路径上传 preserve_files.
-
-    在 provider exec 路径下 ``_get_sandbox_id`` 通常通过 ``asyncio.to_thread``
-    被调用 (非事件循环线程), 因此直接走 sync upload; 若错误判定也降级 sync。
-    """
+    """Upload preserve_files via sync or fire-and-forget async depending on event loop."""
     if not upload_entries:
         return 0
     try:
-        # 试一下当前线程是否绑定事件循环
+        # Check if current thread has a running event loop
         asyncio.get_running_loop()
         running_in_loop = True
     except RuntimeError:
         running_in_loop = False
     if running_in_loop:
-        # 在 loop 中 (例如 async test); 启动任务但不阻塞
+        # Fire-and-forget async upload when already in a loop (e.g. async tests)
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(
@@ -1041,83 +953,35 @@ async def force_recreate_jiuwenbox_sandbox(
     timeout_seconds: float = 30.0,
     preserve_files_upload: Any = None,
     extra_stale_sandbox_ids: Sequence[str] | None = None,
+    lifecycle_hook: Optional[Callable[[str, dict], None]] = None,
+    reason: str = "sandbox_lost",
 ) -> str:
-    """清除指定 ``base_url`` 的 sandbox_id 缓存, 并立即在远端创建新 sandbox 实例.
+    """Clear cache and create a new remote sandbox for base_url.
 
-    用于 ``/sandbox files allow/deny`` 即时生效场景: 文件 policy 变更后, 立刻向
-    jiuwenbox 服务发起 ``create_sandbox`` 并把新 ID 写回共享缓存, 这样 provider
-    下次 exec 时直接复用新实例, 无需先发一次会失败的 exec 才触发重建.
+    Used for policy hot-update (/sandbox files allow|deny) and sandbox-lost retry.
 
     Args:
-        base_url: jiuwenbox 服务 base url.
-        policy / policy_mode: 新 sandbox 的安全策略.
-        timeout_seconds: HTTP 客户端超时.
-        preserve_files_upload: ``copy`` 模式下需要在新 sandbox 中重新上传的固有
-            文件/目录列表 (``[{host_path, sandbox_path, kind}, ...]``); ``mount``
-            模式下传 ``None`` 或 ``[]``。
-        extra_stale_sandbox_ids: 额外需要 best-effort 删除的旧 sandbox_id 列表;
-            会和 ``clear_jiuwenbox_shared_sandbox(base_url)`` 的结果合并去重后
-            一起送进 delete-stale 循环。 retry 路径 (provider op 撞 "Sandbox
-            not found" 时) 拿到的 stale ``_sandbox_id`` 不一定还留在
-            ``_shared_sandbox_ids`` 里 (例如来自 ``launcher.extra_params``,
-            或 cache 早就被另一次 force_recreate 清空过); 通过这个参数显式
-            把它捎进来, 保证 server 端的活跃 sandbox 计数会被回收。
+        base_url: jiuwenbox service base URL.
+        policy / policy_mode: Security policy for the new sandbox.
+        timeout_seconds: HTTP client timeout.
+        preserve_files_upload: Files/dirs to re-upload in copy mode.
+        extra_stale_sandbox_ids: Additional stale IDs to delete after create.
+        lifecycle_hook: Strict lifecycle hook for before/after_recreate events.
+        reason: Recreate reason in hook context ("sandbox_lost" or "policy_changed").
 
     Returns:
-        新创建的 sandbox_id; 调用方应回写到 ``launcher_config.extra_params["sandbox_id"]``.
+        New sandbox_id to write back to launcher_config.extra_params["sandbox_id"].
     """
-    # 先把进程内 shared cache 里旧 sandbox_id pop 出来 —— 这一刻 jiuwenclaw 已
-    # 不再"认识"它们, 但 jiuwenbox server 那一侧还是活跃 sandbox。 没有这一步,
-    # 后面 ``_get_sandbox_id`` 命中残留 cache 会重用旧 ID, 新 policy 落不下来;
-    # 但仅 pop 不够, 还需主动回收 server-side sandbox, 不然每次
-    # ``/sandbox files allow|deny`` 都让服务端的活跃 sandbox 数 +1
-    # (jiuwenbox 端**没有** idle-TTL 自动清理: ``sandbox_manager`` 里把
-    # registry 视为 ephemeral across restarts, 只在进程重启时才丢弃描述符)。
+    # Pop stale IDs from shared cache before create; server-side cleanup follows.
     stale_sandbox_ids = clear_jiuwenbox_shared_sandbox(base_url)
-    # 合并调用方显式声明的额外 stale id (例如 retry 路径上从 op 抛出来的 404
-    # 对应的那个 sandbox_id), 按出现顺序去重——shared cache 里的优先, 调用方
-    # 的追加。 这样既保证 cache 那批一定走到, 又不重复 DELETE 同一个 ID。
     if extra_stale_sandbox_ids:
         seen = set(stale_sandbox_ids)
         for extra in extra_stale_sandbox_ids:
             if isinstance(extra, str) and extra and extra not in seen:
                 stale_sandbox_ids.append(extra)
                 seen.add(extra)
-    with _JiuwenBoxClient(base_url=base_url, timeout_seconds=timeout_seconds) as client:
-        sandbox_id = await asyncio.to_thread(
-            client.create_sandbox, policy=policy, policy_mode=policy_mode,
-        )
-        if preserve_files_upload:
-            await _upload_preserve_files(client, sandbox_id, preserve_files_upload)
-        # 新 sandbox 已经就绪(且若需上传 preserve files 也已经上传完毕)。 此时
-        # 再去 best-effort 回收旧 sandbox, 这样即便 DELETE 失败也不会影响主
-        # 流程返回新 sandbox_id。 顺序选择"先 create 后 delete"是因为:
-        # 1) create 失败的概率远小于 delete 失败(后者要走网络且服务端可能正
-        #    在 reaping); create 失败时 stale 沙箱保留, 用户至少看得到明确错;
-        # 2) 反过来"先 delete 后 create"若 create 失败用户彻底没沙箱, 体验更差。
-        for old_id in stale_sandbox_ids:
-            if old_id == sandbox_id:
-                # 防御性: 理论上不会发生(刚 pop 走的 ID 不应等于新 create 出来
-                # 的随机 ID), 但万一两个进程并发把同一 ID 又写回 cache, 跳过
-                # 删除避免误回收当前活动 sandbox。
-                continue
-            try:
-                await asyncio.to_thread(client.delete_sandbox, old_id)
-                logger.info(
-                    "[jiuwenbox] force_recreate_jiuwenbox_sandbox: "
-                    "deleted stale sandbox %s", old_id,
-                )
-            except Exception as exc:  # noqa: BLE001
-                # 404 已经在 ``_JiuwenBoxClient.delete_sandbox`` 内部被吞,
-                # 进入这条分支的多半是连接错误 / 5xx / 超时。 服务端会继续持
-                # 有 stale sandbox 直到下次 jiuwenbox 重启, 但新 sandbox 已经
-                # 上线, 不应当当致命错误向上抛, 仅 warn 让 operator 在日志里
-                # 可见。
-                logger.warning(
-                    "[jiuwenbox] force_recreate_jiuwenbox_sandbox: "
-                    "stale sandbox %s cleanup failed: %s", old_id, exc,
-                )
 
+    # Register new id in shared cache before deleting stale sandboxes.
     shared_key = base_url.rstrip("/")
     create_options: dict[str, Any] = {}
     if policy is not None:
@@ -1127,7 +991,47 @@ async def force_recreate_jiuwenbox_sandbox(
     if create_options:
         options_key = json.dumps(create_options, sort_keys=True, separators=(",", ":"))
         shared_key = f"{shared_key}|{options_key}"
-    _JiuwenBoxProviderMixin.register_shared_sandbox_id(shared_key, sandbox_id)
+
+    for old_id in stale_sandbox_ids:
+        _invoke_lifecycle_hook(
+            lifecycle_hook,
+            "before_recreate",
+            {"reason": reason, "old_sandbox_id": old_id},
+        )
+
+    with _JiuwenBoxClient(base_url=base_url, timeout_seconds=timeout_seconds) as client:
+        sandbox_id = await asyncio.to_thread(
+            client.create_sandbox, policy=policy, policy_mode=policy_mode,
+        )
+        if preserve_files_upload:
+            await _upload_preserve_files(client, sandbox_id, preserve_files_upload)
+
+        _JiuwenBoxProviderMixin.register_shared_sandbox_id(shared_key, sandbox_id)
+        _JiuwenBoxProviderMixin.register_lifecycle_hook(base_url, lifecycle_hook)
+        for old_id in stale_sandbox_ids:
+            _invoke_lifecycle_hook(
+                lifecycle_hook,
+                "after_recreate",
+                {"reason": reason, "sandbox_id": sandbox_id, "old_sandbox_id": old_id},
+            )
+
+        # Create before delete so a failed create leaves the stale sandbox in place.
+        for old_id in stale_sandbox_ids:
+            if old_id == sandbox_id:
+                # Skip delete if stale id equals the new sandbox id.
+                continue
+            try:
+                await asyncio.to_thread(client.delete_sandbox, old_id)
+                logger.info(
+                    "[jiuwenbox] force_recreate_jiuwenbox_sandbox: "
+                    "deleted stale sandbox %s", old_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[jiuwenbox] force_recreate_jiuwenbox_sandbox: "
+                    "stale sandbox %s cleanup failed: %s", old_id, exc,
+                )
+
     logger.info(
         "[jiuwenbox] force_recreate_jiuwenbox_sandbox: new sandbox_id=%s for %s",
         sandbox_id,
@@ -1136,18 +1040,63 @@ async def force_recreate_jiuwenbox_sandbox(
     return sandbox_id
 
 
-def _decode_subprocess_stream(value: Any) -> str:
-    """把 ``subprocess`` 返回 / 异常携带的 stdout / stderr 统一成 ``str``.
+async def delete_jiuwenbox_sandbox(
+    *,
+    reason: str = "teardown",
+    timeout_seconds: float = 30.0,
+) -> list[str]:
+    """Delete all cached remote jiuwenbox sandboxes on sysoperation teardown.
 
-    ``subprocess.run(text=True)`` 正常情况下产出 ``str`` (``None`` 表示没有
-    捕获), 但是 ``subprocess.TimeoutExpired`` 异常上挂的 ``stdout`` /
-    ``stderr`` 文档明确说: 即使 ``text=True`` 也"可能是 ``bytes`` 或 ``None``"
-    (CPython issue #16962 / docs)。 把这段三态归一成"始终 ``str``"在
-    ``_run_local_subprocess`` 的 ``timeout`` 分支里要写两次, 直接复制粘贴会让
-    那两行超过 120 列 (G.FMT.02); 抽出辅助函数同时收敛"被吃掉的 surrogate
-    /非 UTF-8 字节用 ``replace`` 容错解码"的策略, 避免哪天误用 ``strict``
-    把 timeout 路径再次踢回更难定位的解码异常上去。
+    base_url and lifecycle_hook are taken from the process-wide cache populated
+    when sandboxes were created (``register_lifecycle_hook`` /
+    ``register_shared_sandbox_id``), so callers only pass the teardown reason.
+    Each cached base_url's sandboxes are deleted remotely and fire ``before_delete``
+    then ``after_delete`` (strict hooks; ctx ``{"reason", "sandbox_id"}``).
+
+    Args:
+        reason: Passed to delete hook context; default "teardown".
+        timeout_seconds: HTTP client timeout.
+
+    Returns:
+        sandbox_ids successfully deleted, in order.
     """
+    deleted: list[str] = []
+    for base_url in _JiuwenBoxProviderMixin.cached_base_urls():
+        lifecycle_hook = _JiuwenBoxProviderMixin.pop_lifecycle_hook(base_url)
+        sandbox_ids = clear_jiuwenbox_shared_sandbox(base_url)
+        if not sandbox_ids:
+            continue
+        with _JiuwenBoxClient(base_url=base_url, timeout_seconds=timeout_seconds) as client:
+            for sandbox_id in sandbox_ids:
+                if not sandbox_id:
+                    continue
+                _invoke_lifecycle_hook(
+                    lifecycle_hook,
+                    "before_delete",
+                    {"reason": reason, "sandbox_id": sandbox_id},
+                )
+                try:
+                    await asyncio.to_thread(client.delete_sandbox, sandbox_id)
+                except Exception as exc:
+                    logger.warning(
+                        "[jiuwenbox] delete_jiuwenbox_sandbox: "
+                        "sandbox %s cleanup failed: %s", sandbox_id, exc,
+                    )
+                    continue
+                deleted.append(sandbox_id)
+                logger.info(
+                    "[jiuwenbox] delete_jiuwenbox_sandbox: deleted sandbox %s", sandbox_id,
+                )
+                _invoke_lifecycle_hook(
+                    lifecycle_hook,
+                    "after_delete",
+                    {"reason": reason, "sandbox_id": sandbox_id},
+                )
+    return deleted
+
+
+def _decode_subprocess_stream(value: Any) -> str:
+    """Normalize subprocess stdout/stderr bytes or None to str."""
     if isinstance(value, (bytes, bytearray)):
         return value.decode("utf-8", "replace")
     return value or ""
@@ -1161,15 +1110,7 @@ async def _run_local_subprocess(
     timeout: Optional[int] = None,
     stdin: Optional[str] = None,
 ) -> dict[str, Any]:
-    """以本地 subprocess 形式运行 ``argv``, 返回与 jiuwenbox exec 同形结构.
-
-    用于两层本地降级:
-    - 预先路由 (``excluded_commands`` 命中) 跳过沙箱, 直接本地执行;
-    - 沙箱执行失败且 ``fallback_on_failure=True`` 时降级本地.
-
-    Returns:
-        ``{"stdout": str, "stderr": str, "exit_code": int, "local": True}`` 字典.
-    """
+    """Run argv locally; return dict matching jiuwenbox exec shape."""
     def _run() -> dict[str, Any]:
         merged_env = None
         if env is not None:
@@ -1212,10 +1153,7 @@ async def _run_local_subprocess(
 
 
 def _read_excluded_commands(extra: Any) -> list[str] | None:
-    """从 ``launcher_config.extra_params`` 读出 exclude 列表.
-
-    读取 ``excluded_commands`` 字段; 返回 ``None`` 表示没有配置该列表。
-    """
+    """Read excluded_commands from launcher extra_params; None if unset."""
     if not isinstance(extra, dict):
         return None
     raw = extra.get("excluded_commands")
@@ -1225,12 +1163,7 @@ def _read_excluded_commands(extra: Any) -> list[str] | None:
 
 
 def _command_matches_exclude(command: str, patterns: list[str] | None) -> bool:
-    """以 ``fnmatch`` 判定命令是否匹配任一 exclude pattern.
-
-    匹配规则:
-    - 命令首个 token 整体匹配 (例: ``git status`` 对 ``git *`` 命中);
-    - 整个命令字符串匹配 (例: ``ls -la`` 对 ``ls *`` 命中).
-    """
+    """Return True if command matches any fnmatch exclude pattern."""
     if not command or not patterns:
         return False
     stripped = command.strip()
@@ -1651,7 +1584,7 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
         exclude_patterns = _read_excluded_commands(extra)
         fallback_on_failure = bool(extra.get("fallback_on_failure", False)) if isinstance(extra, dict) else False
 
-        # (a) 预先路由: 命中 excluded_commands 直接本地执行, 不发请求到沙箱
+        # (a) Pre-route excluded commands to local execution
         if _command_matches_exclude(command, exclude_patterns):
             logger.info(
                 "[jiuwenbox] shell pre-routed to local (exclude pattern hit): %s",
@@ -1692,7 +1625,7 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
                     ExecuteCmdResult,
                     data=data,
                 )
-            # (b) 失败回退: 沙箱返回 exit_code != 0 且 fallback 开启时降级本地
+            # (b) Fallback to local on non-zero exit when enabled
             if exit_code != 0 and fallback_on_failure:
                 logger.info(
                     "[jiuwenbox] sandbox exit_code=%d, falling back to local exec: %s",
@@ -1708,7 +1641,7 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
                 return self._wrap_shell_local_result(command, cwd, timeout, local_result)
             return ExecuteCmdResult(code=StatusCode.SUCCESS.code, message=StatusCode.SUCCESS.errmsg, data=data)
         except Exception as exc:
-            # (b) 失败回退: 沙箱抛异常 (HTTP / 连接错误) 且 fallback 开启时降级本地
+            # (b) Fallback to local on sandbox exception when enabled
             if fallback_on_failure:
                 logger.info(
                     "[jiuwenbox] sandbox raised %s, falling back to local exec: %s",
@@ -1855,7 +1788,7 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
         exclude_patterns = _read_excluded_commands(extra)
         fallback_on_failure = bool(extra.get("fallback_on_failure", False)) if isinstance(extra, dict) else False
 
-        # (a) 预先路由: code 的首行命中 exclude pattern 则直接本地执行
+        # (a) Pre-route when first line matches exclude pattern
         first_line = code.splitlines()[0] if code else ""
         if _command_matches_exclude(first_line, exclude_patterns):
             logger.info(
@@ -1894,7 +1827,7 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
                     ExecuteCodeResult,
                     data=result_data,
                 )
-            # (b) 失败回退: 沙箱返回 exit_code != 0 且 fallback 开启时降级本地
+            # (b) Fallback to local on non-zero exit when enabled
             if result_data.exit_code != 0 and fallback_on_failure:
                 logger.info(
                     "[jiuwenbox] sandbox code exit_code=%d, falling back to local exec",
@@ -1910,7 +1843,7 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
             return ExecuteCodeResult(code=StatusCode.SUCCESS.code,
                                      message="Code executed successfully", data=result_data)
         except Exception as exc:
-            # (b) 失败回退: 沙箱抛异常时降级本地
+            # (b) Fallback to local on sandbox exception when enabled
             if fallback_on_failure:
                 logger.info(
                     "[jiuwenbox] sandbox code raised %s, falling back to local exec",

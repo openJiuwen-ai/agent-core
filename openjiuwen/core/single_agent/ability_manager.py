@@ -15,6 +15,7 @@ from openjiuwen.core.common.exception.errors import AgentError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import ToolMessage, ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.session.agent import Session
@@ -75,12 +76,19 @@ class AbilityManager:
     - Execute ability calls (get instances from ResourceManager)
     """
 
-    def __init__(self):
+    def __init__(self, owner_id: Optional[str] = None):
         self._tools: Dict[str, ToolCard] = {}
         self._workflows: Dict[str, WorkflowCard] = {}
         self._agents: Dict[str, AgentCard] = {}
         self._mcp_servers: Dict[str, McpServerConfig] = {}
         self._context_engine = None
+        # Owner agent id used to qualify stateful tool ids on registration so
+        # each agent owns an exclusive resource-manager entry.
+        self._owner_id: Optional[str] = owner_id
+
+    def set_owner_id(self, owner_id: Optional[str]) -> None:
+        """Set the owner agent id used to qualify stateful tool ids."""
+        self._owner_id = owner_id
 
     @staticmethod
     def _build_tool_message_content(result: Any) -> str:
@@ -319,6 +327,84 @@ class AbilityManager:
 
         return add_single_ability(ability)
 
+    def add_ability(self, card: ToolCard, resource: Tool) -> AddAbilityResult:
+        """Register an executable tool ability (card + concrete instance).
+
+        Single entry point that keeps the ability-manager card id and the
+        resource-manager registration key consistent, branching on whether the
+        tool holds per-agent state:
+
+        - Stateful (``card.stateless`` is False, the default): the tool is owned
+            exclusively by this agent. The card id is rewritten to
+            ``f"{card.name}_{owner_id}"`` (derived from the name so a
+            pre-qualified id is idempotently normalized) and the instance is
+            (re)bound in the resource manager with ``refresh=True`` so a later
+            owner of the same id wins.
+        - Stateless (``card.stateless`` is True): the tool is a shared
+            module-level singleton. The bare id is kept and the resource-manager
+            add is an idempotent ``skip_if_exists`` no-op.
+
+        Args:
+            card: The tool card to register (``card`` is the same object as
+                ``resource.card`` for agent-owned tools).
+            resource: The concrete tool instance backing the card.
+
+        Returns:
+            The ability-manager add result for the (possibly id-rewritten) card.
+        """
+        from openjiuwen.core.runner import Runner
+
+        if card.stateless:
+            Runner.resource_mgr.add_tool(resource, skip_if_exists=True)
+            return self.add(card)
+
+        if self._owner_id:
+            card.id = f"{card.name}_{self._owner_id}"
+        Runner.resource_mgr.add_tool(resource, refresh=True)
+        return self.add(card)
+
+    def remove_ability(self, name: Union[str, List[str]]) -> None:
+        """Remove tool ability(ies) by name from this manager and the resource manager.
+
+        Mirrors :meth:`add_ability`: stateful tools are removed from the resource
+        manager by their agent-qualified id; stateless (shared) tools are dropped
+        from this manager only, leaving the shared resource-manager entry for
+        other agents still using it.
+        """
+        from openjiuwen.core.runner import Runner
+
+        names = name if isinstance(name, list) else [name]
+        for item in names:
+            card = self._tools.get(item)
+            self.remove(item)
+            if card is None or card.stateless:
+                continue
+            Runner.resource_mgr.remove_tool(card.id)
+
+    def teardown_tools(self) -> None:
+        """Drop this owner's agent-qualified stateful tools from the resource manager.
+
+        Round-end teardown calls this so a stopped agent does not leave its
+        per-agent (stateful) tool instances registered in the process-global
+        resource manager. Without it the next run cycle rebuilds a fresh agent
+        and re-registers every tool over the stale id, and :meth:`add_ability`'s
+        refresh path then logs a warning per residual id.
+
+        Only tools this manager qualified with its own owner id
+        (``card.id == f"{name}_{owner_id}"``) are removed; stateless shared
+        singletons and externally-scoped tools (e.g. MCP server-scoped ids) are
+        left in place for other agents still using them.
+        """
+        from openjiuwen.core.runner import Runner
+
+        if not self._owner_id:
+            return
+        for name, card in list(self._tools.items()):
+            if card.stateless or card.id != f"{name}_{self._owner_id}":
+                continue
+            self.remove(name)
+            Runner.resource_mgr.remove_tool(card.id)
+
     def remove(self, name: Union[str, List[str]]) -> Union[None, Ability, List[Ability]]:
         """Remove an ability by name
 
@@ -531,6 +617,7 @@ class AbilityManager:
             ctx: AgentCallbackContext,
             tool_call: Union[ToolCall, List[ToolCall]],
             session: Session,
+            parallel_tool_calls: bool = True,
             tag=None
     ) -> List[Tuple[Any, ToolMessage]]:
         """Execute ability call(s) with per-tool rail hooks.
@@ -582,8 +669,18 @@ class AbilityManager:
                 )
             )
 
-        # Execute all tool calls in parallel.
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = []
+        if parallel_tool_calls:
+            # Execute all tool calls in parallel.
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            # Execute all tool calls in sequence.
+            for task in tasks:
+                try:
+                    result = await task
+                except Exception as e:
+                    result = e
+                results.append(result)
 
         # Process results
         final_results: List[Tuple[Any, ToolMessage]] = []
@@ -609,6 +706,22 @@ class AbilityManager:
 
                 error_msg = f"Ability execution error: {str(result)}"
                 logger.error(error_msg)
+
+                # Trigger TOOL_CALL_ERROR event for observability
+                # This only affects telemetry collection, not business logic
+                try:
+                    from openjiuwen.core.runner import Runner
+                    from openjiuwen.core.runner.callback.events import ToolCallEvents
+                    tc = tool_calls[i]
+                    await Runner.callback_framework.trigger(
+                        ToolCallEvents.TOOL_CALL_ERROR,
+                        tool_name=tc.name,
+                        tool_id=tc.id,
+                        error=result,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to trigger TOOL_CALL_ERROR event: {e}")
+
                 tool_result = None
                 tool_message = None
                 if isinstance(tool_ctx.inputs, ToolCallInputs):

@@ -45,6 +45,66 @@ Public team skill evolution Rail, similar to `SkillEvolutionRail` but specialize
 `TeamSkillRail` is the compatibility public alias for `TeamSkillEvolutionRail`.
 New team skill creation remains owned by `TeamSkillCreateRail`; this rail only evolves existing `kind: team-skill` skills.
 
+### Import
+
+```python
+from openjiuwen.harness.rails import (
+    EvolutionReviewRuntime,
+    SubagentRail,
+    TeamSkillRail,
+    configure_skill_evolution,
+)
+```
+
+`TeamSkillEvolutionRail` also registers the stable `evolution_reviewer` flow through `SubagentRail`; active review tools depend on shared `EvolutionReviewRuntime`.
+
+`TeamSkillEvolutionRail` / `SkillEvolutionRail` `init()` does not configure `EvolutionInterruptRail`. Add one shared interrupt rail explicitly if you do not use the factory.
+
+Stable review subagent registration is deduplicated by `evolution_reviewer`; inconsistent runtime/query/store on re-register raises a fast failure.
+
+### 推荐优先 / 推荐构建方式
+
+Prefer team configuration:
+
+```python
+configure_skill_evolution(
+    agent,
+    skills_dir="/path/to/skills",
+    llm=model_client,
+    model="gpt-4",
+    team=True,
+    auto_save=False,
+    language="cn",
+)
+```
+
+The configuration API adds `SubagentRail` when needed and wires `EvolutionInterruptRail` with `TeamSkillRail`.
+
+Manual assembly requires explicit shared dependencies:
+
+```python
+runtime = EvolutionReviewRuntime()
+team_rail = TeamSkillRail(
+    skills_dir="/path/to/skills",
+    llm=model_client,
+    model="gpt-4",
+    review_runtime=runtime,
+    team_id="research-team",
+    auto_save=False,
+)
+interrupt_rail = EvolutionInterruptRail(
+    review_runtime=runtime,
+    submission_service=team_rail.experience_manager.experience_submission_service,
+)
+agent = create_deep_agent(
+    model=model_client,
+    tools=team_tools,
+    rails=[SubagentRail(), interrupt_rail, team_rail],
+)
+```
+
+`EvolutionInterruptRail` no longer routes by `subject.kind`; it should be one shared rail bound to the same runtime/service.
+
 ### Features
 
 - Trajectory issue detection (role coordination, constraint violations, workflow inefficiency)
@@ -67,12 +127,12 @@ class TeamSkillRail(
     model: str,
     language: str = "cn",
     trajectory_store: Optional[TrajectoryStore] = None,
-    team_trajectory_store: Optional[TrajectoryStore] = None,
     trajectory_source: Optional[TrajectorySource] = None,
     trajectory_sink: Optional[TrajectorySink] = None,
     member_role: Optional[str] = None,
     auto_scan: bool = True,
     auto_save: bool = False,
+    review_runtime: EvolutionReviewRuntime,
     async_evolution: bool = True,
     max_concurrent_evolution: int = 1,
     team_id: Optional[str] = None,
@@ -95,12 +155,12 @@ class TeamSkillRail(
 * **model** (str): Model name.
 * **language** (str): Language setting.
 * **trajectory_store** (TrajectoryStore, optional): Trajectory store instance.
-* **team_trajectory_store** (TrajectoryStore, optional): Deprecated team trajectory store instance. Use `trajectory_source` / `trajectory_sink` for runtime aggregation.
 * **trajectory_source** (TrajectorySource, optional): Runtime source for aggregated member trajectory evidence.
 * **trajectory_sink** (TrajectorySink, optional): Runtime sink for publishing this member's latest trajectory snapshot.
 * **member_role** (str, optional): Role written to published snapshots. Defaults to `"leader"` for team skill evolution.
 * **auto_scan** (bool): Whether to detect passive team completion and trigger passive evolution, defaults to `True`.
 * **auto_save** (bool): Whether to auto-save generated experience records, defaults to `False` (requires user approval).
+* **review_runtime** (EvolutionReviewRuntime): Shared active-review runtime required for review subagent + active approval tools.
 * **async_evolution** (bool): Whether to execute evolution asynchronously, defaults to `True`.
 * **max_concurrent_evolution** (int): Max concurrent background evolution tasks, defaults to 1.
 * **team_id** (str, optional): Team ID.
@@ -210,7 +270,7 @@ Evolution metadata is carried in `OutputSchema.payload["evolution_meta"]`:
 | `rail_kind` | Producing rail kind, usually `team` for this rail. |
 | `stage` | Lifecycle stage for progress or outcome events. |
 | `skill_name` | Target team skill name. |
-| `request_id` | Approval or governance request id. |
+| `request_id` | Approval request id. |
 | `signal_type` | Signal type that contributed to the request. |
 | `source` | Signal or event source. |
 | `status` | Outcome status when available. |
@@ -224,6 +284,20 @@ Approval events use `type="chat.ask_user_question"` and include `payload["reques
 Async snapshots contain `trajectory`, `messages`, and optionally `skill_name`. `messages` are detection context; `trajectory` is execution evidence. The current implementation keeps legacy dict compatibility, so hosts should treat rail methods and host events as public integration points instead of depending on the dict shape.
 
 Team signal semantics are partly structured as `EvolutionSignal` fields and partly carried in `EvolutionSignal.context`. Runtime team member / role attribution remains heuristic; role summaries extracted from `SKILL.md` are documentation context, not runtime identity proof.
+
+### Subject Schema in Evolution Tools
+
+Team evolution also uses the normalized subject contract:
+
+```python
+{
+    "kind": "swarm-skill",
+    "name": "team-skill-name",
+    "scope": { ... }  # optional
+}
+```
+
+`"team-skill"` remains accepted as a legacy alias and is normalized to `"swarm-skill"` by `EvolutionReviewRuntime` / interrupt contract validation.
 
 ---
 
@@ -255,13 +329,13 @@ User-initiated evolution request. The method trusts the provided `skill_name` as
 
 **Returns**:
 
-* `EvolutionRequestResult`: `request_id` is set when records were generated; otherwise an empty result object is returned.
+* `EvolutionRequestResult`: request id, generated records, optional approval event, and `auto_approved` status when records were generated; otherwise an empty result object is returned.
 
 ---
 
-### async request_simplify(skill_name, user_intent=None) -> Optional[str]
+### async request_simplify(skill_name, user_intent=None) -> SimplifyRequestResult
 
-Stage an experience simplification proposal and emit an approval event.
+Stage scorer-driven Team Skill simplify governance and return an approval event.
 
 **Parameters**:
 
@@ -270,7 +344,7 @@ Stage an experience simplification proposal and emit an approval event.
 
 **Returns**:
 
-* `str`: governance request id when actions were proposed, otherwise `None`.
+* `SimplifyRequestResult`: governance `request_id`, proposed `actions`, and optional `approval_event`.
 
 Use `on_approve_simplify(request_id)` to execute and `on_reject_simplify(request_id)` to discard.
 
@@ -413,9 +487,9 @@ if result.approval_event is not None:
     await team_rail.approve_record(result.request_id)
 
 # Request simplify
-simplify_request_id = await team_rail.request_simplify("research-team")
-if simplify_request_id:
-    await team_rail.on_approve_simplify(simplify_request_id)
+simplify_result = await team_rail.request_simplify("research-team")
+if simplify_result.approval_event:
+    await team_rail.on_approve_simplify(simplify_result.request_id)
 
 # Request rebuild
 prompt = await team_rail.request_rebuild("research-team", min_score=0.5)

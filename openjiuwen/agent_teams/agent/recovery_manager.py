@@ -50,6 +50,19 @@ class RecoveryManager:
         for member in all_members:
             if member.member_name == member_name:
                 continue
+            # Idempotency: a teammate already running in this runtime keeps its
+            # live spawn handle, so skip it. ``recover_team`` can be invoked more
+            # than once per activation (the runtime manager's COLD_RECOVER path
+            # and the leader's ``coordination.start`` both call it); without this
+            # guard ``restart_teammate`` tears down and rebuilds an already
+            # healthy teammate, re-registering its whole tool set each time.
+            if self._spawn_manager.has_live_handle(member.member_name):
+                team_logger.debug(
+                    "[{}] teammate {} already running; skip recover restart",
+                    member_name or "?",
+                    member.member_name,
+                )
+                continue
             team_name = self._configurator.team_name
             if team_name:
                 await team_backend.db.member.update_member_status(

@@ -23,14 +23,7 @@ def make_step(kind="llm", detail=None, error=None, **kwargs):
     )
 
 
-def make_llm_step(
-    model="gpt-4",
-    messages=None,
-    response=None,
-    tools=None,
-    usage=None,
-    **kwargs
-):
+def make_llm_step(model="gpt-4", messages=None, response=None, tools=None, usage=None, **kwargs):
     """Factory for creating LLM TrajectoryStep."""
     detail = LLMCallDetail(
         model=model,
@@ -43,12 +36,7 @@ def make_llm_step(
 
 
 def make_tool_step(
-    tool_name="test_tool",
-    call_args=None,
-    call_result=None,
-    tool_description=None,
-    tool_schema=None,
-    **kwargs
+    tool_name="test_tool", call_args=None, call_result=None, tool_description=None, tool_schema=None, **kwargs
 ):
     """Factory for creating Tool TrajectoryStep."""
     detail = ToolCallDetail(
@@ -316,3 +304,32 @@ class TestUpdates:
             ("op1", "user_prompt"): "new user",
         }
         assert ("op1", "system_prompt") in updates
+
+
+class TestNoFirstPhaseNormalizedTrajectoryModel:
+    """Guardrails for the passive first phase trajectory scope."""
+
+    @staticmethod
+    def test_no_normalized_public_read_model_types_are_added():
+        import openjiuwen.agent_evolving.trajectory.types as trajectory_types
+
+        forbidden_names = [
+            "LLMCallNode",
+            "ToolIntentNode",
+            "ToolExecutionNode",
+            "MessageNode",
+            "TrajectoryEdge",
+            "TrajectoryRun",
+            "TrajectoryView",
+        ]
+        for name in forbidden_names:
+            assert not hasattr(trajectory_types, name)
+
+    @staticmethod
+    def test_trajectory_keeps_existing_step_only_shape():
+        from openjiuwen.agent_evolving.trajectory.types import Trajectory
+
+        trajectory = Trajectory(execution_id="exec-1", steps=[], source="online")
+
+        assert not hasattr(trajectory, "schema_version")
+        assert not hasattr(trajectory, "read_model")

@@ -13,7 +13,6 @@ from unittest.mock import (
 import pytest
 
 from openjiuwen.core.session.agent import Session
-from openjiuwen.core.foundation.llm.schema.message import UserMessage
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
@@ -399,8 +398,8 @@ async def test_before_model_call_without_prompt_builder() -> None:
 # after_tool_call progress reminder tests
 # ================================================================
 @pytest.mark.asyncio
-async def test_after_tool_call_injects_progress_reminder() -> None:
-    """after_tool_call injects progress reminder at interval."""
+async def test_after_tool_call_pushes_steering_message() -> None:
+    """after_tool_call pushes steering message at interval."""
     rail = _make_rail()
     rail.enable_progress_repeat = True
     rail.list_tool_call_interval = 1
@@ -410,9 +409,9 @@ async def test_after_tool_call_injects_progress_reminder() -> None:
     ctx = _make_ctx()
     ctx.inputs = ToolCallInputs(tool_name="todo_create")
     ctx.context = MagicMock()
-    ctx.context.get_messages.return_value = []
     ctx.session = MagicMock()
     ctx.session.get_session_id.return_value = "test-session-id"
+    ctx.push_steering = MagicMock()
 
     todos = _make_todos([
         ("task-a", TodoStatus.PENDING),
@@ -425,10 +424,10 @@ async def test_after_tool_call_injects_progress_reminder() -> None:
     await rail.after_tool_call(ctx)
 
     assert rail._tool_call_counts["test-session-id"] == 1
-    ctx.context.set_messages.assert_called_once()
-    messages = ctx.context.set_messages.call_args[0][0]
-    assert len(messages) == 1
-    assert isinstance(messages[0], UserMessage)
+    ctx.push_steering.assert_called_once()
+    steering_msg = ctx.push_steering.call_args[0][0]
+    assert "task-a" in steering_msg
+    assert "task-b" in steering_msg
 
 
 @pytest.mark.asyncio
@@ -441,8 +440,6 @@ async def test_after_tool_call_counts_all_tools() -> None:
 
     ctx = _make_ctx()
     ctx.inputs = ToolCallInputs(tool_name="todo_create")
-    ctx.context = MagicMock()
-    ctx.context.get_messages.return_value = []
     ctx.session = MagicMock()
     ctx.session.get_session_id.return_value = "test-session-id"
 
@@ -464,8 +461,6 @@ async def test_after_invoke_removes_tool_call_count() -> None:
 
     ctx = _make_ctx()
     ctx.inputs = ToolCallInputs(tool_name="todo_create")
-    ctx.context = MagicMock()
-    ctx.context.get_messages.return_value = []
     ctx.session = MagicMock()
     ctx.session.get_session_id.return_value = "test-session-id"
 
@@ -491,10 +486,9 @@ async def test_after_tool_call_custom_interval() -> None:
 
     ctx = _make_ctx()
     ctx.inputs = ToolCallInputs(tool_name="todo_create")
-    ctx.context = MagicMock()
-    ctx.context.get_messages.return_value = []
     ctx.session = MagicMock()
     ctx.session.get_session_id.return_value = "test-session-id"
+    ctx.push_steering = MagicMock()
 
     todos = _make_todos([
         ("task-a", TodoStatus.PENDING),
@@ -509,7 +503,7 @@ async def test_after_tool_call_custom_interval() -> None:
 
     await rail.after_tool_call(ctx)
     assert rail._tool_call_counts[ctx.session.get_session_id()] == 3
-    ctx.context.set_messages.assert_called_once()
+    ctx.push_steering.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -522,10 +516,9 @@ async def test_after_tool_call_skips_when_disabled() -> None:
 
     ctx = _make_ctx()
     ctx.inputs = ToolCallInputs(tool_name="todo_create")
-    ctx.context = MagicMock()
-    ctx.context.get_messages.return_value = []
     ctx.session = MagicMock()
     ctx.session.get_session_id.return_value = "test-session-id"
+    ctx.push_steering = MagicMock()
 
     tool = rail._find_todo_tool()
     assert tool is not None
@@ -534,7 +527,7 @@ async def test_after_tool_call_skips_when_disabled() -> None:
     await rail.after_tool_call(ctx)
 
     assert "test-session-id" not in rail._tool_call_counts
-    ctx.context.set_messages.assert_not_called()
+    ctx.push_steering.assert_not_called()
 
 
 @pytest.mark.asyncio

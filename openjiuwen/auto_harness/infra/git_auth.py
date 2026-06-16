@@ -30,7 +30,7 @@ def build_git_auth_env(
         f"{username}:{token}".encode("utf-8")
     ).decode("ascii")
     env.update({
-        "GIT_CONFIG_COUNT": "3",
+        "GIT_CONFIG_COUNT": "6",
         "GIT_CONFIG_KEY_0": "credential.helper",
         "GIT_CONFIG_VALUE_0": "",
         "GIT_CONFIG_KEY_1": "credential.interactive",
@@ -39,6 +39,12 @@ def build_git_auth_env(
         "GIT_CONFIG_VALUE_2": (
             f"AUTHORIZATION: basic {basic}"
         ),
+        "GIT_CONFIG_KEY_3": "http.version",
+        "GIT_CONFIG_VALUE_3": "HTTP/1.1",
+        "GIT_CONFIG_KEY_4": "http.lowSpeedLimit",
+        "GIT_CONFIG_VALUE_4": "1",
+        "GIT_CONFIG_KEY_5": "http.lowSpeedTime",
+        "GIT_CONFIG_VALUE_5": "60",
     })
     return env
 

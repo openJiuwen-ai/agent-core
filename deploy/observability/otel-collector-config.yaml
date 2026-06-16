@@ -1,7 +1,7 @@
 # OpenTelemetry Collector configuration for openjiuwen agent_teams.
 #
 # Pipeline:  application(otlp/grpc) -> memory_limiter -> batch
-#                                   -> truncate_long_strings
+#                                   -> transform/limit_strings
 #                                   -> langfuse / debug
 #
 # - The transform processor caps any string attribute at 16 KiB so that
@@ -35,10 +35,12 @@ processors:
           - truncate_all(attributes, 16384)
 
 exporters:
-  otlp/langfuse:
-    endpoint: langfuse-server:4317
+  otlphttp/langfuse:
+    endpoint: http://langfuse-web:3000/api/public/otel
     tls:
       insecure: true
+    headers:
+      Authorization: "Basic cGstbGYtaml1d2VuOnNrLWxmLWppdXdlbg=="
 
   debug:
     verbosity: basic
@@ -48,4 +50,4 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch, transform/limit_strings]
-      exporters: [otlp/langfuse, debug]
+      exporters: [otlphttp/langfuse, debug]

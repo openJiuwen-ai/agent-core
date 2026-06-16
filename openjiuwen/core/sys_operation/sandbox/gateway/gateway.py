@@ -236,6 +236,9 @@ class SandboxGateway:
             sandbox_type=config.launcher_config.sandbox_type,
             container_config_hash=_compute_container_config_hash(config.launcher_config),
             last_used_ts=now,
+            metadata={
+                "lifecycle_hook": config.launcher_config.extra_params.get("lifecycle_hook"),
+            },
         )
         await self._store.set(key, record)
         return launched

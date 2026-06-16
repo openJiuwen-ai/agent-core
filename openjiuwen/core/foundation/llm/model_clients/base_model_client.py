@@ -80,6 +80,72 @@ class BaseModelClient(ABC):
         self._validate_config()
 
     @staticmethod
+    def _extract_cache_tokens(obj: Any) -> int:
+        """Extract prompt cache hit tokens from provider usage metadata.
+
+        Providers disagree on the field shape. Count only cache hits/read tokens;
+        cache writes/creations and misses are intentionally ignored.
+        """
+
+        def _get_value(source: Any, key: str) -> Any:
+            if source is None:
+                return None
+            if isinstance(source, dict):
+                return source.get(key)
+            return getattr(source, key, None)
+
+        def _get_path(source: Any, path: tuple[str, ...]) -> Any:
+            current = source
+            for key in path:
+                current = _get_value(current, key)
+                if current is None:
+                    return None
+            return current
+
+        def _to_int(value: Any) -> int:
+            if value is None or isinstance(value, bool):
+                return 0
+            if not isinstance(value, (int, float, str)):
+                return 0
+            try:
+                return max(int(float(value)), 0)
+            except (TypeError, ValueError):
+                return 0
+
+        cache_token_paths = (
+            ("prompt_tokens_details", "cached_tokens"),
+            ("promptTokensDetails", "cachedTokens"),
+            ("input_tokens_details", "cached_tokens"),
+            ("input_token_details", "cached_tokens"),
+            ("inputTokensDetails", "cachedTokens"),
+            ("inputTokenDetails", "cachedTokens"),
+            ("usageMetadata", "cachedContentTokenCount"),
+        )
+        for path in cache_token_paths:
+            cache_tokens = _to_int(_get_path(obj, path))
+            if cache_tokens:
+                return cache_tokens
+
+        cache_token_fields = (
+            "prompt_cache_hit_tokens",
+            "cache_read_input_tokens",
+            "cachedContentTokenCount",
+            "cached_content_token_count",
+            "cache_tokens",
+            "cached_tokens",
+            "cache_hit_tokens",
+            "cached_input_tokens",
+            "cache_read_tokens",
+            "prompt_cache_tokens",
+            "prompt_cached_tokens",
+        )
+        for field in cache_token_fields:
+            cache_tokens = _to_int(_get_value(obj, field))
+            if cache_tokens:
+                return cache_tokens
+        return 0
+
+    @staticmethod
     def _extract_cost_info(obj: Any) -> tuple:
         """Extract cost information from a response or chunk object.
         Supports three formats:

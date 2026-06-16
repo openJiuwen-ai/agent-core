@@ -22,9 +22,11 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import SysOperationError
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import OperationMode, SandboxGatewayConfig, SysOperation, SysOperationCard
 from openjiuwen.core.sys_operation.config import ContainerScope, PreDeployLauncherConfig, SandboxIsolationConfig
+from openjiuwen.core.sys_operation.sandbox.gateway.gateway_client import SandboxGatewayClient
 from openjiuwen.extensions.sys_operation.sandbox.providers import jiuwenbox as jb
 from openjiuwen.extensions.sys_operation.sandbox.providers.jiuwenbox import clear_jiuwenbox_shared_sandbox
 
@@ -44,6 +46,33 @@ def _list_sandbox_ids(client: httpx.Client) -> set[str]:
     response = client.get("/api/v1/sandboxes")
     response.raise_for_status()
     return {item["id"] for item in response.json()}
+
+
+async def _release_sandbox_for_sys_operation(
+    sys_operation_id: str,
+    *,
+    ignore_missing: bool = False,
+) -> None:
+    """Release CUSTOM-scope sandbox via gateway (see 沙箱.md lifecycle section)."""
+    sys_op = Runner.resource_mgr.get_sys_operation(sys_operation_id)
+    if sys_op is None:
+        return
+    isolation_key = sys_op.isolation_key_template
+    if not isolation_key:
+        return
+    try:
+        await SandboxGatewayClient.release(isolation_key, on_stop="delete")
+    except Exception as exc:
+        # Gateway record may already be removed if release was attempted earlier.
+        if ignore_missing and "not found" in str(exc).lower():
+            return
+        raise
+
+
+async def _remove_sys_operation_with_sandbox_release(sys_operation_id: str) -> None:
+    """Unregister sysoperation after explicitly releasing its sandbox."""
+    await _release_sandbox_for_sys_operation(sys_operation_id)
+    Runner.resource_mgr.remove_sys_operation(sys_operation_id=sys_operation_id)
 
 
 @pytest.fixture
@@ -87,7 +116,7 @@ async def sys_op_fixture(server_endpoint, monkeypatch) -> AsyncIterator[SysOpera
             yield Runner.resource_mgr.get_sys_operation(card_id)
         finally:
             if card_added:
-                Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
+                await _remove_sys_operation_with_sandbox_release(card_id)
             await Runner.stop()
             clear_jiuwenbox_shared_sandbox(base_url)
 
@@ -105,7 +134,7 @@ async def _await_sandbox_file(
 ):
     """Poll-read ``path`` from the sandbox until it succeeds or times out.
 
-    Background uploads scheduled by ``_upload_preserve_files_best_effort``
+    Background uploads scheduled by ``_try_upload_preserve_files``
     (the fire-and-forget ``loop.create_task(...)`` path used when
     ``_get_sandbox_id`` runs on the event-loop thread) can race with the
     next ``read_file``. Tests that depend on a freshly auto-uploaded
@@ -251,6 +280,9 @@ async def test_extra_params_shares_sandbox_id_after_memory_cache_cleared(
         assert code_read.data.exit_code == 0
         assert code_read.data.stdout.strip() == file_content
     finally:
+        # Second card only reuses sandbox_id; remote sandbox is still owned by
+        # the fixture card — unregister without release (release would delete
+        # the shared jiuwenbox sandbox for the whole base_url).
         if second_card_added:
             Runner.resource_mgr.remove_sys_operation(sys_operation_id=second_card_id)
 
@@ -324,7 +356,7 @@ async def test_extra_params_policy_and_policy_mode_are_used_to_create_sandbox(
             assert extra_dir in policy["filesystem_policy"]["read_write"]
         finally:
             if card_added:
-                Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
+                await _remove_sys_operation_with_sandbox_release(card_id)
             await Runner.stop()
             clear_jiuwenbox_shared_sandbox(base_url)
 
@@ -561,7 +593,7 @@ async def test_preserve_file_uploaded_when_provider_creates_new_sandbox(
             assert sandbox_id in _list_sandbox_ids(client)
         finally:
             if card_added:
-                Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
+                await _remove_sys_operation_with_sandbox_release(card_id)
             await Runner.stop()
             clear_jiuwenbox_shared_sandbox(base_url)
 
@@ -632,7 +664,7 @@ async def test_preserve_directory_recurses_into_sandbox(
             assert child_res.data.content == "child-content"
         finally:
             if card_added:
-                Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
+                await _remove_sys_operation_with_sandbox_release(card_id)
             await Runner.stop()
             clear_jiuwenbox_shared_sandbox(base_url)
 
@@ -720,12 +752,352 @@ async def test_preserve_file_not_re_uploaded_when_sandbox_id_already_cached(
             assert res2.data.content == initial_payload
         finally:
             if first_added:
-                Runner.resource_mgr.remove_sys_operation(sys_operation_id=first_card_id)
+                await _remove_sys_operation_with_sandbox_release(first_card_id)
             if second_added:
-                Runner.resource_mgr.remove_sys_operation(sys_operation_id=second_card_id)
+                await _remove_sys_operation_with_sandbox_release(second_card_id)
             await Runner.stop()
             clear_jiuwenbox_shared_sandbox(base_url)
 
             after_ids = _list_sandbox_ids(client)
             for sandbox_id in after_ids - before_ids:
                 client.delete(f"/api/v1/sandboxes/{sandbox_id}")
+
+
+# ===========================================================================
+# E2E tests: lifecycle hooks (``extra_params["lifecycle_hook"]``).
+# ===========================================================================
+
+
+class _HookRecorder:
+    """Records ``(event_name, ctx)`` tuples for lifecycle-hook assertions."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    def __call__(self, event: str, ctx: dict) -> None:
+        self.events.append((event, dict(ctx)))
+
+    @property
+    def names(self) -> list[str]:
+        return [name for name, _ in self.events]
+
+    def assert_exact(self, expected: list[tuple[str, dict]]) -> None:
+        """Assert exact lifecycle events (order + event + ctx)."""
+        assert self.events == expected
+
+
+@pytest.mark.asyncio
+@requires_jiuwenbox
+async def test_lifecycle_hook_fires_before_after_create_on_provider_sandbox_creation(
+    server_endpoint: str,
+    monkeypatch,
+):
+    """First provider op auto-creates the sandbox and must fire
+    ``before_create`` then ``after_create`` (both ``reason="initial"``).
+    """
+    base_url = _normalize_endpoint(server_endpoint)
+    monkeypatch.delenv("JIUWENBOX_SANDBOX_ID", raising=False)
+    clear_jiuwenbox_shared_sandbox(base_url)
+
+    recorder = _HookRecorder()
+    marker = uuid.uuid4().hex[:8]
+
+    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+        before_ids = _list_sandbox_ids(client)
+
+        await Runner.start()
+        card_id = f"jiuwenbox_hook_create_{marker}"
+        card_added = False
+        card = _build_card(
+            card_id=card_id,
+            base_url=base_url,
+            extra_params={"lifecycle_hook": recorder},
+        )
+
+        try:
+            assert Runner.resource_mgr.add_sys_operation(card).is_ok()
+            card_added = True
+
+            sys_op = Runner.resource_mgr.get_sys_operation(card_id)
+            write_res = await sys_op.fs().write_file(
+                f"/tmp/jiuwenbox_hook_create_{marker}.txt",
+                "hook-create",
+                prepend_newline=False,
+            )
+            assert write_res.code == StatusCode.SUCCESS.code
+
+            launcher = sys_op._run_config.config.launcher_config
+            sandbox_id = launcher.extra_params.get("sandbox_id")
+            assert isinstance(sandbox_id, str) and sandbox_id
+            recorder.assert_exact(
+                [
+                    ("before_create", {"reason": "initial"}),
+                    ("after_create", {"reason": "initial", "sandbox_id": sandbox_id}),
+                ]
+            )
+        finally:
+            if card_added:
+                await _remove_sys_operation_with_sandbox_release(card_id)
+            await Runner.stop()
+            clear_jiuwenbox_shared_sandbox(base_url)
+
+            after_ids = _list_sandbox_ids(client)
+            for sandbox_id in after_ids - before_ids:
+                client.delete(f"/api/v1/sandboxes/{sandbox_id}")
+
+
+@pytest.mark.asyncio
+@requires_jiuwenbox
+async def test_lifecycle_hook_fires_recreate_events_on_force_recreate(
+    sys_op: SysOperation,
+    server_endpoint: str,
+):
+    """``force_recreate`` must fire ``before_recreate`` then ``after_recreate``
+    per old sandbox id, carrying ``old_sandbox_id`` / new ``sandbox_id``, and
+    must NOT fire any delete events (stale cleanup is internal to recreate).
+    """
+    base_url = _normalize_endpoint(server_endpoint)
+
+    # Materialise the sandbox so the shared cache has exactly one entry.
+    write_res = await sys_op.fs().write_file(
+        f"/tmp/jiuwenbox_hook_recreate_{uuid.uuid4().hex[:8]}.txt",
+        "pre-recreate",
+        prepend_newline=False,
+    )
+    assert write_res.code == StatusCode.SUCCESS.code
+
+    cache = jb._JiuwenBoxProviderMixin._shared_sandbox_ids
+    original_id = cache.get(base_url.rstrip("/"))
+    assert isinstance(original_id, str) and original_id
+
+    recorder = _HookRecorder()
+    new_id = await jb.force_recreate_jiuwenbox_sandbox(
+        base_url, lifecycle_hook=recorder, reason="policy_changed",
+    )
+    assert isinstance(new_id, str) and new_id and new_id != original_id
+
+    recorder.assert_exact(
+        [
+            ("before_recreate", {"reason": "policy_changed", "old_sandbox_id": original_id}),
+            (
+                "after_recreate",
+                {
+                    "reason": "policy_changed",
+                    "sandbox_id": new_id,
+                    "old_sandbox_id": original_id,
+                },
+            ),
+        ]
+    )
+    # No delete hooks during recreate.
+    assert not any(name in ("before_delete", "after_delete") for name in recorder.names)
+
+
+@pytest.mark.asyncio
+@requires_jiuwenbox
+async def test_lifecycle_hook_strict_propagates_exception(
+    server_endpoint: str,
+    monkeypatch,
+):
+    """Hook exceptions are strict for create / recreate: they must surface as a
+    failed operation result (create path) and propagate out of
+    ``force_recreate`` (recreate path).
+    """
+    base_url = _normalize_endpoint(server_endpoint)
+    monkeypatch.delenv("JIUWENBOX_SANDBOX_ID", raising=False)
+    clear_jiuwenbox_shared_sandbox(base_url)
+
+    create_events: list[tuple[str, dict]] = []
+    recreate_events: list[tuple[str, dict]] = []
+
+    def raise_on_before_create(event: str, ctx: dict) -> None:
+        create_events.append((event, dict(ctx)))
+        if event == "before_create":
+            raise RuntimeError("boom")
+
+    def raise_on_before_recreate(event: str, ctx: dict) -> None:
+        recreate_events.append((event, dict(ctx)))
+        if event == "before_recreate":
+            raise RuntimeError("boom-recreate")
+
+    marker = uuid.uuid4().hex[:8]
+
+    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+        before_ids = _list_sandbox_ids(client)
+
+        await Runner.start()
+        card_id = f"jiuwenbox_hook_strict_{marker}"
+        card_added = False
+        card = _build_card(
+            card_id=card_id,
+            base_url=base_url,
+            extra_params={"lifecycle_hook": raise_on_before_create},
+        )
+
+        try:
+            assert Runner.resource_mgr.add_sys_operation(card).is_ok()
+            card_added = True
+
+            # create path: strict hook -> op returns an error result.
+            sys_op = Runner.resource_mgr.get_sys_operation(card_id)
+            write_res = await sys_op.fs().write_file(
+                f"/tmp/jiuwenbox_hook_strict_{marker}.txt",
+                "should-not-be-written",
+                prepend_newline=False,
+            )
+            assert write_res.code != StatusCode.SUCCESS.code
+            assert "boom" in write_res.message
+            assert create_events == [("before_create", {"reason": "initial"})]
+
+            # recreate path: strict hook -> force_recreate re-raises.
+            with pytest.raises(RuntimeError, match="boom-recreate"):
+                await jb.force_recreate_jiuwenbox_sandbox(
+                    base_url,
+                    lifecycle_hook=raise_on_before_recreate,
+                    reason="policy_changed",
+                    extra_stale_sandbox_ids=["nonexistent-stale-id"],
+                )
+            assert recreate_events == [
+                ("before_recreate", {"reason": "policy_changed", "old_sandbox_id": "nonexistent-stale-id"})
+            ]
+        finally:
+            if card_added:
+                await _remove_sys_operation_with_sandbox_release(card_id)
+            await Runner.stop()
+            clear_jiuwenbox_shared_sandbox(base_url)
+
+            after_ids = _list_sandbox_ids(client)
+            for sandbox_id in after_ids - before_ids:
+                client.delete(f"/api/v1/sandboxes/{sandbox_id}")
+
+
+@pytest.mark.asyncio
+@requires_jiuwenbox
+async def test_lifecycle_hook_fires_delete_events_on_teardown(
+    server_endpoint: str,
+    monkeypatch,
+):
+    """``SandboxGatewayClient.release`` should trigger delete hooks and remote delete."""
+    base_url = _normalize_endpoint(server_endpoint)
+    monkeypatch.delenv("JIUWENBOX_SANDBOX_ID", raising=False)
+    clear_jiuwenbox_shared_sandbox(base_url)
+
+    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+        before_ids = _list_sandbox_ids(client)
+        await Runner.start()
+        marker = uuid.uuid4().hex[:8]
+        card_id = f"jiuwenbox_hook_delete_{marker}"
+        card_added = False
+        try:
+            recorder = _HookRecorder()
+            card = _build_card(
+                card_id=card_id,
+                base_url=base_url,
+                extra_params={"lifecycle_hook": recorder},
+            )
+            assert Runner.resource_mgr.add_sys_operation(card).is_ok()
+            card_added = True
+
+            sys_op = Runner.resource_mgr.get_sys_operation(card_id)
+            write_res = await sys_op.fs().write_file(
+                f"/tmp/jiuwenbox_hook_delete_{marker}.txt",
+                "materialize-sandbox",
+                prepend_newline=False,
+            )
+            assert write_res.code == StatusCode.SUCCESS.code
+
+            sandbox_id = card.gateway_config.launcher_config.extra_params.get("sandbox_id")
+            assert isinstance(sandbox_id, str) and sandbox_id
+            assert sandbox_id in _list_sandbox_ids(client)
+            # Ignore create-stage hook events; this test verifies teardown events only.
+            recorder.events.clear()
+
+            isolation_key = sys_op.isolation_key_template
+            assert isolation_key
+            await SandboxGatewayClient.release(isolation_key, on_stop="delete")
+            Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
+            card_added = False
+
+            recorder.assert_exact(
+                [
+                    ("before_delete", {"reason": "teardown", "sandbox_id": sandbox_id}),
+                    ("after_delete", {"reason": "teardown", "sandbox_id": sandbox_id}),
+                ]
+            )
+            assert sandbox_id not in _list_sandbox_ids(client)
+        finally:
+            if card_added:
+                await _remove_sys_operation_with_sandbox_release(card_id)
+            await Runner.stop()
+            clear_jiuwenbox_shared_sandbox(base_url)
+            after_ids = _list_sandbox_ids(client)
+            for leftover in after_ids - before_ids:
+                client.delete(f"/api/v1/sandboxes/{leftover}")
+
+
+@pytest.mark.asyncio
+@requires_jiuwenbox
+async def test_lifecycle_hook_strict_propagates_on_delete(
+    server_endpoint: str,
+    monkeypatch,
+):
+    """If before_delete hook raises, delete is interrupted and sandbox remains."""
+    base_url = _normalize_endpoint(server_endpoint)
+    monkeypatch.delenv("JIUWENBOX_SANDBOX_ID", raising=False)
+    clear_jiuwenbox_shared_sandbox(base_url)
+
+    delete_events: list[tuple[str, dict]] = []
+
+    def raise_on_before_delete(event: str, ctx: dict) -> None:
+        delete_events.append((event, dict(ctx)))
+        if event == "before_delete":
+            raise RuntimeError("delete-boom")
+
+    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+        before_ids = _list_sandbox_ids(client)
+        await Runner.start()
+        marker = uuid.uuid4().hex[:8]
+        card_id = f"jiuwenbox_hook_delete_strict_{marker}"
+        card_added = False
+        try:
+            card = _build_card(
+                card_id=card_id,
+                base_url=base_url,
+                extra_params={"lifecycle_hook": raise_on_before_delete},
+            )
+            assert Runner.resource_mgr.add_sys_operation(card).is_ok()
+            card_added = True
+
+            sys_op = Runner.resource_mgr.get_sys_operation(card_id)
+            write_res = await sys_op.fs().write_file(
+                f"/tmp/jiuwenbox_hook_delete_strict_{marker}.txt",
+                "materialize-sandbox",
+                prepend_newline=False,
+            )
+            assert write_res.code == StatusCode.SUCCESS.code
+
+            sandbox_id = card.gateway_config.launcher_config.extra_params.get("sandbox_id")
+            assert sandbox_id in _list_sandbox_ids(client)
+            # Ignore create-stage events; this case asserts strict delete behavior only.
+            delete_events.clear()
+
+            isolation_key = sys_op.isolation_key_template
+            assert isolation_key
+            # Gateway wraps hook exceptions into SysOperationError on failed release.
+            with pytest.raises(SysOperationError, match="delete-boom"):
+                await SandboxGatewayClient.release(isolation_key, on_stop="delete")
+            Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
+            card_added = False
+
+            # before_delete raises before remote DELETE; sandbox should still exist.
+            assert delete_events == [("before_delete", {"reason": "teardown", "sandbox_id": sandbox_id})]
+            assert sandbox_id in _list_sandbox_ids(client)
+        finally:
+            if card_added:
+                await _release_sandbox_for_sys_operation(card_id, ignore_missing=True)
+                Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
+            await Runner.stop()
+            clear_jiuwenbox_shared_sandbox(base_url)
+            after_ids = _list_sandbox_ids(client)
+            for leftover in after_ids - before_ids:
+                client.delete(f"/api/v1/sandboxes/{leftover}")

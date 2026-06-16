@@ -74,12 +74,21 @@ class TeamRole(str, Enum):
     pure-text protocol — the local LLM acts as a scheduler while
     concrete work output is produced by the remote agent and surfaced
     through framework-managed mailbox auto-forwarding.
+
+    ``WORKER`` is the swarmflow execution role: a single-shot, stateless
+    member the swarmflow engine's worker backend creates for one
+    ``agent()`` call. It carries a roster identity (member_name + DB row)
+    but does NOT enter the coordination loop — it runs one DeepAgent turn
+    that ends by calling the structured-output tool, then is torn down.
+    Context is fresh per call ("用完即弃"); workers never poll the
+    mailbox, claim tasks, or run multi-turn.
     """
 
     LEADER = "leader"
     TEAMMATE = "teammate"
     HUMAN_AGENT = "human_agent"
     BRIDGE_AGENT = "bridge_agent"
+    WORKER = "worker"
 
 
 class BridgeMailboxInjectMode(str, Enum):

@@ -16,6 +16,7 @@ from openjiuwen.agent_teams.external.cli_agent.adapters import (
 from openjiuwen.agent_teams.external.cli_agent.injector import StdinPipeInjector
 from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.harness import TeamHarness
+from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.core.common.exception.errors import BaseError
 
 
@@ -119,7 +120,7 @@ async def _lines(*items: str):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_runtime_run_streaming_writes_input_and_consumes_until_complete():
+async def test_runtime_drive_writes_input_and_consumes_until_complete():
     injector = _RecordingInjector()
     runtime = ExternalCliRuntime(
         member_name="dev-1",
@@ -128,7 +129,7 @@ async def test_runtime_run_streaming_writes_input_and_consumes_until_complete():
         output_lines=_lines("thinking...", "more <<END_OF_TURN>>", "next-turn-line"),
     )
 
-    chunks = [chunk async for chunk in runtime.run_streaming({"query": "do it"}, session_id="s")]
+    chunks = [chunk async for chunk in runtime._drive({"query": "do it"})]
 
     # stdout narration is surfaced as output chunks up to the turn marker.
     assert [c.payload["content"] for c in chunks] == ["thinking...", "more <<END_OF_TURN>>"]
@@ -167,7 +168,7 @@ async def test_runtime_abort_stops_turn():
         injector=injector,
         output_lines=_slow_lines(),
     )
-    chunks = [chunk async for chunk in runtime.run_streaming({"query": "go"}, session_id="s")]
+    chunks = [chunk async for chunk in runtime._drive({"query": "go"})]
     # Only the pre-abort line is surfaced; abort stops before "line-2".
     assert [c.payload["content"] for c in chunks] == ["line-1"]
 
@@ -219,7 +220,7 @@ async def test_streaming_premature_eof_crash_raises_with_stderr():
     )
 
     with pytest.raises(BaseError) as excinfo:
-        async for _ in runtime.run_streaming({"query": "go"}, session_id="s"):
+        async for _ in runtime._drive({"query": "go"}):
             pass
 
     message = str(excinfo.value)
@@ -239,7 +240,7 @@ async def test_streaming_eof_without_process_does_not_raise():
         output_lines=_lines("some output"),  # iterator ends, no sentinel, no process
     )
     # Must complete normally — no process to inspect means no crash to surface.
-    async for _ in runtime.run_streaming({"query": "go"}, session_id="s"):
+    async for _ in runtime._drive({"query": "go"}):
         pass
 
 
@@ -281,7 +282,7 @@ async def test_reinvoke_inactivity_timeout_terminates_silent_process(monkeypatch
         inactivity_timeout_s=0.3,
     )
     start = _time.monotonic()
-    async for _ in runtime.run_streaming({"query": "do it"}, session_id="s"):
+    async for _ in runtime._drive({"query": "do it"}):
         pass
     elapsed = _time.monotonic() - start
     assert elapsed < 5.0, f"inactivity timeout did not fire promptly (took {elapsed:.1f}s)"
@@ -330,7 +331,7 @@ async def test_reinvoke_inactivity_timeout_does_not_kill_active_process(monkeypa
         env=dict(os.environ),
         inactivity_timeout_s=0.5,  # < total runtime, but > the 0.1s gap between lines
     )
-    async for _ in runtime.run_streaming({"query": "work"}, session_id="s"):
+    async for _ in runtime._drive({"query": "work"}):
         pass
 
     # Exited cleanly (code 0): no timeout warning, no failure warning.
@@ -343,9 +344,10 @@ async def test_reinvoke_inactivity_timeout_does_not_kill_active_process(monkeypa
 async def test_reinvoke_abort_terminates_current_subprocess(monkeypatch):
     """abort() must promptly kill the in-flight re-invoke subprocess.
 
-    Starts a long sleeping CLI turn in a background task, then aborts. The turn
-    task must finish promptly (the subprocess is terminated) rather than waiting
-    out the full sleep, and no further re-invocation is started.
+    Starts a long sleeping CLI turn via the MemberRuntime surface (``start`` +
+    ``send`` spins up the turn task), then aborts. The turn must end promptly
+    (the subprocess is terminated) rather than waiting out the full sleep, and
+    no further re-invocation is started.
     """
     import sys
 
@@ -370,18 +372,102 @@ async def test_reinvoke_abort_terminates_current_subprocess(monkeypatch):
         inactivity_timeout_s=60.0,  # large, so only abort can end the turn quickly
     )
 
-    async def _run() -> None:
-        async for _ in runtime.run_streaming({"query": "long task"}, session_id="s"):
-            pass
-
-    task = asyncio.create_task(_run())
+    await runtime.start()
+    await runtime.send("long task")
+    turn_task = runtime._turn_task
     # Wait until the subprocess is actually live before aborting.
     while runtime._current is None:
         await asyncio.sleep(0.01)
-    await runtime.abort()
-    await asyncio.wait_for(task, timeout=5.0)  # raises if abort did not preempt
+    await runtime.abort(immediate=True)
+    assert turn_task is not None
+    await asyncio.wait_for(turn_task, timeout=5.0)  # raises if abort did not preempt
     assert runtime._aborted
     assert runtime._current is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_member_runtime_surface_drives_turn_and_emits_events():
+    """send/outputs/on_round/on_state adapt the single-turn _drive into the surface.
+
+    Starting a turn via ``send`` (IDLE) runs the CLI ``_drive`` to its
+    turn-complete marker, surfaces each narration line through ``outputs``, and
+    fires the same started/finished round events plus RUNNING/IDLE phase
+    transitions the team StreamController maps from a NativeHarness.
+    """
+    injector = _RecordingInjector()
+    runtime = ExternalCliRuntime(
+        member_name="dev-1",
+        adapter=build_adapter("generic"),
+        injector=injector,
+        output_lines=_lines("hello", "world <<END_OF_TURN>>"),
+    )
+    states: list[HarnessState] = []
+    rounds: list[str] = []
+
+    async def _on_state(new: HarnessState) -> None:
+        states.append(new)
+
+    async def _on_round(kind: str) -> None:
+        rounds.append(kind)
+
+    await runtime.start()
+    await runtime.subscribe(on_state=_on_state, on_round=_on_round)
+
+    collected: list = []
+
+    async def _consume() -> None:
+        async for chunk in runtime.outputs():
+            collected.append(chunk)
+
+    consumer = asyncio.create_task(_consume())
+    await runtime.send("do it")
+    assert runtime._turn_task is not None
+    await runtime._turn_task
+    await runtime.stop()
+    await asyncio.wait_for(consumer, timeout=2.0)
+
+    assert [c.payload["content"] for c in collected] == ["hello", "world <<END_OF_TURN>>"]
+    assert rounds == ["started", "finished"]
+    assert HarnessState.RUNNING in states and HarnessState.IDLE in states
+    assert runtime.state is HarnessState.TERMINATED
+    assert injector.writes == ["do it"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_member_runtime_abort_emits_aborted_round():
+    """abort() on a RUNNING turn stops _drive and fires an ``aborted`` round event."""
+    injector = _RecordingInjector()
+
+    async def _slow_lines():
+        yield "line-1"
+        # Block until the turn is aborted, then yield once more (must be skipped).
+        await asyncio.sleep(0.5)
+        yield "should-not-surface <<END_OF_TURN>>"
+
+    runtime = ExternalCliRuntime(
+        member_name="dev-1",
+        adapter=build_adapter("generic"),
+        injector=injector,
+        output_lines=_slow_lines(),
+    )
+    rounds: list[str] = []
+
+    async def _on_round(kind: str) -> None:
+        rounds.append(kind)
+
+    await runtime.start()
+    await runtime.subscribe(on_round=_on_round)
+    await runtime.send("go")
+    turn_task = runtime._turn_task
+    await asyncio.sleep(0.05)  # let the first line flow before aborting
+    await runtime.abort()
+    assert turn_task is not None
+    await asyncio.wait_for(turn_task, timeout=2.0)
+
+    assert rounds == ["started", "aborted"]
+    assert runtime.state is HarnessState.IDLE
 
 
 @pytest.mark.level0
@@ -401,10 +487,15 @@ def test_team_harness_exposes_member_runtime_surface():
     # member the Protocol declares (issubclass is unavailable for Protocols
     # with property members, so check attribute presence on the class).
     for member in (
-        "run_streaming",
-        "steer",
-        "follow_up",
+        "start",
+        "stop",
+        "state",
+        "session_id",
+        "outputs",
+        "send",
         "abort",
+        "pause",
+        "subscribe",
         "init_cwd_for_round",
         "has_pending_interrupt",
         "is_pending_interrupt_resume_valid",
@@ -413,7 +504,6 @@ def test_team_harness_exposes_member_runtime_surface():
         "unregister_rail",
         "register_member_tools",
         "inject_member_memory",
-        "run_agent_customizer",
         "workspace",
         "sys_operation",
     ):
@@ -513,7 +603,7 @@ async def test_reinvoke_runtime_surfaces_failed_turn(monkeypatch):
 
     runtime = ReinvokeCliRuntime(member_name="codex-1", adapter=adapter, env=dict(os.environ))
     # Completes without hanging — if stderr were not drained this would block.
-    async for _ in runtime.run_streaming({"query": "write the file"}, session_id="s"):
+    async for _ in runtime._drive({"query": "write the file"}):
         pass
 
     assert mock_logger.warning.called, "a failed CLI turn must emit a warning"

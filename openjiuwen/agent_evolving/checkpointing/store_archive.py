@@ -89,8 +89,8 @@ description: {description}
         )
         return skill_dir
 
-    async def archive_skill_body(self, name: str) -> Optional[str]:
-        skill_dir = self._store.resolve_skill_dir(name)
+    async def archive_skill_body(self, name: str, *, subject_kind: Optional[str] = None) -> Optional[str]:
+        skill_dir = self._store.resolve_skill_dir(name, subject_kind=subject_kind)
         if skill_dir is None:
             return None
         md_path = self._store.find_skill_md(skill_dir)
@@ -104,8 +104,8 @@ description: {description}
         logger.info("[EvolutionStore] archived %s -> %s", md_path.name, dest.name)
         return dest.name
 
-    async def archive_evolutions(self, name: str) -> Optional[str]:
-        skill_dir = self._store.resolve_skill_dir(name)
+    async def archive_evolutions(self, name: str, *, subject_kind: Optional[str] = None) -> Optional[str]:
+        skill_dir = self._store.resolve_skill_dir(name, subject_kind=subject_kind)
         if skill_dir is None:
             return None
         evo_path = skill_dir / _EVOLUTION_FILENAME
@@ -119,14 +119,14 @@ description: {description}
         logger.info("[EvolutionStore] archived evolutions -> %s", dest.name)
         return dest.name
 
-    async def clear_evolutions(self, name: str) -> None:
+    async def clear_evolutions(self, name: str, *, subject_kind: Optional[str] = None) -> None:
         empty_log = EvolutionLog.empty(skill_id=name)
-        await self._store.save_evolution_log(name, empty_log)
-        await self._store.render_evolution_markdown(name)
+        await self._store.save_evolution_log(name, empty_log, subject_kind=subject_kind)
+        await self._store.render_evolution_markdown(name, subject_kind=subject_kind)
         logger.info("[EvolutionStore] cleared evolutions for skill=%s", name)
 
-    def list_archives(self, name: str) -> List[str]:
-        skill_dir = self._store.resolve_skill_dir(name)
+    def list_archives(self, name: str, *, subject_kind: Optional[str] = None) -> List[str]:
+        skill_dir = self._store.resolve_skill_dir(name, subject_kind=subject_kind)
         if skill_dir is None:
             return []
         archive = skill_dir / "archive"

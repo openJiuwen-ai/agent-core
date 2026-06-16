@@ -112,7 +112,7 @@ class TeamRuntimeManager:
         inputs: object = None,
     ) -> TeamRuntimeActivation:
         """Resolve the TeamAgent to run for the target team/session."""
-        team_session = TeamRuntimeManager._build_session(spec, session)
+        team_session = TeamRuntimeManager._build_session(session)
         target_session_id = team_session.get_session_id()
         team_name = spec.team_name
 
@@ -766,7 +766,7 @@ class TeamRuntimeManager:
 
         from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
 
-        session = create_agent_team_session(session_id=session_id)
+        session = TeamRuntimeManager._build_session(session_id)
         try:
             await session.pre_run()
         except Exception as e:
@@ -896,20 +896,26 @@ class TeamRuntimeManager:
             # prompts) that the rest of manager.py doesn't need at import time.
             from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 
+            # Recover only the leader here. Teammate recovery is a coordination
+            # concern owned by the leader's ``coordination.start`` (which calls
+            # ``recover_team`` once the leader's runtime is live); the activation
+            # is always streamed right after, so spawning teammates eagerly here
+            # would just rebuild the same members the coordination start spawns
+            # — a redundant second restart per teammate every cold recover.
             agent = TeamAgent.recover_from_session(team_session, team_name, runtime_spec=spec)
-            await agent.recover_team()
         elif kind is RunActionKind.NEW_TEAM_IN_SESSION:
             await self._pre_run_with_inputs(team_session, inputs)
             agent = spec.build()
             await agent.resume_for_new_session(team_session)
-            # team_in_db is True at this point — the team row exists, so
-            # there may be teammate rows left over from before the stop
-            # (status STOPPED / PAUSED / etc). Replay them onto the new
-            # session so "recover with a fresh session" actually brings
-            # the original members back, not just an empty leader. Safe
-            # on never-built teams: recover_team iterates DB members and
-            # is a no-op when none exist.
-            await agent.recover_team()
+            # team_in_db is True at this point — the team row exists, so there
+            # may be teammate rows left over from before the stop (status
+            # STOPPED / PAUSED / etc). Those original members are replayed onto
+            # the new session by the leader's ``coordination.start`` (which calls
+            # ``recover_team`` once the leader runtime is live, then iterates the
+            # DB members); the activation is streamed right after, so recovering
+            # them eagerly here would just rebuild the same members a second
+            # time. ``_flush_team_manifest`` persists only the leader config, so
+            # it has no dependency on teammates being spawned first.
             await self._flush_team_manifest(agent, team_session)
         elif kind is RunActionKind.CREATE:
             await self._pre_run_with_inputs(team_session, inputs)
@@ -930,14 +936,14 @@ class TeamRuntimeManager:
 
     @staticmethod
     def _build_session(
-        spec: "TeamAgentSpec",
         session: str | AgentTeamSession | None,
     ) -> AgentTeamSession:
         if isinstance(session, AgentTeamSession):
+            session.set_source_metadata_enabled(False)
             return session
         if isinstance(session, str):
-            return create_agent_team_session(session_id=session)
-        return create_agent_team_session()
+            return create_agent_team_session(session_id=session, source_metadata_enabled=False)
+        return create_agent_team_session(source_metadata_enabled=False)
 
     @staticmethod
     async def _pre_run_with_inputs(session: AgentTeamSession, inputs: object) -> None:

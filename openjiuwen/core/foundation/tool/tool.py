@@ -22,7 +22,8 @@ def tool(
         description: Optional[str] = None,
         input_params: Optional[Union[Dict[str, Any], Type[BaseModel]]] = None,
         card: Optional[ToolCard] = None,
-        auto_extract: bool = True
+        auto_extract: bool = True,
+        stateless: bool = False
 ) -> Callable[[Callable], LocalFunction]:
     ...
 
@@ -34,7 +35,8 @@ def tool(
         description: Optional[str] = None,
         input_params: Optional[Union[Dict[str, Any], Type[BaseModel]]] = None,
         card: Optional[ToolCard] = None,
-        auto_extract: bool = True
+        auto_extract: bool = True,
+        stateless: bool = False
 ) -> LocalFunction:
     """
     Universal decorator to convert functions into LocalFunction tools.
@@ -83,6 +85,8 @@ def tool(
         input_params: Custom parameter schema (jsonschema dict or Pydantic model)
         card: Pre-constructed ToolCard
         auto_extract: Whether to auto-extract schema from signature
+        stateless: Mark the tool as stateless (shared across agents under its
+            bare id) instead of agent-owned. Defaults to False.
 
     Returns:
         LocalFunction instance or decorator function
@@ -90,13 +94,23 @@ def tool(
 
     def decorator(func_: Callable) -> LocalFunction:
         if card is not None:
-            return _handle_prebuilt_card(func_,
-                                         card,
-                                         final_name=name,
-                                         description=description,
-                                         input_params=input_params)
+            return _handle_prebuilt_card(
+                func_,
+                card=card,
+                name=name,
+                description=description,
+                input_params=input_params,
+                stateless=stateless,
+            )
         final_name = name if name is not None else func_.__name__
-        return _create_new_tool_card(func_, final_name, description, input_params, auto_extract)
+        return _create_new_tool_card(
+            func_,
+            final_name=final_name,
+            description=description,
+            input_params=input_params,
+            auto_extract=auto_extract,
+            stateless=stateless,
+        )
 
     if func is not None:
         return decorator(func)
@@ -105,18 +119,20 @@ def tool(
 
 def _handle_prebuilt_card(
         func: Callable,
+        *,
         card: ToolCard,
-        final_name: str,
+        name: Optional[str],
         description: Optional[str],
         input_params: Optional[Union[Dict[str, Any], Type[BaseModel]]],
+        stateless: bool = False,
 ) -> LocalFunction:
     """Handle case where a pre-built ToolCard is provided."""
     overrides = {}
-    if final_name is not None and final_name != card.name:
-        overrides['name'] = final_name
-        if final_name != func.__name__:
+    if name is not None and name != card.name:
+        overrides['name'] = name
+        if name != func.__name__:
             logger.warning(
-                f"Overriding card name '{card.name}' with '{final_name}'"
+                f"Overriding card name '{card.name}' with '{name}'"
             )
 
     if description is not None and description != card.description:
@@ -125,11 +141,15 @@ def _handle_prebuilt_card(
     if input_params is not None and input_params != card.input_params:
         overrides['input_params'] = input_params
 
+    if stateless and not card.stateless:
+        overrides['stateless'] = True
+
     if overrides:
         new_card = ToolCard(
             name=overrides.get('name', card.name),
             description=overrides.get('description', card.description),
             input_params=overrides.get('input_params', card.input_params),
+            stateless=overrides.get('stateless', card.stateless),
         )
         return LocalFunction(card=new_card, func=func)
 
@@ -139,10 +159,12 @@ def _handle_prebuilt_card(
 
 def _create_new_tool_card(
         func: Callable,
+        *,
         final_name: str,
         description: Optional[str],
         input_params: Optional[Union[Dict[str, Any], Type[BaseModel]]],
-        auto_extract: bool
+        auto_extract: bool,
+        stateless: bool = False,
 ) -> LocalFunction:
     """Create a new ToolCard from function and configuration."""
     final_description = _get_final_description(func, description, auto_extract)
@@ -151,6 +173,7 @@ def _create_new_tool_card(
         name=final_name,
         description=final_description,
         input_params=final_input_params,
+        stateless=stateless,
     )
     local_func = LocalFunction(card=new_card, func=func)
     return local_func

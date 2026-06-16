@@ -11,7 +11,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/paths.py` · `context.py` · `i18n.py` · `timefmt.py` · `constants.py` · `worktree_remote.py` · `harness.py` |
-| 最近一次修订日期 | 2026-05-27 |
+| 最近一次修订日期 | 2026-06-05 |
 | 关联 feature | F_24_agent-time-awareness.md |
 
 ## 范围 / 边界
@@ -117,18 +117,25 @@
 
 ### harness.py
 
-21. **TeamAgent 不直接持 DeepAgent 引用**。DeepAgent 的所有调用面（`add_rail` / `steer` /
-    `follow_up` / `abort` / `Runner.run_agent_streaming`）必须经 `TeamHarness`。`TeamHarness.inner_agent`
-    是给测试与少数迁移 helper 的逃生口，生产业务代码禁用。
-22. **Rail 挂载顺序在 `TeamHarness.build` 内固化**：`team_tool_rail` 必须先挂且即时初始化
-    （`init(deep_agent)`），保证 `TeamPolicyRail` 取系统提示词 snapshot 时 team tools 已注册。
-    后续 rail 顺序：`team_policy_rail` → `first_iter_gate?` → `team_workspace_rail?` →
-    `tool_approval_rail?`。
+21. **TeamAgent 不直接持 DeepAgent 引用**。底层 brain 的所有调用面（`add_rail` /
+    `send` / `abort` / `outputs` / 生命周期）必须经 `TeamHarness`（组合单个
+    `NativeHarness`）。`TeamHarness.inner_agent` 返回该 native，是给测试与少数迁移
+    helper 的逃生口，生产业务代码禁用。
+22. **Rail 挂载顺序在 `TeamHarness.build` 内固化**：build 时 provider 按
+    `team_tool_rail` → `team_policy_rail` → `team_workspace_rail?` →
+    `tool_approval_rail?` → `team_plan_mode_rail?` 挂到 DeepAgent template；
+    `native.prepare_config()` 复制 config 后，对**配置好的 native** 即时初始化
+    `team_tool_rail`（`set_sys_operation` / `set_workspace` / `init(native)`），保证
+    运行前 team tools snapshot 可见。FirstIterationGate 已随单 supervisor 模型删除。
 23. **`run_agent_customizer` 隔离用户回调失败**：customizer 抛异常只 log warning，不让整个
     team 装配挂掉。这是有意的容错——customizer 是 user-facing 扩展点，不能让用户的 bug 杀
-    掉 team 启动；但失败必须可见。
-24. **`run_streaming` 的入参形态是序列化友好的**：`inputs: dict[str, Any]` + `session_id: str`。
-    这条不变量是为了让远端 / 分布式调度 backend（替换 DeepAgent 的设想）能走同一份签名。
+    掉 team 启动；但失败必须可见。缓存以便 session 切换重建 native 时重跑。
+24. **交互走 `start` / `outputs` / `send` / `abort` 的 MemberRuntime 表面**（见
+    [[S_18_harness-interaction-contract]]）：`send(content, immediate=)` 是唯一输入入口
+    （IDLE 起轮 / RUNNING immediate steer / 否则 follow-up），`outputs()` 是唯一流式
+    通道。`abort` / `pause` 仅在 cycle 活跃时转发 native，否则 no-op。已删除按
+    `inputs: dict + session_id` 签名的 `run_streaming`——远端 / 分布式 backend 改为
+    实现同一 MemberRuntime 表面（CLI runtime 即一例）。
 
 ## 接口契约
 
@@ -260,9 +267,9 @@ AgentCustomizer = Callable[[DeepAgent, Optional[str], str], None]
 class _MountedRails:
     team_tool: TeamToolRail
     team_policy: TeamPolicyRail
-    first_iter_gate: Optional[FirstIterationGate] = None
     team_workspace: Optional[TeamWorkspaceRail] = None
     tool_approval: Optional[TeamToolApprovalRail] = None
+    team_plan_mode: Optional[TeamPlanModeRail] = None
 
 class TeamHarness:
     @classmethod
@@ -274,9 +281,10 @@ class TeamHarness:
         member_name: Optional[str],
         team_tool_rail: TeamToolRail,
         team_policy_rail: TeamPolicyRail,
-        first_iter_gate: Optional[FirstIterationGate] = None,
         team_workspace_rail: Optional[TeamWorkspaceRail] = None,
         tool_approval_rail: Optional[TeamToolApprovalRail] = None,
+        team_plan_mode_rail: Optional[TeamPlanModeRail] = None,
+        initial_plan_mode: bool = False,
     ) -> "TeamHarness"
 
     def run_agent_customizer(self, customizer: AgentCustomizer) -> None
@@ -294,16 +302,23 @@ class TeamHarness:
     def is_pending_interrupt_resume_valid(self, user_input: Any) -> bool
     def init_cwd_for_round(self) -> None
 
-    # runtime
-    async def steer(self, content: str) -> None
-    async def follow_up(self, content: str) -> None
-    async def abort(self) -> None
-    def run_streaming(
+    # lifecycle + interaction (HarnessProtocol / MemberRuntime surface)
+    @property
+    def state(self) -> HarnessState
+    @property
+    def session_id(self) -> Optional[str]
+    async def start(self, *, team_session: Optional[Any] = None) -> None
+    async def stop(self) -> None
+    def outputs(self) -> AsyncIterator[Any]
+    async def send(self, content: Any, *, immediate: bool = False) -> Any
+    async def abort(self, *, immediate: bool = False) -> None
+    async def pause(self) -> None
+    async def subscribe(
         self,
-        inputs: dict[str, Any],
         *,
-        session_id: Optional[str],
-    ) -> AsyncIterator[Any]
+        on_state: Callable[..., Any] | None = None,
+        on_round: Callable[..., Any] | None = None,
+    ) -> None
 
     # rail / tool registration
     async def register_rail(self, rail: AgentRail) -> None
@@ -393,7 +408,9 @@ tool_approval?。Optional 字段缺省 = 该 rail 当前装配未启用，不是
 - **`worktree_remote.py` 的关系**：依赖 `paths.py`、依赖 `messager/`（P2P 通信）、依赖
   `harness.tools.worktree`（通用 manager / config / git helper / 创建结果模型）。team 一侧
   不再持有 worktree manager 实现，只贡献"远程后端 + 远程 handler + 团队目录布局"这三块。
-- **`harness.py` 的关系**：是 team 子系统对 DeepAgent 的唯一入口。`agent/` 下的所有 manager
-  （spawn / coordination / stream / recovery / session）通过 `TeamHarness` 操作 DeepAgent；
-  `rails/` 下的 team rail 由 `TeamHarness.build` 在挂载时按固定顺序串起来。`runtime/`
-  调度 spec 直接拿 `TeamHarness.run_streaming` 当远端可移植入口。
+- **`harness.py` 的关系**：是 team 子系统对底层 brain 的唯一入口。`agent/` 下的所有 manager
+  （spawn / coordination / stream / recovery / session）通过 `TeamHarness`（组合
+  `NativeHarness`）操作 brain；`rails/` 下的 team rail 由 `TeamHarness.build` 在挂载时按固定
+  顺序串起来。远端 / 分布式 backend 改为实现同一 MemberRuntime 交互表面
+  （`start` / `outputs` / `send` / `abort`，见 [[S_18_harness-interaction-contract]]），
+  CLI runtime 即一例。

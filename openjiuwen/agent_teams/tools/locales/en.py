@@ -34,9 +34,9 @@ STRINGS: dict[str, str] = {
     ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/en/clean_team.md
-    # ===== spawn_member ========================================================
-    # spawn_member._desc lives in descs/en/spawn_member.md
-    "spawn_member.member_name": (
+    # ===== spawn_teammate ======================================================
+    # spawn_teammate._desc lives in descs/en/spawn_teammate.md
+    "spawn_teammate.member_name": (
         "[PUBLIC] Unique member name (semantic slug, e.g. 'backend-dev-1', "
         "DNS-label-style kebab-case). **Must start with a lowercase ASCII "
         "letter (a-z); the rest may be lowercase letters, digits (0-9) or "
@@ -45,13 +45,13 @@ STRINGS: dict[str, str] = {
         "the routing key for all message/approval/task operations; must be "
         "unique within the team"
     ),
-    "spawn_member.display_name": (
+    "spawn_teammate.display_name": (
         "[PUBLIC] Human-readable display label for the member (e.g. 'Backend Expert'); "
         "purely presentational, not used for routing. "
         "Injected into every other member's system prompt and returned by list_members — "
         "do not put private content here"
     ),
-    "spawn_member.desc": (
+    "spawn_teammate.desc": (
         "[PUBLIC] Long-term role profile of the member, including professional background, "
         "core expertise, preferred task types, collaboration style, "
         "and boundaries the member should not own. "
@@ -59,73 +59,114 @@ STRINGS: dict[str, str] = {
         "never put your internal assessment of the member, sensitive goals, "
         "or confidential strategy here"
     ),
-    "spawn_member.role_type": (
-        "[INTERNAL] Optional. Member role type — drives framework wiring, "
-        "never rendered into any member's prompt text. "
-        "'teammate' (default) = regular LLM teammate, "
-        "requires model_name/prompt to drive its avatar. 'human_agent' = human "
-        "member driven by the real user via HumanAgentInbox; **rejects** model_name "
-        "and prompt (the framework template manages them) — passing those fields "
-        "raises an error. Choosing 'human_agent' requires spec.enable_hitt=True and "
-        "the current build_team instance must not have disabled HITT. "
-        "'bridge_agent' = bridge to an external independent agent (e.g. claudecode "
-        "/ codex / hermes). Behaves as a full teammate locally (claims tasks, "
-        "sends/receives messages); concrete work output is produced by the remote "
-        "agent reached over a pure-text protocol, and the local LLM only "
-        "schedules — it passes the remote's output through verbatim. Choosing "
-        "'bridge_agent' requires non-empty 'desc' (used both as the teammate "
-        "persona and the remote's connect briefing) and optional "
-        "mailbox_inject_mode / protocol / adapter_config / model_name. Requires "
-        "spec.enable_bridge=True and the current build_team instance must not have "
-        "disabled Bridge. "
-        "'external_cli' = launch a third-party CLI agent (claudecode / codex / ...) "
-        "directly as a teammate; its brain is the CLI subprocess rather than a local "
-        "LLM, and it sends messages / claims tasks through the auto-injected team MCP "
-        "tools. Choosing 'external_cli' requires 'cli_agent' (the CLI kind) and "
-        "non-empty 'desc' (the member persona), and rejects model_name/prompt (the "
-        "model and config live on the CLI side). 'cli_agent' must name a CLI kind "
-        "pre-declared in spec.external_cli_agents"
-    ),
-    "spawn_member.cli_agent": (
-        "Only used when role_type='external_cli'. Identifier of the third-party CLI "
-        "agent kind to launch, e.g. 'claude' (claudecode) or 'codex'. Must match a "
-        "static config entry pre-declared in spec.external_cli_agents — the launch "
-        "command, working directory and MCP injection all live in that entry; this "
-        "field only references it by name"
-    ),
-    "spawn_member.prompt": (
+    "spawn_teammate.prompt": (
         "[PRIVATE, visible only to this member] Long-term working conventions, "
         "injected only into this member's own system prompt: stable working style, "
         "technical preferences, collaboration constraints, "
         "and any hidden goals or sensitive directives meant only for this member. "
         "Do not write current-batch tasks or generic startup filler such as "
-        "'start working' or 'check the task list'. "
-        "Forbidden when role_type='human_agent'"
+        "'start working' or 'check the task list'"
     ),
-    "spawn_member.model_name": (
+    "spawn_teammate.model_name": (
         "Optional. Suggested model name for this member "
         "(e.g. gpt-4, claude-sonnet-4); "
-        "the system picks an appropriate model when omitted. "
-        "Forbidden when role_type='human_agent'; "
-        "for role_type='bridge_agent' it selects the local scheduler LLM"
+        "the system picks an appropriate model when omitted"
     ),
-    "spawn_member.mailbox_inject_mode": (
-        "Only used when role_type='bridge_agent'. Controls how team-side "
-        "mailbox messages are wrapped before being relayed to the remote agent. "
-        "'passthrough' (default) prefixes only the sender label; 'rephrase' "
-        "wraps full sender context (role, persona, optional task hint)"
+    # ===== spawn_human_agent ===================================================
+    # spawn_human_agent._desc lives in descs/en/spawn_human_agent.md
+    "spawn_human_agent.member_name": (
+        "[PUBLIC] Unique name for the human member (semantic slug, e.g. "
+        "'product-owner', DNS-label-style kebab-case). **Must start with a "
+        "lowercase ASCII letter (a-z); the rest may be lowercase letters, "
+        "digits (0-9) or hyphen (-)** — no uppercase, underscore, whitespace, "
+        "CJK or any other non-ASCII characters. Serves as the primary "
+        "identifier and routing key; must be unique within the team"
     ),
-    "spawn_member.protocol": (
-        "Only used when role_type='bridge_agent'. Protocol identifier "
-        "(e.g. 'a2a' / 'acp' / 'claudecode'). Reserved for future "
-        "BridgeProtocolAdapter lookup; empty string means no adapter is "
+    "spawn_human_agent.display_name": (
+        "[PUBLIC] Human-readable display label for the human member "
+        "(e.g. 'Product Owner'); purely presentational, not used for routing. "
+        "Injected into every other member's system prompt and returned by "
+        "list_members — do not put private content here"
+    ),
+    "spawn_human_agent.desc": (
+        "[PUBLIC] Role profile and responsibilities of the human member, used "
+        "for display and persona persistence and injected into other members' "
+        "system prompts / returned by list_members. The real user drives this "
+        "member via HumanAgentInbox; the model and startup prompt are managed "
+        "by the framework template, so do not provide them here"
+    ),
+    # ===== spawn_bridge_agent ==================================================
+    # spawn_bridge_agent._desc lives in descs/en/spawn_bridge_agent.md
+    "spawn_bridge_agent.member_name": (
+        "[PUBLIC] Unique name for the bridge member (semantic slug, e.g. "
+        "'remote-claude-1', DNS-label-style kebab-case). **Must start with a "
+        "lowercase ASCII letter (a-z); the rest may be lowercase letters, "
+        "digits (0-9) or hyphen (-)** — no uppercase, underscore, whitespace, "
+        "CJK or any other non-ASCII characters. Serves as the primary "
+        "identifier and routing key; must be unique within the team"
+    ),
+    "spawn_bridge_agent.display_name": (
+        "[PUBLIC] Human-readable display label for the bridge member "
+        "(e.g. 'Remote Claude'); purely presentational, not used for routing. "
+        "Injected into every other member's system prompt and returned by "
+        "list_members — do not put private content here"
+    ),
+    "spawn_bridge_agent.desc": (
+        "[PUBLIC] Role profile of the bridge member. **Required**: it doubles "
+        "as the local teammate persona AND the connect briefing the remote "
+        "agent adopts (sent via adapter.connect). Injected into other members' "
+        "system prompts and returned by list_members — do not put private "
+        "content here"
+    ),
+    "spawn_bridge_agent.mailbox_inject_mode": (
+        "Controls how team-side mailbox messages are wrapped before being "
+        "relayed to the remote agent. 'passthrough' (default) prefixes only "
+        "the sender label; 'rephrase' wraps full sender context (role, "
+        "persona, optional task hint)"
+    ),
+    "spawn_bridge_agent.protocol": (
+        "Protocol identifier (e.g. 'a2a' / 'acp' / 'claudecode'). Reserved for "
+        "future BridgeProtocolAdapter lookup; empty string means no adapter is "
         "wired yet (bridge degrades to a normal teammate)"
     ),
-    "spawn_member.adapter_config": (
-        "Only used when role_type='bridge_agent'. Free-form adapter "
-        "configuration (endpoint, auth, relay_timeout_s, ...). Passed "
-        "verbatim to BridgeProtocolAdapter.connect — schema is up to the "
-        "concrete adapter implementation"
+    "spawn_bridge_agent.adapter_config": (
+        "Free-form adapter configuration (endpoint, auth, relay_timeout_s, "
+        "...). Passed verbatim to BridgeProtocolAdapter.connect — schema is up "
+        "to the concrete adapter implementation"
+    ),
+    "spawn_bridge_agent.model_name": (
+        "Optional. Model name for the local scheduler LLM "
+        "(e.g. gpt-4, claude-sonnet-4); the system picks one when omitted. "
+        "Note the remote agent's model lives on its own side, not controlled "
+        "by this field"
+    ),
+    # ===== spawn_external_cli ===================================================
+    # spawn_external_cli._desc lives in descs/en/spawn_external_cli.md
+    "spawn_external_cli.member_name": (
+        "[PUBLIC] Unique name for the CLI member (semantic slug, e.g. "
+        "'cli-coder-1', DNS-label-style kebab-case). **Must start with a "
+        "lowercase ASCII letter (a-z); the rest may be lowercase letters, "
+        "digits (0-9) or hyphen (-)** — no uppercase, underscore, whitespace, "
+        "CJK or any other non-ASCII characters. Serves as the primary "
+        "identifier and routing key; must be unique within the team"
+    ),
+    "spawn_external_cli.display_name": (
+        "[PUBLIC] Human-readable display label for the CLI member "
+        "(e.g. 'Claude CLI Coder'); purely presentational, not used for "
+        "routing. Injected into every other member's system prompt and "
+        "returned by list_members — do not put private content here"
+    ),
+    "spawn_external_cli.desc": (
+        "[PUBLIC] Persona / role profile of this CLI member. **Required**. "
+        "Injected into other members' system prompts and returned by "
+        "list_members — do not put private content here"
+    ),
+    "spawn_external_cli.cli_agent": (
+        "Identifier of the third-party CLI agent kind to launch, e.g. 'claude' "
+        "(claudecode) or 'codex'. Must match a static config entry pre-declared "
+        "in spec.external_cli_agents — the launch command, working directory "
+        "and MCP injection all live in that entry; this field only references "
+        "it by name"
     ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/en/shutdown_member.md
@@ -262,4 +303,27 @@ STRINGS: dict[str, str] = {
         "history (view file version history)"
     ),
     "workspace_meta.path": "Relative path of the target file (required for lock/unlock/history)",
+    # ===== swarmflow / structured_output ======================================
+    # swarmflow._desc lives in descs/en/swarmflow.md
+    # structured_output._desc lives in descs/en/structured_output.md (dynamic schema, no fixed params)
+    "swarmflow.script_path": "Path to the swarmflow script file (a Python module with META and async def run(args)).",
+    "swarmflow.args": "Optional argument value passed to the script's run(args) (e.g. a question, a target path).",
+    "swarmflow_worker.schema": (
+        "You are a single-shot swarmflow worker. Read the task in the user message, "
+        "do the work, then call the `structured_output` tool EXACTLY ONCE with the "
+        "structured result conforming to its input schema. IMPORTANT: `structured_output` "
+        "is the ONLY way to submit your result — if you do NOT call it, the task is "
+        "considered FAILED and your text output is discarded. Do NOT write the result "
+        "as plain text — it is only captured through the tool call. After calling "
+        "`structured_output`, stop immediately."
+    ),
+    "swarmflow_worker.free": (
+        "You are a single-shot swarmflow worker. Read the task in the user message, "
+        "do the work, and return the answer as your final message."
+    ),
+    "structured_output.reminder": (
+        "[IMPORTANT] You MUST submit your result by calling the `structured_output` tool. "
+        "Do NOT write the result in your text. This is the ONLY way to submit — "
+        "not calling the tool = task failure."
+    ),
 }

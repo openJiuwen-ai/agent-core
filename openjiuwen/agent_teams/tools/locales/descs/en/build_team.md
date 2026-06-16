@@ -1,7 +1,7 @@
 Assemble a team and register yourself as Leader. Call as soon as you have a goal — don't hesitate.
 
 ## Call Order
-build_team → create_task → spawn_member → send_message(to="*").
+build_team → create_task → spawn_teammate → send_message(to="*").
 No other team tool may be called before build_team.
 
 ## HITT (Human in the Team)
@@ -9,9 +9,9 @@ HITT is a layered switch: `TeamAgentSpec.enable_hitt` is the spec-level capabili
 
 - `enable_hitt` omitted: inherit the spec setting (on if spec is on, off if spec is off)
 - `enable_hitt=true`: explicitly enable for this build — requires spec.enable_hitt=True or it errors
-- `enable_hitt=false`: explicitly disable — predefined HUMAN_AGENT members are skipped, and any subsequent `spawn_member(role_type='human_agent')` is rejected
+- `enable_hitt=false`: explicitly disable — predefined HUMAN_AGENT members are skipped, and any subsequent `spawn_human_agent` is rejected
 
-When enabled, every `role_type=HUMAN_AGENT` entry in `predefined_members` is registered during build_team; you can also bring up new human members at runtime via `spawn_member(role_type='human_agent', ...)`. The framework does **not** auto-inject a default `human_agent` — every human must be declared or spawned explicitly.
+When enabled, every `role_type=HUMAN_AGENT` entry in `predefined_members` is registered during build_team; you can also bring up new human members at runtime via `spawn_human_agent(...)`. The framework does **not** auto-inject a default `human_agent` — every human must be declared or spawned explicitly.
 
 Use HITT when the user signals participation intent ("I'll join", "count me in", "I'll take that one") or when the team spec already pre-declared human members you want to keep for this run.
 

@@ -368,6 +368,9 @@ class Workspace:
         return get_workspace_schema(self.language)
 
     def __post_init__(self) -> None:
+        if self.root_path is None:
+            self.root_path = "./"
+
         # Fill in default schema when no directories are explicitly provided.
         if not self.directories:
             # Use a deepcopy so that callers can mutate their instance safely.

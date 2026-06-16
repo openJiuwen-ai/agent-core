@@ -20,6 +20,15 @@ Output = TypeVar('Output', contravariant=True)
 class ToolCard(BaseCard):
     input_params: Dict[str, Any] | Type[BaseModel] = Field(default_factory=dict)
     properties: Dict[str, Any] = Field(default_factory=dict)
+    stateless: bool = Field(
+        default=False,
+        description=(
+            "Whether the tool holds no per-agent/session state. Stateless tools "
+            "(module-level singletons) are shared across agents under their bare "
+            "id; stateful tools are owned exclusively by one agent and get an "
+            "agent-qualified id at registration."
+        ),
+    )
 
     def tool_info(self):
         return ToolInfo(name=self.name, description=self.description, parameters=self.input_params)

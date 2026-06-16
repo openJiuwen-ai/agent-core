@@ -20,7 +20,6 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import (
     SysOperationSpec,
     VisionModelSpec,
     WorkspaceSpec,
-    register_rail_type,
 )
 from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.agent_teams.schema.team import (
@@ -45,7 +44,6 @@ __all__ = [
     "TransportSpec",
     "VisionModelSpec",
     "WorkspaceSpec",
-    "register_rail_type",
     "register_storage",
     "register_transport",
     "TeamLifecycle",

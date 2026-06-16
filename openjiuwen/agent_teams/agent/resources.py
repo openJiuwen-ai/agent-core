@@ -20,8 +20,7 @@ from typing import (
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
     from openjiuwen.agent_teams.models.allocator import ModelAllocator
-    from openjiuwen.agent_teams.rails import FirstIterationGate
-    from openjiuwen.core.memory.team.manager import TeamMemoryManager
+    from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
@@ -39,7 +38,6 @@ class PrivateAgentResources:
     harness: Optional["MemberRuntime"] = None
     worktree_manager: Optional["WorktreeManager"] = None
     memory_manager: Optional["TeamMemoryManager"] = None
-    first_iter_gate: Optional["FirstIterationGate"] = None
     model_allocator: Optional["ModelAllocator"] = None  # leader-only
 
 

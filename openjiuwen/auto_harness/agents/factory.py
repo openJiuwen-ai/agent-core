@@ -23,6 +23,7 @@ from openjiuwen.core.sys_operation import (
 from openjiuwen.harness.deep_agent import AgentRail, DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
+from openjiuwen.auto_harness.infra.gitcode_pr_template import load_pr_template_fallback
 from openjiuwen.auto_harness.prompts.sections import (
     build_auto_harness_sections,
 )
@@ -580,9 +581,17 @@ def create_pr_draft_agent(
     *,
     workspace_override: Optional[str] = None,
     extra_rails: Optional[List["AgentRail"]] = None,
+    pr_template: Optional[str] = None,
 ) -> "DeepAgent":
     """Create the communicate-only agent used for PR drafts."""
-    prompt = _load_prompt("pr_draft.md")
+
+    template_body = (pr_template or "").strip()
+    if not template_body:
+        template_body = load_pr_template_fallback()
+    prompt = _render_prompt(
+        _load_prompt("pr_draft.md"),
+        pr_template=template_body,
+    )
     rails = _build_readonly_rails(config)
     rails.append(_build_skill_rail(config, ["communicate"]))
     if extra_rails:

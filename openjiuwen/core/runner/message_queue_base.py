@@ -3,10 +3,11 @@
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Awaitable, TypeVar, Optional
+from typing import Any, Callable, Awaitable, TypeVar, Optional, Sequence
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.logging import logger
 
 Output = TypeVar("Output", covariant=True)
 
@@ -86,4 +87,16 @@ class MessageQueueBase(ABC):
 
     @abstractmethod
     async def produce_message(self, topic: str, message: QueueMessage):
+        pass
+
+    async def unsubscribe_all(self):
+        for topic in list(self._get_subscribed_topics()):
+            try:
+                await self.unsubscribe(topic)
+            except Exception as e:
+                logger.warning(f"[MessageQueueBase] failed to unsubscribe topic={topic}: {e}")
+        logger.info("[MessageQueueBase] all subscriptions cleaned")
+
+    @abstractmethod
+    def _get_subscribed_topics(self) -> Sequence[str]:
         pass

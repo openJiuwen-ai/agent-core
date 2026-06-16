@@ -5,6 +5,9 @@
 ``RemoteAgent`` with ``ProtocolEnum.A2A`` wraps ``A2ARemoteClient``; you can also register the same
 instance on ``Runner.resource_mgr`` and use ``Runner.run_agent`` / ``run_agent_streaming``.
 
+``invoke`` drains the underlying A2A SSE event stream and returns the aggregated final result
+(``status=COMPLETED`` with echo artifacts). ``stream`` yields each SSE event as it arrives.
+
 **Terminal 1** — start the reference server::
 
     PYTHONPATH=. uv run --extra all-a2a python examples/a2a/server_open_a2a_sdk_jsonrpc_echo.py
@@ -21,6 +24,11 @@ your registration / tests (here same as ``AGENT_CARD_NAME`` on the server for cl
 from __future__ import annotations
 
 import asyncio
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from example_utils import print_invoke_result, print_stream_chunk
 
 from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
 from openjiuwen.core.runner.drunner.remote_client.remote_client_config import ProtocolEnum
@@ -42,17 +50,19 @@ async def main() -> None:
         },
     )
     try:
-        print("--- invoke ---")
+        invoke_query = "hello from jiuwen client"
         result = await remote.invoke(
-            {"query": "hello from jiuwen client", "conversation_id": "session-open-sdk-1"},
+            {"query": invoke_query, "conversation_id": "session-open-sdk-1"},
         )
-        print(result)
+        print_invoke_result(result, expect_text=invoke_query)
 
         print("--- stream ---")
+        index = 0
         async for chunk in remote.stream(
             {"query": "hello stream", "conversation_id": "session-open-sdk-2"},
         ):
-            print(chunk)
+            print_stream_chunk(f"stream[{index}]", chunk)
+            index += 1
     finally:
         await remote.client.stop()
 

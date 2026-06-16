@@ -1,5 +1,7 @@
 # Bridge Agent — 桥接外部独立 Agent
 
+> **后续变更（F_26）**：bridge 的动态 spawn 现走独立工具 `spawn_bridge_agent`（不再是 `spawn_member(role_type='bridge_agent')`）。下文相关表述是当时的设计记录，工具名与门控现状以 F_26 / S_08 为准。
+
 ## 元信息
 
 | 项 | 值 |
