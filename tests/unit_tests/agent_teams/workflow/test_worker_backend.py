@@ -224,6 +224,9 @@ def test_execute_worker_derives_teammate_spec_without_team_tools(tmp_path, monke
         async def run_once(self, content, **kw):
             return {"output": "ok", "result_type": "answer"}
 
+        def add_rail(self, rail):
+            return None
+
         async def dispose(self):
             return None
 
@@ -280,6 +283,9 @@ def test_execute_worker_derives_build_context_from_leader_base(monkeypatch):
     class _FakeHarness:
         async def run_once(self, content, **kw):
             return {"output": "ok", "result_type": "answer"}
+
+        def add_rail(self, rail):
+            return None
 
         async def dispose(self):
             return None

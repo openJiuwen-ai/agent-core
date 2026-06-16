@@ -215,6 +215,33 @@ def test_human_one_shot_opens_and_closes_its_ephemeral_session(tmp_path):
     assert result == "turn:pick one:0"
 
 
+_HUMAN_ONESHOT_LABELLED_SCRIPT = '''
+from swarmflow import human, phase
+
+META = {"name": "human-lbl", "description": "one-shot human with label", "phases": []}
+
+async def run(args):
+    phase("signoff")
+    return await human("approve?", label="host")
+'''
+
+
+def test_human_one_shot_accepts_label_and_phase(tmp_path):
+    """``human(label=..., phase=...)`` mirrors agent()/sessions and labels the turn.
+
+    A one-shot ``human`` must accept ``label`` (and ``phase``) like ``agent`` and
+    ``human_session`` do; the label/phase flow into the deterministic human
+    correlation id (``phase:label:turn``).
+    """
+    script = _write(tmp_path, "humanlbl.py", _HUMAN_ONESHOT_LABELLED_SCRIPT)
+    backend = _RecordingBackend()
+
+    result = asyncio.run(run_workflow(script, backend=backend))
+
+    assert backend.correlations == ["signoff:host:0"]
+    assert result == "turn:approve?:0"
+
+
 _BAD_OPTION_SCRIPT = '''
 from swarmflow import agent_session
 

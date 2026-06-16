@@ -29,6 +29,7 @@ class _FakeHarness:
         self._on_round = None
         self.sends: list[str] = []
         self.tools: list = []
+        self.rails: list = []
         self.removed: list[str] = []
         self.disposed = False
         self._round = 0
@@ -59,6 +60,9 @@ class _FakeHarness:
 
     def add_tool(self, tool) -> None:
         self.tools.append(tool)
+
+    def add_rail(self, rail) -> None:
+        self.rails.append(rail)
 
     def remove_tool(self, name: str) -> None:
         self.removed.append(name)

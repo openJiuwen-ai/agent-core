@@ -169,6 +169,75 @@ def test_nested_parallel_does_not_deadlock_under_cap_one(tmp_path):
     assert all(len(inner) == 2 for inner in result)
 
 
+_CONCURRENT_WF_CHILD = '''
+from swarmflow import agent
+
+META = {"name": "wf-child", "description": "leaf sub-workflow", "phases": []}
+
+async def run(args):
+    return await agent(f"echo:{args}", label="leaf")
+'''
+
+
+def _concurrent_parent_src(child_path: str) -> str:
+    """Parent source that fans out three sub-workflows concurrently via parallel."""
+    return (
+        "from swarmflow import parallel, workflow\n"
+        'META = {"name": "wf-parent", "description": "concurrent subs", "phases": []}\n'
+        f"_CHILD = {child_path!r}\n"
+        "async def run(args):\n"
+        "    return await parallel([(lambda i=i: workflow(_CHILD, i)) for i in range(3)])\n"
+    )
+
+
+def test_workflow_runs_concurrently_via_parallel(tmp_path):
+    """parallel([workflow(...), ...]) runs every sub-workflow — none are skipped.
+
+    Regression guard: nesting depth is tracked per execution path (a ContextVar
+    copied per Task), not as a single shared Runtime counter. So concurrent
+    sibling ``workflow()`` calls each keep their own depth budget and all run,
+    instead of all-but-one tripping the nesting guard and returning None.
+    """
+    child = _write(tmp_path, "child.py", _CONCURRENT_WF_CHILD)
+    parent = _write(tmp_path, "parent.py", _concurrent_parent_src(child))
+
+    result = asyncio.run(run_workflow(parent, backend=MockBackend()))
+
+    assert isinstance(result, list) and len(result) == 3
+    assert all(r is not None for r in result), result
+
+
+_NESTING_DEEP_CHILD = '''
+from swarmflow import workflow
+
+META = {"name": "wf-deep-child", "description": "tries to nest one level deeper", "phases": []}
+
+async def run(args):
+    # Already at depth 1 on this path; nesting another workflow() must be skipped.
+    return await workflow(args, None)
+'''
+
+
+def test_workflow_nesting_depth_still_capped(tmp_path):
+    """Genuine recursion (a sub-workflow calling workflow() again) is still capped."""
+    leaf = _write(tmp_path, "leaf.py", _CONCURRENT_WF_CHILD)
+    deep = _write(tmp_path, "deep.py", _NESTING_DEEP_CHILD)
+    top_src = (
+        "from swarmflow import workflow\n"
+        'META = {"name": "wf-top", "description": "top", "phases": []}\n'
+        f"_DEEP = {deep!r}\n"
+        f"_LEAF = {leaf!r}\n"
+        "async def run(args):\n"
+        "    return await workflow(_DEEP, _LEAF)\n"
+    )
+    top = _write(tmp_path, "top.py", top_src)
+
+    result = asyncio.run(run_workflow(top, backend=MockBackend()))
+
+    # top -> deep (depth 1) -> deep's workflow(leaf) is depth 2 -> skipped -> None.
+    assert result is None
+
+
 def test_lazy_import_inside_run_resolves(tmp_path):
     """`from swarmflow import ...` resolves in run's body, not only at module top.
 
