@@ -12,6 +12,7 @@ from openjiuwen.harness.prompts.sections.tools.base import (
 DESCRIPTION: Dict[str, str] = {
     "cn": (
         "执行代码（Python 或 JavaScript）。\n\n"
+        "每次调用在独立进程中执行，变量与对象不跨调用保留，请提交可独立运行的完整代码。\n\n"
         "重要：本工具用于运行计算、数据处理、算法逻辑等代码。"
         "对于文件类的读写操作（尤其涉及到大文件），尽量使用专用工具如：\n"
         " - 读取文件：使用 read_file 工具\n"
@@ -21,6 +22,8 @@ DESCRIPTION: Dict[str, str] = {
     ),
     "en": (
         "Execute code (Python or JavaScript).\n\n"
+        "Each invocation runs in an isolated process; variables and objects do not persist "
+        "across calls—submit self-contained code every time.\n\n"
         "IMPORTANT: This tool is for running computations, data processing, and algorithmic logic. "
         "For file read/write operations (especially involving large files), prefer using dedicated tools such as:\n"
         " - Read files: Use read_file tool\n"
