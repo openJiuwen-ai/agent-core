@@ -112,7 +112,7 @@ class TeamRuntimeManager:
         inputs: object = None,
     ) -> TeamRuntimeActivation:
         """Resolve the TeamAgent to run for the target team/session."""
-        team_session = TeamRuntimeManager._build_session(spec, session)
+        team_session = TeamRuntimeManager._build_session(session)
         target_session_id = team_session.get_session_id()
         team_name = spec.team_name
 
@@ -766,7 +766,7 @@ class TeamRuntimeManager:
 
         from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
 
-        session = create_agent_team_session(session_id=session_id)
+        session = TeamRuntimeManager._build_session(session_id)
         try:
             await session.pre_run()
         except Exception as e:
@@ -936,7 +936,6 @@ class TeamRuntimeManager:
 
     @staticmethod
     def _build_session(
-        spec: "TeamAgentSpec",
         session: str | AgentTeamSession | None,
     ) -> AgentTeamSession:
         if isinstance(session, AgentTeamSession):

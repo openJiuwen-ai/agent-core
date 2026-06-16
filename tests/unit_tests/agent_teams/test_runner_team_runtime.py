@@ -550,7 +550,7 @@ async def test_agent_teams_session_does_not_inject_source_metadata(isolated_chec
     from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 
     session_id = f"agent_teams_no_source_meta_{uuid.uuid4().hex}"
-    team_session = TeamRuntimeManager._build_session(SimpleNamespace(), session_id)
+    team_session = TeamRuntimeManager._build_session(session_id)
     await team_session.pre_run(inputs={"query": "hello"})
 
     child = team_session.create_agent_session(agent_id="leader")
