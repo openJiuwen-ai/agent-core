@@ -360,7 +360,11 @@ class _TeamRunnerMixin:
         ``runtime/CLAUDE.md``) is preserved.
         """
         with self._root_task_group_scope():
-            team_session = self._create_agent_team_session(agent, session)
+            team_session = self._create_agent_team_session(
+                agent,
+                session,
+                source_metadata_enabled=False,
+            )
             await team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
             team_runtime = getattr(agent, "runtime", None)
             if team_runtime is not None:
@@ -387,7 +391,11 @@ class _TeamRunnerMixin:
     ) -> AsyncIterator[Any]:
         """Stream-variant of :meth:`_run_team_member` (internal)."""
         with self._root_task_group_scope():
-            team_session = self._create_agent_team_session(agent, session)
+            team_session = self._create_agent_team_session(
+                agent,
+                session,
+                source_metadata_enabled=False,
+            )
             await team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
             team_runtime = getattr(agent, "runtime", None)
             if team_runtime is not None:
@@ -647,8 +655,9 @@ class _TeamRunnerMixin:
 
         if isinstance(session, AgentTeamSession):
             team_session = session
+            team_session.set_source_metadata_enabled(False)
         else:
-            team_session = create_agent_team_session(session_id=session)
+            team_session = create_agent_team_session(session_id=session, source_metadata_enabled=False)
         try:
             await team_session.pre_run()
         except Exception as exc:
@@ -701,17 +710,24 @@ class _TeamRunnerMixin:
     def _create_agent_team_session(
         agent_team: Any,
         session: Optional[Union[str, AgentTeamSession, AgentSession]],
+        *,
+        source_metadata_enabled: bool = True,
     ):
         if isinstance(session, AgentTeamSession):
+            session.set_source_metadata_enabled(source_metadata_enabled)
             return session
         if isinstance(session, AgentSession):
             return create_agent_team_session(
                 session_id=session.get_session_id(),
                 envs=session.get_envs(),
+                source_metadata_enabled=source_metadata_enabled,
             )
         if isinstance(session, str):
-            return create_agent_team_session(session_id=session)
-        return create_agent_team_session()
+            return create_agent_team_session(
+                session_id=session,
+                source_metadata_enabled=source_metadata_enabled,
+            )
+        return create_agent_team_session(source_metadata_enabled=source_metadata_enabled)
 
     async def _close_team_interact_gate(
         self,

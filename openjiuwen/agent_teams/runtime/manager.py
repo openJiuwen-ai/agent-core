@@ -940,10 +940,11 @@ class TeamRuntimeManager:
         session: str | AgentTeamSession | None,
     ) -> AgentTeamSession:
         if isinstance(session, AgentTeamSession):
+            session.set_source_metadata_enabled(False)
             return session
         if isinstance(session, str):
-            return create_agent_team_session(session_id=session)
-        return create_agent_team_session()
+            return create_agent_team_session(session_id=session, source_metadata_enabled=False)
+        return create_agent_team_session(source_metadata_enabled=False)
 
     @staticmethod
     async def _pre_run_with_inputs(session: AgentTeamSession, inputs: object) -> None:
