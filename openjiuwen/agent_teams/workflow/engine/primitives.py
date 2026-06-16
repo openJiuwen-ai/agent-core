@@ -360,7 +360,7 @@ async def _call_backend(rt, prompt, opts, json_schema, model) -> _BackendCallRes
     )
 
 
-async def _attempt_calls(rt, opts, json_schema, model, make_call) -> tuple[Any, bool, str | None]:
+async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCallResult:
     """Run ``make_call()`` with retries + schema validation.
 
     Shared by the single-shot ``agent()`` path (``backend.run``) and the stateful
@@ -565,28 +565,43 @@ class AgentSession:
                 rt.journal.use(ks, cached)
                 result = _rehydrate(cached, model_cls)
                 self._append_history(prompt, result, model_cls)
-                _emit_agent_completed(rt, opts, result)
+                outcome_text = cached.get("raw_text") or _preview(result)
+                _emit_agent_completed(rt, opts, outcome_text)
                 return None if notify else result
 
             # A human turn carries a deterministic correlation id (phase:label:turn)
             # so a person's reply matches even across a resume — never a uuid.
             correlation_id = self._correlation_id(opts) if self._human else None
-            result, ok, err = await self._drive(
+            call_result = await self._drive(
                 rt, prompt, opts, json_schema, model_cls, correlation_id
             )
-            if not ok:
+            if not call_result.succeeded:
                 attempts = rt.retries + 1
                 who = "human" if self._human else "agent"
                 label = opts.get("label") or who
                 msg = f"{who} session {label!r} failed after {attempts} attempts"
-                if err:
-                    msg = f"{msg}: {err}"
+                if call_result.error_detail:
+                    msg = f"{msg}: {call_result.error_detail}"
                 _emit_agent_failed(rt, opts, msg)
                 return None
 
-            rt.journal.use(ks, _make_record(ks, sig, opts, result, model_cls))
+            result = call_result.result
+            rt.journal.use(
+                ks,
+                _make_record(
+                    _JournalRecordInput(
+                        key=ks,
+                        sig=sig,
+                        opts=opts,
+                        result=result,
+                        model=model_cls,
+                        raw_text=call_result.raw_text,
+                    )
+                ),
+            )
             self._append_history(prompt, result, model_cls)
-            _emit_agent_completed(rt, opts, result)
+            outcome_text = call_result.raw_text or _preview(result)
+            _emit_agent_completed(rt, opts, outcome_text)
             return None if notify else result
         finally:
             self._in_flight = False
@@ -611,7 +626,7 @@ class AgentSession:
         if rt.spawn_count >= rt.spawn_limit:
             detail = f"spawn limit {rt.spawn_limit} reached"
             rt.log_sink(f"[wf] {detail}; skipping {opts.get('label')!r}")
-            return None, False, detail
+            return _BackendCallResult(result=None, succeeded=False, error_detail=detail)
         if rt.sem is None:  # safety net; normally created in run_workflow
             rt.sem = asyncio.Semaphore(rt.make_cap())
         async with rt.sem:
