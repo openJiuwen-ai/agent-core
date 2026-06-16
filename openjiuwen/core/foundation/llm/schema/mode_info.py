@@ -13,7 +13,7 @@ class BaseModelInfo(BaseModel):
     api_base: str = Field(min_length=1)
     model_name: str = Field(default="", alias="model")
     temperature: float = Field(default=0.95)
-    top_p: float = Field(default=0.1)
+    top_p: Optional[float] = Field(default=None)
     streaming: bool = Field(default=False, alias="stream")
     timeout: int = Field(default=60, gt=0)
     custom_headers: Optional[dict[str, Any]] = Field(default=None)

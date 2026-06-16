@@ -68,10 +68,10 @@ def _resolve_tool_timeout_s(default_s: float = 180.0) -> float:
 def _resolve_sampling_value(
     keys: tuple[str, ...],
     *,
-    default: float,
+    default: Optional[float],
     min_value: float,
     max_value: float,
-) -> float:
+) -> Optional[float]:
     for key in keys:
         raw = (os.getenv(key) or "").strip()
         if not raw:
@@ -90,8 +90,8 @@ def _resolve_sampling_params(
     temperature_keys: tuple[str, ...],
     top_p_keys: tuple[str, ...],
     default_temperature: float,
-    default_top_p: float,
-) -> tuple[float, float]:
+    default_top_p: Optional[float],
+) -> tuple[float, Optional[float]]:
     temperature = _resolve_sampling_value(
         temperature_keys,
         default=default_temperature,
@@ -324,11 +324,12 @@ def build_browser_worker_agent(
         temperature_keys=("BROWSER_WORKER_TEMPERATURE", "BROWSER_MODEL_TEMPERATURE", "MODEL_TEMPERATURE"),
         top_p_keys=("BROWSER_WORKER_TOP_P", "BROWSER_MODEL_TOP_P", "MODEL_TOP_P"),
         default_temperature=0.2,
-        default_top_p=0.1,
+        default_top_p=None,
     )
     if config.model_config_obj is not None:
         config.model_config_obj.temperature = worker_temperature
-        config.model_config_obj.top_p = worker_top_p
+        if worker_top_p is not None:
+            config.model_config_obj.top_p = worker_top_p
     agent = ReActAgent(card=card).configure(config)
     agent.ability_manager.add(mcp_cfg)
     ensure_execute_signature_compat(agent, tool_result_observer=tool_result_observer)
