@@ -320,6 +320,9 @@ class DeepAgent(BaseAgent):
         if config.context_engine_config is not None:
             new_react_config.context_engine_config = config.context_engine_config
         self._react_agent.configure(new_react_config)
+        if self.system_prompt_builder is not None:
+            self._react_agent.prompt_builder = self.system_prompt_builder
+            self._react_agent.system_prompt_builder = self.system_prompt_builder
         self._react_agent.prompt_attachment_manager = self.prompt_attachment_manager
         logger.info("[DeepAgent] Model configuration hot reloaded")
 

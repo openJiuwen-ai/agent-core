@@ -14,9 +14,6 @@ from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.harness.prompts.sections import SectionName
-from openjiuwen.harness.prompts.prompt_attachment_manager import (
-    PromptAttachmentKind,
-)
 from openjiuwen.harness.prompts.sections.skills import (
     build_all_mode_skill_prompt,
     build_skill_line,
@@ -82,7 +79,6 @@ class SkillUseRail(DeepAgentRail):
 
         self.skills: List[Skill] = []
         self.system_prompt_builder = None
-        self.attachment_manager = None
 
         # Cache loaded skills across invokes.
         self._skill_cache: Dict[str, Skill] = {}
@@ -244,7 +240,6 @@ class SkillUseRail(DeepAgentRail):
     def init(self, agent):
         """Register tool cards into agent and concrete tools into resource manager."""
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
-        self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
 
         tools = []
 
@@ -312,7 +307,6 @@ class SkillUseRail(DeepAgentRail):
                     )
 
         self._owned_tool_names.clear()
-        self.attachment_manager = None
 
     async def refresh_skill_prompt(self, ctx: AgentCallbackContext) -> None:
         """Regenerate the skills system prompt"""
@@ -363,38 +357,9 @@ class SkillUseRail(DeepAgentRail):
         await self._refresh_skill_prompt_if_changed(ctx)
         skills_section = self._build_skills_section()
         if skills_section is not None:
-            if self._is_no_skill_fallback_section():
-                self.system_prompt_builder.remove_section(SectionName.SKILLS)
-                if self.attachment_manager is None:
-                    logger.warning(
-                        "[SkillUseRail] skip no-skill prompt attachment: attachment manager is unavailable"
-                    )
-                    return
-                writer = self.attachment_manager.bind_context(ctx)
-                try:
-                    await writer.add_from_prompt_section(
-                        prompt_section=skills_section,
-                        kind=PromptAttachmentKind.SKILL,
-                        source="agent_core.skill_use_rail",
-                        language=self.system_prompt_builder.language,
-                        content_kind="text/markdown",
-                    )
-                except ValueError as exc:
-                    logger.warning("[SkillUseRail] skip prompt attachment section=%s: %s", skills_section.name, exc)
-                return
             self.system_prompt_builder.add_section(skills_section)
-            if self.attachment_manager is not None:
-                try:
-                    await self.attachment_manager.bind_context(ctx).clear_section(SectionName.SKILLS)
-                except ValueError as exc:
-                    logger.warning("[SkillUseRail] skip clearing skills prompt attachment: %s", exc)
         else:
             self.system_prompt_builder.remove_section(SectionName.SKILLS)
-            if self.attachment_manager is not None:
-                try:
-                    await self.attachment_manager.bind_context(ctx).clear_section(SectionName.SKILLS)
-                except ValueError as exc:
-                    logger.warning("[SkillUseRail] skip clearing skills prompt attachment: %s", exc)
 
     async def _refresh_skill_prompt_if_changed(self, ctx: AgentCallbackContext) -> None:
         """Refresh skills when visible skill directories or SKILL.md mtimes changed."""
@@ -450,10 +415,6 @@ class SkillUseRail(DeepAgentRail):
                 language=self.system_prompt_builder.language,
                 mode="auto_list",
             )
-
-    def _is_no_skill_fallback_section(self) -> bool:
-        """Return whether the current skills section is the all-mode no-skill fallback."""
-        return self.skill_mode == self.SKILL_MODE_ALL and not self.skills
 
     def _build_all_mode_prompt(self) -> str:
         """Build skill prompt for all mode."""
