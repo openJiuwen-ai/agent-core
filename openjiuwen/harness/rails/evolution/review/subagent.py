@@ -180,23 +180,20 @@ def ensure_evolution_review_agent_config(subagents: list[Any], config: SubAgentC
         return [*subagents, config]
 
     existing_binding = _get_review_agent_binding(existing)
-    if existing_binding is None:
-        raise RuntimeError(
-            "Existing evolution_reviewer lacks binding metadata. "
-            "Use build_evolution_review_agent_config() to create the config."
-        )
     incoming_binding = _get_review_agent_binding(config)
-    if existing_binding != incoming_binding:
-        raise RuntimeError(
-            "evolution_reviewer runtime/query_service/store binding mismatch. "
-            "Use a consistent EvolutionReviewRuntime, query service, and store when reconfiguring."
-        )
+    if existing_binding is None or existing_binding != incoming_binding:
+        return replace_evolution_review_agent_config(subagents, config)
     return subagents
 
 
 def remove_evolution_review_agent_config(subagents: list[Any]) -> list[Any]:
     """Return subagents without the stable evolution review agent entry."""
     return [item for item in subagents if _agent_name(item) != EVOLUTION_REVIEW_AGENT_NAME]
+
+
+def replace_evolution_review_agent_config(subagents: list[Any], config: SubAgentConfig) -> list[Any]:
+    """Replace any existing stable evolution review agent entry with the provided config."""
+    return [*remove_evolution_review_agent_config(subagents), config]
 
 
 def _agent_name(config: Any) -> str:
@@ -218,4 +215,5 @@ __all__ = [
     "build_evolution_review_agent_config",
     "ensure_evolution_review_agent_config",
     "remove_evolution_review_agent_config",
+    "replace_evolution_review_agent_config",
 ]

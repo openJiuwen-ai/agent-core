@@ -2,7 +2,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Tests for the stable Skill evolution review subagent config."""
 
-import pytest
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.review.subagent import (
     EVOLUTION_REVIEW_AGENT_NAME,
@@ -184,7 +183,7 @@ def test_evolution_review_agent_config_ensure_keeps_same_binding():
     assert [item.agent_card.name for item in subagents] == [EVOLUTION_REVIEW_AGENT_NAME]
 
 
-def test_evolution_review_agent_config_ensure_fails_with_runtime_mismatch():
+def test_evolution_review_agent_config_ensure_replaces_runtime_mismatch():
     runtime_a = EvolutionReviewRuntime()
     runtime_b = EvolutionReviewRuntime()
     query_service = DummyQueryService()
@@ -203,12 +202,13 @@ def test_evolution_review_agent_config_ensure_fails_with_runtime_mismatch():
     )
 
     subagents = ensure_evolution_review_agent_config([], config_a)
+    replaced = ensure_evolution_review_agent_config(subagents, config_b)
 
-    with pytest.raises(RuntimeError, match="binding mismatch"):
-        ensure_evolution_review_agent_config(subagents, config_b)
+    assert replaced == [config_b]
+    assert len(replaced) == 1
 
 
-def test_evolution_review_agent_config_ensure_fails_with_query_service_mismatch():
+def test_evolution_review_agent_config_ensure_replaces_query_service_mismatch():
     runtime = EvolutionReviewRuntime()
     store = DummyStore()
     config_a = build_evolution_review_agent_config(
@@ -225,12 +225,13 @@ def test_evolution_review_agent_config_ensure_fails_with_query_service_mismatch(
     )
 
     subagents = ensure_evolution_review_agent_config([], config_a)
+    replaced = ensure_evolution_review_agent_config(subagents, config_b)
 
-    with pytest.raises(RuntimeError, match="binding mismatch"):
-        ensure_evolution_review_agent_config(subagents, config_b)
+    assert replaced == [config_b]
+    assert len(replaced) == 1
 
 
-def test_evolution_review_agent_config_ensure_fails_with_store_mismatch():
+def test_evolution_review_agent_config_ensure_replaces_store_mismatch():
     runtime = EvolutionReviewRuntime()
     query_service = DummyQueryService()
     config_a = build_evolution_review_agent_config(
@@ -247,9 +248,34 @@ def test_evolution_review_agent_config_ensure_fails_with_store_mismatch():
     )
 
     subagents = ensure_evolution_review_agent_config([], config_a)
+    replaced = ensure_evolution_review_agent_config(subagents, config_b)
 
-    with pytest.raises(RuntimeError, match="binding mismatch"):
-        ensure_evolution_review_agent_config(subagents, config_b)
+    assert replaced == [config_b]
+    assert len(replaced) == 1
+
+
+def test_evolution_review_agent_config_ensure_replaces_entry_without_binding_metadata():
+    runtime = EvolutionReviewRuntime()
+    query_service = DummyQueryService()
+    store = DummyStore()
+    stale_config = build_evolution_review_agent_config(
+        runtime=runtime,
+        query_service=query_service,
+        store=store,
+        model=None,
+    )
+    delattr(stale_config, "_evolution_review_binding")
+    fresh_config = build_evolution_review_agent_config(
+        runtime=runtime,
+        query_service=query_service,
+        store=store,
+        model=None,
+    )
+
+    replaced = ensure_evolution_review_agent_config([stale_config], fresh_config)
+
+    assert replaced == [fresh_config]
+    assert len(replaced) == 1
 
 
 def test_evolution_package_exports_stable_review_runtime_and_agent_helpers():
@@ -295,7 +321,7 @@ def test_same_binding_not_same_instance_still_matches():
     assert result is subagents
 
 
-def test_hand_written_config_without_metadata_fails():
+def test_hand_written_config_without_metadata_is_replaced():
     from openjiuwen.harness.schema.config import SubAgentConfig
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -309,8 +335,10 @@ def test_hand_written_config_without_metadata_fails():
         store=DummyStore(),
         model=None,
     )
-    with pytest.raises(RuntimeError, match="lacks binding metadata"):
-        ensure_evolution_review_agent_config(subagents, config)
+    replaced = ensure_evolution_review_agent_config(subagents, config)
+
+    assert replaced == [config]
+    assert len(replaced) == 1
 
 
 def test_set_and_get_binding_helpers_roundtrip():

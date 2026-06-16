@@ -20,6 +20,10 @@ EVOLUTION_PROTOCOL_PROMPT_CN = """## 演进协议
 - 一次性任务事实、个人偏好、临时环境/权限/网络问题、已有经验覆盖或低置信度候选，
   应不演进。
 
+### 用户确认询问
+- 询问用户时必须明确说“Skill 演进”，推荐句式：
+  “这条反馈可以沉淀为以后处理同类任务时的流程经验，是否需要我发起 Skill 演进？”
+
 ### 工具流程
 - 所有演进工具都必须使用顶层 subject 参数对象，例如 {"kind":"skill","name":"..."}。
 - 用户同意后，调用 prepare_skill_evolution(user_confirmed=true, user_intent=...)。
@@ -45,7 +49,7 @@ EVOLUTION_FUZZY_REVIEW_PROMPT_CN = """
 - 如果你需要回复本次自检，只能说本次技能演进自检未发现可演进的 Skill，
   不要使用“候选”等内部术语。
 - 有可演进机会时，用一句话确认这条反馈可以沉淀为以后处理同类任务时的流程经验，
-  是否需要我记录到相关 Skill？
+  是否需要我发起 Skill 演进？
 - 用户确认后才进入工具流程；未确认时不要提交演进变更。
 """
 
@@ -62,6 +66,11 @@ EVOLUTION_PROTOCOL_PROMPT_EN = """## Evolution Protocol
   is empty, submit no_evolution.
 - Do not evolve for one-off task facts, personal preferences, temporary environment/permission/network issues,
   duplicate coverage by existing experiences, or low-confidence signals.
+
+### User Confirmation Prompt
+- When asking the user, explicitly mention Skill evolution. Recommended wording:
+  "This feedback can be distilled into a workflow lesson for similar future tasks.
+  Should I start Skill evolution?"
 
 ### Tool Flow
 - Use top-level subject objects for all evolution tools, for example {"kind":"skill","name":"..."}.
@@ -90,7 +99,7 @@ EVOLUTION_FUZZY_REVIEW_PROMPT_EN = """
 - Do not ask to evolve for one-off preferences, non-reusable feedback, duplicate coverage, or feedback that cannot
   fit any related Skill context.
 - If there is an evolution opportunity, ask in one sentence: This feedback can be distilled into a workflow lesson for
-  similar future tasks. Should I record it in the related Skill?
+  similar future tasks. Should I start Skill evolution?
 - Enter the tool flow only after user confirmation; do not submit evolution changes before confirmation.
 """
 
@@ -101,6 +110,7 @@ EVOLUTION_PROTOCOL_PROMPT = {
 
 TEAM_EVOLUTION_PROTOCOL_PROMPT_CN = """## 团队 Skill 演进关注点
 
+### 演进范围判断
 - 优先判断问题属于 handoff、delegation、shared context、成员执行记录不一致，还是 collaboration
   protocol gap。
 - 团队演进审查聚焦可复用的协作改进。
@@ -114,10 +124,16 @@ TEAM_EVOLUTION_PROTOCOL_PROMPT_CN = """## 团队 Skill 演进关注点
 - 普通成员局部工具失败或一次性任务事实不自动变成 swarm skill 经验。
 - 不要仅因当前是团队任务就把普通 skill 写成 swarm-skill；subject.kind 必须来自目标 Skill
   定义。
+
+### 用户确认询问
+- 询问用户时必须明确说“Swarm Skill 演进”，推荐句式：
+  “这条反馈可以沉淀为以后处理同类团队任务时的团队协作/交付流程经验，
+  是否需要我发起 Swarm Skill 演进？”
 """
 
 TEAM_EVOLUTION_PROTOCOL_PROMPT_EN = """## Team Skill Evolution Focus
 
+### Evolution Scope
 - First classify whether the issue is handoff, delegation, shared context, mismatch between member
   work records, or a collaboration protocol gap.
 - The team evolution review focuses on reusable collaboration improvements and should evolve only when
@@ -135,6 +151,11 @@ TEAM_EVOLUTION_PROTOCOL_PROMPT_EN = """## Team Skill Evolution Focus
 - Ordinary member-local tool failures or one-off task facts do not automatically become swarm skill experiences.
 - Do not write a regular skill as swarm-skill just because this is a team task; subject.kind must come from the
   target Skill definition.
+
+### User Confirmation Prompt
+- When asking the user, explicitly mention Swarm Skill evolution. Recommended wording:
+  "This feedback can be distilled into a team collaboration or delivery workflow lesson for similar future tasks.
+  Should I start Swarm Skill evolution?"
 """
 
 TEAM_EVOLUTION_PROTOCOL_PROMPT = {

@@ -97,7 +97,7 @@ _FUZZY_REVIEW_PROMPT_CN = (
     "没有可演进机会时，不要打扰用户；如果你需要回复本次自检，"
     "只能说：本次技能演进自检未发现需要更新的 Skill。\n"
     "有可演进机会时，用一句话询问：这条反馈可以沉淀为以后处理同类任务时的"
-    "流程经验，是否需要我记录到相关 Skill？\n"
+    "流程经验，是否需要我发起 Skill 演进？\n"
     "用户确认后，才使用 prepare_skill_evolution、evolve_review_task、evolve_skill_experiences。\n"
     "不要直接编辑 Skill 文件；未确认时不要提交演进变更。"
 )
@@ -117,7 +117,7 @@ fit any related Skill context.
 If there is no evolution opportunity, do not bother the user; if you need to respond to this self-check, only say:
 This skill evolution self-check did not find any Skill that needs updating.
 If there is an evolution opportunity, ask this sentence in one line: This feedback can be distilled into a workflow
-lesson for similar future tasks. Should I record it in the related Skill?
+lesson for similar future tasks. Should I start Skill evolution?
 Only after user confirmation, use prepare_skill_evolution, evolve_review_task, and evolve_skill_experiences.
 Do not edit Skill files directly, and do not submit evolution changes before confirmation."""
 
@@ -420,7 +420,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         if deep_config is None:
             return
         agent_id = getattr(getattr(agent, "card", None), "id", None)
-        subagents = list(getattr(deep_config, "subagents", None) or [])
+        subagents = remove_evolution_review_agent_config(list(getattr(deep_config, "subagents", None) or []))
         deep_config.subagents = ensure_evolution_review_agent_config(
             subagents,
             build_evolution_review_agent_config(

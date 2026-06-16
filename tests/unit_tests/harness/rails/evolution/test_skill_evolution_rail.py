@@ -3254,6 +3254,45 @@ def test_skill_evolution_rail_registers_stable_review_subagent_without_rail_stat
     assert getattr(rail, "_review_runtime") is not None
 
 
+def test_skill_evolution_rail_init_replaces_stale_review_subagent(monkeypatch, tmp_path):
+    from openjiuwen.harness.rails.evolution.review.subagent import (
+        EVOLUTION_REVIEW_AGENT_NAME,
+        build_evolution_review_agent_config,
+    )
+
+    rail = _make_rail(tmp_path)
+    stale_review_config = build_evolution_review_agent_config(
+        runtime=EvolutionReviewRuntime(),
+        query_service=Mock(),
+        store=Mock(),
+        model=None,
+        agent_id="stale-agent",
+    )
+    agent = SimpleNamespace(
+        card=SimpleNamespace(id="agent-1"),
+        ability_manager=SimpleNamespace(add=Mock(return_value=SimpleNamespace(added=True))),
+        deep_config=SimpleNamespace(subagents=[stale_review_config]),
+        find_rails_by_type=_find_rails_by_type(SubagentRail()),
+    )
+
+    monkeypatch.setattr(
+        "openjiuwen.core.runner.Runner.resource_mgr.add_tool",
+        Mock(return_value=SimpleNamespace(is_err=lambda: False)),
+    )
+
+    rail.init(agent)
+
+    assert [config.agent_card.name for config in agent.deep_config.subagents] == [EVOLUTION_REVIEW_AGENT_NAME]
+    refreshed = agent.deep_config.subagents[0]
+    assert refreshed is not stale_review_config
+    review_query_services = {
+        getattr(tool, "_query_service")
+        for tool in refreshed.tools
+        if hasattr(tool, "_query_service") and getattr(tool, "_query_service") is not None
+    }
+    assert review_query_services == {rail.experience_manager.experience_query_service}
+
+
 @pytest.mark.asyncio
 async def test_run_evolution_regular_signal_uses_online_updater_without_passive_state(tmp_path):
     rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
