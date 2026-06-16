@@ -22,6 +22,7 @@ from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
 )
 from openjiuwen.harness.rails import TeamSkillCreateRail, TeamSkillRail
+from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 
 
 @dataclass
@@ -139,6 +140,7 @@ async def test_team_skill_rail_generates_and_persists_patch_after_completion(tmp
         model="mock-model",
         auto_save=False,
         async_evolution=False,
+        review_runtime=EvolutionReviewRuntime(),
     )
     agent = _Agent()
 
@@ -160,6 +162,16 @@ async def test_team_skill_rail_generates_and_persists_patch_after_completion(tmp
                 tool_name="spawn_member",
                 tool_args={"name": "researcher"},
                 tool_result={"status": "spawned"},
+            ),
+        )
+    )
+    await rail.after_tool_call(
+        _ctx(
+            agent,
+            ToolCallInputs(
+                tool_name="send_message",
+                tool_args={"to_member_name": "researcher"},
+                tool_result="Error: researcher handoff failed because output format was missing",
             ),
         )
     )

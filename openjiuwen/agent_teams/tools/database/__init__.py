@@ -15,11 +15,13 @@ from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database.config import (
     DatabaseConfig as DatabaseConfig,
     DatabaseType as DatabaseType,
 )
 from openjiuwen.agent_teams.tools.database.engine import (
+    DbSessions,
     cleanup_all_runtime_state as _cleanup_all_runtime_state,
     create_cur_session_tables as _create_cur_session_tables,
     drop_cur_session_tables as _drop_cur_session_tables,
@@ -72,19 +74,34 @@ class TeamDatabase:
         return _get_current_time()
 
     async def initialize(self) -> None:
-        """Initialize async engine, create tables, and wire up DAOs."""
+        """Initialize async engine, create static schema, and wire up DAOs.
+
+        Engine setup creates the static schema (the team-scoped tables) that
+        every caller needs. Per-session dynamic tables are a separate concern:
+        they are created here only when a session is already bound in the
+        contextvar. Session-less callers — dispatch inspection, delete /
+        release by explicit session id — only touch the static schema, so
+        skipping the dynamic step keeps them from targeting a session that is
+        not theirs. The bound interact path creates the dynamic tables via
+        ``create_cur_session_tables()`` at session-bind time.
+        """
         if self._initialized:
             return
         async with self._init_lock:
             if self._initialized:
                 return
             self.engine, self.session_local = await _initialize_engine(self.config)
-            await _create_cur_session_tables(self.engine)
+            if get_session_id():
+                await _create_cur_session_tables(self.engine)
 
-            self.team = TeamDao(self.session_local)
-            self.member = MemberDao(self.session_local)
-            self.task = TaskDao(self.session_local)
-            self.message = MessageDao(self.session_local)
+            # One DbSessions (one write lock) shared by every DAO: SQLite's
+            # write lock is database-wide, so all four tables must serialise
+            # writes through the same lock — see DbSessions.
+            sessions = DbSessions(self.session_local)
+            self.team = TeamDao(sessions)
+            self.member = MemberDao(sessions)
+            self.task = TaskDao(sessions)
+            self.message = MessageDao(sessions)
 
             self._initialized = True
             team_logger.info("Team database initialized")

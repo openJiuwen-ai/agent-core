@@ -61,11 +61,12 @@ class TestMcpRailInit:
         list_tool, read_tool = self._make_tools()
 
         with patch("openjiuwen.harness.rails.mcp_rail.ListMcpResourcesTool", return_value=list_tool), \
-             patch("openjiuwen.harness.rails.mcp_rail.ReadMcpResourceTool", return_value=read_tool), \
-             patch("openjiuwen.harness.rails.mcp_rail.Runner") as MockRunner:
+             patch("openjiuwen.harness.rails.mcp_rail.ReadMcpResourceTool", return_value=read_tool):
             rail.init(agent)
 
-        MockRunner.resource_mgr.add_tool.assert_called_once_with([list_tool, read_tool])
+        registered = [c.args for c in agent.ability_manager.add_ability.call_args_list]
+        assert (list_tool.card, list_tool) in registered
+        assert (read_tool.card, read_tool) in registered
 
     def test_adds_both_cards_to_ability_manager(self):
         rail = McpRail()
@@ -73,11 +74,10 @@ class TestMcpRailInit:
         list_tool, read_tool = self._make_tools()
 
         with patch("openjiuwen.harness.rails.mcp_rail.ListMcpResourcesTool", return_value=list_tool), \
-             patch("openjiuwen.harness.rails.mcp_rail.ReadMcpResourceTool", return_value=read_tool), \
-             patch("openjiuwen.harness.rails.mcp_rail.Runner"):
+             patch("openjiuwen.harness.rails.mcp_rail.ReadMcpResourceTool", return_value=read_tool):
             rail.init(agent)
 
-        calls = [c.args[0] for c in agent.ability_manager.add.call_args_list]
+        calls = [c.args[0] for c in agent.ability_manager.add_ability.call_args_list]
         assert list_tool.card in calls
         assert read_tool.card in calls
 
@@ -87,8 +87,7 @@ class TestMcpRailInit:
         list_tool, read_tool = self._make_tools()
 
         with patch("openjiuwen.harness.rails.mcp_rail.ListMcpResourcesTool", return_value=list_tool), \
-             patch("openjiuwen.harness.rails.mcp_rail.ReadMcpResourceTool", return_value=read_tool), \
-             patch("openjiuwen.harness.rails.mcp_rail.Runner"):
+             patch("openjiuwen.harness.rails.mcp_rail.ReadMcpResourceTool", return_value=read_tool):
             rail.init(agent)
 
         assert rail.tools == [list_tool, read_tool]
@@ -98,8 +97,7 @@ class TestMcpRailInit:
         agent = _make_agent(language="en", agent_id="my-agent")
 
         with patch("openjiuwen.harness.rails.mcp_rail.ListMcpResourcesTool") as MockList, \
-             patch("openjiuwen.harness.rails.mcp_rail.ReadMcpResourceTool") as MockRead, \
-             patch("openjiuwen.harness.rails.mcp_rail.Runner"):
+             patch("openjiuwen.harness.rails.mcp_rail.ReadMcpResourceTool") as MockRead:
             MockList.return_value = _make_tool("list_mcp_resources", "lid")
             MockRead.return_value = _make_tool("read_mcp_resource", "rid")
             rail.init(agent)
@@ -113,8 +111,7 @@ class TestMcpRailInit:
         del agent.card  # 移除 card 属性
 
         with patch("openjiuwen.harness.rails.mcp_rail.ListMcpResourcesTool") as MockList, \
-             patch("openjiuwen.harness.rails.mcp_rail.ReadMcpResourceTool") as MockRead, \
-             patch("openjiuwen.harness.rails.mcp_rail.Runner"):
+             patch("openjiuwen.harness.rails.mcp_rail.ReadMcpResourceTool") as MockRead:
             MockList.return_value = _make_tool("list_mcp_resources", "lid")
             MockRead.return_value = _make_tool("read_mcp_resource", "rid")
             rail.init(agent)
@@ -132,8 +129,7 @@ class TestMcpRailUninit:
         list_tool = _make_tool("list_mcp_resources", "ListMcpResourcesTool_abc")
         read_tool = _make_tool("read_mcp_resource", "ReadMcpResourceTool_abc")
         with patch("openjiuwen.harness.rails.mcp_rail.ListMcpResourcesTool", return_value=list_tool), \
-             patch("openjiuwen.harness.rails.mcp_rail.ReadMcpResourceTool", return_value=read_tool), \
-             patch("openjiuwen.harness.rails.mcp_rail.Runner"):
+             patch("openjiuwen.harness.rails.mcp_rail.ReadMcpResourceTool", return_value=read_tool):
             rail.init(agent)
         return list_tool, read_tool
 
@@ -142,24 +138,11 @@ class TestMcpRailUninit:
         agent = _make_agent()
         list_tool, read_tool = self._init_rail(rail, agent)
 
-        with patch("openjiuwen.harness.rails.mcp_rail.Runner"):
-            rail.uninit(agent)
+        rail.uninit(agent)
 
-        removed = [c.args[0] for c in agent.ability_manager.remove.call_args_list]
+        removed = [c.args[0] for c in agent.ability_manager.remove_ability.call_args_list]
         assert "list_mcp_resources" in removed
         assert "read_mcp_resource" in removed
-
-    def test_removes_tool_ids_from_resource_manager(self):
-        rail = McpRail()
-        agent = _make_agent()
-        list_tool, read_tool = self._init_rail(rail, agent)
-
-        with patch("openjiuwen.harness.rails.mcp_rail.Runner") as MockRunner:
-            rail.uninit(agent)
-
-        removed_ids = [c.args[0] for c in MockRunner.resource_mgr.remove_tool.call_args_list]
-        assert list_tool.card.id in removed_ids
-        assert read_tool.card.id in removed_ids
 
     def test_uninit_without_init_does_not_raise(self):
         rail = McpRail()
@@ -172,5 +155,4 @@ class TestMcpRailUninit:
         list_tool, _ = self._init_rail(rail, agent)
         del agent.ability_manager  # 模拟 ability_manager 不存在
 
-        with patch("openjiuwen.harness.rails.mcp_rail.Runner"):
-            rail.uninit(agent)  # should not raise
+        rail.uninit(agent)  # should not raise

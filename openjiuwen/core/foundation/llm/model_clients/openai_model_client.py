@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 class OpenAIModelClient(BaseModelClient):
     """OpenAI API client supporting GPT models and OpenAI-compatible services."""
-    __client_name__ = [ProviderType.OpenAI.value, ProviderType.OpenRouter.value]
+    __client_name__ = [ProviderType.OpenAI.value]
     _PROTECTED_HEADERS = PROTECTED_HEADERS
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
@@ -408,7 +408,10 @@ class OpenAIModelClient(BaseModelClient):
                 LLMCallEvents.LLM_OUTPUT,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
-                is_stream=True)
+                is_stream=True,
+                response=final_message.content if final_message else None,
+                usage=final_message.usage_metadata if final_message else None,
+                tool_calls=final_message.tool_calls if final_message else None)
 
         except Exception as e:
             # Many stream-layer exceptions (httpx.RemoteProtocolError,
@@ -544,6 +547,10 @@ class OpenAIModelClient(BaseModelClient):
 
                 yield chunk_with_parser
 
+    @staticmethod
+    def _extract_reasoning_content(msg_or_delta: Any) -> Optional[str]:
+        return getattr(msg_or_delta, 'reasoning_content', None)
+
     async def _parse_response(
             self,
             response: Any,
@@ -581,8 +588,7 @@ class OpenAIModelClient(BaseModelClient):
                 )
                 tool_calls.append(tool_call)
 
-        # Get reasoning_content (if exists)
-        reasoning_content = getattr(message, 'reasoning_content', None)
+        reasoning_content = self._extract_reasoning_content(message)
 
         # Build UsageMetadata, use returned data to populate UsageMetadata attribute fields as much as possible
         usage_metadata = None
@@ -592,12 +598,6 @@ class OpenAIModelClient(BaseModelClient):
             output_tokens = getattr(response.usage, 'completion_tokens', 0) or 0
             total_tokens = getattr(response.usage, 'total_tokens', 0) or 0
 
-            # Extract cached token information (OpenAI API may return in prompt_tokens_details)
-            cache_tokens = 0
-            prompt_tokens_details = getattr(response.usage, 'prompt_tokens_details', None)
-            if prompt_tokens_details:
-                cache_tokens = getattr(prompt_tokens_details, 'cached_tokens', 0) or 0
-
             # Extract cost information if available
             input_cost, output_cost, total_cost = self._extract_cost_info(response.usage)
 
@@ -606,7 +606,7 @@ class OpenAIModelClient(BaseModelClient):
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
-                cache_tokens=cache_tokens,
+                cache_tokens=self._extract_cache_tokens(response.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
                 total_cost=total_cost,
@@ -705,6 +705,7 @@ class OpenAIModelClient(BaseModelClient):
                 input_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
                 output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
                 total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
+                cache_tokens=self._extract_cache_tokens(chunk.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
                 total_cost=total_cost,
@@ -731,7 +732,7 @@ class OpenAIModelClient(BaseModelClient):
 
         # Extract content
         content = getattr(delta, 'content', None) or ""
-        reasoning_content = getattr(delta, 'reasoning_content', None)
+        reasoning_content = self._extract_reasoning_content(delta)
 
         # Parse tool_calls delta
         tool_calls = []

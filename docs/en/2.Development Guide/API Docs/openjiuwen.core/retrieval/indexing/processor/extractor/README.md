@@ -8,3 +8,4 @@
 |-------|-------------|---------------|
 | **Extractor** | Extractor abstract base class. | [base.md](./base.md) |
 | **TripleExtractor** | Triple extractor. | [triple_extractor.md](./triple_extractor.md) |
+| **OntologyTripleExtractor** | Triple extractor. | [ontology_triple_extractor.md](./ontology_triple_extractor.md) |

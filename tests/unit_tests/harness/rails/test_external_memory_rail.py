@@ -1,4 +1,4 @@
-# coding: utf-8
+﻿# coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """单元测试：ExternalMemoryRail"""
 
@@ -9,6 +9,7 @@ import pytest
 from openjiuwen.core.single_agent.rail.base import RunKind
 from openjiuwen.harness.rails.memory.external_memory_rail import ExternalMemoryRail
 from openjiuwen.core.memory.external.provider import MemoryProvider
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 
 
 class MockInputs:
@@ -24,6 +25,33 @@ class MockCallbackContext:
 
     def __init__(self, inputs):
         self.inputs = inputs
+        self.extra = {}
+        self.agent = None
+        self.session = None
+
+
+class MockSession:
+    def get_session_id(self) -> str:
+        return "sess1"
+
+
+class MockAgent:
+    def __init__(self) -> None:
+        self.prompt_attachment_manager = PromptAttachmentManager()
+
+
+class MockPromptBuilder:
+    language = "cn"
+
+    def __init__(self) -> None:
+        self.added_sections = []
+        self.removed_sections = []
+
+    def add_section(self, section):
+        self.added_sections.append(section)
+
+    def remove_section(self, section_name):
+        self.removed_sections.append(section_name)
 
 
 class MockMemoryProvider(MemoryProvider):
@@ -254,3 +282,30 @@ async def test_after_invoke_skips_empty_assistant_output():
         await rail._sync_task
 
     assert provider.sync_turn_calls == []
+
+
+@pytest.mark.asyncio
+async def test_external_memory_prefetch_goes_to_prompt_attachment_not_system_section():
+    provider = MockMemoryProvider()
+    rail = ExternalMemoryRail(provider)
+    agent = MockAgent()
+    prompt_builder = MockPromptBuilder()
+    ctx = MockCallbackContext(MockInputs(query="what did we decide?"))
+    ctx.agent = agent
+    ctx.session = MockSession()
+
+    rail._initialized = True
+    rail.system_prompt_builder = prompt_builder
+    rail.attachment_manager = agent.prompt_attachment_manager
+
+    await rail.before_model_call(ctx)
+
+    assert "external_memory_prefetch" in prompt_builder.removed_sections
+    assert prompt_builder.added_sections == []
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    assert [item.id for item in items] == [
+        "session.sess1.external_memory_prefetch"
+    ]
+    assert items[0].kind.value == "memory"
+    assert items[0].source == "agent_core.external_memory_rail"
+    assert "Memory context for: what did we decide?" in (items[0].content or "")

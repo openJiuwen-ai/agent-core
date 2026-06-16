@@ -24,7 +24,9 @@ share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
+# Anchor to the repo root: this targets setuptools' generated MANIFEST file, not
+# nested packages named "manifest" (case-insensitive filesystems match either).
+/MANIFEST
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

@@ -19,7 +19,6 @@ from openjiuwen.agent_evolving.signal.from_eval import (
     from_evaluated_cases,
 )
 from openjiuwen.agent_evolving.signal.team import (
-    TeamSignalDetector,
     TeamSignalType,
     TrajectoryIssue,
     UserIntent,
@@ -28,7 +27,6 @@ from openjiuwen.agent_evolving.signal.team import (
     get_team_trajectory_issues,
     make_team_trajectory_signal,
     make_team_user_intent_signal,
-    parse_team_model_json,
 )
 
 __all__ = [
@@ -40,7 +38,6 @@ __all__ = [
     "make_signal_fingerprint",
     "ConversationSignalDetector",
     "SignalDetector",
-    "TeamSignalDetector",
     "TeamSignalType",
     "TrajectoryIssue",
     "UserIntent",
@@ -51,5 +48,4 @@ __all__ = [
     "from_evaluated_cases",
     "make_team_trajectory_signal",
     "make_team_user_intent_signal",
-    "parse_team_model_json",
 ]

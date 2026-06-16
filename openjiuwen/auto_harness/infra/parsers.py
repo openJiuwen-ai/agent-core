@@ -40,6 +40,116 @@ _ALLOWED_PR_KINDS = {
 }
 
 
+def _raw_decode_json_object(
+    text: str,
+    *,
+    start: int = 0,
+) -> tuple[dict[str, Any] | None, str]:
+    """Decode the first JSON object starting at or after ``start``.
+
+    This intentionally avoids regex-based closing fence detection. PR bodies
+    may contain Markdown code fences, so a non-greedy ```json ... ``` regex
+    can stop inside a JSON string and produce a truncated object.
+    """
+    decoder = json.JSONDecoder()
+    index = start
+    while index < len(text):
+        brace_index = text.find("{", index)
+        if brace_index < 0:
+            return None, "未找到 JSON 对象"
+        try:
+            item, _ = decoder.raw_decode(text[brace_index:])
+        except json.JSONDecodeError as exc:
+            index = brace_index + 1
+            last_error = exc
+            continue
+        if isinstance(item, dict):
+            return item, ""
+        index = brace_index + 1
+    if "last_error" in locals():
+        return None, f"JSON 解析失败: {last_error}"
+    return None, "未找到 JSON 对象"
+
+
+def _decode_json_object_from_markdown(
+    raw: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Decode a JSON object from fenced Markdown or surrounding prose."""
+    fence_match = re.search(
+        r"```(?:json|JSON)?\s*", raw
+    )
+    if fence_match:
+        item, error = _raw_decode_json_object(
+            raw,
+            start=fence_match.end(),
+        )
+        if item is not None:
+            return item, ""
+        # Fall through to a full-text scan. Some models include prose inside
+        # the fence before the object, or nest code fences in body text.
+    return _raw_decode_json_object(raw)
+
+
+def _unescape_loose_json_string(value: str) -> str:
+    """Best-effort unescape for model text that is almost JSON."""
+    return (
+        value.replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
+        .replace('\\"', '"')
+        .replace("\\\\", "\\")
+    )
+
+
+def _parse_pr_draft_fields_loose(
+    raw: str,
+) -> dict[str, str] | None:
+    """Extract PR draft fields from malformed JSON-like text.
+
+    Some model outputs are wrapped in ```json but contain unescaped quotes
+    inside the long Markdown body. Strict JSON parsing is correct to reject
+    that, but for PR creation we only need title/kind/body, so recover those
+    fields directly.
+    """
+    title_match = re.search(
+        r'"title"\s*:\s*"(?P<title>(?:\\.|[^"\\])*)"',
+        raw,
+        re.DOTALL,
+    )
+    kind_match = re.search(
+        r'"kind"\s*:\s*"(?P<kind>[a-z_]+)"',
+        raw,
+        re.DOTALL,
+    )
+    body_start = re.search(
+        r'"body"\s*:\s*"',
+        raw,
+        re.DOTALL,
+    )
+    if not title_match or not body_start:
+        return None
+    body_text = raw[body_start.end():]
+    body_end = re.search(
+        r'"\s*\}\s*(?:```)?',
+        body_text,
+        re.DOTALL,
+    )
+    if not body_end:
+        return None
+    body = body_text[: body_end.start()]
+    return {
+        "title": _unescape_loose_json_string(
+            title_match.group("title")
+        ).strip(),
+        "kind": (
+            kind_match.group("kind").strip()
+            if kind_match
+            else ""
+        ),
+        "body": _unescape_loose_json_string(body).strip(),
+    }
+
+
 def parse_tasks(raw: str) -> List[OptimizationTask]:
     """从 agent 输出中解析 JSON 任务列表。
 
@@ -127,25 +237,12 @@ def parse_pr_draft_with_error(
     raw: str,
 ) -> tuple[PullRequestDraft | None, str]:
     """Parse a PR draft JSON response with detailed errors."""
-    match = re.search(
-        r"```json\s*(.*?)\s*```", raw, re.DOTALL
-    )
-    json_str: str
-    if match:
-        json_str = match.group(1)
-    else:
-        obj_match = re.search(r"\{.*}", raw, re.DOTALL)
-        if not obj_match:
-            return None, "未找到 JSON 对象"
-        json_str = obj_match.group(0)
-
-    try:
-        item = json.loads(json_str)
-    except json.JSONDecodeError:
-        logger.warning("Failed to parse PR draft JSON")
-        return None, "JSON 解析失败"
-    if not isinstance(item, dict):
-        return None, "JSON 顶层必须是对象"
+    item, error = _decode_json_object_from_markdown(raw)
+    if item is None:
+        item = _parse_pr_draft_fields_loose(raw)
+    if item is None:
+        logger.warning("Failed to parse PR draft JSON: %s", error)
+        return None, error or "JSON 解析失败"
 
     title = str(item.get("title", "")).strip()
     body = str(item.get("body", "")).strip()

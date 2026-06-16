@@ -340,6 +340,15 @@ class TraceWorkflowHandler(TraceBaseHandler):
         self._span_manager.update_span(span, update_data)
 
         await self._send_data(span)
+        # Retry intermediate error: history stays in on_invoke_data; clear span field
+        # so the next pre_invoke trace is not emitted as error again.
+        if (
+            exception is None
+            and isinstance(on_invoke_data, dict)
+            and "inner_error" in on_invoke_data
+        ):
+            span.inner_error = None
+            self._span_manager.update_span(span, {"inner_error": None})
         if exception and span.component_type == "LLM":
             self._span_manager.update_span(span, {})
 

@@ -7,9 +7,8 @@ from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from openjiuwen.agent_teams.tools.database.engine import get_current_time
+from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
 from openjiuwen.agent_teams.tools.models import Team
 from openjiuwen.core.common.logging import team_logger
 
@@ -17,9 +16,9 @@ from openjiuwen.core.common.logging import team_logger
 class TeamDao:
     """Data access object for the team_info table."""
 
-    def __init__(self, session_local: async_sessionmaker) -> None:
-        """Initialize team DAO with the shared session factory."""
-        self._session_local = session_local
+    def __init__(self, sessions: DbSessions) -> None:
+        """Initialize team DAO with the shared read/write session provider."""
+        self._sessions = sessions
 
     async def create_team(
         self,
@@ -30,7 +29,7 @@ class TeamDao:
         prompt: Optional[str] = None,
     ) -> bool:
         """Create a new team."""
-        async with self._session_local() as session:
+        async with self._sessions.write() as session:
             try:
                 ts = get_current_time()
                 team = Team(
@@ -53,7 +52,7 @@ class TeamDao:
 
     async def get_team(self, team_name: str) -> Optional[Team]:
         """Get team information by ID."""
-        async with self._session_local() as session:
+        async with self._sessions.read() as session:
             result = await session.execute(select(Team).where(Team.team_name == team_name))
             return result.scalar_one_or_none()
 
@@ -63,7 +62,7 @@ class TeamDao:
         Lighter than ``get_team`` when only existence is needed: selects the
         team name column instead of hydrating a full ORM object.
         """
-        async with self._session_local() as session:
+        async with self._sessions.read() as session:
             result = await session.execute(
                 select(Team.team_name).where(Team.team_name == team_name)
             )
@@ -77,7 +76,7 @@ class TeamDao:
             not exist. Callers that treat "missing" as success can map
             ``False`` themselves.
         """
-        async with self._session_local() as session:
+        async with self._sessions.write() as session:
             result = await session.execute(select(Team).where(Team.team_name == team_name))
             team = result.scalar_one_or_none()
             if not team:
@@ -99,7 +98,7 @@ class TeamDao:
             Last update timestamp (ms), or ``0`` when the row is
             missing or the column is null.
         """
-        async with self._session_local() as session:
+        async with self._sessions.read() as session:
             result = await session.execute(select(Team.updated_at).where(Team.team_name == team_name))
             value = result.scalar_one_or_none()
             return int(value) if value is not None else 0

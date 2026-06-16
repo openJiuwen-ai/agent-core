@@ -7,9 +7,9 @@ from __future__ import annotations
 from typing import List, TYPE_CHECKING
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.sections import SectionName
+from openjiuwen.harness.prompts.tools import get_tool_description
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.tools import SessionToolkit, build_session_tools, create_task_tool
@@ -73,12 +73,29 @@ class SubagentRail(DeepAgentRail):
                 agent_id=agent_id,
             )
 
-        Runner.resource_mgr.add_tool(list(self.tools))
         for tool in self.tools:
-            agent.ability_manager.add(tool.card)
+            agent.ability_manager.add_ability(tool.card, tool)
 
         mode = "async session" if self.enable_async_subagent else "sync task"
         logger.info(f"[SubagentRail] Registered {mode} tool with {len(agent.deep_config.subagents)} subagent(s)")
+
+    def refresh_available_agents(self, agent) -> None:
+        """Refresh the available-agents text in registered subagent tool cards."""
+        if not self.tools:
+            return
+        self.system_prompt_builder = getattr(agent, "system_prompt_builder", self.system_prompt_builder)
+        language = getattr(self.system_prompt_builder, "language", "cn")
+        available_agents = self._build_available_agents_description(agent.deep_config.subagents or [])
+        refreshed = []
+        for tool in self.tools:
+            card = getattr(tool, "card", None)
+            name = getattr(card, "name", None)
+            if name not in {"task_tool", "sessions_spawn"}:
+                continue
+            card.description = get_tool_description(name, language).format(available_agents=available_agents)
+            refreshed.append(name)
+        if refreshed:
+            logger.info("[SubagentRail] Refreshed available_agents for %s", ", ".join(refreshed))
 
     def uninit(self, agent) -> None:
         """Remove tools from the agent.
@@ -90,10 +107,7 @@ class SubagentRail(DeepAgentRail):
             for tool in self.tools:
                 name = getattr(tool.card, "name", None)
                 if name:
-                    agent.ability_manager.remove(name)
-                tool_id = tool.card.id
-                if tool_id:
-                    Runner.resource_mgr.remove_tool(tool_id)
+                    agent.ability_manager.remove_ability(name)
 
         if self.enable_async_subagent:
             agent.set_session_toolkit(None)
@@ -127,9 +141,7 @@ class SubagentRail(DeepAgentRail):
                 else:
                     self.system_prompt_builder.remove_section(SectionName.TASK_TOOL)
             except ImportError:
-                logger.warning(
-                    "[SubagentRail] task_tool prompt section not available, skipping"
-                )
+                logger.warning("[SubagentRail] task_tool prompt section not available, skipping")
             return
 
         try:
@@ -143,9 +155,7 @@ class SubagentRail(DeepAgentRail):
             else:
                 self.system_prompt_builder.remove_section(SectionName.SESSION_TOOLS)
         except ImportError:
-            logger.warning(
-                "[SubagentRail] session_tools prompt section not available, skipping"
-            )
+            logger.warning("[SubagentRail] session_tools prompt section not available, skipping")
 
     # Well-known tool sets for built-in agent types whose tools are resolved
     # at runtime (i.e. ``SubAgentConfig.tools`` is empty).

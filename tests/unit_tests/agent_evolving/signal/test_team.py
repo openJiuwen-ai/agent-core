@@ -1,204 +1,97 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Tests for team-signal domain helpers and detectors."""
+"""Tests for team-domain signal helpers."""
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
-
-import pytest
-
-from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.signal import (
-    TeamSignalDetector,
+    TeamSignalType,
+    TrajectoryIssue,
+    UserIntent,
+    build_team_trajectory_summary,
+    get_signal_source,
     get_team_signal_skill_content,
     get_team_trajectory_issues,
-    parse_team_model_json,
+    make_team_trajectory_signal,
+    make_team_user_intent_signal,
 )
-from openjiuwen.agent_evolving.trajectory.types import Trajectory
-from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.agent_evolving.trajectory.types import ToolCallDetail, Trajectory, TrajectoryStep
 
 
-def _build_detector(llm: object) -> TeamSignalDetector:
-    return TeamSignalDetector(
-        llm=llm,
-        model="test-model",
-        language="cn",
-        llm_policy=LLMInvokePolicy(
-            attempt_timeout_secs=5,
-            total_budget_secs=15,
-            max_attempts=2,
-        ),
-    )
+def test_team_signal_type_values_are_stable() -> None:
+    assert TeamSignalType.USER_INTENT.value == "user_intent"
+    assert TeamSignalType.USER_REQUEST.value == "user_request"
+    assert TeamSignalType.TRAJECTORY_ISSUE.value == "trajectory_issue"
 
 
-def _build_trajectory() -> Trajectory:
-    return Trajectory(
-        execution_id="team-exec",
-        session_id="team-session",
-        source="online",
-        steps=[],
-    )
+def test_user_intent_dataclass_fields() -> None:
+    intent = UserIntent(is_improvement=True, intent="add reviewer role")
 
-def test_parse_team_model_json_prefers_full_array_from_fenced_json():
-    raw = """```json
-[
-  {"issue_type": "coordination", "severity": "high"},
-  {"issue_type": "workflow", "severity": "medium"}
-]
-```"""
-
-    parsed = parse_team_model_json(raw)
-
-    assert isinstance(parsed, list)
-    assert len(parsed) == 2
-    assert parsed[0]["issue_type"] == "coordination"
+    assert intent.is_improvement is True
+    assert intent.intent == "add reviewer role"
 
 
-class TestTeamSignalDetector:
-    @pytest.mark.asyncio
-    async def test_raises_on_llm_failure(self):
-        detector = _build_detector(MagicMock(invoke=AsyncMock(side_effect=RuntimeError("connection lost"))))
+def test_trajectory_issue_defaults() -> None:
+    issue = TrajectoryIssue(issue_type="handoff", description="missing summary")
 
-        with pytest.raises(BaseError):
-            await detector.detect_trajectory_issues(
-                trajectory=_build_trajectory(),
-                skill_content="skill content",
-            )
+    assert issue.affected_role == ""
+    assert issue.severity == "medium"
 
-    @pytest.mark.asyncio
-    async def test_raises_on_non_list_json(self):
-        detector = _build_detector(
-            MagicMock(invoke=AsyncMock(return_value=MagicMock(content='{"not_a_list": true}')))
-        )
 
-        with pytest.raises(BaseError):
-            await detector.detect_trajectory_issues(
-                trajectory=_build_trajectory(),
-                skill_content="skill content",
-            )
-
-    @pytest.mark.asyncio
-    async def test_retries_when_first_response_is_invalid_json(self):
-        import json
-
-        llm = MagicMock(
-            invoke=AsyncMock(
-                side_effect=[
-                    MagicMock(content="not json"),
-                    MagicMock(content=json.dumps([
-                        {
-                            "issue_type": "coordination",
-                            "description": "data not passed",
-                            "affected_role": "reviewer",
-                            "severity": "high",
-                        }
-                    ])),
-                ]
-            )
-        )
-        detector = _build_detector(llm)
-
-        issues = await detector.detect_trajectory_issues(
-            trajectory=_build_trajectory(),
-            skill_content="skill content",
-        )
-
-        assert len(issues) == 1
-        assert issues[0]["issue_type"] == "coordination"
-        assert llm.invoke.await_count == 2
-
-    @pytest.mark.asyncio
-    async def test_filters_out_low_severity(self):
-        import json
-
-        detector = _build_detector(
-            MagicMock(
-                invoke=AsyncMock(
-                    return_value=MagicMock(content=json.dumps([
-                        {"issue_type": "minor", "description": "cosmetic issue", "affected_role": "a", "severity": "low"},
-                        {"issue_type": "coordination", "description": "data not passed", "affected_role": "b", "severity": "high"},
-                    ]))
-                )
-            )
-        )
-
-        issues = await detector.detect_trajectory_issues(
-            trajectory=_build_trajectory(),
-            skill_content="skill content",
-        )
-
-        assert len(issues) == 1
-        assert issues[0]["issue_type"] == "coordination"
-
-    @pytest.mark.asyncio
-    async def test_defaults_invalid_severity_to_medium(self):
-        import json
-
-        detector = _build_detector(
-            MagicMock(
-                invoke=AsyncMock(
-                    return_value=MagicMock(content=json.dumps([
-                        {"issue_type": "test", "description": "bad severity value", "severity": "invalid"},
-                    ]))
-                )
-            )
-        )
-
-        issues = await detector.detect_trajectory_issues(
-            trajectory=_build_trajectory(),
-            skill_content="skill content",
-        )
-
-        assert len(issues) == 1
-        assert issues[0]["severity"] == "medium"
-
-    @pytest.mark.asyncio
-    async def test_detect_trajectory_signals_wraps_issues_as_standard_signal(self):
-        import json
-
-        detector = _build_detector(
-            MagicMock(
-                invoke=AsyncMock(
-                    return_value=MagicMock(content=json.dumps([
-                        {
-                            "issue_type": "workflow",
-                            "description": "handoff gap",
-                            "affected_role": "leader",
-                            "severity": "high",
-                        }
-                    ]))
-                )
-            )
-        )
-
-        signals = await detector.detect_trajectory_signals(
-            trajectory=_build_trajectory(),
-            skill_name="research-team",
-            skill_content="# current skill",
-        )
-
-        assert len(signals) == 1
-        assert signals[0].signal_type == "trajectory_issue"
-        assert signals[0].skill_name == "research-team"
-        assert get_team_trajectory_issues(signals[0]) == [
+def test_team_trajectory_signal_helpers_roundtrip_context() -> None:
+    signal = make_team_trajectory_signal(
+        skill_name="team-a",
+        skill_content="# current skill",
+        trajectory_issues=[
             {
-                "issue_type": "workflow",
-                "description": "handoff gap",
-                "affected_role": "leader",
-                "severity": "high",
+                "issue_type": "handoff",
+                "description": "missing summary",
+                "affected_role": "researcher",
+                "severity": "medium",
             }
-        ]
-        assert get_team_signal_skill_content(signals[0]) == "# current skill"
-        assert signals[0].context == {
-            "source": "passive_trajectory",
-            "trajectory_issues": [
-                {
-                    "issue_type": "workflow",
-                    "description": "handoff gap",
-                    "affected_role": "leader",
-                    "severity": "high",
-                }
-            ],
-            "skill_content": "# current skill",
+        ],
+    )
+
+    assert signal.signal_type == "trajectory_issue"
+    assert signal.skill_name == "team-a"
+    assert get_team_signal_skill_content(signal) == "# current skill"
+    assert get_team_trajectory_issues(signal) == [
+        {
+            "issue_type": "handoff",
+            "description": "missing summary",
+            "affected_role": "researcher",
+            "severity": "medium",
         }
+    ]
+
+
+def test_team_user_intent_signal_helper() -> None:
+    signal = make_team_user_intent_signal(skill_name="team-a", user_intent="add reviewer role")
+
+    assert signal.signal_type == "user_intent"
+    assert signal.section == "Instructions"
+    assert signal.excerpt == "add reviewer role"
+    assert signal.skill_name == "team-a"
+    assert get_signal_source(signal) == "explicit_request"
+
+
+def test_build_team_trajectory_summary_includes_tool_calls() -> None:
+    trajectory = Trajectory(
+        execution_id="exec-1",
+        steps=[
+            TrajectoryStep(
+                kind="tool",
+                detail=ToolCallDetail(
+                    tool_name="send_message",
+                    call_args={"to": "reviewer"},
+                    call_result="sent",
+                ),
+            )
+        ]
+    )
+
+    summary = build_team_trajectory_summary(trajectory)
+
+    assert "Tool Calls (1)" in summary
+    assert "[Tool:send_message]" in summary
+    assert "reviewer" in summary

@@ -314,14 +314,20 @@ def _start_fix_loop(
     fix_loop_ctrl: "FixLoopController",
     msg_factory: Any,
     extra_rails: list | None = None,
-) -> tuple[asyncio.Task[Any], asyncio.Queue[Any], asyncio.Event]:
-    """启动 fix loop 任务，并返回流式输出通道。"""
+) -> tuple[asyncio.Task[Any], asyncio.Queue[Any], asyncio.Event, dict[str, Any]]:
+    """启动 fix loop 任务，并返回流式输出通道。
+
+    Returns:
+        (fix_task, chunk_queue, fix_done, last_ci_result) —
+        last_ci_result 是 fix loop 中最后一次 CI 运行的结果字典。
+    """
     chunk_queue: asyncio.Queue[Any] = asyncio.Queue()
     attempt_state = {
         "ci": 0,
         "fix": 0,
         "eval": 0,
     }
+    last_ci_result: dict[str, Any] = {}
 
     async def _emit_message(text: str) -> None:
         await chunk_queue.put(msg_factory(text))
@@ -351,6 +357,8 @@ def _start_fix_loop(
             f"[修复循环] 第 {attempt_state['ci']} 次重跑 CI"
         )
         result = await ci_gate.run("all")
+        last_ci_result.clear()
+        last_ci_result.update(result)
         for message in _iter_ci_gate_messages(
             result,
             prefix="[修复循环] ",
@@ -411,7 +419,7 @@ def _start_fix_loop(
             fix_done.set()
 
     fix_task = asyncio.create_task(_run_fix())
-    return fix_task, chunk_queue, fix_done
+    return fix_task, chunk_queue, fix_done, last_ci_result
 
 
 class VerifyStage(TaskStage):
@@ -439,7 +447,32 @@ class MetaVerifyStage(VerifyStage):
         self,
         ctx: TaskContext,
     ) -> AsyncIterator[Any]:
-        ci_result = await ctx.orchestrator.ci_gate.run("all")
+        try:
+            ci_result = await ctx.orchestrator.ci_gate.run("all")
+        except Exception as exc:
+            error = f"CI gate exception: {exc}"
+            ctx.task.status = TaskStatus.FAILED
+            yield StageResult(
+                status="failed",
+                artifacts={
+                    "verify_report": VerifyReportArtifact(
+                        ci_result={
+                            "passed": False,
+                            "gates": [],
+                            "errors": error,
+                        },
+                        error=error,
+                    ),
+                    "task_result": CycleResult(
+                        success=False,
+                        error=error,
+                        error_log=error,
+                    ),
+                },
+                messages=[f"CI 门禁异常: {error}"],
+                error=error,
+            )
+            return
         messages: list[str] = []
         for message in _iter_ci_gate_messages(ci_result):
             messages.append(message)
@@ -449,7 +482,7 @@ class MetaVerifyStage(VerifyStage):
         if not ci_result.get("passed"):
             messages.append("CI 未通过，启动修复循环")
             yield ctx.message("CI 未通过，启动修复循环")
-            fix_task, chunk_queue, fix_done = _start_fix_loop(
+            fix_task, chunk_queue, fix_done, last_ci_result = _start_fix_loop(
                 config=ctx.orchestrator.config,
                 task=ctx.task,
                 agent=(
@@ -506,6 +539,9 @@ class MetaVerifyStage(VerifyStage):
                 )
                 return
             fix_errors = "\n".join(fix_res.error_log)
+            # 用 fix loop 中最后一次 CI 结果更新 ci_result
+            if last_ci_result:
+                ci_result = last_ci_result
         yield StageResult(
             artifacts={
                 "verify_report": VerifyReportArtifact(

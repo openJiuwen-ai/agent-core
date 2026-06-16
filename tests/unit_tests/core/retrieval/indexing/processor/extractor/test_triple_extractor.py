@@ -63,6 +63,18 @@ class TestTripleExtractor:
             llm_client=mock_llm_client,
             model_name="test-model",
         )
+    
+    @classmethod
+    def test_init_with_validation(cls, mock_llm_client):
+        """Test initialization with validation"""
+        extractor = TripleExtractor(
+            llm_client=mock_llm_client,
+            model_name="test-model",
+            temperature=0.0,
+            max_concurrent=10,
+            validate=True
+        )
+        assert getattr(extractor, "validate", False) is True
 
     @pytest.mark.asyncio
     async def test_extract_multiple_chunks(self, mock_llm_client, mock_completion):
@@ -185,3 +197,71 @@ class TestTripleExtractor:
         ex = _TestableTripleExtractor(llm_client=mock_llm_client, model_name="m")
         triples, ok = ex.parse_triples_for_test('{"triples": [["x"], {"bad": 1}]}', "d1", "c1")
         assert not ok and triples == []
+
+    @pytest.mark.asyncio
+    async def test_extract_multiple_chunks_with_validation(self, mock_llm_client, mock_completion):
+        mock_llm_client.invoke = AsyncMock(return_value=mock_completion)
+
+        extractor = TripleExtractor(
+            llm_client=mock_llm_client,
+            model_name="test-model",
+            max_concurrent=2,
+            validate=True
+        )
+        chunks = [
+            TextChunk(id_="1", text="Alice knows Bob", doc_id="doc_1"),
+            TextChunk(id_="2", text="Charlie knows David", doc_id="doc_1"),
+        ]
+        triples = await extractor.extract(chunks)
+        
+        assert mock_llm_client.invoke.call_count == 4
+
+    @pytest.mark.asyncio
+    async def test_extract_with_validation_and_exception(self, mock_llm_client):
+        """Test exception during extraction with validation enabled"""
+        mock_llm_client.invoke = AsyncMock(side_effect=Exception("429 too many requests"))
+
+        extractor = TripleExtractor(
+            llm_client=mock_llm_client,
+            model_name="test-model",
+            validate=True,
+        )
+        chunks = [
+            TextChunk(id_="1", text="Alice knows Bob", doc_id="doc_1"),
+        ]
+        with pytest.raises(BaseError) as exc_info:
+            await extractor.extract(chunks)
+        assert exc_info.value.code == StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR.code
+        assert "429 too many requests" in (exc_info.value.message or "")
+
+    @pytest.mark.asyncio
+    async def test_extract_invalid_json_with_validation(self, mock_llm_client):
+        """Test invalid JSON response with validation enabled"""
+        mock_completion = MagicMock()
+        mock_completion.content = "Invalid JSON response"
+        mock_llm_client.invoke = AsyncMock(return_value=mock_completion)
+
+        extractor = TripleExtractor(
+            llm_client=mock_llm_client,
+            model_name="test-model",
+            validate=True,
+        )
+        chunks = [
+            TextChunk(id_="1", text="Alice knows Bob", doc_id="doc_1"),
+        ]
+        with pytest.raises(BaseError) as exc_info:
+            await extractor.extract(chunks)
+        assert exc_info.value.code == StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR.code
+        assert "parsed" in (exc_info.value.message or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_extract_empty_chunks_with_validation(self, mock_llm_client):
+        """Test extracting empty chunk list with validation enabled"""
+        extractor = TripleExtractor(
+            llm_client=mock_llm_client,
+            model_name="test-model",
+            validate=True,
+        )
+        triples = await extractor.extract([])
+        assert len(triples) == 0
+        mock_llm_client.invoke.assert_not_called()

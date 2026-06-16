@@ -77,13 +77,19 @@ def test_spawn_payload_coordination_keys_are_frozen():
     assert payload["query"] == "hello"
 
 
-def test_spawn_payload_query_default_when_no_initial_message():
+def test_spawn_payload_query_empty_when_no_initial_message():
+    """No initial_message -> empty query (no fabricated placeholder).
+
+    An empty query signals "no first round": the spawned member comes up,
+    subscribes, and idles until a real mailbox message arrives. The
+    ``query`` key is still present to keep the wire schema frozen.
+    """
     builder = _make_builder()
     ctx = _make_member_ctx("worker_a")
 
     payload = builder.build_spawn_payload(ctx)
 
-    assert payload["query"] == "Join the team and wait for your first assignment."
+    assert payload["query"] == ""
 
 
 def test_spawn_payload_with_empty_team_spec():

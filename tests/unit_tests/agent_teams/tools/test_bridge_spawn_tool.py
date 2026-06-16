@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Unit tests for ``SpawnMemberTool`` bridge_agent branch."""
+"""Unit tests for ``SpawnBridgeAgentTool``."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from openjiuwen.agent_teams.tools.database import (
 )
 from openjiuwen.agent_teams.tools.locales import make_translator
 from openjiuwen.agent_teams.tools.team import TeamBackend
-from openjiuwen.agent_teams.tools.team_tools import SpawnMemberTool
+from openjiuwen.agent_teams.tools.team_tools import SpawnBridgeAgentTool
 
 
 @pytest.fixture
@@ -66,8 +66,8 @@ async def _build_backend(db, messager, *, enable_bridge: bool) -> TeamBackend:
     return backend
 
 
-def _make_tool(backend) -> SpawnMemberTool:
-    return SpawnMemberTool(team=backend, t=make_translator("cn"))
+def _make_tool(backend) -> SpawnBridgeAgentTool:
+    return SpawnBridgeAgentTool(team=backend, t=make_translator("cn"))
 
 
 @pytest.mark.asyncio
@@ -80,7 +80,6 @@ async def test_bridge_spawn_rejected_when_disabled(db, messager):
             "member_name": "codex",
             "display_name": "Codex",
             "desc": "reviewer",
-            "role_type": "bridge_agent",
         },
     )
     assert out.success is False
@@ -97,7 +96,6 @@ async def test_bridge_spawn_requires_desc(db, messager):
             "member_name": "codex",
             "display_name": "Codex",
             "desc": "",
-            "role_type": "bridge_agent",
         },
     )
     assert out.success is False
@@ -114,7 +112,6 @@ async def test_bridge_spawn_happy_path(db, messager):
             "member_name": "codex",
             "display_name": "Codex",
             "desc": "senior python reviewer",
-            "role_type": "bridge_agent",
             "mailbox_inject_mode": "rephrase",
             "protocol": "codex",
             "adapter_config": {"endpoint": "stdio://codex"},
@@ -144,7 +141,6 @@ async def test_bridge_spawn_rejects_bad_inject_mode(db, messager):
             "member_name": "codex",
             "display_name": "Codex",
             "desc": "x",
-            "role_type": "bridge_agent",
             "mailbox_inject_mode": "summarize",  # not a valid enum
         },
     )
@@ -162,29 +158,8 @@ async def test_bridge_spawn_rejects_non_dict_adapter_config(db, messager):
             "member_name": "codex",
             "display_name": "Codex",
             "desc": "x",
-            "role_type": "bridge_agent",
             "adapter_config": "not-a-dict",
         },
     )
     assert out.success is False
     assert "adapter_config" in (out.error or "")
-
-
-@pytest.mark.asyncio
-@pytest.mark.level0
-async def test_invalid_role_type_lists_three_choices(db, messager):
-    backend = await _build_backend(db, messager, enable_bridge=True)
-    tool = _make_tool(backend)
-    out = await tool.invoke(
-        {
-            "member_name": "x",
-            "display_name": "X",
-            "desc": "y",
-            "role_type": "alien",
-        },
-    )
-    assert out.success is False
-    err = out.error or ""
-    assert "teammate" in err
-    assert "human_agent" in err
-    assert "bridge_agent" in err

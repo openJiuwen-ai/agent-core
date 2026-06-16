@@ -16,6 +16,9 @@ Uses ``ClientFactory.create_from_url`` so the agent card is loaded from
 There is no separate HTTP "invoke" RPC in the SDK: both paths use ``send_message`` and consume the
 returned event iterator. This example uses *invoke-style* (collect all events, print the last) vs
 *stream-style* (print each ``StreamResponse`` as it arrives).
+
+openjiuwen ``A2AClient.invoke`` / ``RemoteAgent.invoke`` follow the same *invoke-style* contract:
+drain the SSE event stream internally and return the aggregated ``COMPLETED`` result.
 """
 
 from __future__ import annotations

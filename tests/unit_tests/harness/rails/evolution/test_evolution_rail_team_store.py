@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from openjiuwen.agent_evolving.trajectory import (
-    FileTrajectoryStore,
     InMemoryTrajectoryRegistry,
     InMemoryTrajectoryStore,
 )
@@ -123,11 +122,9 @@ class TestEvolutionRailTeamTrajectory:
         assert all(snapshot.member_id == "test-agent" for snapshot in sink.snapshots)
         assert [len(snapshot.trajectory.steps) for snapshot in sink.snapshots] == [1, 2]
 
-    def test_team_trajectory_store_is_deprecated(self):
-        with pytest.warns(DeprecationWarning, match="team_trajectory_store"):
-            rail = EvolutionRail(team_trajectory_store=InMemoryTrajectoryStore())
-
-        assert rail is not None
+    def test_team_trajectory_store_is_not_accepted_by_evolution_rail(self):
+        with pytest.raises(TypeError, match="team_trajectory_store"):
+            EvolutionRail(team_trajectory_store=InMemoryTrajectoryStore())
 
     def test_trajectory_sink_requires_team_id(self):
         rail = EvolutionRail(async_evolution=False)
@@ -263,17 +260,3 @@ class TestEvolutionRailTeamTrajectory:
             "view_task",
             "send_message",
         ]
-
-    @pytest.mark.asyncio
-    async def test_deprecated_team_trajectory_store_does_not_append_snapshots(self, tmp_path):
-        team_store = FileTrajectoryStore(tmp_path)
-        with pytest.warns(DeprecationWarning, match="team_trajectory_store"):
-            rail = EvolutionRail(
-                trajectory_store=InMemoryTrajectoryStore(),
-                team_trajectory_store=team_store,
-                async_evolution=False,
-            )
-        await _record_tool_invoke(rail, tool_name="read_file", tool_result="x" * 1000)
-        await _record_tool_invoke(rail, tool_name="read_file", tool_result="y" * 1000)
-
-        assert not (tmp_path / "trajectories_default.jsonl").exists()

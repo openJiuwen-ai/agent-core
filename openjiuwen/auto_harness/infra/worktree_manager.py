@@ -33,10 +33,15 @@ def _slugify(topic: str) -> str:
     Returns:
         仅含字母、数字、连字符的 slug。
     """
-    slug = re.sub(
-        r"[^a-zA-Z0-9\u4e00-\u9fff]+", "-", topic
+    issue_match = re.search(
+        r"(?:fix-issue-|issue-|\bissue\s*#?|#)\s*(\d+)",
+        topic,
+        flags=re.IGNORECASE,
     )
-    return slug.strip("-")[:40] or "task"
+    if issue_match:
+        return f"fix-issue-{issue_match.group(1)}"
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", topic)
+    return slug.strip("-").lower()[:40] or "task"
 
 
 async def _run_git(

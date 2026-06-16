@@ -37,7 +37,7 @@ Agent Swarm 是一个多智能体协作编排框架，核心目标是让多个 A
 
 团队模式决定了成员的来源和动态性：
 
-- **Default（动态模式）**：Leader 拥有 `spawn_member` 工具，可按需动态创建 Teammate
+- **Default（动态模式）**：Leader 拥有 `spawn_teammate` 工具（及按团队能力开启的 `spawn_human_agent` / `spawn_bridge_agent` / `spawn_external_cli`），可按需动态创建成员
 - **Predefined（预定义模式）**：成员在创建时固定，Leader 无法动态增减成员
 - **Hybrid（混合模式）**：预注册基础成员，同时保留 Leader 动态创建新成员的能力
 

@@ -51,7 +51,7 @@ class _FakeCoordination:
         self.enqueued_inputs.append(inputs)
         await self._agent._stream_controller.stream_queue.put(None)
 
-    async def enqueue_mailbox_after_first_iteration(self) -> None:
+    async def enqueue_initial_mailbox_poll(self) -> None:
         self.mailbox_enqueued = True
 
     async def finalize_round(self) -> None:
@@ -86,7 +86,7 @@ def test_team_plan_leader_mounts_team_plan_mode_rail() -> None:
         enable_team_plan=True,
     ).build()
 
-    assert isinstance(leader.harness.rails.team_plan_mode, TeamPlanModeRail)
+    assert leader.harness.find_rails(TeamPlanModeRail)
 
 
 @pytest.mark.level0
@@ -97,7 +97,7 @@ def test_team_normal_leader_does_not_mount_team_plan_mode_rail() -> None:
         enable_team_plan=False,
     ).build()
 
-    assert leader.harness.rails.team_plan_mode is None
+    assert not leader.harness.find_rails(TeamPlanModeRail)
 
 
 @pytest.mark.level0

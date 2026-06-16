@@ -36,7 +36,7 @@ from openjiuwen.harness.tools.multimodal import (
     VisualQuestionAnsweringTool,
     create_vision_tools,
 )
-from openjiuwen.harness.tools.web_tools import (
+from openjiuwen.harness.tools.web import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
     WebPaidSearchTool,

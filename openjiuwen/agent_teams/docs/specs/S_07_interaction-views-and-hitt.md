@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/interaction/`、`openjiuwen/agent_teams/constants.py`、`openjiuwen/agent_teams/runtime/manager.py`（`_dispatch_payload`）、`openjiuwen/agent_teams/agent/coordination/handlers/message.py`（HITT inbound 钩子）|
-| 最近一次修订日期 | 2026-05-17 |
+| 最近一次修订日期 | 2026-06-09 |
 | 关联 feature | F_13_human-agent-send-message.md |
 
 ## 范围 / 边界
@@ -44,7 +44,7 @@
    - `GodViewMessage` → `UserInbox.deliver_to_leader`，落到 leader DeepAgent 的 `deliver_input`，**不**写消息总线；
    - `OperatorMessage(target=None)` → `auto_start_all()` + `UserInbox.broadcast`（先启动再广播）；
    - `OperatorMessage(target=<name>)` → `auto_start_member(<name>)` + `UserInbox.direct`（先启动再投递）；
-   - `HumanAgentMessage(target=None)` → `HumanAgentInbox._drive_agent`（驱动该 avatar 的 DeepAgent，不写总线）；
+   - `HumanAgentMessage(target=None)` → `HumanAgentInbox._drive_agent`（经 `TeamAgent.interact` 把驱动输入投进该 avatar **自身** coordination 的 `USER_INPUT` 事件，不写消息总线、不 reach-in 未启动的 harness）；
    - `HumanAgentMessage(target in {"all", "*"})` → `HumanAgentInbox` 经 `broadcast_message`；
    - `HumanAgentMessage(target=<name>)` → `HumanAgentInbox` 经 `deliver_direct`。
    不存在第二张映射表。`auto_start` 是 dispatch 层行为（`_dispatch_payload`），不归 inbox 层管。
@@ -53,7 +53,7 @@
 8. **HITT 关时 inbox 直接拒**：`HumanAgentInbox.send` 在 `team.human_agent_names()` 为空时抛 `HumanAgentNotEnabledError`（`_dispatch_payload` 转 `DeliverResult.failure("human_agent_not_enabled")`）；HITT 开但 sender 不匹配抛 `UnknownHumanAgentError`，转 `DeliverResult.failure("unknown_human_agent")`。绝不允许 silent drop 或者 silent inject 一个新身份。
 9. **保留名 `human_agent` 命中语义**：当 sender 省略时，`HumanAgentInbox._resolve_sender` 用 `HUMAN_AGENT_MEMBER_NAME` 作为优先默认；找不到则取 `sorted(names)[0]`。这是 backward-compat 兜底，不是 routing 含义。
 10. **`HumanAgentInboundEvent` 是 team→user 反向通道的唯一类型**：人类成员收到的消息（点对点 / 广播）由 `MessageHandler.on_message_or_broadcast` 把消息总线 row 包成 `HumanAgentInboundEvent`，喂给注册在 `TeamBackend` 上的 `on_inbound` 回调。**人类成员的 LLM 不消费这些消息**——按 phase-2 设计，业务层（CLI / SDK / IM 适配器）拿到事件再决定怎么投给真实用户。
-11. **interaction 层 inbox 不感知 wake-up**：`UserInbox` / `HumanAgentInbox` 只调 `TeamMessageManager.send_message` / `broadcast_message` 与 `TeamAgent.deliver_input`。它们既不写 `EventBus`，也不阅读 `MemberStatus`。从消息总线到 dispatcher 的 wake-up 是 `messager` + coordination 的事，跟这一层无关。
+11. **interaction 层 inbox 不感知 wake-up**：`UserInbox` 只调 `TeamMessageManager.send_message` / `broadcast_message` 与 leader 的 `TeamAgent.deliver_input`。`HumanAgentInbox` 的 avatar-drive（`to is None`）是**唯一**会触达 avatar `EventBus` 的入站分支——但它经 `TeamAgent.interact` **只 enqueue 一个 `USER_INPUT` 事件**，由 avatar 自己的 coordination 在 harness 起好后消费，inbox 自身不消费、不驱动 round、也不读 `MemberStatus`。这样 avatar-drive 与 teammate 的输入路径同构（都经各自 coordination），不再从 leader 协程 reach-in 未启动的 harness。从消息总线到 dispatcher 的 wake-up 仍是 `messager` + coordination 的事。
     **注意**：`_dispatch_payload`（dispatch 层）在 OperatorMessage 分支调用 `auto_start_member` / `auto_start_all` 做 best-effort lazy startup——这是 dispatch 层行为，不是 inbox 层行为。inbox 层仍然不感知成员状态。
 12. **错误以 `DeliverResult` 为准，不抛业务态异常**：`UserInbox` / `HumanAgentInbox` 对外 contract 是同一个 `DeliverResult(ok, message_id, reason)`。HITT 相关的 `HumanAgentNotEnabledError` / `UnknownHumanAgentError` 是 inbox 内部状态信号，由 `_dispatch_payload` 在边界吃掉转换成 `failure(reason)`。SDK 用户**不需要** try/except 一个具体异常类。
 
@@ -212,7 +212,7 @@ class HumanAgentInbox:
 
 支持的入站消息类型：`HumanAgentMessage`。三条分支严格按 `to`：
 
-- `to is None` → `_drive_agent`：用 `agent_lookup(sender)` 找 live `TeamAgent` 后调 `agent.deliver_input(body)`。`agent_lookup is None` 或返回 `None` 时 `failure("agent_unavailable")`。
+- `to is None` → `_drive_agent`：用 `agent_lookup(sender)` 找 live `TeamAgent` 后调 `agent.interact(body)`（enqueue `USER_INPUT` 进该 avatar 自身 coordination，由其 loop 在 harness 起好后消费——不直接 `deliver_input` / `harness.send`，避免 reach-in 未启动的 harness）。`agent_lookup is None` 或返回 `None` 时 `failure("agent_unavailable")`。
 - `to in BROADCAST_TARGETS`（`{"all", "*"}`）→ `message_manager.broadcast_message(content=body, from_member_name=sender)`。
 - `to=<member>` → 复用 router 层的 `deliver_direct` 原语，先 `_member_exists` 再写总线。
 
@@ -288,7 +288,7 @@ interaction 层**不**直接产 `EventMessage`。具体路径分两段：
 1. `_dispatch_payload` 把 payload 分到 inbox。`UserInbox.broadcast` / `UserInbox.direct` / `HumanAgentInbox._send_*` 都调 `TeamMessageManager`，由 `message_manager` 写消息总线后通过 `messager.publish` 在 `TeamTopic.MESSAGE.build(session_id, team_name)` 上发 `EventMessage(MESSAGE)` / `EventMessage(BROADCAST)`。
 2. 这个 `EventMessage` 被 `EventBus` 收下进 `EventDispatcher`，由 `MessageHandler.on_message_or_broadcast` 处理：(a) leader 端把面向 `user` 的消息变成 user-bound ack；(b) 命中人类成员的消息包成 `HumanAgentInboundEvent` 给 `on_inbound` 回调（团队→外部用户的反向通道）。
 
-`GodViewMessage` 与 `HumanAgentMessage(target=None)` 不写消息总线，所以也不会产生 `EventMessage`——它们直接通过 `TeamAgent.deliver_input` 进对应 DeepAgent 的输入队列，由 coordination 层的 `USER_INPUT` 事件路径唤醒。换句话说，从入口角度看，三视角→后续运行时存在两条并行路径：**总线路径**（Operator + HumanAgent 写总线 → MESSAGE 事件）和 **DeepAgent 输入路径**（GodView + HumanAgent 驱 avatar 走 deliver_input → USER_INPUT 事件），interaction 层负责选哪一条。
+`GodViewMessage` 与 `HumanAgentMessage(target=None)` 不写消息总线，所以也不会产生 `EventMessage`——它们走 DeepAgent 输入路径，但落点不同：GodView 直接 `UserInbox.deliver_to_leader(leader.deliver_input, ...)`（leader 在主 run cycle 里 harness 必已 start，直投安全）；avatar-drive 经 `TeamAgent.interact` enqueue `USER_INPUT` 进 avatar 自身 coordination，由其 loop 在 harness 起好后消费。换句话说，从入口角度看，三视角→后续运行时存在两条并行路径：**总线路径**（Operator + HumanAgent 写总线 → MESSAGE 事件）和 **DeepAgent 输入路径**（GodView 直投 leader / HumanAgent 驱 avatar 经 `interact` → USER_INPUT 事件），interaction 层负责选哪一条。
 
 ## 数据结构
 

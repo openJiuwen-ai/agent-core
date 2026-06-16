@@ -24,6 +24,9 @@ TOOL_FAILURE_SIGNAL: Final[Literal["tool_failure"]] = "tool_failure"
 TRAJECTORY_ISSUE_SIGNAL: Final[Literal["trajectory_issue"]] = "trajectory_issue"
 USER_INTENT_SIGNAL: Final[Literal["user_intent"]] = "user_intent"
 
+EVOLUTION_TARGET_VALUES: Final[tuple[str, ...]] = ("description", "body", "script")
+EVOLUTION_SUBJECT_KIND_VALUES: Final[tuple[str, ...]] = ("skill", "team-skill", "swarm-skill")
+SIMPLIFY_ACTION_VALUES: Final[tuple[str, ...]] = ("DELETE", "MERGE", "REFINE", "KEEP")
 VALID_PATCH_ACTIONS = frozenset({"append", "merge", "replace", "skip"})
 VALID_SECTIONS = frozenset(
     {
@@ -43,6 +46,8 @@ __all__ = [
     "APPEND_MODE",
     "CONVERSATION_REVIEW_SIGNAL",
     "EXECUTION_FAILURE_SIGNAL",
+    "EVOLUTION_SUBJECT_KIND_VALUES",
+    "EVOLUTION_TARGET_VALUES",
     "EXPERIENCES_TARGET",
     "EXPERIENCE_ENTRY",
     "LOCAL_APPLY_COMPLETED",
@@ -52,6 +57,7 @@ __all__ = [
     "REPLACE_MODE",
     "RETRY_ACTION",
     "SKILL_EXPERIENCE_ENTRY",
+    "SIMPLIFY_ACTION_VALUES",
     "STATE_EFFECT",
     "TOOL_FAILURE_SIGNAL",
     "TRAJECTORY_ISSUE_SIGNAL",

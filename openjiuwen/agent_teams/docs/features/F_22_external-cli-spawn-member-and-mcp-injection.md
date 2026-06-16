@@ -1,5 +1,7 @@
 # External-CLI as a spawn_member Role + Static Spec Config + MCP Auto-Injection
 
+> **后续变更（F_26）**：本特性当时复用 `spawn_member` + `role_type` 区分、并明确拒绝独立工具；F_26 基于「降低 LLM 调用负担」反转该决策，把 spawn 按 role_type 拆为四个独立工具，外部 CLI 对应 `spawn_external_cli`。下文「复用 spawn_member」「拒绝独立工具」是当时的决策记录，现状以 F_26 / S_08 为准。
+
 ## 元信息
 
 | 项 | 值 |

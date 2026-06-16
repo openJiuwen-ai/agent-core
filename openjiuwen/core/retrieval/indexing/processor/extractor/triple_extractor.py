@@ -3,12 +3,14 @@
 """
 Triple Extractor Implementation
 
-Uses LLM for triple extraction.
+Uses LLM for triple extraction and optional triple validation.
 """
 
 import asyncio
+from collections import defaultdict
 from typing import Any, List
 
+import json
 from json_repair import repair_json
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -20,7 +22,7 @@ from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extracto
 
 
 class TripleExtractor(Extractor):
-    """Triple extractor implementation using LLM for OpenIE triple extraction"""
+    """Triple extractor with triple validation using LLM for OpenIE triple extraction"""
 
     def __init__(
         self,
@@ -28,6 +30,7 @@ class TripleExtractor(Extractor):
         model_name: str,
         temperature: float = 0.0,
         max_concurrent: int = 50,
+        validate: bool = False,
         **kwargs,
     ):
         """
@@ -38,11 +41,13 @@ class TripleExtractor(Extractor):
             model_name: Model name
             temperature: Temperature parameter
             max_concurrent: Maximum concurrency, defaults to 50
+            validate: Whether to validate extracted triples via LLM
         """
         self.llm_client = llm_client
         self.model_name = model_name
         self.temperature = temperature
         self.limiter = asyncio.Semaphore(max_concurrent)
+        self.validate = validate
 
     async def extract(
         self,
@@ -50,7 +55,7 @@ class TripleExtractor(Extractor):
         **kwargs,
     ) -> List[Triple]:
         """
-        Extract triples from chunks via parallel LLM calls.
+        Extract and validate triples from chunks via parallel LLM calls.
 
         On any failure, raises the first error in chunk order (``BaseError`` is re-raised
         unchanged; other exceptions are wrapped).
@@ -67,43 +72,132 @@ class TripleExtractor(Extractor):
                 extraction or parsing fails.
         """
 
+        all_triples = await self._extract_internal(chunks)
+
+        if not self.validate:
+            return all_triples
+        
+        return await self._validate_internal(all_triples, chunks)
+    
+
+    async def _invoke_and_parse(self, prompt: str, chunk: TextChunk) -> List[Triple]:
+        """
+        Call the LLM and parse output
+
+        Args:
+            prompt: Prompt to be given to the LLM.
+            chunk: Text chunk given as context
+
+        Returns:
+            Parsed response of the LLM
+
+        Raises:
+            BaseError: Specifically `RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR`, 
+                raised if the LLM's response cannot be parsed into valid JSON.
+        """
+
+        messages = [{"role": "user", "content": prompt}]
+        
+        completion = await self.llm_client.invoke(
+            messages=messages,
+            temperature=self.temperature,
+        )
+
+        triples, parse_success = self._parse_triples(
+            completion.content, chunk.doc_id, chunk.id_
+        )
+        
+        if not parse_success:
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR,
+                error_msg=(
+                    f"{chunk.id_}: LLM response could not be parsed as valid triple JSON"
+                ),
+            )
+        return triples
+
+    async def _gather_results(
+        self, tasks: list[asyncio.Task], chunks: List[TextChunk]
+    ) -> List[Triple]:
+        """
+        Await tasks, handle exceptions, and gather the resulting triples.
+
+        Args:
+            tasks: List of asyncio tasks executing the LLM requests.
+            chunks: List of text chunks corresponding to the tasks.
+
+        Returns:
+            A flattened list of all triples gathered from the successful tasks.
+
+        Raises:
+            BaseError: Re-raises the first encountered BaseError or wraps a standard 
+                Exception into a RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR.
+        """
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        all_triples: List[Triple] = []
+        first_error: BaseError | Exception | None = None
+        first_error_chunk_id: str | None = None
+
+        for idx, result in enumerate(results):
+            chunk_id = chunks[idx].id_
+            
+            if isinstance(result, BaseException) and not isinstance(result, Exception):
+                raise result
+            if isinstance(result, Exception):
+                logger.error(f"Task failed for chunk {chunk_id}: {result}")
+                if first_error is None:
+                    first_error = result
+                    first_error_chunk_id = chunk_id
+                continue
+            
+            all_triples.extend(result)
+
+        if first_error is not None:
+            if isinstance(first_error, BaseError):
+                raise first_error
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR,
+                error_msg=f"{first_error_chunk_id}: {first_error}",
+                cause=first_error,
+            ) from first_error
+            
+        return all_triples
+
+
+
+    async def _extract_internal(self, chunks: List[TextChunk]) -> List[Triple]:
+        """
+        Execute the internal extraction of triples across all provided chunks.
+
+        Args:
+            chunks: List of text chunks to extract triples from.
+
+        Returns:
+            All triples merged from successful chunk results.
+        
+        Raises:
+            BaseError: Propagates any `BaseError` from parsing, or wraps unexpected 
+                system/network exceptions into a `BaseError`.
+        """
         async def _extract_chunk(chunk: TextChunk) -> List[Triple]:
             """
-            Invoke LLM and parse triples for a single chunk.
+            Process a single text chunk to extract triples.
 
             Args:
-                chunk: Text chunk to process.
+                chunk: The specific text chunk being processed.
 
             Returns:
-                Extracted triples for this chunk.
+                A list of extracted Triple objects.
 
             Raises:
-                BaseError: On invalid LLM output or failed invoke (after wrapping).
+                BaseError: Propagates any `BaseError` from parsing, or wraps unexpected 
+                    exceptions into a `BaseError`.
             """
-
             async with self.limiter:
                 try:
-                    # Build prompt
                     prompt = self._build_prompt(chunk.text, chunk.metadata.get("title", ""))
-                    messages = [{"role": "user", "content": prompt}]
-
-                    # Call LLM
-                    completion = await self.llm_client.invoke(
-                        messages=messages,
-                        temperature=self.temperature,
-                    )
-
-                    # Parse result
-                    triples, parse_success = self._parse_triples(completion.content, chunk.doc_id, chunk.id_)
-                    if not parse_success:
-                        raise build_error(
-                            StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR,
-                            error_msg=(
-                                f"{chunk.id_}: LLM response could not be parsed as valid triple JSON"
-                            ),
-                        )
-                    return triples
-
+                    return await self._invoke_and_parse(prompt, chunk)
                 except BaseError:
                     raise
                 except Exception as e:
@@ -115,34 +209,67 @@ class TripleExtractor(Extractor):
                     ) from e
 
         tasks = [asyncio.create_task(_extract_chunk(chunk)) for chunk in chunks]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return await self._gather_results(tasks, chunks)
 
-        all_triples: List[Triple] = []
-        first_error: BaseError | Exception | None = None
-        first_error_chunk_id: str | None = None
+    async def _validate_internal(
+        self, triples: List[Triple], chunks: List[TextChunk]
+    ) -> List[Triple]:
+        """
+        Group candidate triples by their source chunk and validate them via the LLM.
 
-        for idx, result in enumerate(results):
-            chunk_id = chunks[idx].id_
-            if isinstance(result, BaseException) and not isinstance(result, Exception):
-                raise result
-            if isinstance(result, Exception):
-                logger.error(f"Task failed for chunk {chunk_id}: {result}")
-                if first_error is None:
-                    first_error = result
-                    first_error_chunk_id = chunk_id
-                continue
-            all_triples.extend(result)
+        Args:
+            triples: List of previously extracted candidate triples.
+            chunks: List of text chunks that serve as the ground truth context.
 
-        if first_error is not None:
-            if isinstance(first_error, BaseError):
-                raise first_error
-            raise build_error(
-                StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR,
-                error_msg=f"{first_error_chunk_id}: {first_error}",
-                cause=first_error,
-            ) from first_error
+        Returns:
+            A filtered list of valid triples that are directly supported by the text.
+        """
+        if not triples:
+            return []
 
-        return all_triples
+        triples_by_chunk: dict[str, List[Triple]] = defaultdict(list)
+        for t in triples:
+            chunk_id = t.metadata.get("chunk_id")
+            if chunk_id:
+                triples_by_chunk[chunk_id].append(t)
+
+        async def _validate_chunk(chunk: TextChunk, chunk_triples: List[Triple]) -> List[Triple]:
+            """
+            Validate candidate triples via the LLM.
+
+            Args:
+                triples: List of previously extracted candidate triples.
+                chunks: List of text chunks that serve as the ground truth context.
+
+            Returns:
+                A filtered list of valid triples that are directly supported by the text.
+            """
+            async with self.limiter:
+                try:
+                    prompt = self._build_validation_prompt(chunk.text, chunk_triples)
+                    return await self._invoke_and_parse(prompt, chunk)
+                except BaseError:
+                    raise
+                except Exception as e:
+                    logger.error(f"Failed to validate triples for chunk {chunk.id_}: {e}")
+                    raise build_error(
+                        StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR,
+                        error_msg=f"{chunk.id_}: {e}",
+                        cause=e,
+                    ) from e
+
+        tasks = []
+        valid_chunks = []
+        for chunk in chunks:
+            chunk_triples = triples_by_chunk.get(chunk.id_)
+            if chunk_triples:
+                tasks.append(asyncio.create_task(_validate_chunk(chunk, chunk_triples)))
+                valid_chunks.append(chunk)
+
+        if not tasks:
+            return []
+
+        return await self._gather_results(tasks, valid_chunks)
 
     def _build_prompt(self, passage: str, title: str = "") -> str:
         """
@@ -261,6 +388,57 @@ Passage:
 {passage}
 """
         return prompt_template.format(passage=passage, title=title or "Untitled")
+
+    def _build_validation_prompt(self, passage: str, triples: List[Triple]) -> str:
+        """
+        Build the triple validation prompt for the LLM.
+
+        Args:
+            passage: Chunk body text.
+            triples: Candidate triples to validate.
+
+        Returns:
+            Rendered prompt string.
+        """
+        prompt_template = """# Instruction
+
+You are an OpenIE triple validator.
+Given the Text and Candidate Triples, output only the triples that are directly supported by the text.
+Modify predicates where needed for correctness or clarity
+Drop triples that rely on outside knowledge, mismatch dates/numbers/places
+or are not necessarily true based on the text.
+
+Validate the following list of triples based on the rules above.
+
+Return only the valid triples in one valid JSON object in this format:
+{{
+  "triples": [
+    ["subject1", "predicate1", "object1"],
+    ["subject2", "predicate2", "object2"]
+  ]
+}}
+
+Requirements:
+- Output valid JSON only. Do not use markdown, comments, or extra text.
+- Return exactly one top-level JSON object.
+- The top-level object must contain exactly one key: "triples".
+- "triples" must be a JSON array.
+- Each item in "triples" must be a JSON array of exactly three strings.
+- Do not output tuples, objects, or arrays with more than three elements inside "triples".
+- Use double quotes for all JSON strings.
+- If no valid triples are found, return {{"triples": []}}.
+- Prefer triples that use at least one, and preferably two, named entities from the title or passage.
+- Keep entity and predicate wording consistent with the source language.
+- Do not include duplicate triples.
+
+You are given the following Text:
+{passage}
+
+You are given the following extracted Triples:
+{triples}
+"""
+        triples_text = json.dumps([[t.subject, t.predicate, t.object] for t in triples], ensure_ascii=False, indent=2)
+        return prompt_template.format(passage=passage, triples=triples_text)
 
     def _parse_triples(self, content: str, doc_id: str, chunk_id: str) -> tuple[List[Triple], bool]:
         """

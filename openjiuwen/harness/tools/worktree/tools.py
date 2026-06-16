@@ -83,6 +83,27 @@ def _resolve_workspace_worktree_path(slug: str) -> str:
     return worktree_path_for(workspace, slug)
 
 
+def _validate_enter_inputs(inputs: Dict[str, Any]) -> None:
+    """Validate EnterWorktree input shape before any side effects."""
+    if not isinstance(inputs, dict):
+        raise ValueError("Input must be an object")
+
+    unexpected = sorted(set(inputs) - {"name"})
+    if unexpected:
+        joined = ", ".join(unexpected)
+        raise ValueError(f"Unexpected input field(s): {joined}")
+
+    if "name" not in inputs:
+        return
+
+    requested = inputs["name"]
+    if not isinstance(requested, str):
+        raise ValueError("'name' must be a string")
+    if not requested:
+        raise ValueError("'name' must not be empty")
+    validate_slug(requested)
+
+
 class EnterWorktreeTool(_WorktreeToolBase):
     """Create or enter an isolated git worktree.
 
@@ -118,6 +139,11 @@ class EnterWorktreeTool(_WorktreeToolBase):
         Returns:
             ToolOutput with worktree_path, worktree_branch, and message on success.
         """
+        try:
+            _validate_enter_inputs(inputs)
+        except ValueError as e:
+            return ToolOutput(success=False, error=str(e))
+
         existing = get_current_session()
         if existing:
             return ToolOutput(
@@ -190,7 +216,7 @@ class EnterWorktreeTool(_WorktreeToolBase):
         if not isinstance(requested, str):
             raise ValueError("'name' must be a string")
 
-        selected = requested.strip()
+        selected = requested
         if not selected:
             raise ValueError("'name' must not be empty")
 
