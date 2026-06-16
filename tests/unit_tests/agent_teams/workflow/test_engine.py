@@ -194,3 +194,31 @@ def test_workflow_failed_emitted_on_crash(tmp_path):
     assert ProgressKind.WORKFLOW_COMPLETED not in kinds
     failed = [e for e in events if e.kind == ProgressKind.WORKFLOW_FAILED]
     assert "boom" in failed[0].message
+
+
+def test_load_workflow_meta_reads_name_without_importing(tmp_path):
+    """load_workflow_meta extracts META via AST only — it does not import."""
+    import sys
+
+    from openjiuwen.agent_teams.workflow.engine.loader import load_workflow_meta
+
+    src = 'META = {"name": "metaonly", "description": "d"}\nasync def run(args):\n    return 1\n'
+    script = _write(tmp_path, "meta_only.py", src)
+    before = {k for k in sys.modules if k.startswith("wf_flow__")}
+
+    meta = load_workflow_meta(str(script))
+
+    after = {k for k in sys.modules if k.startswith("wf_flow__")}
+    assert meta["name"] == "metaonly"
+    assert before == after  # no importlib import happened
+
+
+def test_load_workflow_meta_rejects_non_literal_meta(tmp_path):
+    """A non-pure-literal META is rejected with MetaError."""
+    from openjiuwen.agent_teams.workflow.engine.errors import MetaError
+    from openjiuwen.agent_teams.workflow.engine.loader import load_workflow_meta
+
+    src = 'NAME = "x"\nMETA = {"name": NAME}\n'
+    script = _write(tmp_path, "bad_meta.py", src)
+    with pytest.raises(MetaError):
+        load_workflow_meta(str(script))
