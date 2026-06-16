@@ -557,6 +557,7 @@ class StatusCode(Enum):
         "retrieval kb_triple_extraction process error, reason: {error_msg}",
     )
     RETRIEVAL_KB_DATABASE_CONFIG_INVALID = (155508, "retrieval kb_database_config is invalid, reason: {error_msg}")
+    RETRIEVAL_KB_ONTOLOGY_INVALID = (155509, "retrieval kb_ontology is invalid, reason: {error_msg}")
 
     # KnowledgeBase Retrieval - Reranker 155600 - 155699
     RETRIEVAL_RERANKER_REQUEST_CALL_FAILED = (
