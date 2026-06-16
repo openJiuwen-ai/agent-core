@@ -10,7 +10,7 @@ from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
 @dataclass(frozen=True)
 class ForkedCompressionRequest:
     prompt: str
-    context_messages: list[BaseMessage]
+    context_messages: list[BaseMessage] = field(default_factory=list)
     system_messages: list[BaseMessage] = field(default_factory=list)
     tools: list[Any] | None = None
     exclude_recent_messages: int = 0
@@ -78,7 +78,8 @@ class ForkedCompressionExecutor:
     def build_messages(request: ForkedCompressionRequest) -> list[BaseMessage]:
         context_messages = list(request.context_messages)
         if request.exclude_recent_messages > 0:
-            context_messages = context_messages[: -request.exclude_recent_messages]
+            keep_count = max(len(context_messages) - request.exclude_recent_messages, 0)
+            context_messages = context_messages[:keep_count]
         return [
             *list(request.system_messages or []),
             *context_messages,
