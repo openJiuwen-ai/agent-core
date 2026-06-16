@@ -260,3 +260,21 @@ class TeamMessageManager:
         else:
             team_logger.error(f"Failed to mark message {message_id} as read by {member_name}")
         return success
+
+    async def mark_messages_read(self, message_ids: list[str], member_name: str) -> int:
+        """Mark several messages read for one member in one transaction.
+
+        Batches the per-message read-state writes into a single commit
+        (one fsync) — the dominant write-throughput lever on SQLite.
+
+        Args:
+            message_ids: Message ids to mark read, in delivery order.
+            member_name: Member who read the messages.
+
+        Returns:
+            Count of messages whose read state was applied.
+        """
+        marked = await self.db.message.mark_messages_read(message_ids, member_name)
+        if marked:
+            team_logger.debug("Marked %d messages read by %s", marked, member_name)
+        return marked

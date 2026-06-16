@@ -1070,3 +1070,40 @@ class InMemoryTeamDatabase:
                 msg.is_read = True
             team_logger.debug("Message %s marked as read by %s", message_id, member_name)
             return True
+
+    async def mark_messages_read(self, message_ids: list[str], member_name: str) -> int:
+        """Mark several messages read for one member (in-memory batch).
+
+        Mirrors the SQL backend's batch API so callers share one code
+        path. Missing ids are skipped; returns the count actually marked.
+        """
+        if not message_ids:
+            return 0
+        async with self._lock:
+            if member_name not in self._members:
+                team_logger.error("Member %s not found", member_name)
+                return 0
+            by_id = {m.message_id: m for m in self._messages}
+            marked = 0
+            for message_id in message_ids:
+                msg = by_id.get(message_id)
+                if not msg:
+                    team_logger.error("Message %s not found", message_id)
+                    continue
+                if msg.broadcast:
+                    key = (member_name, msg.team_name)
+                    rs = self._read_status.get(key)
+                    if rs is None:
+                        self._read_status[key] = _MemReadStatus(
+                            member_name=member_name,
+                            team_name=msg.team_name,
+                            read_at=msg.timestamp,
+                        )
+                    else:
+                        rs.read_at = msg.timestamp
+                else:
+                    msg.is_read = True
+                marked += 1
+            if marked:
+                team_logger.debug("Marked %d messages read by %s", marked, member_name)
+            return marked
