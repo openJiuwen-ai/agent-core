@@ -8,7 +8,7 @@ Extends ``PermissionInterruptRail`` with two team-specific overrides:
    session-scoped and should not be persisted to disk (the team config
    is shared across members; persisting per-member session decisions
    would pollute the shared config and not survive across sessions).
-2. ``_parse_confirm_payload()`` automatically sets ``decided_by="leader"`` on
+2. ``parse_confirm_payload()`` automatically sets ``decided_by="leader"`` on
    every approval response, returning ``TeamPermissionConfirmResponse`` instead
    of the base ``PermissionConfirmResponse``.
 
@@ -20,6 +20,7 @@ to the leader and returns ``"interrupt"`` to trigger the interrupt flow.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
@@ -65,10 +66,10 @@ class TeamApprovalOrchestrator:
         tool_call = request.tool_call
         tool_call_id = tool_call.id if tool_call else ""
         tool_name = tool_call.name if tool_call else ""
-        tool_args = PermissionInterruptRail._parse_tool_args(tool_call)
+        tool_args = PermissionInterruptRail.parse_tool_args(tool_call)
         matched_rule = request.result.matched_rule or "N/A"
 
-        args_preview = PermissionInterruptRail._format_args_preview(tool_args)
+        args_preview = PermissionInterruptRail.format_args_preview(tool_args)
 
         content = (
             f"Teammate tool approval request (permission: ASK).\n"
@@ -109,7 +110,7 @@ class TeamPermissionRail(PermissionInterruptRail):
     Key overrides:
     - ``should_persist_to_disk()`` → ``False``: leader approvals do not
       write to teammate's local YAML.
-    - ``_parse_confirm_payload()`` → ``TeamPermissionConfirmResponse`` with
+    - ``parse_confirm_payload()`` → ``TeamPermissionConfirmResponse`` with
       ``decided_by="leader"`` automatically set.
     """
 
@@ -122,12 +123,12 @@ class TeamPermissionRail(PermissionInterruptRail):
         return False
 
     @staticmethod
-    def _parse_confirm_payload(
+    def parse_confirm_payload(
         user_input: Any,
     ) -> Optional[TeamPermissionConfirmResponse]:
         """Parse confirmation payload and automatically set ``decided_by="leader"``.
 
-        Mirrors ``PermissionInterruptRail._parse_confirm_payload`` but returns
+        Mirrors ``PermissionInterruptRail.parse_confirm_payload`` but returns
         ``TeamPermissionConfirmResponse`` with ``decided_by="leader"`` instead
         of the base ``PermissionConfirmResponse``.
         """
@@ -185,12 +186,12 @@ class TeamPermissionRail(PermissionInterruptRail):
 
         if isinstance(user_input, str):
             try:
-                raw_payload = PermissionInterruptRail._parse_tool_args_from_str(user_input)
+                raw_payload = json.loads(user_input)
             except Exception:
                 return None
             if not isinstance(raw_payload, dict):
                 return None
-            return TeamPermissionRail._parse_confirm_payload(raw_payload)
+            return TeamPermissionRail.parse_confirm_payload(raw_payload)
 
         return None
 

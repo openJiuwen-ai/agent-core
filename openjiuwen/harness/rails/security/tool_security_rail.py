@@ -119,7 +119,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return ""
 
         tool_name = tool_call.name or ""
-        tool_args = self._parse_tool_args(tool_call)
+        tool_args = self.parse_tool_args(tool_call)
 
         if tool_name in {"bash", "mcp_exec_command", "create_terminal"}:
             cmd = tool_args.get("command", tool_args.get("cmd", ""))
@@ -309,7 +309,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     ):
         tool_name = tool_call.name if tool_call is not None else ""
         normalized_name = self._normalize_tool_name(tool_name)
-        tool_args = self._parse_tool_args(tool_call)
+        tool_args = self.parse_tool_args(tool_call)
         auto_confirm_key = self._get_auto_confirm_key(tool_call)
 
         logger.info(
@@ -481,7 +481,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             ))
 
         logger.info("[PermissionEngine] permission.rail.user_response tool=%s", tool_name)
-        payload = self._parse_confirm_payload(user_input)
+        payload = self.parse_confirm_payload(user_input)
         if payload is None:
             message = self._build_message(tool_call, PermissionResult(
                 permission=PermissionLevel.ASK,
@@ -533,7 +533,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         return self.reject(tool_result=payload.feedback or "[PERMISSION_REJECTED] User rejected the request.")
 
     @staticmethod
-    def _parse_tool_args(tool_call: Optional[ToolCall]) -> dict:
+    def parse_tool_args(tool_call: Optional[ToolCall]) -> dict:
         if tool_call is None:
             return {}
         args = tool_call.arguments
@@ -548,7 +548,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         return {}
 
     @staticmethod
-    def _parse_confirm_payload(user_input: Any) -> Optional[PermissionConfirmResponse]:
+    def parse_confirm_payload(user_input: Any) -> Optional[PermissionConfirmResponse]:
         if isinstance(user_input, PermissionConfirmResponse):
             return user_input
         if isinstance(user_input, ConfirmPayload):
@@ -574,7 +574,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 return None
             if not isinstance(raw_payload, dict):
                 return None
-            return PermissionInterruptRail._parse_confirm_payload(raw_payload)
+            return PermissionInterruptRail.parse_confirm_payload(raw_payload)
         return None
 
     def _confirm_path_label(self) -> str:
@@ -627,7 +627,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         return None
 
     @staticmethod
-    def _format_args_preview(tool_args: dict) -> str:
+    def format_args_preview(tool_args: dict) -> str:
         try:
             return json.dumps(tool_args, ensure_ascii=False, indent=2)[:1000]
         except Exception:
@@ -639,14 +639,14 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         result: PermissionResult,
     ) -> str:
         tool_name = tool_call.name if tool_call else ""
-        tool_args = self._parse_tool_args(tool_call)
+        tool_args = self.parse_tool_args(tool_call)
 
         parts = [
             f"**工具 `{tool_name}` 需要授权才能执行**\n\n",
             "请确认是否允许该操作。\n\n",
         ]
 
-        args_preview = self._format_args_preview(tool_args)
+        args_preview = self.format_args_preview(tool_args)
         if args_preview and args_preview != "{}":
             parts.append(f"参数：\n```json\n{args_preview}\n```\n")
 
@@ -665,7 +665,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return ""
         
         tool_name = tool_call.name or ""
-        tool_args = self._parse_tool_args(tool_call)
+        tool_args = self.parse_tool_args(tool_call)
         auto_confirm_key = self._get_auto_confirm_key(tool_call)
         
         if tool_name == "bash":
