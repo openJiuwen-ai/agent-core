@@ -37,6 +37,7 @@ import yaml
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
+from openjiuwen.agent_teams import paths
 from openjiuwen.agent_teams.interaction.payload import HumanAgentMessage
 from openjiuwen.agent_teams.paths import configure_openjiuwen_home
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
@@ -79,6 +80,11 @@ _RUN_TIMEOUT_S = 600.0
 # leader narrates nothing), capped by the max.
 _NARRATION_QUIESCE_S = 6.0
 _NARRATION_MAX_S = 90.0
+# Teardown (Runner.stop) is optional. Set SWARMFLOW_E2E_TEARDOWN=0 to leave the
+# runtime up and keep every intermediate file (journal / scratch dir / team db)
+# for inspection. Default on (clean shutdown). The journal is already flushed to
+# disk by the time the workflow completes, so it survives either way.
+_TEARDOWN = os.getenv("SWARMFLOW_E2E_TEARDOWN", "1").strip().lower() not in ("0", "false", "no")
 
 if _LOG_CONFIG_PATH.is_file():
     configure_log(str(_LOG_CONFIG_PATH))
@@ -368,7 +374,19 @@ async def main() -> int:
 
     probe = await _run_team(spec, query, session_id)
 
-    await Runner.stop()
+    # Report where the run's artifacts live (the journal is already flushed).
+    journal = paths.workflow_journal_path(spec.team_name, session_id, "party-planner")
+    test_logger.info("[swarmflow] journal:  %s", journal)
+    test_logger.info("[swarmflow] workdir:  %s", _WORKDIR)
+    test_logger.info("[swarmflow] home:     %s", _HERE / "openjiuwen_home")
+
+    if _TEARDOWN:
+        await Runner.stop()
+    else:
+        test_logger.info(
+            "[swarmflow] teardown skipped (SWARMFLOW_E2E_TEARDOWN=0): runtime left up, "
+            "intermediate files kept for inspection"
+        )
 
     try:
         _verify(probe)
