@@ -26,6 +26,7 @@ from openjiuwen.harness.security.models import (
     PermissionResult,
     PermissionsSection,
 )
+
 from openjiuwen.harness.security.patterns import (
     build_command_allow_pattern,
     merge_external_directory_allow_into_permissions,

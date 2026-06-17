@@ -24,16 +24,6 @@ class ConfirmPayload(BaseModel):
         return cls.model_json_schema()
 
 
-class TeamConfirmPayload(ConfirmPayload):
-    """Team-mode confirmation payload with ``decided_by`` tracking.
-
-    ``decided_by`` records who made the approval decision (e.g. ``"leader"``).
-    It is not exposed to the LLM — it is set internally by
-    ``TeamPermissionRail._parse_confirm_payload``.
-    """
-    decided_by: str | None = None
-
-
 class ConfirmRequest(BaseModel):
     """Confirmation request configuration for a tool."""
     message: str = Field(default="Please approve or reject?", description="Message shown to the user.")

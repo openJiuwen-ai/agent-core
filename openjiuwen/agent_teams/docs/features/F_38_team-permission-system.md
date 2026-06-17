@@ -5,7 +5,7 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-06-17 |
-| 范围 | `agent_teams/rails/team_permission_rail.py`（新增）、`harness/rails/security/tool_security_rail.py`、`harness/rails/interrupt/confirm_rail.py`、`harness/security/models.py`、`harness/security/narrowing.py`（新增）、`agent_teams/tools/member_options.py`（新增）、`agent_teams/schema/blueprint.py`、`agent_teams/schema/team.py`、`agent_teams/agent/agent_configurator.py`、`agent_teams/agent/spawn_manager.py`、`agent_teams/agent/coordination/handlers/message.py`、`agent_teams/rails/team_context.py`、`agent_teams/rails/elements.py`、`agent_teams/rails/team_tool_rail.py`、`agent_teams/tools/tool_factory.py`、`agent_teams/tools/tool_member.py`、`agent_teams/tools/team.py`、`agent_teams/tools/locales/{cn,en}.py`、`agent_teams/tools/database/{engine,member_dao,message_dao}.py`、`agent_teams/tools/memory_database.py`、`agent_teams/tools/message_manager.py`、`agent_teams/tools/models.py`、`agent_teams/monitor/models.py`、`core/single_agent/interrupt/{handler,response}.py` |
+| 范围 | `agent_teams/rails/team_permission_rail.py`、`agent_teams/rails/confirm_payload.py`、`agent_teams/security/narrowing.py`、`agent_teams/tools/member_options.py`、`agent_teams/schema/blueprint.py`、`agent_teams/schema/team.py`、`agent_teams/agent/agent_configurator.py`、`agent_teams/agent/spawn_manager.py`、`agent_teams/agent/coordination/handlers/message.py`、`agent_teams/rails/team_context.py`、`agent_teams/rails/elements.py`、`agent_teams/rails/team_tool_rail.py`、`agent_teams/tools/tool_factory.py`、`agent_teams/tools/tool_member.py`、`agent_teams/tools/team.py`、`agent_teams/tools/locales/{cn,en}.py`、`agent_teams/tools/database/{engine,member_dao,message_dao}.py`、`agent_teams/tools/memory_database.py`、`agent_teams/tools/message_manager.py`、`agent_teams/tools/models.py`、`agent_teams/monitor/models.py`、`core/single_agent/interrupt/{handler,response}.py` |
 | 测试基线 | `pytest tests/unit_tests/agent_teams/ tests/unit_tests/harness/security/` → 251 passed, 16 skipped |
 | Refs | #751 |
 
@@ -22,7 +22,7 @@ teammate 路径没有对应的审批机制：要么走用户前端 HITL（单 ag
 ## 决策
 
 1. **`TeamPermissionRail` 继承 `PermissionInterruptRail`**：复用完整的 `PermissionEngine`
-   三级判定 + auto_confirm + 持久化钩子。新增 `should_persist_to_disk() → False`
+   三级判定 + auto_confirm。override `_persist_allow_always() → False`
    （leader 审批 session-scoped，不写 teammate 本地 YAML）和
    `should_emit_interrupt_output() → False`（审批不产生用户可见输出）。
 

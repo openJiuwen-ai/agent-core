@@ -14,7 +14,7 @@
 **管：**
 
 - `agent_teams/prompts/` 下系统提示词的全部产出路径：模板加载、占位符装配、`PromptSection` 构造、动态 section 的 mtime 缓存。
-- `agent_teams/rails/` 下四个团队级 Rail（`TeamPolicyRail` / `FirstIterationGate` / `TeamToolApprovalRail` / `TeamPermissionRail`）的契约、注入时机、与 DeepAgent rail registry 的交互。
+- `agent_teams/rails/` 下四个团队级 Rail（`TeamPolicyRail` / `FirstIterationGate` / `TeamToolApprovalRail` / `TeamPermissionRail`）及 team-specific confirmation payload models（`TeamConfirmPayload` / `TeamPermissionConfirmResponse`）的契约、注入时机、与 DeepAgent rail registry 的交互。
 - prompts 子模块的 `cn/` `en/` 双语模板布局，以及与 `agent_teams/i18n.py`（运行时硬编码字符串）的边界。
 
 **不管：**
@@ -75,8 +75,8 @@
 
 ### `TeamPermissionRail`
 
-25. **继承 `PermissionInterruptRail`**：复用完整 `PermissionEngine` 三级判定（ALLOW/DENY/ASK + auto_confirm + `should_persist_to_disk` 钩子）。`enable_permissions=True` 时替代 `TeamToolApprovalRail`。
-26. **`should_persist_to_disk() → False`**：leader 审批 session-scoped，不写 teammate 本地 YAML。
+25. **继承 `PermissionInterruptRail`**：复用完整 `PermissionEngine` 三级判定（ALLOW/DENY/ASK + auto_confirm）。`enable_permissions=True` 时替代 `TeamToolApprovalRail`。
+26. **`_persist_allow_always() → False`**：leader 审批 session-scoped，override 父类的磁盘写盘方法直接返回 `False`，不写 teammate 本地 YAML。
 27. **`should_emit_interrupt_output() → False`**：ASK 不产生用户可见输出——审批经 `TeamApprovalOrchestrator` 内部消息通道路由 leader，leader `approve_tool` 后 `protocol="json"` DB message 作为 teammate `resume_interrupt` 的 fallback。
 28. **`parse_confirm_payload()` 自动设置 `decided_by="leader"`**：返回 `TeamPermissionConfirmResponse`（`PermissionConfirmResponse` + `decided_by`），`decided_by` 仅用于内部审计，不暴露给 LLM。
 
@@ -298,6 +298,22 @@ class FirstIterationGate(AgentRail):
 - `wait()` 不超时；caller 自行 `asyncio.wait_for` 包外层。
 - `reset()` 只清状态，不取消已 `await wait()` 的协程；正常路径是先 `reset()` 再触发新一轮，等待者会被本轮的下一次 `set()` 唤醒。
 
+### `rails/confirm_payload.py`
+
+```python
+class TeamConfirmPayload(ConfirmPayload):
+    decided_by: str | None = None
+        # Records who made the approval decision (e.g. "leader").
+        # Not exposed to the LLM — set by TeamPermissionRail.parse_confirm_payload.
+
+class TeamPermissionConfirmResponse(PermissionConfirmResponse):
+    decided_by: str | None = None
+        # Same as TeamConfirmPayload but for the dataclass-based confirm path.
+```
+
+- Both classes extend harness base classes with a ``decided_by`` field for
+  internal audit tracking. Exported from ``agent_teams/rails/__init__.py``.
+
 ### `rails/tool_approval_rail.py`
 
 ```python
@@ -345,7 +361,7 @@ class TeamApprovalOrchestrator:
         # returns "interrupt" to let the rail suspend the teammate.
 
 class TeamPermissionRail(PermissionInterruptRail):
-    def should_persist_to_disk(self) -> bool: ...  # always False
+    def _persist_allow_always(self, normalized_name: str, tool_args: dict) -> bool: ...  # always False
     def should_emit_interrupt_output(self) -> bool: ...  # always False
 
     @staticmethod

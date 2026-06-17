@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import dataclass
+
 from typing import Any, Iterable, Optional, cast
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
@@ -162,14 +162,6 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         auto-confirm — a rejection should not be remembered as "always allowed".
         """
         return bool(approved and auto_confirm and session is not None and auto_confirm_key and not persisted)
-
-    def should_persist_to_disk(self) -> bool:
-        """Whether ``_persist_allow_always`` is allowed to write config to disk.
-
-        Subclasses may override to disable disk persistence (e.g. when
-        approvals are session-scoped rather than permanent).
-        """
-        return True
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         tool_name = ctx.inputs.tool_name
@@ -433,8 +425,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     confirm_payload = ext_out
                     persisted = False
                     if confirm_payload.approved and confirm_payload.auto_confirm:
-                        if self.should_persist_to_disk():
-                            persisted = self._persist_allow_always(normalized_name, tool_args)
+                        persisted = self._persist_allow_always(normalized_name, tool_args)
                     logger.info(
                         "[PermissionEngine] permission.persist.result tool=%s confirm_path=hosted persisted=%s",
                         tool_name,
@@ -496,8 +487,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         persisted = False
         if payload.approved and payload.auto_confirm:
-            if self.should_persist_to_disk():
-                persisted = self._persist_allow_always(normalized_name, tool_args)
+            persisted = self._persist_allow_always(normalized_name, tool_args)
             logger.info(
                 "[PermissionEngine] permission.persist.result tool=%s confirm_path=%s persisted=%s",
                 tool_name,

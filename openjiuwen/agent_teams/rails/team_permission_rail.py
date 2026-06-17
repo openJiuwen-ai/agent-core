@@ -4,7 +4,7 @@
 
 Extends ``PermissionInterruptRail`` with two team-specific overrides:
 
-1. ``should_persist_to_disk()`` returns ``False`` — leader approvals are
+1. ``_persist_allow_always()`` returns ``False`` — leader approvals are
    session-scoped and should not be persisted to disk (the team config
    is shared across members; persisting per-member session decisions
    would pollute the shared config and not survive across sessions).
@@ -23,6 +23,10 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+from openjiuwen.agent_teams.rails.confirm_payload import (
+    TeamConfirmPayload,
+    TeamPermissionConfirmResponse,
+)
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.harness.security.host import (
@@ -31,9 +35,8 @@ from openjiuwen.harness.security.host import (
 )
 from openjiuwen.harness.security.models import (
     PermissionConfirmResponse,
-    TeamPermissionConfirmResponse,
 )
-from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload, TeamConfirmPayload
+from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload
 from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
 
 
@@ -108,13 +111,17 @@ class TeamPermissionRail(PermissionInterruptRail):
     but with leader-mediated ASK resolution and session-scoped auto-confirm.
 
     Key overrides:
-    - ``should_persist_to_disk()`` → ``False``: leader approvals do not
-      write to teammate's local YAML.
+    - ``_persist_allow_always()`` → ``False``: leader approvals are
+      session-scoped; skip disk persistence entirely.
     - ``parse_confirm_payload()`` → ``TeamPermissionConfirmResponse`` with
       ``decided_by="leader"`` automatically set.
     """
 
-    def should_persist_to_disk(self) -> bool:
+    def _persist_allow_always(
+        self,
+        normalized_name: str,
+        tool_args: dict,
+    ) -> bool:
         """Leader approvals are session-scoped; never persist to disk."""
         return False
 

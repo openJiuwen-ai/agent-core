@@ -5,6 +5,10 @@
 The override can only *tighten* (restrict) permissions — never *loosen* them.
 For each tool listed in the override, the effective permission level is the
 ``strictest()`` of the base level and the override level.
+
+Moved from ``openjiuwen.harness.security.narrowing`` — narrowing is
+team-specific logic (per-member permission tightening at spawn time)
+and belongs in the agent_teams subsystem.
 """
 
 from __future__ import annotations
@@ -129,3 +133,9 @@ def format_base_permissions_for_desc(
         lines.append("ask → deny ✓  |  allow → ask/deny ✓  |  deny → allow/ask ✗ (auto-corrected)")
 
     return "\n".join(lines)
+
+
+__all__ = [
+    "format_base_permissions_for_desc",
+    "narrow_permissions",
+]
