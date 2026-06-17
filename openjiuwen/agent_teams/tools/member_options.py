@@ -9,7 +9,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class MemberModelRef(BaseModel):
@@ -33,14 +33,14 @@ class TeamMemberOptions(BaseModel):
 
     model_ref: MemberModelRef | None = None
     worktree: MemberWorktreeOptions | None = None
-    permissions_override: dict[str, str] | None = None
-    """Per-member permission narrowing — flat ``{tool_name: level_string}`` dict.
-
-    A flat ``{tool_name: level_string}`` dict — e.g.
-    ``{"bash": "deny", "write_file": "ask"}``.  Set by
-    ``spawn_teammate.permissions`` at creation time.  ``None`` when
-    no override was specified.
-    """
+    permissions_override: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Per-member permission narrowing from spawn_teammate.permissions. "
+            "Flat {tool_name: level_string} dict fed to narrow_permissions "
+            "to tighten the base config. None when no override was specified."
+        ),
+    )
 
 
 def load_member_options(raw: str | None) -> TeamMemberOptions:
