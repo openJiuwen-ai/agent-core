@@ -254,3 +254,4 @@ images/
 *.txt
 *.bin
 *.sqlite3
+tests/system_tests/config_llm_local.yaml

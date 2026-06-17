@@ -31,7 +31,7 @@ workflow/
 
 ## 四条铁律
 
-**铁律 1：`engine/` 保持业务无关。** engine 子包**不得** import 任何 `openjiuwen.agent_teams` 业务模块。只依赖 stdlib + 可选 pydantic/jsonschema。这是它能用 `MockBackend` 独立单测、并能与上游 `dw/wf` 同步的前提。业务对接（worker backend、observer→team 事件、swarmflow 工具）全部放 `workflow/` 顶层。
+**铁律 1：`engine/` 保持业务无关。** engine 子包**不得** import 任何 `openjiuwen.agent_teams` 业务模块——这是它能用 `MockBackend` 独立单测、并能与上游 `dw/wf` 同步的前提。业务对接（worker backend、observer→team 事件、swarmflow 工具）全部放 `workflow/` 顶层。**约束的是"不耦合业务"，不是"只能 stdlib"**：engine 可以依赖通用第三方库（如 `aiofiles` 做异步文件 I/O、可选 `pydantic`/`jsonschema`），只要不引入 agent_teams 业务耦合即可。"仅 stdlib" 是给 **swarmflow 脚本**(用户编写的外部代码)的约束,不是给引擎的。
 
 **铁律 2：结构化输出走工具，不靠提示词解析。** harness 无原生 `response_format`。worker 装 `StructuredOutputTool`（`input_params=schema_json`，描述经 `tools/locales` i18n 解析），完成时调它提交结果，backend 读 `captured`。该工具**作为对象**追加进 worker spec.tools（`DeepAgentSpec._resolve_tools` 原样透传实例），由 harness 的 ability_manager 注册（id 按 owner re-qualify 为 `structured_output_{owner_id}`，并发 worker 不撞）+ `run_once` 的 `teardown_tools` 自动清理——backend **不手动** add/remove。引擎的 `retries` 兜底未调用/不合规的情况。
 
