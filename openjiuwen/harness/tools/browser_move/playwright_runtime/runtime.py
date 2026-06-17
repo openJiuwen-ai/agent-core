@@ -508,6 +508,15 @@ class BrowserAgentRuntime:
         parsed.setdefault("error", None)
         parsed.setdefault("cards", [])
 
+        if parsed.get("ok"):
+            try:
+                selector_cache.record_card_probe_cache_rejection(parsed)
+            except Exception:
+                logger.debug(
+                    "Failed to record rejected card-probe selector cache attempt",
+                    exc_info=True,
+                )
+
         if parsed.get("ok") and parsed.get("cards"):
             try:
                 selector_cache.record_card_probe_result(parsed)
