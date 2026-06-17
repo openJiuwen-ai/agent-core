@@ -35,6 +35,10 @@ from openjiuwen.harness.tools.todo import (
     TodoTool,
     create_todos_tool,
 )
+from openjiuwen.harness.tools.todo_resume import (
+    TODO_RESUME_SNAPSHOT_PENDING_KEY,
+    build_interrupt_resume_todo_reminder,
+)
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 from openjiuwen.core.context_engine.processor.compressor.util import shorten_session_label
 
@@ -199,6 +203,67 @@ class TaskPlanningRail(DeepAgentRail):
             self.system_prompt_builder.remove_section(SectionName.TODO)
 
         await self._inject_pending_progress_reminder(ctx)
+        await self._inject_interrupt_resume_todo_snapshot(ctx)
+
+    async def _inject_interrupt_resume_todo_snapshot(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """On first model call after interrupt-resume, inject structured todo snapshot."""
+        if not ctx.session or not ctx.context:
+            return
+
+        session_id = ctx.session.get_session_id()
+        pending = ctx.session.get_state(TODO_RESUME_SNAPSHOT_PENDING_KEY)
+        if pending is not True:
+            return
+
+        tool = self._find_todo_tool()
+        if tool is None or self.system_prompt_builder is None:
+            logger.warning(
+                "TaskPlanningRail: interrupt-resume pending but todo tool unavailable session_id=%s; "
+                "clearing latch (supplementary prompt already injected)",
+                session_id,
+            )
+            ctx.session.update_state({TODO_RESUME_SNAPSHOT_PENDING_KEY: False})
+            return
+
+        todos = await self._load_session_todos(session_id, tool)
+        if not todos:
+            logger.warning(
+                "TaskPlanningRail: interrupt-resume pending but no todos loaded session_id=%s; "
+                "clearing latch (supplementary prompt already injected)",
+                session_id,
+            )
+            ctx.session.update_state({TODO_RESUME_SNAPSHOT_PENDING_KEY: False})
+            return
+
+        tasks, in_progress_task = self._format_task_content(todos)
+        language = self.system_prompt_builder.language
+        prompt = build_interrupt_resume_todo_reminder(
+            language,
+            tasks=tasks,
+            in_progress_task=in_progress_task,
+        )
+
+        session_label = shorten_session_label(session_id)
+        content = f"[TODO · session={session_label}]\n{prompt}"
+        metadata = {
+            _TODO_PROGRESS_REMINDER_KEY: True,
+            _TODO_SESSION_ID_KEY: session_id,
+            "interrupt_resume_todo_snapshot": True,
+        }
+        messages = [
+            message
+            for message in ctx.context.get_messages()
+            if not _is_progress_reminder_for_session(message, session_id)
+        ]
+        messages.append(UserMessage(content=content, metadata=metadata))
+        ctx.context.set_messages(messages)
+        ctx.session.update_state({TODO_RESUME_SNAPSHOT_PENDING_KEY: False})
+        logger.info(
+            "TaskPlanningRail: injected interrupt-resume todo snapshot session_id=%s",
+            session_id,
+        )
 
     async def after_tool_call(
         self, ctx: AgentCallbackContext

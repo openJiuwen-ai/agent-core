@@ -18,6 +18,11 @@ from openjiuwen.core.foundation.tool import Tool, ToolCard, Input, Output
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.prompts.sections.tools import build_tool_card
+from openjiuwen.harness.tools.todo_resume import (
+    has_active_todo_items,
+    todo_create_blocked_message,
+    todo_create_read_failed_message,
+)
 
 
 class TodoStatus(str, Enum):
@@ -292,6 +297,7 @@ class TodoCreateTool(TodoTool):
             operation,
             workspace
         )
+        self._language = language
 
     async def invoke(self, inputs: Input, **kwargs) -> Output:
         """Asynchronous invocation handler for TodoCreate tool operations
@@ -312,8 +318,11 @@ class TodoCreateTool(TodoTool):
         results = dict()
         try:
             tasks_str = inputs.get("tasks")
+            force = bool(inputs.get("force"))
             if tasks_str and isinstance(tasks_str, str):
-                results["message"] = await self._create_from_string(tasks_str, file_path)
+                results["message"] = await self._create_from_string(
+                    tasks_str, file_path, force=force,
+                )
                 return results
 
             raise build_error(
@@ -375,18 +384,56 @@ class TodoCreateTool(TodoTool):
         )
         return parsed_tasks
 
-    async def _create_from_string(self, tasks_str: str, file_path: str) -> str:
+    async def _load_existing_todos_for_create(
+        self, file_path: str, *, force: bool = False,
+    ) -> List[TodoItem]:
+        """Load existing todos before create; missing file means no prior plan."""
+        if not os.path.isfile(os.path.abspath(file_path)):
+            return []
+
+        try:
+            return await self.load_todos(file_path)
+        except Exception as exc:
+            tool_logger.warning(
+                f"Failed to load existing todos before create: {exc}",
+                event_type=LogEventType.TOOL_CALL_START,
+            )
+            if force:
+                return []
+            raise build_error(
+                StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                reason=todo_create_read_failed_message(str(self._language)),
+            ) from exc
+
+    async def _create_from_string(
+        self,
+        tasks_str: str,
+        file_path: str,
+        *,
+        force: bool = False,
+    ) -> str:
         """Create todo items from string of task descriptions
 
         Args:
             tasks_str: Delimited string of task descriptions
+            file_path: Session todo file path
+            force: When True, overwrite an existing active plan
 
         Returns:
             Formatted creation success message
 
         Raises:
-            ToolError: If no valid tasks provided
+            ToolError: If no valid tasks provided or active plan exists without force
         """
+        existing = await self._load_existing_todos_for_create(file_path, force=force)
+
+        if existing and has_active_todo_items(existing) and not force:
+            language = self._language
+            raise build_error(
+                StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                reason=todo_create_blocked_message(str(language)),
+            )
+
         tasks = self._parse_task_string(tasks_str)
 
         if not tasks:

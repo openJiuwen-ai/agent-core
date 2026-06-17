@@ -30,6 +30,7 @@ TODO_CREATE_DESCRIPTION_CN = """
 - 单个简单任务
 - 纯信息查询或对话
 - 可在 3 步以内完成的琐碎任务
+- 本 session 已有 pending/in_progress 且用户要续跑/重试（先 todo_list → todo_modify，勿 todo_create 覆盖）
 
 ## 使用方式
 
@@ -38,12 +39,17 @@ TODO_CREATE_DESCRIPTION_CN = """
         "tasks": "设计用户界面；实现接口集成；添加单元测试"
     }
 
+可选 `force`（默认 false）：仅当用户**明确要求重新规划/清空计划**时设为 true，才会覆盖已有 pending/in_progress 任务。
+
 ## 规则
 
 - 第一个任务自动设为 in_progress，其余为 pending
 - 同一时间只能有一个 in_progress 任务
 - 任务描述必须具体、可执行、清晰明确
 - 调用本工具会覆盖当前会话的任务列表；若需追加任务，请使用 todo_modify
+- **若 todo.json 中已有 pending/in_progress 任务，默认拒绝创建**；续跑请 todo_list + todo_modify
+- force=true 的唯一用途：有活跃项且用户要求重规划时，绕过默认拒绝并覆盖当前列表
+- 本工具仅影响**当前 session** 的 todo.json；不影响其他 session（含子 Agent session）
 """
 
 TODO_CREATE_DESCRIPTION_EN = """
@@ -64,6 +70,8 @@ Once you identify a planning need, call this tool immediately.
 - Single, straightforward task
 - Pure informational queries or conversation
 - Tasks completable in fewer than 3 trivial steps
+- This session already has pending/in_progress and the user wants to continue/retry
+  (todo_list → todo_modify first; do not todo_create over them)
 
 ## Usage
 
@@ -72,12 +80,20 @@ Use semicolons (;) to separate multiple tasks:
         "tasks": "Design user interface;Implement API integration;Add unit tests"
     }
 
+Optional `force` (default false): set true only when the user **explicitly asks to replan or clear the plan**,
+to overwrite existing pending/in_progress tasks.
+
 ## Rules
 
 - First task is automatically set to in_progress, others to pending
 - Only one task can be in_progress at a time
 - Task descriptions must be specific, actionable, and clear
 - Calling this tool replaces the current session's task list; use todo_modify to append tasks
+- **Rejected by default if pending/in_progress todos exist**; resume with todo_list + todo_modify
+- The only use of force=true: when active items exist and the user asks to replan,
+  bypass default rejection and overwrite the current list
+- This tool only affects **this session's** todo.json;
+  does not affect other sessions (including sub-agent sessions)
 """
 
 TODO_CREATE_DESCRIPTION: Dict[str, str] = {
@@ -284,6 +300,11 @@ TODO_CREATE_PARAMS: Dict[str, Dict[str, str]] = {
         "en": ("Task list (only semicolons supported). "
                "Example: 'Create login form;Implement form validation;Add error handling'"),
     },
+    "force": {
+        "cn": "是否强制覆盖已有活跃计划（默认 false）。仅当用户明确要求重来/重规划时设为 true",
+        "en": ("Whether to force-overwrite an existing active plan (default false). "
+               "Set true only when the user explicitly asks to replan or restart planning"),
+    },
 }
 
 _TODO_ITEM_PARAMS: Dict[str, Dict[str, str]] = {
@@ -332,6 +353,7 @@ def get_todo_create_input_params(language: str = "cn") -> Dict[str, Any]:
         "type": "object",
         "properties": {
             "tasks": {"type": "string", "description": p["tasks"].get(language, p["tasks"]["cn"])},
+            "force": {"type": "boolean", "description": p["force"].get(language, p["force"]["cn"])},
         },
         "required": ["tasks"],
     }

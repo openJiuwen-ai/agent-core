@@ -19,6 +19,10 @@ from openjiuwen.harness.tools.todo import (
     TodoModifyTool,
     STATUS_ICONS
 )
+from openjiuwen.harness.tools.todo_resume import (
+    todo_create_blocked_message,
+    todo_create_read_failed_message,
+)
 
 
 def create_mock_file_stream(tell_return=0):
@@ -272,6 +276,66 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Exception) as cm:
             await self.tool.invoke(inputs, session=self.mock_session)
         self.assertIn("Invalid task data", str(cm.exception))
+
+    async def test_invoke_create_blocked_when_active_without_force(self):
+        """Reject todo_create when active items exist and force is false."""
+        active_todos = [
+            TodoItem.create(content="existing task", status=TodoStatus.IN_PROGRESS),
+        ]
+        self.tool.load_todos = AsyncMock(return_value=active_todos)
+
+        with patch("openjiuwen.harness.tools.todo.os.path.isfile", return_value=True):
+            with self.assertRaises(Exception) as cm:
+                await self.tool.invoke(
+                    {"tasks": "New task"},
+                    session=self.mock_session,
+                )
+
+        self.assertIn(todo_create_blocked_message("cn"), str(cm.exception))
+        self.tool.save_todos.assert_not_awaited()
+
+    async def test_invoke_create_overwrites_when_force_true(self):
+        """Allow todo_create to overwrite when force=true and active items exist."""
+        active_todos = [
+            TodoItem.create(content="existing task", status=TodoStatus.IN_PROGRESS),
+        ]
+        self.tool.load_todos = AsyncMock(return_value=active_todos)
+
+        with patch("openjiuwen.harness.tools.todo.os.path.isfile", return_value=True):
+            result = await self.tool.invoke(
+                {"tasks": "Replacement task", "force": True},
+                session=self.mock_session,
+            )
+
+        self.assertIn("Successfully created 1 task(s)", result["message"])
+        self.tool.save_todos.assert_awaited_once()
+
+    async def test_invoke_create_force_true_tolerates_corrupted_file(self):
+        """force=true should recover when existing todo file cannot be read."""
+        self.tool.load_todos = AsyncMock(side_effect=ValueError("corrupted json"))
+
+        with patch("openjiuwen.harness.tools.todo.os.path.isfile", return_value=True):
+            result = await self.tool.invoke(
+                {"tasks": "Fresh task", "force": True},
+                session=self.mock_session,
+            )
+
+        self.assertIn("Successfully created 1 task(s)", result["message"])
+        self.tool.save_todos.assert_awaited_once()
+
+    async def test_invoke_create_raises_when_corrupted_file_without_force(self):
+        """force=false should reject create when existing todo file cannot be read."""
+        self.tool.load_todos = AsyncMock(side_effect=ValueError("corrupted json"))
+
+        with patch("openjiuwen.harness.tools.todo.os.path.isfile", return_value=True):
+            with self.assertRaises(Exception) as cm:
+                await self.tool.invoke(
+                    {"tasks": "Fresh task"},
+                    session=self.mock_session,
+                )
+
+        self.assertIn(todo_create_read_failed_message("cn"), str(cm.exception))
+        self.tool.save_todos.assert_not_awaited()
 
 
 class TestTodoListTool(unittest.IsolatedAsyncioTestCase):

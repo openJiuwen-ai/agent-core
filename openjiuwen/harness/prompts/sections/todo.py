@@ -42,6 +42,16 @@ Identify the planning need and call todo_create BEFORE starting execution.
 - Never mark completed if: partially implemented, tests failing, unresolved errors
 - After completing, check if new follow-up tasks were discovered and append them via todo_modify
 - skill_complete does not update todos — use todo_modify to modify todos
+
+**Interrupt resume and todo tool choice (same for main and sub agents: each checks its own session's todo.json)**
+| This session's todo status | Action |
+| Has pending / in_progress | todo_list → todo_modify to resume; **do not** todo_create |
+| No pending / in_progress, or user asks to restart | todo_create (force=true) |
+
+- When the user says "continue" / "retry" / "try again", resume from the in_progress item;
+  do not restart from Stage 1
+- Sub-agents have separate sessions; the main agent must **not** block a sub-agent from
+  todo_create in its own session because the main session already has todos
 """
 
 TODO_SYSTEM_PROMPT_CN = """
@@ -70,6 +80,14 @@ TODO_SYSTEM_PROMPT_CN = """
 - 以下情况绝对不能标记为已完成：部分实现、测试失败、存在未解决的错误等
 - 标记完成后，检查实现过程中是否发现新的后续任务，及时通过 todo_modify 追加
 - skill_complete 不更新 todo，修改 todo 请用 todo_modify
+
+**中断续跑与todo工具选择（主 Agent、子 Agent 相同：各看本 session 的 todo.json）**
+| 本 session todo 状态 | 做法 |
+| 有 pending / in_progress | todo_list → todo_modify 续跑；**不要** todo_create |
+| 无 pending / in_progress，或用户要求重来 | todo_create（force=true） |
+
+- 用户说「继续/重试/再试一次」时，从 in_progress 项续跑，勿从 Stage 1 重来
+- 子 Agent 拥有独立 session；主 Agent **不得**因主会话已有 todo 而阻止子 Agent 在其自身 session 内正常 todo_create
 """
 
 TODO_SYSTEM_PROMPT: Dict[str, str] = {

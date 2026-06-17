@@ -51,6 +51,7 @@ from openjiuwen.harness.tools.todo import (
     TodoItem,
     TodoStatus,
 )
+from openjiuwen.harness.tools.todo_resume import TODO_RESUME_SNAPSHOT_PENDING_KEY
 
 
 def _make_operation():
@@ -395,6 +396,120 @@ async def test_before_model_call_without_prompt_builder() -> None:
     ctx.agent = _make_agent(workspace="/tmp/ws")
 
     await rail.before_model_call(ctx)
+
+
+@pytest.mark.asyncio
+async def test_interrupt_resume_snapshot_injected_when_pending() -> None:
+    """Inject todo snapshot on first model call after interrupt-resume latch."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx(session=MagicMock())
+    ctx.agent = agent
+    ctx.context = MagicMock()
+    ctx.context.get_messages.return_value = []
+    ctx.session.get_state.return_value = True
+    ctx.session.get_session_id.return_value = "resume-session"
+
+    todos = _make_todos([
+        ("task-a", TodoStatus.IN_PROGRESS),
+        ("task-b", TodoStatus.PENDING),
+    ])
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=todos)
+
+    mock_builder = MagicMock()
+    rail.system_prompt_builder = mock_builder
+
+    await rail.before_model_call(ctx)
+
+    ctx.context.set_messages.assert_called_once()
+    messages = ctx.context.set_messages.call_args[0][0]
+    assert len(messages) == 1
+    assert isinstance(messages[0], UserMessage)
+    assert messages[0].metadata.get("interrupt_resume_todo_snapshot") is True
+    ctx.session.update_state.assert_called_with(
+        {TODO_RESUME_SNAPSHOT_PENDING_KEY: False}
+    )
+
+
+@pytest.mark.asyncio
+async def test_interrupt_resume_snapshot_skips_when_pending_not_true() -> None:
+    """Do not inject snapshot unless interrupt-resume latch is exactly True."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx(session=MagicMock())
+    ctx.agent = agent
+    ctx.context = MagicMock()
+    ctx.context.get_messages.return_value = []
+    ctx.session.get_state.return_value = MagicMock()
+
+    mock_builder = MagicMock()
+    rail.system_prompt_builder = mock_builder
+
+    await rail.before_model_call(ctx)
+
+    ctx.context.set_messages.assert_not_called()
+    ctx.session.update_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_interrupt_resume_snapshot_clears_latch_when_tool_unavailable() -> None:
+    """Clear pending latch when todo tool is unavailable (avoid stuck state)."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx(session=MagicMock())
+    ctx.agent = agent
+    ctx.context = MagicMock()
+    ctx.context.get_messages.return_value = []
+    ctx.session.get_state.return_value = True
+    ctx.session.get_session_id.return_value = "resume-session"
+
+    rail.tools = []
+    mock_builder = MagicMock()
+    rail.system_prompt_builder = mock_builder
+
+    await rail.before_model_call(ctx)
+
+    ctx.context.set_messages.assert_not_called()
+    ctx.session.update_state.assert_called_once_with(
+        {TODO_RESUME_SNAPSHOT_PENDING_KEY: False}
+    )
+
+
+@pytest.mark.asyncio
+async def test_interrupt_resume_snapshot_clears_latch_when_no_todos_loaded() -> None:
+    """Clear pending latch when todo file loads empty (supplementary prompt already sent)."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx(session=MagicMock())
+    ctx.agent = agent
+    ctx.context = MagicMock()
+    ctx.context.get_messages.return_value = []
+    ctx.session.get_state.return_value = True
+    ctx.session.get_session_id.return_value = "resume-session"
+
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=[])
+
+    mock_builder = MagicMock()
+    rail.system_prompt_builder = mock_builder
+
+    await rail.before_model_call(ctx)
+
+    ctx.context.set_messages.assert_not_called()
+    ctx.session.update_state.assert_called_once_with(
+        {TODO_RESUME_SNAPSHOT_PENDING_KEY: False}
+    )
 
 
 # ================================================================
