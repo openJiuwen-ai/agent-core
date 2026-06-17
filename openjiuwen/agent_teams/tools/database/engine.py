@@ -233,35 +233,6 @@ def _ensure_message_protocol_column(sync_conn) -> None:
         )
 
 
-def _ensure_team_member_options_column(sync_conn) -> None:
-    """Ensure TeamMember.options exists and backfill it from legacy columns."""
-    inspector = inspect(sync_conn)
-    if "team_member" not in inspector.get_table_names():
-        return
-    columns = {col["name"] for col in inspector.get_columns("team_member")}
-    if "options" not in columns:
-        sync_conn.exec_driver_sql("ALTER TABLE team_member ADD COLUMN options TEXT")
-        team_logger.info("Migrated legacy team_member table: added options column")
-
-    if "model_ref_json" not in columns:
-        return
-
-    from openjiuwen.agent_teams.tools.member_options import merge_legacy_member_options
-
-    rows = sync_conn.exec_driver_sql(
-        "SELECT member_name, team_name, options, model_ref_json FROM team_member"
-    ).mappings()
-    for row in rows:
-        merged = merge_legacy_member_options(
-            options=row.get("options"),
-            model_ref_json=row.get("model_ref_json"),
-        )
-        if merged == row.get("options"):
-            continue
-        sync_conn.exec_driver_sql(
-            "UPDATE team_member SET options = ? WHERE member_name = ? AND team_name = ?",
-            (merged, row["member_name"], row["team_name"]),
-        )
 
 
 async def initialize_engine(

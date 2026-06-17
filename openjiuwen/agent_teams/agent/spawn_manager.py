@@ -297,10 +297,7 @@ class SpawnManager:
 
     async def build_context_from_db(self, member_name: str) -> Optional[TeamRuntimeContext]:
         from openjiuwen.agent_teams.models.allocator import resolve_member_model
-        from openjiuwen.agent_teams.tools.member_options import (
-            get_member_model_ref,
-            get_member_permissions_override,
-        )
+        from openjiuwen.agent_teams.tools.member_options import get_member_permissions_override
 
         team_backend = self._configurator.team_backend
         if team_backend is None:
