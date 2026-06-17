@@ -23,9 +23,9 @@ DESCRIPTION: Dict[str, str] = {
         "工作目录在命令之间保持不变，但 Shell 状态（变量、函数、alias）不保留。"
         "Shell 环境从用户的 profile（bash 或 zsh）初始化。\n"
         "\n"
-        "Windows 注意：`cmd` 自带 `mkdir` **不支持 `-p`**，不要在 cmd/PowerShell 中使用 `mkdir -p`。"
-        "本工具按 Bash 语义执行时（默认/`shell_type=bash`，Windows 上常为 Git Bash），POSIX `mkdir` **支持 `-p`**。"
-        "只有 `shell_type=cmd` 或 `shell_type=powershell` 时，才改用 `New-Item ... -Force` 或逐级 `mkdir`。\n"
+        "Windows 注意：`auto` 在 Windows 上解析为 **cmd.exe**（非 Git Bash）；"
+        "cmd/PowerShell 的 `mkdir` **不支持 `-p`**，在这些 shell 中不要使用 `mkdir -p`。"
+        "如果必须要使用 `-p` ，请将 `shell_type` 设为 `bash`（Git Bash 支持 POSIX `mkdir -p`）。\n"
         "\n"
         "Windows 中文环境编码注意：Windows PowerShell 的 `Get-Content` 默认以系统 ANSI 编码（CP936/GBK），"
         "因此，在读文件时， UTF-8 文件（如 `.md`、`.json`、`.yaml`、`.py`）会被误读为 GBK 导致乱码。\n"
@@ -92,11 +92,10 @@ DESCRIPTION: Dict[str, str] = {
         "(variables, functions, aliases) does not. The shell environment "
         "is initialized from the user's profile (bash or zsh).\n"
         "\n"
-        "Windows note: `cmd`'s `mkdir` **does not support `-p`**; do not use "
-        "`mkdir -p` in cmd/PowerShell. When this tool runs with Bash semantics "
-        "(default/`shell_type=bash`, often Git Bash on Windows), POSIX `mkdir` "
-        "**supports `-p`**. Only with `shell_type=cmd` or `shell_type=powershell`, "
-        "use `New-Item ... -Force` or create each level with `mkdir`.\n"
+        "Windows note: `auto` resolves to **cmd.exe** on Windows (not Git Bash). "
+        "cmd/PowerShell's `mkdir` **does not support `-p`**; do not use `mkdir -p` "
+        "with these shells. If you need `-p` semantics, set `shell_type` to `bash` "
+        "(Git Bash supports POSIX `mkdir -p`).\n"
         "\n"
         "Windows CJK encoding: Windows PowerShell's `Get-Content` defaults to the system ANSI code page"
         "(CP936/GBK) when reading files, so UTF-8 files (e.g. `.md`, `.json`, `.yaml`, `.py`) will be"
@@ -269,12 +268,14 @@ BASH_PARAMS: Dict[str, Dict[str, str]] = {
     },
     "shell_type": {
         "cn": (
-            "指定 Shell 类型，可选值：auto/cmd/powershell/bash/sh，默认 auto。cmd/PowerShell 不支持 `mkdir -p`；"
-            "需要该语法时保持 auto/bash/sh。"
+            "指定 Shell 类型，可选值：auto/cmd/powershell/bash/sh，默认 auto。"
+            "`auto` 在 Windows 上解析为 cmd.exe，其 `mkdir` 不支持 `-p`；"
+            "如需 `-p` 语法请将 shell_type 设为 `bash`。"
         ),
         "en": (
-            "Shell to use: auto/cmd/powershell/bash/sh, default auto. cmd/PowerShell do not support `mkdir -p`; "
-            "keep auto/bash/sh when you need that syntax."
+            "Shell to use: auto/cmd/powershell/bash/sh, default auto. "
+            "On Windows `auto` resolves to cmd.exe whose `mkdir` does not support `-p`; "
+            "set `shell_type=bash` if you need `-p` syntax."
         ),
     },
 }
