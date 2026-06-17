@@ -787,12 +787,22 @@ class WriteFileTool(Tool):
                         )
 
                     read_state = _FILE_READ_REGISTRY.get(path)
-                    if read_state is None or read_state.is_partial:
+                    if read_state is not None and read_state.is_partial:
                         return ToolOutput(
                             success=False,
                             error=(
-                                "File has not been read yet. "
-                                f"Call read_file on '{path}' first before writing to it."
+                                f"File was only partially read (offset/limit). "
+                                f"Call read_file on '{path}' without offset or limit "
+                                "to read the entire file before writing to it."
+                            ),
+                        )
+                    if read_state is None:
+                        return ToolOutput(
+                            success=False,
+                            error=(
+                                f"File has not been read yet. "
+                                f"Call read_file on '{path}' first before writing to it "
+                                "(read the entire file; do not use offset or limit)."
                             ),
                         )
 
@@ -1145,12 +1155,22 @@ class EditFileTool(Tool):
 
         # ---- Pre-read validation -------------------------------------------------
         read_state = _FILE_READ_REGISTRY.get(file_path)
-        if read_state is None or read_state.is_partial:
+        if read_state is not None and read_state.is_partial:
+            return ToolOutput(
+                success=False,
+                error=(
+                    f"File was only partially read (offset/limit). "
+                    f"Call read_file on '{file_path}' without offset or limit "
+                    "to read the entire file before editing."
+                ),
+            )
+        if read_state is None:
             return ToolOutput(
                 success=False,
                 error=(
                     f"File must be read before editing. "
-                    f"Call read_file on '{file_path}' first."
+                    f"Call read_file on '{file_path}' first "
+                    "(read the entire file; do not use offset or limit)."
                 ),
             )
 

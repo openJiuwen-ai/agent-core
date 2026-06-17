@@ -121,6 +121,23 @@ async def test_write_file_tool_requires_read_before_overwrite(sys_op, temp_dir):
 
     assert res.success is False
     assert "read" in res.error.lower()
+    assert "offset or limit" in res.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_write_file_tool_rejects_partial_read(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "partial_write.txt")
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("line one\nline two\n")
+
+    await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 1})
+    res = await write_tool.invoke({"file_path": file_path, "content": "replacement"})
+
+    assert res.success is False
+    assert "partially read" in res.error.lower()
+    assert "without offset or limit" in res.error.lower()
 
 
 @pytest.mark.asyncio
@@ -454,6 +471,28 @@ async def test_edit_file_tool_requires_read_first(sys_op, temp_dir):
     })
     assert res.success is False
     assert "read" in res.error.lower()
+    assert "offset or limit" in res.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_file_tool_rejects_partial_read(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "partial_edit.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "line one\nline two\n"})
+
+    _FILE_READ_REGISTRY.pop(file_path, None)
+    await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 1})
+    res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "line two",
+        "new_string": "line TWO",
+    })
+
+    assert res.success is False
+    assert "partially read" in res.error.lower()
+    assert "without offset or limit" in res.error.lower()
 
 
 @pytest.mark.asyncio
