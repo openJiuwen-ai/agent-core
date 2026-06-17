@@ -7,7 +7,7 @@ Provides a unified interface for reranker models.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Optional
 import uuid
 
 from pydantic import BaseModel, Field
@@ -21,7 +21,7 @@ class RerankerConfig(BaseModel):
     model_name: str = Field(default="", alias="model")
     timeout: float = Field(default=10, gt=0)
     temperature: float = Field(default=0.95)
-    top_p: float = Field(default=0.1)
+    top_p: Optional[float] = Field(default=None)
     yes_no_ids: tuple[int, int] = Field(default=None, description='Token ids for "yes" and "no"')
     extra_body: dict = Field(default_factory=dict, description="special keyword arguments to pass in")
 
