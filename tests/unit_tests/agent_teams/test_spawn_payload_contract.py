@@ -133,3 +133,24 @@ def test_build_spawn_config_payload_has_spec_and_context():
     assert isinstance(spawn_config.payload["context"], dict)
     assert spawn_config.payload["context"]["member_name"] == "worker_a"
     assert spawn_config.payload["context"]["role"] == "teammate"
+
+
+def test_worktree_spawn_context_only_carries_cwd_override():
+    """Worktree host metadata stays out of the child runtime context."""
+    pytest.importorskip("openjiuwen.core.runner.runner")
+    builder = _make_builder()
+    ctx = _make_member_ctx("worker_a").model_copy(
+        update={"worktree_path": "/tmp/repo/.worktrees/agent-t-worker-a-deadbeef"}
+    )
+
+    spawn_config = builder.build_spawn_config(ctx)
+
+    context = spawn_config.payload["context"]
+    assert context["worktree_path"] == "/tmp/repo/.worktrees/agent-t-worker-a-deadbeef"
+    for key in (
+        "isolation",
+        "worktree_name",
+        "worktree_branch",
+        "worktree_head_commit",
+    ):
+        assert key not in context

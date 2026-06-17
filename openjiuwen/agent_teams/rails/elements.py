@@ -45,7 +45,6 @@ from openjiuwen.agent_teams.rails.team_context import (
     get_swarmflow_worker_base_spec,
     get_team_backend,
     get_workspace_manager,
-    get_worktree_manager,
 )
 
 # Element names (the RailSpec ``type`` values). The team rails live under the
@@ -103,7 +102,6 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         model_config_allocator=model_config_allocator,
         exclude_tools=set(inp.exclude_tools) or None,
         workspace_manager=get_workspace_manager(context),
-        worktree_manager=get_worktree_manager(context),
         qualify_ids=inp.qualify_ids,
         team_name=inp.team_name,
         member_name=inp.member_name,

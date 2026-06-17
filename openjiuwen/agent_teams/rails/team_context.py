@@ -36,7 +36,6 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.reliability.factory import ReliabilityComponents
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tools.team import TeamBackend
-    from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
 class TeamHandleKey:
@@ -44,7 +43,6 @@ class TeamHandleKey:
 
     TEAM_BACKEND = "team.team_backend"
     WORKSPACE_MANAGER = "team.workspace_manager"
-    WORKTREE_MANAGER = "team.worktree_manager"
     MODEL_ALLOCATOR = "team.model_allocator"
     MESSAGER = "team.messager"
     ON_TEAMMATE_CREATED = "team.on_teammate_created"
@@ -58,7 +56,6 @@ def inject_team_handles(
     *,
     team_backend: Optional["TeamBackend"] = None,
     workspace_manager: Optional["TeamWorkspaceManager"] = None,
-    worktree_manager: Optional["WorktreeManager"] = None,
     model_allocator: Optional["ModelAllocator"] = None,
     messager: Optional["Messager"] = None,
     on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
@@ -75,7 +72,6 @@ def inject_team_handles(
         extras: The per-member ``BuildContext.extras`` dict to populate.
         team_backend: The member's team backend.
         workspace_manager: The team workspace manager, if any.
-        worktree_manager: The member's worktree manager, if any.
         model_allocator: The team model allocator, if any.
         messager: The member's messager, if any.
         on_teammate_created: The leader's spawn-on-created callback, if any.
@@ -92,7 +88,6 @@ def inject_team_handles(
     """
     extras[TeamHandleKey.TEAM_BACKEND] = team_backend
     extras[TeamHandleKey.WORKSPACE_MANAGER] = workspace_manager
-    extras[TeamHandleKey.WORKTREE_MANAGER] = worktree_manager
     extras[TeamHandleKey.MODEL_ALLOCATOR] = model_allocator
     extras[TeamHandleKey.MESSAGER] = messager
     extras[TeamHandleKey.ON_TEAMMATE_CREATED] = on_teammate_created
@@ -115,11 +110,6 @@ def get_team_backend(context: Any) -> Optional["TeamBackend"]:
 def get_workspace_manager(context: Any) -> Optional["TeamWorkspaceManager"]:
     """Return the team workspace manager handle, or None."""
     return _get(context, TeamHandleKey.WORKSPACE_MANAGER)
-
-
-def get_worktree_manager(context: Any) -> Optional["WorktreeManager"]:
-    """Return the worktree manager handle, or None."""
-    return _get(context, TeamHandleKey.WORKTREE_MANAGER)
 
 
 def get_model_allocator(context: Any) -> Optional["ModelAllocator"]:
@@ -161,7 +151,6 @@ __all__ = [
     "inject_team_handles",
     "get_team_backend",
     "get_workspace_manager",
-    "get_worktree_manager",
     "get_model_allocator",
     "get_messager",
     "get_on_teammate_created",

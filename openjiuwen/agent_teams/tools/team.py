@@ -302,6 +302,7 @@ class TeamBackend:
         mode: MemberMode = MemberMode.BUILD_MODE,
         allocation: Optional["Allocation"] = None,
         role: TeamRole = TeamRole.TEAMMATE,
+        isolation: Optional[str] = None,
     ) -> MemberOpResult:
         """Create a team member record in the database.
 
@@ -335,10 +336,15 @@ class TeamBackend:
         existing = await self.db.member.get_member(member_name, self.team_name)
         if existing is not None:
             return MemberOpResult.fail(f"Member {member_name} already exists in team {self.team_name}")
+        if isolation is not None and isolation != "worktree":
+            return MemberOpResult.fail("Invalid isolation: expected 'worktree' or None")
 
-        import json as _json
+        from openjiuwen.agent_teams.tools.member_options import build_member_options
 
-        model_ref_json: Optional[str] = _json.dumps(allocation.to_db_ref()) if allocation is not None else None
+        options = build_member_options(
+            model_ref=allocation.to_db_ref() if allocation is not None else None,
+            worktree_isolation=isolation,
+        )
 
         success = await self.db.member.create_member(
             member_name=member_name,
@@ -351,7 +357,7 @@ class TeamBackend:
             execution_status=execution_status,
             mode=mode.value,
             prompt=prompt,
-            model_ref_json=model_ref_json,
+            options=options,
         )
         if not success:
             return MemberOpResult.fail(f"Database rejected create_member for {member_name} in team {self.team_name}")
