@@ -111,10 +111,20 @@ def format_base_permissions_for_desc(
     # Narrowing rules explanation.
     if lang == "cn":
         lines.append("")
+        lines.append(
+            "创建成员的时候，你可以根据任务风险设置更严格的工具权限；"
+            "例如对只读分析任务禁用写入类工具，或将高风险执行类工具从 allow 收紧为 ask/deny。"
+            "不得授予比上述基础权限更宽的权限。"
+        )
         lines.append("收窄规则：只能收紧，不能放宽。")
         lines.append("ask → deny ✓  |  allow → ask/deny ✓  |  deny → allow/ask ✗ (自动修正)")
     else:
         lines.append("")
+        lines.append(
+            "When creating a member, you may set stricter tool permissions based on task risk; for example, "
+            "disable write tools for read-only analysis tasks, or narrow high-risk execution tools from allow "
+            "to ask/deny. You must not grant permissions broader than the base permissions above."
+        )
         lines.append("Narrowing rules: only tightening, never loosening.")
         lines.append("ask → deny ✓  |  allow → ask/deny ✓  |  deny → allow/ask ✗ (auto-corrected)")
 
