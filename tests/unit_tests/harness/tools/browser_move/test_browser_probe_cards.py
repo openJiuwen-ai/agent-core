@@ -57,6 +57,9 @@ def test_build_card_probe_js_contains_card_extraction_terms() -> None:
     assert "recurring_signatures" in js
     assert "price" in js
     assert "rating" in js
+    assert "author" in js
+    assert "source" in js
+    assert "summary" in js
     assert "primary_link" in js
     assert "buttons" in js
 
@@ -351,8 +354,12 @@ def test_build_card_probe_js_has_cache_first_diagnostics() -> None:
     assert "hasEnoughGoodCards(cachedCandidates)" in js
     assert "selectorSource = 'cache'" in js
     assert "cache_accepted" in js
+    assert "cache_rejection_reason" in js
+    assert "cache_candidate_count" in js
+    assert "cache_good_candidate_count" in js
     assert "selector_source" in js
     assert "cached_container_selectors" in js
+    assert "record.kind || 'card_probe'" in js
 
 
 def test_build_card_probe_js_filters_page_chrome_candidates() -> None:
@@ -369,3 +376,99 @@ def test_build_card_probe_js_uses_selectable_not_raw_scored() -> None:
 
     assert "const selectable = scored.filter" in js
     assert "for (const item of selectable)" in js
+
+
+def test_build_card_probe_js_includes_table_and_list_row_selectors() -> None:
+    js = build_card_probe_js(max_cards=10, viewport_only=True)
+
+    assert "tbody > tr" in js
+    assert "[role=\"article\"]" in js
+    assert "[role=\"row\"]" in js
+    assert "[class*=\"article\" i]" in js
+    assert "[class*=\"post\" i]" in js
+    assert "[class*=\"result\" i]" in js
+    assert "[class*=\"search-result\" i]" in js
+    assert "[class*=\"list\" i]" in js
+    assert "[class*=\"row\" i]" in js
+
+
+def test_build_card_probe_js_extracts_article_metadata_fields() -> None:
+    js = build_card_probe_js(max_cards=10, viewport_only=True)
+
+    assert "extractAuthor" in js
+    assert "extractSource" in js
+    assert "extractSummary" in js
+    assert "author_selector_hint" in js
+    assert "source_selector_hint" in js
+    assert "summary_selector_hint" in js
+    assert "[class*=\"author\" i]" in js
+    assert "[class*=\"summary\" i]" in js
+    assert "[class*=\"snippet\" i]" in js
+
+
+def test_runtime_probe_cards_records_rejected_cache_attempt(tmp_path, monkeypatch) -> None:
+    import json
+    from openjiuwen.harness.tools.browser_move.playwright_runtime.site_profiles import (
+        BrowserSelectorCache,
+    )
+    import openjiuwen.harness.tools.browser_move.playwright_runtime.runtime as runtime_module
+
+    cache_path = tmp_path / "selector_cache.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "records": [
+                    {
+                        "domain": "example.com",
+                        "route_signature": "/search",
+                        "kind": "card_probe",
+                        "selectors": {"card_container_selectors": [".old-card"]},
+                        "success_count": 2,
+                        "failure_count": 0,
+                        "quality_score": 0.8,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    cache = BrowserSelectorCache(cache_path)
+    monkeypatch.setattr(runtime_module, "get_selector_cache", lambda: cache)
+
+    runtime = _make_runtime()
+    runtime.ensure_runtime_ready = AsyncMock()
+    runtime._code_executor = AsyncMock(
+        return_value={
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        '{"ok": true, '
+                        '"url": "https://example.com/search?q=mouse", '
+                        '"cache_records_used": 1, '
+                        '"cache_accepted": false, '
+                        '"cache_rejection_reason": "cache_validation_failed", '
+                        '"selector_source": "generic", '
+                        '"cards": []}'
+                    ),
+                }
+            ]
+        }
+    )
+
+    result = _run(runtime.probe_cards())
+
+    assert result["ok"] is True
+    exported = cache.export_for_probe()
+    assert exported[0]["failure_count"] == 1
+    assert exported[0]["last_failure_reason"] == "cache_validation_failed"
+
+
+def test_browser_probe_cards_prioritizes_article_links_over_author_links() -> None:
+    js = build_card_probe_js(max_cards=5, viewport_only=False)
+
+    assert "isAuthorProfileElement" in js
+    assert "isArticleLinkElement" in js
+    assert "a.block-title.so-item-report[href]" in js
+    assert "buttonArticleLink" in js
