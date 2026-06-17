@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +11,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
+from openjiuwen.core.context_engine.processor.compressor.util import build_compressor_reinjected_state_message
 from openjiuwen.core.context_engine.processor.compressor.forked.executor import (
     ForkedCompressionExecutor,
     ForkedCompressionRequest,
@@ -65,6 +67,7 @@ class ForkedPrefixCompactProcessor(ContextProcessor):
     memory_block_close: str = "</memory_block>"
     default_prompt: str = ""
     processor_label: str = "ForkedPrefixCompactProcessor"
+    reinject_builder_names: list[str] | None = None
 
     def __init__(self, config: BaseModel):
         super().__init__(config)
@@ -132,12 +135,21 @@ class ForkedPrefixCompactProcessor(ContextProcessor):
             logger.warning("[%s] forked compression failed: %s", self.processor_type(), exc, exc_info=True)
             return None, context_window
 
-        summary = (response.content or "").strip()
+        summary = self._extract_state_snapshot_or_raw(response.content or "")
         if not summary:
             return None, context_window
 
         memory_message = UserMessage(content=self._wrap_memory_block(summary))
         new_messages = [*span.preserved_prefix, memory_message, *span.protected_tail]
+        reinjected_message = build_compressor_reinjected_state_message(
+            source_messages=original_messages,
+            messages_to_keep=new_messages,
+            context=context,
+            config=self.config,
+            builder_names=self.reinject_builder_names,
+        )
+        if reinjected_message is not None:
+            new_messages = [*span.preserved_prefix, memory_message, reinjected_message, *span.protected_tail]
         if not self._has_compression_benefit(context, original_messages, new_messages):
             return None, context_window
 
@@ -168,6 +180,17 @@ class ForkedPrefixCompactProcessor(ContextProcessor):
             f"{summary}\n"
             f"{self.memory_block_close}"
         )
+
+    @staticmethod
+    def _extract_state_snapshot_or_raw(content: str) -> str:
+        raw = (content or "").strip()
+        if not raw:
+            return ""
+        match = re.search(r"<state_snapshot>\s*(.*?)\s*</state_snapshot>", raw, flags=re.DOTALL | re.IGNORECASE)
+        if match is None:
+            return raw
+        snapshot = match.group(1).strip()
+        return snapshot or raw
 
     def _has_compression_benefit(
         self,

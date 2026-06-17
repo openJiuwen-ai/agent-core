@@ -149,8 +149,37 @@ def build_tool_result_hint_reinjected_content(ctx: ReinjectContext) -> str:
 
 
 def build_todo_reinjected_content(ctx: ReinjectContext) -> str:
-    _ = ctx
-    return ""
+    todos = _read_todo_file(ctx)
+    if not todos:
+        return ""
+
+    active_statuses = {"pending", "in_progress"}
+    counts: dict[str, int] = {}
+    active: list[dict[str, Any]] = []
+    for todo in todos:
+        status = str(todo.get("status") or "pending")
+        counts[status] = counts.get(status, 0) + 1
+        if status in active_statuses:
+            active.append(todo)
+
+    if not active:
+        return ""
+
+    lines = ["Active todos:"]
+    for todo in active:
+        todo_id = str(todo.get("id") or "unknown")
+        status = str(todo.get("status") or "pending")
+        content = str(todo.get("content") or todo.get("description") or "").strip()
+        if not content:
+            content = "(no content)"
+        active_form = str(todo.get("activeForm") or "").strip()
+        suffix = f" ({active_form})" if active_form and active_form != content else ""
+        lines.append(f"- [{status}] {todo_id}: {content}{suffix}")
+
+    summary = ", ".join(f"{status}: {count}" for status, count in sorted(counts.items()))
+    if summary:
+        lines.append(f"Status counts: {summary}")
+    return ctx.truncate("\n".join(lines))
 
 
 def build_plan_mode_reinjected_content(ctx: ReinjectContext) -> str:
@@ -193,6 +222,49 @@ def _get_plan_mode(session_state: dict[str, Any]) -> dict[str, Any] | None:
     if isinstance(deepagent, dict) and isinstance(deepagent.get("plan_mode"), dict):
         return deepagent["plan_mode"]
     return None
+
+
+def _normalize_todos(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _read_todo_file(ctx: ReinjectContext) -> list[dict[str, Any]]:
+    workspace_root = ctx.workspace_root
+    context = ctx.context
+    if not workspace_root and context is not None and hasattr(context, "workspace_dir"):
+        try:
+            workspace_root = context.workspace_dir()
+        except Exception:
+            workspace_root = None
+    if not workspace_root:
+        return []
+
+    session_id = ""
+    if context is not None and hasattr(context, "session_id"):
+        try:
+            session_id = context.session_id()
+        except Exception:
+            session_id = ""
+    if not session_id and context is not None and hasattr(context, "get_session_ref"):
+        try:
+            session = context.get_session_ref()
+            if session is not None and hasattr(session, "get_session_id"):
+                session_id = session.get_session_id()
+        except Exception:
+            session_id = ""
+    if not session_id:
+        return []
+
+    todo_path = Path(workspace_root) / session_id / "todo.json"
+    if not todo_path.exists():
+        return []
+    try:
+        data = json.loads(todo_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    return _normalize_todos(data)
 
 
 def is_skill_file_path(file_path: str) -> bool:

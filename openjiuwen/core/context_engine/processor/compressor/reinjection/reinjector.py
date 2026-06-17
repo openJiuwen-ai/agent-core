@@ -5,6 +5,8 @@ from typing import Any, Callable, Protocol
 
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
 
+REINJECTED_STATE_LABEL = "REINJECTED_STATE"
+
 
 class ReinjectBuilder(Protocol):
     def __call__(self, ctx: "ReinjectContext") -> str | list[BaseMessage]:
@@ -61,3 +63,46 @@ class StateReinjector:
             if content:
                 messages.append(UserMessage(content=f"{ctx.state_marker}\n[{spec.label}]\n{ctx.truncate(content)}"))
         return messages
+
+
+def build_single_reinjected_state_message(
+    ctx: ReinjectContext,
+    specs: list[ReinjectBuilderSpec],
+    *,
+    only: list[str] | None = None,
+) -> UserMessage | None:
+    active = set(only) if only is not None else None
+    sections: list[str] = []
+    for spec in specs:
+        if active is not None and spec.name not in active:
+            continue
+        content = spec.builder(ctx)
+        if isinstance(content, list):
+            rendered = "\n\n".join(
+                getattr(message, "content", "") for message in content if getattr(message, "content", "")
+            )
+        else:
+            rendered = content
+        if not rendered:
+            continue
+        rendered = _strip_state_header(str(rendered), ctx.state_marker, spec.label)
+        if rendered:
+            sections.append(f"[{spec.label}]\n{ctx.truncate(rendered)}")
+    if not sections:
+        return None
+    return UserMessage(
+        content=f"{ctx.state_marker}\n[{REINJECTED_STATE_LABEL}]\n" + "\n\n".join(sections)
+    )
+
+
+def _strip_state_header(content: str, state_marker: str, label: str) -> str:
+    text = content.strip()
+    prefix = f"{state_marker}\n[{label}]\n"
+    if text.startswith(prefix):
+        return text[len(prefix):].strip()
+    generic_prefix = f"{state_marker}\n"
+    if text.startswith(generic_prefix):
+        rest = text[len(generic_prefix):]
+        if rest.startswith("[") and "]\n" in rest:
+            return rest.split("]\n", 1)[1].strip()
+    return text

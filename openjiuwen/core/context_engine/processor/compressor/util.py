@@ -10,11 +10,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.processor.compressor.reinjection import (
+    ReinjectContext,
     StateReinjector as FullCompactStateReinjector,
     build_file_reinjected_content,
     build_plan_mode_reinjected_content,
     build_plan_reinjected_content,
     build_skill_reinjected_content,
+    build_single_reinjected_state_message,
     build_task_status_reinjected_content,
     build_todo_reinjected_content,
     build_tool_result_hint_reinjected_content,
@@ -23,6 +25,22 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
     group_completed_api_rounds as group_completed_api_round_ranges,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMessage, UserMessage
+
+STATE_REINJECTION_MARKER = "[STATE_REINJECTION]"
+
+__all__ = [
+    "FullCompactStateReinjector",
+    "ReinjectedStateBuilderSpec",
+    "STATE_REINJECTION_MARKER",
+    "build_compressor_reinjected_state_message",
+    "build_file_reinjected_content",
+    "build_plan_mode_reinjected_content",
+    "build_plan_reinjected_content",
+    "build_skill_reinjected_content",
+    "build_task_status_reinjected_content",
+    "build_todo_reinjected_content",
+    "build_tool_result_hint_reinjected_content",
+]
 
 
 @dataclass(frozen=True)
@@ -246,6 +264,65 @@ def count_messages_tokens(messages: List[BaseMessage], token_counter, processor_
             prefix = f"[{processor_type}] " if processor_type else ""
             logger.warning(f"{prefix}token_counter failed, fallback to char-based estimate: {exc}")
     return sum(estimate_content_tokens(getattr(message, "content", "")) for message in messages)
+
+
+def build_compressor_reinjected_state_message(
+    *,
+    source_messages: List[BaseMessage],
+    messages_to_keep: List[BaseMessage],
+    context: Any,
+    config: Any,
+    builder_names: List[str] | None,
+    session_state: dict[str, Any] | None = None,
+) -> UserMessage | None:
+    ctx = ReinjectContext(
+        session_state=session_state if session_state is not None else get_session_state_for_reinjection(context),
+        source_messages=source_messages,
+        messages_to_keep=messages_to_keep,
+        workspace_root=get_workspace_root_for_reinjection(context),
+        config=config,
+        state_marker=STATE_REINJECTION_MARKER,
+        truncate=lambda text: truncate_state_text(
+            text,
+            int(getattr(config, "reinject_max_chars_per_section", 12000) or 12000),
+        ),
+        context=context,
+    )
+    return build_single_reinjected_state_message(ctx, builder_names=builder_names)
+
+
+def get_session_state_for_reinjection(context: Any) -> dict[str, Any]:
+    if context is None or not hasattr(context, "get_session_ref"):
+        return {}
+    try:
+        session = context.get_session_ref()
+    except Exception:
+        return {}
+    if session is None or not hasattr(session, "get_state"):
+        return {}
+    try:
+        state = session.get_state()
+    except Exception:
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def get_workspace_root_for_reinjection(context: Any) -> str | None:
+    if context is None or not hasattr(context, "workspace_dir"):
+        return None
+    try:
+        workspace_root = context.workspace_dir()
+    except Exception:
+        return None
+    return workspace_root or None
+
+
+def truncate_state_text(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    head = text[: max_chars // 2]
+    tail = text[-max(max_chars - len(head), 0):]
+    return f"{head}\n...[STATE_REINJECTION_TRUNCATED]...\n{tail}"
 
 
 def find_last_completed_api_round_end_idx(
