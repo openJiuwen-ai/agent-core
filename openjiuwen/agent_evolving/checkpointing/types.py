@@ -268,6 +268,7 @@ class EvolutionContext:
     messages: List[dict]
     existing_desc_records: List[EvolutionRecord]
     existing_body_records: List[EvolutionRecord]
+    tool_call_chain: str = ""
 
 
 __all__ = [

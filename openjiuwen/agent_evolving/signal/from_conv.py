@@ -135,7 +135,8 @@ class ConversationSignalDetector:
         """Convert Trajectory.steps to message list format.
 
         The message format matches what SignalDetector.detect() expects:
-        - LLM steps: messages from LLMCallDetail, including tool_calls
+        - LLM steps: messages from LLMCallDetail (prefers new compressed
+          fields, falls back to legacy ``messages`` for old data)
         - Tool steps: tool result from ToolCallDetail.call_result
 
         Args:
@@ -227,6 +228,11 @@ class ConversationSignalDetector:
                 if tool_call_id and tool_call_id in pending_scripts:
                     has_failure = bool(_FAILURE_KEYWORDS.search(content)) if content else False
                     if not has_failure:
+                        logger.info(
+                            "[FromConvSignalDetector] tool_call_id: %s, pending_scripts: %s",
+                            tool_call_id,
+                            pending_scripts[tool_call_id],
+                        )
                         signals.append(
                             EvolutionSignal(
                                 signal_type="script_artifact",
@@ -243,10 +249,12 @@ class ConversationSignalDetector:
                     continue
 
                 match = _FAILURE_KEYWORDS.search(content)
+                logger.info(f"[FromConvSignalDetector] _FAILURE_KEYWORDS match: {match}")
                 if match:
                     if _TOOL_SCHEMA_PATTERN.search(content):
                         continue
                     excerpt = _extract_around_match(content, match)
+                    logger.info(f"[FromConvSignalDetector] _extract_around_match excerpt: {excerpt}")
                     signals.append(
                         EvolutionSignal(
                             signal_type="execution_failure",
@@ -260,8 +268,10 @@ class ConversationSignalDetector:
             elif role == "user":
                 active_skill = self._resolve_active_skill(msg_idx, skill_read_history)
                 match = _CORRECTION_PATTERN.search(content)
+                logger.info(f"[FromConvSignalDetector] _CORRECTION_PATTERN match: {match}")
                 if match:
                     excerpt = _extract_around_match(content, match)
+                    logger.info(f"[FromConvSignalDetector] _extract_around_match excerpt: {excerpt}")
                     signals.append(
                         EvolutionSignal(
                             signal_type="user_correction",

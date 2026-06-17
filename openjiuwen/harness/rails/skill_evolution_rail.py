@@ -28,6 +28,7 @@ from openjiuwen.agent_evolving.checkpointing.types import (
 from openjiuwen.agent_evolving.optimizer.skill_call import (
     SkillExperienceOptimizer,
     ExperienceScorer,
+    build_tool_call_chain,
     update_score,
 )
 from openjiuwen.agent_evolving.signal import (
@@ -538,6 +539,9 @@ class SkillEvolutionRail(EvolutionRail):
         # Inject current conversation messages so the optimizer can use them for context
         state = skill_op.get_state()
         state["messages"] = messages
+        state["tool_call_chain"] = build_tool_call_chain(
+            messages, language=self._optimizer_language,
+        )
         skill_op.load_state(state)
 
         # bind() expects Dict[str, Operator], not a list
@@ -640,7 +644,12 @@ class SkillEvolutionRail(EvolutionRail):
             existing_desc_records=await self._evolution_store.get_pending_records(
                 skill_name, EvolutionTarget.DESCRIPTION
             ),
-            existing_body_records=await self._evolution_store.get_pending_records(skill_name, EvolutionTarget.BODY),
+            existing_body_records=await self._evolution_store.get_pending_records(
+                skill_name, EvolutionTarget.BODY,
+            ),
+            tool_call_chain=build_tool_call_chain(
+                messages, language=self._language,
+            ),
         )
         try:
             return await self._evolver.generate_records(context)
@@ -760,7 +769,14 @@ class SkillEvolutionRail(EvolutionRail):
             # the SKILL.md tool result.  DESCRIPTION records are surfaced through
             # the index block and are not individually injected, so inflating their
             # times_presented here would produce misleading utilisation scores.
-            body_records = [r for r in records if r.target == EvolutionTarget.BODY]
+            # Backward/forward compatible: some tests and historical code may set
+            # `record.target` directly, while the canonical location is
+            # `record.change.target`.
+            body_records = [
+                r
+                for r in records
+                if getattr(r, "target", r.change.target) == EvolutionTarget.BODY
+            ]
             if not body_records:
                 return
 
@@ -960,7 +976,7 @@ class SkillEvolutionRail(EvolutionRail):
         ctx: AgentCallbackContext,
         proposal: Dict[str, Any],
     ) -> None:
-        """Emit approval event for new skill creation."""
+        """Emit approval event for new skill creation or auto-create if auto_save enabled."""
         pending = PendingSkillCreation(
             name=proposal.get("name", ""),
             description=proposal.get("description", ""),
@@ -970,41 +986,73 @@ class SkillEvolutionRail(EvolutionRail):
         proposal_id = pending.proposal_id
         self._pending_skill_proposals[proposal_id] = pending
 
-        questions = [
-            {
-                "question": (
-                    f"**New Skill Proposal: '{pending.name}'**\n\n"
-                    f"{pending.description}\n\n"
-                    f"**Reason:** {pending.reason}\n\n"
-                    "Create this new skill?"
-                ),
-                "header": "New Skill Creation",
-                "options": [
-                    {"label": "Create", "description": "Create the new skill with proposed content"},
-                    {"label": "Skip", "description": "Discard this proposal"},
-                ],
-                "multi_select": False,
-            }
-        ]
-        event = OutputSchema(
-            type="chat.ask_user_question",
-            index=0,
-            payload={
-                "request_id": proposal_id,
-                "_new_skill_data": {
-                    "name": pending.name,
-                    "description": pending.description,
-                    "body": pending.body,
+        if self._auto_save:
+            # Auto-save mode: directly create the new skill without approval
+            try:
+                result = await self._evolution_store.create_skill(
+                    name=pending.name,
+                    description=pending.description,
+                    body=pending.body,
+                )
+                if result:
+                    self._pending_skill_proposals.pop(proposal_id, None)
+                    logger.info(
+                        "[SkillEvolutionRail] auto-created new skill: %s (proposal_id=%s)",
+                        pending.name,
+                        proposal_id,
+                    )
+                else:
+                    logger.error(
+                        "[SkillEvolutionRail] failed to auto-create skill: %s "
+                        "(proposal_id=%s retained for retry)",
+                        pending.name,
+                        proposal_id,
+                    )
+            except Exception as exc:
+                logger.error(
+                    "[SkillEvolutionRail] auto-create new skill failed for %s "
+                    "(proposal_id=%s retained for retry): %s",
+                    pending.name,
+                    proposal_id,
+                    exc,
+                )
+        else:
+            # Approval-required mode: emit approval request
+            questions = [
+                {
+                    "question": (
+                        f"**New Skill Proposal: '{pending.name}'**\n\n"
+                        f"{pending.description}\n\n"
+                        f"**Reason:** {pending.reason}\n\n"
+                        "Create this new skill?"
+                    ),
+                    "header": "New Skill Creation",
+                    "options": [
+                        {"label": "Create", "description": "Create the new skill with proposed content"},
+                        {"label": "Skip", "description": "Discard this proposal"},
+                    ],
+                    "multi_select": False,
+                }
+            ]
+            event = OutputSchema(
+                type="chat.ask_user_question",
+                index=0,
+                payload={
+                    "request_id": proposal_id,
+                    "_new_skill_data": {
+                        "name": pending.name,
+                        "description": pending.description,
+                        "body": pending.body,
+                    },
+                    "questions": questions,
                 },
-                "questions": questions,
-            },
-        )
-        self._pending_approval_events.append(event)
-        logger.info(
-            "[SkillEvolutionRail] buffered new skill approval request (%s) for '%s'",
-            proposal_id,
-            pending.name,
-        )
+            )
+            self._pending_approval_events.append(event)
+            logger.info(
+                "[SkillEvolutionRail] buffered new skill approval request (%s) for '%s'",
+                proposal_id,
+                pending.name,
+            )
 
     async def on_approve_new_skill(self, request_id: str) -> Optional[str]:
         """Handle approval of new skill creation.
@@ -1017,7 +1065,17 @@ class SkillEvolutionRail(EvolutionRail):
         """
         pending = self._pending_skill_proposals.pop(request_id, None)
         if not pending:
-            logger.warning("[SkillEvolutionRail] on_approve_new_skill: unknown request_id=%s", request_id)
+            if self._auto_save:
+                logger.info(
+                    "[SkillEvolutionRail] on_approve_new_skill: request_id=%s not pending "
+                    "(likely auto-created or unknown)",
+                    request_id,
+                )
+            else:
+                logger.warning(
+                    "[SkillEvolutionRail] on_approve_new_skill: unknown request_id=%s",
+                    request_id,
+                )
             return None
 
         try:

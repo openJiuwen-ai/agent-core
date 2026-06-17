@@ -359,6 +359,8 @@ async def test_generate_experience_for_skill_builds_context(tmp_path):
     assert evo_ctx.skill_content == "# skill"
     assert evo_ctx.existing_desc_records == [old_desc]
     assert evo_ctx.existing_body_records == [old_body]
+    assert isinstance(evo_ctx.tool_call_chain, str)
+    assert len(evo_ctx.tool_call_chain) > 0
 
 
 @pytest.mark.asyncio
@@ -828,7 +830,7 @@ async def test_check_skill_overlap_no_existing_skills(tmp_path):
 
 @pytest.mark.asyncio
 async def test_emit_new_skill_approval_buffers_event(tmp_path):
-    rail = _make_rail(tmp_path)
+    rail = _make_rail(tmp_path, auto_save=False)
     ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
     proposal = {
         "name": "my-skill",
@@ -853,7 +855,7 @@ async def test_emit_new_skill_approval_buffers_event(tmp_path):
 @pytest.mark.asyncio
 async def test_emit_new_skill_approval_unique_ids(tmp_path):
     """Two concurrent proposals must not share the same request_id."""
-    rail = _make_rail(tmp_path)
+    rail = _make_rail(tmp_path, auto_save=False)
     ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
     proposal_a = {"name": "skill-a", "description": "A", "body": "", "reason": ""}
     proposal_b = {"name": "skill-b", "description": "B", "body": "", "reason": ""}
@@ -873,7 +875,7 @@ async def test_emit_new_skill_approval_unique_ids(tmp_path):
 
 @pytest.mark.asyncio
 async def test_on_approve_new_skill_creates_skill(tmp_path):
-    rail = _make_rail(tmp_path)
+    rail = _make_rail(tmp_path, auto_save=False)
     ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
     proposal = {"name": "new-skill", "description": "desc", "body": "body", "reason": "reason"}
 
@@ -904,7 +906,7 @@ async def test_on_approve_new_skill_unknown_request_id(tmp_path):
 
 @pytest.mark.asyncio
 async def test_on_approve_new_skill_store_failure_returns_none(tmp_path):
-    rail = _make_rail(tmp_path)
+    rail = _make_rail(tmp_path, auto_save=False)
     ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
     proposal = {"name": "fail-skill", "description": "d", "body": "b", "reason": "r"}
 
@@ -919,7 +921,7 @@ async def test_on_approve_new_skill_store_failure_returns_none(tmp_path):
 
 @pytest.mark.asyncio
 async def test_on_approve_new_skill_exception_returns_none(tmp_path):
-    rail = _make_rail(tmp_path)
+    rail = _make_rail(tmp_path, auto_save=False)
     ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
     proposal = {"name": "exc-skill", "description": "d", "body": "b", "reason": "r"}
 
@@ -934,7 +936,7 @@ async def test_on_approve_new_skill_exception_returns_none(tmp_path):
 
 @pytest.mark.asyncio
 async def test_on_reject_new_skill_discards_proposal(tmp_path):
-    rail = _make_rail(tmp_path)
+    rail = _make_rail(tmp_path, auto_save=False)
     ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
     proposal = {"name": "rej-skill", "description": "d", "body": "b", "reason": "r"}
 
@@ -951,6 +953,58 @@ async def test_on_reject_new_skill_unknown_id_is_noop(tmp_path):
     rail = _make_rail(tmp_path)
     await rail.on_reject_new_skill("ns_does_not_exist")
     # No exception should be raised
+
+
+@pytest.mark.asyncio
+async def test_emit_new_skill_approval_auto_save_creates_and_clears_pending(tmp_path):
+    rail = _make_rail(tmp_path, auto_save=True)
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    proposal = {"name": "auto-skill", "description": "d", "body": "b", "reason": "r"}
+
+    rail._evolution_store.create_skill = AsyncMock(return_value=tmp_path / "auto-skill")
+
+    await rail._emit_new_skill_approval(ctx, proposal)
+
+    rail._evolution_store.create_skill.assert_awaited_once_with(
+        name="auto-skill",
+        description="d",
+        body="b",
+    )
+    assert rail.drain_pending_approval_events() == []
+    assert not rail._pending_skill_proposals
+
+
+@pytest.mark.asyncio
+async def test_emit_new_skill_approval_auto_save_failure_retains_pending_for_retry(tmp_path):
+    rail = _make_rail(tmp_path, auto_save=True)
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    proposal = {"name": "retry-skill", "description": "d", "body": "b", "reason": "r"}
+
+    rail._evolution_store.create_skill = AsyncMock(return_value=None)
+
+    await rail._emit_new_skill_approval(ctx, proposal)
+
+    assert len(rail._pending_skill_proposals) == 1
+    request_id = next(iter(rail._pending_skill_proposals))
+
+    rail._evolution_store.create_skill = AsyncMock(return_value=tmp_path / "retry-skill")
+    result = await rail.on_approve_new_skill(request_id)
+
+    assert result == "retry-skill"
+    assert request_id not in rail._pending_skill_proposals
+
+
+@pytest.mark.asyncio
+async def test_on_approve_new_skill_auto_save_already_created_returns_none(tmp_path):
+    rail = _make_rail(tmp_path, auto_save=True)
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    proposal = {"name": "done-skill", "description": "d", "body": "b", "reason": "r"}
+
+    rail._evolution_store.create_skill = AsyncMock(return_value=tmp_path / "done-skill")
+    await rail._emit_new_skill_approval(ctx, proposal)
+
+    result = await rail.on_approve_new_skill("skill_create_nonexistent")
+    assert result is None
 
 
 # =============================================================================

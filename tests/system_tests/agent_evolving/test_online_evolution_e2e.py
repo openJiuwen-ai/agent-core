@@ -104,6 +104,25 @@ def _build_conversation_with_script() -> list[dict]:
     ]
 
 
+def _mock_analyzer_json(candidates: list) -> str:
+    return json.dumps({
+        "root_causes": [{
+            "failure_type": "skill_instruction_gap",
+            "confidence": 0.9,
+            "evidence": ["conversation signals"],
+            "should_evolve": True,
+        }],
+        "candidates": candidates,
+    }, ensure_ascii=False)
+
+
+def _two_stage_llm_side_effect(candidates: list, formatter_patches: list) -> list:
+    return [
+        SimpleNamespace(content=_mock_analyzer_json(candidates)),
+        SimpleNamespace(content=json.dumps(formatter_patches, ensure_ascii=False)),
+    ]
+
+
 def _build_mock_llm_response_with_script() -> str:
     return json.dumps([
         {
@@ -162,9 +181,22 @@ class TestOnlineEvolutionE2E:
         assert script_signals[0].skill_name == skill_name
 
         # --- Phase 2: LLM-based Experience Generation (mocked) ---
+        formatter_patches = json.loads(_build_mock_llm_response_with_script())
+        analyzer_candidates = [
+            {
+                "action": "append",
+                "target": p["target"],
+                "section": p["section"],
+                "content": p["content"],
+                "merge_target": p.get("merge_target"),
+                **({k: p[k] for k in ("script_filename", "script_language", "script_purpose")
+                    if k in p}),
+            }
+            for p in formatter_patches
+        ]
         llm = MagicMock()
         llm.invoke = AsyncMock(
-            return_value=SimpleNamespace(content=_build_mock_llm_response_with_script())
+            side_effect=_two_stage_llm_side_effect(analyzer_candidates, formatter_patches),
         )
         optimizer = SkillExperienceOptimizer(llm=llm, model="mock-model", language="en")
 
@@ -277,15 +309,23 @@ class TestOnlineEvolutionE2E:
         skill_name = "retry-skill"
         _prepare_skill(tmp_path / "skills", skill_name, "# Retry Skill\n")
 
+        candidates = [{
+            "action": "append",
+            "target": "body",
+            "section": "Troubleshooting",
+            "content": "### Recovered Fix\n- Retry succeeded",
+        }]
+        formatter_patch = [{
+            "action": "append",
+            "target": "body",
+            "section": "Troubleshooting",
+            "content": "### Recovered Fix\n- Retry succeeded",
+        }]
         llm = MagicMock()
         llm.invoke = AsyncMock(side_effect=[
             SimpleNamespace(content="This is not JSON at all { broken"),
-            SimpleNamespace(content=json.dumps([{
-                "action": "append",
-                "target": "body",
-                "section": "Troubleshooting",
-                "content": "### Recovered Fix\n- Retry succeeded",
-            }])),
+            SimpleNamespace(content=_mock_analyzer_json(candidates)),
+            SimpleNamespace(content=json.dumps(formatter_patch)),
         ])
 
         optimizer = SkillExperienceOptimizer(llm=llm, model="mock", language="cn")
@@ -305,7 +345,7 @@ class TestOnlineEvolutionE2E:
 
         records = await optimizer.generate_records(ctx)
 
-        assert llm.invoke.await_count == 2
+        assert llm.invoke.await_count == 3
         assert len(records) == 1
         assert "Recovered Fix" in records[0].change.content
 
@@ -321,13 +361,16 @@ class TestOnlineEvolutionE2E:
             "# Solidify Skill\n\n## Troubleshooting\n- existing item\n",
         )
 
-        llm = MagicMock()
-        llm.invoke = AsyncMock(return_value=SimpleNamespace(content=json.dumps([{
+        patch = {
             "action": "append",
             "target": "body",
             "section": "Troubleshooting",
             "content": "### New Finding\n- Always check permissions first",
-        }])))
+        }
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            side_effect=_two_stage_llm_side_effect([patch], [patch]),
+        )
 
         optimizer = SkillExperienceOptimizer(llm=llm, model="mock", language="en")
         store = EvolutionStore(str(tmp_path / "skills"))
@@ -375,13 +418,16 @@ class TestOnlineEvolutionE2E:
         store = EvolutionStore(str(tmp_path / "skills"))
 
         # First round: generate initial record
-        llm = MagicMock()
-        llm.invoke = AsyncMock(return_value=SimpleNamespace(content=json.dumps([{
+        patch_v1 = {
             "action": "append",
             "target": "body",
             "section": "Troubleshooting",
             "content": "### Initial finding\n- v1 content",
-        }])))
+        }
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            side_effect=_two_stage_llm_side_effect([patch_v1], [patch_v1]),
+        )
 
         optimizer = SkillExperienceOptimizer(llm=llm, model="mock", language="en")
         signals = SignalDetector().detect([
@@ -401,13 +447,16 @@ class TestOnlineEvolutionE2E:
         old_id = records_v1[0].id
 
         # Second round: generate merging record
-        llm.invoke = AsyncMock(return_value=SimpleNamespace(content=json.dumps([{
+        patch_v2 = {
             "action": "append",
             "target": "body",
             "section": "Troubleshooting",
             "content": "### Updated finding\n- v2 content with more detail",
             "merge_target": old_id,
-        }])))
+        }
+        llm.invoke = AsyncMock(
+            side_effect=_two_stage_llm_side_effect([patch_v2], [patch_v2]),
+        )
 
         existing_body = await store.get_pending_records(skill_name, EvolutionTarget.BODY)
         ctx2 = EvolutionContext(

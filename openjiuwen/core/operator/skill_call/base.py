@@ -134,11 +134,13 @@ class SkillCallOperator(Operator):
         body_records = await store.get_pending_records(self._skill_name, EvolutionTarget.BODY)
         # Preserve messages if they were set externally (e.g., from conversation context)
         existing_messages = self._cached_state.get("messages", [])
+        existing_tool_call_chain = self._cached_state.get("tool_call_chain", "")
         self._cached_state = {
             "skill_content": skill_content,
             "desc_records": desc_records,
             "body_records": body_records,
             "messages": existing_messages,
+            "tool_call_chain": existing_tool_call_chain,
         }
 
     def get_state(self) -> Dict[str, Any]:
