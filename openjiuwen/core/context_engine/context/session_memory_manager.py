@@ -80,27 +80,36 @@ The file {{notesPath}} has already been read for you. Here are its current conte
 {{currentNotes}}
 </current_notes_content>
 
+The notes above already include the full standard section template (headers and _description_
+lines). Use those sections as your editing guide. The pending file {{notesPath}} must NOT
+contain any _description_ lines — delete them from every section you keep.
+
 Your ONLY task is to use the edit_file to update the notes file, then stop.
 You can make multiple edits (update every section as needed) - make all
 edit_file calls in parallel in a single message. Do not call any other tools.
 
 CRITICAL RULES FOR EDITING:
-- The file must maintain its exact structure with all sections, headers, and italic descriptions intact
--- NEVER modify, delete, or add section headers (the lines starting with '#' like # Task specification)
--- NEVER modify or delete the italic _section description_ lines
-(these are the lines in italics immediately following each header -
-they start and end with underscores)
--- The italic _section descriptions_ are TEMPLATE INSTRUCTIONS
-that must be preserved exactly as-is - they guide what content belongs
-in each section
--- ONLY update the actual content that appears BELOW the italic
-_section descriptions_ within each existing section
--- Do NOT add any new sections, summaries, or information outside the existing structure
+- The italic _description_ lines in <current_notes_content> are editing reference only;
+  do NOT copy or keep them in {{notesPath}}
+- NEVER modify, delete, or add section headers (the lines starting with '#' like # Task specification)
+- Do NOT add any new sections, summaries, or information outside the sections present
+in <current_notes_content>
+- Use each _description_ line to decide what body content belongs in that section, then
+write or update body text directly below the "# Header" line
+- The saved file must contain ONLY sections with substantive body content
+- Each included section has exactly two parts: one "# Header" line, then body text
+- Do NOT write italic _description_ lines in the saved file
+- Omit empty sections entirely — do not leave placeholder headers or filler like "No info yet"
+- Output section headers must come from <current_notes_content> only
+- Keep sections in the same order as they appear in <current_notes_content>
+- You MUST delete every italic _description_ line from {{notesPath}} for each section
+with body content — including sections whose body text you leave unchanged
+- Preserve existing valid body content; append or update rather than discard
+- If a section already has body content and there are no substantial new insights,
+keep the existing body text but still remove its _description_ line from {{notesPath}}
 - Do NOT reference this note-taking process or instructions anywhere in the notes
-- It's OK to skip updating a section if there are no substantial new insights
-to add. Do not add filler content like "No info yet", just leave sections
-blank/unedited if appropriate.
-- Write DETAILED, INFO-DENSE content for each section - include specifics
+- It's OK to skip updating a section with no body and no substantial new insights to add
+- Write DETAILED, INFO-DENSE content for each included section - include specifics
 like file paths, document names, skill stages, tool outputs, commands, 
 error messages, and deliverable summaries as relevant, etc.
 - For "Key Deliverables", include the complete output the user requested (e.g., full table, 
@@ -117,21 +126,14 @@ this is critical for continuity after compaction
 Use the edit_file with file_path: {{notesPath}}
 
 STRUCTURE PRESERVATION REMINDER:
-Each section has TWO parts that must be preserved exactly as they appear
-in the current file:
-1. The section header (line starting with #)
-2. The italic description line
-(the _italicized text_ immediately after the header -
-this is a template instruction)
-
-You ONLY update the actual content that comes AFTER these two preserved lines.
-The italic description lines starting and ending with underscores are part of
-the template structure, NOT content to be edited or removed.
+<current_notes_content> shows headers and _description_ lines as template guidance only.
+Read them to decide what belongs in each section. The pending file ({{notesPath}}) must
+contain only "# Header" + body — delete every _description_ line from the pending file.
 
 REMEMBER: Use the edit_file in parallel and stop. Do not continue after
 the edits. Only include insights from the actual user conversation,
-never from these note-taking instructions. Do not delete or change
-section headers or italic _section descriptions_.
+never from these note-taking instructions. The pending file must use
+header + body only, with no empty sections and no _description_ lines.
 
 """
 )
@@ -151,25 +153,33 @@ The file {{notesPath}} has already been read for you. Here are its current conte
 {{currentNotes}}
 </current_notes_content>
 
+The notes above already include the full standard section template (headers and _description_
+lines). Use those sections as your editing guide. Your returned content must NOT contain
+any _description_ lines — omit them from every section you include.
+
 Your ONLY task is to return the COMPLETE updated notes file content, then stop. Do not call any tools.
 
 CRITICAL RULES FOR EDITING:
-- The file must maintain its exact structure with all sections, headers, and italic descriptions intact
--- NEVER modify, delete, or add section headers (the lines starting with '#' like # Task specification)
--- NEVER modify or delete the italic _section description_ lines
-(these are the lines in italics immediately following each header -
-they start and end with underscores)
--- The italic _section descriptions_ are TEMPLATE INSTRUCTIONS
-that must be preserved exactly as-is - they guide what content belongs
-in each section
--- ONLY update the actual content that appears BELOW the italic
-_section descriptions_ within each existing section
--- Do NOT add any new sections, summaries, or information outside the existing structure
+- The italic _description_ lines in <current_notes_content> are editing reference only;
+  do NOT include them in your returned content
+- NEVER modify, delete, or add section headers (the lines starting with '#' like # Task specification)
+- Do NOT add any new sections, summaries, or information outside the sections present
+in <current_notes_content>
+- Use each _description_ line to decide what body content belongs in that section, then
+output body text directly below the "# Header" line
+- The saved file must contain ONLY sections with substantive body content
+- Each included section has exactly two parts: one "# Header" line, then body text
+- Do NOT write italic _description_ lines in the saved file
+- Omit empty sections entirely — do not leave placeholder headers or filler like "No info yet"
+- Output section headers must come from <current_notes_content> only
+- Keep sections in the same order as they appear in <current_notes_content>
+- Remove every italic _description_ line from the result — for all sections with body content
+- Preserve existing valid body content; append or update rather than discard
+- If a section already has body content and there are no substantial new insights,
+keep the existing body text but do not include any _description_ line for that section
 - Do NOT reference this note-taking process or instructions anywhere in the notes
-- It's OK to skip updating a section if there are no substantial new insights
-to add. Do not add filler content like "No info yet", just leave sections
-blank/unedited if appropriate.
-- Write DETAILED, INFO-DENSE content for each section - include specifics
+- It's OK to skip updating a section with no body and no substantial new insights to add
+- Write DETAILED, INFO-DENSE content for each included section - include specifics
 like file paths, document names, skill stages, tool outputs, commands, 
 error messages, and deliverable summaries as relevant, etc.
 - For "Key Deliverables", include the complete output the user requested (e.g., full table, 
@@ -186,16 +196,13 @@ this is critical for continuity after compaction
 - Do NOT wrap the result in code fences
 
 STRUCTURE PRESERVATION REMINDER:
-Each section has TWO parts that must be preserved exactly as they appear
-in the current file:
-1. The section header (line starting with #)
-2. The italic description line
-(the _italicized text_ immediately after the header -
-this is a template instruction)
+<current_notes_content> shows headers and _description_ lines as template guidance only.
+Read them to decide what belongs in each section. Your returned content must contain
+only "# Header" + body — never include _description_ lines.
 
-You ONLY update the actual content that comes AFTER these two preserved lines.
-The italic description lines starting and ending with underscores are part of
-the template structure, NOT content to be edited or removed.
+REMEMBER: Only include insights from the actual user conversation,
+never from these note-taking instructions. Return the full file in
+header + body format only, with no empty sections and no _description_ lines.
 
 """
 )
@@ -543,8 +550,45 @@ def _is_session_memory_section_description_line(line: str) -> bool:
     return len(stripped) > 2 and stripped.startswith("_") and stripped.endswith("_")
 
 
-def _strip_empty_session_memory_sections(content: str) -> str:
-    """Drop sections that have no body content below the header and italic description."""
+def _parse_session_memory_into_sections(
+    content: str,
+    *,
+    include_descriptions: bool = True,
+) -> List[Dict[str, Any]]:
+    """Parse session memory markdown into section dicts with header, optional description, and body_lines."""
+    lines = content.splitlines()
+    sections: List[Dict[str, Any]] = []
+    current: Dict[str, Any] | None = None
+
+    for line in lines:
+        if line.startswith("# "):
+            if current is not None:
+                sections.append(current)
+            if include_descriptions:
+                current = {"header": line, "description": None, "body_lines": []}
+            else:
+                current = {"header": line, "body_lines": []}
+            continue
+        if current is None:
+            continue
+        if include_descriptions:
+            if current["description"] is None and _is_session_memory_section_description_line(line):
+                current["description"] = line
+            else:
+                current["body_lines"].append(line)
+        elif _is_session_memory_section_description_line(line):
+            continue
+        else:
+            current["body_lines"].append(line)
+
+    if current is not None:
+        sections.append(current)
+
+    return sections
+
+
+def _clean_session_memory_sections(content: str) -> str:
+    """Drop empty sections and strip italic description lines; output header + body only."""
     lines = content.splitlines()
     sections: List[Dict[str, Any]] = []
     preamble: List[str] = []
@@ -571,13 +615,9 @@ def _strip_empty_session_memory_sections(content: str) -> str:
 
     rendered_sections = []
     for sec in kept_sections:
-        section_lines = [sec["header"]]
-        if sec["description"] is not None:
-            section_lines.append(sec["description"])
         body = "\n".join(sec["body_lines"]).strip()
         if body:
-            section_lines.append(body)
-        rendered_sections.append("\n".join(section_lines))
+            rendered_sections.append(f"{sec['header']}\n{body}")
 
     result_parts: List[str] = []
     preamble_text = "\n".join(preamble).strip()
@@ -755,31 +795,53 @@ The file {{notesPath}} has already been read for you. Here are its current conte
 {{currentNotes}}
 </current_notes_content>
 
+The notes above already include the full standard section template (headers and _description_
+lines). Use those sections as your editing guide. The pending file {{notesPath}} must NOT
+contain any _description_ lines — delete them from every section you keep.
+
 Your ONLY task is to use the edit_file to update the notes file, then stop.
 You can make multiple edits (update every section as needed) - make all
 edit_file calls in parallel in a single message. Do not call any other tools.
 
-CRITICAL RULES FOR EDITING:
+INCREMENTAL UPDATE RULES:
 - You only see NEW messages since the last update. The existing notes already
   cover earlier conversation.
 - Update sections based on the new information only.
 - Do NOT remove information from the notes unless the new messages explicitly
   contradict or supersede it.
-- If new messages don't add relevant information to a section, leave it unchanged.
-- The file must maintain its exact structure with all sections, headers, and italic descriptions intact
--- NEVER modify, delete, or add section headers (the lines starting with '#' like # Task specification)
--- NEVER modify or delete the italic _section description_ lines
--- ONLY update the actual content that appears BELOW the italic _section descriptions_ within each existing section
-- Write DETAILED, INFO-DENSE content for each section
+- If new messages don't add relevant information to a section, leave its body text
+  unchanged but still remove any _description_ line from that section in {{notesPath}}
+
+CRITICAL RULES FOR EDITING:
+- The italic _description_ lines in <current_notes_content> are editing reference only;
+  do NOT copy or keep them in {{notesPath}}
+- NEVER modify, delete, or add section headers
+- Do NOT add any new sections outside those present in <current_notes_content>
+- Use each _description_ line to decide what body content belongs in that section, then
+write or update body text directly below the "# Header" line
+- The saved file must contain ONLY sections with substantive body content
+- Each included section: one "# Header" line, then body text — no _description_ lines
+- Omit empty sections; do not use filler like "No info yet"
+- Output section headers must come from <current_notes_content> only
+- You MUST delete every italic _description_ line from {{notesPath}} for each section
+with body content — including sections whose body text you leave unchanged
+- Preserve existing valid body content; append or update rather than discard
+- Do NOT reference this note-taking process or instructions anywhere in the notes
+- Write DETAILED, INFO-DENSE content for each included section
 - IMPORTANT: Always update "Current State" to reflect the most recent work -
 this is critical for continuity after compaction
 
 Use the edit_file with file_path: {{notesPath}}
 
+STRUCTURE PRESERVATION REMINDER:
+<current_notes_content> shows headers and _description_ lines as template guidance only.
+Read them to decide what belongs in each section. The pending file ({{notesPath}}) must
+contain only "# Header" + body — delete every _description_ line from the pending file.
+
 REMEMBER: Use the edit_file in parallel and stop. Do not continue after
 the edits. Only include insights from the actual user conversation,
-never from these note-taking instructions. Do not delete or change
-section headers or italic _section descriptions_.
+never from these note-taking instructions. The pending file must use
+header + body only, with no empty sections and no _description_ lines.
 """
 )
 
@@ -797,9 +859,13 @@ The file {{notesPath}} has already been read for you. Here are its current conte
 {{currentNotes}}
 </current_notes_content>
 
+The notes above already include the full standard section template (headers and _description_
+lines). Use those sections as your editing guide. Your returned content must NOT contain
+any _description_ lines — omit them from every section you include.
+
 Your ONLY task is to return the COMPLETE updated notes file content, then stop. Do not call any tools.
 
-CRITICAL RULES FOR EDITING:
+INCREMENTAL UPDATE RULES:
 - You only see NEW messages since the last update. The existing notes already
   cover earlier conversation.
 - Merge the new information into the existing notes structure.
@@ -807,17 +873,34 @@ CRITICAL RULES FOR EDITING:
 - Add new information from the new messages.
 - Update sections that are affected by the new messages.
 - Remove information only if new messages explicitly contradict it.
-- The file must maintain its exact structure with all sections, headers, and italic descriptions intact
--- NEVER modify, delete, or add section headers
--- NEVER modify or delete the italic _section description_ lines
--- ONLY update the actual content that appears BELOW the italic _section descriptions_
-- Write DETAILED, INFO-DENSE content for each section
+
+CRITICAL RULES FOR EDITING:
+- The italic _description_ lines in <current_notes_content> are editing reference only;
+  do NOT include them in your returned content
+- NEVER modify, delete, or add section headers
+- Do NOT add any new sections outside those present in <current_notes_content>
+- Use each _description_ line to decide what body content belongs in that section, then
+output body text directly below the "# Header" line
+- The saved file must contain ONLY sections with substantive body content
+- Each included section: one "# Header" line, then body text — no _description_ lines
+- Omit empty sections; do not use filler like "No info yet"
+- Output section headers must come from <current_notes_content> only
+- Remove every italic _description_ line from the result — for all sections with body content
+- Preserve existing valid body content; append or update rather than discard
+- Do NOT reference this note-taking process or instructions anywhere in the notes
+- Write DETAILED, INFO-DENSE content for each included section
 - IMPORTANT: Always update "Current State" to reflect the most recent work
 - Output plain markdown only
 - Do NOT wrap the result in code fences
 
+STRUCTURE PRESERVATION REMINDER:
+<current_notes_content> shows headers and _description_ lines as template guidance only.
+Read them to decide what belongs in each section. Your returned content must contain
+only "# Header" + body — never include _description_ lines.
+
 REMEMBER: Only include insights from the actual user conversation,
-never from these note-taking instructions.
+never from these note-taking instructions. Return the full file in
+header + body format only, with no empty sections and no _description_ lines.
 """
 )
 
@@ -844,6 +927,18 @@ def build_system_prompt_text(messages: List[BaseMessage]) -> str:
 
 
 class SessionMemoryManager:
+    # Workspace template: {workspace}/context/session_memory.md
+    # Resolved from session_context.md at .../context/{session_id}_context/session_memory/
+    _WORKSPACE_TEMPLATE_FILENAME = "session_memory.md"
+    _WORKSPACE_CONTEXT_ANCESTOR_DEPTH = 2
+
+    @staticmethod
+    def _get_workspace_template_path(session_memory_path: Path) -> Path:
+        return (
+            session_memory_path.parents[SessionMemoryManager._WORKSPACE_CONTEXT_ANCESTOR_DEPTH]
+            / SessionMemoryManager._WORKSPACE_TEMPLATE_FILENAME
+        )
+
     def __init__(self, config: SessionMemoryConfig):
         self.config = config
         self._tasks: dict[str, asyncio.Task] = {}
@@ -1164,7 +1259,7 @@ class SessionMemoryManager:
         notes_path = self._get_session_memory_path(workspace, session_id)
         pending_notes_path = self._get_pending_session_memory_path(notes_path)
         current_notes = self._read_or_init_session_memory(notes_path)
-        self._prepare_pending_session_memory(notes_path, pending_notes_path, current_notes)
+        merged_notes = self._prepare_pending_session_memory(notes_path, pending_notes_path, current_notes)
         logger.info(
             "[SessionMemory] update_background start session_obj=%s session_id=%s "
             "mode=%s incremental=%s notes_path=%s pending_notes_path=%s messages=%s",
@@ -1185,17 +1280,26 @@ class SessionMemoryManager:
                 full_scan_tokens = (
                     ContextUtils.estimate_tokens(self._update_agent.get_inherited_system_prompt() or "")
                     + sum(ContextUtils.estimate_message_tokens(m) for m in full_context_window.context_messages)
-                    + ContextUtils.estimate_tokens(build_session_memory_prompt(str(pending_notes_path), current_notes))
+                    + ContextUtils.estimate_tokens(build_session_memory_prompt(str(pending_notes_path), merged_notes))
                 )
             await self._update_agent.invoke(
                 context_messages=context_window.get_messages(),
                 notes_path=pending_notes_path,
-                current_notes=current_notes,
+                current_notes=merged_notes,
                 is_incremental=is_incremental,
                 trigger_tokens=self._count_tokens(ctx.context, full_context_window) if ctx.context else 0,
                 full_scan_tokens=full_scan_tokens,
             )
-            self._commit_pending_session_memory(pending_notes_path, notes_path)
+            committed = self._commit_pending_session_memory(pending_notes_path, notes_path)
+            if not committed:
+                logger.warning(
+                    "[SessionMemory] update skipped anchor advance session_id=%s "
+                    "notes_path=%s pending_notes_path=%s reason=empty_commit_refused",
+                    session_id,
+                    notes_path,
+                    pending_notes_path,
+                )
+                return
             if ctx.context is not None:
                 runtime["tokens_at_last_update"] = self._count_tokens(ctx.context, full_context_window)
             runtime["tool_calls_at_last_update"] = self._count_tool_calls(list(full_context_window.context_messages))
@@ -1296,30 +1400,98 @@ class SessionMemoryManager:
         if not path.parent.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
 
-        template_path = path.parents[2] / "session_memory.md"
+        template_path = SessionMemoryManager._get_workspace_template_path(path)
         if template_path.exists():
             shutil.copy2(template_path, path)
             return path.read_text(encoding="utf-8")
 
+        logger.warning(
+            "[SessionMemory] workspace template not found at %s (notes_path=%s), "
+            "initializing session_context.md from DEFAULT_SESSION_MEMORY_TEMPLATE",
+            template_path,
+            path,
+        )
         path.write_text(DEFAULT_SESSION_MEMORY_TEMPLATE, encoding="utf-8")
         return DEFAULT_SESSION_MEMORY_TEMPLATE
 
     @staticmethod
-    def _prepare_pending_session_memory(active_path: Path, pending_path: Path, current_notes: str) -> None:
+    def _prepare_pending_session_memory(active_path: Path, pending_path: Path, current_notes: str) -> str:
+        template_path = SessionMemoryManager._get_workspace_template_path(active_path)
+        if template_path.exists():
+            template_content = template_path.read_text(encoding="utf-8")
+        else:
+            logger.warning(
+                "[SessionMemory] workspace template not found at %s (notes_path=%s), "
+                "falling back to DEFAULT_SESSION_MEMORY_TEMPLATE for pending merge",
+                template_path,
+                active_path,
+            )
+            template_content = DEFAULT_SESSION_MEMORY_TEMPLATE
+
+        current_sections = _parse_session_memory_into_sections(current_notes, include_descriptions=False)
+
+        current_by_header: Dict[str, List[str]] = {}
+        for sec in current_sections:
+            body_text = "\n".join(sec["body_lines"]).strip()
+            if not body_text:
+                continue
+            current_by_header[sec["header"]] = list(sec["body_lines"])
+
+        template_sections = _parse_session_memory_into_sections(template_content, include_descriptions=True)
+
+        matched_headers: set[str] = set()
+        merged_blocks: List[str] = []
+        for template_section in template_sections:
+            header = template_section["header"]
+            body_lines: List[str] = []
+            if header in current_by_header:
+                body_lines = list(current_by_header[header])
+                matched_headers.add(header)
+
+            block_lines = [header]
+            if template_section["description"] is not None:
+                block_lines.append(template_section["description"])
+            body = "\n".join(body_lines).strip()
+            if body:
+                block_lines.append(body)
+            merged_blocks.append("\n".join(block_lines))
+
+        for sec in current_sections:
+            body_text = "\n".join(sec["body_lines"]).strip()
+            if not body_text:
+                continue
+            if sec["header"] not in matched_headers:
+                logger.warning(
+                    "[SessionMemory] section body not merged into template: "
+                    "header=%r body_chars=%s",
+                    sec["header"],
+                    len(body_text),
+                )
+
+        merged_notes = "\n\n".join(merged_blocks).strip()
+        if merged_notes:
+            merged_notes += "\n"
+
         if not pending_path.parent.exists():
             pending_path.parent.mkdir(parents=True, exist_ok=True)
-        if active_path.exists():
-            shutil.copy2(active_path, pending_path)
-            return
-        pending_path.write_text(current_notes, encoding="utf-8")
+        pending_path.write_text(merged_notes, encoding="utf-8")
+        return merged_notes
 
     @staticmethod
-    def _commit_pending_session_memory(pending_path: Path, active_path: Path) -> None:
+    def _commit_pending_session_memory(pending_path: Path, active_path: Path) -> bool:
         if not pending_path.exists():
             raise RuntimeError(f"Pending session memory does not exist: {pending_path}")
-        stripped = _strip_empty_session_memory_sections(pending_path.read_text(encoding="utf-8"))
+        stripped = _clean_session_memory_sections(pending_path.read_text(encoding="utf-8"))
+        if not stripped.strip():
+            logger.warning(
+                "[SessionMemory] refusing empty commit: pending=%s active=%s",
+                pending_path,
+                active_path,
+            )
+            return False
         pending_path.write_text(stripped, encoding="utf-8")
         pending_path.replace(active_path)
+        return True
 
     @staticmethod
     def _count_tool_calls(messages: List[BaseMessage]) -> int:
