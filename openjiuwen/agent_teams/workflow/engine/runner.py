@@ -124,9 +124,16 @@ async def run_workflow(
 
         raise LintError(f"{len(loaded.warnings)} lint warning(s) in strict mode")
 
+    # The WAL is a sidecar of the canonical journal write-path (``<journal>.wal``):
+    # fresh records are appended to it as they complete, so a mid-run crash (no
+    # save) stays recoverable, and a residual WAL is replayed on the next load.
+    # Derived in-engine from the given path (no agent_teams import — engine stays
+    # business-agnostic); the journal path itself comes from the caller (paths.py).
+    wal_path = f"{journal_path}.wal" if journal_path else None
+    journal = await Journal.load(resume, wal_path=wal_path)
     rt = Runtime(
         backend=backend or MockBackend(),
-        journal=Journal.load(resume),
+        journal=journal,
         args=args,
         log_sink=log,
         progress_sink=progress_sink or noop_progress_sink,
@@ -145,5 +152,9 @@ async def run_workflow(
         except Exception as exc:  # noqa: BLE001 - teardown is best-effort
             log(f"[wf] backend.aclose() failed: {exc}")
     if journal_path:
-        rt.journal.save(journal_path)
+        # Reached only when the workflow ran to normal completion (any
+        # interrupt / crash / cancellation re-raises and skips this line, leaving
+        # the WAL for recovery). finalize = atomic journal write + terminal WAL
+        # removal; a future mid-run checkpoint must call save() (keeps the WAL).
+        await rt.journal.finalize(journal_path)
     return result

@@ -313,7 +313,7 @@ async def agent(
 
     cached = rt.journal.get_cached(ks, sig)
     if cached is not None:  # resume hit — no semaphore, no backend
-        rt.journal.use(ks, cached)
+        await rt.journal.use(ks, cached)
         result = _rehydrate(cached, model_cls)
         # Prefer stored raw_text; if absent (old journal), fall back to
         # preamble + structured data via _preview()
@@ -344,7 +344,7 @@ async def agent(
         _emit_agent_failed(rt, opts, msg)
         return None
 
-    rt.journal.use(
+    await rt.journal.use(
         ks,
         _make_record(
             _JournalRecordInput(
@@ -572,7 +572,7 @@ class AgentSession:
 
             cached = rt.journal.get_cached(ks, sig)
             if cached is not None:  # resume hit — no backend, no harness, no person
-                rt.journal.use(ks, cached)
+                await rt.journal.use(ks, cached)
                 result = _rehydrate(cached, model_cls)
                 self._append_history(prompt, result, model_cls)
                 outcome_text = cached.get("raw_text") or _preview(result)
@@ -596,7 +596,7 @@ class AgentSession:
                 return None
 
             result = call_result.result
-            rt.journal.use(
+            await rt.journal.use(
                 ks,
                 _make_record(
                     _JournalRecordInput(
