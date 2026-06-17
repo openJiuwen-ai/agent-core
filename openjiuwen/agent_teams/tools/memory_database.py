@@ -40,6 +40,9 @@ from openjiuwen.agent_teams.tools.database import (
     TASK_TERMINAL_STATUSES,
     detect_cycle_in_adjacency,
 )
+from openjiuwen.agent_teams.tools.member_options import (
+    set_member_worktree_options,
+)
 from openjiuwen.agent_teams.tools.models import (
     Team,
     TeamMember,
@@ -356,7 +359,7 @@ class InMemoryTeamDatabase:
         execution_status: Optional[str] = None,
         mode: str = MemberMode.BUILD_MODE.value,
         prompt: Optional[str] = None,
-        model_ref_json: Optional[str] = None,
+        options: Optional[str] = None,
     ) -> bool:
         async with self._lock:
             if member_name in self._members:
@@ -373,10 +376,30 @@ class InMemoryTeamDatabase:
                 execution_status=execution_status,
                 mode=mode,
                 prompt=prompt,
-                model_ref_json=model_ref_json,
+                options=options,
                 updated_at=self.get_current_time(),
             )
             team_logger.info("Member %s created", member_name)
+            return True
+
+    async def update_member_worktree(
+        self,
+        member_name: str,
+        team_name: str,
+        *,
+        isolation: Optional[str] = None,
+        worktree_path: Optional[str] = None,
+    ) -> bool:
+        async with self._lock:
+            member = self._members.get(member_name)
+            if member is None or member.team_name != team_name:
+                team_logger.error("Member %s not found in team %s", member_name, team_name)
+                return False
+            member.options = set_member_worktree_options(
+                member.options,
+                isolation=isolation,
+                worktree_path=worktree_path,
+            )
             return True
 
     async def is_human_agent(self, team_name: str, member_name: str) -> bool:

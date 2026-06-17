@@ -287,6 +287,8 @@ class TeamRuntimeContext(BaseModel):
     db_config: DatabaseConfig | MemoryDatabaseConfig = Field(default_factory=DatabaseConfig)
     member_model: Optional[TeamModelConfig] = None
     """TeamModelConfig assigned to this member by the allocator."""
+    worktree_path: Optional[str] = None
+    """Absolute cwd override for a teammate running in an isolated worktree."""
     cli_agent: Optional[str] = None
     """When set, this teammate is driven by an external CLI agent (the named
     adapter, e.g. ``"claude"`` / ``"codex"``) instead of a local DeepAgent.

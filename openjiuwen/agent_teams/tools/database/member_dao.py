@@ -17,6 +17,9 @@ from openjiuwen.agent_teams.schema.status import (
     is_valid_transition,
 )
 from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
+from openjiuwen.agent_teams.tools.member_options import (
+    set_member_worktree_options,
+)
 from openjiuwen.agent_teams.tools.models import TeamMember
 from openjiuwen.core.common.logging import team_logger
 
@@ -41,7 +44,7 @@ class MemberDao:
         execution_status: Optional[str] = None,
         mode: str = MemberMode.BUILD_MODE.value,
         prompt: Optional[str] = None,
-        model_ref_json: Optional[str] = None,
+        options: Optional[str] = None,
     ) -> bool:
         """Create a new team member.
 
@@ -70,7 +73,7 @@ class MemberDao:
                     execution_status=execution_status,
                     mode=mode,
                     prompt=prompt,
-                    model_ref_json=model_ref_json,
+                    options=options,
                     updated_at=get_current_time(),
                 )
                 session.add(member)
@@ -275,4 +278,32 @@ class MemberDao:
                 member_name,
                 execution_status,
             )
+            return True
+
+    async def update_member_worktree(
+        self,
+        member_name: str,
+        team_name: str,
+        *,
+        isolation: Optional[str] = None,
+        worktree_path: Optional[str] = None,
+    ) -> bool:
+        """Update worktree isolation metadata for a member."""
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                select(TeamMember).where(
+                    TeamMember.member_name == member_name,
+                    TeamMember.team_name == team_name,
+                )
+            )
+            member = result.scalar_one_or_none()
+            if not member:
+                team_logger.error("Member %s not found in team %s", member_name, team_name)
+                return False
+            member.options = set_member_worktree_options(
+                member.options,
+                isolation=isolation,
+                worktree_path=worktree_path,
+            )
+            await session.commit()
             return True

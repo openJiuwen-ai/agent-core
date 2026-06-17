@@ -258,8 +258,9 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 
 通用实现已下沉到 `openjiuwen.harness.tools.worktree`，由 deepagent 与 team 共用。team 侧只保留三件事：
 
-- 通过 `TeamAgentSpec.worktree`（`WorktreeConfig`）描述配置，`agent_configurator.create_worktree_manager` 在非 LEADER 角色上构造 `WorktreeManager`。
-- **workspace 视图软链由 team 侧自管**：`create_worktree_manager` 给 `WorktreeManager` 注入一个翻译适配器，把 `WorktreeCreatedEvent` / `WorktreeRemovedEvent` 路由到 `TeamWorkspaceManager.mount_worktree` / `unmount_worktree`，在共享 team workspace 下维护 `.worktree/{slug}` 软链。这一层是"本 team 当前活跃 worktree 一览"的导航视图，**单 agent 不订阅事件，软链物理上不存在**——`WorktreeManager` 本身不知道软链。
+- 通过 `TeamAgentSpec.worktree`（`WorktreeConfig`）描述配置；team 下 worktree 隔离只由 leader / 宿主在 `SpawnManager.build_context_from_db` 里按 `TeamMember.options.worktree.isolation == "worktree"` 调用 `create_owner_worktree(slug)` 创建，不向 leader 或 teammate 暴露 `enter_worktree` / `exit_worktree` 作为手动兜底。
+- **workspace 视图软链由 team 侧自管**：`create_worktree_manager` 给 `WorktreeManager` 注入一个翻译适配器，把 `WorktreeCreatedEvent` / `WorktreeRemovedEvent` 路由到 `TeamWorkspaceManager.mount_worktree` / `unmount_worktree`，在共享 team workspace 下维护 `.worktree/{slug}` 软链。这一层是"本 team 当前活跃 worktree 一览"的导航视图，**单 agent 不订阅事件，软链物理上不存在**——`WorktreeManager` 本身不知道软链。team 侧同时把这些事件桥到 `TeamEvent.WORKTREE_*` 总线。
+- Team teammate 隔离 worktree 命名固定为 `agent-{team_name}-{member_name}-{hash8}`。`TeamMember.options.worktree` 持久化 `isolation/path`；旧库迁移会把 `model_ref_json` 回填到 `options.model_ref` 后删除旧列，不匹配 `isolation/worktree_path` 物理列。`worktree_name/worktree_branch/head_commit` 留在 leader 宿主内存。`cleanup_teammate` 停掉成员后检查变更：干净则 `git worktree remove` 并清空路径字段；有变更、宿主 metadata 丢失或无法确认状态则保留 `worktree_path` 给 leader 合并与解冲突。
 - `worktree_remote.py`：`RemoteWorktreeBackend` / `WorktreeRemoteHandler` 跨机器 worktree 后端，依赖 `paths.get_agent_teams_home`。需要时由调用方直接 `WorktreeManager(backend=RemoteWorktreeBackend(...))` 注入，不走 backend registry（构造参数不止 config）。
 
 `harness/tools/worktree` 暴露的 `WorktreeManager` 接受可选 `event_handler: Callable[[WorktreeEvent], Awaitable[None]]`；team 端如需进一步把生命周期事件桥接到 `TeamEvent.WORKTREE_*` 总线，让上面的 mount/unmount 适配器和总线发布共享同一个 handler 即可（当前总线投递未启用）。

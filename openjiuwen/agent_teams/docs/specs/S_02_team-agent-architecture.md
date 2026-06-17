@@ -7,8 +7,8 @@
 | 类型 | spec |
 | 编号 / slug | S_02 / team-agent-architecture |
 | 关联模块 | `openjiuwen/agent_teams/agent/` |
-| 最近一次修订日期 | 2026-05-14 |
-| 关联 feature | F_11_leader-member-status-tracking.md、F_10_temporary-leader-clean-team-stream-end.md |
+| 最近一次修订日期 | 2026-06-17 |
+| 关联 feature | F_11_leader-member-status-tracking.md、F_10_temporary-leader-clean-team-stream-end.md、F_38_team-teammate-worktree-isolation-agenttool.md |
 
 ## 范围 / 边界
 
@@ -190,7 +190,7 @@ class AgentConfigurator:
 构造顺序契约：
 
 1. `setup_infra` 必须先于 `setup_agent`。
-2. `setup_infra` 内部固定顺序：解析 agent spec → 构造 `TeamAgentBlueprint` → 构造 `SpawnPayloadBuilder` → 创建 `messager` → 创建 `workspace_manager`（如启用）→（LEADER）创建 `model_allocator` → 创建 `team_backend` →（非 LEADER 且启用）创建 `worktree_manager`。
+2. `setup_infra` 内部固定顺序：解析 agent spec → 构造 `TeamAgentBlueprint` → 构造 `SpawnPayloadBuilder` → 创建 `messager` → 创建 `workspace_manager`（如启用）→（LEADER）创建 `model_allocator` → 创建 `team_backend` →（LEADER 且启用 worktree）创建 `worktree_manager`。team 的 `worktree_manager` 只用于 leader-side spawn owner-scoped teammate worktree；tool rail 不向 leader 或 teammate 暴露 `enter_worktree` / `exit_worktree`。
 3. `setup_agent` 内部固定顺序：mount workspace → 构造 `TeamHarness.build(...)` → 构造 `TeamMemoryManager`（如启用）→ 跑 `agent_customizer`。
 4. `model_allocator` 必须在 `team_backend` 之前就绪——`team_backend` 构造时直接读 `self.model_allocator.allocate`。
 
@@ -310,7 +310,7 @@ class SpawnPayloadBuilder:
 | State | `event_listeners` | `list` | `add_event_listener` / `remove_event_listener` | 调用方 |
 | State | `team_cleaned` | `bool` | `clean_team` 成功回调（`TeamBackend.on_team_cleaned` → `TeamAgent._mark_team_cleaned`） | TeamAgent |
 | Resources | `harness` | `TeamHarness | None` | `setup_agent` 调用 `TeamHarness.build(...)` | 一次性 |
-| Resources | `worktree_manager` | `WorktreeManager | None` | `setup_infra`（非 LEADER 且启用 worktree） | 一次性 |
+| Resources | `worktree_manager` | `WorktreeManager | None` | `setup_infra`（LEADER 且启用 worktree；用于 spawn 隔离，不作为 teammate 手动工具暴露） | 一次性 |
 | Resources | `memory_manager` | `TeamMemoryManager | None` | `setup_agent`（启用 memory） | 一次性 |
 | Resources | `first_iter_gate` | `FirstIterationGate | None` | `setup_agent`（非 HUMAN_AGENT） | 一次性 |
 | Resources | `model_allocator` | `ModelAllocator | None` | `setup_infra`（LEADER），可由 `attach_model_allocator` 替换；`update_model_pool` 重建 | LEADER 限定 |

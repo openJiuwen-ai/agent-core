@@ -902,7 +902,7 @@ MEMBER_TOOLS = MEMBER_ONLY_TOOLS | SHARED_TOOLS
 
 `predefined` 模式下 `spawn_member` 从 Leader 工具集移除；`teammate_mode != "plan_mode"` 时移除 `approve_plan` / `approve_tool`。
 
-Worktree 工具（`enter_worktree` / `exit_worktree`）已下沉到 `openjiuwen.harness.tools.worktree`，由 `TeamToolRail` 在 `WorktreeManager` 可用时挂载。
+Worktree 工具（`enter_worktree` / `exit_worktree`）已下沉到 `openjiuwen.harness.tools.worktree`，但 team teammate 隔离不再通过 `TeamToolRail` 手动挂载这些工具；team 侧只在 spawn 时由 leader / 宿主根据 `isolation="worktree"` 创建 owner-scoped worktree。
 
 ### 11.2 工具输出契约
 
@@ -931,7 +931,7 @@ Worktree 工具（`enter_worktree` / `exit_worktree`）已下沉到 `openjiuwen.
 
 通用 `WorktreeManager` 实现已下沉到 `openjiuwen.harness.tools.worktree`，由 DeepAgent 与 Team 共用。Team 侧只保留三件事：
 
-1. `TeamAgentSpec.worktree` (`WorktreeConfig`) 配置；`agent_configurator.create_worktree_manager` 在非 LEADER 角色上构造 `WorktreeManager`
+1. `TeamAgentSpec.worktree` (`WorktreeConfig`) 配置；team 下 `WorktreeManager` 由 leader / 宿主用于 spawn owner-scoped teammate worktree，不在非 LEADER 成员上挂手动 worktree 工具
 2. **Workspace 视图软链由 team 侧管**：`create_worktree_manager` 注入翻译适配器，把 `WorktreeCreatedEvent` / `WorktreeRemovedEvent` 路由到 `TeamWorkspaceManager.mount_worktree` / `unmount_worktree`，在共享 workspace 下维护 `.worktree/{slug}` 软链。单 agent 不订阅该事件、软链物理不存在
 3. `worktree_remote.py`：跨机器 backend，调用方需要时直接构造 `WorktreeManager(backend=RemoteWorktreeBackend(...))`，不走 backend registry
 

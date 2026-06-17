@@ -14,8 +14,8 @@ does not.
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-05-27 |
-| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）。其余条目见 `docs/features/` |
+| 最近一次修订日期 | 2026-06-17 |
+| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）。其余条目见 `docs/features/` |
 
 ## 范围 / 边界
 
@@ -462,12 +462,18 @@ tool / rail / sys_operation 与 `DeepAgentSpec.build()` 同模式。
 | `messager_config` | `Optional[MessagerTransportConfig]` | `None` |
 | `db_config` | `DatabaseConfig \| MemoryDatabaseConfig` | `DatabaseConfig()` |
 | `member_model` | `Optional[TeamModelConfig]` | `None` |
+| `worktree_path` | `Optional[str]` | `None` |
 
 是 **Spec → Runtime 的边界**。`build()` 出来的对象（messager config、db
 config、allocator 给当前成员的 model 选择）封进 `TeamRuntimeContext`，传给
 `TeamAgent.configure(spec, context)`。`TeamRuntimeContext` 自身不持有 live
 session、live messager 实例 —— 只放配置，由 manager 拿配置去 `build()` /
 `create_messager(...)`。
+
+当成员启用 worktree 隔离时，只有 `worktree_path` 会跨 spawn 边界进入
+`TeamRuntimeContext`，用于覆盖 teammate 的 cwd / workspace root。
+`worktree_name` / `worktree_branch` / `head_commit` 属于 leader 宿主的生命周期
+metadata，不属于 runtime context。
 
 #### `MemberOpResult`
 

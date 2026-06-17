@@ -73,15 +73,12 @@ class TeamMember(SQLModel, table=True):
     # ``database/engine.py``.
     role: str = Field(nullable=False, default="teammate")
     prompt: Optional[str] = Field(default=None, nullable=True)
-    model_ref_json: Optional[str] = Field(default=None, nullable=True)
-    """Lightweight reference to the assigned ``ModelPoolEntry`` as JSON.
+    options: Optional[str] = Field(default=None, nullable=True)
+    """JSON object for extensible member configuration.
 
-    Stores ``{"model_id": str, "model_name": str}`` rather than the full
-    ``TeamModelConfig`` so credential/endpoint refreshes in the live pool
-    (carried in the team session) take effect on the next resolution
-    instead of being frozen at spawn time. Resolved via
-    ``resolve_member_model`` against the current ``TeamSpec.model_pool``.
-    NULL when the team is configured without a pool.
+    Current shape:
+    ``{"model_ref": {"model_name": str, "model_index": int},
+    "worktree": {"isolation": str, "path": str}}``.
     """
     # Set on roster mutations only (create_member).  Status / execution
     # status updates intentionally do NOT bump this column because they
