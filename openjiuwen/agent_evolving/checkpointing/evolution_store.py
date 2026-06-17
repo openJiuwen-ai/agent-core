@@ -17,12 +17,13 @@ from openjiuwen.agent_evolving.checkpointing.skill_package import (
 )
 from openjiuwen.agent_evolving.checkpointing.store_archive import StoreArchiveHelper
 from openjiuwen.agent_evolving.checkpointing.store_projection import StoreProjectionHelper
-from openjiuwen.agent_evolving.checkpointing.store_records import StoreRecordsHelper
+from openjiuwen.agent_evolving.checkpointing.store_records import MergeRecordsRequest, StoreRecordsHelper
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionLog,
     EvolutionRecord,
     EvolutionTarget,
 )
+from openjiuwen.agent_evolving.utils import parse_top_level_frontmatter
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, raise_error
 from openjiuwen.core.common.logging import logger
@@ -117,8 +118,8 @@ class EvolutionStore:
                 names.append(item.name)
         return names
 
-    def skill_exists(self, name: str) -> bool:
-        return self.resolve_skill_dir(name) is not None
+    def skill_exists(self, name: str, *, subject_kind: Optional[str] = None) -> bool:
+        return self.resolve_skill_dir(name, subject_kind=subject_kind) is not None
 
     def skill_definition_exists(self, name: str) -> bool:
         """Return True only when the skill directory contains ``SKILL.md``."""
@@ -245,14 +246,60 @@ class EvolutionStore:
             logger.info("[EvolutionStore] installed skill package to %s", dest_dir)
             return dest_dir
 
-    def resolve_skill_dir(self, name: str, create: bool = False) -> Optional[Path]:
+    def resolve_skill_dir(
+        self,
+        name: str,
+        create: bool = False,
+        *,
+        subject_kind: Optional[str] = None,
+    ) -> Optional[Path]:
         candidates = [base / name for base in self._base_dirs]
+        if subject_kind is not None:
+            normalized_kind = self._normalize_subject_kind(subject_kind)
+            for candidate in candidates:
+                if candidate.is_dir() and self._skill_dir_matches_subject_kind(candidate, normalized_kind):
+                    return candidate
+            if create:
+                for candidate in candidates:
+                    if not candidate.exists():
+                        return candidate
+            return None
+
         for candidate in candidates:
             if candidate.is_dir():
                 return candidate
         if create and self._base_dirs:
             return self._base_dirs[0] / name
         return None
+
+    def resolve_subject_payload(self, name: str) -> Optional[dict[str, str]]:
+        """Resolve a skill-like subject from its on-disk definition."""
+        skill_dir = self.resolve_skill_dir(name)
+        if skill_dir is None:
+            return None
+        return {"kind": self._read_skill_dir_subject_kind(skill_dir), "name": name}
+
+    def _skill_dir_matches_subject_kind(self, skill_dir: Path, subject_kind: str) -> bool:
+        return self._read_skill_dir_subject_kind(skill_dir) == subject_kind
+
+    def _read_skill_dir_subject_kind(self, skill_dir: Path) -> str:
+        md_path = self._find_skill_md(skill_dir)
+        if md_path is None:
+            return "skill"
+        try:
+            frontmatter = parse_top_level_frontmatter(md_path.read_text(encoding="utf-8"))
+        except OSError:
+            return "skill"
+        raw_kind = str(frontmatter.get("kind", "")).strip().strip("\"'")
+        if not raw_kind:
+            raw_kind = "skill"
+        return self._normalize_subject_kind(raw_kind)
+
+    @staticmethod
+    def _normalize_subject_kind(subject_kind: str) -> str:
+        from openjiuwen.agent_evolving.experience.draft_schema import normalize_evolution_subject_kind
+
+        return normalize_evolution_subject_kind(subject_kind)
 
     def find_skill_md(self, skill_dir: Path) -> Optional[Path]:
         """Return the markdown file used as the skill entrypoint."""
@@ -342,9 +389,11 @@ class EvolutionStore:
         self,
         name: str,
         target: Optional[EvolutionTarget] = None,
+        *,
+        subject_kind: Optional[str] = None,
     ) -> EvolutionLog:
         """Load evolution log for one skill; optionally filter by target."""
-        evo_log = await self.load_full_evolution_log(name)
+        evo_log = await self.load_full_evolution_log(name, subject_kind=subject_kind)
         if target is not None:
             evo_log = EvolutionLog(
                 skill_id=evo_log.skill_id,
@@ -354,10 +403,16 @@ class EvolutionStore:
             )
         return evo_log
 
-    async def append_record(self, name: str, record: EvolutionRecord) -> None:
+    async def append_record(
+        self,
+        name: str,
+        record: EvolutionRecord,
+        *,
+        subject_kind: Optional[str] = None,
+    ) -> None:
         """Append or merge one evolution record to evolutions.json."""
         async with self._get_skill_lock(name):
-            evo_log = await self._records.append_record_transactional(name, record)
+            evo_log = await self._records.append_record_transactional(name, record, subject_kind=subject_kind)
             if evo_log is None:
                 return
             logger.info(
@@ -376,8 +431,8 @@ class EvolutionStore:
                     total,
                 )
 
-    async def load_full_evolution_log(self, name: str) -> EvolutionLog:
-        return await self._records.load_full_evolution_log(name)
+    async def load_full_evolution_log(self, name: str, *, subject_kind: Optional[str] = None) -> EvolutionLog:
+        return await self._records.load_full_evolution_log(name, subject_kind=subject_kind)
 
     async def save_evolution_log(
         self,
@@ -385,9 +440,10 @@ class EvolutionStore:
         evo_log: EvolutionLog,
         *,
         skill_dir: Optional[Path] = None,
+        subject_kind: Optional[str] = None,
     ) -> None:
         """Persist one evolution log through the public store facade."""
-        await self._records.save_evolution_log(name, evo_log, skill_dir=skill_dir)
+        await self._records.save_evolution_log(name, evo_log, skill_dir=skill_dir, subject_kind=subject_kind)
 
     async def get_pending_records(
         self,
@@ -396,8 +452,8 @@ class EvolutionStore:
     ) -> List[EvolutionRecord]:
         return (await self.load_evolution_log(name, target)).pending_entries
 
-    async def render_evolution_markdown(self, name: str) -> None:
-        await self._projection.render_evolution_markdown(name)
+    async def render_evolution_markdown(self, name: str, *, subject_kind: Optional[str] = None) -> None:
+        await self._projection.render_evolution_markdown(name, subject_kind=subject_kind)
 
     async def format_desc_experience_text(self, name: str, max_items: int = 5) -> str:
         return await self._projection.format_desc_experience_text(name, max_items=max_items)
@@ -415,41 +471,54 @@ class EvolutionStore:
         self,
         name: str,
         updates: Dict[str, Dict[str, Any]],
+        *,
+        subject_kind: Optional[str] = None,
     ) -> int:
         async with self._get_skill_lock(name):
-            return await self._records.update_record_scores(name, updates)
+            return await self._records.update_record_scores(name, updates, subject_kind=subject_kind)
 
     async def get_records_by_score(
         self,
         name: str,
         min_score: Optional[float] = None,
+        *,
+        subject_kind: Optional[str] = None,
     ) -> List[EvolutionRecord]:
-        return await self._records.get_records_by_score(name, min_score=min_score)
+        return await self._records.get_records_by_score(name, min_score=min_score, subject_kind=subject_kind)
 
-    async def delete_records(self, name: str, record_ids: List[str]) -> int:
-        async with self._get_skill_lock(name):
-            return await self._records.delete_records(name, record_ids)
-
-    async def mark_records_applied(self, name: str, record_ids: List[str]) -> int:
-        async with self._get_skill_lock(name):
-            return await self._records.mark_records_applied(name, record_ids)
-
-    async def merge_records(
+    async def load_records_by_ids(
         self,
         name: str,
-        primary_id: str,
-        remove_ids: List[str],
-        new_content: str,
-        new_score: Optional[float] = None,
-    ) -> Optional[EvolutionRecord]:
+        record_ids: List[str],
+        *,
+        subject_kind: Optional[str] = None,
+    ) -> List[EvolutionRecord]:
+        """Load records by stable ids, preserving the requested id order."""
+        return await self._records.load_records_by_ids(name, record_ids, subject_kind=subject_kind)
+
+    async def delete_records(
+        self,
+        name: str,
+        record_ids: List[str],
+        *,
+        subject_kind: Optional[str] = None,
+    ) -> int:
         async with self._get_skill_lock(name):
-            return await self._records.merge_records(
-                name,
-                primary_id,
-                remove_ids,
-                new_content,
-                new_score=new_score,
-            )
+            return await self._records.delete_records(name, record_ids, subject_kind=subject_kind)
+
+    async def mark_records_applied(
+        self,
+        name: str,
+        record_ids: List[str],
+        *,
+        subject_kind: Optional[str] = None,
+    ) -> int:
+        async with self._get_skill_lock(name):
+            return await self._records.mark_records_applied(name, record_ids, subject_kind=subject_kind)
+
+    async def merge_records(self, request: MergeRecordsRequest) -> Optional[EvolutionRecord]:
+        async with self._get_skill_lock(request.name):
+            return await self._records.merge_records(request)
 
     async def update_record_content(
         self,
@@ -457,6 +526,7 @@ class EvolutionStore:
         record_id: str,
         new_content: str,
         new_score: Optional[float] = None,
+        subject_kind: Optional[str] = None,
     ) -> Optional[EvolutionRecord]:
         async with self._get_skill_lock(name):
             return await self._records.update_record_content(
@@ -464,6 +534,7 @@ class EvolutionStore:
                 record_id,
                 new_content,
                 new_score=new_score,
+                subject_kind=subject_kind,
             )
 
     async def create_skill(
@@ -492,16 +563,102 @@ class EvolutionStore:
     def extract_description_from_skill_md(content: str) -> str:
         return StoreProjectionHelper.extract_description_from_skill_md(content)
 
+    # ── Subject-aware store Interface ──
+
+    @staticmethod
+    def _to_evolution_subject(subject: dict[str, Any] | Any) -> Any:
+        """Normalize a subject dict or EvolutionSubject into an EvolutionSubject instance."""
+        from openjiuwen.agent_evolving.experience.draft_schema import EvolutionSubject, normalize_subject
+
+        if isinstance(subject, EvolutionSubject):
+            return subject
+        return normalize_subject(subject)
+
+    def resolve_subject_dir(self, subject: dict[str, Any] | Any) -> Path | None:
+        """Resolve the directory for a subject (kind+name)."""
+        normalized = self._to_evolution_subject(subject)
+        return self.resolve_skill_dir(normalized.name, subject_kind=normalized.kind)
+
+    def skill_subject_exists(self, subject: dict[str, Any] | Any) -> bool:
+        """Check whether a subject (kind+name) exists."""
+        normalized = self._to_evolution_subject(subject)
+        return self.skill_exists(normalized.name, subject_kind=normalized.kind)
+
+    async def read_subject_content(self, subject: dict[str, Any] | Any, *, strict: bool = False) -> str:
+        """Read SKILL.md content for a subject."""
+        normalized = self._to_evolution_subject(subject)
+        return await self.read_skill_content(normalized.name, strict=strict)
+
+    async def load_subject_evolution_log(self, subject: dict[str, Any] | Any) -> EvolutionLog:
+        """Load the full evolution log for a subject."""
+        normalized = self._to_evolution_subject(subject)
+        return await self.load_full_evolution_log(normalized.name, subject_kind=normalized.kind)
+
+    async def append_subject_record(self, subject: dict[str, Any] | Any, record: EvolutionRecord) -> None:
+        """Append an evolution record for a subject."""
+        normalized = self._to_evolution_subject(subject)
+        await self.append_record(normalized.name, record, subject_kind=normalized.kind)
+
+    async def load_subject_records_by_ids(
+        self, subject: dict[str, Any] | Any, record_ids: list[str]
+    ) -> list[EvolutionRecord]:
+        """Load records by ids for a subject."""
+        normalized = self._to_evolution_subject(subject)
+        return await self.load_records_by_ids(normalized.name, record_ids, subject_kind=normalized.kind)
+
+    async def delete_subject_records(self, subject: dict[str, Any] | Any, record_ids: list[str]) -> int:
+        """Delete records for a subject."""
+        normalized = self._to_evolution_subject(subject)
+        return await self.delete_records(normalized.name, record_ids, subject_kind=normalized.kind)
+
+    async def merge_subject_records(
+        self,
+        subject: dict[str, Any] | Any,
+        primary_id: str,
+        remove_ids: list[str],
+        new_content: str,
+        new_score: float | None = None,
+    ) -> EvolutionRecord | None:
+        """Merge records for a subject."""
+        normalized = self._to_evolution_subject(subject)
+        return await self.merge_records(
+            MergeRecordsRequest(
+                name=normalized.name,
+                primary_id=primary_id,
+                remove_ids=remove_ids,
+                new_content=new_content,
+                new_score=new_score,
+                subject_kind=normalized.kind,
+            )
+        )
+
+    async def update_subject_record_content(
+        self,
+        subject: dict[str, Any] | Any,
+        record_id: str,
+        new_content: str,
+        new_score: float | None = None,
+    ) -> EvolutionRecord | None:
+        """Update record content for a subject."""
+        normalized = self._to_evolution_subject(subject)
+        return await self.update_record_content(
+            normalized.name,
+            record_id,
+            new_content,
+            new_score=new_score,
+            subject_kind=normalized.kind,
+        )
+
     # ── Governance primitives (archive / clear / rollback) ──
 
-    async def archive_skill_body(self, name: str) -> Optional[str]:
-        return await self._archive.archive_skill_body(name)
+    async def archive_skill_body(self, name: str, *, subject_kind: Optional[str] = None) -> Optional[str]:
+        return await self._archive.archive_skill_body(name, subject_kind=subject_kind)
 
-    async def archive_evolutions(self, name: str) -> Optional[str]:
-        return await self._archive.archive_evolutions(name)
+    async def archive_evolutions(self, name: str, *, subject_kind: Optional[str] = None) -> Optional[str]:
+        return await self._archive.archive_evolutions(name, subject_kind=subject_kind)
 
-    async def clear_evolutions(self, name: str) -> None:
-        await self._archive.clear_evolutions(name)
+    async def clear_evolutions(self, name: str, *, subject_kind: Optional[str] = None) -> None:
+        await self._archive.clear_evolutions(name, subject_kind=subject_kind)
 
-    def list_archives(self, name: str) -> List[str]:
-        return self._archive.list_archives(name)
+    def list_archives(self, name: str, *, subject_kind: Optional[str] = None) -> List[str]:
+        return self._archive.list_archives(name, subject_kind=subject_kind)

@@ -14,10 +14,6 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeI
 from openjiuwen.core.memory.lite.memory_tools import (
     init_memory_manager_async,
 )
-from openjiuwen.harness.prompts.prompt_attachment_manager import (
-    PromptAttachmentKind,
-    PromptAttachmentScope,
-)
 from openjiuwen.harness.prompts.sections.memory import build_memory_section
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools.memory import create_memory_tools
@@ -62,7 +58,6 @@ class MemoryRail(DeepAgentRail):
         self._embedding_config = embedding_config
         self._is_proactive = is_proactive
         self.system_prompt_builder = None
-        self.attachment_manager = None
         self._tool_ctx: MemoryToolContext | None = None
         self._is_read_only = False
 
@@ -74,7 +69,6 @@ class MemoryRail(DeepAgentRail):
         """
         super().init(agent)
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
-        self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
         self._register_memory_tools(agent)
 
     def uninit(self, agent) -> None:
@@ -95,7 +89,6 @@ class MemoryRail(DeepAgentRail):
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("memory")
             self.system_prompt_builder = None
-        self.attachment_manager = None
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Initialize memory manager and register tools on first invoke.
@@ -124,36 +117,8 @@ class MemoryRail(DeepAgentRail):
             read_only=self._is_read_only,
             is_proactive=self._is_proactive
         )
-        if memory_section is None:
-            return
-
-        if not self._is_read_only:
+        if memory_section is not None:
             self.system_prompt_builder.add_section(memory_section)
-            if self.attachment_manager is not None:
-                try:
-                    await self.attachment_manager.for_context(ctx).clear_section(
-                        section="memory",
-                        scope=PromptAttachmentScope.TURN,
-                    )
-                except ValueError as exc:
-                    logger.warning("[MemoryRail] skip clearing memory prompt attachment: %s", exc)
-            return
-
-        if self.attachment_manager is None:
-            self.system_prompt_builder.add_section(memory_section)
-            return
-        writer = self.attachment_manager.for_context(ctx)
-        try:
-            await writer.upsert_from_section(
-                section=memory_section,
-                scope=PromptAttachmentScope.TURN,
-                kind=PromptAttachmentKind.MEMORY,
-                source="agent_core.memory.policy",
-                language=self.system_prompt_builder.language,
-                content_kind="text/markdown",
-            )
-        except ValueError as exc:
-            logger.warning("[MemoryRail] skip prompt attachment section=%s: %s", memory_section.name, exc)
 
     async def _init_memory_manager(self, ctx: AgentCallbackContext) -> None:
         """Initialize the memory index manager.

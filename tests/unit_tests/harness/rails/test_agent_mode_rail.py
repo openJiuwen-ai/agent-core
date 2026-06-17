@@ -66,7 +66,7 @@ def _make_ctx(
     ctx = SimpleNamespace(
         session=SimpleNamespace(session_id="sess1"),
         inputs=inputs,
-        extra={"_invoke_turn_id": "turn1"},
+        extra={},
     )
 
     rail = rail or AgentModeRail()
@@ -205,8 +205,8 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         self.assertNotIn("sessions_spawn", visible_tool_names)
         self.assertIn("read_file", visible_tool_names)
 
-        items = await rail.attachment_manager.collect_for_turn("sess1", "turn1")
-        self.assertEqual([item.id for item in items], ["turn.sess1.turn1.mode_instructions"])
+        items = await rail.attachment_manager.collect_for_session("sess1")
+        self.assertEqual([item.id for item in items], ["session.sess1.mode_instructions"])
         self.assertEqual(items[0].content, "MODE_SECTION")
 
     async def test_before_model_call_in_auto_mode_removes_mode_section(self) -> None:
@@ -222,12 +222,12 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         with patch("openjiuwen.harness.rails.agent_mode_rail.build_plan_mode_section", return_value=mode_section):
             await rail.before_model_call(ctx)
 
-        self.assertIsNotNone(await rail.attachment_manager.get_by_id("turn.sess1.turn1.mode_instructions"))
+        self.assertIsNotNone(await rail.attachment_manager.get_by_id("session.sess1.mode_instructions"))
 
         agent.load_state.return_value.plan_mode.mode = "auto"
         await rail.before_model_call(ctx)
 
-        self.assertIsNone(await rail.attachment_manager.get_by_id("turn.sess1.turn1.mode_instructions"))
+        self.assertIsNone(await rail.attachment_manager.get_by_id("session.sess1.mode_instructions"))
 
     async def test_after_tool_call_register_unregister_task_tool_and_respect_skip(self) -> None:
         rail, ctx_enter, agent = _make_ctx("enter_plan_mode", mode="plan")

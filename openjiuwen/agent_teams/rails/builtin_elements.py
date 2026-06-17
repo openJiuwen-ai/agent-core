@@ -44,12 +44,13 @@ from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.schema.config import AudioModelConfig, VisionModelConfig
 from openjiuwen.harness.tools import (
     AudioMetadataTool,
+    WebFetchWebpageTool,
+    WebFreeSearchTool,
     WebPaidSearchTool,
     create_audio_tools,
     create_vision_tools,
     is_paid_search_enabled,
 )
-from openjiuwen.harness.tools.web_tools import WebFetchWebpageTool, WebFreeSearchTool
 from openjiuwen.harness.tools.worktree import WorktreeConfig, WorktreeRail
 
 # Element name constants — the RailSpec / BuiltinToolSpec ``type`` values. Every
@@ -73,6 +74,7 @@ WEB_FETCH = "core.web_fetch"
 WEB_PAID_SEARCH = "core.web_paid_search"
 VISION = "core.vision"
 AUDIO = "core.audio"
+OBSERVABILITY = "core.observability"
 
 
 def _build_skill_use_rail(params: dict[str, Any], context: Any) -> SkillUseRail:
@@ -162,8 +164,15 @@ def _build_lsp_rail(params: dict[str, Any], context: Any) -> LspRail:
     return LspRail(InitializeOptions(cwd=inp.project_dir))
 
 
-class WebPaidSearchInput(ConstructionInput):
-    """Construction inputs for the paid web-search tool."""
+class WebToolInput(ConstructionInput):
+    """Construction inputs shared by the free / fetch / paid web tools.
+
+    Mirrors how jiuwenswarm constructs every web tool with both ``language``
+    and ``agent_id``: the agent card id (``member_card_id``) namespaces the
+    tool card id so each member owns a stable, deterministic web-tool id
+    instead of the random uuid fallback ``build_tool_card`` uses when no
+    ``agent_id`` is supplied.
+    """
 
     language: str = context_field(
         attr="language", default="cn", description="Member language code."
@@ -173,6 +182,34 @@ class WebPaidSearchInput(ConstructionInput):
         default=None,
         description="Agent card id used to namespace tool ids.",
     )
+
+
+def _build_web_free_search(params: dict[str, Any], context: Any) -> WebFreeSearchTool:
+    """Build the free web-search tool with member-scoped language / agent id.
+
+    Args:
+        params: Spec params (unused).
+        context: Per-member build context; supplies ``language`` / ``agent_id``.
+
+    Returns:
+        A ``WebFreeSearchTool`` namespaced by the member card id.
+    """
+    inp = WebToolInput.resolve(params, context)
+    return WebFreeSearchTool(language=inp.language, agent_id=inp.agent_id)
+
+
+def _build_web_fetch(params: dict[str, Any], context: Any) -> WebFetchWebpageTool:
+    """Build the web page fetch tool with member-scoped language / agent id.
+
+    Args:
+        params: Spec params (unused).
+        context: Per-member build context; supplies ``language`` / ``agent_id``.
+
+    Returns:
+        A ``WebFetchWebpageTool`` namespaced by the member card id.
+    """
+    inp = WebToolInput.resolve(params, context)
+    return WebFetchWebpageTool(language=inp.language, agent_id=inp.agent_id)
 
 
 def _build_web_paid_search(params: dict[str, Any], context: Any) -> list[Any]:
@@ -187,7 +224,7 @@ def _build_web_paid_search(params: dict[str, Any], context: Any) -> list[Any]:
     """
     if not is_paid_search_enabled():
         return []
-    inp = WebPaidSearchInput.resolve(params, context)
+    inp = WebToolInput.resolve(params, context)
     return [WebPaidSearchTool(language=inp.language, agent_id=inp.agent_id)]
 
 
@@ -284,6 +321,28 @@ def _build_audio_tool_group(params: dict[str, Any], context: Any) -> list[Any]:
     )
 
 
+def _build_observability_rail(params: dict[str, Any], context: Any) -> Any:
+    """Build an ObservabilityRail when observability is initialized.
+
+    Returns ``None`` when observability is not initialized, making this a
+    safe unconditional addition to any spec's ``rails`` list — the provider
+    handles the on/off logic itself.
+
+    Args:
+        params: Spec params (unused).
+        context: Per-member build context (unused).
+
+    Returns:
+        An ``ObservabilityRail``, or ``None`` when observability is disabled.
+    """
+    from openjiuwen.agent_teams.observability.setup import is_initialized
+
+    if not is_initialized():
+        return None
+    from openjiuwen.agent_teams.observability import ObservabilityRail
+    return ObservabilityRail()
+
+
 harness_element(
     kind=ElementKind.RAIL,
     name=TASK_PLANNING,
@@ -363,19 +422,21 @@ harness_element(
     kind=ElementKind.TOOL,
     name=WEB_SEARCH,
     description="Free web search tool.",
-    builder=WebFreeSearchTool,
+    input_model=WebToolInput,
+    builder=_build_web_free_search,
 )
 harness_element(
     kind=ElementKind.TOOL,
     name=WEB_FETCH,
     description="Web page fetch tool.",
-    builder=WebFetchWebpageTool,
+    input_model=WebToolInput,
+    builder=_build_web_fetch,
 )
 harness_element(
     kind=ElementKind.TOOL,
     name=WEB_PAID_SEARCH,
     description="Paid web-search tool (built only when a paid-search key is set).",
-    input_model=WebPaidSearchInput,
+    input_model=WebToolInput,
     builder=_build_web_paid_search,
 )
 harness_element(
@@ -391,6 +452,12 @@ harness_element(
     description="Audio tool group built from a supplied AudioModelConfig.",
     input_model=AudioToolsInput,
     builder=_build_audio_tool_group,
+)
+harness_element(
+    kind=ElementKind.RAIL,
+    name=OBSERVABILITY,
+    description="Creates per-iteration agent spans for observability tracing.",
+    builder=_build_observability_rail,
 )
 
 
@@ -412,4 +479,5 @@ __all__ = [
     "WEB_PAID_SEARCH",
     "VISION",
     "AUDIO",
+    "OBSERVABILITY",
 ]

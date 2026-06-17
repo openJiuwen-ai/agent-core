@@ -557,6 +557,7 @@ class StatusCode(Enum):
         "retrieval kb_triple_extraction process error, reason: {error_msg}",
     )
     RETRIEVAL_KB_DATABASE_CONFIG_INVALID = (155508, "retrieval kb_database_config is invalid, reason: {error_msg}")
+    RETRIEVAL_KB_ONTOLOGY_INVALID = (155509, "retrieval kb_ontology is invalid, reason: {error_msg}")
 
     # KnowledgeBase Retrieval - Reranker 155600 - 155699
     RETRIEVAL_RERANKER_REQUEST_CALL_FAILED = (
@@ -854,13 +855,16 @@ class StatusCode(Enum):
     TOOL_TODOS_INVOKE_FAILED = (182504, "todo tool invoke failed, error='{reason}'")
     TOOL_TASK_TOOL_INVOKED = (182505, "task tool invoked failed, error='{reason}'")
 
-    TOOL_WEB_SEARCH_ENGINE_ERROR = (182506, "web search engine error, engine='{engine}', reason='{reason}'")
-    TOOL_WEB_SEARCH_ALL_ENGINES_FAILED = (182507, "all web search engines failed, errors='{errors}'")
-    TOOL_WEB_API_KEY_NOT_SET = (182508, "web tool api key is not set, key_name='{key_name}'")
     TOOL_SESSION_TOOL_INVOKED = (182509, "session tool invoked failed, error='{reason}'")
 
     # worktree tool 182510 - 182519
     TOOL_WORKTREE_EXIT_INVALID = (182510, "worktree exit is invalid, reason='{reason}'")
+
+    # web tool 182600 - 182699
+    TOOL_WEB_SEARCH_ENGINE_ERROR = (182600, "web search engine error, engine='{engine}', reason='{reason}'")
+    TOOL_WEB_SEARCH_ALL_ENGINES_FAILED = (182601, "all web search engines failed, errors='{errors}'")
+    TOOL_WEB_API_KEY_NOT_SET = (182602, "web tool api key is not set, key_name='{key_name}'")
+    TOOL_WEB_FETCH_EXECUTION_ERROR = (182603, "web page fetch failed, url='{url}', reason='{reason}'")
 
     # Foundation - Logger 183000 - 183999
     COMMON_LOG_PATH_INVALID = (183000, "common log_path is invalid, reason: {error_msg}")

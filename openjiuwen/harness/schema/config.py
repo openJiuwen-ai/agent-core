@@ -185,6 +185,8 @@ class DeepAgentConfig:
             常见键结构见 :class:`openjiuwen.harness.security.models.PermissionsSection`。
         permission_host: Optional ToolPermissionHost callbacks (YAML path,
             workspace, hot-reload snapshot, hosted confirmation).
+        parallel_tool_calls: Whether or not tool calls are executed in parallel
+            (True for parallel, False for sequential)
     """
 
     model: Optional[Model] = None
@@ -231,6 +233,9 @@ class DeepAgentConfig:
     permissions: PermissionsSection | None = None
     permission_host: Any = None
 
+    # Whether or not the inner ReactAgent executes tool calls in parallel.
+    parallel_tool_calls: bool = True
+
     # Filesystem sandbox: when True, file ops are restricted to workspace/project root.
     # Subagents inherit the stricter of their own spec and this value.
     restrict_to_work_dir: bool = True
@@ -257,4 +262,5 @@ class SubAgentConfig:
     factory_name: Optional[str] = None
     factory_kwargs: dict[str, Any] = field(default_factory=dict)
     enable_plan_mode: bool = False
+    parallel_tool_calls: bool = True
     restrict_to_work_dir: bool = True

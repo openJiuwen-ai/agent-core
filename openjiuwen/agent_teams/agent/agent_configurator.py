@@ -386,6 +386,10 @@ class AgentConfigurator:
 
         ensure_harness_elements_registered()
 
+        # Observability rail spec — shared by all agents (members + swarmflow workers).
+        # The provider checks is_initialized() — no-op when disabled.
+        observability_rail_spec = RailSpec(type="core.observability")
+
         # Predefined teams pin their roster — strip every dynamic spawn tool
         # (one per role_type) from the leader's tool set.
         exclude = (
@@ -527,6 +531,15 @@ class AgentConfigurator:
             base_specs = spec.agents
             swarmflow_worker_base_spec = base_specs.get("teammate") or base_specs.get("leader")
 
+            # Workers also need the observability rail for agent spans.
+            if swarmflow_worker_base_spec is not None:
+                swarmflow_worker_base_spec = swarmflow_worker_base_spec.model_copy(
+                    update={
+                        "rails": list(swarmflow_worker_base_spec.rails or [])
+                                 + [observability_rail_spec],
+                    },
+                )
+
         inject_team_handles(
             member_build_context.extras,
             team_backend=self.team_backend,
@@ -542,6 +555,7 @@ class AgentConfigurator:
 
         # Fold the team rails into the spec rails (after the user rails, to keep
         # the init order consistent with the legacy mount order).
+        team_rail_specs.append(observability_rail_spec)
         build_spec = build_spec.model_copy(
             update={"rails": list(build_spec.rails or []) + team_rail_specs},
         )

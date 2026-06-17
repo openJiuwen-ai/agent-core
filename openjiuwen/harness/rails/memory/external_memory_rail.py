@@ -16,7 +16,6 @@ from openjiuwen.core.memory.external.provider import MemoryProvider
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
-    PromptAttachmentScope,
 )
 from openjiuwen.harness.prompts.sections.external_memory import (
     build_external_memory_section,
@@ -134,6 +133,7 @@ class ExternalMemoryRail(DeepAgentRail):
     
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         if not self._initialized:
+            await self._clear_prefetch_attachment(ctx)
             return
         
         # Remove old cached prefetch section
@@ -148,6 +148,7 @@ class ExternalMemoryRail(DeepAgentRail):
             # Use a unified user text resolution method to resolve query for prefetch
             query = self._resolve_user_text_for_memory(ctx)
             if not query:
+                await self._clear_prefetch_attachment(ctx)
                 return
             try:
                 raw_context = await asyncio.wait_for(
@@ -160,9 +161,11 @@ class ExternalMemoryRail(DeepAgentRail):
                 self._prefetch_invoke_id = invoke_id
             except asyncio.TimeoutError:
                 logger.warning("[ExternalMemoryRail] prefetch timeout")
+                await self._clear_prefetch_attachment(ctx)
                 return
             except Exception as e:
                 logger.error(f"[ExternalMemoryRail] prefetch failed: {e}")
+                await self._clear_prefetch_attachment(ctx)
                 return
         
         if raw_context:
@@ -172,20 +175,29 @@ class ExternalMemoryRail(DeepAgentRail):
                     "[ExternalMemoryRail] prompt attachment manager is unavailable; skip prefetch attachment"
                 )
                 return
-            writer = self.attachment_manager.for_context(ctx)
+            writer = self.attachment_manager.bind_context(ctx)
             try:
-                await writer.upsert_section(
+                await writer.add_section(
                     section=EXTERNAL_MEMORY_PREFETCH_SECTION,
                     content=fenced,
-                    scope=PromptAttachmentScope.TURN,
                     kind=PromptAttachmentKind.MEMORY,
-                    source="agent_core.external_memory.prefetch",
+                    source="agent_core.external_memory_rail",
                     priority=55,
                     metadata={"provider": self._provider.name},
                     content_kind="text/markdown",
                 )
             except ValueError as exc:
                 logger.warning("[ExternalMemoryRail] skip prefetch prompt attachment: %s", exc)
+        else:
+            await self._clear_prefetch_attachment(ctx)
+
+    async def _clear_prefetch_attachment(self, ctx: AgentCallbackContext) -> None:
+        if self.attachment_manager is None:
+            return
+        try:
+            await self.attachment_manager.bind_context(ctx).clear_section(EXTERNAL_MEMORY_PREFETCH_SECTION)
+        except ValueError as exc:
+            logger.warning("[ExternalMemoryRail] skip clearing prefetch prompt attachment: %s", exc)
     
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         if not self._initialized:

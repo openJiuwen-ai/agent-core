@@ -41,6 +41,7 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.rails import TeamSkillRail
+from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 
 
 def configure_example_logging() -> None:
@@ -243,6 +244,7 @@ async def main() -> None:
                 model=model_name,
                 auto_save=False,
                 async_evolution=False,
+                review_runtime=EvolutionReviewRuntime(),
             )
             agent = create_deep_agent(
                 model=model,

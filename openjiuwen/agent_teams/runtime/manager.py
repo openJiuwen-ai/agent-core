@@ -112,7 +112,7 @@ class TeamRuntimeManager:
         inputs: object = None,
     ) -> TeamRuntimeActivation:
         """Resolve the TeamAgent to run for the target team/session."""
-        team_session = TeamRuntimeManager._build_session(spec, session)
+        team_session = TeamRuntimeManager._build_session(session)
         target_session_id = team_session.get_session_id()
         team_name = spec.team_name
 
@@ -473,9 +473,7 @@ class TeamRuntimeManager:
             return result
         if isinstance(payload, HumanAgentMessage):
             try:
-                if payload.target is None:
-                    await agent.auto_start_member(payload.sender)
-                else:
+                if payload.target is not None:
                     if payload.target in {"all", "*"}:
                         await agent.auto_start_all()
                     else:
@@ -484,7 +482,6 @@ class TeamRuntimeManager:
                     backend,
                     backend.message_manager,
                     agent_lookup=agent.lookup_human_agent_runtime,
-                    wait_agent_ready=agent.spawn_manager.wait_for_inprocess_ready,
                 )
                 return await inbox.send(
                     payload.body,
@@ -769,7 +766,7 @@ class TeamRuntimeManager:
 
         from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
 
-        session = create_agent_team_session(session_id=session_id)
+        session = TeamRuntimeManager._build_session(session_id)
         try:
             await session.pre_run()
         except Exception as e:
@@ -939,14 +936,14 @@ class TeamRuntimeManager:
 
     @staticmethod
     def _build_session(
-        spec: "TeamAgentSpec",
         session: str | AgentTeamSession | None,
     ) -> AgentTeamSession:
         if isinstance(session, AgentTeamSession):
+            session.set_source_metadata_enabled(False)
             return session
         if isinstance(session, str):
-            return create_agent_team_session(session_id=session)
-        return create_agent_team_session()
+            return create_agent_team_session(session_id=session, source_metadata_enabled=False)
+        return create_agent_team_session(source_metadata_enabled=False)
 
     @staticmethod
     async def _pre_run_with_inputs(session: AgentTeamSession, inputs: object) -> None:

@@ -18,6 +18,7 @@ resolver) and reaches the harness via ``parent_agent`` — never through TeamAge
 from __future__ import annotations
 
 import asyncio
+import uuid
 from typing import Any, Callable
 
 from openjiuwen.agent_teams.harness.async_tools import AsyncTool, render_result_text
@@ -105,21 +106,28 @@ class SwarmflowTool(AsyncTool):
         model = self._parent_agent.model
         messager = self._messager
         team_name = self._team_name
-        name_box: dict[str, Any] = {"name": None}
+        run_id = f"wf_{uuid.uuid4().hex[:12]}"
+        name_box: dict[str, Any] = {"name": None, "description": None}
 
         def _publish(progress: Any) -> None:
             if messager is None:
                 return
             if progress.kind == "workflow_started":
-                name_box["name"] = progress.message
+                name_box["name"] = progress.name
+                name_box["description"] = progress.description
+            # When the engine's progress.model is None (no model hint on
+            # agent_started), fall back to the parent agent's own model.
+            resolved_model = progress.model if progress.model is not None else self._parent_agent.model
             team_event = WorkflowProgressTeamEvent(
                 team_name=team_name,
                 kind=progress.kind,
+                run_id=run_id,
                 workflow_name=name_box["name"],
+                description=name_box.get("description"),
                 phase=progress.phase,
                 label=progress.label,
                 prompt=progress.prompt,
-                model=progress.model,
+                model=resolved_model,
                 outcome=progress.outcome,
                 text=progress.message,
                 phases=progress.phases,

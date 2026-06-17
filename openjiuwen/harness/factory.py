@@ -182,6 +182,7 @@ def resolve_deep_agent_parts(
     restrict_to_work_dir: bool = True,
     default_mode: AgentMode = AgentMode.NORMAL,
     model_selection: Optional[Dict[Model, str]] = None,
+    parallel_tool_calls: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgentParts:
     """Assemble DeepAgent config + rails + tools without creating an instance.
@@ -266,6 +267,7 @@ def resolve_deep_agent_parts(
         enable_async_subagent=enable_async_subagent,
         add_general_purpose_agent=add_general_purpose_agent,
         default_mode=default_mode,
+        parallel_tool_calls=parallel_tool_calls,
         restrict_to_work_dir=restrict_to_work_dir,
     )
 
@@ -398,6 +400,7 @@ def create_deep_agent(
     restrict_to_work_dir: bool = True,
     default_mode: AgentMode = AgentMode.NORMAL,
     model_selection: Optional[Dict[Model, str]] = None,
+    parallel_tool_calls: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -478,6 +481,7 @@ def create_deep_agent(
         restrict_to_work_dir=restrict_to_work_dir,
         default_mode=default_mode,
         model_selection=model_selection,
+        parallel_tool_calls=parallel_tool_calls,
         **config_kwargs,
     )
     agent = DeepAgent(parts.config.card)

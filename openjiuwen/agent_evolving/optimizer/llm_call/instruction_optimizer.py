@@ -59,12 +59,14 @@ class InstructionOptimizer(LLMCallOptimizerBase):
         failure_signal_types = {
             "execution_failure",
             "low_score",
-            "user_correction",
-            "collaboration_failure",
+            "user_intent",
         }
         for signal in signals:
             context = signal.context or {}
-            if context.get("score", 1) == 0 or signal.signal_type in failure_signal_types:
+            collaboration_failed = (
+                signal.signal_type == "collaboration" and context.get("collaboration_event") == "failure"
+            )
+            if context.get("score", 1) == 0 or signal.signal_type in failure_signal_types or collaboration_failed:
                 selected.append(signal)
         return selected
 
@@ -127,12 +129,14 @@ class InstructionOptimizer(LLMCallOptimizerBase):
         """Use LLM to analyze why the current prompt failed."""
         system_tpl = self._get_prompt_template(op, "system_prompt")
         user_tpl = self._get_prompt_template(op, "user_prompt")
-        messages = CREATE_PROMPT_TEXTUAL_GRADIENT_TEMPLATE.format({
-            "system_prompt": TuneUtils.get_content_string_from_template(system_tpl),
-            "user_prompt": TuneUtils.get_content_string_from_template(user_tpl),
-            "bad_cases": self._format_bad_cases(),
-            "tools_description": "None",
-        }).to_messages()
+        messages = CREATE_PROMPT_TEXTUAL_GRADIENT_TEMPLATE.format(
+            {
+                "system_prompt": TuneUtils.get_content_string_from_template(system_tpl),
+                "user_prompt": TuneUtils.get_content_string_from_template(user_tpl),
+                "bad_cases": self._format_bad_cases(),
+                "tools_description": "None",
+            }
+        ).to_messages()
         raw_response = (await self._model.invoke(messages)).content
         return raw_response if isinstance(raw_response, str) else str(raw_response)
 
@@ -147,26 +151,36 @@ class InstructionOptimizer(LLMCallOptimizerBase):
         user_tpl = self._get_prompt_template(op, "user_prompt")
         gradient = param.get_gradient("system_prompt") or ""
 
-        messages = PROMPT_INSTRUCTION_OPTIMIZE_BOTH_TEMPLATE.format({
-            "system_prompt": TuneUtils.get_content_string_from_template(system_tpl),
-            "user_prompt": TuneUtils.get_content_string_from_template(user_tpl),
-            "bad_cases": self._format_bad_cases(),
-            "reflections_on_bad_cases": gradient,
-            "tools_description": "None",
-        }).to_messages()
+        messages = PROMPT_INSTRUCTION_OPTIMIZE_BOTH_TEMPLATE.format(
+            {
+                "system_prompt": TuneUtils.get_content_string_from_template(system_tpl),
+                "user_prompt": TuneUtils.get_content_string_from_template(user_tpl),
+                "bad_cases": self._format_bad_cases(),
+                "reflections_on_bad_cases": gradient,
+                "tools_description": "None",
+            }
+        ).to_messages()
 
         raw_response = await self._invoke_llm(messages)
         sys_prompt = self._extract_tag(raw_response, "SYSTEM_PROMPT_OPTIMIZED")
         usr_prompt = self._extract_tag(raw_response, "USER_PROMPT_OPTIMIZED")
 
-        sys_prompt = await self._restore_placeholders(
-            TuneUtils.get_content_string_from_template(system_tpl),
-            sys_prompt or "",
-        ) if sys_prompt else None
-        usr_prompt = await self._restore_placeholders(
-            TuneUtils.get_content_string_from_template(user_tpl),
-            usr_prompt or "",
-        ) if usr_prompt else None
+        sys_prompt = (
+            await self._restore_placeholders(
+                TuneUtils.get_content_string_from_template(system_tpl),
+                sys_prompt or "",
+            )
+            if sys_prompt
+            else None
+        )
+        usr_prompt = (
+            await self._restore_placeholders(
+                TuneUtils.get_content_string_from_template(user_tpl),
+                usr_prompt or "",
+            )
+            if usr_prompt
+            else None
+        )
 
         return sys_prompt, usr_prompt
 
@@ -175,12 +189,14 @@ class InstructionOptimizer(LLMCallOptimizerBase):
         target_tpl = self._get_prompt_template(op, prompt_type)
         gradient = param.get_gradient(prompt_type) or ""
 
-        messages = PROMPT_INSTRUCTION_OPTIMIZE_TEMPLATE.format({
-            "prompt_instruction": TuneUtils.get_content_string_from_template(target_tpl),
-            "bad_cases": self._format_bad_cases(),
-            "reflections_on_bad_cases": gradient,
-            "tools_description": "None",
-        }).to_messages()
+        messages = PROMPT_INSTRUCTION_OPTIMIZE_TEMPLATE.format(
+            {
+                "prompt_instruction": TuneUtils.get_content_string_from_template(target_tpl),
+                "bad_cases": self._format_bad_cases(),
+                "reflections_on_bad_cases": gradient,
+                "tools_description": "None",
+            }
+        ).to_messages()
 
         raw_response = await self._invoke_llm(messages)
         optimized = self._extract_tag(raw_response, "PROMPT_OPTIMIZED")
@@ -198,12 +214,14 @@ class InstructionOptimizer(LLMCallOptimizerBase):
         parts: List[str] = []
         for signal in self._selected_signals:
             ctx = signal.context or {}
-            formatted = CREATE_BAD_CASE_TEMPLATE.format({
-                "question": ctx.get("question", ""),
-                "label": ctx.get("label", ""),
-                "answer": ctx.get("answer", ""),
-                "reason": ctx.get("reason", ""),
-            })
+            formatted = CREATE_BAD_CASE_TEMPLATE.format(
+                {
+                    "question": ctx.get("question", ""),
+                    "label": ctx.get("label", ""),
+                    "answer": ctx.get("answer", ""),
+                    "reason": ctx.get("reason", ""),
+                }
+            )
             content = formatted.content
             if isinstance(content, str):
                 parts.append(content)
@@ -233,12 +251,14 @@ class InstructionOptimizer(LLMCallOptimizerBase):
         missing = set(original_keys) - set(optimized_keys)
 
         if missing:
-            messages = PLACEHOLDER_RESTORE_TEMPLATE.format({
-                "original_prompt": original_prompt,
-                "revised_prompt": optimized_prompt,
-                "all_placeholders": str(list(original_keys)),
-                "missing_placeholders": str(list(missing)),
-            }).to_messages()
+            messages = PLACEHOLDER_RESTORE_TEMPLATE.format(
+                {
+                    "original_prompt": original_prompt,
+                    "revised_prompt": optimized_prompt,
+                    "all_placeholders": str(list(original_keys)),
+                    "missing_placeholders": str(list(missing)),
+                }
+            ).to_messages()
 
             raw = await self._invoke_llm(messages)
             restored_keys = PromptAssembler(raw).input_keys

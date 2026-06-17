@@ -545,6 +545,33 @@ async def test_team_harness_child_stream_close_does_not_close_team_stream(isolat
 
 
 @pytest.mark.asyncio
+async def test_agent_teams_session_does_not_inject_source_metadata(isolated_checkpointer):
+    """AgentTeams uses TeamOutputSchema ownership fields instead of payload source metadata."""
+    from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+
+    session_id = f"agent_teams_no_source_meta_{uuid.uuid4().hex}"
+    team_session = TeamRuntimeManager._build_session(session_id)
+    await team_session.pre_run(inputs={"query": "hello"})
+
+    child = team_session.create_agent_session(agent_id="leader")
+    await child.pre_run(inputs={"payload": "child"})
+    await child.write_stream({"kind": "child"})
+    await child.post_run()
+
+    await team_session.write_stream({"kind": "team"})
+    await team_session.post_run()
+
+    chunks = [chunk async for chunk in team_session.stream_iterator()]
+    payloads = [chunk.payload for chunk in chunks if isinstance(getattr(chunk, "payload", None), dict)]
+
+    assert payloads
+    assert all("source_team_id" not in payload for payload in payloads)
+    assert all("source_agent_id" not in payload for payload in payloads)
+
+    await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
 async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
     from openjiuwen.agent_teams.runtime.dispatch import RunActionKind
     from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager

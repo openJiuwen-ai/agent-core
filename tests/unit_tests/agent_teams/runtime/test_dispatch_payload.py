@@ -59,11 +59,6 @@ def _make_agent(*, known_members: set[str] | None = None) -> MagicMock:
     avatar = AsyncMock(name="HumanAgentRuntime")
     agent.lookup_human_agent_runtime = AsyncMock(return_value=avatar)
     agent._avatar = avatar  # exposed for tests that want to assert on it
-    # SpawnManager.wait_for_inprocess_ready is an async gate; mock it
-    # to return True immediately so _drive_agent proceeds without
-    # waiting for a real ready_event.
-    agent.spawn_manager = MagicMock(name="SpawnManager")
-    agent.spawn_manager.wait_for_inprocess_ready = AsyncMock(return_value=True)
     return agent
 
 
@@ -130,7 +125,9 @@ async def test_operator_message_broadcasts_when_target_none():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_human_agent_message_drives_avatar_when_no_target():
-    """HumanAgentMessage with no target starts and drives the sender avatar."""
+    """HumanAgentMessage with no target/mention drives the avatar via its
+    own coordination (``interact`` → USER_INPUT), not a harness reach-in.
+    """
     agent = _make_agent()
     agent.team_backend.human_agent_names = AsyncMock(return_value={"human_alice"})
 
@@ -140,8 +137,8 @@ async def test_human_agent_message_drives_avatar_when_no_target():
     )
 
     assert result.ok
-    agent.auto_start_member.assert_awaited_once_with("human_alice")
-    agent._avatar.deliver_input.assert_awaited_once_with("please summarise design.md")
+    agent._avatar.interact.assert_awaited_once_with("please summarise design.md")
+    agent._avatar.deliver_input.assert_not_called()
     agent.team_backend.message_manager.send_message.assert_not_called()
 
 
@@ -225,7 +222,8 @@ async def test_interact_str_dollar_prefix_drives_human_agent():
     result = await manager.interact("$alice please summarise", team_name="alpha", session_id="s1")
 
     assert result.ok
-    agent._avatar.deliver_input.assert_awaited_once_with("please summarise")
+    agent._avatar.interact.assert_awaited_once_with("please summarise")
+    agent._avatar.deliver_input.assert_not_called()
     agent.deliver_input.assert_not_called()
 
 
@@ -323,7 +321,7 @@ async def test_interact_str_unknown_member_dollar_drives_avatar():
     result = await manager.interact("$alice @ghost hi", team_name="alpha", session_id="s1")
 
     assert result.ok
-    agent._avatar.deliver_input.assert_awaited_once_with("@ghost hi")
+    agent._avatar.interact.assert_awaited_once_with("@ghost hi")
     agent.team_backend.message_manager.send_message.assert_not_called()
 
 

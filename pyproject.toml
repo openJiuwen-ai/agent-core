@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openjiuwen"
-version = "0.1.14"
+version = "0.1.15"
 description = "openJiuwen agent-core is a feature-rich AI agent SDK for developing, running, tuning, and improving your AI agents."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -62,6 +62,7 @@ dependencies = [
     "anyio>=4.0.0",
     "loguru>=0.7.3",
     "gitcode-api>=1.2.20",
+    "pyoxigraph>=0.5.8",
 ]
 
 # A2A: required for `openjiuwen.remote_clients` / `openjiuwen.server_adapters` A2A entry
@@ -84,6 +85,12 @@ zmq = ["pyzmq>=26.0.0", "tornado>=6.1"]
 sandbox = ["agent-sandbox>=0.0.26"]
 mem0 = ["mem0ai>=1.0.0"]
 agentarts = ["agentarts-sdk>=0.1.2,<0.2"]
+observability = [
+    "opentelemetry-api>=1.25.0",
+    "opentelemetry-sdk>=1.25.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.25.0",
+]
 mobile-gui = [
     # Install: pip install 'openjiuwen[mobile-gui]'
     "uiautomator2>=3.2.0",

@@ -21,7 +21,7 @@ from .backends import MockBackend
 from .backends.base import AgentBackend
 from .journal import Journal
 from .loader import load_workflow_source
-from .primitives import _fresh_holder, _invoke_loaded, _path, _rt, _seq
+from .primitives import _fresh_holder, _invoke_loaded, _path, _preview, _rt, _seq
 from .progress import PhasePlan, ProgressKind, ProgressSink, WorkflowProgressEvent, noop_progress_sink
 from .provider import ENGINE_PROVIDER
 from .runtime import Runtime
@@ -63,15 +63,33 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
     tok_p = _path.set(())
     tok_s = _seq.set(_fresh_holder())
     name = loaded.meta.get("name") if isinstance(loaded.meta, dict) else None
+    description = loaded.meta.get("description") if isinstance(loaded.meta, dict) else None
     raw_phases = loaded.meta.get("phases") if isinstance(loaded.meta, dict) else None
     phases = _normalize_meta_phases(raw_phases)
     try:
-        rt.progress_sink(WorkflowProgressEvent(kind=ProgressKind.WORKFLOW_STARTED, message=name, phases=phases))
+        args_text = _preview(rt.args) or ""
+        rt.progress_sink(WorkflowProgressEvent(
+            kind=ProgressKind.WORKFLOW_STARTED,
+            name=name,
+            description=description,
+            message=f"Workflow started, args: {args_text}",
+            phases=phases,
+        ))
         result = await _invoke_loaded(loaded, rt.args)
-        rt.progress_sink(WorkflowProgressEvent(kind=ProgressKind.WORKFLOW_COMPLETED, message=name))
+        result_text = _preview(result) or ""
+        rt.progress_sink(WorkflowProgressEvent(
+            kind=ProgressKind.WORKFLOW_COMPLETED,
+            name=name,
+            description=description,
+            message=f"Workflow completed, result: {result_text}",
+        ))
         return result
     except Exception as exc:
-        rt.progress_sink(WorkflowProgressEvent(kind=ProgressKind.WORKFLOW_FAILED, message=str(exc)))
+        rt.progress_sink(WorkflowProgressEvent(
+            kind=ProgressKind.WORKFLOW_FAILED,
+            name=name,
+            description=description,
+            message=f"Workflow failed, exception: {exc}"))
         raise
     finally:
         _seq.reset(tok_s)

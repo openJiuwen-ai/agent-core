@@ -202,41 +202,6 @@ class SpawnManager:
             return None
         return getattr(handle, "agent_ref", None)
 
-    async def wait_for_inprocess_ready(
-        self,
-        member_name: str,
-        timeout: float = 30.0,
-    ) -> bool:
-        """Wait until an inprocess member's runtime is fully ready.
-
-        Returns ``True`` when the member's ``ready_event`` was set within
-        *timeout* seconds, ``False`` on timeout or when no handle is
-        registered for *member_name*.  Used by ``HumanAgentInbox`` to
-        gate ``deliver_input`` so it doesn't race with the async harness
-        startup inside the spawned task.
-        """
-        handle = self.spawned_handles.get(member_name)
-        if handle is None:
-            return False
-        if not hasattr(handle, "ready_event"):
-            # Subprocess handles do not carry ready_event; they use the
-            # message bus for delivery, so direct _drive_agent is not
-            # applicable.  Return True so the caller proceeds — the
-            # agent_lookup will return None and inbox.send falls through
-            # to the bus path anyway.
-            return True
-        try:
-            await asyncio.wait_for(handle.ready_event.wait(), timeout=timeout)
-            return True
-        except asyncio.TimeoutError:
-            team_logger.warning(
-                "wait_for_inprocess_ready: member {} did not become "
-                "ready within {}s",
-                member_name,
-                timeout,
-            )
-            return False
-
     def has_live_handle(self, member_name: str) -> bool:
         """Return whether ``member_name`` already has a registered spawn handle.
 

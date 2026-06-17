@@ -18,7 +18,6 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRa
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentManager,
     PromptAttachmentKind,
-    PromptAttachmentScope,
 )
 
 from ..controllers import ActionController, BaseController
@@ -598,15 +597,10 @@ class BrowserRuntimeRail(AgentRail):
         )
         manager = getattr(ctx.agent, "prompt_attachment_manager", None)
         if not isinstance(manager, PromptAttachmentManager):
-            builder.add_section(
-                PromptSection(
-                    name=_BROWSER_PROGRESS_SECTION_NAME,
-                    content={
-                        "en": continuation_text_en,
-                        "cn": continuation_text_cn,
-                    },
-                    priority=83,
-                )
+            builder.remove_section(_BROWSER_PROGRESS_SECTION_NAME)
+            logger.warning(
+                "[BrowserRuntimeRail] prompt attachment manager unavailable; "
+                "skip browser progress continuation attachment"
             )
             return
 
@@ -621,12 +615,11 @@ class BrowserRuntimeRail(AgentRail):
         manager: PromptAttachmentManager,
         content: str,
     ) -> None:
-        writer = manager.for_context(ctx)
+        writer = manager.bind_context(ctx)
         try:
-            await writer.upsert_section(
+            await writer.add_section(
                 section=_BROWSER_PROGRESS_SECTION_NAME,
                 content=content,
-                scope=PromptAttachmentScope.TURN,
                 kind=PromptAttachmentKind.RUNTIME,
                 source="agent_core.browser_runtime",
                 priority=83,
@@ -639,12 +632,9 @@ class BrowserRuntimeRail(AgentRail):
         manager = getattr(ctx.agent, "prompt_attachment_manager", None)
         if not isinstance(manager, PromptAttachmentManager):
             return
-        writer = manager.for_context(ctx)
+        writer = manager.bind_context(ctx)
         try:
-            await writer.clear_section(
-                section=_BROWSER_PROGRESS_SECTION_NAME,
-                scope=PromptAttachmentScope.TURN,
-            )
+            await writer.clear_section(_BROWSER_PROGRESS_SECTION_NAME)
         except ValueError:
             return
 

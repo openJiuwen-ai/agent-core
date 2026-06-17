@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Unit tests for SubagentRail."""
+
 from __future__ import annotations
 
 from unittest.mock import Mock, patch
@@ -47,7 +48,6 @@ class TestSubagentRail:
         mock_tool.card.id = "test_tool_id"
         mock_create_task_tool.return_value = [mock_tool]
 
-
         mock_agent = Mock()
         mock_agent.system_prompt_builder = Mock()
         mock_agent.system_prompt_builder.language = "cn"
@@ -76,9 +76,7 @@ class TestSubagentRail:
         rail = SubagentRail()
         rail.init(mock_agent)
 
-        mock_logger.info.assert_called_once_with(
-            "[SubagentRail] No subagents configured, skipping"
-        )
+        mock_logger.info.assert_called_once_with("[SubagentRail] No subagents configured, skipping")
         assert rail.tools is None
 
     @staticmethod
@@ -120,9 +118,7 @@ class TestSubagentRail:
 
         subagents = [
             SubAgentConfig(
-                agent_card=AgentCard(
-                    name="research_agent", description="Research specialist"
-                ),
+                agent_card=AgentCard(name="research_agent", description="Research specialist"),
                 system_prompt="Research prompt",
             ),
             SubAgentConfig(
@@ -144,8 +140,45 @@ class TestSubagentRail:
         call_args = mock_create.call_args
         assert "available_agents" in call_args.kwargs
         available_agents = call_args.kwargs["available_agents"]
-        assert '- research_agent: Research specialist (Tools: All tools)' in available_agents
-        assert '- code_agent: Code specialist (Tools: All tools)' in available_agents
+        assert "- research_agent: Research specialist (Tools: All tools)" in available_agents
+        assert "- code_agent: Code specialist (Tools: All tools)" in available_agents
+
+    @staticmethod
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
+    def test_refresh_available_agents_updates_task_tool_description_only(mock_create):
+        """refresh_available_agents updates task_tool metadata without re-registering tools."""
+        tool = _make_tool_mock()
+        tool.card.name = "task_tool"
+        tool.card.id = "task_tool"
+        tool.card.description = "old description"
+        mock_create.return_value = [tool]
+
+        mock_agent = Mock()
+        mock_agent.system_prompt_builder = Mock()
+        mock_agent.system_prompt_builder.language = "cn"
+        mock_agent.deep_config.subagents = [_minimal_subagent_spec()]
+        mock_agent.ability_manager = Mock()
+
+        rail = SubagentRail()
+        rail.init(mock_agent)
+        mock_agent.deep_config.subagents = [
+            _minimal_subagent_spec(),
+            SubAgentConfig(
+                agent_card=AgentCard(
+                    name="evolution_reviewer",
+                    description="Restricted evolution review agent",
+                ),
+                system_prompt="Review prompt",
+            ),
+        ]
+
+        original_tool = rail.tools[0]
+        rail.refresh_available_agents(mock_agent)
+
+        assert mock_create.call_count == 1
+        mock_agent.ability_manager.remove.assert_not_called()
+        assert rail.tools == [original_tool]
+        assert "evolution_reviewer" in tool.card.description
 
     @staticmethod
     @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
@@ -205,7 +238,7 @@ class TestSubagentRail:
         call_args = mock_create.call_args
         assert "available_agents" in call_args.kwargs
         available_agents = call_args.kwargs["available_agents"]
-        assert '- test_agent: Test description (Tools: All tools)' in available_agents
+        assert "- test_agent: Test description (Tools: All tools)" in available_agents
 
     @staticmethod
     @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
@@ -232,7 +265,7 @@ class TestSubagentRail:
         call_args = mock_create.call_args
         assert "available_agents" in call_args.kwargs
         available_agents = call_args.kwargs["available_agents"]
-        assert '- agent_name: agent description (Tools: All tools)' in available_agents
+        assert "- agent_name: agent description (Tools: All tools)" in available_agents
 
     @staticmethod
     @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
@@ -257,7 +290,7 @@ class TestSubagentRail:
         call_args = mock_create.call_args
         assert "available_agents" in call_args.kwargs
         available_agents = call_args.kwargs["available_agents"]
-        assert '- general-purpose: DeepAgent instance (Tools: All tools)' in available_agents
+        assert "- general-purpose: DeepAgent instance (Tools: All tools)" in available_agents
 
     @staticmethod
     @pytest.mark.asyncio
@@ -306,7 +339,6 @@ class TestSubagentRailAsyncMode:
         mock_tool.card.id = "session_tool_id"
         mock_build_session_tools.return_value = [mock_tool]
 
-
         mock_agent = Mock()
         mock_agent.system_prompt_builder = Mock()
         mock_agent.system_prompt_builder.language = "cn"
@@ -321,6 +353,45 @@ class TestSubagentRailAsyncMode:
         mock_agent.set_session_toolkit.assert_called_once()
         assert rail.tools == [mock_tool]
         assert rail._toolkit is not None
+
+    @staticmethod
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.build_session_tools")
+    def test_async_refresh_available_agents_updates_spawn_description_only(mock_build_session_tools):
+        """refresh_available_agents updates sessions_spawn metadata without rebuilding session tools."""
+        mock_tool = _make_tool_mock()
+        mock_tool.card.name = "sessions_spawn"
+        mock_tool.card.id = "sessions_spawn"
+        mock_tool.card.description = "old description"
+        mock_build_session_tools.return_value = [mock_tool]
+
+        mock_agent = Mock()
+        mock_agent.system_prompt_builder = Mock()
+        mock_agent.system_prompt_builder.language = "en"
+        mock_agent.deep_config.subagents = [_minimal_subagent_spec()]
+        mock_agent.ability_manager = Mock()
+
+        rail = SubagentRail(enable_async_subagent=True)
+        rail.init(mock_agent)
+        mock_agent.deep_config.subagents = [
+            _minimal_subagent_spec(),
+            SubAgentConfig(
+                agent_card=AgentCard(
+                    name="evolution_reviewer",
+                    description="Restricted evolution review agent",
+                ),
+                system_prompt="Review prompt",
+            ),
+        ]
+
+        original_tools = rail.tools
+        original_toolkit = rail._toolkit
+        rail.refresh_available_agents(mock_agent)
+
+        assert mock_build_session_tools.call_count == 1
+        mock_agent.ability_manager.remove.assert_not_called()
+        assert rail.tools is original_tools
+        assert rail._toolkit is original_toolkit
+        assert "evolution_reviewer" in mock_tool.card.description
 
     @staticmethod
     @patch("openjiuwen.harness.rails.subagent.subagent_rail.build_session_tools")

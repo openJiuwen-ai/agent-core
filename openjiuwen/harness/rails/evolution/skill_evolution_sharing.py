@@ -10,7 +10,7 @@ import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord, EvolutionTarget
-from openjiuwen.agent_evolving.experience.types import ExperienceApprovalRequest
+from openjiuwen.agent_evolving.experience.types import ExperienceApprovalRequest, request_for_online_evolution_result
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
     GENERATE_RECORDS_LLM_POLICY,
 )
@@ -207,19 +207,23 @@ class SkillEvolutionSharingMixin:
         skill_name: str,
         skill_signals: List[EvolutionSignal],
         messages: List[dict],
+        trajectory: Any | None = None,
         ctx: Optional[AgentCallbackContext],
         shared_records: List[EvolutionRecord],
+        requires_approval: bool,
     ) -> bool:
         if shared_records:
             shared_records = await self._filter_duplicate_shared_records(skill_name, shared_records)
         if not shared_records:
-            request = await self._handle_evolution_from_signals(
+            result = await self._handle_evolution_from_signals(
                 skill_name=skill_name,
                 signals=skill_signals,
                 messages=messages,
+                trajectory=trajectory,
                 ctx=ctx,
-                requires_approval=not self._auto_save,
+                requires_approval=requires_approval,
             )
+            request = request_for_online_evolution_result(result)
             return request is not None
 
         if self._auto_save:
@@ -234,6 +238,7 @@ class SkillEvolutionSharingMixin:
                 skill_name=skill_name,
                 signals=skill_signals,
                 messages=messages,
+                trajectory=trajectory,
                 ctx=ctx,
                 requires_approval=False,
             )

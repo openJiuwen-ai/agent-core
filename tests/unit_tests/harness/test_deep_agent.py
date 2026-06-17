@@ -1,11 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Unit tests for DeepAgent public APIs."""
+
 # pylint: disable=protected-access
 from __future__ import annotations
 
 import asyncio
-
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from unittest.mock import AsyncMock, call, patch
@@ -21,9 +21,11 @@ from openjiuwen.core.foundation.llm import (
     UsageMetadata,
     UserMessage,
 )
-from openjiuwen.core.foundation.tool import Tool, ToolCard, McpServerConfig
+from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard
 from openjiuwen.core.foundation.tool.schema import ToolInfo
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.resources_manager.base import Ok
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream.base import OutputSchema, StreamMode
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgentConfig
 from openjiuwen.core.single_agent.rail.base import (
@@ -31,10 +33,8 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
     AgentRail,
 )
-from openjiuwen.core.runner import Runner
-from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.harness import create_deep_agent, Workspace
+from openjiuwen.harness import Workspace, create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
@@ -51,9 +51,11 @@ from openjiuwen.harness.subagents.research_agent import (
     DEFAULT_RESEARCH_AGENT_SYSTEM_PROMPT,
     RESEARCH_AGENT_FACTORY_NAME,
 )
-from openjiuwen.harness.task_loop.task_loop_event_handler import TaskLoopEventHandler
 from openjiuwen.harness.task_loop.loop_coordinator import LoopCoordinator
+from openjiuwen.harness.task_loop.task_loop_event_executor import DEEP_TASK_TYPE
+from openjiuwen.harness.task_loop.task_loop_event_handler import TaskLoopEventHandler
 from openjiuwen.harness.tools import WebFreeSearchTool
+from openjiuwen.harness.tools.subagent.session_tools import SessionToolkit
 
 
 def _create_dummy_model() -> Model:
@@ -66,7 +68,6 @@ def _create_dummy_model() -> Model:
     )
     model_config = ModelRequestConfig(model="test-model")
     return Model(model_client_config=model_client_config, model_config=model_config)
-
 
 
 class FakeInnerCallbackManager:
@@ -129,18 +130,48 @@ class FakeReactAgent:
         session: Optional[Any] = None,
     ) -> None:
         from openjiuwen.core.session.stream.base import OutputSchema
+
         if session is not None:
-            await session.write_stream(OutputSchema(
-                type="answer",
-                index=0,
-                payload={
-                    "output": result.get("output", ""),
-                    "result_type": result.get("result_type", ""),
-                },
-            ))
+            await session.write_stream(
+                OutputSchema(
+                    type="answer",
+                    index=0,
+                    payload={
+                        "output": result.get("output", ""),
+                        "result_type": result.get("result_type", ""),
+                    },
+                )
+            )
 
     def configure(self, config: ReActAgentConfig) -> None:
         self.config = config
+
+
+class SlowReactAgent(FakeReactAgent):
+    """Fake ReActAgent that stays in invoke until cancelled."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def invoke(
+        self,
+        inputs: Dict[str, Any],
+        session: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        self.invoke_calls.append({"inputs": inputs, "session": session})
+        self.started.set()
+        try:
+            await asyncio.sleep(30.0)
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        return {
+            "output": "late",
+            "result_type": "answer",
+        }
 
 
 class CountingRail(AgentRail):
@@ -191,9 +222,7 @@ class DummyTool(Tool):
 def test_configure_set_react_agent_and_is_initialized() -> None:
     agent = DeepAgent(AgentCard(name="deep", description="test"))
 
-    configured = agent.configure(
-        DeepAgentConfig(enable_task_loop=False, max_iterations=3)
-    )
+    configured = agent.configure(DeepAgentConfig(enable_task_loop=False, max_iterations=3))
     assert configured is agent
     assert agent.is_initialized is False
 
@@ -207,20 +236,14 @@ def test_configure_set_react_agent_and_is_initialized() -> None:
 
 @pytest.mark.asyncio
 async def test_add_rail_lazy_register_on_first_invoke() -> None:
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    ).configure(
-        DeepAgentConfig(enable_task_loop=False)
-    )
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=False))
     fake_react = FakeReactAgent()
     agent.set_react_agent(fake_react, initialized=False)
 
     rail = CountingRail()
     assert agent.add_rail(rail) is agent
 
-    result = await agent.invoke(
-        {"query": "hello", "conversation_id": "c1"}
-    )
+    result = await agent.invoke({"query": "hello", "conversation_id": "c1"})
 
     assert result["output"] == "echo:hello"
     assert rail.before_invoke_count == 1
@@ -238,11 +261,7 @@ async def test_add_rail_lazy_register_on_first_invoke() -> None:
 
 @pytest.mark.asyncio
 async def test_register_and_unregister_rail() -> None:
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    ).configure(
-        DeepAgentConfig(enable_task_loop=False)
-    )
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=False))
     fake_react = FakeReactAgent()
     agent.set_react_agent(fake_react, initialized=True)
 
@@ -260,6 +279,40 @@ async def test_register_and_unregister_rail() -> None:
     assert rail.after_invoke_count == 1
     assert len(fake_react.agent_callback_manager.unregister_calls) == 1
     assert fake_react.agent_callback_manager.unregister_calls[0][0] is rail
+
+
+@pytest.mark.asyncio
+async def test_outer_rails_are_isolated_between_same_card_id_agents() -> None:
+    card = AgentCard(
+        id="shared-deep-agent-card",
+        name="deep",
+        description="test",
+    )
+    agents: List[DeepAgent] = []
+    rails: List[CountingRail] = []
+
+    for _ in range(3):
+        agent = DeepAgent(card).configure(DeepAgentConfig(enable_task_loop=False))
+        agent.set_react_agent(FakeReactAgent(), initialized=False)
+        rail = CountingRail()
+        agent.add_rail(rail)
+        await agent._ensure_initialized()
+        agents.append(agent)
+        rails.append(rail)
+
+    try:
+        assert len(
+            {agent.agent_callback_manager._get_agent_event(AgentCallbackEvent.BEFORE_INVOKE) for agent in agents}
+        ) == len(agents)
+
+        result = await agents[0].invoke({"query": "hello"})
+
+        assert result["output"] == "echo:hello"
+        assert [rail.before_invoke_count for rail in rails] == [1, 0, 0]
+        assert [rail.after_invoke_count for rail in rails] == [1, 0, 0]
+    finally:
+        for agent in agents:
+            await agent.agent_callback_manager.clear()
 
 
 def test_find_rails_by_type_returns_matching_rails() -> None:
@@ -283,11 +336,7 @@ async def test_invoke_runtime_error_when_not_configured() -> None:
 
 @pytest.mark.asyncio
 async def test_invoke_invalid_input_type_error() -> None:
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    ).configure(
-        DeepAgentConfig(enable_task_loop=False)
-    )
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=False))
     agent.set_react_agent(FakeReactAgent(), initialized=True)
 
     with pytest.raises(Exception, match="Input must be dict"):
@@ -296,26 +345,16 @@ async def test_invoke_invalid_input_type_error() -> None:
 
 @pytest.mark.asyncio
 async def test_invoke_task_loop_requires_session() -> None:
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    ).configure(
-        DeepAgentConfig(enable_task_loop=True)
-    )
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=True))
     agent.set_react_agent(FakeReactAgent(), initialized=True)
 
-    with pytest.raises(
-        Exception, match="session is required"
-    ):
+    with pytest.raises(Exception, match="session is required"):
         await agent.invoke("no_session")
 
 
 @pytest.mark.asyncio
 async def test_invoke_task_loop_delegates_to_event_queue() -> None:
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    ).configure(
-        DeepAgentConfig(enable_task_loop=True)
-    )
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=True))
     fake_react = FakeReactAgent()
     agent.set_react_agent(fake_react, initialized=True)
 
@@ -329,11 +368,7 @@ async def test_invoke_task_loop_delegates_to_event_queue() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_single_round_branch() -> None:
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    ).configure(
-        DeepAgentConfig(enable_task_loop=False)
-    )
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=False))
     fake_react = FakeReactAgent()
     agent.set_react_agent(fake_react, initialized=True)
 
@@ -375,11 +410,7 @@ async def test_stream_sets_result_before_after_invoke() -> None:
                 payload={"output": "hello world", "result_type": "answer"},
             )
 
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    ).configure(
-        DeepAgentConfig(enable_task_loop=False)
-    )
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=False))
     rail = CountingRail()
     agent.add_rail(rail)
     agent.set_react_agent(AnswerStreamingReactAgent(), initialized=False)
@@ -398,21 +429,16 @@ async def test_stream_sets_result_before_after_invoke() -> None:
 async def test_stream_task_loop_yields_result() -> None:
     await Runner.start()
     try:
-        agent = DeepAgent(
-            AgentCard(name="deep", description="test")
-        ).configure(
-            DeepAgentConfig(enable_task_loop=True)
-        )
+        agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=True))
         fake_react = FakeReactAgent()
         agent.set_react_agent(fake_react, initialized=True)
 
         chunks = []
-        async for chunk in Runner.run_agent_streaming(
-            agent, {"query": "loop_input"}
-        ):
+        async for chunk in Runner.run_agent_streaming(agent, {"query": "loop_input"}):
             chunks.append(chunk)
 
         from openjiuwen.core.session.stream.base import OutputSchema
+
         assert len(chunks) >= 1
         # Chunks should be OutputSchema instances (token-level streaming)
         assert isinstance(chunks[-1], OutputSchema)
@@ -426,11 +452,7 @@ async def test_stream_task_loop_yields_result() -> None:
 
 @pytest.mark.asyncio
 async def test_follow_up_steer_noop_without_queue() -> None:
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    ).configure(
-        DeepAgentConfig(enable_task_loop=False)
-    )
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=False))
 
     # No event_queue → these are safe no-ops
     await agent.follow_up("continue", task_id="task_1")
@@ -440,9 +462,7 @@ async def test_follow_up_steer_noop_without_queue() -> None:
 
 @pytest.mark.asyncio
 async def test_get_context_usage_prefers_model_usage_metadata() -> None:
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    ).configure(
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
         DeepAgentConfig(
             enable_task_loop=False,
             context_engine_config=ContextEngineConfig(
@@ -452,16 +472,16 @@ async def test_get_context_usage_prefers_model_usage_metadata() -> None:
     )
 
     session = Session(session_id="ctx_usage")
-    context = await agent.react_agent.context_engine.create_context(
-        session=session
+    context = await agent.react_agent.context_engine.create_context(session=session)
+    await context.add_messages(
+        [
+            UserMessage(content="hello"),
+            AssistantMessage(
+                content="world",
+                usage_metadata=UsageMetadata(total_tokens=250),
+            ),
+        ]
     )
-    await context.add_messages([
-        UserMessage(content="hello"),
-        AssistantMessage(
-            content="world",
-            usage_metadata=UsageMetadata(total_tokens=250),
-        ),
-    ])
 
     usage = agent.get_context_usage(session_id="ctx_usage")
 
@@ -475,16 +495,10 @@ async def test_get_context_usage_prefers_model_usage_metadata() -> None:
 
 @pytest.mark.asyncio
 async def test_get_current_context_returns_messages() -> None:
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    ).configure(
-        DeepAgentConfig(enable_task_loop=False)
-    )
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=False))
 
     session = Session(session_id="ctx_messages")
-    context = await agent.react_agent.context_engine.create_context(
-        session=session
-    )
+    context = await agent.react_agent.context_engine.create_context(session=session)
     await context.add_messages(UserMessage(content="current"))
 
     messages = agent.get_current_context(session_id="ctx_messages")
@@ -495,11 +509,7 @@ async def test_get_current_context_returns_messages() -> None:
 
 @pytest.mark.asyncio
 async def test_create_new_context_engine_returns_session_id_and_keeps_existing_context() -> None:
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    ).configure(
-        DeepAgentConfig(enable_task_loop=False)
-    )
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=False))
 
     old_engine = agent.react_agent.context_engine
     session = Session(session_id="old_ctx")
@@ -515,19 +525,13 @@ async def test_create_new_context_engine_returns_session_id_and_keeps_existing_c
 
 @pytest.mark.asyncio
 async def test_create_new_context_engine_seeds_messages() -> None:
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    ).configure(
-        DeepAgentConfig(enable_task_loop=False)
-    )
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=False))
 
     await agent.create_new_context_engine(
         "seeded_ctx",
         messages=["seed prompt"],
     )
-    context = agent.react_agent.context_engine.get_context(
-        session_id="seeded_ctx"
-    )
+    context = agent.react_agent.context_engine.get_context(session_id="seeded_ctx")
 
     messages = context.get_messages()
     assert len(messages) == 1
@@ -537,31 +541,21 @@ async def test_create_new_context_engine_seeds_messages() -> None:
 
 @pytest.mark.asyncio
 async def test_new_context_engine_accepts_messages() -> None:
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    ).configure(
-        DeepAgentConfig(enable_task_loop=False)
-    )
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=False))
 
     session_id = await agent.new_context_engine(
         session_id="alias_ctx",
         messages=["alias prompt"],
     )
 
-    context = agent.react_agent.context_engine.get_context(
-        session_id="alias_ctx"
-    )
+    context = agent.react_agent.context_engine.get_context(session_id="alias_ctx")
     assert session_id == "alias_ctx"
     assert context.get_messages()[0].content == "alias prompt"
 
 
 @pytest.mark.asyncio
 async def test_abort_sets_coordinator_flag() -> None:
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    ).configure(
-        DeepAgentConfig(enable_task_loop=True)
-    )
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=True))
     fake_react = FakeReactAgent()
     agent.set_react_agent(fake_react, initialized=True)
 
@@ -572,6 +566,7 @@ async def test_abort_sets_coordinator_flag() -> None:
 
     class FakeController:
         """Minimal Controller stub."""
+
         def __init__(self) -> None:
             self.event_handler = handler
             self.event_queue = None
@@ -589,9 +584,7 @@ async def test_abort_sets_coordinator_flag() -> None:
     assert coordinator.is_aborted is True
 
     # Future should be resolved with abort error
-    fut_result = await handler.wait_completion(
-        timeout=1.0
-    )
+    fut_result = await handler.wait_completion(timeout=1.0)
     assert fut_result == {"error": "aborted"}
 
 
@@ -758,15 +751,18 @@ async def test_create_deep_agent_registers_mcps_on_first_invoke() -> None:
     )
     mcp_tool_raw_name = mcp_tool.name
 
-    with patch.object(
-        Runner.resource_mgr,
-        "add_mcp_server",
-        new=AsyncMock(return_value=Ok(mcp_config.server_id)),
-    ) as mock_add_mcp_server, patch.object(
-        Runner.resource_mgr,
-        "get_mcp_tool_infos",
-        new=AsyncMock(return_value=[mcp_tool]),
-    ) as mock_get_mcp_tool_infos:
+    with (
+        patch.object(
+            Runner.resource_mgr,
+            "add_mcp_server",
+            new=AsyncMock(return_value=Ok(mcp_config.server_id)),
+        ) as mock_add_mcp_server,
+        patch.object(
+            Runner.resource_mgr,
+            "get_mcp_tool_infos",
+            new=AsyncMock(return_value=[mcp_tool]),
+        ) as mock_get_mcp_tool_infos,
+    ):
         agent = create_deep_agent(
             model=_create_dummy_model(),
             mcps=[mcp_config],
@@ -815,26 +811,32 @@ async def test_create_deep_agent_reuses_registered_mcps_with_same_config() -> No
     )
     mcp_tool_id = f"{mcp_config.server_id}.{mcp_config.server_name}.{mcp_tool.name}"
 
-    with patch.object(
-        Runner.resource_mgr,
-        "get_mcp_server_config",
-        return_value=mcp_config,
-    ), patch.object(
-        Runner.resource_mgr,
-        "add_mcp_server",
-        new=AsyncMock(),
-    ) as mock_add_mcp_server, patch.object(
-        Runner.resource_mgr,
-        "get_mcp_tool_ids",
-        return_value=[mcp_tool_id],
-    ), patch.object(
-        Runner.resource_mgr,
-        "add_resource_tag",
-        return_value=Ok(["deep_agent_id"]),
-    ) as mock_add_resource_tag, patch.object(
-        Runner.resource_mgr,
-        "get_mcp_tool_infos",
-        new=AsyncMock(return_value=[mcp_tool]),
+    with (
+        patch.object(
+            Runner.resource_mgr,
+            "get_mcp_server_config",
+            return_value=mcp_config,
+        ),
+        patch.object(
+            Runner.resource_mgr,
+            "add_mcp_server",
+            new=AsyncMock(),
+        ) as mock_add_mcp_server,
+        patch.object(
+            Runner.resource_mgr,
+            "get_mcp_tool_ids",
+            return_value=[mcp_tool_id],
+        ),
+        patch.object(
+            Runner.resource_mgr,
+            "add_resource_tag",
+            return_value=Ok(["deep_agent_id"]),
+        ) as mock_add_resource_tag,
+        patch.object(
+            Runner.resource_mgr,
+            "get_mcp_tool_infos",
+            new=AsyncMock(return_value=[mcp_tool]),
+        ),
     ):
         agent = create_deep_agent(
             model=_create_dummy_model(),
@@ -1057,9 +1059,7 @@ def test_create_deep_agent_subclass_skill_rail_not_duplicated() -> None:
     )
 
     skill_rail_count = sum(1 for r in agent._pending_rails if isinstance(r, SkillUseRail))
-    assert skill_rail_count == 1, (
-        f"Subclass should suppress default SkillUseRail, but found {skill_rail_count}"
-    )
+    assert skill_rail_count == 1, f"Subclass should suppress default SkillUseRail, but found {skill_rail_count}"
 
 
 def test_create_deep_agent_subclass_task_planning_rail_not_duplicated() -> None:
@@ -1078,9 +1078,7 @@ def test_create_deep_agent_subclass_task_planning_rail_not_duplicated() -> None:
     )
 
     task_plan_count = sum(1 for r in agent._pending_rails if isinstance(r, TaskPlanningRail))
-    assert task_plan_count == 1, (
-        f"Subclass should suppress default TaskPlanningRail, but found {task_plan_count}"
-    )
+    assert task_plan_count == 1, f"Subclass should suppress default TaskPlanningRail, but found {task_plan_count}"
 
 
 def test_create_code_agent_injects_default_code_tool_and_fs_rail() -> None:
@@ -1205,9 +1203,7 @@ async def test_stream_cancel_waits_for_cleanup() -> None:
     """Cancelled stream should wait for cleanup before returning."""
     await Runner.start()
     try:
-        agent = DeepAgent(
-            AgentCard(name="deep", description="test")
-        ).configure(DeepAgentConfig(enable_task_loop=True))
+        agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=True))
         fake_react = FakeReactAgent()
         agent.set_react_agent(fake_react, initialized=True)
 
@@ -1232,6 +1228,59 @@ async def test_stream_cancel_waits_for_cleanup() -> None:
         assert agent._bound_session_id is None
         assert agent._loop_controller is None
     finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_stream_cancel_cancels_deep_task_when_controller_is_kept_alive() -> None:
+    """Client disconnect should stop the current ReAct task without killing session-spawn tasks."""
+    await Runner.start()
+    try:
+        agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=True))
+        slow_react = SlowReactAgent()
+        agent.set_react_agent(slow_react, initialized=True)
+
+        toolkit = SessionToolkit()
+        toolkit.upsert_running(
+            "spawn-running",
+            "sub-session",
+            "keep controller alive",
+        )
+        agent.set_session_toolkit(toolkit)
+
+        async def _collect() -> None:
+            async for _chunk in Runner.run_agent_streaming(
+                agent,
+                {"query": "slow"},
+                session="issue959",
+            ):
+                pass
+
+        stream_task = asyncio.create_task(_collect())
+        await asyncio.wait_for(slow_react.started.wait(), timeout=5.0)
+
+        controller = agent.loop_controller
+        assert controller is not None
+        scheduler = controller.task_scheduler
+        assert scheduler is not None
+
+        stream_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(stream_task, timeout=5.0)
+
+        await asyncio.wait_for(slow_react.cancelled.wait(), timeout=5.0)
+
+        running_tasks = getattr(scheduler, "_running_tasks")
+        assert running_tasks == {}
+        tasks = await scheduler.task_manager.get_task()
+        deep_tasks = [task for task in tasks if task.task_type == DEEP_TASK_TYPE]
+        assert deep_tasks
+        assert all(task.status.value == "canceled" for task in deep_tasks)
+        assert toolkit.get("spawn-running").status == "running"
+    finally:
+        controller = agent.loop_controller if "agent" in locals() else None
+        if controller is not None:
+            await controller.stop()
         await Runner.stop()
 
 

@@ -243,14 +243,14 @@ type: user
         mock_ctx.inputs.is_cron = Mock(return_value=False)
         mock_ctx.inputs.is_heartbeat = Mock(return_value=False)
         mock_ctx.session = SimpleNamespace(get_session_id=lambda: "sess1")
-        mock_ctx.extra = {"_invoke_turn_id": "turn1"}
+        mock_ctx.extra = {}
 
         await rail.before_model_call(mock_ctx)
 
         # 验证注入了召回内容
         mock_builder.add_section.assert_called_once()
-        items = await rail.attachment_manager.collect_for_turn("sess1", "turn1")
-        assert [item.id for item in items] == ["turn.sess1.turn1.coding_memory_context"]
+        items = await rail.attachment_manager.collect_for_session("sess1")
+        assert [item.id for item in items] == ["session.sess1.coding_memory_context"]
         assert "已加载的相关记忆" in (items[0].content or "")
 
     def test_scenario_switching(self):

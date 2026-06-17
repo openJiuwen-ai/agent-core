@@ -14,7 +14,7 @@ Built-in guardrails that hook into the `DeepAgent` lifecycle. Rails are register
 | `ProgressiveToolRail` | Dynamically loads and unloads tools based on relevance to the current task. |
 | `SecurityRail` | Applies security policies such as command allowlists and path validation. |
 | `SkillUseRail` | Enables the agent to discover and invoke learned skills; it does not generate, approve, or persist evolution records. |
-| `SkillEvolutionRail` | Evolves existing regular skills from trajectories or user requests, with optional approval before `EvolutionStore` persistence. |
+| `SkillEvolutionRail` | Evolves existing regular skills from trajectories or user requests, with optional approval before `EvolutionStore` persistence; active review flow must be used together with `SubagentRail`. |
 | `SubagentRail` | Manages sub-agent spawning via `enable_async_subagent` flag — sync mode registers `TaskTool`, async mode registers `session` tools. |
 | `TaskCompletionRail` | Evaluates whether the current task is complete and triggers the stop condition. |
 | `ContextEvolutionRail` | Persists and retrieves task-specific memory across iterations. |
@@ -44,6 +44,11 @@ Regular skill and team skill evolution share the downstream lifecycle:
 ```text
 signals -> local apply preview -> pending approval or auto-approved -> EvolutionStore persistence -> projection
 ```
+
+Prefer configuration helpers to wire shared review dependencies:
+
+- `configure_skill_evolution(...)` for regular skill evolution.
+- `configure_skill_evolution(..., team=True)` for team/swarm evolution.
 
 - See [`skill_evolution_rail`](./evolution/skill_evolution_rail.md) for regular `SkillEvolutionRail`.
 - See [`team_skill_evolution_rail`](./evolution/team_skill_evolution_rail.md) for `TeamSkillCreateRail`, `TeamSkillEvolutionRail`, and the `TeamSkillRail` compatibility alias.

@@ -198,8 +198,8 @@ class ReActAgentConfig(BaseModel):
 
     context_engine_config: ContextEngineConfig = Field(
         default=ContextEngineConfig(
-            max_context_message_num=200,
-            default_window_round_num=10
+            max_context_message_num=None,
+            default_window_round_num=None
         ),
         description="Context engine configuration"
     )
@@ -210,6 +210,11 @@ class ReActAgentConfig(BaseModel):
     )
 
     workspace: Optional[Any] = Field(default=None, description="Workspace instance for filesystem operations")
+
+    parallel_tool_calls: bool = Field(
+        default=True,
+        description="Whether to execute tool calls in parallel (as opposed to in sequence)",
+    )
 
     def configure_model(self, model_name: str) -> 'ReActAgentConfig':
         """Configure model name
@@ -274,8 +279,8 @@ class ReActAgentConfig(BaseModel):
 
     def configure_context_engine(
             self,
-            max_context_message_num: Optional[int] = 200,
-            default_window_round_num: Optional[int] = 10,
+            max_context_message_num: Optional[int] = None,
+            default_window_round_num: Optional[int] = None,
             enable_reload: bool = False,
             enable_kv_cache_release: bool = False,
     ) -> 'ReActAgentConfig':
@@ -401,6 +406,13 @@ class ReActAgentConfig(BaseModel):
             processors: List[Tuple[str, BaseModel]]
     ) -> 'ReActAgentConfig':
         self.context_processors = processors
+        return self
+
+    def configure_parallel_tool_calls(
+            self,
+            parallel_tool_calls: bool
+    ) -> 'ReActAgentConfig':
+        self.parallel_tool_calls = parallel_tool_calls
         return self
 
 
@@ -725,10 +737,8 @@ class ReActAgent(BaseAgent):
                 if ctx.session is not None
                 else ctx.context.session_id()
             )
-            invoke_turn_id = ctx.extra.get("_invoke_turn_id") or f"turn_{uuid.uuid4().hex}"
-            ctx.extra["_invoke_turn_id"] = invoke_turn_id
             context_window_kwargs["window_mutators"] = [
-                make_window_mutator(session_id, invoke_turn_id)
+                make_window_mutator(session_id)
             ]
         if enable_kv_release and supports_kv_release:
             context_window_kwargs["model"] = llm
@@ -896,7 +906,12 @@ class ReActAgent(BaseAgent):
         for tool_call in tool_calls:
             logger.info(f"Executing tool: {tool_call.name} with args: {tool_call.arguments}")
 
-        results = await self.ability_manager.execute(ctx=ctx, tool_call=tool_calls, session=session)
+        results = await self.ability_manager.execute(
+            ctx=ctx, 
+            tool_call=tool_calls, 
+            session=session,
+            parallel_tool_calls=self._config.parallel_tool_calls,
+        )
 
         for tool_result, tool_message in results:
             if tool_message is not None:
@@ -1326,12 +1341,6 @@ class ReActAgent(BaseAgent):
         invoke_inputs = InvokeInputs(query=query, conversation_id=conversation_id)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
         ctx.extra["_streaming"] = kwargs.get("_streaming", False)
-        input_invoke_turn_id = inputs.get("_invoke_turn_id") if isinstance(inputs, dict) else None
-        ctx.extra["_invoke_turn_id"] = (
-            kwargs.get("_invoke_turn_id")
-            or input_invoke_turn_id
-            or f"turn_{uuid.uuid4().hex}"
-        )
         if isinstance(inputs, dict):
             ctx.extra["user_id"] = inputs.get("user_id", "")
             ctx.extra["run_kind"] = inputs.get("run_kind", "")

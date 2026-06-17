@@ -7,7 +7,7 @@ Top-level ``parse_interact_str`` already strips channel and mention
 prefixes, so the inbox itself never inspects the body. Routing
 decisions follow the explicit ``to`` argument:
 
-- ``to is None`` → drive the avatar's DeepAgent.
+- ``to is None`` → enqueue into the avatar's own coordination (interact).
 - ``to`` ∈ ``BROADCAST_TARGETS`` → broadcast as ``sender``.
 - ``to=<member>`` → validated direct message from ``sender``.
 """
@@ -107,7 +107,12 @@ async def team_backend(db, messager):
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_send_to_none_drives_avatar(team_backend):
-    """``to=None`` feeds the body verbatim to the avatar's DeepAgent."""
+    """``to=None`` enqueues the body into the avatar's own coordination.
+
+    Routing through ``interact`` (a USER_INPUT inner event) instead of a
+    direct ``deliver_input`` reach-in is what keeps the drive path safe
+    against a spawned-but-not-yet-started avatar harness.
+    """
     avatar = AsyncMock()
     inbox = HumanAgentInbox(
         team_backend,
@@ -119,7 +124,8 @@ async def test_send_to_none_drives_avatar(team_backend):
 
     assert result.ok
     assert result.message_id is None
-    avatar.deliver_input.assert_awaited_once_with("read design.md and summarise it")
+    avatar.interact.assert_awaited_once_with("read design.md and summarise it")
+    avatar.deliver_input.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -137,7 +143,7 @@ async def test_send_inbox_does_not_parse_at_in_body(team_backend):
 
     assert result.ok
     assert result.message_id is None
-    avatar.deliver_input.assert_awaited_once_with(f"@{TEAMMATE} ping me when done")
+    avatar.interact.assert_awaited_once_with(f"@{TEAMMATE} ping me when done")
 
 
 @pytest.mark.asyncio

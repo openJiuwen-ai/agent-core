@@ -28,7 +28,6 @@ from openjiuwen.harness.prompts.sections.coding_memory import (
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentManager,
     PromptAttachmentKind,
-    PromptAttachmentScope,
 )
 from openjiuwen.core.memory.lite.coding_memory_tools import (
     init_memory_manager_async,
@@ -359,14 +358,13 @@ class CodingMemoryRail(DeepAgentRail):
     ) -> None:
         if self.attachment_manager is None:
             return
-        writer = self.attachment_manager.for_context(ctx)
+        writer = self.attachment_manager.bind_context(ctx)
         try:
-            await writer.upsert_section(
+            await writer.add_section(
                 section="coding_memory_context",
                 content=content,
-                scope=PromptAttachmentScope.TURN,
                 kind=PromptAttachmentKind.MEMORY,
-                source="agent_core.coding_memory",
+                source="agent_core.coding_memory_rail",
                 priority=85,
                 content_kind="text/markdown",
             )
@@ -376,12 +374,9 @@ class CodingMemoryRail(DeepAgentRail):
     async def _clear_dynamic_memory_attachment(self, ctx: AgentCallbackContext) -> None:
         if self.attachment_manager is None:
             return
-        writer = self.attachment_manager.for_context(ctx)
+        writer = self.attachment_manager.bind_context(ctx)
         try:
-            await writer.clear_section(
-                section="coding_memory_context",
-                scope=PromptAttachmentScope.TURN,
-            )
+            await writer.clear_section("coding_memory_context")
         except ValueError:
             return
 

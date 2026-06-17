@@ -53,6 +53,10 @@ class WorkflowProgressEvent:
 
     Fields are populated per ``kind``:
 
+    * ``name``                — the workflow script's META ``name`` (``WORKFLOW_STARTED``
+      / ``WORKFLOW_COMPLETED``); ``None`` on all other kinds.
+    * ``description``         — the workflow script's META ``description``
+      (``WORKFLOW_STARTED`` / ``WORKFLOW_COMPLETED``); ``None`` on all other kinds.
     * ``phase``               — set by ``PHASE`` (the new phase title) and echoed
       on ``AGENT_STARTED`` / ``AGENT_COMPLETED`` / ``AGENT_FAILED`` so a consumer
       can group agents under their phase without tracking state.
@@ -61,14 +65,17 @@ class WorkflowProgressEvent:
     * ``model``               — the ``agent(model=...)`` name hint (``AGENT_STARTED``).
     * ``outcome``             — a short preview of the agent's result
       (``AGENT_COMPLETED``); absent on ``AGENT_FAILED`` (use ``message`` instead).
-    * ``message``             — free narration text (``LOG``); also carries the
-      workflow name on ``WORKFLOW_STARTED`` / ``WORKFLOW_COMPLETED``, and the
-      error description on ``WORKFLOW_FAILED`` / ``AGENT_FAILED``.
+    * ``message``             — free narration text (``LOG``); a human-readable
+      term on ``WORKFLOW_STARTED`` / ``WORKFLOW_COMPLETED`` (e.g. "Workflow started",
+      "Workflow completed"), and the error description on ``WORKFLOW_FAILED`` /
+      ``AGENT_FAILED``.
     * ``phases``              — the static phase plan from the script's ``META``
       dict (``WORKFLOW_STARTED``); ``None`` on all other kinds.
     """
 
     kind: str
+    name: str | None = None
+    description: str | None = None
     phase: str | None = None
     label: str | None = None
     prompt: str | None = None

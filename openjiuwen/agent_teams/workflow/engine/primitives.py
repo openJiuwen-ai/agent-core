@@ -144,8 +144,6 @@ def _preview(value: Any) -> str | None:
         return None
     if isinstance(value, str):
         return value
-    # Structured result: preamble + complete JSON
-    preamble = "structured result: "
     try:
         if hasattr(value, "model_dump") and callable(value.model_dump):
             body = json.dumps(value.model_dump(mode="json"), ensure_ascii=False, default=str)
@@ -153,7 +151,7 @@ def _preview(value: Any) -> str | None:
             body = json.dumps(value, ensure_ascii=False, default=str)
     except Exception:
         body = str(value)
-    return preamble + body
+    return body
 
 
 def _emit_agent_started(rt, opts: dict, prompt: str) -> None:

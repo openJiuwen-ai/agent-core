@@ -29,7 +29,7 @@ class EvolutionSignal:
     """Detected evolution signal from dialogue/tool trace.
 
     Attributes:
-        signal_type: Type of signal (e.g., 'execution_failure', 'user_correction', 'low_score').
+        signal_type: Type of signal (e.g., 'execution_failure', 'user_intent', 'low_score').
         section: Target section in SKILL.md (e.g., 'Troubleshooting', 'Examples').
         excerpt: Relevant excerpt from the conversation/trace.
         skill_name: Skill name for skill resolution.

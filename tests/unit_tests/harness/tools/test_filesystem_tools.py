@@ -460,6 +460,86 @@ async def test_edit_file_tool_requires_read_first(sys_op, temp_dir):
 
 
 @pytest.mark.asyncio
+async def test_edit_file_tool_accepts_partial_read(sys_op, temp_dir):
+    # A large file forces read_file into offset/limit (partial) reads; edit_file
+    # must still allow editing once any read_file call has populated the registry —
+    # otherwise files too big to read in one shot would be permanently uneditable.
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "partial_edit.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "line1\nline2\nline3"})
+
+    read_res = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 1})
+    assert read_res.success is True
+    assert _FILE_READ_REGISTRY[file_path].is_partial is True
+
+    edit_res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "line2",
+        "new_string": "line2-edited",
+    })
+    assert edit_res.success is True
+    assert edit_res.data["replacements"] == 1
+
+
+@pytest.mark.asyncio
+async def test_edit_file_tool_editable_after_offset_paginated_reads_only(sys_op, temp_dir):
+    # Reproduces the original deadlock: a file larger than MAX_LINES_TO_READ can
+    # never produce a non-partial registry entry (default reads truncate and get
+    # flagged partial; explicit offset/limit reads are always flagged partial too).
+    # edit_file must still succeed once the file has been paginated through via
+    # offset/limit alone, with no full read ever taking place.
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "big_file.txt")
+
+    total_lines = ReadFileTool.MAX_LINES_TO_READ + 500
+    lines = [f"line{i}" for i in range(total_lines)]
+    lines[2400] = "TARGET_LINE"
+    await write_tool.invoke({"file_path": file_path, "content": "\n".join(lines)})
+
+    # Paginate through the file in chunks, mirroring how an agent would read a
+    # file too large to fit in one call. Never issue a full (no offset/limit) read.
+    page_size = 1000
+    for offset in range(0, total_lines, page_size):
+        page_res = await read_tool.invoke({"file_path": file_path, "offset": offset, "limit": page_size})
+        assert page_res.success is True
+    assert _FILE_READ_REGISTRY[file_path].is_partial is True
+
+    edit_res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "TARGET_LINE",
+        "new_string": "EDITED_LINE",
+    })
+    assert edit_res.success is True
+    assert edit_res.data["replacements"] == 1
+
+
+@pytest.mark.asyncio
+async def test_edit_file_tool_partial_read_still_rejects_external_modification(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "partial_edit_stale.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "line1\nline2\nline3"})
+    await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 1})
+
+    # External modification after the partial read must still be detected.
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("line1\nCHANGED\nline3")
+
+    res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "line2",
+        "new_string": "line2-edited",
+    })
+    assert res.success is False
+    assert "modified externally" in res.error
+
+
+@pytest.mark.asyncio
 async def test_edit_file_tool_full_workflow(sys_op, temp_dir):
     write_tool = WriteFileTool(sys_op)
     read_tool = ReadFileTool(sys_op)

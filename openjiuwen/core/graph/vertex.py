@@ -2,7 +2,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import asyncio
-import math
 from asyncio import CancelledError
 from datetime import datetime, timezone
 from typing import Any, Optional, AsyncIterator, AsyncGenerator, Literal
@@ -241,12 +240,12 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         max_retries = self._node_config.max_retries if self._node_config else 0
         timeout = getattr(self._node_config, 'timeout', -1.0)
 
-        if max_retries <= 0 and (timeout < 0 or math.isclose(timeout, 0.0, abs_tol=1e-9)):
+        if max_retries < 0:
             return await self._run_executable(ability, is_subgraph, config, event)
 
         for attempt in range(max_retries + 1):
             try:
-                if timeout < 0 or math.isclose(timeout, 0.0, abs_tol=1e-9):
+                if timeout < 0:
                     return await self._run_executable(ability, is_subgraph, config, event)
                 return await asyncio.wait_for(
                     self._run_executable(ability, is_subgraph, config, event),
@@ -256,9 +255,8 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                 raise
             except asyncio.TimeoutError as e:
                 # Wrap as BaseError to prevent capture by workflow-level timeout handler
-                wrapped = build_error(
-                    StatusCode.WORKFLOW_EXECUTION_TIMEOUT,
-                    cause=e, timeout=timeout, node_id=self._node_id,
+                wrapped = await self._build_timeout_error(
+                    e, timeout=timeout,
                 )
                 if attempt < max_retries:
                     logger.warning(
@@ -287,6 +285,49 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                 return await self._run_error_recovery(ability, e)
 
         return False
+
+    async def _build_timeout_error(
+        self,
+        cause: asyncio.TimeoutError,
+        *,
+        timeout: float,
+    ) -> BaseError:
+        """Build a timeout error, decoupled via CallbackFramework trigger.
+
+        Fires a ``component_timeout_error`` event through CallbackFramework.
+        A registered handler may return a custom BaseError; if no handler
+        returns a non-None result the default ``build_error`` is used.
+        """
+        try:
+            from openjiuwen.core.runner.runner import Runner
+            _fw = Runner.callback_framework
+            exception_config = self._node_config.exception_config if self._node_config else None
+            if _fw is not None:
+                result = await _fw.trigger_until(
+                    "component_timeout_error",
+                    lambda r: r is not None,
+                    cause=cause,
+                    timeout=timeout,
+                    node_id=self._node_id,
+                    exception_config=exception_config,
+                    session=self._session,
+                )
+                if result is not None:
+                    return result
+        except Exception as e:
+            logger.error(
+                f"Failed to use CallbackFramework to build timeout error for node [{self._node_id}]",
+                event_type=LogEventType.GRAPH_VERTEX_ABILITY_ERROR,
+                exception=e,
+                **self._log_message
+            )
+            pass
+
+        return build_error(
+            StatusCode.WORKFLOW_EXECUTION_TIMEOUT,
+            cause=cause, timeout=timeout,
+            node_id=self._node_id,
+        )
 
     async def _run_error_recovery(self, ability: ComponentAbility, error: Exception) -> bool:
         """Error recovery after all retries exhausted. Decoupled via CallbackFramework trigger."""

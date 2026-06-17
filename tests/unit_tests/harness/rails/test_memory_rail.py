@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
+from openjiuwen.harness.prompts.sections.memory import build_memory_section
 from openjiuwen.harness.rails.memory.memory_rail import MemoryRail
 
 
@@ -29,14 +29,13 @@ def _make_ctx() -> SimpleNamespace:
     return SimpleNamespace(
         session=SimpleNamespace(session_id="sess1"),
         inputs=None,
-        extra={"_invoke_turn_id": "turn1"},
+        extra={},
     )
 
 
 def _make_rail(*, read_only: bool) -> MemoryRail:
     rail = MemoryRail(embedding_config=Mock())
     rail.system_prompt_builder = _PromptBuilder()
-    rail.attachment_manager = PromptAttachmentManager()
     rail._is_read_only = read_only
     return rail
 
@@ -49,17 +48,25 @@ async def test_memory_policy_uses_system_section_for_normal_invokes() -> None:
 
     assert rail.system_prompt_builder.removed_sections == ["memory"]
     assert [section.name for section in rail.system_prompt_builder.added_sections] == ["memory"]
-    assert await rail.attachment_manager.collect_for_turn("sess1", "turn1") == []
 
 
 @pytest.mark.asyncio
-async def test_memory_policy_uses_attachment_for_read_only_invokes() -> None:
+async def test_memory_policy_uses_system_section_for_read_only_invokes() -> None:
     rail = _make_rail(read_only=True)
 
     await rail.before_model_call(_make_ctx())
 
     assert rail.system_prompt_builder.removed_sections == ["memory"]
-    assert rail.system_prompt_builder.added_sections == []
-    items = await rail.attachment_manager.collect_for_turn("sess1", "turn1")
-    assert [item.id for item in items] == ["turn.sess1.turn1.memory"]
-    assert items[0].source == "agent_core.memory.policy"
+    assert [section.name for section in rail.system_prompt_builder.added_sections] == ["memory"]
+
+
+def test_memory_policy_is_static_for_read_only_flag() -> None:
+    normal = build_memory_section(language="en", read_only=False, is_proactive=True).render("en")
+    read_only = build_memory_section(language="en", read_only=True, is_proactive=True).render("en")
+    passive = build_memory_section(language="en", read_only=False, is_proactive=False).render("en")
+
+    assert normal == read_only
+    assert "{today_date}" not in normal
+    assert "YYYY-MM-DD.md" in normal
+    assert "scheduled task or heartbeat task" in normal
+    assert "scheduled task or heartbeat task" not in passive

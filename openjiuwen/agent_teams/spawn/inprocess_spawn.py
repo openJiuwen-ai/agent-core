@@ -75,6 +75,7 @@ async def inprocess_spawn(
     async def _run() -> Any:
         if session_id:
             set_session_id(session_id)
+
         team_logger.info("[inprocess] teammate {} started", member_name)
         try:
             # Spawned teammates are not leaders and never enter the pool —
@@ -98,10 +99,6 @@ async def inprocess_spawn(
         _task=task,
         agent_ref=teammate,
     )
-    # Wire the runtime-ready callback so CoordinationKernel.start()
-    # sets the handle's ready_event once the member's harness, stream
-    # controller, tools, and event bus are all up.
-    teammate.on_runtime_ready = handle.ready_event.set
     team_logger.info(
         "[inprocess] spawned teammate {} as task {}",
         member_name,

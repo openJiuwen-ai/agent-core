@@ -268,11 +268,18 @@ async def test_publish_pr_stage_generates_draft_then_creates_pr():
     git.push.assert_awaited_once_with(
         branch_name="auto-harness/topic"
     )
-    git.create_pr.assert_awaited_once_with(
-        title="fix(harness): 补齐 PR draft",
-        body="<!--  Thanks for sending a pull request!  Here are some tips for you:\n\n1) If this is your first time, please read our contributor guidelines: https://gitcode.com/openJiuwen/community/blob/master/CONTRIBUTING.md\n\n2) If you want to contribute your code but don't know who will review and merge, please add label `openjiuwen-assistant` to the pull request, we will find and do it as soon as possible.\n-->\n\n**What type of PR is this?**\n<!--\n选择下面一种标签替换下方 `/kind <label>`，可选标签类型有：\n- /kind bug\n- /kind task\n- /kind feature\n- /kind refactor\n- /kind clean_code\n如PR描述不符合规范，修改PR描述后需要/check-pr重新检查PR规范。\n-->\n/kind bug\n\n## 概述\n修复 PR 文案来源。\n\n## 变更内容\n- publish_pr 阶段先生成 PR draft\n\n## 验证结果\n- pytest passed\n\n**Self-checklist**:（**请自检，在[ ]内打上x，我们将检视你的完成情况，否则会导致pr无法合入**）\n\n+ - [ ] **设计**：PR对应的方案是否已经经过Maintainer评审，方案检视意见是否均已答复并完成方案修改\n+ - [x] **测试**：PR中的代码是否已有UT/ST测试用例进行充分的覆盖，新增测试用例是否随本PR一并上库或已经上库\n+ - [x] **验证**：PR描述信息中是否已包含对该PR对应的Feature、Refactor、Bugfix的预期目标达成情况的详细验证结果描述\n+ - [ ] **接口**：是否涉及对外接口变更，相应变更已得到接口评审组织的通过，API对应的注释信息已经刷新正确\n+ - [ ] **文档**：是否涉及官网文档修改，如果涉及请及时提交资料到Doc仓",
-        head_branch="auto-harness/topic",
-    )
+    git.create_pr.assert_awaited_once()
+    kwargs = git.create_pr.await_args.kwargs
+    assert kwargs["title"] == "fix(harness): 补齐 PR draft"
+    assert kwargs["head_branch"] == "auto-harness/topic"
+    assert "修复 PR 文案来源。" in kwargs["body"]
+    assert "+ - [" not in kwargs["body"]
+    assert "- [ ]" not in kwargs["body"]
+    assert "- [x] **设计**" in kwargs["body"]
+    assert "- [x] **测试**" in kwargs["body"]
+    assert "- [x] **验证**" in kwargs["body"]
+    assert "- [x] **接口**" in kwargs["body"]
+    assert "- [x] **文档**" in kwargs["body"]
 
 
 @pytest.mark.asyncio
@@ -326,17 +333,19 @@ async def test_publish_pr_stage_fails_when_draft_is_invalid():
         stage = PublishPRStage()
         events = [event async for event in stage.stream(ctx)]
 
-    assert events[-1].status == "failed"
     assert (
-        events[-1].error
-        == "PR draft generation failed after 2 attempts: 未找到 JSON 对象"
+        events[-1].artifacts["pull_request"].pr_url
+        == "https://gitcode.com/pr/1"
     )
-    assert (
-        events[-1].artifacts["task_result"].error
-        == "PR draft generation failed after 2 attempts: 未找到 JSON 对象"
+    git.push.assert_awaited_once_with(
+        branch_name="auto-harness/topic"
     )
-    git.push.assert_not_awaited()
-    git.create_pr.assert_not_awaited()
+    git.create_pr.assert_awaited_once()
+    kwargs = git.create_pr.await_args.kwargs
+    assert kwargs["title"] == "fix(auto-harness): 修复 PR draft"
+    assert "PR draft agent 未返回可解析 JSON" in kwargs["body"]
+    assert "- [x] **设计**" in kwargs["body"]
+    assert "- [x] **测试**" in kwargs["body"]
 
 
 @pytest.mark.asyncio
@@ -371,11 +380,13 @@ async def test_publish_pr_stage_accepts_simplified_pr_body():
     git.push.assert_awaited_once_with(
         branch_name="auto-harness/topic"
     )
-    git.create_pr.assert_awaited_once_with(
-        title="docs(cli): add test line to README",
-        body=expected_body,
-        head_branch="auto-harness/topic",
-    )
+    git.create_pr.assert_awaited_once()
+    kwargs = git.create_pr.await_args.kwargs
+    assert kwargs["title"] == "docs(cli): add test line to README"
+    assert kwargs["head_branch"] == "auto-harness/topic"
+    assert expected_body in kwargs["body"]
+    assert "**Self-checklist**" in kwargs["body"]
+    assert "- [ ]" not in kwargs["body"]
 
 
 @pytest.mark.asyncio

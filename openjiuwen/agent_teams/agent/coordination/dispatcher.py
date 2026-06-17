@@ -246,11 +246,13 @@ class EventDispatcher:
         role = self._blueprint.role
 
         if isinstance(event, InnerEventMessage):
-            # Human agents must never autonomously poll. USER_INPUT
-            # through this path comes from coordination bootstrap (the
-            # leader's god-view input); a human agent never reaches
-            # that path because the leader is the one whose invoke()
-            # carries it. Defensively short-circuit polling branches.
+            # Human agents must never autonomously poll, but USER_INPUT is
+            # legitimate: it is the avatar's controller driving its LLM,
+            # enqueued by ``HumanAgentInbox`` (``$<name>`` drive →
+            # ``TeamAgent.interact`` → USER_INPUT) so the avatar consumes
+            # it inside its own loop after the harness has started — never
+            # a reach-in to a not-yet-started harness. Only the autonomous
+            # POLL_* branches stay muted for a human agent.
             if role == TeamRole.HUMAN_AGENT and event.event_type in (
                 InnerEventType.POLL_TASK,
                 InnerEventType.POLL_MAILBOX,
@@ -266,11 +268,13 @@ class EventDispatcher:
             return
 
         # Human agents are user avatars. Their LLM is driven by two
-        # input sources: (1) their controller's direct instructions via
-        # HumanAgentInbox, and (2) team events that concern the avatar,
-        # delivered into the harness and rendered as "notification for
-        # the controller" (see F_14). The avatar prompt strictly forbids
-        # autonomous action on the latter. The whitelist has two groups:
+        # input sources: (1) their controller's instructions via
+        # HumanAgentInbox, enqueued as a USER_INPUT inner event (handled
+        # in the InnerEventMessage branch above), and (2) team events
+        # that concern the avatar, delivered into the harness and
+        # rendered as "notification for the controller" (see F_14). The
+        # avatar prompt strictly forbids autonomous action on the
+        # latter. The transport-event whitelist below has two groups:
         #
         # Lifecycle (drive the avatar's own teardown / standby, no
         # autonomous round involved): CLEANED tears the agent down with
