@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-05-27 |
+| 最近一次修订日期 | 2026-06-17 |
 | 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md` |
 
 ## 范围 / 边界
@@ -14,7 +14,7 @@
 **管：**
 
 - `agent_teams/prompts/` 下系统提示词的全部产出路径：模板加载、占位符装配、`PromptSection` 构造、动态 section 的 mtime 缓存。
-- `agent_teams/rails/` 下三个团队级 Rail（`TeamPolicyRail` / `FirstIterationGate` / `TeamToolApprovalRail`）的契约、注入时机、与 DeepAgent rail registry 的交互。
+- `agent_teams/rails/` 下四个团队级 Rail（`TeamPolicyRail` / `FirstIterationGate` / `TeamToolApprovalRail` / `TeamPermissionRail`）的契约、注入时机、与 DeepAgent rail registry 的交互。
 - prompts 子模块的 `cn/` `en/` 双语模板布局，以及与 `agent_teams/i18n.py`（运行时硬编码字符串）的边界。
 
 **不管：**
@@ -72,6 +72,13 @@
 22. **`auto_confirm_config` 是 user input 通道，不持久化**：每轮构造一份；`_get_auto_confirm_key` 从 `tool_call` 派生 key。同一 key 的后续审批请求若命中 config 直接 `approve()`，无需消息。
 23. **未配置 `approval_required_tools` 不挂 rail**：`agent_configurator` 仅在 teammate + `agent_spec.approval_required_tools` 非空时构造该 rail。leader 与 human_agent 不挂。
 24. **消息发送失败 = 直接 reject**：`send_message` 返回 falsy 时 rail `reject(tool_result="Failed to send approval request to leader")`，**不重试**——避免对 messager 的重试压力反向放大故障。
+
+### `TeamPermissionRail`
+
+25. **继承 `PermissionInterruptRail`**：复用完整 `PermissionEngine` 三级判定（ALLOW/DENY/ASK + auto_confirm + `should_persist_to_disk` 钩子）。`enable_permissions=True` 时替代 `TeamToolApprovalRail`。
+26. **`should_persist_to_disk() → False`**：leader 审批 session-scoped，不写 teammate 本地 YAML。
+27. **`should_emit_interrupt_output() → False`**：ASK 不产生用户可见输出——审批经 `TeamApprovalOrchestrator` 内部消息通道路由 leader，leader `approve_tool` 后 `protocol="json"` DB message 作为 teammate `resume_interrupt` 的 fallback。
+28. **`parse_confirm_payload()` 自动设置 `decided_by="leader"`**：返回 `TeamPermissionConfirmResponse`（`PermissionConfirmResponse` + `decided_by`），`decided_by` 仅用于内部审计，不暴露给 LLM。
 
 ## 接口契约
 
@@ -320,6 +327,40 @@ class TeamToolApprovalRail(ConfirmInterruptRail):
   - `user_input` 非空：解析为 `ConfirmPayload` → `approved=True` `approve()`，否则 `reject(tool_result=feedback)`。
 - 解析失败重新 `interrupt(...)`，**不丢错误成 approve**。
 
+### `rails/team_permission_rail.py`
+
+```python
+class TeamApprovalOrchestrator:
+    def __init__(
+        self,
+        message_manager: TeamMessageManager,
+        leader_member_name: str,
+    ) -> None: ...
+
+    async def handle_approval_request(
+        self,
+        request: PermissionConfirmationRequest,
+    ) -> PermissionConfirmationResult: ...
+        # Sends approval request via message_manager (protocol="plain"),
+        # returns "interrupt" to let the rail suspend the teammate.
+
+class TeamPermissionRail(PermissionInterruptRail):
+    def should_persist_to_disk(self) -> bool: ...  # always False
+    def should_emit_interrupt_output(self) -> bool: ...  # always False
+
+    @staticmethod
+    def parse_confirm_payload(
+        user_input: Any,
+    ) -> Optional[TeamPermissionConfirmResponse]: ...
+        # Mirrors PermissionInterruptRail.parse_confirm_payload but returns
+        # TeamPermissionConfirmResponse with decided_by="leader".
+```
+
+- `TeamApprovalOrchestrator` 实现 `RequestPermissionConfirmationHook`，注入到 `ToolPermissionHost.request_permission_confirmation`。
+- `handle_approval_request` 用 `message_manager.send_message(content=..., protocol="plain")` 发送审批请求给 leader，返回 `"interrupt"`。
+- leader `approve_tool` 写 `protocol="json"` DB message 作为 fallback delivery；`MessageHandler._try_parse_approval_payload` 识别并 `resume_interrupt`。
+- `TeamPermissionRail` 的 `parse_confirm_payload` 对所有分支自动注入 `decided_by="leader"`。
+
 ## 数据结构
 
 ### `PromptSection`（消费的 core 类型）
@@ -378,8 +419,14 @@ FirstIterationGate  ✓               ✓               ✗
 TeamWorkspaceRail   conditional on workspace_manager
 TeamToolApprovalRail ✗  conditional ✓ when team-coordinated
                         and approval_required_tools non-empty
+                        and enable_permissions=False
+                                                    ✗
+TeamPermissionRail  ✗  conditional ✓ when team-coordinated
+                        and enable_permissions=True
                                                     ✗
 ```
+
+当 `enable_permissions=True` 时 `TeamPermissionRail` 替代 `TeamToolApprovalRail`；两者互斥，不同时挂。
 
 ## 与其它 spec 的关系
 

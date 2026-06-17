@@ -74,10 +74,11 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 7. **每条 ToolCard 描述都过 Translator**。工具构造器拿到的是同一个
    `t: Translator` 闭包，`ToolCard.description` 必须由 `t(name)` 提供，
    不许在构造器里写硬编码字面量。
-8. **`teammate_mode` 只挡 leader 的审批工具**：`approve_plan` /
+8. **审批工具的角色门控**：`approve_plan` /
    `approve_tool` 只在 `teammate_mode == "plan_mode"` 才进入 leader 工具集；
-   `build_mode` 下 leader 工具集里没有这两个名字。`teammate_mode` 不影响
-   teammate / human_agent 的工具集。
+   `build_mode` 下默认不包含。但当 `team_permissions_enabled=True` 时，
+   `approve_tool` 在 `build_mode` 下也保留——leader 需用它解决 teammate ASK interrupt。
+   `teammate_mode` 不影响 teammate / human_agent 的工具集。
 9. **`exclude_tools` 是减法，不是注册口**。它从角色集合里**移除**给定名字，
    不能通过它注册新工具。新工具靠的是工厂里的静态 `all_tools` 字典。
 10. **角色集合互相对称**：

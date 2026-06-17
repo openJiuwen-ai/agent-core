@@ -19,12 +19,13 @@
 
 | File | Owns |
 |---|---|
-| `team.py` | `TeamBackend` — the backend object every tool talks to (spawn/shutdown/clean/approve, roster queries, cleanup-path registry). `startup_member` (single UNSTARTED→STARTING CAS + spawn), `startup` (batch via `startup_member`), `_spawn_and_publish` (shared helper) |
+| `team.py` | `TeamBackend` — the backend object every tool talks to (spawn/shutdown/clean/approve, roster queries, cleanup-path registry). `startup_member` (single UNSTARTED→STARTING CAS + spawn), `startup` (batch via `startup_member`), `_spawn_and_publish` (shared helper). `approve_tool` writes `protocol="json"` DB message as interrupt-resolving fallback delivery |
 | `task_manager.py` | `TeamTaskManager` — add/claim/complete/reset/cancel/approve_plan, event publishing, dependency refresh |
 | `message_manager.py` | `TeamMessageManager` — point-to-point + broadcast send, read-state queries |
 | `database/` | `TeamDatabase` + per-table DAOs over a shared `DbSessions` (read/write session split — see *Database concurrency* below). SQL layer for static + per-session dynamic tables |
 | `memory_database.py` | In-memory backend variant for tests |
 | `models.py` | `Team`, `TeamMember` static tables + dynamic per-session `TeamTask*` / `TeamMessage*` factories |
+| `member_options.py` | `TeamMemberOptions` / `MemberModelRef` / `MemberWorktreeOptions` structured options helpers (load/dump/build/merge/get_member_model_ref/get_member_permissions_override). Replaces legacy `model_ref_json` column with unified `options` JSON |
 | `locales/` | i18n strings (`cn.py`, `en.py`) and Markdown description files (`descs/<lang>/<tool>.md`) |
 
 Tools never reach into `TeamDatabase` directly — they go through `TeamBackend` or one of the managers so event publication and state transitions stay centralised.
