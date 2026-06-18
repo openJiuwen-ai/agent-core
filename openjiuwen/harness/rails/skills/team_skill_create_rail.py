@@ -44,6 +44,13 @@ _FOLLOW_UP_PROMPT_EN = (
     "   Save the new skill to: {skills_dir}"
 )
 _TEAM_SKILL_KINDS = {"team-skill", "swarm-skill"}
+_TEAM_SPAWN_TOOL_NAMES = {
+    "spawn_member",
+    "spawn_teammate",
+    "spawn_human_agent",
+    "spawn_bridge_agent",
+    "spawn_external_cli",
+}
 
 
 class TeamSkillCreateRail(EvolutionRail):
@@ -205,10 +212,18 @@ class TeamSkillCreateRail(EvolutionRail):
         spawn_count = 0
         for step in self._builder.steps:
             if step.kind == "tool" and step.detail:
-                tool_name = getattr(step.detail, "tool_name", "")
-                if "spawn_member" in tool_name:
+                tool_name = self._normalize_tool_name(getattr(step.detail, "tool_name", ""))
+                if tool_name in _TEAM_SPAWN_TOOL_NAMES:
                     spawn_count += 1
         return spawn_count
+
+    @staticmethod
+    def _normalize_tool_name(tool_name: str) -> str:
+        """Normalize tool names to base names to support namespaced variants."""
+        tool = (tool_name or "").strip()
+        if "." in tool:
+            tool = tool.rsplit(".", 1)[-1]
+        return tool
 
     def _detect_used_team_skill(self) -> Optional[str]:
         """Return the team skill referenced by the trajectory, if any."""
