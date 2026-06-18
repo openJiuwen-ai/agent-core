@@ -688,10 +688,14 @@ class AbilityManager:
         except Exception as e:
             error_msg = f"Ability execution error: {str(e)}"
             logger.error(error_msg)
-            tool_result = None
+            from openjiuwen.harness.tools import ToolOutput
+            tool_result = ToolOutput(
+                success=False,
+                error=error_msg,
+            )
             tool_message: Optional[ToolMessage] = None
             if isinstance(tool_ctx.inputs, ToolCallInputs):
-                tool_result = tool_ctx.inputs.tool_result
+                tool_result = tool_ctx.inputs.tool_result or tool_result
                 tool_message = tool_ctx.inputs.tool_msg
 
             if tool_message is None and isinstance(e, AbilityExecutionError):
