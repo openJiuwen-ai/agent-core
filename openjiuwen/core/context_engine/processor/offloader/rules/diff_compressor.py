@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any
 
 from openjiuwen.core.context_engine.processor.offloader.rules.common import (
-    ERROR_RE,
     meets_savings_ratio,
 )
 from openjiuwen.core.context_engine.processor.offloader.rules.types import (
@@ -21,8 +21,16 @@ class DiffHunk:
     position: int
 
     @property
+    def additions(self) -> int:
+        return sum(1 for line in self.lines if _is_addition_line(line))
+
+    @property
+    def deletions(self) -> int:
+        return sum(1 for line in self.lines if _is_deletion_line(line))
+
+    @property
     def change_count(self) -> int:
-        return sum(1 for line in self.lines if _is_change_line(line))
+        return self.additions + self.deletions
 
 
 @dataclass(frozen=True)
@@ -36,13 +44,33 @@ class DiffFile:
         return self.header[0] if self.header else f"diff-file-{self.position}"
 
     @property
+    def additions(self) -> int:
+        return sum(hunk.additions for hunk in self.hunks)
+
+    @property
+    def deletions(self) -> int:
+        return sum(hunk.deletions for hunk in self.hunks)
+
+    @property
     def change_count(self) -> int:
         return sum(hunk.change_count for hunk in self.hunks)
 
 
+_PRIORITY_RE = re.compile(
+    r"\b("
+    r"error|exception|fail|failed|failure|fatal|critical|crash|panic|"
+    r"important|note|todo|fixme|hack|xxx|bug|fix|"
+    r"security|auth|password|secret|token"
+    r")\b",
+    re.IGNORECASE,
+)
+_CCR_RATIO_THRESHOLD = 0.8
+
+
 class DiffCompressor:
     def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult:
-        if len(content.splitlines()) < ctx.diff_min_lines:
+        original_line_count = len(content.splitlines())
+        if original_line_count < ctx.diff_min_lines:
             return _unchanged(content)
         preamble, files = _parse_diff(content)
         if not files:
@@ -54,6 +82,8 @@ class DiffCompressor:
         hunks_omitted = 0
         context_lines_retained = 0
         context_lines_omitted = 0
+        additions = sum(file.additions for file in files)
+        deletions = sum(file.deletions for file in files)
 
         for file in sorted(selected_files, key=lambda item: item.position):
             output.extend(file.header)
@@ -77,14 +107,16 @@ class DiffCompressor:
                 context_lines_retained += retained
                 context_lines_omitted += omitted
             if omitted_for_file:
-                output.append(f"[{omitted_for_file} diff hunks omitted from {file.label}]")
                 hunks_omitted += omitted_for_file
 
         files_omitted = len(files) - len(selected_files)
-        if files_omitted:
-            output.append(f"[{files_omitted} diff files omitted]")
+        output.append(
+            f"[{len(files)} files changed, +{additions} -{deletions} lines, "
+            f"{hunks_omitted} hunks omitted, {files_omitted} files omitted]"
+        )
 
         candidate = "\n".join(output)
+        compressed_line_count = len(candidate.splitlines())
         details: dict[str, Any] = {
             "files_affected": len(files),
             "files_retained": len(selected_files),
@@ -92,8 +124,13 @@ class DiffCompressor:
             "hunks_affected": sum(len(file.hunks) for file in files),
             "hunks_retained": hunks_retained,
             "hunks_omitted": hunks_omitted,
+            "additions": additions,
+            "deletions": deletions,
             "context_lines_retained": context_lines_retained,
             "context_lines_omitted": context_lines_omitted,
+            "original_line_count": original_line_count,
+            "compressed_line_count": compressed_line_count,
+            "should_offload_original": compressed_line_count < original_line_count * _CCR_RATIO_THRESHOLD,
         }
         lossy = files_omitted > 0 or hunks_omitted > 0 or context_lines_omitted > 0
         if candidate != content and lossy and meets_savings_ratio(content, candidate, ctx):
@@ -119,7 +156,7 @@ class DiffCompressor:
         return sorted(
             files,
             key=lambda file: (
-                -_score_text(_file_text(file), file.change_count, ctx.query_terms),
+                -file.change_count,
                 file.position,
             ),
         )[: ctx.diff_max_files]
@@ -210,10 +247,10 @@ def _reduce_context(lines: tuple[str, ...], max_context: int) -> tuple[list[str]
 
 def _score_text(text: str, change_count: int, query_terms: frozenset[str]) -> int:
     lowered = text.lower()
-    score = change_count * 10
-    score += 100 if ERROR_RE.search(text) else 0
-    score += 30 * sum(1 for term in query_terms if term in lowered)
-    return score
+    score = min(0.3, change_count * 0.03)
+    score += 0.2 * sum(1 for term in query_terms if term.lower() in lowered)
+    score += 0.3 if _PRIORITY_RE.search(text) else 0
+    return int(min(score, 1.0) * 1000)
 
 
 def _file_text(file: DiffFile) -> str:
@@ -232,11 +269,19 @@ def _is_hunk_header(line: str) -> bool:
 
 
 def _is_change_line(line: str) -> bool:
-    return line.startswith(("+", "-")) and not line.startswith(("+++ ", "--- "))
+    return _is_addition_line(line) or _is_deletion_line(line)
+
+
+def _is_addition_line(line: str) -> bool:
+    return line.startswith("+") and not line.startswith("+++ ")
+
+
+def _is_deletion_line(line: str) -> bool:
+    return line.startswith("-") and not line.startswith("--- ")
 
 
 def _is_context_line(line: str) -> bool:
-    return line.startswith(" ") and not _is_change_line(line)
+    return (line.startswith(" ") or line == "") and not _is_change_line(line)
 
 
 def _unchanged(content: str) -> RuleCompressionResult:

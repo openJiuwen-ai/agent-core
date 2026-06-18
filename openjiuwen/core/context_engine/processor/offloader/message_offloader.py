@@ -16,9 +16,6 @@ from openjiuwen.core.context_engine.processor.offloader.rules import RuleCompres
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
 
-
-CONTEXT_TTL_OCCUPANCY_RATIO = 0.5
-OFFLOAD_PREVIEW_CHARS = 100
 OMIT_STRING = "..."
 
 
@@ -27,10 +24,36 @@ class MessageOffloaderConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    add_message_threshold_ratio: float = Field(default=0.2, gt=0)
+    """Context-capacity ratio above which a newly added tool message is processed."""
+
     ttl_seconds: int = Field(default=300, ge=0)
     """Idle time between LLM context-window requests before TTL processing is eligible."""
 
-    protected_tool_names: list[str] = Field(default_factory=lambda: ["reload_original_context_messages"])
+    ttl_context_occupancy_ratio: float = Field(
+        default=0.5,
+        gt=0,
+    )
+    """Context-capacity ratio above which TTL processing is eligible."""
+
+    ttl_message_threshold_ratio: float = Field(
+        default=0.1,
+        gt=0,
+    )
+    """Context-capacity ratio above which one TTL tool message is processed."""
+
+    offload_preview_head_tail_chars: int = Field(
+        default=2000,
+        ge=0,
+    )
+    """Characters kept from both head and tail in direct/offload-reuse previews."""
+
+    enable_rule_compression: bool = True
+    """Whether deterministic rule compression runs before offload fallback."""
+
+    protected_tool_names: list[str] = Field(
+        default_factory=lambda: ["reload_original_context_messages"]
+    )
     """Tool names, or ``tool:argument-pattern`` entries, that must remain inline."""
 
 
@@ -47,7 +70,13 @@ class MessageOffloader(ContextProcessor):
         **kwargs: Any,
     ) -> bool:
         _ = kwargs
-        return self._rule_pipeline.has_candidate(messages_to_add, context)
+        threshold = self._add_message_threshold(context)
+        return any(
+            isinstance(message, ToolMessage)
+            and isinstance(getattr(message, "content", None), str)
+            and len(message.content) > threshold
+            for message in messages_to_add
+        )
 
     async def on_add_messages(
         self,
@@ -56,51 +85,99 @@ class MessageOffloader(ContextProcessor):
         **kwargs: Any,
     ) -> tuple[ContextEvent, list[BaseMessage]]:
         all_messages = context.get_messages() + messages_to_add
-        threshold = self._rule_pipeline.add_message_threshold(context)
+        threshold = self._add_message_threshold(context)
         processed = list(messages_to_add)
         event = ContextEvent(event_type=self.processor_type())
         context_size = len(context)
 
-        for index, message in enumerate(processed):
-            if not self._is_processable_tool_message(message, all_messages):
-                continue
-            if len(message.content) <= threshold:
-                continue
-            replacement = self._rule_pipeline.compress(
+        for index, message in enumerate(messages_to_add):
+            replacement = await self._process_added_message(
                 message,
                 context,
-                pass_name="add",
-                max_chars=threshold,
+                all_messages,
+                threshold,
+                **kwargs,
             )
-            if self._is_rule_compressed_message(replacement):
-                replacement = await self._attach_offload_path_to_rule_compressed_message(
-                    replacement,
-                    original_message=message,
-                    context=context,
-                    **kwargs,
-                )
-                if len(replacement.content) > threshold:
-                    replacement = replacement.model_copy(
-                        update={
-                            "content": self._truncate_preserving_offload_marker(
-                                replacement.content,
-                                threshold,
-                            )
-                        }
-                    )
-            elif len(replacement.content) > threshold:
-                replacement = await self._offload_message(
-                    replacement,
-                    context,
-                    original_message=message,
-                    **kwargs,
-                )
             if replacement is message:
                 continue
             processed[index] = replacement
             event.messages_to_modify.append(context_size + index)
 
         return event, processed
+
+    async def _process_added_message(
+        self,
+        message: BaseMessage,
+        context: ModelContext,
+        context_messages: list[BaseMessage],
+        threshold: int,
+        **kwargs: Any,
+    ) -> BaseMessage:
+        if not self._is_processable_tool_message(message, context_messages):
+            return message
+        if len(message.content) <= threshold:
+            return message
+
+        if self._enable_rule_compression():
+            compressed = self._rule_pipeline.compress(
+                message,
+                context,
+                pass_name="add",
+                max_chars=threshold,
+                context_messages=context_messages,
+            )
+            if self._is_rule_compressed_message(compressed):
+                return await self._finalize_rule_compressed_message(
+                    compressed,
+                    context,
+                    original_message=message,
+                    max_chars=threshold,
+                    offload_original=True,
+                    truncate_offloaded_preview=True,
+                    **kwargs,
+                )
+
+        return await self._offload_message(
+            message,
+            context,
+            original_message=message,
+            **kwargs,
+        )
+
+    async def _finalize_rule_compressed_message(
+        self,
+        message: BaseMessage,
+        context: ModelContext,
+        *,
+        original_message: BaseMessage,
+        max_chars: int,
+        offload_original: bool,
+        truncate_offloaded_preview: bool,
+        **kwargs: Any,
+    ) -> BaseMessage:
+        if not offload_original and len(message.content) <= max_chars:
+            return message
+
+        offloaded = await self._offload_message(
+            message,
+            context,
+            original_message=original_message,
+            **kwargs,
+        )
+        if not truncate_offloaded_preview:
+            return offloaded
+        if self._should_keep_full_rule_compressed_preview(message):
+            return offloaded
+        if len(offloaded.content) <= max_chars:
+            return offloaded
+        return offloaded.model_copy(
+            update={
+                "content": self._truncate_preserving_offload_marker(
+                    offloaded.content,
+                    max_chars,
+                )
+            }
+        )
 
     async def trigger_get_context_window(
         self,
@@ -127,15 +204,17 @@ class MessageOffloader(ContextProcessor):
         messages = context.get_messages()
         processed = list(messages)
         event = ContextEvent(event_type=self.processor_type())
-        ttl_budget = self._rule_pipeline.ttl_message_budget(context)
+        ttl_message_threshold = self._ttl_message_threshold(context)
 
         for index, message in enumerate(processed):
             if not self._is_processable_tool_message(message, processed):
                 continue
+            if len(message.content) <= ttl_message_threshold:
+                continue
             replacement = await self._process_ttl_message(
                 message,
                 context,
-                ttl_budget,
+                ttl_message_threshold,
                 **kwargs,
             )
             if replacement is message:
@@ -155,6 +234,13 @@ class MessageOffloader(ContextProcessor):
         ttl_budget: int,
         **kwargs: Any,
     ) -> BaseMessage:
+        if not self._enable_rule_compression():
+            return await self._offload_message(
+                message,
+                context,
+                original_message=message,
+                **kwargs,
+            )
         if self._is_rule_compressed_message(message):
             return message
         processed = self._rule_pipeline.compress(
@@ -163,7 +249,18 @@ class MessageOffloader(ContextProcessor):
             pass_name="ttl",
             max_chars=ttl_budget,
             force=True,
+            context_messages=context.get_messages(),
         )
+        if self._is_rule_compressed_message(processed):
+            return await self._finalize_rule_compressed_message(
+                processed,
+                context,
+                original_message=message,
+                max_chars=ttl_budget,
+                offload_original=True,
+                truncate_offloaded_preview=True,
+                **kwargs,
+            )
         if len(processed.content) <= ttl_budget:
             return processed
         return await self._offload_message(
@@ -183,7 +280,15 @@ class MessageOffloader(ContextProcessor):
     ) -> BaseMessage:
         content = message.content
         if not self._is_rule_compressed_message(message):
-            content = f"{content[:OFFLOAD_PREVIEW_CHARS]}{OMIT_STRING}"
+            content = self._head_tail_preview(
+                content,
+                description="Content truncated and offloaded. Load the OFFLOAD marker for the full original content.",
+            )
+        elif self._rule_compression_requests_original_offload(message):
+            content = (
+                f"{content}\n"
+                "[Original content offloaded. Retrieve full diff with the OFFLOAD marker below.]"
+            )
         extra_fields = message.model_dump()
         extra_fields.pop("role", None)
         extra_fields.pop("content", None)
@@ -191,30 +296,6 @@ class MessageOffloader(ContextProcessor):
         offloaded = await self.offload_messages(
             role=message.role,
             content=content,
-            messages=[original_message],
-            context=context,
-            offload_handle=offload_handle,
-            offload_path=offload_path,
-            **extra_fields,
-            **kwargs,
-        )
-        return offloaded or message
-
-    async def _attach_offload_path_to_rule_compressed_message(
-        self,
-        message: BaseMessage,
-        *,
-        original_message: BaseMessage,
-        context: ModelContext,
-        **kwargs: Any,
-    ) -> BaseMessage:
-        extra_fields = message.model_dump()
-        extra_fields.pop("role", None)
-        extra_fields.pop("content", None)
-        offload_handle, offload_path = self._new_offload_handle_and_path(context)
-        offloaded = await self.offload_messages(
-            role=message.role,
-            content=message.content,
             messages=[original_message],
             context=context,
             offload_handle=offload_handle,
@@ -248,11 +329,38 @@ class MessageOffloader(ContextProcessor):
 
         marker = content[marker_start:].strip()
         body = content[:marker_start].rstrip()
-        separator = "\n...\n"
-        body_budget = max_chars - len(marker) - len(separator)
+        marker_separator = "\n...\n"
+        body_budget = max_chars - len(marker) - len(marker_separator)
         if body_budget <= 0:
             return marker
-        return f"{body[:body_budget].rstrip()}{separator}{marker}"
+        if len(body) <= body_budget:
+            return f"{body}{marker_separator}{marker}"
+
+        body_separator = "\n...\n"
+        tail_budget = body_budget // 2
+        head_budget = body_budget - len(body_separator) - tail_budget
+        if head_budget <= 0:
+            return f"{body[-body_budget:].lstrip()}{marker_separator}{marker}"
+        return (
+            f"{body[:head_budget].rstrip()}"
+            f"{body_separator}"
+            f"{body[-tail_budget:].lstrip()}"
+            f"{marker_separator}"
+            f"{marker}"
+        )
+
+    @staticmethod
+    def _rule_compression_requests_original_offload(message: BaseMessage) -> bool:
+        metadata = getattr(message, "metadata", None) or {}
+        details = metadata.get("rule_compression_details") or {}
+        return (
+            metadata.get("rule_compression_type") == "GIT_DIFF"
+            and bool(details.get("should_offload_original"))
+            and not isinstance(message, OffloadMixin)
+        )
+
+    def _should_keep_full_rule_compressed_preview(self, message: BaseMessage) -> bool:
+        return self._rule_compression_requests_original_offload(message)
 
     def _context_occupancy_chars(self, context: ModelContext) -> int:
         return sum(
@@ -263,7 +371,42 @@ class MessageOffloader(ContextProcessor):
 
     def _ttl_occupancy_threshold(self, context: ModelContext) -> int:
         capacity = self._rule_pipeline.context_character_capacity(context)
-        return max(int(capacity * CONTEXT_TTL_OCCUPANCY_RATIO), 1)
+        return max(int(capacity * self._ttl_context_occupancy_ratio()), 1)
+
+    def _add_message_threshold(self, context: ModelContext) -> int:
+        capacity = self._rule_pipeline.context_character_capacity(context)
+        return max(int(capacity * self._add_message_threshold_ratio()), 1)
+
+    def _ttl_message_threshold(self, context: ModelContext) -> int:
+        capacity = self._rule_pipeline.context_character_capacity(context)
+        return max(int(capacity * self._ttl_message_threshold_ratio()), 1)
+
+    def _head_tail_preview(self, content: str, *, description: str) -> str:
+        keep_chars = self._offload_preview_head_tail_chars()
+        if keep_chars <= 0:
+            return f"[{description}]"
+        if len(content) <= keep_chars * 2:
+            return content
+        return (
+            f"{content[:keep_chars]}"
+            f"\n{OMIT_STRING} [{description}] {OMIT_STRING}\n"
+            f"{content[-keep_chars:]}"
+        )
+
+    def _enable_rule_compression(self) -> bool:
+        return bool(getattr(self.config, "enable_rule_compression", True))
+
+    def _add_message_threshold_ratio(self) -> float:
+        return float(getattr(self.config, "add_message_threshold_ratio", 0.2))
+
+    def _ttl_context_occupancy_ratio(self) -> float:
+        return float(getattr(self.config, "ttl_context_occupancy_ratio", 0.5))
+
+    def _ttl_message_threshold_ratio(self) -> float:
+        return float(getattr(self.config, "ttl_message_threshold_ratio", 0.1))
+
+    def _offload_preview_head_tail_chars(self) -> int:
+        return int(getattr(self.config, "offload_preview_head_tail_chars", 2000))
 
     @staticmethod
     def _replace_window_messages(

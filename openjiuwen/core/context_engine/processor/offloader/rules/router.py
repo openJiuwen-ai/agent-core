@@ -33,6 +33,10 @@ class RuleCompressor(Protocol):
 class RuleContentRouter:
     """Detect content type and dispatch to one focused deterministic compressor."""
 
+    _HTML_STRUCTURAL_TAG_RE = re.compile(
+        r"</?(?:html|head|body|article|main|section|div|script|style|nav|footer|aside|table|p|h[1-6])\b",
+        re.IGNORECASE,
+    )
     _SEARCH_LINE_RE = re.compile(r"^.+?:\d+[:\-].+$")
     _ERROR_RE = re.compile(
         r"\b(error|failed|failure|traceback|exception|warn|warning)\b",
@@ -43,6 +47,11 @@ class RuleContentRouter:
         r"pub|fn|impl|use|struct|enum|interface|type|package|func|public|private|"
         r"protected|#include)\b",
         re.MULTILINE,
+    )
+    _NUMBERED_LINE_PREFIX_RE = re.compile(r"(?m)^\s*\d+\t")
+    _NUMBERED_SOURCE_LINE_RE = re.compile(
+        r"(?m)^\s*\d+\t\s*(?:@|async\s+def|def|class|import|from|try:|if |elif |"
+        r"else:|for |while |with |return\b|[A-Za-z_]\w*\s*=)"
     )
 
     def __init__(self) -> None:
@@ -66,17 +75,26 @@ class RuleContentRouter:
             parsed = None
         if isinstance(parsed, list):
             return ContentType.JSON_ARRAY
+        source_text = self._source_detection_text(text)
+        if source_text != text and self._CODE_RE.search(source_text):
+            return ContentType.SOURCE_CODE
         if "diff --git " in text or re.search(r"(?m)^@@ .+ @@", text):
             return ContentType.GIT_DIFF
-        lowered = text[:5000].lower()
-        if "<!doctype html" in lowered or "<html" in lowered or "<body" in lowered:
+        lowered = text[:3000].lower()
+        if (
+            "<!doctype html" in lowered
+            or "<html" in lowered
+            or "<head" in lowered
+            or "<body" in lowered
+            or len(self._HTML_STRUCTURAL_TAG_RE.findall(lowered)) >= 2
+        ):
             return ContentType.HTML
         lines = [line for line in text.splitlines() if line.strip()]
         if lines:
             matches = sum(1 for line in lines if self._SEARCH_LINE_RE.match(line))
             if matches / len(lines) >= 0.3:
                 return ContentType.SEARCH_RESULTS
-        if self._CODE_RE.search(text):
+        if self._CODE_RE.search(source_text):
             return ContentType.SOURCE_CODE
         if self._ERROR_RE.search(text) or re.search(
             r"\b(pytest|npm|cargo|make|jest)\b",
@@ -88,7 +106,17 @@ class RuleContentRouter:
 
     def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult:
         content_type = self.detect(content)
-        return self._compressors[content_type].compress(content, ctx)
+        routed_content = self._strip_numbered_source_lines(content) if content_type == ContentType.SOURCE_CODE else content
+        return self._compressors[content_type].compress(routed_content, ctx)
+
+    def _source_detection_text(self, content: str) -> str:
+        stripped = self._strip_numbered_source_lines(content)
+        return stripped if stripped != content else content
+
+    def _strip_numbered_source_lines(self, content: str) -> str:
+        if len(self._NUMBERED_SOURCE_LINE_RE.findall(content)) < 2:
+            return content
+        return self._NUMBERED_LINE_PREFIX_RE.sub("", content)
 
 
 ContentRouter = RuleContentRouter

@@ -13,8 +13,6 @@ from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, UserMessage
 
 
 CHARACTERS_PER_TOKEN = 3
-ADD_MESSAGE_RATIO = 0.2
-TTL_MESSAGE_RATIO = 0.1
 
 
 class RuleCompressionPipeline:
@@ -36,21 +34,6 @@ class RuleCompressionPipeline:
         context_tokens = context.context_window_tokens()
         return max(int(context_tokens or 0) * CHARACTERS_PER_TOKEN, 1)
 
-    def add_message_threshold(self, context: ModelContext) -> int:
-        return max(int(self.context_character_capacity(context) * ADD_MESSAGE_RATIO), 1)
-
-    def ttl_message_budget(self, context: ModelContext) -> int:
-        return max(int(self.context_character_capacity(context) * TTL_MESSAGE_RATIO), 1)
-
-    def has_candidate(self, messages: list[BaseMessage], context: ModelContext) -> bool:
-        threshold = self.add_message_threshold(context)
-        return any(
-            isinstance(message, ToolMessage)
-            and isinstance(getattr(message, "content", None), str)
-            and len(message.content) > threshold
-            for message in messages
-        )
-
     def compress(
         self,
         message: BaseMessage,
@@ -59,6 +42,7 @@ class RuleCompressionPipeline:
         pass_name: str,
         max_chars: int,
         force: bool = False,
+        context_messages: list[BaseMessage] | None = None,
     ) -> BaseMessage:
         if not isinstance(message, ToolMessage) or not isinstance(message.content, str):
             return message
@@ -73,7 +57,10 @@ class RuleCompressionPipeline:
                 head_tokens=max(max_chars // (CHARACTERS_PER_TOKEN * 2), 1),
                 tail_tokens=max(max_chars // (CHARACTERS_PER_TOKEN * 2), 1),
                 count_tokens=lambda text: max(len(text) // CHARACTERS_PER_TOKEN, 1),
-                query_terms=self._query_terms_for_message(message, context),
+                query_terms=self._query_terms_for_message(
+                    message,
+                    context_messages or context.get_messages(),
+                ),
             ),
         )
         content = result.content
@@ -88,6 +75,8 @@ class RuleCompressionPipeline:
                 "rule_compression_pass": pass_name,
             }
         )
+        if result.details:
+            metadata["rule_compression_details"] = result.details
         logger.info(
             "[RuleCompression] applied tool_call_id=%s pass=%s type=%s chars=%s->%s",
             getattr(message, "tool_call_id", "unknown"),
@@ -98,8 +87,11 @@ class RuleCompressionPipeline:
         )
         return message.model_copy(update={"content": content, "metadata": metadata})
 
-    def _query_terms_for_message(self, message: BaseMessage, context: ModelContext) -> frozenset[str]:
-        context_messages = context.get_messages()
+    def _query_terms_for_message(
+        self,
+        message: BaseMessage,
+        context_messages: list[BaseMessage],
+    ) -> frozenset[str]:
         latest_user_content = ""
         for context_message in reversed(context_messages):
             if isinstance(context_message, UserMessage) and isinstance(context_message.content, str):

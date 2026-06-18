@@ -1,5 +1,10 @@
 from openjiuwen.core.context_engine.processor.offloader.rules.diff_compressor import DiffCompressor
-from openjiuwen.core.context_engine.processor.offloader.rules.html_compressor import HtmlCompressor
+from openjiuwen.core.context_engine.processor.offloader.rules.html_compressor import (
+    HTMLExtractionResult,
+    HTMLExtractor,
+    HTMLExtractorConfig,
+    HtmlCompressor,
+)
 from openjiuwen.core.context_engine.processor.offloader.rules.json_array_compressor import JsonArrayCompressor
 from openjiuwen.core.context_engine.processor.offloader.rules.log_compressor import LogCompressor
 from openjiuwen.core.context_engine.processor.offloader.rules.plain_text_compressor import PlainTextCompressor
@@ -21,6 +26,9 @@ __all__ = [
     "ContentRouter",
     "ContentType",
     "DiffCompressor",
+    "HTMLExtractionResult",
+    "HTMLExtractor",
+    "HTMLExtractorConfig",
     "HtmlCompressor",
     "JsonArrayCompressor",
     "LogCompressor",

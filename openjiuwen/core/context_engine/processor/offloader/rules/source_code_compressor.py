@@ -88,7 +88,7 @@ class SourceCodeCompressor:
         candidate = candidate_bytes.decode("utf-8")
 
         candidate_tree = parser.parse(candidate)
-        syntax_valid = not _has_syntax_error(candidate_tree.root_node())
+        syntax_valid = _candidate_syntax_valid(language, candidate_tree.root_node(), candidate)
         details: dict[str, Any] = {
             "language": language,
             **stats,
@@ -125,7 +125,8 @@ def _collect_replacements(
             return
         stats["bodies_seen"] += 1
         function_text = content[_start(node):_end(node)].decode("utf-8", errors="replace")
-        if any(term in function_text.lower() for term in ctx.query_terms):
+        query_terms = {term.lower() for term in ctx.query_terms if term}
+        if any(term in function_text.lower() for term in query_terms):
             stats["query_protected_bodies"] += 1
             return
         body_lines = _position_row(_end_position(body)) - _position_row(_start_position(body)) + 1
@@ -153,7 +154,7 @@ def _omission_body(body: Any, content: bytes, config: LanguageConfig) -> bytes:
     if config.python_style:
         line_start = content.rfind(b"\n", 0, start) + 1
         indentation = content[line_start:start]
-        if not indentation.strip():
+        if indentation == b"":
             indentation = re.match(rb"[ \t]*", original).group(0)
         return indentation + marker + b"\n" + indentation + b"pass"
 
@@ -191,6 +192,17 @@ def _count_syntax_errors(node: Any) -> int:
 
 def _has_syntax_error(node: Any) -> bool:
     return bool(node.has_error()) or _count_syntax_errors(node) > 0
+
+
+def _candidate_syntax_valid(language: str, root: Any, candidate: str) -> bool:
+    if _has_syntax_error(root):
+        return False
+    if language == "python":
+        try:
+            compile(candidate, "<source-code-compressor>", "exec")
+        except SyntaxError:
+            return False
+    return True
 
 
 def _named_children(node: Any) -> list[Any]:

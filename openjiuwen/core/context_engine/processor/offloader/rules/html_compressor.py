@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from importlib import import_module
 import re
 from typing import Any
 
@@ -11,6 +13,107 @@ from openjiuwen.core.context_engine.processor.offloader.rules.types import (
     RuleCompressionResult,
     RuleContext,
 )
+
+
+@dataclass(frozen=True)
+class HTMLExtractorConfig:
+    output_format: str = "markdown"
+    include_links: bool = True
+    include_images: bool = False
+    include_tables: bool = True
+    include_comments: bool = False
+    include_formatting: bool = True
+    favor_precision: bool = False
+    favor_recall: bool = True
+    extract_metadata: bool = True
+
+
+@dataclass(frozen=True)
+class HTMLExtractionResult:
+    extracted: str
+    original: str
+    original_length: int
+    extracted_length: int
+    compression_ratio: float
+    title: str | None = None
+    author: str | None = None
+    date: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def reduction_percent(self) -> float:
+        return (1 - self.compression_ratio) * 100
+
+
+class HTMLExtractor:
+    def __init__(self, config: HTMLExtractorConfig | None = None) -> None:
+        self.config = config or HTMLExtractorConfig()
+        self._trafilatura_config = self._build_trafilatura_config()
+
+    def extract(self, html: str, url: str | None = None) -> HTMLExtractionResult:
+        trafilatura = import_module("trafilatura")
+        extracted = trafilatura.extract(
+            html,
+            url=url,
+            include_links=self.config.include_links,
+            include_images=self.config.include_images,
+            include_tables=self.config.include_tables,
+            include_comments=self.config.include_comments,
+            include_formatting=self.config.include_formatting,
+            output_format=self.config.output_format,
+            config=self._trafilatura_config,
+        )
+        if extracted is None:
+            extracted = ""
+
+        metadata: dict[str, Any] = {}
+        title = author = date = None
+        if self.config.extract_metadata and hasattr(trafilatura, "extract_metadata"):
+            meta = trafilatura.extract_metadata(html, default_url=url)
+            if meta is not None:
+                title = getattr(meta, "title", None)
+                author = getattr(meta, "author", None)
+                date = getattr(meta, "date", None)
+                metadata = {
+                    "title": title,
+                    "author": author,
+                    "date": date,
+                    "sitename": getattr(meta, "sitename", None),
+                    "description": getattr(meta, "description", None),
+                    "categories": getattr(meta, "categories", None),
+                    "tags": getattr(meta, "tags", None),
+                }
+
+        original_length = len(html)
+        extracted_length = len(extracted)
+        compression_ratio = extracted_length / max(original_length, 1)
+        return HTMLExtractionResult(
+            extracted=extracted,
+            original=html,
+            original_length=original_length,
+            extracted_length=extracted_length,
+            compression_ratio=compression_ratio,
+            title=title,
+            author=author,
+            date=date,
+            metadata=metadata,
+        )
+
+    def extract_batch(self, html_contents: list[tuple[str, str | None]]) -> list[HTMLExtractionResult]:
+        return [self.extract(html, url) for html, url in html_contents]
+
+    def _build_trafilatura_config(self) -> Any:
+        try:
+            from trafilatura.settings import use_config
+
+            config = use_config()
+        except Exception:
+            import configparser
+
+            config = configparser.ConfigParser()
+        config.set("DEFAULT", "FAVOR_PRECISION", str(self.config.favor_precision))
+        config.set("DEFAULT", "FAVOR_RECALL", str(self.config.favor_recall))
+        return config
 
 
 _MAIN_SELECTORS = (
@@ -52,7 +155,58 @@ _BLOCK_TAGS = {
 
 
 class HtmlCompressor:
+    def __init__(self, extractor: HTMLExtractor | None = None) -> None:
+        self._extractor = extractor or HTMLExtractor()
+
     def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult:
+        try:
+            extracted = self._extractor.extract(content)
+        except ModuleNotFoundError:
+            return self._compress_with_beautifulsoup_fallback(content, ctx)
+        except Exception:
+            return _unchanged(content)
+
+        candidate = extracted.extracted.strip()
+        details: dict[str, Any] = {
+            "extractor": "trafilatura",
+            "original_length": extracted.original_length,
+            "extracted_length": extracted.extracted_length,
+            "compression_ratio": extracted.compression_ratio,
+            "reduction_percent": extracted.reduction_percent,
+            "title": extracted.title,
+            "author": extracted.author,
+            "date": extracted.date,
+            "metadata": extracted.metadata,
+        }
+        if not candidate or len(_plain_text(candidate)) < ctx.html_min_content_chars:
+            return RuleCompressionResult(
+                content=content,
+                content_type=ContentType.HTML,
+                modified=False,
+                lossy=False,
+                details=details,
+            )
+        if candidate != content and meets_savings_ratio(content, candidate, ctx):
+            return RuleCompressionResult(
+                content=candidate,
+                content_type=ContentType.HTML,
+                modified=True,
+                lossy=True,
+                details=details,
+            )
+        return RuleCompressionResult(
+            content=content,
+            content_type=ContentType.HTML,
+            modified=False,
+            lossy=False,
+            details=details,
+        )
+
+    def _compress_with_beautifulsoup_fallback(
+        self,
+        content: str,
+        ctx: RuleContext,
+    ) -> RuleCompressionResult:
         try:
             soup = _parse_html(content)
         except Exception:
