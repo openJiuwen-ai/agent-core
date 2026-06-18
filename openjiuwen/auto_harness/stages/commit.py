@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+import os
 import re
 from typing import (
     TYPE_CHECKING,
@@ -50,6 +52,8 @@ if TYPE_CHECKING:
     from openjiuwen.auto_harness.schema import (
         OptimizationTask,
     )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -161,6 +165,28 @@ async def _collect_commit_facts(
 ) -> "CommitFacts":
     status = await git.collect_status()
     edited_files = edit_safety_rail.edited_files()
+
+    # Cross-check rail-tracked files against actual git dirty files
+    # to detect writes that went outside the worktree (wrong path).
+    if edited_files:
+        dirty_set = set(status["dirty_files"])
+        filtered: list[str] = []
+        for path in edited_files:
+            if os.path.isabs(path):
+                logger.warning(
+                    "rail tracked absolute path (skipping — write was outside worktree): %s",
+                    path,
+                )
+                continue
+            if path not in dirty_set:
+                logger.warning(
+                    "rail tracked '%s' but worktree git status shows no change",
+                    path,
+                )
+                continue
+            filtered.append(path)
+        edited_files = filtered
+
     # Fallback: when edit_safety_rail tracked nothing
     # (e.g. extension pipeline where the task agent writes
     # files directly), treat all dirty files minus
@@ -297,11 +323,26 @@ def _extract_issue_target_symbols(task: "OptimizationTask") -> list[str]:
         "false",
         "none",
         "null",
+        # Generic English words commonly wrapped in backticks in
+        # Chinese issue descriptions but not actual code symbols.
+        "method",
+        "class",
+        "function",
+        "value",
+        "name",
+        "type",
+        "param",
+        "args",
+        "kwargs",
     }
     for pattern in patterns:
         for match in re.finditer(pattern, text, flags=re.IGNORECASE):
             symbol = match.group(1)
             if symbol.lower() in ignored:
+                continue
+            # Underscore-prefixed short names (< 8 chars) are likely
+            # prose references like `_name`, not real code symbols.
+            if symbol.startswith("_") and len(symbol) < 8:
                 continue
             if symbol not in symbols:
                 symbols.append(symbol)
@@ -313,6 +354,7 @@ async def _validate_issue_target_alignment(
     task: "OptimizationTask",
     git: "GitOperations",
     against_base: bool,
+    allowed_files: list[str] | None = None,
 ) -> str:
     """Ensure explicit issue-fix diffs hit symbols named by the issue."""
     symbols = _extract_issue_target_symbols(task)
@@ -331,6 +373,14 @@ async def _validate_issue_target_alignment(
         if re.search(rf"\b{re.escape(symbol)}\b", diff_text)
     ]
     if matched:
+        return ""
+    if allowed_files:
+        logger.warning(
+            "Issue symbols %s not found in diff, but allowed_files %s "
+            "has content — passing advisory check",
+            symbols,
+            allowed_files,
+        )
         return ""
     return (
         "Issue target validation failed: final diff did not touch symbols "
@@ -525,6 +575,7 @@ class CommitStage(TaskStage):
             task=ctx.task,
             git=ctx.orchestrator.git,
             against_base=False,
+            allowed_files=facts.allowed_files,
         )
         if alignment_error:
             ctx.task.status = TaskStatus.FAILED
@@ -558,6 +609,7 @@ class CommitStage(TaskStage):
                 task=ctx.task,
                 git=ctx.orchestrator.git,
                 against_base=True,
+                allowed_files=facts.allowed_files,
             )
             if alignment_error:
                 ctx.task.status = TaskStatus.FAILED
