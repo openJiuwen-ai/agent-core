@@ -1,5 +1,7 @@
 # coding: utf-8
 
+import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,12 +20,14 @@ async def create_context(
     *,
     context_window_tokens: int = 100,
     default_window_message_num: int = 100,
+    workspace=None,
 ):
     engine = ContextEngine(
         ContextEngineConfig(
             context_window_tokens=context_window_tokens,
             default_window_message_num=default_window_message_num,
-        )
+        ),
+        workspace=workspace,
     )
     return await engine.create_context(
         "test_ctx",
@@ -103,16 +107,63 @@ class TestMessageOffloaderAddTrigger:
         assert "x" * 61 in reloaded
 
     @pytest.mark.asyncio
-    async def test_rule_compression_can_keep_message_inline(self):
+    async def test_rule_compression_offloads_original_message(self):
         context = await create_context(context_window_tokens=100)
         content = "\n".join(["same line"] * 20)
 
         await context.add_messages(ToolMessage(content=content, tool_call_id="tc-repeat"))
 
         message = context.get_messages()[0]
-        assert not isinstance(message, OffloadMixin)
-        assert message.content == "same line"
+        assert isinstance(message, OffloadMixin)
+        assert "[[OFFLOAD:" in message.content
+        assert message.content.rstrip().endswith("]]")
         assert message.metadata["rule_compression_pass"] == "add"
+        reloaded = await context.reloader_tool().invoke(
+            {
+                "offload_handle": message.offload_handle,
+                "offload_type": message.offload_type,
+            }
+        )
+        assert "same line" in reloaded
+        assert context.save_state()["offload_messages"][message.offload_handle][0].content == content
+
+    @pytest.mark.asyncio
+    async def test_rule_compression_writes_original_to_filesystem_and_preserves_path(
+        self,
+        tmp_path,
+    ):
+        workspace = SimpleNamespace(root_path=str(tmp_path))
+        context = await create_context(context_window_tokens=500, workspace=workspace)
+        content = "\n".join(["same line"] * 100)
+
+        await context.add_messages(ToolMessage(content=content, tool_call_id="tc-repeat"))
+
+        message = context.get_messages()[0]
+        assert isinstance(message, OffloadMixin)
+        assert message.offload_type == "filesystem"
+        assert "same line" in message.content
+        assert "[[OFFLOAD: type=filesystem, path=" in message.content
+        assert message.content.rstrip().endswith("]]")
+
+        offload_path = tmp_path / "context" / "default_session_id_context" / "offload"
+        files = list(offload_path.glob("MessageOffloader_*.json"))
+        assert len(files) == 1
+        payload = json.loads(files[0].read_text(encoding="utf-8"))
+        assert payload["messages"][0]["content"] == content
+
+    @pytest.mark.asyncio
+    async def test_rule_compression_truncates_without_dropping_offload_marker(self, tmp_path):
+        workspace = SimpleNamespace(root_path=str(tmp_path))
+        context = await create_context(context_window_tokens=100, workspace=workspace)
+        content = "\n".join(["same line"] * 100)
+
+        await context.add_messages(ToolMessage(content=content, tool_call_id="tc-repeat"))
+
+        message = context.get_messages()[0]
+        assert isinstance(message, OffloadMixin)
+        assert "[[OFFLOAD: type=filesystem, path=" in message.content
+        assert message.content.rstrip().endswith("]]")
+        assert str(tmp_path) in message.content
 
     @pytest.mark.asyncio
     async def test_non_tool_messages_do_not_trigger_offload(self):
@@ -146,8 +197,7 @@ class TestMessageOffloaderTtl:
         processor = context._processors[0]  # type: ignore[attr-defined]
         processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
         messages = [
-            ToolMessage(content=character * 55, tool_call_id=f"tc-{character}")
-            for character in ("a", "b", "c")
+            ToolMessage(content=character * 55, tool_call_id=f"tc-{character}") for character in ("a", "b", "c")
         ]
         await context.add_messages(messages)
 
@@ -188,10 +238,7 @@ class TestMessageOffloaderTtl:
         processor = context._processors[0]  # type: ignore[attr-defined]
         processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
         await context.add_messages(
-            [
-                ToolMessage(content=character * 55, tool_call_id=f"tc-{character}")
-                for character in ("a", "b", "c")
-            ]
+            [ToolMessage(content=character * 55, tool_call_id=f"tc-{character}") for character in ("a", "b", "c")]
         )
         await context.get_context_window()
 
@@ -219,9 +266,7 @@ class TestMessageOffloaderTtl:
         await context.get_context_window()
         tool_messages = [message for message in context.get_messages() if message.role == "tool"]
         contents_before_ttl = [message.content for message in tool_messages]
-        timestamps_before_ttl = [
-            message.metadata["rule_compressed_at"] for message in tool_messages
-        ]
+        timestamps_before_ttl = [message.metadata["rule_compressed_at"] for message in tool_messages]
         router_compress = processor._rule_pipeline._router.compress  # type: ignore[attr-defined]
         processor._rule_pipeline._router.compress = MagicMock(wraps=router_compress)  # type: ignore[attr-defined]
 
@@ -229,11 +274,9 @@ class TestMessageOffloaderTtl:
         await context.get_context_window()
 
         tool_messages = [message for message in context.get_messages() if message.role == "tool"]
-        assert all(not isinstance(message, OffloadMixin) for message in tool_messages)
+        assert all(isinstance(message, OffloadMixin) for message in tool_messages)
         assert [message.content for message in tool_messages] == contents_before_ttl
-        assert [
-            message.metadata["rule_compressed_at"] for message in tool_messages
-        ] == timestamps_before_ttl
+        assert [message.metadata["rule_compressed_at"] for message in tool_messages] == timestamps_before_ttl
         processor._rule_pipeline._router.compress.assert_not_called()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
