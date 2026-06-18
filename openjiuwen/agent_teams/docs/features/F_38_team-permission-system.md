@@ -23,31 +23,26 @@ teammate 路径没有对应的审批机制：要么走用户前端 HITL（单 ag
 
 1. **`TeamPermissionRail` 继承 `PermissionInterruptRail`**：复用完整的 `PermissionEngine`
    三级判定 + auto_confirm。override `_persist_allow_always() → False`
-   （leader 审批 session-scoped，不写 teammate 本地 YAML）和
-   `should_emit_interrupt_output() → False`（审批不产生用户可见输出）。
+   （leader 审批 session-scoped，不写 teammate 本地 YAML）。
 
 2. **`TeamApprovalOrchestrator` 作为 hosted 确认路径**：实现
    `RequestPermissionConfirmationHook`，注入到 `ToolPermissionHost`。收到 ASK 结果后
    发消息给 leader，返回 `"interrupt"` 让 rail 挂起 teammate。
 
-3. **`InterruptRequest.silent=True`**：team permission 的 ASK interrupt 不生成
-   `__interaction__` 输出。`ToolInterruptHandler` 对 `silent=True` 的请求跳过 payload
-   收集，agent 挂起但不向前端输出交互提示。
-
-4. **`protocol="json"` 消息通道 + DB fallback**：leader `approve_tool` 写
+3. **`protocol="json"` 消息通道 + DB fallback**：leader `approve_tool` 写
    `protocol="json"` DB message（`type=tool_approval_result`）。teammate 的
    `MessageHandler._try_parse_approval_payload` 识别该类消息并 `resume_interrupt`，
    解决 interrupt-resolving 的 fallback delivery。
 
-5. **`enable_permissions=True` 替代 `TeamToolApprovalRail`**：两者互斥。
+4. **`enable_permissions=True` 替代 `TeamToolApprovalRail`**：两者互斥。
    `AgentConfigurator` 在 `enable_permissions=True` 时挂 `TeamPermissionRail`，
    不挂 `TeamToolApprovalRail`。leader 在 `build_mode` 下也保留 `approve_tool`。
 
-6. **`permissions_override` per-member narrowing**：`spawn_teammate.permissions`
+5. **`permissions_override` per-member narrowing**：`spawn_teammate.permissions`
    接收 `{tool_name: level_string}` dict，经 `narrow_permissions` 收紧基础配置
    （只收紧、不放宽），存入 `TeamMember.options.permissions_override`。
 
-7. **`parse_tool_args` 等受保护方法提升为公共方法**：`PermissionInterruptRail` 的
+6. **`parse_tool_args` 等受保护方法提升为公共方法**：`PermissionInterruptRail` 的
    `_parse_tool_args` / `_format_args_preview` / `_parse_confirm_payload` 去掉
    `_` 前缀，因为 `TeamApprovalOrchestrator`（非子类）需要调用它们——符合 G.CLS.11
    规则。

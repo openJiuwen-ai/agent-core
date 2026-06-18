@@ -8,10 +8,11 @@
 with the same ``decided_by`` field for the dataclass-based confirm path.
 
 Both are used exclusively by ``TeamPermissionRail`` and belong to the
-agent_teams subsystem rather than the generic harness package.
+agent_teams subsystem.
 """
 
-from __future__ import annotations
+from dataclasses import dataclass
+from typing import Optional
 
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload
 from openjiuwen.harness.security.models import PermissionConfirmResponse
@@ -28,15 +29,16 @@ class TeamConfirmPayload(ConfirmPayload):
     decided_by: str | None = None
 
 
+@dataclass(frozen=True)
 class TeamPermissionConfirmResponse(PermissionConfirmResponse):
     """Team-mode confirmation response with ``decided_by`` tracking.
 
     ``decided_by`` records who made the approval decision (e.g. ``"leader"``).
     It is not exposed to the LLM — it is set internally by
-    ``TeamPermissionRail._parse_confirm_payload``.
+    ``TeamPermissionRail.parse_confirm_payload``.
     """
 
-    decided_by: str | None = None
+    decided_by: Optional[str] = None
 
 
 __all__ = [

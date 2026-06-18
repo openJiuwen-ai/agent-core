@@ -468,7 +468,6 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return self.interrupt(InterruptRequest(
                 message=message,
                 payload_schema=ConfirmPayload.to_schema(),
-                silent=not self.should_emit_interrupt_output(),
             ))
 
         logger.info("[PermissionEngine] permission.rail.user_response tool=%s", tool_name)
@@ -482,7 +481,6 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return self.interrupt(InterruptRequest(
                 message=message,
                 payload_schema=ConfirmPayload.to_schema(),
-                silent=not self.should_emit_interrupt_output(),
             ))
 
         persisted = False
@@ -569,10 +567,6 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
     def _confirm_path_label(self) -> str:
         return "hosted" if self._host.request_permission_confirmation is not None else "interrupt"
-
-    def should_emit_interrupt_output(self) -> bool:
-        """Return whether ASK interrupts should emit user-visible output."""
-        return True
 
     @staticmethod
     def _is_auto_confirmed(auto_confirm_config: Optional[dict], tool_name: str) -> bool:

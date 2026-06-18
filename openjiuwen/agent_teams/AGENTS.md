@@ -89,7 +89,7 @@ customizer 后处理）。
 |---|---|
 | `team_policy_rail.py` | `TeamPolicyRail`：把 prompts/sections 的 `PromptSection` 注入 `SystemPromptBuilder`；含 `MtimeSectionCache` 驱动的 dynamic section 刷新 |
 | `confirm_payload.py` | `TeamConfirmPayload` + `TeamPermissionConfirmResponse`：team-specific confirmation payload/response models（extend harness base classes with `decided_by` tracking） |
-| `team_permission_rail.py` | `TeamPermissionRail` + `TeamApprovalOrchestrator`：team-mode permission guardrail；继承 `PermissionInterruptRail`，leader-mediated ASK resolution + session-scoped auto-confirm（`_persist_allow_always=False`、`should_emit_interrupt_output=False`）。`enable_permissions=True` 时替代 `TeamToolApprovalRail` |
+| `team_permission_rail.py` | `TeamPermissionRail` + `TeamApprovalOrchestrator`：team-mode permission guardrail；继承 `PermissionInterruptRail`，leader-mediated ASK resolution + session-scoped auto-confirm（`_persist_allow_always=False`）。`enable_permissions=True` 时替代 `TeamToolApprovalRail` |
 | `tool_approval_rail.py` | `TeamToolApprovalRail`：teammate 调工具时通过消息向 leader 申请审批的中断 rail（`enable_permissions=False` 时使用） |
 | `team_tool_rail.py` / `team_plan_mode_rail.py` | `TeamToolRail`（协同工具注册）/ `TeamPlanModeRail`（plan mode 提示叠加） |
 | `elements.py` | 7 个 team rail 的 `@harness_element` 工厂 + `ConstructionInput`（`team.tool`/`team.policy`/`team.workspace`/`team.tool_approval`/`team.permission`/`team.plan_mode`/`team.reliability`） |

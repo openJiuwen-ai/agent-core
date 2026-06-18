@@ -155,16 +155,11 @@ class ToolInterruptHandler:
             interrupt_requests={inner_id: tool_result.request},
         )
 
-        # Silent interrupts suspend the agent but do not produce a
-        # user-visible __interaction__ output — the approval is
-        # routed through an internal channel and resume is triggered
-        # by the approval event (not by user input from the frontend).
-        if not tool_result.request.silent:
-            payload = ToolCallInterruptRequest.from_tool_call(
-                request=tool_result.request,
-                tool_call=tc,
-            )
-            payloads.append((inner_id, payload))
+        payload = ToolCallInterruptRequest.from_tool_call(
+            request=tool_result.request,
+            tool_call=tc,
+        )
+        payloads.append((inner_id, payload))
 
         auto_confirm_mapping[inner_id] = tool_result.request.auto_confirm_key
 

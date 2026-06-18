@@ -125,10 +125,6 @@ class TeamPermissionRail(PermissionInterruptRail):
         """Leader approvals are session-scoped; never persist to disk."""
         return False
 
-    def should_emit_interrupt_output(self) -> bool:
-        """Team permission approvals are routed through the leader."""
-        return False
-
     @staticmethod
     def parse_confirm_payload(
         user_input: Any,

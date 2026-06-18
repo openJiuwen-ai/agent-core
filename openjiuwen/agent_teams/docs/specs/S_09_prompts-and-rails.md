@@ -77,8 +77,7 @@
 
 25. **继承 `PermissionInterruptRail`**：复用完整 `PermissionEngine` 三级判定（ALLOW/DENY/ASK + auto_confirm）。`enable_permissions=True` 时替代 `TeamToolApprovalRail`。
 26. **`_persist_allow_always() → False`**：leader 审批 session-scoped，override 父类的磁盘写盘方法直接返回 `False`，不写 teammate 本地 YAML。
-27. **`should_emit_interrupt_output() → False`**：ASK 不产生用户可见输出——审批经 `TeamApprovalOrchestrator` 内部消息通道路由 leader，leader `approve_tool` 后 `protocol="json"` DB message 作为 teammate `resume_interrupt` 的 fallback。
-28. **`parse_confirm_payload()` 自动设置 `decided_by="leader"`**：返回 `TeamPermissionConfirmResponse`（`PermissionConfirmResponse` + `decided_by`），`decided_by` 仅用于内部审计，不暴露给 LLM。
+27. **`parse_confirm_payload()` 自动设置 `decided_by="leader"`**：返回 `TeamPermissionConfirmResponse`（`PermissionConfirmResponse` + `decided_by`），`decided_by` 仅用于内部审计，不暴露给 LLM。
 
 ## 接口契约
 
@@ -362,7 +361,6 @@ class TeamApprovalOrchestrator:
 
 class TeamPermissionRail(PermissionInterruptRail):
     def _persist_allow_always(self, normalized_name: str, tool_args: dict) -> bool: ...  # always False
-    def should_emit_interrupt_output(self) -> bool: ...  # always False
 
     @staticmethod
     def parse_confirm_payload(
