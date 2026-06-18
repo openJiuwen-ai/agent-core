@@ -114,13 +114,15 @@ class LogCompressor:
 
     @staticmethod
     def _select(lines: list[LogLine], ctx: RuleContext) -> tuple[list[LogLine], int]:
-        errors = [line for line in lines if line.level in {LogLevel.ERROR, LogLevel.FAIL}]
+        errors = [line for line in lines if line.level == LogLevel.ERROR]
+        fails = [line for line in lines if line.level == LogLevel.FAIL]
         warnings = [line for line in lines if line.level == LogLevel.WARN]
         deduped_warnings = _dedupe_warnings(warnings)
         traces = _group_traces(lines)
         summaries = [line for line in lines if line.summary]
 
         selected = _first_last_top(errors, ctx.log_max_errors)
+        selected.extend(_first_last_top(fails, ctx.log_max_errors))
         selected.extend(deduped_warnings[: ctx.log_max_warnings])
         for trace in traces[: ctx.log_max_stack_traces]:
             selected.extend(trace[: ctx.log_stack_trace_max_lines])
@@ -157,16 +159,16 @@ def _classify_lines(lines: list[str], max_trace_lines: int) -> tuple[list[LogLin
         level = _classify_level(content)
         summary = bool(_SUMMARY_RE.search(content))
         score = {
-            LogLevel.ERROR: 100,
-            LogLevel.FAIL: 100,
-            LogLevel.WARN: 50,
-            LogLevel.INFO: 10,
-            LogLevel.DEBUG: 5,
+            LogLevel.ERROR: 90,
+            LogLevel.FAIL: 90,
+            LogLevel.WARN: 45,
+            LogLevel.INFO: 12,
+            LogLevel.DEBUG: 4,
             LogLevel.TRACE: 2,
-            LogLevel.UNKNOWN: 10,
+            LogLevel.UNKNOWN: 15,
         }[level]
-        score += 30 if in_trace else 0
-        score += 40 if summary else 0
+        score += 35 if in_trace else 0
+        score += 35 if summary else 0
         classified.append(LogLine(position, content, level, in_trace, summary, min(score, 100)))
     return classified, traces_seen
 

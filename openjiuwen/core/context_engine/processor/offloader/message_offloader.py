@@ -30,9 +30,7 @@ class MessageOffloaderConfig(BaseModel):
     ttl_seconds: int = Field(default=300, ge=0)
     """Idle time between LLM context-window requests before TTL processing is eligible."""
 
-    protected_tool_names: list[str] = Field(
-        default_factory=lambda: ["reload_original_context_messages"]
-    )
+    protected_tool_names: list[str] = Field(default_factory=lambda: ["reload_original_context_messages"])
     """Tool names, or ``tool:argument-pattern`` entries, that must remain inline."""
 
 
@@ -74,7 +72,23 @@ class MessageOffloader(ContextProcessor):
                 pass_name="add",
                 max_chars=threshold,
             )
-            if len(replacement.content) > threshold:
+            if self._is_rule_compressed_message(replacement):
+                replacement = await self._attach_offload_path_to_rule_compressed_message(
+                    replacement,
+                    original_message=message,
+                    context=context,
+                    **kwargs,
+                )
+                if len(replacement.content) > threshold:
+                    replacement = replacement.model_copy(
+                        update={
+                            "content": self._truncate_preserving_offload_marker(
+                                replacement.content,
+                                threshold,
+                            )
+                        }
+                    )
+            elif len(replacement.content) > threshold:
                 replacement = await self._offload_message(
                     replacement,
                     context,
@@ -186,6 +200,30 @@ class MessageOffloader(ContextProcessor):
         )
         return offloaded or message
 
+    async def _attach_offload_path_to_rule_compressed_message(
+        self,
+        message: BaseMessage,
+        *,
+        original_message: BaseMessage,
+        context: ModelContext,
+        **kwargs: Any,
+    ) -> BaseMessage:
+        extra_fields = message.model_dump()
+        extra_fields.pop("role", None)
+        extra_fields.pop("content", None)
+        offload_handle, offload_path = self._new_offload_handle_and_path(context)
+        offloaded = await self.offload_messages(
+            role=message.role,
+            content=message.content,
+            messages=[original_message],
+            context=context,
+            offload_handle=offload_handle,
+            offload_path=offload_path,
+            **extra_fields,
+            **kwargs,
+        )
+        return offloaded or message
+
     def _is_processable_tool_message(
         self,
         message: BaseMessage,
@@ -201,6 +239,20 @@ class MessageOffloader(ContextProcessor):
     @staticmethod
     def _is_rule_compressed_message(message: BaseMessage) -> bool:
         return bool((getattr(message, "metadata", None) or {}).get("rule_compressed_at"))
+
+    @staticmethod
+    def _truncate_preserving_offload_marker(content: str, max_chars: int) -> str:
+        marker_start = content.rfind("[[OFFLOAD:")
+        if marker_start < 0:
+            return content[:max_chars]
+
+        marker = content[marker_start:].strip()
+        body = content[:marker_start].rstrip()
+        separator = "\n...\n"
+        body_budget = max_chars - len(marker) - len(separator)
+        if body_budget <= 0:
+            return marker
+        return f"{body[:body_budget].rstrip()}{separator}{marker}"
 
     def _context_occupancy_chars(self, context: ModelContext) -> int:
         return sum(
@@ -280,9 +332,7 @@ class MessageOffloader(ContextProcessor):
         else:
             function = getattr(tool_call, "function", None)
             arguments = (
-                getattr(function, "arguments", None)
-                if function is not None
-                else getattr(tool_call, "arguments", None)
+                getattr(function, "arguments", None) if function is not None else getattr(tool_call, "arguments", None)
             )
         if isinstance(arguments, dict):
             return arguments
@@ -296,10 +346,7 @@ class MessageOffloader(ContextProcessor):
 
     @staticmethod
     def _match_pattern(args: dict[str, Any], pattern: str) -> bool:
-        return any(
-            isinstance(value, str) and fnmatch.fnmatch(value, pattern)
-            for value in args.values()
-        )
+        return any(isinstance(value, str) and fnmatch.fnmatch(value, pattern) for value in args.values())
 
     def load_state(self, state: dict[str, Any]) -> None:
         _ = state

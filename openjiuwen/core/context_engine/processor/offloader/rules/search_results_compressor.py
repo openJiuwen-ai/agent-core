@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from openjiuwen.core.context_engine.processor.offloader.rules.common import ERROR_RE, meets_savings_ratio
+from openjiuwen.core.context_engine.processor.offloader.rules.common import meets_savings_ratio
 from openjiuwen.core.context_engine.processor.offloader.rules.types import (
     ContentType,
     RuleCompressionResult,
@@ -19,7 +19,25 @@ class SearchMatch:
     content: str
     original: str
     position: int
-    score: int = 0
+    score: float = 0.0
+
+
+ERROR_SIGNAL_RE = re.compile(
+    r"\b(error|failed|failure|traceback|exception|fatal|panic)\b",
+    re.IGNORECASE,
+)
+WARNING_SIGNAL_RE = re.compile(r"\b(warn|warning|deprecated)\b", re.IGNORECASE)
+IMPORTANCE_SIGNAL_RE = re.compile(r"\b(todo|fixme|important|critical)\b", re.IGNORECASE)
+
+QUERY_CONTENT_HIT_SCORE = 0.25
+QUERY_CONTENT_SCORE_CAP = 0.60
+QUERY_PATH_HIT_SCORE = 0.15
+QUERY_PATH_SCORE_CAP = 0.30
+ERROR_SIGNAL_SCORE = 0.50
+WARNING_SIGNAL_SCORE = 0.35
+IMPORTANCE_SIGNAL_SCORE = 0.25
+MAX_SEARCH_MATCH_SCORE = 1.0
+HIGH_SIGNAL_SCORE_THRESHOLD = 0.5
 
 
 class SearchResultsCompressor:
@@ -122,7 +140,7 @@ class SearchResultsCompressor:
         diversity_ratio = len(normalized_contents) / total
         base_limit = min(5, total)
         diversity_slots = round((min(total, hard_limit) - base_limit) * diversity_ratio)
-        high_signal_count = sum(1 for match in matches if match.score > 0)
+        high_signal_count = sum(1 for match in matches if match.score >= HIGH_SIGNAL_SCORE_THRESHOLD)
         signal_floor = min(base_limit + high_signal_count, hard_limit, total)
         return min(max(base_limit + diversity_slots, signal_floor), hard_limit, total)
 
@@ -133,9 +151,22 @@ class SearchResultsCompressor:
 
     @staticmethod
     def _score_match(match: SearchMatch, query_terms: frozenset[str]) -> SearchMatch:
-        lowered = match.content.lower()
-        score = 100 if ERROR_RE.search(match.content) else 0
-        score += 20 * sum(1 for term in query_terms if term in lowered)
+        lowered_content = match.content.lower()
+        lowered_path = match.file_path.lower()
+        content_hits = sum(1 for term in query_terms if term in lowered_content)
+        path_hits = sum(1 for term in query_terms if term in lowered_path)
+
+        score = 0.0
+        score += min(content_hits * QUERY_CONTENT_HIT_SCORE, QUERY_CONTENT_SCORE_CAP)
+        score += min(path_hits * QUERY_PATH_HIT_SCORE, QUERY_PATH_SCORE_CAP)
+
+        if ERROR_SIGNAL_RE.search(match.content):
+            score += ERROR_SIGNAL_SCORE
+        elif WARNING_SIGNAL_RE.search(match.content):
+            score += WARNING_SIGNAL_SCORE
+        elif IMPORTANCE_SIGNAL_RE.search(match.content):
+            score += IMPORTANCE_SIGNAL_SCORE
+        score = min(score, MAX_SEARCH_MATCH_SCORE)
         return SearchMatch(
             file_path=match.file_path,
             line_number=match.line_number,
