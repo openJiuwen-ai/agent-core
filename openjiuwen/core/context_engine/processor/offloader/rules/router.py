@@ -38,9 +38,28 @@ class RuleContentRouter:
         re.IGNORECASE,
     )
     _SEARCH_LINE_RE = re.compile(r"^.+?:\d+[:\-].+$")
-    _ERROR_RE = re.compile(
-        r"\b(error|failed|failure|traceback|exception|warn|warning)\b",
-        re.IGNORECASE,
+    _TIMESTAMP_LOG_LINE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\b")
+    _BUILD_OUTPUT_RE = re.compile(
+        r"(?im)("
+        r"^=+ (?:test session starts|failures|errors|short test summary info) =+$|"
+        r"^collected \d+ items\b|"
+        r"^(?:FAILED|ERROR) .+::.+(?: - |$)|"
+        r"^\d+\s+(?:failed|passed|skipped|errors?|warnings?)\b|"
+        r"\b\d+\s+failed,\s+\d+\s+passed\b|"
+        r"^npm (?:ERR!|WARN|info)\b|"
+        r"^(?:PASS|FAIL) \S+|"
+        r"^Test Suites:|"
+        r"^(?:Compiling|Finished|Running) \S+|"
+        r"^(?:error|warning)(?:\[[A-Z]\d+\])?:|"
+        r"^(?:\[[A-Z]+\]\s*)?(?:ERROR|WARN|WARNING|INFO|DEBUG|TRACE|FATAL|CRITICAL)\b|"
+        r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}.*\b(?:ERROR|WARN|WARNING|INFO|DEBUG|TRACE|FATAL|CRITICAL)\b|"
+        r"^.+?:\d+(?::\d+)?:\s*(?:error|warning):|"
+        r"^make(?:\[\d+\])?:|"
+        r"^Traceback \(most recent call last\)|"
+        r"^\s*File \".+\", line \d+|"
+        r"^\s*at .+\(.+:\d+:\d+\)|"
+        r"^-->\s+.+:\d+:\d+"
+        r")"
     )
     _CODE_RE = re.compile(
         r"^\s*(?:def|class|import|from|async\s+def|export|function|const|let|var|"
@@ -91,16 +110,16 @@ class RuleContentRouter:
             return ContentType.HTML
         lines = [line for line in text.splitlines() if line.strip()]
         if lines:
-            matches = sum(1 for line in lines if self._SEARCH_LINE_RE.match(line))
+            matches = sum(
+                1
+                for line in lines
+                if self._SEARCH_LINE_RE.match(line) and not self._TIMESTAMP_LOG_LINE_RE.match(line)
+            )
             if matches / len(lines) >= 0.3:
                 return ContentType.SEARCH_RESULTS
         if self._CODE_RE.search(source_text):
             return ContentType.SOURCE_CODE
-        if self._ERROR_RE.search(text) or re.search(
-            r"\b(pytest|npm|cargo|make|jest)\b",
-            text,
-            re.IGNORECASE,
-        ):
+        if self._BUILD_OUTPUT_RE.search(text):
             return ContentType.BUILD_OUTPUT
         return ContentType.PLAIN_TEXT
 
