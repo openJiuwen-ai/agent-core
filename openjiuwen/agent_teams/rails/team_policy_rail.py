@@ -89,7 +89,6 @@ class TeamPolicyRail(DeepAgentRail):
         team_workspace_path: str | None = None,
         team_backend: "TeamBackend | None" = None,
         expose_human_agents_to_teammates: bool = False,
-        enable_swarmflow: bool = False,
     ) -> None:
         super().__init__()
         self._language = language
@@ -99,7 +98,6 @@ class TeamPolicyRail(DeepAgentRail):
         self._team_workspace_path = team_workspace_path
         self._role = role
         self._expose_human_agents_to_teammates = expose_human_agents_to_teammates
-        self._enable_swarmflow = enable_swarmflow
         self.system_prompt_builder = None
 
         # Static sections built once and reused on every call. HITT is
@@ -187,7 +185,6 @@ class TeamPolicyRail(DeepAgentRail):
             base_prompt=base_prompt,
             language=self._language,
             bridge_agent_names=bridge_agent_names,
-            enable_swarmflow=self._enable_swarmflow,
         )
         team_logger.info(
             "[{}] TeamPolicyRail static sections: section_names={}",

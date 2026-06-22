@@ -15,7 +15,7 @@ contextvars).
 """
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Sequence
+from typing import Any, Awaitable, Callable, Literal, Sequence
 
 from . import primitives as _p
 
@@ -32,7 +32,8 @@ class EngineProvider:
         schema: Any = None,
         model: str | None = None,
         timeout: float | None = None,
-        isolation: str | None = None,
+        isolation: Literal["worktree"] | None = None,
+        agent_type: str | None = None,
     ) -> Any:
         return await _p.agent(
             prompt,
@@ -42,6 +43,7 @@ class EngineProvider:
             model=model,
             timeout=timeout,
             isolation=isolation,
+            agent_type=agent_type,
         )
 
     async def parallel(self, thunks: Sequence[Callable[[], Awaitable]]) -> list:

@@ -70,23 +70,48 @@ class SwarmflowTool(AsyncTool):
         self._model_resolver = model_resolver
         self._worker_base_spec = worker_base_spec
         self._human_base_spec = human_base_spec
+        # Four script sources mirror the reference tool's surface
+        # (script_path / script / name / resume_id). "At least one" is enforced
+        # in ``invoke`` rather than via JSON-Schema ``required`` because the rule
+        # is a one-of, not a fixed key. Today only ``script_path`` is wired to
+        # execution; the rest are accepted and rejected with a clear message.
         self.card.input_params = {
             "type": "object",
             "properties": {
                 "script_path": {"type": "string", "description": translator("swarmflow", "script_path")},
+                "script": {"type": "string", "description": translator("swarmflow", "script")},
+                "name": {"type": "string", "description": translator("swarmflow", "name")},
+                "resume_id": {"type": "string", "description": translator("swarmflow", "resume_id")},
                 "args": {"type": "string", "description": translator("swarmflow", "args")},
             },
-            "required": ["script_path"],
         }
 
     def launched_description(self, inputs: dict[str, Any]) -> str:
         return f"swarmflow: {(inputs.get('script_path') or '').strip()}"
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
-        """Validate, guard against a concurrent run, then launch in background."""
+        """Validate the script source, guard a concurrent run, then launch.
+
+        Accepts the reference tool's four script sources but only runs
+        ``script_path`` today. ``script`` / ``name`` / ``resume_id`` are
+        recognised and rejected with an explicit "not supported yet" message
+        (never a silent no-op), so the surface is honest about what is wired.
+        """
         script_path = (inputs.get("script_path") or "").strip()
+        script = (inputs.get("script") or "").strip()
+        name = (inputs.get("name") or "").strip()
+        resume_id = (inputs.get("resume_id") or "").strip()
+        if not any((script_path, script, name, resume_id)):
+            return ToolOutput(
+                success=False,
+                error="one of 'script_path' / 'script' / 'name' / 'resume_id' is required",
+            )
         if not script_path:
-            return ToolOutput(success=False, error="'script_path' is required")
+            pending = [n for n, v in (("script", script), ("name", name), ("resume_id", resume_id)) if v]
+            return ToolOutput(
+                success=False,
+                error=f"{pending[0]!r} is not supported yet; provide 'script_path' to run a script from disk",
+            )
         if self._parent_agent.async_tool_runtime.has_running(self.card.name):
             return ToolOutput(success=False, error="A swarmflow run is already in progress")
         return await super().invoke(inputs, **kwargs)

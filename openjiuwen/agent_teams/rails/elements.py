@@ -140,7 +140,6 @@ class TeamPolicyInput(ConstructionInput):
         default=False,
         description="Whether teammates see the concrete human-agent roster.",
     )
-    enable_swarmflow: bool = param_field(default=False, description="Whether swarmflow is enabled.")
 
 
 @harness_element(
@@ -168,7 +167,6 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         team_workspace_path=inp.team_workspace_path,
         team_backend=get_team_backend(context),
         expose_human_agents_to_teammates=inp.expose_human_agents_to_teammates,
-        enable_swarmflow=inp.enable_swarmflow,
     )
 
 

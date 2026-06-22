@@ -474,7 +474,6 @@ class AgentConfigurator:
                     "team_workspace_mount": team_workspace_mount,
                     "team_workspace_path": team_workspace_path,
                     "expose_human_agents_to_teammates": spec.expose_human_agents_to_teammates,
-                    "enable_swarmflow": spec.enable_swarmflow,
                 },
             ),
         ]

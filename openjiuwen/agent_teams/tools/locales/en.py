@@ -311,8 +311,33 @@ STRINGS: dict[str, str] = {
     # ===== swarmflow / structured_output ======================================
     # swarmflow._desc lives in descs/en/swarmflow.md
     # structured_output._desc lives in descs/en/structured_output.md (dynamic schema, no fixed params)
-    "swarmflow.script_path": "Path to the swarmflow script file (a Python module with META and async def run(args)).",
-    "swarmflow.args": "Optional argument value passed to the script's run(args) (e.g. a question, a target path).",
+    "swarmflow.script_path": (
+        "Path to a swarmflow script file on disk — a Python module with a top-level META (pure literal) "
+        "and async def run(args), whose body uses primitives imported via from swarmflow import "
+        "agent()/parallel()/pipeline()/... Highest precedence of the four script sources "
+        "(script_path / script / name / resume_id), and the only one wired to execution today."
+    ),
+    "swarmflow.script": (
+        "Self-contained inline swarmflow script source (avoids writing to disk first). Must begin with a "
+        "top-level META (pure literal, no variables / calls / f-strings), then async def run(args), with the "
+        "body using agent()/parallel()/pipeline()/phase() primitives. Interface is in place; execution is "
+        "coming — use script_path for now."
+    ),
+    "swarmflow.name": (
+        "Name of a saved / named swarmflow workflow, resolved to a self-contained script to run. "
+        "Interface is in place; execution is coming — use script_path for now."
+    ),
+    "swarmflow.resume_id": (
+        "The run_id of a prior run to resume. Unchanged agent() calls (same prompt + opts + schema) return "
+        "their cached results instantly; only edited / new calls re-run (an upstream change cascades to "
+        "invalidate downstream); same script + same args → full cache hit. Interface is in place; execution "
+        "is coming — use script_path for now."
+    ),
+    "swarmflow.args": (
+        "Optional argument passed to the script's async def run(args), as a **string** verbatim (e.g. a "
+        "research question, a target path). The script parses it itself (json.loads inside run for "
+        "structured input)."
+    ),
     "swarmflow_worker.schema": (
         "You are a single-shot swarmflow worker. Read the task in the user message, "
         "do the work, then call the `structured_output` tool EXACTLY ONCE with the "

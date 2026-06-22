@@ -67,6 +67,10 @@ _wf_depth: ContextVar[int] = ContextVar("wf_depth", default=0)
 # Max nesting of ``workflow()`` calls along one path. 1 = a script may call a
 # sub-workflow, but that sub-workflow may not call another (recursion guard).
 _MAX_WORKFLOW_DEPTH = 1
+# Max items in a single ``parallel()`` / ``pipeline()`` call. Exceeding it raises
+# rather than silently truncating — a bounded fan-out keeps one call from
+# spawning an unbounded agent fleet by accident.
+_MAX_FANOUT = 4096
 
 
 @dataclass
@@ -207,7 +211,9 @@ def _emit_agent_failed(rt, opts: dict, message: str) -> None:
 # ─────────────────────────── options bag ───────────────────────────
 #: Engine-owned ``options`` keys. A backend may widen this via its
 #: ``KNOWN_OPTIONS``; anything outside the union is a typo and fails fast.
-_ENGINE_OPTIONS = frozenset({"label", "phase", "schema", "model", "timeout"})
+_ENGINE_OPTIONS = frozenset(
+    {"label", "phase", "schema", "model", "timeout", "isolation", "agent_type"}
+)
 
 
 def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
@@ -256,7 +262,7 @@ async def agent(
     prompt: str, *, schema: type[M],
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
-    isolation: str | None = ...,
+    isolation: Literal["worktree"] | None = ..., agent_type: str | None = ...,
 ) -> "M | None":
     """Overload: ``schema=<pydantic model>`` narrows the result to that model."""
     ...
@@ -267,7 +273,7 @@ async def agent(
     prompt: str, *, schema: dict,
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
-    isolation: str | None = ...,
+    isolation: Literal["worktree"] | None = ..., agent_type: str | None = ...,
 ) -> "dict | None":
     """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
     ...
@@ -278,7 +284,7 @@ async def agent(
     prompt: str, *, schema: None = ...,
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
-    isolation: str | None = ...,
+    isolation: Literal["worktree"] | None = ..., agent_type: str | None = ...,
 ) -> "str | None":
     """Overload: no ``schema`` returns the agent's raw text."""
     ...
@@ -292,15 +298,22 @@ async def agent(
     schema: Any = None,
     model: str | None = None,
     timeout: float | None = None,
-    isolation: str | None = None,
+    isolation: Literal["worktree"] | None = None,
+    agent_type: str | None = None,
 ) -> Any:
     rt = _rt.get()
     if isolation is not None and isolation != "worktree":
         raise WorkflowError("agent(isolation=...) only supports 'worktree'")
     opts: dict = {}
+    # ``isolation`` / ``agent_type`` are carried in opts for forward-compat with
+    # the reference tool's surface, but the reference engine's backend does not
+    # act on them yet (a worktree-isolated or typed sub-agent is not spawned);
+    # they are accepted, not silently rejected. TODO: wire them into the backend
+    # and into ``call_signature`` once isolated / typed execution lands.
     for _k, _v in (
         ("label", label), ("phase", phase), ("schema", schema),
-        ("model", model), ("timeout", timeout), ("isolation", isolation),
+        ("model", model), ("timeout", timeout),
+        ("isolation", isolation), ("agent_type", agent_type),
     ):
         if _v is not None:
             opts[_k] = _v
@@ -761,6 +774,11 @@ async def parallel(thunks: Sequence[Callable[[], Awaitable]]) -> list:
     k = _next_ordinal()  # this block's slot in the parent scope
     base = _path.get()
     thunks = list(thunks)
+    if len(thunks) > _MAX_FANOUT:
+        raise WorkflowError(
+            f"parallel() got {len(thunks)} thunks; the per-call limit is "
+            f"{_MAX_FANOUT}. Split into batches instead of one giant fan-out."
+        )
 
     async def branch(i: int, th: Callable[[], Awaitable]):
         # Runs in a Task-copied context; sets are private to this branch.
@@ -782,6 +800,11 @@ async def pipeline(items: Sequence, *stages: Callable) -> list:
     k = _next_ordinal()  # this block's slot in the parent scope
     base = _path.get()
     items = list(items)
+    if len(items) > _MAX_FANOUT:
+        raise WorkflowError(
+            f"pipeline() got {len(items)} items; the per-call limit is "
+            f"{_MAX_FANOUT}. Split into batches instead of one giant fan-out."
+        )
 
     async def chain(i: int, item: Any):
         prev = item

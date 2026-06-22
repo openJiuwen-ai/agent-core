@@ -212,8 +212,29 @@ STRINGS: dict[str, str] = {
     # ===== swarmflow / structured_output ======================================
     # swarmflow._desc lives in descs/cn/swarmflow.md
     # structured_output._desc lives in descs/cn/structured_output.md (无固定参数，schema 动态)
-    "swarmflow.script_path": "swarmflow 脚本文件路径（一个含 META 与 async def run(args) 的 Python 模块）。",
-    "swarmflow.args": "传给脚本 run(args) 的可选参数值（如研究问题、目标路径）。",
+    "swarmflow.script_path": (
+        "磁盘上的 swarmflow 脚本文件路径——一个 Python 模块，含顶层 META（纯字面量）与 "
+        "async def run(args)，脚本体用 from swarmflow import 引入 agent()/parallel()/pipeline() "
+        "等原语。四个脚本来源（script_path / script / name / resume_id）中优先级最高，也是当前唯一接通执行的来源。"
+    ),
+    "swarmflow.script": (
+        "自包含的内联 swarmflow 脚本源码（免去先写盘）。必须以顶层 META（纯字面量，无变量 / 函数调用 / "
+        "f-string）开头，后跟 async def run(args)，脚本体用 agent()/parallel()/pipeline()/phase() 等原语。"
+        "接口已就位、执行推进中——当前请改用 script_path。"
+    ),
+    "swarmflow.name": (
+        "已保存 / 具名 swarmflow 工作流的名称，解析为一个自包含脚本来运行。"
+        "接口已就位、执行推进中——当前请改用 script_path。"
+    ),
+    "swarmflow.resume_id": (
+        "要续跑的上次运行 run_id。内容未变的 agent() 调用（prompt + opts + schema 一致）瞬时返回缓存结果，"
+        "只有改动 / 新增的调用重跑（上游变更级联失效下游）；同脚本 + 同 args → 全缓存命中。"
+        "接口已就位、执行推进中——当前请改用 script_path。"
+    ),
+    "swarmflow.args": (
+        "传给脚本 async def run(args) 的可选参数，作为**字符串**原样传入（如研究问题、目标路径）。"
+        "脚本内自行解析（需结构化输入可在 run 里 json.loads）。"
+    ),
     "swarmflow_worker.schema": (
         "你是一名单次执行的 swarmflow 工作节点。阅读用户消息中的任务，完成工作，"
         "然后**必须**调用 `structured_output` 工具**恰好一次**，传入符合其输入 schema "

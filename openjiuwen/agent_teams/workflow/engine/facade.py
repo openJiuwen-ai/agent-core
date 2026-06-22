@@ -23,7 +23,7 @@ simulated, local vs. distributed) without touching script code.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence, TypeVar, overload
 
 from .seam import (
     BudgetView,
@@ -60,7 +60,7 @@ async def agent(
     prompt: str, *, schema: type[M],
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
-    isolation: str | None = ...,
+    isolation: Literal["worktree"] | None = ..., agent_type: str | None = ...,
 ) -> "M | None":
     """Overload: ``schema=<pydantic model>`` narrows the result to that model."""
     ...
@@ -71,7 +71,7 @@ async def agent(
     prompt: str, *, schema: dict,
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
-    isolation: str | None = ...,
+    isolation: Literal["worktree"] | None = ..., agent_type: str | None = ...,
 ) -> "dict | None":
     """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
     ...
@@ -82,7 +82,7 @@ async def agent(
     prompt: str, *, schema: None = ...,
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
-    isolation: str | None = ...,
+    isolation: Literal["worktree"] | None = ..., agent_type: str | None = ...,
 ) -> "str | None":
     """Overload: no ``schema`` returns the agent's raw text."""
     ...
@@ -96,9 +96,16 @@ async def agent(
     schema: Any = None,
     model: str | None = None,
     timeout: float | None = None,
-    isolation: str | None = None,
+    isolation: Literal["worktree"] | None = None,
+    agent_type: str | None = None,
 ) -> Any:
-    """Spawn a sub-agent. Delegates to the current provider's ``agent``."""
+    """Spawn a sub-agent. Delegates to the current provider's ``agent``.
+
+    ``isolation`` (run the sub-agent in a fresh git worktree) and ``agent_type``
+    (use a named specialist sub-agent) mirror the reference tool's surface so
+    scripts can be written against the full API. The reference engine accepts
+    them but does not act on them yet — execution is identical to omitting them.
+    """
     return await current_provider().agent(
         prompt,
         label=label,
@@ -107,6 +114,7 @@ async def agent(
         model=model,
         timeout=timeout,
         isolation=isolation,
+        agent_type=agent_type,
     )
 
 
