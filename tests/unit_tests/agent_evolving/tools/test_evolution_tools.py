@@ -9,6 +9,7 @@ import pytest
 
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.agent_evolving.tools import (
+    EvolveReviewTaskTool,
     MAIN_EVOLUTION_TOOL_NAMES,
     REVIEW_EVOLUTION_TOOL_NAMES,
     create_main_evolution_tools,
@@ -67,6 +68,25 @@ def test_main_and_review_evolution_tool_names_are_distinct_surfaces():
     assert "read_trajectory_steps" not in MAIN_EVOLUTION_TOOL_NAMES
     assert "submit_evolution_review" not in MAIN_EVOLUTION_TOOL_NAMES
     assert "evolve_skill_experiences" not in REVIEW_EVOLUTION_TOOL_NAMES
+
+
+def test_evolve_review_task_description_hardens_intent_and_evidence_rules():
+    description = EvolveReviewTaskTool._build_task_description(
+        {
+            "subject": {"kind": "skill", "name": "skill-a"},
+            "user_intent": "capture parser failure",
+        },
+        "review-ref-1",
+    )
+
+    assert "user_intent: capture parser failure" in description
+    assert "If no task evidence is available but user_intent is present" in description
+    assert "evidence_refs=[]" in description
+    assert "If no task evidence is available and user_intent is empty" in description
+    assert "outcome=no_evolution" in description
+    assert "Do not invent execution evidence" in description
+    assert "If task evidence is available, first read relevant task and experience evidence" in description
+    assert "refs you actually read" in description
 
 
 @pytest.mark.asyncio
@@ -234,6 +254,7 @@ async def test_evolve_tool_uses_submission_service_interface():
 
     assert result.success is True
     submission_service.apply_prepared_evolve_submission.assert_awaited_once()
+    assert submission_service.apply_prepared_evolve_submission.await_args.kwargs == {}
     review_runtime.consume_prepared_submission.assert_called_once()
     scope = review_runtime.resolve_scope(launch.evolution_review_ref, session_id="session-1")
     assert scope.status == "submitted"

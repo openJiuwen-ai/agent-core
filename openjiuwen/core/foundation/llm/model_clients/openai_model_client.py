@@ -408,7 +408,10 @@ class OpenAIModelClient(BaseModelClient):
                 LLMCallEvents.LLM_OUTPUT,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
-                is_stream=True)
+                is_stream=True,
+                response=final_message.content if final_message else None,
+                usage=final_message.usage_metadata if final_message else None,
+                tool_calls=final_message.tool_calls if final_message else None)
 
         except Exception as e:
             # Many stream-layer exceptions (httpx.RemoteProtocolError,

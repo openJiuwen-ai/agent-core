@@ -76,7 +76,7 @@ class EditSafetyRail(DeepAgentRail):
         self._reject_tool(
             ctx,
             "Out-of-scope edit blocked. Only "
-            "`openjiuwen/harness/**`, `openjiuwen/core/**`, "
+            "`openjiuwen/dev_tools/**`, `openjiuwen/harness/**`, `openjiuwen/core/**`, "
             "`tests/**`, `examples/**`, `docs/en/**`, and `docs/zh/**` may be modified. "
             f"Rejected path: '{normalized or file_path}'.",
         )

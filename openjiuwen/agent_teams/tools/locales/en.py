@@ -72,6 +72,11 @@ STRINGS: dict[str, str] = {
         "(e.g. gpt-4, claude-sonnet-4); "
         "the system picks an appropriate model when omitted"
     ),
+    "spawn_teammate.permissions": (
+        "Narrow the teammate's tool permissions (only tightening, never loosening). "
+        "Keys are tool names, values are permission levels: 'allow', 'ask', or 'deny'. "
+        "Example: {\"bash\": \"deny\", \"write_file\": \"ask\"}"
+    ),
     # ===== spawn_human_agent ===================================================
     # spawn_human_agent._desc lives in descs/en/spawn_human_agent.md
     "spawn_human_agent.member_name": (

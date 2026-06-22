@@ -62,6 +62,7 @@ class TeamMessageManager:
         content: str,
         to_member_name: str,
         from_member_name: str | None = None,
+        protocol: str = "plain",
     ) -> Optional[str]:
         """Send a point-to-point message.
 
@@ -69,6 +70,8 @@ class TeamMessageManager:
             content: Message content.
             to_member_name: Recipient member ID.
             from_member_name: Override sender ID. Defaults to self.member_name.
+            protocol: Message format — ``"plain"`` for normal text,
+                ``"json"`` for structured payloads.
         """
         sender = from_member_name or self.member_name
         message_id = str(uuid.uuid4())
@@ -81,6 +84,7 @@ class TeamMessageManager:
             to_member_name=to_member_name,
             broadcast=False,
             is_read=False,
+            protocol=protocol,
         )
         if not success:
             team_logger.error(f"Failed to create message {message_id}")
@@ -260,3 +264,21 @@ class TeamMessageManager:
         else:
             team_logger.error(f"Failed to mark message {message_id} as read by {member_name}")
         return success
+
+    async def mark_messages_read(self, message_ids: list[str], member_name: str) -> int:
+        """Mark several messages read for one member in one transaction.
+
+        Batches the per-message read-state writes into a single commit
+        (one fsync) — the dominant write-throughput lever on SQLite.
+
+        Args:
+            message_ids: Message ids to mark read, in delivery order.
+            member_name: Member who read the messages.
+
+        Returns:
+            Count of messages whose read state was applied.
+        """
+        marked = await self.db.message.mark_messages_read(message_ids, member_name)
+        if marked:
+            team_logger.debug("Marked %d messages read by %s", marked, member_name)
+        return marked

@@ -42,6 +42,37 @@ def _complete_review(runtime: EvolutionReviewRuntime, *, session_id: str = "sess
     return launch
 
 
+def _resolve_record_source(
+    runtime: EvolutionReviewRuntime,
+    *,
+    user_intent: str = "",
+) -> str | None:
+    launch = runtime.create_scope(
+        source="explicit_command",
+        subject={"kind": "skill", "name": "skill-a"},
+        session_id="session-1",
+        user_intent=user_intent,
+    )
+    runtime.record_review_result(
+        launch.evolution_review_ref,
+        session_id="session-1",
+        result={
+            "subject": {"kind": "skill", "name": "skill-a"},
+            "outcome": "recommend_evolve",
+            "evidence_refs": [],
+            "proposals": [_proposal("prop_1", "Prefer parser fields.") | {"evidence_refs": []}],
+            "summary": "one proposal",
+        },
+    )
+    resolved = runtime.resolve_selected_proposals(
+        launch.evolution_review_ref,
+        subject={"kind": "skill", "name": "skill-a"},
+        selected_proposal_ids=["prop_1"],
+        session_id="session-1",
+    )
+    return resolved.record_source
+
+
 def test_create_scope_returns_ref_and_subject():
     runtime = EvolutionReviewRuntime()
 
@@ -178,6 +209,24 @@ def test_resolve_selected_proposals_returns_detail_and_execution_drafts():
     assert resolved.proposals[0].content == "Prefer parser fields."
     assert resolved.experience_drafts[0]["content"] == "Prefer parser fields."
     assert resolved.experience_drafts[0]["reason"] == "reviewed evidence supports this proposal"
+    assert resolved.record_source == "agent_inferred"
+
+
+def test_resolve_selected_proposals_record_source_prefers_user_intent():
+    runtime = EvolutionReviewRuntime()
+    record_source = _resolve_record_source(
+        runtime,
+        user_intent="capture parser failure",
+    )
+
+    assert record_source == "user_intent"
+
+
+def test_resolve_selected_proposals_record_source_defaults_to_agent_inferred():
+    runtime = EvolutionReviewRuntime()
+    record_source = _resolve_record_source(runtime)
+
+    assert record_source == "agent_inferred"
 
 
 def test_resolve_selected_proposals_rejects_uncompleted_review():

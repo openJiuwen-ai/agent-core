@@ -80,8 +80,15 @@ class TestParseJsonFromLlmResponse:
 
     @staticmethod
     def test_missing_json_marker():
-        """Missing ```json marker returns None."""
+        """Missing ```json marker parses stripped JSON string."""
         response = '{"result": true}'
+        result = TuneUtils.parse_json_from_llm_response(response)
+        assert result == {"result": True}
+
+    @staticmethod
+    def test_invalid_json_markerless_string():
+        """Markerless invalid string returns None."""
+        response = "not a json string"
         result = TuneUtils.parse_json_from_llm_response(response)
         assert result is None
 
@@ -128,11 +135,18 @@ class TestParseJsonFromLlmResponse:
         assert result["key"] is None
 
     @staticmethod
-    def test_json_array():
-        """JSON with array at root."""
+    def test_fenced_json_array_returns_none():
+        """Non-dict fenced JSON returns None."""
         response = "```json\n[1, 2, 3]\n```"
         result = TuneUtils.parse_json_from_llm_response(response)
-        assert result == [1, 2, 3]
+        assert result is None
+
+    @staticmethod
+    def test_markerless_json_array_returns_none():
+        """Non-dict raw JSON returns None."""
+        response = "[1, 2, 3]"
+        result = TuneUtils.parse_json_from_llm_response(response)
+        assert result is None
 
 
 class TestParseListFromLlMResponse:

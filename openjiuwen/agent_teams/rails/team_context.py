@@ -36,7 +36,6 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.reliability.factory import ReliabilityComponents
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tools.team import TeamBackend
-    from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
 class TeamHandleKey:
@@ -44,13 +43,13 @@ class TeamHandleKey:
 
     TEAM_BACKEND = "team.team_backend"
     WORKSPACE_MANAGER = "team.workspace_manager"
-    WORKTREE_MANAGER = "team.worktree_manager"
     MODEL_ALLOCATOR = "team.model_allocator"
     MESSAGER = "team.messager"
     ON_TEAMMATE_CREATED = "team.on_teammate_created"
     SWARMFLOW_MODEL_RESOLVER = "team.swarmflow_model_resolver"
     SWARMFLOW_WORKER_BASE_SPEC = "team.swarmflow_worker_base_spec"
     RELIABILITY_COMPONENTS = "team.reliability_components"
+    PERMISSIONS_OVERRIDE = "team.permissions_override"
 
 
 def inject_team_handles(
@@ -58,13 +57,13 @@ def inject_team_handles(
     *,
     team_backend: Optional["TeamBackend"] = None,
     workspace_manager: Optional["TeamWorkspaceManager"] = None,
-    worktree_manager: Optional["WorktreeManager"] = None,
     model_allocator: Optional["ModelAllocator"] = None,
     messager: Optional["Messager"] = None,
     on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
     swarmflow_model_resolver: Optional[Callable[[str], Any]] = None,
     swarmflow_worker_base_spec: Optional["DeepAgentSpec"] = None,
     reliability_components: Optional["ReliabilityComponents"] = None,
+    permissions_override: Optional[dict[str, str]] = None,
 ) -> None:
     """Write the team live handles into ``extras`` (configurator-side).
 
@@ -75,7 +74,6 @@ def inject_team_handles(
         extras: The per-member ``BuildContext.extras`` dict to populate.
         team_backend: The member's team backend.
         workspace_manager: The team workspace manager, if any.
-        worktree_manager: The member's worktree manager, if any.
         model_allocator: The team model allocator, if any.
         messager: The member's messager, if any.
         on_teammate_created: The leader's spawn-on-created callback, if any.
@@ -89,16 +87,19 @@ def inject_team_handles(
         reliability_components: The member's reused reliability core (detectors /
             remediator / local reporter), if reliability is enabled. Built once
             and wrapped by a fresh rail each cycle so its state outlives rebuilds.
+        permissions_override: Per-member permission narrowing from
+            ``spawn_teammate.permissions``.  ``None`` when no override was
+            specified at spawn time.
     """
     extras[TeamHandleKey.TEAM_BACKEND] = team_backend
     extras[TeamHandleKey.WORKSPACE_MANAGER] = workspace_manager
-    extras[TeamHandleKey.WORKTREE_MANAGER] = worktree_manager
     extras[TeamHandleKey.MODEL_ALLOCATOR] = model_allocator
     extras[TeamHandleKey.MESSAGER] = messager
     extras[TeamHandleKey.ON_TEAMMATE_CREATED] = on_teammate_created
     extras[TeamHandleKey.SWARMFLOW_MODEL_RESOLVER] = swarmflow_model_resolver
     extras[TeamHandleKey.SWARMFLOW_WORKER_BASE_SPEC] = swarmflow_worker_base_spec
     extras[TeamHandleKey.RELIABILITY_COMPONENTS] = reliability_components
+    extras[TeamHandleKey.PERMISSIONS_OVERRIDE] = permissions_override
 
 
 def _get(context: Any, key: str) -> Any:
@@ -115,11 +116,6 @@ def get_team_backend(context: Any) -> Optional["TeamBackend"]:
 def get_workspace_manager(context: Any) -> Optional["TeamWorkspaceManager"]:
     """Return the team workspace manager handle, or None."""
     return _get(context, TeamHandleKey.WORKSPACE_MANAGER)
-
-
-def get_worktree_manager(context: Any) -> Optional["WorktreeManager"]:
-    """Return the worktree manager handle, or None."""
-    return _get(context, TeamHandleKey.WORKTREE_MANAGER)
 
 
 def get_model_allocator(context: Any) -> Optional["ModelAllocator"]:
@@ -156,15 +152,25 @@ def get_reliability_components(context: Any) -> Optional["ReliabilityComponents"
     return _get(context, TeamHandleKey.RELIABILITY_COMPONENTS)
 
 
+def get_permissions_override(context: Any) -> Optional[dict[str, str]]:
+    """Return the per-member permissions override, or None.
+
+    Set by ``AgentConfigurator.setup_agent`` from
+    ``TeamRuntimeContext.permissions_override``.  ``None`` when no override
+    was specified at spawn time.
+    """
+    return _get(context, TeamHandleKey.PERMISSIONS_OVERRIDE)
+
+
 __all__ = [
     "TeamHandleKey",
     "inject_team_handles",
     "get_team_backend",
     "get_workspace_manager",
-    "get_worktree_manager",
     "get_model_allocator",
     "get_messager",
     "get_on_teammate_created",
+    "get_permissions_override",
     "get_swarmflow_model_resolver",
     "get_swarmflow_worker_base_spec",
     "get_reliability_components",

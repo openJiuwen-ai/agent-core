@@ -213,9 +213,15 @@ class EvolveReviewTaskTool(BaseEvolutionTool):
     @staticmethod
     def _build_task_description(args: dict[str, Any], ref: str) -> str:
         lines = [
-            "Perform the restricted Skill evolution review for this prepared scope.",
+            "Perform the Skill evolution review for this prepared review ref.",
             f"evolution_review_ref: {ref}",
-            "Use the scope-bound read-only review tools and call submit_evolution_review before the final answer.",
+            "If no task evidence is available but user_intent is present, you may propose review-direction-only "
+            "experience with evidence_refs=[].",
+            "If no task evidence is available and user_intent is empty, submit outcome=no_evolution.",
+            "Do not invent execution evidence.",
+            "If task evidence is available, first read relevant task and experience evidence, then cite only "
+            "the refs you actually read.",
+            "Use the available read-only review tools and call submit_evolution_review before the final answer.",
             "Return only the exact JSON produced by submit_evolution_review.",
         ]
         subject = args.get("subject")

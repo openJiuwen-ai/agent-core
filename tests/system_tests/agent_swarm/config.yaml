@@ -21,13 +21,7 @@ leader:
 # Worktree isolation — each teammate gets its own working copy
 # ---------------------------------------------------------------------------
 worktree:
-  enabled: true
-  # symlink heavy dirs instead of copying (saves disk + time)
-  symlink_directories:
-    - .venv
-    - node_modules
-  auto_cleanup_on_shutdown: true
-  lifecycle_policy: auto          # temporary team → ephemeral worktrees
+  enabled: false
 
 # Shared team workspace: ~/.openjiuwen/.agent_teams/{team_name}/team-workspace/
 # Omit root_path to use the default. Members access it via .team/ symlink.
@@ -58,24 +52,24 @@ x-model-template: &model_template
     top_p: 0.9
 
 x-shared-rails: &shared_rails
-  - type: filesystem
-  - type: skill_use
+  - type: core.sys_operation
+  - type: core.skill_use
     params:
       skill_mode: all
-#  - type: context_engineering
+#  - type: core.task_planning
 #    params:
 #      preset: true
-#  - type: token_tracking
-#  - type: tool_tracking
-#  - type: ask_user
-#  - type: confirm_interrupt
+#  - type: core.token_tracking
+#  - type: core.tool_tracking
+#  - type: core.ask_user
+#  - type: core.confirm_interrupt
 #    params:
 #      tool_names: [bash, write_file, edit_file]
 
 x-shared-tools: &shared_tools
-  - type: web_search
+  - type: core.web_search
     params: { language: cn }
-  - type: web_fetch
+  - type: core.web_fetch
     params: { language: cn }
 
 x-shared-subagents: &shared_subagents
@@ -86,30 +80,30 @@ x-shared-subagents: &shared_subagents
 #      规则：能用工具就用工具（读/写/编辑/grep/list/bash/code），不要猜文件内容；
 #      变更要小、可回滚；先澄清数据结构与接口，再动代码；输出给出测试/验证步骤。
 #    rails:
-#      - type: filesystem
+#      - type: core.sys_operation
 #    tools:
-#      - type: web_search
+#      - type: core.web_search
 #        params: { language: cn }
-#      - type: web_fetch
+#      - type: core.web_fetch
 #        params: { language: cn }
 #  - agent_card:
 #      name: research_agent
 #      description: "研究调查专家，每次只给一个主题。"
 #    system_prompt: "你是研究助理，负责围绕用户输入的主题开展调研，仅需返回最终研究结果。"
 #    rails:
-#      - type: filesystem
+#      - type: core.sys_operation
 #    tools:
-#      - type: web_search
+#      - type: core.web_search
 #        params: { language: cn }
-#      - type: web_fetch
+#      - type: core.web_fetch
 #        params: { language: cn }
   - agent_card:
       name: browser_agent
       description: "浏览器自动化代理，使用浏览器工具完成导航、交互和信息提取。"
     system_prompt: "你是浏览器自动化代理，负责执行网页任务。请如实、简洁地汇报结果。"
-    factory_name: browser_agent
+    factory_name: core.browser_agent
     rails:
-      - type: filesystem
+      - type: core.sys_operation
 
 x-shared-agent-spec: &shared_agent_spec
   workspace:
@@ -124,7 +118,7 @@ x-shared-agent-spec: &shared_agent_spec
   rails: *shared_rails
   tools: *shared_tools
   subagents: *shared_subagents
-  project_root: /Users/alan/Developer/alan_workspace/jiuwenclaw
+  # project_root 不设置，默认使用当前工作目录（跨平台通用）
 
 # ---------------------------------------------------------------------------
 # Agent specifications

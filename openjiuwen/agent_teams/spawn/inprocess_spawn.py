@@ -75,6 +75,7 @@ async def inprocess_spawn(
     async def _run() -> Any:
         if session_id:
             set_session_id(session_id)
+
         team_logger.info("[inprocess] teammate {} started", member_name)
         try:
             # Spawned teammates are not leaders and never enter the pool —

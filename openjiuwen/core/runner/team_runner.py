@@ -178,6 +178,7 @@ class _TeamRunnerMixin:
         if member:
             return await self._run_team_member(agent_team, inputs, session=session)
         spec = await self._resolve_team_agent_spec(agent_team, session=session)
+        team_name_for_finally = spec.team_name
         with self._root_task_group_scope():
             activation = await self._get_team_runtime_manager().activate(spec, session, inputs)
             try:
@@ -191,6 +192,7 @@ class _TeamRunnerMixin:
                         action.reason or "",
                     )
                     return None
+                self._maybe_attach_observability(activation.agent)
                 return await activation.agent.invoke(inputs, session=activation.session)
             finally:
                 await self._get_team_runtime_manager().finalize(
@@ -202,6 +204,7 @@ class _TeamRunnerMixin:
                     session_id=activation.session.get_session_id(),
                 )
                 await activation.session.post_run()
+                self._maybe_finalize_trace(team_name_for_finally)
 
     async def run_agent_team_streaming(
         self,
@@ -231,7 +234,9 @@ class _TeamRunnerMixin:
                 yield chunk
             return
         spec = await self._resolve_team_agent_spec(agent_team, session=session)
-        with self._root_task_group_scope():
+        team_name_for_finally = spec.team_name
+        token = self._enter_root_task_group_context()
+        try:
             activation = await self._get_team_runtime_manager().activate(spec, session, inputs)
             try:
                 action = activation.action
@@ -257,6 +262,7 @@ class _TeamRunnerMixin:
                 if stream_logger is not None:
                     stream_logger.feed(ready_chunk)
                 yield ready_chunk
+                self._maybe_attach_observability(activation.agent)
                 async for chunk in activation.agent.stream(inputs, session=activation.session):
                     if stream_logger is not None:
                         stream_logger.feed(chunk)
@@ -273,6 +279,9 @@ class _TeamRunnerMixin:
                     session_id=activation.session.get_session_id(),
                 )
                 await activation.session.post_run()
+                self._maybe_finalize_trace(team_name_for_finally)
+        finally:
+            self._exit_root_task_group_context(token)
 
     async def _run_base_team(
         self,
@@ -351,7 +360,11 @@ class _TeamRunnerMixin:
         ``runtime/CLAUDE.md``) is preserved.
         """
         with self._root_task_group_scope():
-            team_session = self._create_agent_team_session(agent, session)
+            team_session = self._create_agent_team_session(
+                agent,
+                session,
+                source_metadata_enabled=False,
+            )
             await team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
             team_runtime = getattr(agent, "runtime", None)
             if team_runtime is not None:
@@ -373,7 +386,11 @@ class _TeamRunnerMixin:
     ) -> AsyncIterator[Any]:
         """Stream-variant of :meth:`_run_team_member` (internal)."""
         with self._root_task_group_scope():
-            team_session = self._create_agent_team_session(agent, session)
+            team_session = self._create_agent_team_session(
+                agent,
+                session,
+                source_metadata_enabled=False,
+            )
             await team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
             team_runtime = getattr(agent, "runtime", None)
             if team_runtime is not None:
@@ -628,8 +645,9 @@ class _TeamRunnerMixin:
 
         if isinstance(session, AgentTeamSession):
             team_session = session
+            team_session.set_source_metadata_enabled(False)
         else:
-            team_session = create_agent_team_session(session_id=session)
+            team_session = create_agent_team_session(session_id=session, source_metadata_enabled=False)
         try:
             await team_session.pre_run()
         except Exception as exc:
@@ -682,17 +700,24 @@ class _TeamRunnerMixin:
     def _create_agent_team_session(
         agent_team: Any,
         session: Optional[Union[str, AgentTeamSession, AgentSession]],
+        *,
+        source_metadata_enabled: bool = True,
     ):
         if isinstance(session, AgentTeamSession):
+            session.set_source_metadata_enabled(source_metadata_enabled)
             return session
         if isinstance(session, AgentSession):
             return create_agent_team_session(
                 session_id=session.get_session_id(),
                 envs=session.get_envs(),
+                source_metadata_enabled=source_metadata_enabled,
             )
         if isinstance(session, str):
-            return create_agent_team_session(session_id=session)
-        return create_agent_team_session()
+            return create_agent_team_session(
+                session_id=session,
+                source_metadata_enabled=source_metadata_enabled,
+            )
+        return create_agent_team_session(source_metadata_enabled=source_metadata_enabled)
 
     async def _close_team_interact_gate(
         self,
@@ -713,6 +738,69 @@ class _TeamRunnerMixin:
         if entry is None or entry.current_session_id != session_id:
             return
         await entry.interact_gate.close_and_drain()
+
+    @staticmethod
+    def _maybe_attach_observability(agent: Any) -> None:
+        """Attach observability to a leader agent.
+
+        Creates the team span so that callback handlers see the correct identity.
+        Team span lifecycle (create / close) is owned by the runner:
+        - Created here (before agent.invoke/stream)
+        - Closed in _maybe_finalize_trace (runner's finally block)
+        """
+        try:
+            from openjiuwen.agent_teams.observability import (
+                attach_to_team_agent,
+                is_initialized,
+            )
+            if not is_initialized():
+                return
+            attach_to_team_agent(agent)
+            team_name = getattr(agent, "team_name", None)
+            if not team_name:
+                return
+            # No longer set team_name ContextVar - read from agent.team_name directly
+            from openjiuwen.agent_teams.observability.span_context import (
+                get_or_create_team_span,
+                get_team_span,
+            )
+            from openjiuwen.agent_teams.observability.setup import get_tracer
+            existing = get_team_span()
+            if existing is not None:
+                logger.info(
+                    "_maybe_attach_observability: found existing team span name={} "
+                    "is_recording={} trace_id={:032x} span_id={:016x}",
+                    existing.name, existing.is_recording(),
+                    existing.context.trace_id, existing.context.span_id,
+                )
+            if existing is None or not existing.is_recording():
+                if existing is not None:
+                    logger.warning(
+                        "_maybe_attach_observability: team span ENDED, will create new one. "
+                        "old trace_id={:032x}",
+                        existing.context.trace_id,
+                    )
+                    from openjiuwen.agent_teams.observability.span_context import clear_team_span
+                    clear_team_span()
+                get_or_create_team_span(team_name, get_tracer("openjiuwen.agent_teams.observability"))
+        except Exception as exc:
+            logger.debug("observability attach skipped: {}", exc)
+
+    @staticmethod
+    def _maybe_finalize_trace(team_name: str) -> None:
+        """Finalize observability trace for a team when the runner exits."""
+        try:
+            from openjiuwen.agent_teams.observability.setup import (
+                finalize_team_trace,
+                is_initialized,
+            )
+            if is_initialized():
+                logger.info("_maybe_finalize_trace: calling finalize_team_trace for team={}", team_name)
+                finalize_team_trace(team_name)
+            else:
+                logger.debug("_maybe_finalize_trace: observability not initialized, skip team={}", team_name)
+        except Exception as exc:
+            logger.debug("observability finalize skipped: {}", exc)
 
     @staticmethod
     def _build_team_runtime_ready_chunk(
@@ -738,23 +826,6 @@ class _TeamRunnerMixin:
                 "session_id": session_id,
                 "activation_kind": action_kind.value,
             },
-            source_member=leader_member_name,
-            role=leader_role,
-        )
-
-    @staticmethod
-    def _build_team_control_chunk(
-        payload: dict[str, Any],
-        *,
-        leader_member_name: Optional[str] = None,
-        leader_role: Optional[Any] = None,
-    ) -> OutputSchema:
-        from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
-
-        return TeamOutputSchema(
-            type="message",
-            index=0,
-            payload=payload,
             source_member=leader_member_name,
             role=leader_role,
         )

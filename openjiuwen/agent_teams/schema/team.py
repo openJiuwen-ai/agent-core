@@ -287,6 +287,8 @@ class TeamRuntimeContext(BaseModel):
     db_config: DatabaseConfig | MemoryDatabaseConfig = Field(default_factory=DatabaseConfig)
     member_model: Optional[TeamModelConfig] = None
     """TeamModelConfig assigned to this member by the allocator."""
+    worktree_path: Optional[str] = None
+    """Absolute cwd override for a teammate running in an isolated worktree."""
     cli_agent: Optional[str] = None
     """When set, this teammate is driven by an external CLI agent (the named
     adapter, e.g. ``"claude"`` / ``"codex"``) instead of a local DeepAgent.
@@ -296,6 +298,14 @@ class TeamRuntimeContext(BaseModel):
     (default) keeps the standard DeepAgent-backed member. See
     ``agent_teams/external/cli_agent``.
     """
+    permissions_override: Optional[dict[str, str]] = Field(
+        default=None,
+        description=(
+            "Per-member permission narrowing from spawn_teammate.permissions. "
+            "Flat {tool_name: level_string} dict fed to narrow_permissions "
+            "to tighten the base config. None when no override was specified."
+        ),
+    )
 
 
 __all__ = [

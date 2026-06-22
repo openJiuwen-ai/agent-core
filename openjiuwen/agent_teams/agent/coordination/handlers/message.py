@@ -12,6 +12,7 @@ agent before tear-down.
 
 from __future__ import annotations
 
+import json
 from typing import Any, ClassVar
 
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
@@ -131,23 +132,50 @@ class MessageHandler(BaseCoordinationHandler):
                 break
 
             team_logger.info("[{}] processing {} unread messages (steer={})", member_name, len(new_messages), use_steer)
-            for msg in new_messages:
-                seen_ids.add(msg.message_id)
-                if self._round.has_pending_interrupt():
-                    team_logger.info(
-                        "[{}] deferring mailbox message {} until pending interrupt is resolved",
-                        member_name,
-                        msg.message_id,
-                    )
-                    return
-                if is_bridge:
-                    text = await self._bridge_deliverable_for(member_name, msg)
-                else:
-                    text = self._format_message(msg, is_human_agent=is_human_agent, now_ms=get_current_time())
-                team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
+            # Collect delivered ids and batch their read-state write into a
+            # single transaction after the loop — one commit (one fsync)
+            # instead of one per message. The finally guarantees already
+            # delivered messages are marked even if delivery raises or an
+            # interrupt cuts the drain short; undelivered ones stay unread
+            # for the next poll.
+            delivered_ids: list[str] = []
+            interrupted = False
+            try:
+                for msg in new_messages:
+                    seen_ids.add(msg.message_id)
+                    if self._round.has_pending_interrupt():
+                        # Approval messages are admitted to resume_interrupt;
+                        # all other messages are deferred until the interrupt clears.
+                        approval_data = self._try_parse_approval_payload(msg)
+                        if approval_data is not None:
+                            team_logger.info(
+                                "[{}] admitting approval message {} to resume interrupt",
+                                member_name,
+                                msg.message_id,
+                            )
+                            await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
+                            await self._round.resume_interrupt(approval_data)
+                            continue
+                        team_logger.info(
+                            "[{}] deferring mailbox message {} until pending interrupt is resolved",
+                            member_name,
+                            msg.message_id,
+                        )
+                        interrupted = True
+                        break
+                    if is_bridge:
+                        text = await self._bridge_deliverable_for(member_name, msg)
+                    else:
+                        text = self._format_message(msg, is_human_agent=is_human_agent, now_ms=get_current_time())
+                    team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
-                await self._round.deliver_input(text, use_steer=use_steer)
-                await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
+                    await self._round.deliver_input(text, use_steer=use_steer)
+                    delivered_ids.append(msg.message_id)
+            finally:
+                if delivered_ids:
+                    await self._infra.message_manager.mark_messages_read(delivered_ids, member_name)
+            if interrupted:
+                return
 
     async def _bridge_deliverable_for(self, member_name: str, msg: Any) -> str:
         """Build the text delivered to a bridge avatar's DeepAgent.
@@ -395,3 +423,21 @@ class MessageHandler(BaseCoordinationHandler):
             content=msg.content,
             time_info=format_time_context(msg.timestamp, now_ms),
         )
+
+    @staticmethod
+    def _try_parse_approval_payload(msg: Any) -> dict | None:
+        """Try to parse a tool-approval result from a message.
+
+        Returns the parsed approval dict if the message is a
+        ``protocol="json"` message with ``type == "tool_approval_result"``,
+        or ``None`` otherwise.  Parses JSON only once.
+        """
+        if msg.protocol != "json" or not msg.content:
+            return None
+        try:
+            data = json.loads(msg.content)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if isinstance(data, dict) and data.get("type") == "tool_approval_result":
+            return data
+        return None

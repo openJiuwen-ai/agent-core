@@ -33,4 +33,8 @@ class ObservabilityConfig(BaseModel):
     redact_prompts: bool = False
     redact_completions: bool = False
     attribute_value_max_length: int = 8192
+    llm_input_last_n_messages: int = Field(default=2, ge=1, description="LLM span input 显示最后N条消息")
     export_timeout_ms: int = 5000
+    # Langfuse authentication (for OTLP export via Langfuse OTLP endpoint)
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""

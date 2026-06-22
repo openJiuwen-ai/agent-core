@@ -5,10 +5,10 @@
 
 Mirrors the pattern of :class:`SysOperationRail` / :class:`McpRail` /
 :class:`LspRail`: the rail's ``init`` constructs the role-appropriate
-team tools (coordination, messaging, task, optional workspace and
-worktree extras) and wires their ``ToolCard``s into the agent's shared
-``ability_manager``, while registering the runtime instances on
-``Runner.resource_mgr`` so the dispatcher can resolve invocations.
+team tools (coordination, messaging, task, optional workspace extras)
+and wires their ``ToolCard``s into the agent's shared ``ability_manager``,
+while registering the runtime instances on ``Runner.resource_mgr`` so the
+dispatcher can resolve invocations.
 
 Centralising team tool registration in a Rail keeps the team tool
 surface aligned with how every other DeepAgent capability is mounted,
@@ -28,7 +28,6 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.tools.team_tools import create_team_tools
-from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.harness.rails.base import DeepAgentRail
 
@@ -36,7 +35,6 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tools.team import TeamBackend
-    from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
 class TeamToolRail(DeepAgentRail):
@@ -47,8 +45,6 @@ class TeamToolRail(DeepAgentRail):
     the corresponding manager is supplied:
 
       * ``workspace_manager`` -> ``WorkspaceMetaTool``
-      * ``worktree_manager`` -> ``EnterWorktreeTool`` / ``ExitWorktreeTool``
-        (also primes the worktree session ContextVar)
 
     When the team runs in ``inprocess`` spawn mode, ``qualify_ids``
     suffixes each ``ToolCard.id`` with ``{team_name}.{member_name}`` so
@@ -70,13 +66,13 @@ class TeamToolRail(DeepAgentRail):
         model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
         exclude_tools: Optional[Set[str]] = None,
         workspace_manager: Optional["TeamWorkspaceManager"] = None,
-        worktree_manager: Optional["WorktreeManager"] = None,
         qualify_ids: bool = False,
         team_name: str = "default",
         member_name: str = "",
         messager: Optional[Any] = None,
         swarmflow_model_resolver: Optional[Callable[[str], Any]] = None,
         swarmflow_worker_base_spec: Optional[Any] = None,
+        team_permissions_enabled: bool = False,
     ) -> None:
         super().__init__()
         self._team_backend = team_backend
@@ -88,13 +84,13 @@ class TeamToolRail(DeepAgentRail):
         self._model_config_allocator = model_config_allocator
         self._exclude_tools = exclude_tools
         self._workspace_manager = workspace_manager
-        self._worktree_manager = worktree_manager
         self._qualify_ids = qualify_ids
         self._team_name = team_name or "default"
         self._member_name = member_name or "unknown"
         self._messager = messager
         self._swarmflow_model_resolver = swarmflow_model_resolver
         self._swarmflow_worker_base_spec = swarmflow_worker_base_spec
+        self._team_permissions_enabled = team_permissions_enabled
         self._tools: list[Tool] | None = None
 
     def init(self, agent: Any) -> None:
@@ -122,6 +118,7 @@ class TeamToolRail(DeepAgentRail):
             team_name=self._team_name,
             swarmflow_model_resolver=self._swarmflow_model_resolver,
             swarmflow_worker_base_spec=self._swarmflow_worker_base_spec,
+            team_permissions_enabled=self._team_permissions_enabled,
         )
 
         if self._workspace_manager is not None:
@@ -130,17 +127,6 @@ class TeamToolRail(DeepAgentRail):
 
             ws_t = make_translator(self._language)
             tools.append(WorkspaceMetaTool(self._workspace_manager, ws_t))
-
-        if self._worktree_manager is not None:
-            from openjiuwen.harness.tools.worktree import (
-                EnterWorktreeTool,
-                ExitWorktreeTool,
-                init_session_state,
-            )
-
-            tools.append(EnterWorktreeTool(self._worktree_manager, language=self._language))
-            tools.append(ExitWorktreeTool(self._worktree_manager, language=self._language))
-            init_session_state()
 
         # Register through the unified ``add_ability`` entry point. It qualifies
         # each stateful tool id to ``{name}_{owner_id}`` (owner_id is this

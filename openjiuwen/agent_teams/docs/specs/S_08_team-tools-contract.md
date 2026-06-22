@@ -19,8 +19,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-05-27 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md |
+| 最近一次修订日期 | 2026-06-17 |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md |
 
 ## 范围 / 边界
 
@@ -35,9 +35,11 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 - `TeamToolRail` 怎么把工具挂到 DeepAgent——那是 `rails/team_tool_rail.py`
   的事，本规约只规定它必须经过 `create_team_tools` 这一道门。
 - `WorkspaceMetaTool` / `EnterWorktreeTool` / `ExitWorktreeTool`——
-  workspace 工具属于 `team_workspace/` 子系统，worktree 工具已经下沉到
-  `harness/tools/worktree`。两者由 `TeamToolRail` 在工厂返回值之上 **追加**
-  挂载，不在本工厂的内置目录里，也不能通过 `exclude_tools` 屏蔽。
+  workspace 工具属于 `team_workspace/` 子系统，worktree 工具属于
+  `harness/tools/worktree`。只有 `WorkspaceMetaTool` 会由 `TeamToolRail`
+  在工厂返回值之上 **追加**挂载；team 场景不再把
+  `EnterWorktreeTool` / `ExitWorktreeTool` 作为成员工具暴露，也不能通过
+  `exclude_tools` 改写这条边界。
 - 系统提示词（`prompts/`）。提示词写"角色身份与决策原则"，工具描述写
   "操作过程"，两边内容禁止重复——这是分层契约。
 - 运行时硬编码字符串（dispatcher 通知 / 默认 persona）走 `agent_teams/i18n.py`，
@@ -72,10 +74,11 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 7. **每条 ToolCard 描述都过 Translator**。工具构造器拿到的是同一个
    `t: Translator` 闭包，`ToolCard.description` 必须由 `t(name)` 提供，
    不许在构造器里写硬编码字面量。
-8. **`teammate_mode` 只挡 leader 的审批工具**：`approve_plan` /
+8. **审批工具的角色门控**：`approve_plan` /
    `approve_tool` 只在 `teammate_mode == "plan_mode"` 才进入 leader 工具集；
-   `build_mode` 下 leader 工具集里没有这两个名字。`teammate_mode` 不影响
-   teammate / human_agent 的工具集。
+   `build_mode` 下默认不包含。但当 `team_permissions_enabled=True` 时，
+   `approve_tool` 在 `build_mode` 下也保留——leader 需用它解决 teammate ASK interrupt。
+   `teammate_mode` 不影响 teammate / human_agent 的工具集。
 9. **`exclude_tools` 是减法，不是注册口**。它从角色集合里**移除**给定名字，
    不能通过它注册新工具。新工具靠的是工厂里的静态 `all_tools` 字典。
 10. **角色集合互相对称**：
@@ -218,8 +221,8 @@ openjiuwen/agent_teams/tools/locales/
 
 `workspace_meta` 不在以上任何集合里：它由 `TeamToolRail.init` 在
 `workspace_manager is not None` 时 **追加**注册（leader / teammate / human_agent
-都吃同一份）；同理 `enter_worktree` / `exit_worktree` 由
-`worktree_manager is not None` 触发追加，且实现住 `harness/tools/worktree`。
+都吃同一份）。Team 场景下 `enter_worktree` / `exit_worktree` 不再作为成员工具追加；
+worktree 隔离只通过 spawn 时的 `isolation="worktree"` 由 leader / 宿主创建。
 
 ### `teammate_mode` 的精确门禁
 
@@ -333,7 +336,7 @@ all_tools = {
 
 没有"动态注册表"。`exclude_tools` 是减法，不是注入口；想新增能力请走
 上面四步，不要走 `kwargs`、不要 monkey-patch、不要在 `TeamToolRail`
-追加除 workspace / worktree 之外的工具（那两个有明确的子系统归属）。
+追加除 workspace 之外的工具（workspace 有明确的子系统归属）。
 
 ## 与其它 spec 的关系
 
@@ -341,9 +344,9 @@ all_tools = {
   反模式"，系统提示词写"角色身份 / 决策原则 / 状态迁移"。两边 i18n 走
   各自的 `locales/`，不互通。新增长文本前先判断归属，再选目录。
 - **`rails/team_tool_rail.py`**：`TeamToolRail` 是工厂的唯一调用方，
-  也是 workspace / worktree 工具的追加挂载点。`TeamToolRail.init`
-  与本工厂的契约：必须用关键字参数透传 `role` / `teammate_mode` /
-  `lang`，不允许 rail 自行重写工具集合。
+  也是 `workspace_meta` 的追加挂载点。`TeamToolRail.init` 与本工厂的
+  契约：必须用关键字参数透传 `role` / `teammate_mode` / `lang`，
+  不允许 rail 自行重写工具集合。
 - **`agent_teams/i18n.py`**：运行时硬编码字符串（dispatcher 通知、
   默认 persona 等）走 `t(key)` 这一组；本规约的描述文本是另一条路径。
   两者读不同的源，不要把工具描述塞进 `i18n.py` 的 `STRINGS`。

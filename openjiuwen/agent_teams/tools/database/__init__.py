@@ -21,6 +21,7 @@ from openjiuwen.agent_teams.tools.database.config import (
     DatabaseType as DatabaseType,
 )
 from openjiuwen.agent_teams.tools.database.engine import (
+    DbSessions,
     cleanup_all_runtime_state as _cleanup_all_runtime_state,
     create_cur_session_tables as _create_cur_session_tables,
     drop_cur_session_tables as _drop_cur_session_tables,
@@ -93,10 +94,14 @@ class TeamDatabase:
             if get_session_id():
                 await _create_cur_session_tables(self.engine)
 
-            self.team = TeamDao(self.session_local)
-            self.member = MemberDao(self.session_local)
-            self.task = TaskDao(self.session_local)
-            self.message = MessageDao(self.session_local)
+            # One DbSessions (one write lock) shared by every DAO: SQLite's
+            # write lock is database-wide, so all four tables must serialise
+            # writes through the same lock — see DbSessions.
+            sessions = DbSessions(self.session_local)
+            self.team = TeamDao(sessions)
+            self.member = MemberDao(sessions)
+            self.task = TaskDao(sessions)
+            self.message = MessageDao(sessions)
 
             self._initialized = True
             team_logger.info("Team database initialized")

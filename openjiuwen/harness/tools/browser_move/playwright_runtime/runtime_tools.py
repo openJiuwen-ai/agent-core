@@ -94,9 +94,11 @@ _RUNTIME_HEALTH_PARAMS: Dict[str, Any] = {
 _PROBE_INTERACTIVES_DESC = (
     "Return a compact list of visible, high-value interactive elements on the current page. "
     "Use this for page-level controls such as buttons, links, inputs, forms, navigation, login, "
-    "pagination, menus, and visible actions. Prefer max_items around 20-30 unless a larger inventory "
+    "pagination, menus, and visible actions. The optional query filter is alias-aware for common "
+    "search/input terms, including placeholders, aria labels, input type/name/id/class, and Chinese "
+    "search text such as 搜索/关键词. Prefer max_items around 20-30 unless a larger inventory "
     "is needed. For product/search/listing card data, prefer browser_probe_cards first. "
-    "The result includes role/text/aria-label/testid/bbox/selector_hint for likely controls."
+    "The result includes role/action_likelihood/text/aria-label/testid/bbox/selector_hint for likely controls."
 )
 _PROBE_INTERACTIVES_PARAMS: Dict[str, Any] = {
     "type": "object",
@@ -120,10 +122,13 @@ _PROBE_INTERACTIVES_PARAMS: Dict[str, Any] = {
 _PROBE_CARDS_DESC = (
     "Return compact repeated card/listing structures from the current page. "
     "Use this first on product pages, marketplace pages, search-result pages, catalog pages, "
-    "article-list pages, or any page with repeated visible cards/listings. "
-    "The result includes candidate card title, price, rating, review count, availability, "
-    "primary link, visible buttons, bbox, selector_hint, and recurring structure signatures. "
-    "This should usually be preferred over browser_probe_interactives for product/listing/item-data tasks."
+    "article-list pages, table/list-row result pages, or any page with repeated visible cards/listings. "
+    "The result includes candidate card title, author/source, summary/snippet, price, rating, "
+    "review count, availability, primary link, visible buttons, bbox, selector_hint, "
+    "recurring structure signatures, and cache diagnostics. If this returns the fields needed "
+    "for the task, including article/search-result title/link/author/source/summary fields, "
+    "use the compact card result directly instead of taking screenshots/snapshots or running "
+    "broad DOM evaluation. Only evaluate again when a required field is missing."
 )
 _PROBE_CARDS_PARAMS: Dict[str, Any] = {
     "type": "object",

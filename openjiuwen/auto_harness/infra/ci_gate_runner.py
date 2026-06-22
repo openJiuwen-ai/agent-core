@@ -479,6 +479,30 @@ class CIGateRunner:
                 for f in stdout_text.splitlines()
                 if f.strip() and (f.endswith(".py") or f.endswith(".pyi"))
             ]
+            if files:
+                return files
+
+            if commits_val > 0:
+                logger.info(
+                    "No committed changes for COMMITS=%s; "
+                    "falling back to worktree diff (git diff HEAD)",
+                    commits_val,
+                )
+                wm_result = subprocess.run(
+                    ["git", "diff", "HEAD", "--name-only", "--diff-filter=ACMR"],
+                    cwd=self._workspace,
+                    capture_output=True,
+                    check=False,
+                )
+                if wm_result.returncode == 0:
+                    wm_stdout = decode_stdout(wm_result.stdout)
+                    files = [
+                        f.strip()
+                        for f in wm_stdout.splitlines()
+                        if f.strip() and (f.endswith(".py") or f.endswith(".pyi"))
+                    ]
+                    return files
+
             return files
         except Exception as e:
             logger.warning("Error getting changed files: %s", e)
@@ -523,7 +547,27 @@ class CIGateRunner:
                 return {}
 
             diff_text = decode_stdout(result.stdout)
-            return _parse_unified_diff_hunks(diff_text)
+            line_ranges = _parse_unified_diff_hunks(diff_text)
+            if line_ranges:
+                return line_ranges
+
+            if commits_val > 0:
+                logger.info(
+                    "No diff line ranges for COMMITS=%s; "
+                    "falling back to worktree diff (git diff HEAD -U0)",
+                    commits_val,
+                )
+                wm_result = subprocess.run(
+                    ["git", "diff", "-U0", "HEAD", "--diff-filter=ACMR"],
+                    cwd=self._workspace,
+                    capture_output=True,
+                    check=False,
+                )
+                if wm_result.returncode == 0:
+                    wm_text = decode_stdout(wm_result.stdout)
+                    return _parse_unified_diff_hunks(wm_text)
+
+            return line_ranges
         except Exception as e:
             logger.warning("Error getting diff line ranges: %s", e)
             return {}
@@ -619,7 +663,7 @@ class CIGateRunner:
         for v in in_range:
             code = v.get("code", "")
             msg = v.get("message", "")
-            filepath = v.get("filename", "")
+            filepath = str(v.get("filename", "")).replace("\\", "/")
             line_num = v.get("location", {}).get("row", "")
             col = v.get("location", {}).get("column", "")
             lines.append(
@@ -660,7 +704,7 @@ class CIGateRunner:
         for v in in_range:
             symbol = v.get("symbol", "")
             msg = v.get("message", "")
-            filepath = v.get("path", "")
+            filepath = str(v.get("path", "")).replace("\\", "/")
             line_num = v.get("line", "")
             msg_id = v.get("message-id", "")
             lines.append(
@@ -685,14 +729,18 @@ class CIGateRunner:
             m = pattern.match(line)
             if not m:
                 continue
-            filepath, line_num_str = m.group(1), m.group(2)
+            raw_path, line_num_str = m.group(1), m.group(2)
             line_num = int(line_num_str)
+            filepath = raw_path
             if repo_relative_fn:
                 filepath = repo_relative_fn(filepath)
             allowed = line_ranges.get(filepath)
             if allowed is None or line_num not in allowed:
                 continue
-            in_range.append(line)
+            normalized_path = raw_path.replace("\\", "/")
+            in_range.append(
+                line.replace(raw_path, normalized_path, 1)
+            )
 
         if not in_range:
             return False, ""
@@ -718,14 +766,18 @@ class CIGateRunner:
             if not m:
                 # Skip summary lines like "Found N errors"
                 continue
-            filepath, line_num_str = m.group(1), m.group(2)
+            raw_path, line_num_str = m.group(1), m.group(2)
             line_num = int(line_num_str)
+            filepath = raw_path
             if repo_relative_fn:
                 filepath = repo_relative_fn(filepath)
             allowed = line_ranges.get(filepath)
             if allowed is None or line_num not in allowed:
                 continue
-            in_range.append(line)
+            normalized_path = raw_path.replace("\\", "/")
+            in_range.append(
+                line.replace(raw_path, normalized_path, 1)
+            )
 
         if not in_range:
             return False, ""
@@ -756,9 +808,11 @@ class CIGateRunner:
                 continue
             overlap = allowed.intersection(fmt_lines)
             if overlap:
+                norm_filepath = filepath.replace("\\", "/")
                 # Some format changes hit changed lines — report it
                 in_range_lines.append(
-                    f"{filepath}: formatting differs on changed lines "
+                    f"{norm_filepath}: "
+                    f"formatting differs on changed lines "
                     f"{sorted(overlap)}"
                 )
 

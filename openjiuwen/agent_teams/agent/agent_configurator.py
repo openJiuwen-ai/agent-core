@@ -32,7 +32,7 @@ from openjiuwen.agent_teams.paths import (
 from openjiuwen.agent_teams.prompts import role_policy
 from openjiuwen.agent_teams.runtime.team_plan import is_team_plan_enabled
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
-from openjiuwen.agent_teams.schema.deep_agent_spec import SysOperationSpec
+from openjiuwen.agent_teams.schema.deep_agent_spec import SysOperationSpec, WorkspaceSpec
 from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
@@ -242,7 +242,7 @@ class AgentConfigurator:
             on_team_built=on_team_built,
         )
 
-        if ctx.role != TeamRole.LEADER and spec.worktree and spec.worktree.enabled:
+        if ctx.role == TeamRole.LEADER and spec.worktree and spec.worktree.enabled:
             self.worktree_manager = self.create_worktree_manager(spec)
 
     @staticmethod
@@ -265,15 +265,15 @@ class AgentConfigurator:
 
     def create_worktree_manager(self, spec: TeamAgentSpec) -> WorktreeManager:
         from openjiuwen.harness.tools.worktree import (
-            WorktreeCreatedEvent,
             WorktreeManager,
-            WorktreeRemovedEvent,
         )
+        from openjiuwen.harness.tools.worktree import WorktreeCreatedEvent as HarnessWorktreeCreatedEvent
+        from openjiuwen.harness.tools.worktree import WorktreeRemovedEvent as HarnessWorktreeRemovedEvent
 
         ws_mgr = self.workspace_manager
 
         event_handler = None
-        if ws_mgr is not None:
+        if ws_mgr is not None or self.messager is not None:
 
             async def _mirror_worktree_into_workspace(event: Any) -> None:
                 """Keep ``.worktree/{slug}`` in lockstep with manager events.
@@ -283,10 +283,26 @@ class AgentConfigurator:
                 install this handler, so the symlink view is team-only by
                 construction.
                 """
-                if isinstance(event, WorktreeCreatedEvent):
-                    ws_mgr.mount_worktree(event.worktree_name, event.worktree_path)
-                elif isinstance(event, WorktreeRemovedEvent):
-                    ws_mgr.unmount_worktree(event.worktree_name)
+                if ws_mgr is not None:
+                    if isinstance(event, HarnessWorktreeCreatedEvent):
+                        ws_mgr.mount_worktree(event.worktree_name, event.worktree_path)
+                    elif isinstance(event, HarnessWorktreeRemovedEvent):
+                        ws_mgr.unmount_worktree(event.worktree_name)
+
+                if self.messager is not None and self.team_backend is not None:
+                    from openjiuwen.agent_teams.context import get_session_id
+                    from openjiuwen.agent_teams.schema.events import TeamTopic
+
+                    message = self._build_team_worktree_event_message(event)
+                    if message is None:
+                        return
+                    try:
+                        await self.messager.publish(
+                            topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_backend.team_name),
+                            message=message,
+                        )
+                    except Exception as e:
+                        team_logger.warning("Failed to publish worktree event: {}", e)
 
             event_handler = _mirror_worktree_into_workspace
 
@@ -294,6 +310,34 @@ class AgentConfigurator:
             config=spec.worktree,
             event_handler=event_handler,
         )
+
+    @staticmethod
+    def _build_team_worktree_event_message(event: Any) -> Any:
+        """Translate generic harness worktree events into team bus messages."""
+        from openjiuwen.agent_teams.schema.events import (
+            EventMessage,
+            WorktreeCreatedEvent,
+            WorktreeRemovedEvent,
+        )
+        from openjiuwen.harness.tools.worktree import WorktreeCreatedEvent as HarnessWorktreeCreatedEvent
+        from openjiuwen.harness.tools.worktree import WorktreeRemovedEvent as HarnessWorktreeRemovedEvent
+
+        if isinstance(event, HarnessWorktreeCreatedEvent):
+            return EventMessage.from_event(
+                WorktreeCreatedEvent(
+                    worktree_name=event.worktree_name,
+                    worktree_path=event.worktree_path,
+                    existed=event.existed,
+                )
+            )
+        if isinstance(event, HarnessWorktreeRemovedEvent):
+            return EventMessage.from_event(
+                WorktreeRemovedEvent(
+                    worktree_name=event.worktree_name,
+                    worktree_path=event.worktree_path,
+                )
+            )
+        return None
 
     def setup_agent(
         self,
@@ -320,6 +364,15 @@ class AgentConfigurator:
         member_name = ctx.member_name
 
         ws_spec = agent_spec.workspace or spec.agents.get("leader", agent_spec).workspace
+        workspace_is_worktree = bool(ctx.worktree_path)
+        if ctx.worktree_path:
+            base_ws_spec = ws_spec or WorkspaceSpec()
+            ws_spec = base_ws_spec.model_copy(
+                update={
+                    "root_path": ctx.worktree_path,
+                    "stable_base": False,
+                }
+            )
         if ws_spec and ws_spec.stable_base:
             team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
             base = team_home(team_name) / "workspaces"
@@ -330,8 +383,14 @@ class AgentConfigurator:
                 os.symlink(str(independent_ws), str(team_ws_path), target_is_directory=True)
             ws_spec = ws_spec.model_copy(update={"root_path": str(team_ws_path)})
 
-        if ws_spec and ws_spec.root_path and self.team_backend:
-            self.team_backend.register_cleanup_path(ws_spec.root_path)
+        workspace_root_path = ws_spec.root_path if ws_spec is not None else None
+        should_register_cleanup_path = (
+            bool(workspace_root_path)
+            and self.team_backend is not None
+            and not workspace_is_worktree
+        )
+        if should_register_cleanup_path and workspace_root_path is not None:
+            self.team_backend.register_cleanup_path(workspace_root_path)
 
         if self.workspace_manager and ws_spec and ws_spec.root_path:
             self.workspace_manager.mount_into_workspace(ws_spec.root_path)
@@ -386,6 +445,10 @@ class AgentConfigurator:
 
         ensure_harness_elements_registered()
 
+        # Observability rail spec — shared by all agents (members + swarmflow workers).
+        # The provider checks is_initialized() — no-op when disabled.
+        observability_rail_spec = RailSpec(type="core.observability")
+
         # Predefined teams pin their roster — strip every dynamic spawn tool
         # (one per role_type) from the leader's tool set.
         exclude = (
@@ -403,6 +466,7 @@ class AgentConfigurator:
                     "exclude_tools": exclude,
                     "qualify_ids": spec.spawn_mode == "inprocess",
                     "team_name": resolved_team_name,
+                    "team_permissions_enabled": spec.enable_permissions,
                 },
             ),
             RailSpec(
@@ -426,7 +490,9 @@ class AgentConfigurator:
         is_coordinated_teammate = ctx.role == TeamRole.TEAMMATE and ctx.team_spec
         approval_tools = agent_spec.approval_required_tools or []
         can_request_approval = is_coordinated_teammate and self.team_backend and self.messager
-        if can_request_approval and approval_tools:
+        # When team permissions are enabled the platform-mounted
+        # TeamPermissionRail replaces TeamToolApprovalRail.
+        if can_request_approval and approval_tools and not spec.enable_permissions:
             team_rail_specs.append(
                 RailSpec(
                     type=TEAM_TOOL_APPROVAL,
@@ -527,21 +593,31 @@ class AgentConfigurator:
             base_specs = spec.agents
             swarmflow_worker_base_spec = base_specs.get("teammate") or base_specs.get("leader")
 
+            # Workers also need the observability rail for agent spans.
+            if swarmflow_worker_base_spec is not None:
+                swarmflow_worker_base_spec = swarmflow_worker_base_spec.model_copy(
+                    update={
+                        "rails": list(swarmflow_worker_base_spec.rails or [])
+                                 + [observability_rail_spec],
+                    },
+                )
+
         inject_team_handles(
             member_build_context.extras,
             team_backend=self.team_backend,
             workspace_manager=self.workspace_manager,
-            worktree_manager=self.worktree_manager,
             model_allocator=self.model_allocator,
             messager=self.messager,
             on_teammate_created=self._on_teammate_created,
             swarmflow_model_resolver=swarmflow_model_resolver,
             swarmflow_worker_base_spec=swarmflow_worker_base_spec,
             reliability_components=reliability_components,
+            permissions_override=ctx.permissions_override,
         )
 
         # Fold the team rails into the spec rails (after the user rails, to keep
         # the init order consistent with the legacy mount order).
+        team_rail_specs.append(observability_rail_spec)
         build_spec = build_spec.model_copy(
             update={"rails": list(build_spec.rails or []) + team_rail_specs},
         )

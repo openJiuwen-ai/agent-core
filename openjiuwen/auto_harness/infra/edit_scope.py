@@ -13,6 +13,7 @@ from openjiuwen.core.sys_operation.cwd import (
 
 ALLOWED_SOURCE_EDIT_PREFIXES = (
     "jiuwenswarm/",
+    "openjiuwen/dev_tools/",
     "openjiuwen/harness/",
     "openjiuwen/core/",
 )
@@ -65,8 +66,8 @@ def render_edit_scope(
     """Render a stable edit-scope block for prompts."""
     return (
         f"{header}:\n"
-        "- 源码路径允许 `jiuwenswarm/**`、`openjiuwen/harness/**`、`openjiuwen/core/**`\n"
-        "- `jiuwenswarm/**`、`openjiuwen/harness/**`、`openjiuwen/core/**` 下的模块内 "
+        "- 源码路径允许 `jiuwenswarm/**`、`openjiuwen/dev_tools/**`、`openjiuwen/harness/**`、`openjiuwen/core/**`\n"
+        "- `jiuwenswarm/**`、`openjiuwen/dev_tools/**`、`openjiuwen/harness/**`、`openjiuwen/core/**` 下的模块内 "
         "README/Markdown 视为源码目录内容，可正常修改，例如 "
         "`jiuwenswarm/agents/harness/README.md` 或 `openjiuwen/harness/cli/README.md`\n"
         "- 配套文件允许新增或修改 `tests/**`、`examples/**`\n"

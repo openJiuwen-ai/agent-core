@@ -3,14 +3,17 @@
 
 """Message and message-read-status data access object."""
 
-import asyncio
 from typing import List, Optional
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from openjiuwen.agent_teams.tools.database.engine import get_current_time
+from openjiuwen.agent_teams.tools.database.engine import (
+    DbSessions,
+    get_current_time,
+    retry_on_locked,
+)
 from openjiuwen.agent_teams.tools.models import (
     TeamMember,
     TeamMessageBase,
@@ -20,21 +23,17 @@ from openjiuwen.agent_teams.tools.models import (
 from openjiuwen.core.common.logging import team_logger
 
 
-_DB_RETRY_ATTEMPTS = 3
-_DB_RETRY_BASE_DELAY = 0.5
-
-
 class MessageDao:
     """Data access object for message and message-read-status tables."""
 
-    def __init__(self, session_local: async_sessionmaker) -> None:
-        """Initialize message DAO with the shared session factory."""
-        self._session_local = session_local
+    def __init__(self, sessions: DbSessions) -> None:
+        """Initialize message DAO with the shared read/write session provider."""
+        self._sessions = sessions
 
     async def get_message(self, message_id: str) -> Optional[TeamMessageBase]:
         """Get message information by ID."""
         message_model = _get_message_model()
-        async with self._session_local() as session:
+        async with self._sessions.read() as session:
             result = await session.execute(select(message_model).where(message_model.message_id == message_id))
             return result.scalar_one_or_none()
 
@@ -48,6 +47,7 @@ class MessageDao:
         to_member_name: Optional[str] = None,
         broadcast: bool = False,
         is_read: bool = False,
+        protocol: str = "plain",
     ) -> bool:
         """Create a new team message.
 
@@ -57,11 +57,14 @@ class MessageDao:
                 the HITT human_agent) as already read so mailbox polling
                 does not keep re-firing on them. Ignored for broadcasts,
                 whose per-member read state lives in MessageReadStatus.
+            protocol: Message format — ``"plain"`` for normal text,
+                ``"json"`` for structured payloads (e.g. approval results).
         """
         message_model = _get_message_model()
-        for attempt in range(_DB_RETRY_ATTEMPTS):
+
+        async def _op() -> bool:
             try:
-                async with self._session_local() as session:
+                async with self._sessions.write() as session:
                     message = message_model(
                         message_id=message_id,
                         team_name=team_name,
@@ -70,6 +73,7 @@ class MessageDao:
                         content=content,
                         timestamp=get_current_time(),
                         broadcast=broadcast,
+                        protocol=protocol,
                         is_read=None if broadcast else is_read,
                     )
                     session.add(message)
@@ -79,27 +83,8 @@ class MessageDao:
             except IntegrityError as e:
                 team_logger.error("Failed to create %s, reason is %s", message_id, e)
                 return False
-            except OperationalError as e:
-                # Connection has been released by ``async with`` __aexit__ above;
-                # the back-off sleep below must stay outside that block, otherwise
-                # the pool sees a leaked checkout and concurrent writers eventually
-                # hit ``QueuePool ... timed out``.
-                if attempt >= _DB_RETRY_ATTEMPTS - 1:
-                    team_logger.error(
-                        "Failed to create message %s after %d attempts: %s",
-                        message_id,
-                        _DB_RETRY_ATTEMPTS,
-                        e,
-                    )
-                    return False
-                delay = _DB_RETRY_BASE_DELAY * (2**attempt)
-                team_logger.warning(
-                    "Database locked on create_message (attempt %d), retrying in %ss",
-                    attempt + 1,
-                    delay,
-                )
-                await asyncio.sleep(delay)
-        return False
+
+        return await retry_on_locked(_op, on_locked_result=False, label=f"create_message {message_id}")
 
     async def get_messages(
         self,
@@ -110,7 +95,7 @@ class MessageDao:
     ) -> List[TeamMessageBase]:
         """Get direct (point-to-point) messages for a specific member."""
         message_model = _get_message_model()
-        async with self._session_local() as session:
+        async with self._sessions.read() as session:
             query = select(message_model).where(
                 message_model.team_name == team_name,
                 message_model.to_member_name == to_member_name,
@@ -139,7 +124,7 @@ class MessageDao:
         """Get broadcast messages for a specific member, with read status."""
         message_model = _get_message_model()
         read_status_model = _get_message_read_status_model()
-        async with self._session_local() as session:
+        async with self._sessions.read() as session:
             query = select(message_model).where(
                 message_model.team_name == team_name,
                 message_model.broadcast.is_(True),
@@ -169,7 +154,7 @@ class MessageDao:
     async def get_team_messages(self, team_name: str, broadcast: Optional[bool] = None) -> List[TeamMessageBase]:
         """Get all messages for a team (without read status)."""
         message_model = _get_message_model()
-        async with self._session_local() as session:
+        async with self._sessions.read() as session:
             query = select(message_model).where(message_model.team_name == team_name)
 
             if broadcast is not None:
@@ -203,7 +188,7 @@ class MessageDao:
         """
         message_model = _get_message_model()
         read_status_model = _get_message_read_status_model()
-        async with self._session_local() as session:
+        async with self._sessions.read() as session:
             # Direct messages: a single unread row is enough.
             direct_unread = await session.execute(
                 select(message_model.message_id)
@@ -250,54 +235,112 @@ class MessageDao:
                         return True
             return False
 
-    async def mark_message_read(self, message_id: str, member_name: str) -> bool:
-        """Mark a message as read by a member (works for both direct and broadcast messages)."""
+    async def _mark_read_in_session(
+        self,
+        session: AsyncSession,
+        message_id: str,
+        member_name: str,
+    ) -> bool:
+        """Apply read state for one message within an existing session.
+
+        No commit — the caller owns the transaction boundary so single and
+        batch marks share one code path. Returns True when the read state
+        was applied (caller should commit), False when the message is
+        missing or the member / validation check fails.
+
+        Idempotent: re-marking a direct message or advancing a broadcast
+        watermark to an already-covered timestamp is a no-op-safe write, so
+        the caller may safely retry the enclosing transaction on a locked
+        database.
+        """
         message_model = _get_message_model()
         read_status_model = _get_message_read_status_model()
-        async with self._session_local() as session:
-            result = await session.execute(select(message_model).where(message_model.message_id == message_id))
-            message = result.scalar_one_or_none()
-            if not message:
-                team_logger.error("Message %s not found", message_id)
+
+        result = await session.execute(select(message_model).where(message_model.message_id == message_id))
+        message = result.scalar_one_or_none()
+        if not message:
+            team_logger.error("Message %s not found", message_id)
+            return False
+
+        if member_name == "user":
+            if message.broadcast:
+                team_logger.error("'user' pseudo-member cannot read broadcast message %s", message_id)
+                return False
+        else:
+            result = await session.execute(
+                select(TeamMember).where(
+                    TeamMember.member_name == member_name,
+                    TeamMember.team_name == message.team_name,
+                )
+            )
+            member = result.scalar_one_or_none()
+            if not member:
+                team_logger.error("Member %s not found", member_name)
                 return False
 
-            if member_name == "user":
-                if message.broadcast:
-                    team_logger.error("'user' pseudo-member cannot read broadcast message %s", message_id)
-                    return False
-            else:
-                result = await session.execute(
-                    select(TeamMember).where(
-                        TeamMember.member_name == member_name,
-                        TeamMember.team_name == message.team_name,
-                    )
+        if message.broadcast:
+            read_result = await session.execute(
+                select(read_status_model).where(
+                    read_status_model.member_name == member_name,
+                    read_status_model.team_name == message.team_name,
                 )
-                member = result.scalar_one_or_none()
-                if not member:
-                    team_logger.error("Member %s not found", member_name)
-                    return False
-
-            if message.broadcast:
-                read_result = await session.execute(
-                    select(read_status_model).where(
-                        read_status_model.member_name == member_name,
-                        read_status_model.team_name == message.team_name,
-                    )
+            )
+            read_status = read_result.scalar_one_or_none()
+            if read_status is None:
+                read_status = read_status_model(
+                    member_name=member_name,
+                    team_name=message.team_name,
+                    read_at=message.timestamp,
                 )
-                read_status = read_result.scalar_one_or_none()
-                if read_status is None:
-                    read_status = read_status_model(
-                        member_name=member_name,
-                        team_name=message.team_name,
-                        read_at=message.timestamp,
-                    )
-                    session.add(read_status)
-                elif read_status.read_at is None or message.timestamp > read_status.read_at:
-                    read_status.read_at = message.timestamp
-            else:
-                message.is_read = True
+                session.add(read_status)
+            elif read_status.read_at is None or message.timestamp > read_status.read_at:
+                read_status.read_at = message.timestamp
+        else:
+            message.is_read = True
 
-            await session.commit()
+        return True
 
-            team_logger.info("Message %s marked as read by %s", message_id, member_name)
-            return True
+    async def mark_message_read(self, message_id: str, member_name: str) -> bool:
+        """Mark a message as read by a member (works for both direct and broadcast messages)."""
+
+        async def _op() -> bool:
+            async with self._sessions.write() as session:
+                marked = await self._mark_read_in_session(session, message_id, member_name)
+                if marked:
+                    await session.commit()
+            if marked:
+                team_logger.info("Message %s marked as read by %s", message_id, member_name)
+            return marked
+
+        return await retry_on_locked(_op, on_locked_result=False, label=f"mark_message_read {message_id}")
+
+    async def mark_messages_read(self, message_ids: List[str], member_name: str) -> int:
+        """Mark several messages read for one member in a single transaction.
+
+        Batches what would otherwise be one transaction (one fsync) per
+        message into a single commit — the dominant write-throughput lever
+        on SQLite. Skips ids that are missing or fail validation; returns
+        the number actually marked. Idempotent and safe to retry on a
+        locked database (see ``_mark_read_in_session``).
+
+        Args:
+            message_ids: Message ids to mark read, in delivery order.
+            member_name: Member reading the messages.
+
+        Returns:
+            Count of messages whose read state was applied.
+        """
+        if not message_ids:
+            return 0
+
+        async def _op() -> int:
+            marked = 0
+            async with self._sessions.write() as session:
+                for message_id in message_ids:
+                    if await self._mark_read_in_session(session, message_id, member_name):
+                        marked += 1
+                if marked:
+                    await session.commit()
+            return marked
+
+        return await retry_on_locked(_op, on_locked_result=0, label=f"mark_messages_read ({len(message_ids)})")

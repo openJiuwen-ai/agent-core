@@ -3,21 +3,38 @@
 """DeepAgent implementation."""
 from __future__ import annotations
 
+import asyncio
 import importlib
 import os
 import sys
 import uuid
-from typing import (
-    Any, AsyncIterator, Dict, List, Optional,
-    TYPE_CHECKING, Tuple, cast,
-)
-import asyncio
 from pathlib import Path
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    cast,
+)
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.user_config import UserConfig
+from openjiuwen.core.context_engine import ContextEngine
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.controller.config import ControllerConfig
+from openjiuwen.core.controller.modules.task_manager import TaskFilter
+from openjiuwen.core.controller.schema.event import (
+    FollowUpEvent,
+    TaskInteractionEvent,
+)
+from openjiuwen.core.controller.schema.task import TaskStatus
+from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
+from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -29,50 +46,41 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
     AgentRail,
     InvokeInputs,
-    RunKind,
     RunContext,
+    RunKind,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.harness_config.loader import (
+    HarnessConfigLoader,
+)
 from openjiuwen.harness.rails import DeepAgentRail
+from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from openjiuwen.harness.rails.task_completion_rail import (
     TaskCompletionRail,
 )
-from openjiuwen.core.foundation.tool import ToolCard
-from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
 from openjiuwen.harness.schema.config import DeepAgentConfig
-from openjiuwen.core.controller.config import ControllerConfig
-from openjiuwen.core.context_engine import ContextEngine
-from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-from openjiuwen.core.controller.schema.event import (
-    TaskInteractionEvent,
-    FollowUpEvent,
+from openjiuwen.harness.schema.state import (
+    _SESSION_RUNTIME_ATTR,
+    _SESSION_STATE_KEY,
+    DeepAgentState,
 )
-from openjiuwen.harness.task_loop.task_loop_event_handler import (
-    TaskLoopEventHandler,
+from openjiuwen.harness.security.factory import build_permission_interrupt_rail
+from openjiuwen.harness.task_loop.loop_coordinator import (
+    LoopCoordinator,
+)
+from openjiuwen.harness.task_loop.loop_queues import (
+    LoopQueues,
+)
+from openjiuwen.harness.task_loop.task_loop_controller import (
+    TaskLoopController,
 )
 from openjiuwen.harness.task_loop.task_loop_event_executor import (
     DEEP_TASK_TYPE,
     build_deep_executor,
 )
-from openjiuwen.harness.task_loop.loop_coordinator import (
-    LoopCoordinator,
+from openjiuwen.harness.task_loop.task_loop_event_handler import (
+    TaskLoopEventHandler,
 )
-from openjiuwen.harness.schema.state import (
-    DeepAgentState,
-    _SESSION_RUNTIME_ATTR,
-    _SESSION_STATE_KEY,
-)
-from openjiuwen.harness.task_loop.loop_queues import (
-    LoopQueues,
-)
-from openjiuwen.harness.harness_config.loader import (
-    HarnessConfigLoader,
-)
-from openjiuwen.harness.task_loop.task_loop_controller import (
-    TaskLoopController,
-)
-from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
-from openjiuwen.harness.security.factory import build_permission_interrupt_rail
 from openjiuwen.harness.tools import SessionToolkit, is_free_search_enabled, is_paid_search_enabled
 
 if TYPE_CHECKING:
@@ -82,19 +90,16 @@ if TYPE_CHECKING:
     from openjiuwen.harness.schema.config import SubAgentConfig
 
 from openjiuwen.harness.prompts import (
-    resolve_language,
-    resolve_mode,
     PromptSection,
     SystemPromptBuilder,
-)
-from openjiuwen.harness.prompts.sections import SectionName
-from openjiuwen.harness.prompts.sections.identity import build_identity_section
-from openjiuwen.harness.prompts.sections.prompt_attachments import (
-    build_prompt_attachments_section,
+    resolve_language,
+    resolve_mode,
 )
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentManager,
 )
+from openjiuwen.harness.prompts.sections import SectionName
+from openjiuwen.harness.prompts.sections.identity import build_identity_section
 from openjiuwen.harness.workspace.workspace import Workspace
 
 # Events bridged to the inner ReActAgent.
@@ -315,6 +320,9 @@ class DeepAgent(BaseAgent):
         if config.context_engine_config is not None:
             new_react_config.context_engine_config = config.context_engine_config
         self._react_agent.configure(new_react_config)
+        if self.system_prompt_builder is not None:
+            self._react_agent.prompt_builder = self.system_prompt_builder
+            self._react_agent.system_prompt_builder = self.system_prompt_builder
         self._react_agent.prompt_attachment_manager = self.prompt_attachment_manager
         logger.info("[DeepAgent] Model configuration hot reloaded")
 
@@ -382,7 +390,6 @@ class DeepAgent(BaseAgent):
             ))
         else:
             prompt_builder.add_section(build_identity_section(language))
-        prompt_builder.add_section(build_prompt_attachments_section(language))
         prompt = prompt_builder.build()
         new_react_config = self._react_agent.config.model_copy()
         new_react_config.prompt_template = [{"role": "system", "content": prompt}]
@@ -738,7 +745,6 @@ class DeepAgent(BaseAgent):
             ))
         else:
             prompt_builder.add_section(build_identity_section(language))
-        prompt_builder.add_section(build_prompt_attachments_section(language))
         prompt = prompt_builder.build()
         react_config.prompt_template = [{"role": "system", "content": prompt}]
 
@@ -2225,6 +2231,7 @@ class DeepAgent(BaseAgent):
             # Cancel background task explicitly to speed up cleanup.
             # Without this, await task could wait for a long-running
             # operation (e.g., wait_round_completion with 600s timeout).
+            await self._cancel_session_deep_tasks(session.get_session_id())
             await self._cancel_stream_process_task()
             raise
         finally:
@@ -2464,6 +2471,48 @@ class DeepAgent(BaseAgent):
                 "stream process task raised during cancel",
                 exc_info=True,
             )
+
+    async def _cancel_session_deep_tasks(self, session_id: str) -> None:
+        """Cancel active DeepAgent round tasks for a session.
+
+        Session-spawn tasks intentionally keep running after the foreground
+        stream disconnects, so this only targets the current DeepAgent round.
+        """
+        controller = self._loop_controller
+        if controller is None:
+            return
+        scheduler = controller.task_scheduler
+        if scheduler is None or scheduler.task_manager is None:
+            return
+
+        try:
+            tasks = await scheduler.task_manager.get_task(
+                task_filter=TaskFilter(session_id=session_id)
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to list session tasks during stream cancel: %s",
+                e,
+                exc_info=True,
+            )
+            return
+
+        cancellable = {
+            TaskStatus.SUBMITTED,
+            TaskStatus.WORKING,
+        }
+        for task in tasks:
+            if task.task_type != DEEP_TASK_TYPE or task.status not in cancellable:
+                continue
+            try:
+                await scheduler.cancel_task(task.task_id)
+            except Exception as e:
+                logger.warning(
+                    "Failed to cancel deep task %s during stream cancel: %s",
+                    task.task_id,
+                    e,
+                    exc_info=True,
+                )
 
     async def abort(
         self,

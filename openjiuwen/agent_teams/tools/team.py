@@ -7,6 +7,7 @@ This module implements Agent Team which manages team members, tasks, and message
 """
 
 import asyncio
+import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -302,6 +303,8 @@ class TeamBackend:
         mode: MemberMode = MemberMode.BUILD_MODE,
         allocation: Optional["Allocation"] = None,
         role: TeamRole = TeamRole.TEAMMATE,
+        isolation: Optional[str] = None,
+        permissions_override: Optional[dict[str, str]] = None,
     ) -> MemberOpResult:
         """Create a team member record in the database.
 
@@ -326,6 +329,10 @@ class TeamBackend:
                 Defaults to ``TEAMMATE`` for the ordinary teammate
                 spawn paths; ``spawn_human_agent`` overrides with
                 ``HUMAN_AGENT`` so the role survives cold recovery.
+            permissions_override: Flat ``{tool_name: level_string}`` dict
+                from ``spawn_teammate.permissions``.  Only tightening
+                rules are valid (see ``narrow_permissions``).  Persisted
+                as JSON on the member row so it survives process restarts.
 
         Returns:
             ``MemberOpResult`` describing the outcome. ``__bool__`` falls
@@ -335,10 +342,16 @@ class TeamBackend:
         existing = await self.db.member.get_member(member_name, self.team_name)
         if existing is not None:
             return MemberOpResult.fail(f"Member {member_name} already exists in team {self.team_name}")
+        if isolation is not None and isolation != "worktree":
+            return MemberOpResult.fail("Invalid isolation: expected 'worktree' or None")
 
-        import json as _json
+        from openjiuwen.agent_teams.tools.member_options import build_member_options
 
-        model_ref_json: Optional[str] = _json.dumps(allocation.to_db_ref()) if allocation is not None else None
+        options = build_member_options(
+            model_ref=allocation.to_db_ref() if allocation is not None else None,
+            worktree_isolation=isolation,
+            permissions_override=permissions_override,
+        )
 
         success = await self.db.member.create_member(
             member_name=member_name,
@@ -351,7 +364,7 @@ class TeamBackend:
             execution_status=execution_status,
             mode=mode.value,
             prompt=prompt,
-            model_ref_json=model_ref_json,
+            options=options,
         )
         if not success:
             return MemberOpResult.fail(f"Database rejected create_member for {member_name} in team {self.team_name}")
@@ -528,6 +541,22 @@ class TeamBackend:
         if member_data is None:
             team_logger.error(f"Member {member_name} not found in team {self.team_name}")
             return False
+
+        # DB message (protocol=json): carries detailed approval data for
+        # teammate to read when resuming from interrupt.  This is the
+        # fallback delivery path if the pub-sub event is lost.
+        approval_payload = json.dumps({
+            "type": "tool_approval_result",
+            "tool_call_id": tool_call_id,
+            "approved": approved,
+            "feedback": feedback or "",
+            "auto_confirm": auto_confirm,
+        })
+        await self.message_manager.send_message(
+            content=approval_payload,
+            to_member_name=member_name,
+            protocol="json",
+        )
 
         try:
             await self.messager.publish(

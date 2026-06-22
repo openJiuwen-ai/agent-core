@@ -18,6 +18,7 @@ from openjiuwen.core.operator import LLMCallOperator, ToolCallOperator
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgentConfig
 from openjiuwen.core.single_agent.agents.react_agent_evolve import ReActAgentEvolve
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.foundation.tool.base import ToolCard
 
 
 def _create_mock_skill_util():
@@ -110,9 +111,7 @@ class TestReActAgentEvolveParameterSync:
         """Test _on_llm_parameter_updated syncs to config.prompt_template"""
         mock_skill_util_class.return_value = _create_mock_skill_util()
         card = AgentCard(name="test_agent", description="Test agent")
-        config = ReActAgentConfig().configure_prompt_template(
-            [{"role": "system", "content": "Original prompt"}]
-        )
+        config = ReActAgentConfig().configure_prompt_template([{"role": "system", "content": "Original prompt"}])
 
         agent = ReActAgentEvolve(card=card)
         agent.configure(config)
@@ -158,8 +157,6 @@ class TestReActAgentEvolveParameterSync:
     @patch("openjiuwen.core.single_agent.skills.SkillUtil")
     def test_tool_parameter_updated_syncs_to_ability_manager(mock_skill_util_class):
         """Test _on_tool_parameter_updated syncs to ability_manager"""
-        from openjiuwen.core.foundation.tool.base import ToolCard
-
         mock_skill_util_class.return_value = _create_mock_skill_util()
         card = AgentCard(name="test_agent", description="Test agent")
         agent = ReActAgentEvolve(card=card)
@@ -187,6 +184,33 @@ class TestReActAgentEvolveParameterSync:
 
         # Should not raise with non-dict value
         agent._on_tool_parameter_updated("tool_description", "not a dict")
+
+
+class TestReActAgentEvolveConfigure:
+    """Tests for configure-time operator synchronization."""
+
+    @staticmethod
+    @patch("openjiuwen.core.single_agent.skills.SkillUtil")
+    def test_configure_rebuilds_operators(mock_skill_util_class):
+        """Configure refreshes operator state for current prompt template and tools."""
+        mock_skill_util_class.return_value = _create_mock_skill_util()
+        card = AgentCard(name="test_agent", description="Test agent")
+        agent = ReActAgentEvolve(card=card)
+        agent.ability_manager.add(ToolCard(name="search_tool", description="Search data"))
+
+        first_prompt = [{"role": "system", "content": "first prompt"}]
+        second_prompt = [{"role": "system", "content": "second prompt"}]
+
+        agent.configure(ReActAgentConfig().configure_prompt_template(first_prompt))
+        first_operators = agent.get_operators()
+        assert first_operators["react_llm"].get_state()["system_prompt"][0].content == "first prompt"
+
+        agent.configure(ReActAgentConfig().configure_prompt_template(second_prompt))
+        second_operators = agent.get_operators()
+        assert second_operators["react_llm"] is not first_operators["react_llm"]
+        assert second_operators["react_tool"] is not first_operators["react_tool"]
+        assert second_operators["react_llm"].get_state()["system_prompt"][0].content == "second prompt"
+        assert second_operators["react_tool"].get_state()["tool_description"] == {"search_tool": "Search data"}
 
 
 if __name__ == "__main__":

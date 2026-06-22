@@ -73,16 +73,15 @@ class TeamMember(SQLModel, table=True):
     # ``database/engine.py``.
     role: str = Field(nullable=False, default="teammate")
     prompt: Optional[str] = Field(default=None, nullable=True)
-    model_ref_json: Optional[str] = Field(default=None, nullable=True)
-    """Lightweight reference to the assigned ``ModelPoolEntry`` as JSON.
-
-    Stores ``{"model_id": str, "model_name": str}`` rather than the full
-    ``TeamModelConfig`` so credential/endpoint refreshes in the live pool
-    (carried in the team session) take effect on the next resolution
-    instead of being frozen at spawn time. Resolved via
-    ``resolve_member_model`` against the current ``TeamSpec.model_pool``.
-    NULL when the team is configured without a pool.
-    """
+    options: Optional[str] = Field(
+        default=None,
+        nullable=True,
+        description=(
+            "JSON object for extensible member configuration. "
+            "Current shape: {model_ref: {model_name, model_index}, "
+            "worktree: {isolation, path}, permissions_override: {bash: deny, ...}}"
+        ),
+    )
     # Set on roster mutations only (create_member).  Status / execution
     # status updates intentionally do NOT bump this column because they
     # do not change how the # 成员关系 prompt section is rendered.
@@ -136,6 +135,15 @@ class TeamMessageBase(SQLModel):
     content: str = Field(nullable=False)
     timestamp: int = Field(sa_type=BigInteger, nullable=False, index=True)
     broadcast: bool = Field(nullable=False, index=True)
+    protocol: str = Field(
+        default="plain",
+        nullable=False,
+        description=(
+            "Message format: 'plain' for normal text, 'json' for structured "
+            "payloads (e.g. approval results). Used by mailbox drain to "
+            "selectively admit interrupt-resolving messages while deferring others."
+        ),
+    )
     # Read state for direct (point-to-point) messages only.  Broadcast rows
     # carry NULL here because per-recipient read state for broadcasts lives
     # in MessageReadStatus (high-water mark by timestamp); a single bool on

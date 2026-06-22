@@ -55,6 +55,11 @@ STRINGS: dict[str, str] = {
         "可选。建议该成员使用的模型名称（如 gpt-4、claude-sonnet-4 等）；"
         "未指定时由系统自动选择合适的模型"
     ),
+    "spawn_teammate.permissions": (
+        "收窄该 teammate 的工具权限（只能收紧，不能放宽）。"
+        "键为工具名，值为权限级别：'allow'、'ask' 或 'deny'。"
+        "示例：{\"bash\": \"deny\", \"write_file\": \"ask\"}"
+    ),
     # ===== spawn_human_agent ===================================================
     # spawn_human_agent._desc lives in descs/cn/spawn_human_agent.md
     "spawn_human_agent.member_name": (

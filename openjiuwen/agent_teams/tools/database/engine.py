@@ -3,10 +3,15 @@
 
 """Database engine initialization, session management, and table lifecycle."""
 
+import asyncio
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import TypeVar
 
 from sqlalchemy import event, inspect
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -33,6 +38,91 @@ from openjiuwen.core.common.logging import team_logger
 def get_current_time() -> int:
     """Return current time in milliseconds."""
     return int(round(time.time() * 1000))
+
+
+_T = TypeVar("_T")
+
+# Retry budget for write operations that hit a transient ``database is
+# locked``. With application-level write serialisation in place (see
+# ``DbSessions``) this is rare — it only surfaces from WAL checkpoint
+# edges or a foreign process touching the same file — so a short bounded
+# back-off is enough.
+_DB_RETRY_ATTEMPTS = 3
+_DB_RETRY_BASE_DELAY = 0.5
+
+
+class DbSessions:
+    """Read/write session provider with process-wide write serialisation.
+
+    SQLite permits a single writer at a time (a database-level lock). In
+    the in-process team runtime every member shares one engine and one
+    connection pool, so a process-wide ``asyncio.Lock`` funnels all writes
+    through one logical writer slot. Writers therefore never contend on the
+    SQLite lock — no busy-timeout back-off pinning a checked-out connection
+    — and the remaining pool connections stay free for concurrent WAL
+    reads. This mirrors SQLite's own concurrency model (serialised writes +
+    concurrent readers) instead of fighting it with a pool of would-be
+    parallel writers.
+    """
+
+    def __init__(self, session_local: async_sessionmaker) -> None:
+        """Bind the shared session factory and create the write lock."""
+        self._session_local = session_local
+        self._write_lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def read(self) -> AsyncIterator[AsyncSession]:
+        """Yield a session for read-only work; the write lock is not held."""
+        async with self._session_local() as session:
+            yield session
+
+    @asynccontextmanager
+    async def write(self) -> AsyncIterator[AsyncSession]:
+        """Yield a session while holding the process-wide write lock.
+
+        The lock is non-reentrant: a write must not open a nested
+        ``write()`` or it will deadlock. Compose multi-step writes inside a
+        single ``write()`` block, and keep the lock on the outermost public
+        method when one write helper delegates to another.
+        """
+        async with self._write_lock:
+            async with self._session_local() as session:
+                yield session
+
+
+async def retry_on_locked(
+    op: Callable[[], Awaitable[_T]],
+    *,
+    on_locked_result: _T,
+    label: str,
+) -> _T:
+    """Run a write ``op`` with exponential back-off on ``database is locked``.
+
+    The back-off sleep runs *between* ``op`` calls, never inside the session
+    ``op`` opens: ``op`` must fully exit its ``async with write()`` block
+    (releasing the connection) before returning, so a retry wait never pins
+    a checked-out connection and starves the pool.
+
+    Args:
+        op: Zero-arg coroutine factory performing one write attempt.
+        on_locked_result: Value returned after the final failed attempt.
+        label: Human-readable operation name for logs.
+
+    Returns:
+        The ``op`` result, or ``on_locked_result`` when every attempt hit a
+        locked database.
+    """
+    for attempt in range(_DB_RETRY_ATTEMPTS):
+        try:
+            return await op()
+        except OperationalError as e:
+            if attempt >= _DB_RETRY_ATTEMPTS - 1:
+                team_logger.error("%s failed after %d attempts: %s", label, _DB_RETRY_ATTEMPTS, e)
+                return on_locked_result
+            delay = _DB_RETRY_BASE_DELAY * (2**attempt)
+            team_logger.warning("%s hit a locked DB (attempt %d), retrying in %ss", label, attempt + 1, delay)
+            await asyncio.sleep(delay)
+    return on_locked_result
 
 
 def _get_table_names(sync_conn) -> list[str]:
@@ -84,6 +174,67 @@ def _ensure_team_member_role_column(sync_conn) -> None:
     )
 
 
+def _ensure_team_member_options_column(sync_conn) -> None:
+    """Ensure TeamMember.options exists, backfill it, and drop legacy columns."""
+    inspector = inspect(sync_conn)
+    if "team_member" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("team_member")}
+    if "options" not in columns:
+        sync_conn.exec_driver_sql("ALTER TABLE team_member ADD COLUMN options TEXT")
+        team_logger.info("Migrated legacy team_member table: added options column")
+
+    if "model_ref_json" not in columns:
+        return
+
+    from openjiuwen.agent_teams.tools.member_options import merge_legacy_member_options
+
+    rows = sync_conn.exec_driver_sql(
+        "SELECT member_name, team_name, options, model_ref_json FROM team_member"
+    ).mappings()
+    for row in rows:
+        merged = merge_legacy_member_options(
+            options=row.get("options"),
+            model_ref_json=row.get("model_ref_json"),
+        )
+        if merged == row.get("options"):
+            continue
+        sync_conn.exec_driver_sql(
+            "UPDATE team_member SET options = ? WHERE member_name = ? AND team_name = ?",
+            (merged, row["member_name"], row["team_name"]),
+        )
+
+    sync_conn.exec_driver_sql("ALTER TABLE team_member DROP COLUMN model_ref_json")
+    team_logger.info("Migrated legacy team_member table: dropped model_ref_json column")
+
+
+def _ensure_message_protocol_column(sync_conn) -> None:
+    """Backfill the ``protocol`` column on pre-existing per-session message tables.
+
+    ``SQLModel.metadata.create_all`` only creates tables that don't exist;
+    it never alters live tables.  Per-session message tables created before
+    the ``protocol`` column was introduced therefore lack it after upgrading.
+    Probe each message table and run ``ALTER TABLE ... ADD COLUMN`` with a
+    default of ``"plain"`` so legacy rows retain their original semantics.
+    """
+    inspector = inspect(sync_conn)
+    for table_name in inspector.get_table_names():
+        if not table_name.startswith("team_message_"):
+            continue
+        columns = {col["name"] for col in inspector.get_columns(table_name)}
+        if "protocol" in columns:
+            continue
+        sync_conn.exec_driver_sql(
+            f"ALTER TABLE {table_name} ADD COLUMN protocol TEXT NOT NULL DEFAULT 'plain'"
+        )
+        team_logger.info(
+            "Migrated legacy message table %s: added protocol column",
+            table_name,
+        )
+
+
+
+
 async def initialize_engine(
     config: DatabaseConfig,
 ) -> tuple[AsyncEngine, async_sessionmaker]:
@@ -116,15 +267,19 @@ async def initialize_engine(
                 connect_args={"check_same_thread": False},
             )
         else:
-            # SQLite WAL allows N concurrent readers + 1 writer, but that
-            # concurrency is per-connection. A single-connection pool
-            # serialises every reader and writer onto one connection and
-            # negates WAL entirely; under multi-member team workloads the
-            # backlog quickly exceeds the 30s checkout timeout. Pool 5
-            # connections so reads can proceed in parallel with the
-            # singleton writer slot; keep max_overflow=0 so checkout
-            # timeouts still surface real session leaks instead of being
-            # masked by unlimited growth.
+            # SQLite allows a single writer at a time. Writes are
+            # serialised in the application layer (see ``DbSessions.write``),
+            # so only one connection is ever on the write path and the
+            # remaining pool connections serve concurrent WAL reads —
+            # matching SQLite's own model instead of fighting it with a pool
+            # of would-be parallel writers. ``max_overflow=0`` keeps checkout
+            # timeouts surfacing real session leaks instead of masking them
+            # with unbounded growth; ``pool_timeout`` is short because, with
+            # writes serialised, a checkout that cannot be satisfied quickly
+            # signals a real problem rather than transient write-lock
+            # contention. ``pool_pre_ping`` is dropped: a local SQLite file
+            # connection does not silently die the way a network socket can,
+            # so pinging every checkout is pure waste.
             engine = create_async_engine(
                 f"sqlite+aiosqlite:///{conn_str}",
                 echo=False,
@@ -132,7 +287,7 @@ async def initialize_engine(
                 poolclass=AsyncAdaptedQueuePool,
                 pool_size=5,
                 max_overflow=0,
-                pool_pre_ping=True,
+                pool_timeout=10,
                 connect_args={
                     "timeout": config.db_timeout,
                     "check_same_thread": False,
@@ -143,6 +298,26 @@ async def initialize_engine(
         def set_sqlite_pragma(dbapi_connection, connection_record):
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
+            if not in_memory:
+                # Connection-level read / I/O tuning for the file-backed
+                # store (a :memory: db already lives in RAM, so a page cache
+                # and mmap add nothing). temp_store=MEMORY keeps sorts and
+                # transient B-trees off disk; cache_size=-65536 is a 64MB
+                # page cache (negative = KiB); mmap_size maps up to 256MB of
+                # the file for read I/O. All three are upper bounds — a small
+                # team.db only uses what it needs.
+                cursor.execute("PRAGMA temp_store=MEMORY")
+                cursor.execute("PRAGMA cache_size=-65536")
+                cursor.execute("PRAGMA mmap_size=268435456")
+                if config.db_enable_wal:
+                    # synchronous=NORMAL is the safe, high-throughput
+                    # pairing for WAL: a power loss loses at most the last
+                    # un-checkpointed transaction and never corrupts the
+                    # database, while avoiding the per-commit fsync that FULL
+                    # forces. Connection-scoped, set on every connect —
+                    # unlike journal_mode, a persistent database-level
+                    # setting applied once on first connect.
+                    cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.close()
 
         if config.db_enable_wal and not in_memory:
@@ -205,6 +380,7 @@ async def initialize_engine(
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
         await conn.run_sync(_ensure_team_member_role_column)
+        await conn.run_sync(_ensure_team_member_options_column)
 
     return engine, session_local
 
@@ -230,6 +406,7 @@ async def create_cur_session_tables(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
         for model in (task_model, dep_model, message_model, read_status_model):
             await conn.run_sync(model.__table__.create, checkfirst=True)
+        await conn.run_sync(_ensure_message_protocol_column)
 
     team_logger.info("Session tables ready for session %s", session_id)
 

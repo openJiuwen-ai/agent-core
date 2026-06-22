@@ -74,6 +74,7 @@ WEB_FETCH = "core.web_fetch"
 WEB_PAID_SEARCH = "core.web_paid_search"
 VISION = "core.vision"
 AUDIO = "core.audio"
+OBSERVABILITY = "core.observability"
 
 
 def _build_skill_use_rail(params: dict[str, Any], context: Any) -> SkillUseRail:
@@ -320,6 +321,28 @@ def _build_audio_tool_group(params: dict[str, Any], context: Any) -> list[Any]:
     )
 
 
+def _build_observability_rail(params: dict[str, Any], context: Any) -> Any:
+    """Build an ObservabilityRail when observability is initialized.
+
+    Returns ``None`` when observability is not initialized, making this a
+    safe unconditional addition to any spec's ``rails`` list — the provider
+    handles the on/off logic itself.
+
+    Args:
+        params: Spec params (unused).
+        context: Per-member build context (unused).
+
+    Returns:
+        An ``ObservabilityRail``, or ``None`` when observability is disabled.
+    """
+    from openjiuwen.agent_teams.observability.setup import is_initialized
+
+    if not is_initialized():
+        return None
+    from openjiuwen.agent_teams.observability import ObservabilityRail
+    return ObservabilityRail()
+
+
 harness_element(
     kind=ElementKind.RAIL,
     name=TASK_PLANNING,
@@ -430,6 +453,12 @@ harness_element(
     input_model=AudioToolsInput,
     builder=_build_audio_tool_group,
 )
+harness_element(
+    kind=ElementKind.RAIL,
+    name=OBSERVABILITY,
+    description="Creates per-iteration agent spans for observability tracing.",
+    builder=_build_observability_rail,
+)
 
 
 __all__ = [
@@ -450,4 +479,5 @@ __all__ = [
     "WEB_PAID_SEARCH",
     "VISION",
     "AUDIO",
+    "OBSERVABILITY",
 ]

@@ -304,3 +304,41 @@ def test_prepare_evolve_submission_does_not_consume_ref():
     )
 
     review_runtime.consume_prepared_submission.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_apply_prepared_evolve_submission_uses_prepared_record_source():
+    store = Mock()
+    store.skill_exists.return_value = True
+    store.append_record = AsyncMock()
+    submission_service = ExperienceSubmissionService(store=store, pending_approval_snapshots={})
+    prepared = Mock()
+    prepared.subject = {"kind": "skill", "name": "test"}
+    prepared.record_source = "execution_failure"
+    prepared.experience_drafts = (
+        {"summary": "Use parser fields", "content": "Prefer parser fields.", "target": "body", "section": "Troubleshooting"},
+    )
+
+    await submission_service.apply_prepared_evolve_submission(prepared, source="agent_evolve_tool")
+
+    written_record = store.append_record.await_args.args[1]
+    assert written_record.source == "execution_failure"
+
+
+@pytest.mark.asyncio
+async def test_apply_prepared_evolve_submission_falls_back_to_source_without_record_source():
+    store = Mock()
+    store.skill_exists.return_value = True
+    store.append_record = AsyncMock()
+    submission_service = ExperienceSubmissionService(store=store, pending_approval_snapshots={})
+    prepared = Mock()
+    prepared.subject = {"kind": "skill", "name": "test"}
+    prepared.record_source = None
+    prepared.experience_drafts = (
+        {"summary": "Use parser fields", "content": "Prefer parser fields.", "target": "body", "section": "Troubleshooting"},
+    )
+
+    await submission_service.apply_prepared_evolve_submission(prepared)
+
+    written_record = store.append_record.await_args.args[1]
+    assert written_record.source == "agent_evolve_tool"
