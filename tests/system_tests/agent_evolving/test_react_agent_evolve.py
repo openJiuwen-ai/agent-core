@@ -1,20 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""
-Agent Evolving System Tests
-
-End-to-end tests require LLM API environment variables:
-- API_BASE: API address
-- API_KEY: API key
-- MODEL_NAME: Model name
-- MODEL_PROVIDER: Model provider (OpenAI, SiliconFlow)
-
-Reference: agent_evo_examples/example_end_to_end_react_agent.py
-"""
+"""System tests for ReAct agent evolution using mock LLM responses."""
 
 import asyncio
 import os
 import tempfile
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -27,49 +18,150 @@ from openjiuwen.agent_evolving import (
     SingleDimUpdater,
     TuneConstant,
 )
-from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    AssistantMessageChunk,
+    BaseMessage,
+    BaseOutputParser,
+    ModelRequestConfig,
+    ModelClientConfig,
+)
+from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.single_agent import ReActAgentEvolve, ReActAgentConfig, AgentCard
 from openjiuwen.agent_evolving.trainer.progress import Callbacks
+from tests.unit_tests.fixtures.mock_llm import (
+    MockLLMModel,
+    create_json_response,
+    create_text_response,
+)
 
+SYSTEM_TEST_MOCK_PROVIDER = "SystemReActEvolveMockLLM"
+MessagePayload = str | list[BaseMessage] | list[dict]
+ToolPayload = list[ToolInfo] | list[dict] | None
 
-# LLM API Config
-API_BASE = os.getenv("API_BASE", "")
-API_KEY = os.getenv("API_KEY", "")
-MODEL_NAME = os.getenv("MODEL_NAME", "")
-MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "")
-MODEL_TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", "0.3"))
-MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", "120"))
+MOCK_AGENT_RESPONSE = create_text_response("This is a mock agent answer.")
+MOCK_EVAL_RESPONSE = create_json_response(
+    {"result": False, "reason": "mock low score"},
+)
+MOCK_GRADIENT_RESPONSE = create_text_response(
+    "Improve prompt clarity and answer completeness.",
+)
+MOCK_PROMPT_RESPONSE = create_text_response(
+    "<PROMPT_OPTIMIZED>Refined prompt to improve instruction compliance.</PROMPT_OPTIMIZED>",
+)
 os.environ.setdefault("LLM_SSL_VERIFY", "false")
 
 
-def _has_llm_config() -> bool:
-    """Check if LLM API is configured"""
-    return bool(API_BASE and API_KEY and MODEL_NAME)
+def _messages_to_text(messages) -> str:
+    """Convert message payload into plain text for simple pattern matching."""
+    if isinstance(messages, str):
+        return messages
+    if not isinstance(messages, list):
+        return ""
+
+    parts = []
+    for message in messages:
+        if isinstance(message, dict):
+            value = message.get("content", "")
+        else:
+            value = getattr(message, "content", "")
+        if value:
+            parts.append(str(value))
+
+    return " ".join(parts)
+
+
+def _infer_mock_call_type(messages) -> str:
+    """Infer which component is invoking the LLM in this call."""
+    content = _messages_to_text(messages).lower()
+
+    if "expected answer" in content and "model answer" in content:
+        return "evaluator"
+    if "<ins>" in content or "detailed feedback" in content:
+        return "optimizer_gradient"
+    if "prompt optimization expert" in content:
+        return "optimizer_prompt"
+
+    return "agent"
+
+
+def _mock_response_for(messages):
+    kind = _infer_mock_call_type(messages)
+    if kind == "evaluator":
+        return MOCK_EVAL_RESPONSE
+    if kind == "optimizer_gradient":
+        return MOCK_GRADIENT_RESPONSE
+    if kind == "optimizer_prompt":
+        return MOCK_PROMPT_RESPONSE
+    return MOCK_AGENT_RESPONSE
+
+
+class _SystemTestMockLLM(MockLLMModel):
+    """Local mock LLM client with deterministic content-routed responses."""
+
+    __client_name__ = SYSTEM_TEST_MOCK_PROVIDER
+
+    async def invoke(
+        self,
+        messages: MessagePayload,
+        *,
+        tools: ToolPayload = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        stop: str | None = None,
+        output_parser: BaseOutputParser | None = None,
+        timeout: float | None = None,
+        **kwargs,
+    ) -> AssistantMessage:
+        return _mock_response_for(messages)
+
+    async def stream(
+        self,
+        messages: MessagePayload,
+        *,
+        tools: ToolPayload = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        stop: str | None = None,
+        output_parser: BaseOutputParser | None = None,
+        timeout: float | None = None,
+        **kwargs,
+    ) -> AsyncIterator[AssistantMessageChunk]:
+        response = await self.invoke(messages, **kwargs)
+        yield AssistantMessageChunk(
+            content=response.content,
+            tool_calls=response.tool_calls,
+            usage_metadata=response.usage_metadata,
+        )
 
 
 def _create_model_config() -> ModelRequestConfig:
-    """Create model request config"""
+    """Create model request config."""
     return ModelRequestConfig(
-        model=MODEL_NAME,
-        temperature=MODEL_TEMPERATURE,
+        model="mock-model",
+        temperature=0.3,
         max_tokens=1000,
         top_p=0.9,
     )
 
 
 def _create_model_client_config() -> ModelClientConfig:
-    """Create model client config"""
+    """Create model client config."""
     return ModelClientConfig(
-        client_provider=MODEL_PROVIDER,
-        api_key=API_KEY,
-        api_base=API_BASE,
-        timeout=MODEL_TIMEOUT,
+        client_provider=SYSTEM_TEST_MOCK_PROVIDER,
+        api_key="mock-api-key",
+        api_base="http://mock-api-base",
+        timeout=30,
         verify_ssl=False,
     )
 
 
 def _create_evaluator() -> DefaultEvaluator:
-    """Create evaluator"""
+    """Create DefaultEvaluator."""
     return DefaultEvaluator(
         model_config=_create_model_config(),
         model_client_config=_create_model_client_config(),
@@ -78,7 +170,7 @@ def _create_evaluator() -> DefaultEvaluator:
 
 
 def _create_optimizer() -> InstructionOptimizer:
-    """Create optimizer"""
+    """Create InstructionOptimizer."""
     return InstructionOptimizer(
         model_config=_create_model_config(),
         model_client_config=_create_model_client_config(),
@@ -86,12 +178,12 @@ def _create_optimizer() -> InstructionOptimizer:
 
 
 def _create_updater() -> SingleDimUpdater:
-    """Create Updater"""
+    """Create Updater."""
     return SingleDimUpdater(optimizer=_create_optimizer())
 
 
 def _create_react_agent(agent_id: str = "demo_agent") -> ReActAgentEvolve:
-    """Create ReActAgentEvolve"""
+    """Create ReActAgentEvolve."""
     agent_card = AgentCard(
         id=agent_id,
         name=f"{agent_id.title()}",
@@ -100,10 +192,10 @@ def _create_react_agent(agent_id: str = "demo_agent") -> ReActAgentEvolve:
 
     config = ReActAgentConfig()
     config.configure_model_client(
-        provider=MODEL_PROVIDER,
-        api_key=API_KEY,
-        api_base=API_BASE,
-        model_name=MODEL_NAME,
+        provider=SYSTEM_TEST_MOCK_PROVIDER,
+        api_key="mock-api-key",
+        api_base="http://mock-api-base",
+        model_name="mock-model",
     )
     config.configure_prompt_template(
         [
@@ -122,7 +214,7 @@ def _create_react_agent(agent_id: str = "demo_agent") -> ReActAgentEvolve:
 
 
 def _create_simple_qa_cases() -> CaseLoader:
-    """Create QA test cases"""
+    """Create QA test cases."""
     cases = [
         Case(inputs={"query": "什么是机器学习？"}, label={"answer": "机器学习是 AI 分支。"}),
         Case(inputs={"query": "Python 如何读取文件？"}, label={"answer": "使用 open() 函数。"}),
@@ -134,7 +226,7 @@ def _create_simple_qa_cases() -> CaseLoader:
 
 
 def _create_simple_qa_cases_for_checkpoint() -> CaseLoader:
-    """Create QA test cases for checkpoint"""
+    """Create QA test cases for checkpoint."""
     cases = [
         Case(inputs={"query": "问题1"}, label={"answer": "答案1"}),
         Case(inputs={"query": "问题2"}, label={"answer": "答案2"}),
@@ -144,7 +236,7 @@ def _create_simple_qa_cases_for_checkpoint() -> CaseLoader:
 
 
 class TrainingMonitor(Callbacks):
-    """Training monitor callback"""
+    """Training monitor callback."""
 
     def __init__(self):
         super().__init__()
@@ -164,37 +256,17 @@ class TrainingMonitor(Callbacks):
         self.end_called = True
 
 
-@pytest.fixture
-def runner():
-    """Pytest fixture for Runner setup/teardown with persistent event loop.
-
-    Uses a single long-lived event loop so that Runner's background tasks
-    (task groups, connector pools) are not cancelled between setup and
-    test execution.
-    """
-    from openjiuwen.core.runner import Runner
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(Runner.start())
-    yield loop
-    loop.run_until_complete(Runner.stop())
-    loop.close()
-
-
-@pytest.mark.skipif(not _has_llm_config(), reason="Requires LLM API configuration")
-def test_agent_creation(runner):
-    """Test Agent creation and invoke"""
+def test_agent_creation():
+    """Test Agent creation and invoke."""
     agent = _create_react_agent("test_agent")
     assert agent.card.id == "test_agent"
 
-    result = runner.run_until_complete(agent.invoke({"query": "What is Python?"}))
+    result = asyncio.run(agent.invoke({"query": "What is Python?"}))
     assert result is not None
 
 
-@pytest.mark.skipif(not _has_llm_config(), reason="Requires LLM API configuration")
-def test_end_to_end_training(runner):
-    """End-to-end training test"""
+def test_end_to_end_training():
+    """End-to-end training test."""
     agent = _create_react_agent("train_demo")
     train_loader, val_loader = _create_simple_qa_cases().split(ratio=0.6)
 
@@ -202,7 +274,7 @@ def test_end_to_end_training(runner):
         trainer = Trainer(
             updater=_create_updater(),
             evaluator=_create_evaluator(),
-            num_parallel=2,
+            num_parallel=1,
             early_stop_score=0.95,
             checkpoint_dir=tmpdir,
             checkpoint_every_n_epochs=1,
@@ -218,16 +290,15 @@ def test_end_to_end_training(runner):
         assert evolved is not None
 
 
-@pytest.mark.skipif(not _has_llm_config(), reason="Requires LLM API configuration")
-def test_training_with_callbacks(runner):
-    """Test training with callbacks"""
+def test_training_with_callbacks():
+    """Test training with callbacks."""
     agent = _create_react_agent("callback_demo")
     train_loader, val_loader = _create_simple_qa_cases().split(ratio=0.6)
 
     trainer = Trainer(
         updater=_create_updater(),
         evaluator=_create_evaluator(),
-        num_parallel=2,
+        num_parallel=1,
         early_stop_score=0.95,
     )
 
@@ -246,16 +317,15 @@ def test_training_with_callbacks(runner):
     assert monitor.best_score >= 0.0
 
 
-@pytest.mark.skipif(not _has_llm_config(), reason="Requires LLM API configuration")
-def test_evolved_agent_inference(runner):
-    """Test evolved agent inference"""
+def test_evolved_agent_inference():
+    """Test evolved agent inference."""
     agent = _create_react_agent("inference_demo")
     train_loader, val_loader = _create_simple_qa_cases().split(ratio=0.6)
 
     trainer = Trainer(
         updater=_create_updater(),
         evaluator=_create_evaluator(),
-        num_parallel=2,
+        num_parallel=1,
         early_stop_score=0.95,
     )
 
@@ -272,13 +342,12 @@ def test_evolved_agent_inference(runner):
     ]
 
     for query in test_queries:
-        result = runner.run_until_complete(evolved.invoke({"query": query}))
+        result = asyncio.run(evolved.invoke({"query": query}))
         assert result is not None
 
 
-@pytest.mark.skipif(not _has_llm_config(), reason="Requires LLM API configuration")
-def test_checkpoint_save_and_resume(runner):
-    """Test checkpoint save and resume"""
+def test_checkpoint_save_and_resume():
+    """Test checkpoint save and resume."""
     agent = _create_react_agent("checkpoint_demo")
     cases = _create_simple_qa_cases_for_checkpoint()
     train_loader, val_loader = cases.split(ratio=0.6)
@@ -287,7 +356,7 @@ def test_checkpoint_save_and_resume(runner):
         trainer = Trainer(
             updater=_create_updater(),
             evaluator=_create_evaluator(),
-            num_parallel=2,
+            num_parallel=1,
             early_stop_score=0.95,
             checkpoint_dir=tmpdir,
             checkpoint_every_n_epochs=1,
@@ -301,17 +370,16 @@ def test_checkpoint_save_and_resume(runner):
             num_iterations=2,
         )
 
-        # Verify checkpoint files
         assert len(os.listdir(tmpdir)) > 0
 
-        # Resume training from checkpoint
         agent2 = _create_react_agent("checkpoint_demo_2")
         trainer2 = Trainer(
             updater=_create_updater(),
             evaluator=_create_evaluator(),
-            num_parallel=2,
+            num_parallel=1,
             early_stop_score=0.95,
             checkpoint_dir=tmpdir,
+            resume_from=os.path.join(tmpdir, "latest.json"),
             checkpoint_every_n_epochs=1,
             checkpoint_on_improve=True,
         )

@@ -1,7 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from openjiuwen.core.operator import (
     Operator,
@@ -18,9 +18,9 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 class ReActAgentEvolve(ReActAgent):
     """ReActAgent variant for self-evolution training.
 
-    Extends ReActAgent with operator parameter synchronization.
-    Operators' parameter updates are propagated back to agent's config
-    via callbacks. Execution logic is fully inherited from ReActAgent.
+    Extends ReActAgent with operator wrappers whose parameter updates
+    are propagated back to the live agent state via callbacks.
+    Execution logic is fully inherited from ReActAgent.
 
     Usage:
         1. Create ReActAgentEvolve with desired configuration
@@ -39,6 +39,22 @@ class ReActAgentEvolve(ReActAgent):
         """
         super().__init__(card)
         self._init_operators()
+
+    def configure(self, config: ReActAgentConfig) -> ReActAgentEvolve:
+        """Update config and sync operators.
+
+        Rebuilds operator wrappers after the parent configure updates the
+        underlying agent config and abilities.
+
+        Args:
+            config: ReActAgentConfig object
+
+        Returns:
+            self (supports chaining)
+        """
+        super().configure(config)
+        self._init_operators()
+        return self
 
     def _init_operators(self) -> None:
         """Initialize operators with parameter update callbacks.
@@ -66,7 +82,7 @@ class ReActAgentEvolve(ReActAgent):
             on_parameter_updated=self._on_tool_parameter_updated,
         )
 
-    def get_operators(self) -> Dict[str, Operator]:
+    def get_operators(self) -> dict[str, Operator]:
         """Return operators for self-evolution framework.
 
         This is the primary interface for the self-evolution framework.
@@ -76,15 +92,15 @@ class ReActAgentEvolve(ReActAgent):
         Returns:
             Dict mapping operator_id to Operator instance.
         """
-        ops: Dict[str, Operator] = {}
+        operators: dict[str, Operator] = {}
 
         if self._tool_op is not None:
-            ops[self._tool_op.operator_id] = self._tool_op
+            operators[self._tool_op.operator_id] = self._tool_op
 
         if self._llm_op is not None:
-            ops[self._llm_op.operator_id] = self._llm_op
+            operators[self._llm_op.operator_id] = self._llm_op
 
-        return ops
+        return operators
 
     def _on_llm_parameter_updated(self, target: str, value: Any) -> None:
         """Callback: sync LLM parameter changes to agent config.
@@ -110,13 +126,13 @@ class ReActAgentEvolve(ReActAgent):
 
         self._config.prompt_template = content
 
-    def _extract_tool_descriptions(self) -> Dict[str, str]:
+    def _extract_tool_descriptions(self) -> dict[str, str]:
         """Extract current tool descriptions from ability_manager.
 
         Returns:
             Dict mapping tool_name to description
         """
-        descriptions: Dict[str, str] = {}
+        descriptions: dict[str, str] = {}
         for ability in self.ability_manager.list():
             tool_info = ability.tool_info()
             if tool_info.name:
@@ -141,6 +157,7 @@ class ReActAgentEvolve(ReActAgent):
             tool_card = self.ability_manager.get(tool_name)
             if tool_card is not None and hasattr(tool_card, "description"):
                 tool_card.description = description
+
 
 __all__ = [
     "ReActAgentEvolve",
