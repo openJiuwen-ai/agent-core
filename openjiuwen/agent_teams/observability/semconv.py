@@ -29,6 +29,7 @@ GEN_AI_REQUEST_MODEL = "gen_ai.request.model"
 GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
 GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"
 GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
+GEN_AI_REQUEST_MESSAGE_COUNT = "gen_ai.request.message_count"
 
 GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
 GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
@@ -40,10 +41,6 @@ GEN_AI_RESPONSE_TTFT_MS = "gen_ai.response.time_to_first_token_ms"
 # Standard OpenLLMetry / GenAI keys
 GEN_AI_PROMPT = "gen_ai.prompt"
 GEN_AI_COMPLETION = "gen_ai.completion"
-
-# Langfuse-compatible keys: t_ prefix avoids Langfuse mapping collision
-GEN_AI_T_PROMPT = "t_gen_ai.prompt"
-GEN_AI_T_COMPLETION = "t_gen_ai.completion"
 GEN_AI_TOOL_DEFINITIONS = "gen_ai.tool.definitions"
 
 GEN_AI_TOOL_NAME = "gen_ai.tool.name"
@@ -123,3 +120,9 @@ LANGFUSE_SESSION_ID = "session.id"
 LANGFUSE_OBSERVATION_INPUT = "langfuse.observation.input"
 LANGFUSE_OBSERVATION_OUTPUT = "langfuse.observation.output"
 LANGFUSE_OBSERVATION_TYPE = "langfuse.observation.type"
+
+# Langfuse-specific gen_ai mirror keys — avoid collision with standard
+# gen_ai.prompt / gen_ai.completion which Langfuse's OTel processor
+# maps differently (expects zero-based indices).
+LANGFUSE_GEN_AI_PROMPT = "langfuse.gen_ai.prompt"
+LANGFUSE_GEN_AI_COMPLETION = "langfuse.gen_ai.completion"

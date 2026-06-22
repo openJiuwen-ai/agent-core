@@ -136,6 +136,7 @@ class _MemMessage:
         content: str,
         timestamp: int,
         broadcast: bool,
+        protocol: str = "plain",
         to_member_name: Optional[str] = None,
         is_read: Optional[bool] = False,
     ) -> None:
@@ -145,6 +146,7 @@ class _MemMessage:
         self.content = content
         self.timestamp = timestamp
         self.broadcast = broadcast
+        self.protocol = protocol
         self.to_member_name = to_member_name
         self.is_read = is_read
 
@@ -294,6 +296,9 @@ class InMemoryTeamDatabase:
             )
             team_logger.info("Team %s created", team_name)
             return True
+
+    async def team_exists(self, team_name: str) -> bool:
+        return team_name in self._teams
 
     async def get_team(self, team_name: str) -> Optional[Team]:
         return self._teams.get(team_name)
@@ -954,6 +959,7 @@ class InMemoryTeamDatabase:
         to_member_name: Optional[str] = None,
         broadcast: bool = False,
         is_read: bool = False,
+        protocol: str = "plain",
     ) -> bool:
         async with self._lock:
             for m in self._messages:
@@ -969,6 +975,7 @@ class InMemoryTeamDatabase:
                     to_member_name=to_member_name,
                     timestamp=self.get_current_time(),
                     broadcast=broadcast,
+                    protocol=protocol,
                     # Broadcast rows leave is_read NULL — per-member read
                     # state lives in _MemReadStatus instead.
                     is_read=None if broadcast else is_read,

@@ -58,6 +58,7 @@ def create_team_tools(
     team_name: str = "default",
     swarmflow_model_resolver: Callable[[str], Any] | None = None,
     swarmflow_worker_base_spec: Any = None,
+    team_permissions_enabled: bool = False,
 ) -> list[Tool]:
     """Create role-appropriate tool instances filtered by permission sets.
 
@@ -148,11 +149,12 @@ def create_team_tools(
         allowed = MEMBER_TOOLS
     # Plan tools only make sense in plan_mode.
     if teammate_mode != "plan_mode":
-        allowed = allowed - {
-            "approve_plan",
-            "approve_tool",
-            "submit_plan",
-        }
+        excluded = {"approve_plan", "submit_plan"}
+        # Leader must keep approve_tool when team permissions are on,
+        # so it can resolve teammate ASK interrupts.
+        if not team_permissions_enabled:
+            excluded.add("approve_tool")
+        allowed = allowed - excluded
     # clean_team is a temporary-team primitive only. Persistent teams are
     # torn down by the operator through SDK facades (delete_agent_team etc.);
     # letting the leader LLM call clean_team mid-round would race the runtime

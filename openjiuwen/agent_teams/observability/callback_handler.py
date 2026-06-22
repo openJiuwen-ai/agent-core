@@ -27,6 +27,7 @@ from opentelemetry.trace import (
 
 from openjiuwen.agent_teams.observability.config import ObservabilityConfig
 from openjiuwen.agent_teams.observability.redaction import (
+    _truncate,
     redact_completion,
     redact_prompt,
 )
@@ -37,9 +38,10 @@ from openjiuwen.agent_teams.observability.semconv import (
     GEN_AI_OPERATION_NAME,
     GEN_AI_PROMPT,
     GEN_AI_PROVIDER_NAME,
-    GEN_AI_T_COMPLETION,
-    GEN_AI_T_PROMPT,
+    LANGFUSE_GEN_AI_COMPLETION,
+    LANGFUSE_GEN_AI_PROMPT,
     GEN_AI_REQUEST_MAX_TOKENS,
+    GEN_AI_REQUEST_MESSAGE_COUNT,
     GEN_AI_REQUEST_MODEL,
     GEN_AI_REQUEST_TEMPERATURE,
     GEN_AI_REQUEST_TOP_P,
@@ -144,17 +146,48 @@ class OtelCallbackHandler:
 
     @staticmethod
     def _get_parent_context_for_llm_tool() -> Any:
-        """Resolve parent context for LLM/tool span creation."""
+        """Resolve parent context for LLM/tool span creation.
+
+        Returns None when no valid parent span exists — callers must
+        skip span creation in that case rather than attaching to the
+        root context, which would produce orphan spans outside the
+        team trace.
+        """
         iteration_span = get_current_agent_span()
-        if iteration_span is not None and iteration_span.is_recording():
-            return set_span_in_context(iteration_span, otel_context.get_current())
+        if iteration_span is not None:
+            if iteration_span.is_recording():
+                return set_span_in_context(iteration_span, otel_context.get_current())
+            else:
+                team_logger.warning(
+                    "otel: _get_parent_context - agent span ENDED name={} "
+                    "trace_id={:032x} span_id={:016x}",
+                    iteration_span.name,
+                    iteration_span.context.trace_id,
+                    iteration_span.context.span_id,
+                )
 
         team_span = get_team_span()
-        if team_span is not None and team_span.is_recording():
-            return set_span_in_context(team_span, otel_context.get_current())
+        if team_span is not None:
+            if team_span.is_recording():
+                team_logger.info(
+                    "otel: _get_parent_context - fallback to team span name={} "
+                    "trace_id={:032x} span_id={:016x}",
+                    team_span.name,
+                    team_span.context.trace_id,
+                    team_span.context.span_id,
+                )
+                return set_span_in_context(team_span, otel_context.get_current())
+            else:
+                team_logger.warning(
+                    "otel: _get_parent_context - team span ENDED name={} "
+                    "trace_id={:032x} span_id={:016x}",
+                    team_span.name,
+                    team_span.context.trace_id,
+                    team_span.context.span_id,
+                )
 
-        team_logger.warning("otel: no parent span for LLM/tool, using root context")
-        return otel_context.get_current()
+        team_logger.error("otel: no valid parent span for LLM/tool — skipping span creation")
+        return None
 
     # ------------------------------------------------------------------
     # LLM
@@ -213,7 +246,6 @@ class OtelCallbackHandler:
             if state is None:
                 team_logger.debug("otel: on_llm_output — no open LLM span to close")
                 return
-
             if not state.span.is_recording():
                 team_logger.debug("otel: on_llm_output — span already ended")
                 return
@@ -227,56 +259,19 @@ class OtelCallbackHandler:
 
             tool_calls = kwargs.get("tool_calls") or getattr(kwargs.get("response"), "tool_calls", None)
             tc_json = _serialize_tool_calls(tool_calls)
-            if tc_json and state.span.is_recording():
-                state.span.set_attribute(GEN_AI_TOOL_CALLS, tc_json)
 
+            # Usage / finish_reason from streaming trigger kwargs
             usage_from_trigger = kwargs.get("usage")
             if usage_from_trigger is not None:
                 self._record_usage_attrs(state, usage_from_trigger, skip_existing=True)
-
             finish_from_trigger = kwargs.get("finish_reason") or kwargs.get("response")
             if finish_from_trigger is not None and not state.span.attributes.get(GEN_AI_RESPONSE_FINISH_REASON):
                 self._maybe_record_finish_from_trigger(state, finish_from_trigger)
 
-            if state.span.is_recording():
-                redacted_compl = redact_completion(completion_text, self._config)
-                # Standard key
-                state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.role", "assistant")
-                state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.content", redacted_compl)
-                # Langfuse-compatible t_ prefix key
-                state.span.set_attribute(f"{GEN_AI_T_COMPLETION}.0.role", "assistant")
-                state.span.set_attribute(f"{GEN_AI_T_COMPLETION}.0.content", redacted_compl)
-
-            recorded_finish_reason = state.span.attributes.get(GEN_AI_RESPONSE_FINISH_REASON)
-            choice_obj = {"index": 0, "message": {"role": "assistant"}}
-            if recorded_finish_reason:
-                choice_obj["finish_reason"] = recorded_finish_reason
-            if completion_text:
-                choice_obj["message"]["content"] = completion_text
-            if tc_json:
-                try:
-                    choice_obj["message"]["tool_calls"] = json.loads(tc_json)
-                except (json.JSONDecodeError, TypeError):
-                    team_logger.debug("otel: tc_json not valid JSON, skipping tool_calls in output")
-            response_obj = {"choices": [choice_obj]}
-            output_json = json.dumps(response_obj, ensure_ascii=False, default=str)
-            if state.span.is_recording():
-                state.span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT,
-                                         redact_completion(output_json, self._config))
-
-            if reasoning_text and state.span.is_recording():
-                with self._tracer().start_as_current_span(
-                    name="llm.reasoning",
-                    context=set_span_in_context(state.span),
-                ) as reasoning_span:
-                    reasoning_span.set_attribute(
-                        "gen_ai.reasoning.content",
-                        redact_completion(reasoning_text, self._config),
-                    )
-
-            if state.span.is_recording():
-                state.span.set_status(Status(StatusCode.OK))
-                state.span.end()
+            self._finalize_llm_span_output(
+                state, completion_text, reasoning_text,
+                tc_json=tc_json, response=kwargs.get("response"),
+            )
         except Exception as exc:
             team_logger.warning("otel: on_llm_output failed: {}", exc)
 
@@ -326,6 +321,8 @@ class OtelCallbackHandler:
             inputs = kwargs.get("inputs")
 
             parent_ctx = self._get_parent_context_for_llm_tool()
+            if parent_ctx is None:
+                return
 
             span = self._tracer().start_span(
                 name=f"tool.{tool_name}",
@@ -451,7 +448,9 @@ class OtelCallbackHandler:
         """Handle AGENT_INVOKE_OUTPUT callback.
 
         DO NOT close agent span here! (managed by Rail)
-        For LEADER: set team span output from result
+        Sets team span output from the FINAL invoke result — this is the
+        overall agent output, distinct from per-iteration results written by
+        ObservabilityRail.after_task_iteration.
         """
         try:
             result = kwargs.get("result")
@@ -460,9 +459,8 @@ class OtelCallbackHandler:
                 if team_span is not None and team_span.is_recording():
                     team_span.set_attribute(
                         LANGFUSE_OBSERVATION_OUTPUT,
-                        redact_completion(str(result), self._config)
+                        redact_completion(str(result), self._config),
                     )
-
         except Exception as exc:
             team_logger.exception("otel: on_agent_invoke_output failed: {}", exc)
         return kwargs.get("result")
@@ -481,10 +479,12 @@ class OtelCallbackHandler:
 
     def _open_llm_span(self, kwargs: dict[str, Any], is_streaming: bool = False) -> None:
         """Open an LLM span with explicit parent context."""
+        parent_ctx = self._get_parent_context_for_llm_tool()
+        if parent_ctx is None:
+            return
+
         messages = kwargs.get("messages") or []
         model_name = kwargs.get("model") or self._derive_model_name(kwargs) or "unknown"
-
-        parent_ctx = self._get_parent_context_for_llm_tool()
 
         span = self._tracer().start_span(
             name="llm.call",
@@ -509,22 +509,37 @@ class OtelCallbackHandler:
                 except (TypeError, ValueError):
                     pass
 
-        messages_list = []
-        for m in messages:
-            msg_obj = {"role": _message_role(m), "content": _coerce_message_content(_message_content(m))}
-            messages_list.append(msg_obj)
-        span.set_attribute(LANGFUSE_OBSERVATION_INPUT, json.dumps(messages_list, ensure_ascii=False, default=str))
+        msg_count = len(messages)
+        span.set_attribute(GEN_AI_REQUEST_MESSAGE_COUNT, msg_count)
 
-        for i, msg in enumerate(messages):
-            role = _message_role(msg)
-            content = _coerce_message_content(_message_content(msg))
-            redacted = redact_prompt(content, self._config)
-            # Standard key
+        for i, m in enumerate(messages):
+            role = _message_role(m)
+            raw_content = _coerce_message_content(_message_content(m))
+            # Per-message prompt attributes (standard + Langfuse)
+            redacted = redact_prompt(raw_content, self._config)
             span.set_attribute(f"{GEN_AI_PROMPT}.{i}.role", role)
             span.set_attribute(f"{GEN_AI_PROMPT}.{i}.content", redacted)
-            # Langfuse-compatible t_ prefix key
-            span.set_attribute(f"{GEN_AI_T_PROMPT}.{i}.role", role)
-            span.set_attribute(f"{GEN_AI_T_PROMPT}.{i}.content", redacted)
+            span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.role", role)
+            span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.content", redacted)
+
+        # langfuse.observation.input: show the last N messages for UI readability.
+        # Framework injects a system-reminder user message before each call,
+        # so showing the last 2 captures both the actual query and the reminder.
+        # Full message list is available via gen_ai.prompt.{i}.* attributes.
+        if messages:
+            tail_n = self._config.llm_input_last_n_messages
+            tail = messages[-tail_n:]
+            input_json = json.dumps(
+                [{"role": _message_role(m),
+                  "content": _coerce_message_content(_message_content(m))}
+                 for m in tail],
+                ensure_ascii=False, default=str,
+            )
+        else:
+            input_json = "[]"
+        input_max_len = max(self._config.attribute_value_max_length * 10, 81920)
+        span.set_attribute(LANGFUSE_OBSERVATION_INPUT,
+                           _truncate(input_json, input_max_len))
 
         tools = kwargs.get("tools")
         if tools:
@@ -542,6 +557,13 @@ class OtelCallbackHandler:
             LlmSpanState(span=span, start_ns=time.monotonic_ns(), is_streaming=is_streaming),
         )
 
+        team_logger.info(
+            "otel: _open_llm_span name=llm.call trace_id={:032x} span_id={:016x} "
+            "parent_span_id={:016x}",
+            span.context.trace_id, span.context.span_id,
+            span.parent.span_id if span.parent else 0,
+        )
+
     def _close_llm_span(self, state: LlmSpanState, response: Any) -> None:
         if not state.span.is_recording():
             team_logger.error(
@@ -557,24 +579,44 @@ class OtelCallbackHandler:
 
         tool_calls = getattr(response, "tool_calls", None)
         tc_json = _serialize_tool_calls(tool_calls)
-        if tc_json and state.span.is_recording():
+        if tc_json:
             state.span.set_attribute(GEN_AI_TOOL_CALLS, tc_json)
             if not isinstance(raw_content, str):
                 completion_text = ""
 
         self._maybe_record_response_attrs(state, response)
 
-        if state.span.is_recording():
-            redacted_compl = redact_completion(completion_text, self._config)
-            # Standard key
-            state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.role", "assistant")
-            state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.content", redacted_compl)
-            # Langfuse-compatible t_ prefix key
-            state.span.set_attribute(f"{GEN_AI_T_COMPLETION}.0.role", "assistant")
-            state.span.set_attribute(f"{GEN_AI_T_COMPLETION}.0.content", redacted_compl)
+        self._finalize_llm_span_output(
+            state, completion_text, reasoning_text,
+            tc_json=tc_json, response=response,
+        )
 
-        choice_obj = {"index": 0, "message": {"role": "assistant"}}
-        finish_reason = getattr(response, "finish_reason", None)
+    def _finalize_llm_span_output(
+        self,
+        state: LlmSpanState,
+        completion_text: str,
+        reasoning_text: str = "",
+        *,
+        tc_json: str = "",
+        response: Any = None,
+    ) -> None:
+        """Shared: set completion/output attrs, reasoning sub-span, close LLM span.
+
+        Called by both ``_close_llm_span`` (non-streaming) and
+        ``on_llm_output`` (streaming final) to avoid ~130 lines of
+        duplicated output assembly.
+        """
+        redacted_compl = redact_completion(completion_text, self._config)
+        # Standard gen_ai.completion keys
+        state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.role", "assistant")
+        state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.content", redacted_compl)
+        # Langfuse-compatible t_ prefix keys
+        state.span.set_attribute(f"{LANGFUSE_GEN_AI_COMPLETION}.0.role", "assistant")
+        state.span.set_attribute(f"{LANGFUSE_GEN_AI_COMPLETION}.0.content", redacted_compl)
+
+        # Build langfuse.observation.output
+        choice_obj: dict[str, Any] = {"index": 0, "message": {"role": "assistant"}}
+        finish_reason = state.span.attributes.get(GEN_AI_RESPONSE_FINISH_REASON)
         if finish_reason:
             choice_obj["finish_reason"] = finish_reason
         if completion_text:
@@ -583,36 +625,40 @@ class OtelCallbackHandler:
             try:
                 choice_obj["message"]["tool_calls"] = json.loads(tc_json)
             except (json.JSONDecodeError, TypeError):
-                team_logger.debug("otel: tc_json not valid JSON, skipping tool_calls in output")
-        response_obj = {"choices": [choice_obj]}
-        usage = getattr(response, "usage_metadata", None)
-        if usage:
-            usage_obj = {}
-            if hasattr(usage, "total_tokens"):
-                usage_obj["total_tokens"] = usage.total_tokens
-            if hasattr(usage, "input_tokens"):
-                usage_obj["prompt_tokens"] = usage.input_tokens
-            if hasattr(usage, "output_tokens"):
-                usage_obj["completion_tokens"] = usage.output_tokens
-            if usage_obj:
-                response_obj["usage"] = usage_obj
+                pass
+        response_obj: dict[str, Any] = {"choices": [choice_obj]}
+        if response is not None:
+            usage = getattr(response, "usage_metadata", None)
+            if usage:
+                usage_obj: dict[str, int] = {}
+                if hasattr(usage, "total_tokens") and usage.total_tokens:
+                    usage_obj["total_tokens"] = usage.total_tokens
+                if hasattr(usage, "input_tokens") and usage.input_tokens:
+                    usage_obj["prompt_tokens"] = usage.input_tokens
+                if hasattr(usage, "output_tokens") and usage.output_tokens:
+                    usage_obj["completion_tokens"] = usage.output_tokens
+                if usage_obj:
+                    response_obj["usage"] = usage_obj
         output_json = json.dumps(response_obj, ensure_ascii=False, default=str)
-        if state.span.is_recording():
-            state.span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redact_completion(output_json, self._config))
+        state.span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redact_completion(output_json, self._config))
 
-        if reasoning_text and state.span.is_recording():
+        if reasoning_text:
             with self._tracer().start_as_current_span(
                 name="llm.reasoning",
                 context=set_span_in_context(state.span),
             ) as reasoning_span:
-                reasoning_span.set_attribute(
-                    "gen_ai.reasoning.content",
-                    redact_completion(reasoning_text, self._config),
-                )
+                redacted_reasoning = redact_completion(reasoning_text, self._config)
+                # Standard gen_ai.completion attributes (Langfuse reasoning display)
+                reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.role", "reasoning")
+                reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.is_reasoning", True)
+                reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.content", redacted_reasoning)
+                # Langfuse observation input/output for UI visibility
+                reasoning_span.set_attribute(LANGFUSE_OBSERVATION_INPUT, "llm reasoning")
+                reasoning_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted_reasoning)
+                reasoning_span.set_status(Status(StatusCode.OK))
 
-        if state.span.is_recording():
-            state.span.set_status(Status(StatusCode.OK))
-            state.span.end()
+        state.span.set_status(Status(StatusCode.OK))
+        state.span.end()
 
     @staticmethod
     def _record_usage_attrs(state: LlmSpanState, usage: Any, *, skip_existing: bool = False) -> None:

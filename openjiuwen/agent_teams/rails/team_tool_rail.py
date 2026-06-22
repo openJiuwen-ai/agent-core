@@ -72,6 +72,7 @@ class TeamToolRail(DeepAgentRail):
         messager: Optional[Any] = None,
         swarmflow_model_resolver: Optional[Callable[[str], Any]] = None,
         swarmflow_worker_base_spec: Optional[Any] = None,
+        team_permissions_enabled: bool = False,
     ) -> None:
         super().__init__()
         self._team_backend = team_backend
@@ -89,6 +90,7 @@ class TeamToolRail(DeepAgentRail):
         self._messager = messager
         self._swarmflow_model_resolver = swarmflow_model_resolver
         self._swarmflow_worker_base_spec = swarmflow_worker_base_spec
+        self._team_permissions_enabled = team_permissions_enabled
         self._tools: list[Tool] | None = None
 
     def init(self, agent: Any) -> None:
@@ -116,6 +118,7 @@ class TeamToolRail(DeepAgentRail):
             team_name=self._team_name,
             swarmflow_model_resolver=self._swarmflow_model_resolver,
             swarmflow_worker_base_spec=self._swarmflow_worker_base_spec,
+            team_permissions_enabled=self._team_permissions_enabled,
         )
 
         if self._workspace_manager is not None:

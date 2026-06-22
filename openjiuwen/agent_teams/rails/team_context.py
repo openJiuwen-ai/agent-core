@@ -49,6 +49,7 @@ class TeamHandleKey:
     SWARMFLOW_MODEL_RESOLVER = "team.swarmflow_model_resolver"
     SWARMFLOW_WORKER_BASE_SPEC = "team.swarmflow_worker_base_spec"
     RELIABILITY_COMPONENTS = "team.reliability_components"
+    PERMISSIONS_OVERRIDE = "team.permissions_override"
 
 
 def inject_team_handles(
@@ -62,6 +63,7 @@ def inject_team_handles(
     swarmflow_model_resolver: Optional[Callable[[str], Any]] = None,
     swarmflow_worker_base_spec: Optional["DeepAgentSpec"] = None,
     reliability_components: Optional["ReliabilityComponents"] = None,
+    permissions_override: Optional[dict[str, str]] = None,
 ) -> None:
     """Write the team live handles into ``extras`` (configurator-side).
 
@@ -85,6 +87,9 @@ def inject_team_handles(
         reliability_components: The member's reused reliability core (detectors /
             remediator / local reporter), if reliability is enabled. Built once
             and wrapped by a fresh rail each cycle so its state outlives rebuilds.
+        permissions_override: Per-member permission narrowing from
+            ``spawn_teammate.permissions``.  ``None`` when no override was
+            specified at spawn time.
     """
     extras[TeamHandleKey.TEAM_BACKEND] = team_backend
     extras[TeamHandleKey.WORKSPACE_MANAGER] = workspace_manager
@@ -94,6 +99,7 @@ def inject_team_handles(
     extras[TeamHandleKey.SWARMFLOW_MODEL_RESOLVER] = swarmflow_model_resolver
     extras[TeamHandleKey.SWARMFLOW_WORKER_BASE_SPEC] = swarmflow_worker_base_spec
     extras[TeamHandleKey.RELIABILITY_COMPONENTS] = reliability_components
+    extras[TeamHandleKey.PERMISSIONS_OVERRIDE] = permissions_override
 
 
 def _get(context: Any, key: str) -> Any:
@@ -146,6 +152,16 @@ def get_reliability_components(context: Any) -> Optional["ReliabilityComponents"
     return _get(context, TeamHandleKey.RELIABILITY_COMPONENTS)
 
 
+def get_permissions_override(context: Any) -> Optional[dict[str, str]]:
+    """Return the per-member permissions override, or None.
+
+    Set by ``AgentConfigurator.setup_agent`` from
+    ``TeamRuntimeContext.permissions_override``.  ``None`` when no override
+    was specified at spawn time.
+    """
+    return _get(context, TeamHandleKey.PERMISSIONS_OVERRIDE)
+
+
 __all__ = [
     "TeamHandleKey",
     "inject_team_handles",
@@ -154,6 +170,7 @@ __all__ = [
     "get_model_allocator",
     "get_messager",
     "get_on_teammate_created",
+    "get_permissions_override",
     "get_swarmflow_model_resolver",
     "get_swarmflow_worker_base_spec",
     "get_reliability_components",

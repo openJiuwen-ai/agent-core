@@ -286,6 +286,7 @@ session checkpoint 全局状态根上有一个 `teams` namespace：
 | `language` | `Optional[str]` | `None` | 通过 `resolve_language` 归一到内置语言之一 |
 | `agent_customizer` | `Optional[Callable]` | `None`（exclude） | 仅 inprocess spawn 可用的 DeepAgent 改造回调 |
 | `memory` | `Optional[TeamMemoryConfig]` | `None` | 团队级 memory 配置 |
+| `enable_permissions` | `bool` | `False` | Team-specific permission control；为 True 时 teammate 挂 `TeamPermissionRail` 替代 `TeamToolApprovalRail` |
 
 方法：
 
@@ -463,6 +464,7 @@ tool / rail / sys_operation 与 `DeepAgentSpec.build()` 同模式。
 | `db_config` | `DatabaseConfig \| MemoryDatabaseConfig` | `DatabaseConfig()` |
 | `member_model` | `Optional[TeamModelConfig]` | `None` |
 | `worktree_path` | `Optional[str]` | `None` |
+| `permissions_override` | `Optional[dict[str, str]]` | `None` | Per-member permission narrowing from `spawn_teammate.permissions`；flat `{tool_name: level_string}` dict，由 `narrow_permissions` 收紧基础配置 |
 
 是 **Spec → Runtime 的边界**。`build()` 出来的对象（messager config、db
 config、allocator 给当前成员的 model 选择）封进 `TeamRuntimeContext`，传给

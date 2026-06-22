@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/monitor/`、`openjiuwen/agent_teams/observability/` |
-| 最近一次修订日期 | 2026-06-09 |
+| 最近一次修订日期 | 2026-06-17 |
 | 关联 feature | F_09_team-stream-logging.md |
 
 ## 范围 / 边界
@@ -312,7 +312,7 @@ class MonitorEvent(BaseModel):
 | `TeamInfo` | `Team` SQLModel | `team_name`, `display_name`, `leader_member_name`, `desc`, `created` (ms) |
 | `MemberInfo` | `TeamMember` SQLModel | `member_name`, `team_name`, `display_name`, `desc`, `status`, `execution_status`, `mode` |
 | `TaskInfo` | `TeamTaskBase` SQLModel | `task_id`, `team_name`, `title`, `content`, `status`, `assignee`, `updated_at` (ms, 与当前 `status` 绑定) |
-| `MessageInfo` | `TeamMessageBase` SQLModel | `message_id`, `team_name`, `from_member_name`, `to_member_name`, `content`, `timestamp` (ms), `broadcast`, `is_read` |
+| `MessageInfo` | `TeamMessageBase` SQLModel | `message_id`, `team_name`, `from_member_name`, `to_member_name`, `content`, `protocol` (`"plain"` 普通文本 / `"json"` 结构化 payload 如审批请求和结果), `timestamp` (ms), `broadcast`, `is_read` |
 
 适配层的存在意义：让监控 API 与内部 db schema 解耦。新增 db 字段不会自动暴露给 monitor 消费方；要暴露需要**显式**在对应 `Info` 上加字段并改 `from_internal`。
 

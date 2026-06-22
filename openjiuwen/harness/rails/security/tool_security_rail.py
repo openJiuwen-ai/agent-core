@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import dataclass
+
 from typing import Any, Iterable, Optional, cast
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
@@ -119,7 +119,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return ""
 
         tool_name = tool_call.name or ""
-        tool_args = self._parse_tool_args(tool_call)
+        tool_args = self.parse_tool_args(tool_call)
 
         if tool_name in {"bash", "mcp_exec_command", "create_terminal"}:
             cmd = tool_args.get("command", tool_args.get("cmd", ""))
@@ -149,12 +149,19 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     @staticmethod
     def _should_store_auto_confirm(
         *,
+        approved: bool,
         auto_confirm: bool,
         session: Any,
         auto_confirm_key: str,
         persisted: bool,
     ) -> bool:
-        return bool(auto_confirm and session is not None and auto_confirm_key and not persisted)
+        """Whether to store auto-confirm in session state.
+
+        Bug fix: previously did not check ``approved``, causing
+        ``approved=False + auto_confirm=True`` to still write session
+        auto-confirm — a rejection should not be remembered as "always allowed".
+        """
+        return bool(approved and auto_confirm and session is not None and auto_confirm_key and not persisted)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         tool_name = ctx.inputs.tool_name
@@ -294,7 +301,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     ):
         tool_name = tool_call.name if tool_call is not None else ""
         normalized_name = self._normalize_tool_name(tool_name)
-        tool_args = self._parse_tool_args(tool_call)
+        tool_args = self.parse_tool_args(tool_call)
         auto_confirm_key = self._get_auto_confirm_key(tool_call)
 
         logger.info(
@@ -350,10 +357,18 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 self.update_config(fresh)
             else:
                 self._engine.update_config(self._static_config)
-            result = await self._engine.check_permission(
-                tool_name=normalized_name,
-                tool_args=tool_args,
-            )
+            try:
+                result = await self._engine.check_permission(
+                    tool_name=normalized_name,
+                    tool_args=tool_args,
+                )
+            except Exception:
+                logger.error(
+                    "[PermissionEngine] permission.rail.check_failed tool=%s normalized=%s",
+                    tool_name,
+                    normalized_name,
+                )
+                raise
 
             if result.permission == PermissionLevel.ALLOW:
                 logger.info(
@@ -417,6 +432,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         persisted,
                     )
                     if self._should_store_auto_confirm(
+                        approved=confirm_payload.approved,
                         auto_confirm=confirm_payload.auto_confirm,
                         session=ctx.session,
                         auto_confirm_key=auto_confirm_key,
@@ -455,7 +471,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             ))
 
         logger.info("[PermissionEngine] permission.rail.user_response tool=%s", tool_name)
-        payload = self._parse_confirm_payload(user_input)
+        payload = self.parse_confirm_payload(user_input)
         if payload is None:
             message = self._build_message(tool_call, PermissionResult(
                 permission=PermissionLevel.ASK,
@@ -478,6 +494,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             )
 
         if self._should_store_auto_confirm(
+            approved=payload.approved,
             auto_confirm=payload.auto_confirm,
             session=ctx.session,
             auto_confirm_key=auto_confirm_key,
@@ -504,7 +521,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         return self.reject(tool_result=payload.feedback or "[PERMISSION_REJECTED] User rejected the request.")
 
     @staticmethod
-    def _parse_tool_args(tool_call: Optional[ToolCall]) -> dict:
+    def parse_tool_args(tool_call: Optional[ToolCall]) -> dict:
         if tool_call is None:
             return {}
         args = tool_call.arguments
@@ -519,7 +536,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         return {}
 
     @staticmethod
-    def _parse_confirm_payload(user_input: Any) -> Optional[PermissionConfirmResponse]:
+    def parse_confirm_payload(user_input: Any) -> Optional[PermissionConfirmResponse]:
         if isinstance(user_input, PermissionConfirmResponse):
             return user_input
         if isinstance(user_input, ConfirmPayload):
@@ -545,7 +562,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 return None
             if not isinstance(raw_payload, dict):
                 return None
-            return PermissionInterruptRail._parse_confirm_payload(raw_payload)
+            return PermissionInterruptRail.parse_confirm_payload(raw_payload)
         return None
 
     def _confirm_path_label(self) -> str:
@@ -594,7 +611,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         return None
 
     @staticmethod
-    def _format_args_preview(tool_args: dict) -> str:
+    def format_args_preview(tool_args: dict) -> str:
         try:
             return json.dumps(tool_args, ensure_ascii=False, indent=2)[:1000]
         except Exception:
@@ -606,14 +623,14 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         result: PermissionResult,
     ) -> str:
         tool_name = tool_call.name if tool_call else ""
-        tool_args = self._parse_tool_args(tool_call)
+        tool_args = self.parse_tool_args(tool_call)
 
         parts = [
             f"**工具 `{tool_name}` 需要授权才能执行**\n\n",
             "请确认是否允许该操作。\n\n",
         ]
 
-        args_preview = self._format_args_preview(tool_args)
+        args_preview = self.format_args_preview(tool_args)
         if args_preview and args_preview != "{}":
             parts.append(f"参数：\n```json\n{args_preview}\n```\n")
 
@@ -632,7 +649,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return ""
         
         tool_name = tool_call.name or ""
-        tool_args = self._parse_tool_args(tool_call)
+        tool_args = self.parse_tool_args(tool_call)
         auto_confirm_key = self._get_auto_confirm_key(tool_call)
         
         if tool_name == "bash":

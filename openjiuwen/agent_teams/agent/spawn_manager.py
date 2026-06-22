@@ -297,6 +297,7 @@ class SpawnManager:
 
     async def build_context_from_db(self, member_name: str) -> Optional[TeamRuntimeContext]:
         from openjiuwen.agent_teams.models.allocator import resolve_member_model
+        from openjiuwen.agent_teams.tools.member_options import get_member_permissions_override
 
         team_backend = self._configurator.team_backend
         if team_backend is None:
@@ -330,6 +331,9 @@ class SpawnManager:
         # External-CLI members carry no DeepAgent: the backend registry says
         # which CLI adapter drives them, routing spawn to external_cli_spawn.
         cli_agent = team_backend.get_external_cli_agent(teammate.member_name)
+
+        permissions_override = get_member_permissions_override(teammate)
+
         return TeamRuntimeContext(
             role=role,
             member_name=teammate.member_name,
@@ -340,6 +344,7 @@ class SpawnManager:
             member_model=member_model,
             worktree_path=worktree_path,
             cli_agent=cli_agent,
+            permissions_override=permissions_override,
         )
 
     async def publish_restart_event(self, member_name: str, restart_count: int) -> None:

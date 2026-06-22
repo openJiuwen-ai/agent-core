@@ -38,9 +38,6 @@ __all__ = [
     "ObservabilityRail",
     "attach_to_team_agent",
     "finalize_team_trace",
-    "flush_child_spans",
-    "get_tracer",
     "init_observability",
-    "is_initialized",
     "shutdown_observability",
 ]

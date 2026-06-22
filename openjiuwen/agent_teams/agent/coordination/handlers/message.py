@@ -12,6 +12,7 @@ agent before tear-down.
 
 from __future__ import annotations
 
+import json
 from typing import Any, ClassVar
 
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
@@ -143,6 +144,18 @@ class MessageHandler(BaseCoordinationHandler):
                 for msg in new_messages:
                     seen_ids.add(msg.message_id)
                     if self._round.has_pending_interrupt():
+                        # Approval messages are admitted to resume_interrupt;
+                        # all other messages are deferred until the interrupt clears.
+                        approval_data = self._try_parse_approval_payload(msg)
+                        if approval_data is not None:
+                            team_logger.info(
+                                "[{}] admitting approval message {} to resume interrupt",
+                                member_name,
+                                msg.message_id,
+                            )
+                            await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
+                            await self._round.resume_interrupt(approval_data)
+                            continue
                         team_logger.info(
                             "[{}] deferring mailbox message {} until pending interrupt is resolved",
                             member_name,
@@ -410,3 +423,21 @@ class MessageHandler(BaseCoordinationHandler):
             content=msg.content,
             time_info=format_time_context(msg.timestamp, now_ms),
         )
+
+    @staticmethod
+    def _try_parse_approval_payload(msg: Any) -> dict | None:
+        """Try to parse a tool-approval result from a message.
+
+        Returns the parsed approval dict if the message is a
+        ``protocol="json"` message with ``type == "tool_approval_result"``,
+        or ``None`` otherwise.  Parses JSON only once.
+        """
+        if msg.protocol != "json" or not msg.content:
+            return None
+        try:
+            data = json.loads(msg.content)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if isinstance(data, dict) and data.get("type") == "tool_approval_result":
+            return data
+        return None

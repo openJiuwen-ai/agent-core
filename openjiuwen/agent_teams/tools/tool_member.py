@@ -145,6 +145,10 @@ class SpawnTeammateTool(_SpawnToolBase):
                         "teammate in an isolated git worktree."
                     ),
                 },
+                "permissions": {
+                    "type": "object",
+                    "description": t("spawn_teammate", "permissions"),
+                },
             },
             "required": ["member_name", "display_name", "desc"],
         }
@@ -160,6 +164,7 @@ class SpawnTeammateTool(_SpawnToolBase):
         member_name = inputs["member_name"]
         display_name = inputs.get("display_name")
         desc = inputs.get("desc", "")
+        permissions_override = inputs.get("permissions")
         allocation = (
             self._allocate_model_config(inputs.get("model_name")) if self._allocate_model_config else None
         )
@@ -177,6 +182,7 @@ class SpawnTeammateTool(_SpawnToolBase):
             mode=MemberMode(self.team.teammate_mode.value),
             allocation=allocation,
             isolation=inputs.get("isolation"),
+            permissions_override=permissions_override,
         )
         return self._from_result(
             result,

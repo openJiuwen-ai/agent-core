@@ -112,6 +112,7 @@ class MessageInfo(BaseModel):
     from_member_name: str
     to_member_name: str | None = None
     content: str
+    protocol: str = "plain"
     timestamp: int
     broadcast: bool
     is_read: bool = False
@@ -129,6 +130,7 @@ class MessageInfo(BaseModel):
             from_member_name=msg.from_member_name,
             to_member_name=msg.to_member_name,
             content=msg.content,
+            protocol=msg.protocol,
             timestamp=msg.timestamp,
             broadcast=msg.broadcast,
             is_read=msg.is_read,

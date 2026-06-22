@@ -62,6 +62,7 @@ class TeamMessageManager:
         content: str,
         to_member_name: str,
         from_member_name: str | None = None,
+        protocol: str = "plain",
     ) -> Optional[str]:
         """Send a point-to-point message.
 
@@ -69,6 +70,8 @@ class TeamMessageManager:
             content: Message content.
             to_member_name: Recipient member ID.
             from_member_name: Override sender ID. Defaults to self.member_name.
+            protocol: Message format — ``"plain"`` for normal text,
+                ``"json"`` for structured payloads.
         """
         sender = from_member_name or self.member_name
         message_id = str(uuid.uuid4())
@@ -81,6 +84,7 @@ class TeamMessageManager:
             to_member_name=to_member_name,
             broadcast=False,
             is_read=False,
+            protocol=protocol,
         )
         if not success:
             team_logger.error(f"Failed to create message {message_id}")

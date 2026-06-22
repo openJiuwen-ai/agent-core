@@ -11,6 +11,7 @@ import yaml
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
+from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.harness.prompts.sections import SectionName
@@ -45,6 +46,7 @@ class SkillUseRail(DeepAgentRail):
         enabled_skills: Optional[Union[str, List[str]]] = None,
         disabled_skills: Optional[Union[str, List[str]]] = None,
         evolution_store: Optional[EvolutionStore] = None,
+        multimodal_skill_mode: str = "hint",
     ):
         """Initialize SkillUseRail.
 
@@ -59,6 +61,7 @@ class SkillUseRail(DeepAgentRail):
             enabled_skills: Optional allow-list of skill names. Supports str or List[str].
             disabled_skills: Optional deny-list of skill names. Supports str or List[str].
             evolution_store: Optional EvolutionStore for progressive disclosure experience text.
+            multimodal_skill_mode: ``hint`` (default), ``attach``, or ``branch``.
         """
         super().__init__()
 
@@ -76,6 +79,7 @@ class SkillUseRail(DeepAgentRail):
         self.enabled_skills = self._normalize_name_set(enabled_skills)
         self.disabled_skills = self._normalize_name_set(disabled_skills)
         self.evolution_store: Optional[EvolutionStore] = evolution_store
+        self.multimodal_skill_mode = multimodal_skill_mode
 
         self.skills: List[Skill] = []
         self.system_prompt_builder = None
@@ -90,6 +94,7 @@ class SkillUseRail(DeepAgentRail):
 
         # Track tools added by this rail only.
         self._owned_tool_names: Set[str] = set()
+        self._owned_tool_ids: Set[str] = set()
 
         # Snapshot of visible skill directories and SKILL.md mtimes.
         self._skills_snapshot_signature: Optional[Tuple[Tuple[str, float], ...]] = None
@@ -245,21 +250,23 @@ class SkillUseRail(DeepAgentRail):
 
         lang = agent.system_prompt_builder.language
         agent_id = getattr(getattr(agent, "card", None), "id", None)
-        
+        deep_config = getattr(agent, "deep_config", None)
+        enable_read_image_multimodal = bool(
+            getattr(deep_config, "enable_read_image_multimodal", True)
+        )
+
         tools.append(
             SkillTool(
                 operation=self.sys_operation,
                 get_skills=lambda: self.skills,
                 language=lang,
-                agent_id=agent_id
+                agent_id=agent_id,
+                multimodal_skill_mode=self.multimodal_skill_mode,
+                enable_read_image_multimodal=enable_read_image_multimodal,
             ),
         )
 
         if self.include_tools:
-            deep_config = getattr(agent, "deep_config", None)
-            enable_read_image_multimodal = bool(
-                getattr(deep_config, "enable_read_image_multimodal", True)
-            )
             tools.extend(
                 [
                     ReadFileTool(
@@ -283,30 +290,65 @@ class SkillUseRail(DeepAgentRail):
                 )
             )
 
+        for tool in tools:
+            try:
+                existing_tool = Runner.resource_mgr.get_tool(tool.card.id)
+                if existing_tool is not None:
+                    Runner.resource_mgr.remove_tool(tool.card.id)
+                Runner.resource_mgr.add_tool(tool)
+                self._owned_tool_ids.add(tool.card.id)
+            except Exception as exc:
+                logger.warning(
+                    f"[SkillUseRail] failed to add tool resource '{tool.card.id}' "
+                    f"to resource_mgr: {exc}"
+                )
+
         if hasattr(agent, "ability_manager"):
             for tool in tools:
                 try:
-                    result = agent.ability_manager.add_ability(tool.card, tool)
+                    result = agent.ability_manager.add(tool.card)
                     if result.added:
                         self._owned_tool_names.add(tool.card.name)
                 except Exception as exc:
                     logger.warning(
-                        f"[SkillUseRail] failed to register tool '{tool.card.name}': {exc}"
+                        f"[SkillUseRail] failed to add tool card '{tool.card.name}' "
+                        f"to ability_manager: {exc}"
                     )
 
     def uninit(self, agent):
-        """Remove tool cards from agent ability manager."""
+        """Remove tool cards from agent ability manager and resource manager."""
         if hasattr(agent, "ability_manager"):
             for tool_name in list(self._owned_tool_names):
                 try:
-                    agent.ability_manager.remove_ability(tool_name)
+                    agent.ability_manager.remove(tool_name)
                 except Exception as exc:
                     logger.warning(
                         f"[SkillUseRail] failed to remove tool '{tool_name}' "
                         f"from ability_manager: {exc}"
                     )
 
+        for tool_id in list(self._owned_tool_ids):
+            if Runner.resource_mgr.get_tool(tool_id) is None:
+                continue
+            try:
+                result = Runner.resource_mgr.remove_tool(tool_id)
+                if hasattr(result, "is_err") and result.is_err():
+                    logger.warning(
+                        "[SkillUseRail] failed to remove tool resource '%s' "
+                        "from resource_mgr: %s",
+                        tool_id,
+                        result,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[SkillUseRail] failed to remove tool resource '%s' "
+                    "from resource_mgr: %s",
+                    tool_id,
+                    exc,
+                )
+
         self._owned_tool_names.clear()
+        self._owned_tool_ids.clear()
 
     async def refresh_skill_prompt(self, ctx: AgentCallbackContext) -> None:
         """Regenerate the skills system prompt"""

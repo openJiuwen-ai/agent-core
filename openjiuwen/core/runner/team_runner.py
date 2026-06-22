@@ -372,11 +372,6 @@ class _TeamRunnerMixin:
             try:
                 return await agent.invoke(inputs, session=team_session)
             finally:
-                # v18: Flush member's spans before finalizing.
-                # When pause/cancel occurs, the member's agent span is in
-                # this coroutine's ContextVar — the leader's finally can't
-                # see it.  We must close it here.
-                self._maybe_flush_spans()
                 await self._get_team_runtime_manager().finalize_member(agent)
                 if team_runtime is not None:
                     team_runtime.unbind_team_session(team_session.get_session_id())
@@ -404,11 +399,6 @@ class _TeamRunnerMixin:
                 async for chunk in agent.stream(inputs, session=team_session):
                     yield chunk
             finally:
-                # v18: Flush member's spans before finalizing.
-                # When pause/cancel occurs, the member's agent span is in
-                # this coroutine's ContextVar — the leader's finally can't
-                # see it.  We must close it here.
-                self._maybe_flush_spans()
                 await self._get_team_runtime_manager().finalize_member(agent)
                 if team_runtime is not None:
                     team_runtime.unbind_team_session(team_session.get_session_id())
@@ -776,19 +766,25 @@ class _TeamRunnerMixin:
             )
             from openjiuwen.agent_teams.observability.setup import get_tracer
             existing = get_team_span()
+            if existing is not None:
+                logger.info(
+                    "_maybe_attach_observability: found existing team span name={} "
+                    "is_recording={} trace_id={:032x} span_id={:016x}",
+                    existing.name, existing.is_recording(),
+                    existing.context.trace_id, existing.context.span_id,
+                )
             if existing is None or not existing.is_recording():
+                if existing is not None:
+                    logger.warning(
+                        "_maybe_attach_observability: team span ENDED, will create new one. "
+                        "old trace_id={:032x}",
+                        existing.context.trace_id,
+                    )
+                    from openjiuwen.agent_teams.observability.span_context import clear_team_span
+                    clear_team_span()
                 get_or_create_team_span(team_name, get_tracer("openjiuwen.agent_teams.observability"))
         except Exception as exc:
             logger.debug("observability attach skipped: {}", exc)
-
-    @staticmethod
-    def _maybe_flush_spans() -> None:
-        """Flush all pending spans when team execution pauses or exits."""
-        try:
-            from openjiuwen.agent_teams.observability import flush_child_spans
-            flush_child_spans()
-        except Exception as exc:
-            logger.debug("observability flush skipped: {}", exc)
 
     @staticmethod
     def _maybe_finalize_trace(team_name: str) -> None:
@@ -799,7 +795,10 @@ class _TeamRunnerMixin:
                 is_initialized,
             )
             if is_initialized():
+                logger.info("_maybe_finalize_trace: calling finalize_team_trace for team={}", team_name)
                 finalize_team_trace(team_name)
+            else:
+                logger.debug("_maybe_finalize_trace: observability not initialized, skip team={}", team_name)
         except Exception as exc:
             logger.debug("observability finalize skipped: {}", exc)
 

@@ -347,6 +347,9 @@ class TeamAgentSpec(BaseModel):
     tool. Workers reuse the leader's model; no separate worker spec is required
     for the MVP. See ``openjiuwen/agent_teams/workflow``.
     """
+    enable_permissions: bool = False
+    """Team-specific permission control."""
+
     language: Optional[str] = None
     """Preferred language for prompts and tool descriptions ("cn" or "en").
 

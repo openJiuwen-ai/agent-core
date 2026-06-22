@@ -298,6 +298,14 @@ class TeamRuntimeContext(BaseModel):
     (default) keeps the standard DeepAgent-backed member. See
     ``agent_teams/external/cli_agent``.
     """
+    permissions_override: Optional[dict[str, str]] = Field(
+        default=None,
+        description=(
+            "Per-member permission narrowing from spawn_teammate.permissions. "
+            "Flat {tool_name: level_string} dict fed to narrow_permissions "
+            "to tighten the base config. None when no override was specified."
+        ),
+    )
 
 
 __all__ = [

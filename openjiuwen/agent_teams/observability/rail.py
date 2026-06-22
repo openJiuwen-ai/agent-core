@@ -55,13 +55,27 @@ from openjiuwen.agent_teams.observability.span_context import (
     get_current_agent_span,
     set_current_agent_span,
     get_team_span,
+    _llm_span_stack,
+    _tool_span_map,
 )
+from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 _TRACER_NAME = "openjiuwen.agent_teams.observability.rail"
 _SPAN_KEY = "_otel_task_iter_span"
+
+
+def _stamp_cancelled_if_empty(span: Span) -> None:
+    """Set a cancelled marker on a span that was never given proper output.
+
+    Only called from cascade-close paths (after_task_iteration,
+    close_team_agent_spans) — spans that reach here had their normal
+    close callback interrupted (e.g. task cancelled mid-LLM-call).
+    """
+    if not span.attributes.get(LANGFUSE_OBSERVATION_OUTPUT):
+        span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, "cancelled")
 
 
 class ObservabilityRail(DeepAgentRail):
@@ -107,6 +121,14 @@ class ObservabilityRail(DeepAgentRail):
             if team_span is None:
                 team_logger.error("RAIL.before_task_iteration: team_span is None! team_name={}", team_name)
                 return
+            if not team_span.is_recording():
+                team_logger.error(
+                    "RAIL.before_task_iteration: team_span ENDED! name={} trace_id={:032x} "
+                    "span_id={:016x} member={} iteration={}",
+                    team_span.name, team_span.context.trace_id, team_span.context.span_id,
+                    member_name, iteration,
+                )
+                return
 
             if _SPAN_KEY in ctx.extra:
                 old = ctx.extra[_SPAN_KEY]
@@ -119,11 +141,40 @@ class ObservabilityRail(DeepAgentRail):
 
             prev_agent = get_current_agent_span()
             if prev_agent is not None and prev_agent.is_recording():
-                team_logger.warning(
-                    "otel rail: closing orphan agent span: {}",
-                    prev_agent.name if hasattr(prev_agent, 'name') else 'unknown'
-                )
-                prev_agent.end()
+                prev_member = prev_agent.attributes.get(AT_MEMBER_NAME, "")
+                if prev_member == member_name:
+                    # Same member — genuinely orphan (previous iteration not cleaned up).
+                    # Drain child LLM/tool spans first, then close the agent span.
+                    team_logger.warning(
+                        "otel rail: closing orphan agent span: {}",
+                        prev_agent.name if hasattr(prev_agent, 'name') else 'unknown'
+                    )
+                    for bucket in _tool_span_map.get().values():
+                        for ts in bucket:
+                            if ts.is_recording():
+                                ts.end()
+                    _tool_span_map.set({})
+                    for state in _llm_span_stack.get():
+                        if state.span.is_recording():
+                            state.span.end()
+                    _llm_span_stack.set([])
+                    prev_agent.end()
+                else:
+                    # Different member — stale copy from ContextVar inheritance
+                    # at asyncio.create_task time. The span belongs to another
+                    # member's task — do NOT close it.
+                    team_logger.info(
+                        "otel rail: clearing stale agent span inherited from member {} "
+                        "(current member: {})",
+                        prev_member, member_name,
+                    )
+                    # Cross-member ContextVar snapshots also carry stale
+                    # LLM/tool span references from the leader's task.
+                    # Clear them so the new member starts with clean stacks
+                    # and cascade-close in after_task_iteration won't
+                    # accidentally touch another member's spans.
+                    _llm_span_stack.set([])
+                    _tool_span_map.set({})
                 set_current_agent_span(None)
 
             member_label = member_name or "unknown"
@@ -171,9 +222,11 @@ class ObservabilityRail(DeepAgentRail):
             otel_context.attach(agent_ctx)
 
             team_logger.info(
-                "otel rail: agent span opened: agent.{}.task_iteration.{} span_id={}",
+                "otel rail: agent span opened: agent.{}.task_iteration.{} "
+                "span_id={:016x} trace_id={:032x} parent_span_id={:016x}",
                 member_label, iteration,
-                format(span.context.span_id, "016x"),
+                span.context.span_id, span.context.trace_id,
+                span.parent.span_id if span.parent else 0,
             )
 
             ctx.extra[_SPAN_KEY] = span
@@ -196,8 +249,10 @@ class ObservabilityRail(DeepAgentRail):
                 return
 
             team_logger.info(
-                "RAIL.after_task_iteration closing agent span: name={} span_id={:016x}",
+                "RAIL.after_task_iteration closing agent span: name={} span_id={:016x} "
+                "trace_id={:032x}",
                 span.name, span.context.span_id,
+                span.context.trace_id,
             )
 
             output = None
@@ -214,6 +269,26 @@ class ObservabilityRail(DeepAgentRail):
                 span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
                 span.set_attribute(AT_AGENT_OUTPUT, redacted)
 
+            # Close child LLM / tool spans before closing the parent agent span.
+            # This is the definitive cleanup point — no separate finally block
+            # in Runner is needed for these spans.
+            # Do NOT set Status(OK) here — these spans only reach this path
+            # when their normal close callback did not fire.  Setting OK would
+            # mask the real problem; leaving them UNSET makes them stand out.
+
+            for bucket in _tool_span_map.get().values():
+                for ts in bucket:
+                    if ts.is_recording():
+                        _stamp_cancelled_if_empty(ts)
+                        ts.end()
+            _tool_span_map.set({})
+
+            for state in _llm_span_stack.get():
+                if state.span.is_recording():
+                    _stamp_cancelled_if_empty(state.span)
+                    state.span.end()
+            _llm_span_stack.set([])
+
             if ctx.exception is not None:
                 span.record_exception(ctx.exception)
                 span.set_status(Status(StatusCode.ERROR, str(ctx.exception)))
@@ -221,6 +296,8 @@ class ObservabilityRail(DeepAgentRail):
                 span.set_status(Status(StatusCode.OK))
 
             span.end()
+            agent = getattr(ctx, "agent", None)
+            member_name = getattr(getattr(agent, "card", None), "name", "") if agent else ""
             set_current_agent_span(None)
 
             team_span = get_team_span()
@@ -229,12 +306,11 @@ class ObservabilityRail(DeepAgentRail):
                 otel_context.attach(team_ctx)
 
             # Set team span output if this is the leader
-            # Business logic: only leader's final answer is team's output
-            agent = getattr(ctx, "agent", None)
+            # Use role attribute (TeamRole.LEADER) instead of comparing card.name
             if agent is not None:
-                member_name = getattr(getattr(agent, "card", None), "name", "")
                 team_name = getattr(agent, "team_name", "")
-                if member_name == "leader" and team_name and output:
+                agent_role = getattr(agent, "role", None)
+                if agent_role == TeamRole.LEADER and team_name and output:
                     team_span = get_team_span()
                     if team_span is not None and team_span.is_recording():
                         output_str = str(output)

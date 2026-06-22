@@ -62,9 +62,20 @@ class TestTeamSkillCreateRailConstructor:
 
 
 class TestTeamSkillCreateRailThresholdCheck:
-    def test_should_propose_when_spawn_meets_threshold(self, tmp_path):
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "spawn_member",
+            "spawn_teammate",
+            "spawn_human_agent",
+            "spawn_bridge_agent",
+            "spawn_external_cli",
+            "team.spawn_teammate",
+        ],
+    )
+    def test_should_propose_when_supported_spawn_tool_meets_threshold(self, tmp_path, tool_name):
         rail = _make_rail(tmp_path, auto_trigger=True)
-        _set_builder_tool_calls(rail, ["spawn_member"] * 3)
+        _set_builder_tool_calls(rail, [tool_name] * 3)
         assert rail._should_propose_new_team_skill() is True
 
     def test_should_not_propose_when_below_threshold(self, tmp_path):
@@ -82,14 +93,58 @@ class TestTeamSkillCreateRailThresholdCheck:
         _set_builder_tool_calls(rail, [])
         assert rail._should_propose_new_team_skill() is False
 
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "send_message",
+            "team.send_message",
+            "view_task",
+        ],
+    )
+    def test_non_spawn_tools_do_not_count(self, tmp_path, tool_name):
+        rail = _make_rail(tmp_path, auto_trigger=True)
+        _set_builder_tool_calls(rail, [tool_name] * 3)
+        assert rail._should_propose_new_team_skill() is False
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "not_spawn_member",
+            "team.spawn_member_extra",
+        ],
+    )
+    def test_spawn_tool_names_require_exact_match(self, tmp_path, tool_name):
+        rail = _make_rail(tmp_path, auto_trigger=True)
+        _set_builder_tool_calls(rail, [tool_name] * 3)
+        assert rail._should_propose_new_team_skill() is False
+
+    def test_should_count_mixed_spawn_calls(self, tmp_path):
+        rail = _make_rail(tmp_path, auto_trigger=True)
+        _set_builder_tool_calls(
+            rail,
+            [
+                "spawn_member",
+                "spawn_teammate",
+                "team.spawn_bridge_agent",
+                "view_task",
+                "team.spawn_external_cli",
+            ],
+        )
+        assert rail._should_propose_new_team_skill() is True
+
 
 class TestTeamSkillCreateRailOnAfterTaskIteration:
     """_on_after_task_iteration detects thresholds and triggers follow_up."""
 
+    @pytest.mark.parametrize("tool_name", ["spawn_member", "team.spawn_teammate"])
     @pytest.mark.asyncio
-    async def test_after_task_iteration_follow_up_when_threshold_met_after_completion(self, tmp_path):
+    async def test_after_task_iteration_follow_up_when_threshold_met_after_completion(
+        self,
+        tmp_path,
+        tool_name,
+    ):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calls(rail, ["spawn_member"] * 3)
+        _set_builder_tool_calls(rail, [tool_name] * 3)
 
         controller = MagicMock()
         controller.enqueue_follow_up = MagicMock()
