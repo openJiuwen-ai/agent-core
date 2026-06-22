@@ -37,6 +37,9 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
     UserMessage,
 )
+from openjiuwen.core.foundation.tool import ToolInfo
+
+SUMMARY_HARD_TRUNCATE_TOKENS = 1500
 
 NO_TOOLS_PREAMBLE = """CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
@@ -247,14 +250,15 @@ class FullCompactProcessor(ContextProcessor):
         candidate_messages = context.get_messages() + list(messages_to_add or [])
         if not self._api_round(candidate_messages):
             return False
+        system_messages = kwargs.get("system_messages") or []
+        tools = kwargs.get("tools") or []
         candidate_tokens = self._count_context_window_tokens(
-            system_messages=[],
-            context_messages=candidate_messages,
-            tools=[],
-            context=context,
+            system_messages,
+            candidate_messages,
+            tools,
+            context,
         )
-        triggered = candidate_tokens > self._trigger_total_tokens
-        return triggered
+        return candidate_tokens > self._trigger_total_tokens
 
     async def on_add_messages(
         self,
@@ -263,6 +267,8 @@ class FullCompactProcessor(ContextProcessor):
         **kwargs: Any,
     ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         all_messages = context.get_messages() + list(messages_to_add or [])
+        system_messages = kwargs.get("system_messages") or []
+        tools = kwargs.get("tools") or []
         write_context_trace(
             "context.processor.full_compact.before",
             {
@@ -276,6 +282,8 @@ class FullCompactProcessor(ContextProcessor):
         event, new_context_messages, session_memory_message = await self._build_replacement_messages(
             context,
             all_messages,
+            system_messages,
+            tools,
         )
         if new_context_messages is None:
             return None, messages_to_add
@@ -302,7 +310,10 @@ class FullCompactProcessor(ContextProcessor):
         self,
         context: ModelContext,
         all_messages: List[BaseMessage],
+        system_messages: List[BaseMessage],
+        tools: List[Any],
     ) -> Tuple[ContextEvent | None, Optional[List[BaseMessage]], Optional[UserMessage]]:
+        threshold = self._trigger_total_tokens
         boundary_index = self._find_last_compaction_boundary_index(all_messages)
         prefix, active_messages = self._split_messages_at_compaction_boundary(
             all_messages,
@@ -320,12 +331,13 @@ class FullCompactProcessor(ContextProcessor):
         )
         if session_memory_messages is not None:
             session_memory_tokens = self._count_context_window_tokens(
-                system_messages=[],
-                context_messages=session_memory_messages,
-                tools=[],
-                context=context,
+                system_messages,
+                session_memory_messages,
+                tools,
+                context,
+                use_baseline=False,
             )
-            if session_memory_tokens <= self._trigger_total_tokens:
+            if session_memory_tokens <= threshold:
                 logger.info("[FullCompact] using session_memory replacement")
                 return (
                     ContextEvent(
@@ -339,13 +351,18 @@ class FullCompactProcessor(ContextProcessor):
         else:
             logger.info("[FullCompact] session_memory candidate unavailable, fallback to full_compact")
 
-        new_context_messages = await self._build_full_compact_messages(
+        new_context_messages = await self._try_full_compact_adaptive_chain(
             context=context,
             prefix=prefix,
             active_messages=active_messages,
+            system_messages=system_messages,
+            tools=tools,
+            threshold=threshold,
         )
         if new_context_messages is None:
-            logger.warning("[FullCompact] full_compact candidate build failed")
+            logger.warning(
+                "[FullCompact] all replacement attempts exceeded threshold; keeping original buffer"
+            )
             return None, None, None
         logger.info(
             "[FullCompact] using full_compact replacement output_messages=%s",
@@ -360,14 +377,16 @@ class FullCompactProcessor(ContextProcessor):
             None,
         )
 
-    async def _build_full_compact_messages(
+    async def _try_full_compact_adaptive_chain(
         self,
         *,
         context: ModelContext,
         prefix: List[BaseMessage],
         active_messages: List[BaseMessage],
+        system_messages: List[BaseMessage],
+        tools: List[Any],
+        threshold: int,
     ) -> Optional[List[BaseMessage]]:
-
         compact_source = self._prepare_messages_for_prompt(self._strip_media_messages(active_messages))
         if not compact_source:
             return None
@@ -381,23 +400,116 @@ class FullCompactProcessor(ContextProcessor):
             logger.warning("[FullCompact] full_compact summary generation returned empty content")
             return None
 
-        messages_to_keep = self._select_messages_to_keep(active_messages, context)
-        summary_message = UserMessage(content=self._build_summary_message(summary, bool(messages_to_keep)))
-        boundary = SystemMessage(content=f"{self._marker}\nConversation compacted")
-
-        new_context_messages = prefix + [boundary, summary_message]
-        new_context_messages.extend(messages_to_keep)
-        new_context_messages.extend(
-            self.build_reinjected_state_messages(
+        reinject_builder_names = ["plan", "plan_mode", "skills", "task_status"]
+        attempts = [
+            {"messages_to_keep": self._messages_to_keep, "reinject_state": True},
+            {"messages_to_keep": self._messages_to_keep, "reinject_state": False},
+            {"messages_to_keep": 0, "reinject_state": False},
+        ]
+        for attempt_idx, attempt in enumerate(attempts):
+            candidate = self._assemble_full_compact_candidate(
                 context=context,
-                source_messages=active_messages,
-                messages_to_keep=messages_to_keep,
-                summary_message=summary_message,
-                boundary_message=boundary,
-                builder_names=["plan", "plan_mode", "skills", "task_status"],
+                prefix=prefix,
+                active_messages=active_messages,
+                summary=summary,
+                messages_to_keep=attempt["messages_to_keep"],
+                reinject_state=attempt["reinject_state"],
+                reinject_builder_names=reinject_builder_names,
             )
+            if candidate is None:
+                continue
+            tokens = self._count_context_window_tokens(
+                system_messages,
+                candidate,
+                tools,
+                context,
+                use_baseline=False,
+            )
+            if tokens <= threshold:
+                logger.info("[FullCompact] adaptive chain accepted attempt=%s tokens=%s", attempt_idx, tokens)
+                return candidate
+            logger.info(
+                "[FullCompact] adaptive chain attempt=%s rejected tokens=%s threshold=%s",
+                attempt_idx,
+                tokens,
+                threshold,
+            )
+
+        truncated_summary = self._truncate_summary_hard(summary, SUMMARY_HARD_TRUNCATE_TOKENS, context)
+        boundary = SystemMessage(content=f"{self._marker}\nConversation compacted")
+        summary_message = UserMessage(content=self._build_summary_message(truncated_summary, False))
+        fallback_candidate = prefix + [boundary, summary_message]
+        fallback_tokens = self._count_context_window_tokens(
+            system_messages,
+            fallback_candidate,
+            tools,
+            context,
+            use_baseline=False,
         )
+        if fallback_tokens <= threshold:
+            logger.info(
+                "[FullCompact] adaptive chain fallback accepted tokens=%s",
+                fallback_tokens,
+            )
+            return fallback_candidate
+        logger.info(
+            "[FullCompact] adaptive chain fallback rejected tokens=%s threshold=%s",
+            fallback_tokens,
+            threshold,
+        )
+        return None
+
+    def _assemble_full_compact_candidate(
+        self,
+        *,
+        context: ModelContext,
+        prefix: List[BaseMessage],
+        active_messages: List[BaseMessage],
+        summary: str,
+        messages_to_keep: int,
+        reinject_state: bool,
+        reinject_builder_names: List[str],
+    ) -> Optional[List[BaseMessage]]:
+        kept = self._select_messages_to_keep(
+            active_messages,
+            context,
+            keep_recent=messages_to_keep,
+        )
+        summary_message = UserMessage(content=self._build_summary_message(summary, bool(kept)))
+        boundary = SystemMessage(content=f"{self._marker}\nConversation compacted")
+        new_context_messages = prefix + [boundary, summary_message]
+        new_context_messages.extend(kept)
+        if reinject_state:
+            new_context_messages.extend(
+                self.build_reinjected_state_messages(
+                    context=context,
+                    source_messages=active_messages,
+                    messages_to_keep=kept,
+                    summary_message=summary_message,
+                    boundary_message=boundary,
+                    builder_names=reinject_builder_names,
+                )
+            )
         return new_context_messages
+
+    async def _build_full_compact_messages(
+        self,
+        *,
+        context: ModelContext,
+        prefix: List[BaseMessage],
+        active_messages: List[BaseMessage],
+        system_messages: List[BaseMessage] | None = None,
+        tools: List[Any] | None = None,
+    ) -> Optional[List[BaseMessage]]:
+        threshold = self._trigger_total_tokens
+        return await self._try_full_compact_adaptive_chain(
+            context=context,
+            prefix=prefix,
+            active_messages=active_messages,
+            system_messages=system_messages or [],
+            tools=tools or [],
+            threshold=threshold,
+        )
 
     async def _build_session_memory_messages(
         self,
@@ -539,14 +651,21 @@ class FullCompactProcessor(ContextProcessor):
             return [UserMessage(content=self._synthetic_user_marker), tail[0]]
         return tail
 
-    def _select_messages_to_keep(self, messages: List[BaseMessage], context=None) -> List[BaseMessage]:
+    def _select_messages_to_keep(
+        self,
+        messages: List[BaseMessage],
+        context=None,
+        *,
+        keep_recent: int | None = None,
+    ) -> List[BaseMessage]:
         from openjiuwen.core.context_engine.processor._protected import (
             is_protected,
             msg_in_window,
             resolve_active_window_message_ids,
         )
         in_window_ids = resolve_active_window_message_ids(context, messages) if context else set()
-        keep_recent = self._messages_to_keep
+        if keep_recent is None:
+            keep_recent = self._messages_to_keep
         if keep_recent <= 0 or not messages:
             return [m for m in messages if is_protected(m, in_active_window=msg_in_window(m, in_window_ids))]
 
@@ -801,24 +920,134 @@ class FullCompactProcessor(ContextProcessor):
                 total += len(getattr(message, "tool_calls", None) or [])
         return total
 
+    def _count_messages_with_fallback(
+        self,
+        token_counter: Any,
+        messages: List[BaseMessage],
+    ) -> int:
+        if not messages:
+            return 0
+        if token_counter is not None:
+            try:
+                return token_counter.count_messages(messages)
+            except Exception as exc:
+                logger.warning(
+                    "[FullCompact] token_counter.count_messages failed: %s, falling back to estimate",
+                    exc,
+                )
+        return sum(self._estimate_message_tokens(message) for message in messages)
+
+    def _count_tools_with_fallback(self, token_counter: Any, tools: List[Any]) -> int:
+        if not tools:
+            return 0
+        tool_infos = [tool for tool in tools if isinstance(tool, ToolInfo)]
+        if token_counter is not None and tool_infos:
+            try:
+                return token_counter.count_tools(tool_infos)
+            except Exception as exc:
+                logger.warning(
+                    "[FullCompact] token_counter.count_tools failed: %s, falling back to estimate",
+                    exc,
+                )
+        total = 0
+        for tool in tools:
+            if isinstance(tool, ToolInfo):
+                payload = {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "parameters": tool.parameters,
+                }
+            elif hasattr(tool, "model_dump"):
+                payload = tool.model_dump()
+            else:
+                payload = tool
+            try:
+                total += ContextUtils.estimate_tokens(json.dumps(payload, ensure_ascii=False))
+            except (TypeError, ValueError):
+                total += ContextUtils.estimate_tokens(str(payload))
+        return total
+
+    def _estimate_messages(self, messages: List[BaseMessage], context: ModelContext) -> int:
+        token_counter = context.token_counter()
+        return self._count_messages_with_fallback(token_counter, messages)
+
+    def _find_recent_usage_baseline(
+        self,
+        messages: List[BaseMessage],
+    ) -> Tuple[int | None, int]:
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if (
+                isinstance(message, AssistantMessage)
+                and message.usage_metadata
+                and message.usage_metadata.total_tokens > 0
+            ):
+                return index, message.usage_metadata.total_tokens
+        return None, 0
+
     def _count_context_window_tokens(
         self,
         system_messages: List[BaseMessage],
         context_messages: List[BaseMessage],
         tools: List[Any],
         context: ModelContext,
+        *,
+        use_baseline: bool = True,
     ) -> int:
         token_counter = context.token_counter()
-        all_messages = list(system_messages or []) + list(context_messages or [])
-        total = 0
+        full = self._count_messages_with_fallback(
+            token_counter,
+            list(system_messages or []) + list(context_messages or []),
+        ) + self._count_tools_with_fallback(token_counter, list(tools or []))
+
+        if not use_baseline:
+            return full
+
+        baseline_idx, baseline_tokens = self._find_recent_usage_baseline(context_messages)
+        if baseline_idx is None:
+            return full
+
+        delta_messages = context_messages[baseline_idx + 1:]
+        via_baseline = baseline_tokens + self._estimate_messages(delta_messages, context)
+        return max(full, via_baseline)
+
+    def _truncate_summary_hard(
+        self,
+        summary: str,
+        target_tokens: int,
+        context: ModelContext,
+    ) -> str:
+        token_counter = context.token_counter()
+        if self._count_text_tokens(summary, token_counter) <= target_tokens:
+            return summary
+
+        low, high = 0, len(summary)
+        best = ""
+        while low <= high:
+            mid = (low + high) // 2
+            candidate = summary[:mid]
+            if self._count_text_tokens(candidate, token_counter) <= target_tokens:
+                best = candidate
+                low = mid + 1
+            else:
+                high = mid - 1
+        if not best:
+            return summary[: max(len(summary) // 4, 1)]
+        if len(best) < len(summary):
+            return best.rstrip() + "\n...[TRUNCATED]..."
+        return best
+
+    @staticmethod
+    def _count_text_tokens(text: str, token_counter: Any) -> int:
         if token_counter is not None:
             try:
-                total += token_counter.count_messages(all_messages)
-                return total
-            except Exception:
-                total = 0
-        total += sum(self._estimate_message_tokens(message) for message in all_messages)
-        return total
+                return token_counter.count(text)
+            except Exception as exc:
+                logger.warning(
+                    "[FullCompact] token_counter.count failed: %s, falling back to estimate",
+                    exc,
+                )
+        return ContextUtils.estimate_tokens(text)
 
     def _build_fallback_summary(self, messages: List[BaseMessage]) -> str:
         lines = []
