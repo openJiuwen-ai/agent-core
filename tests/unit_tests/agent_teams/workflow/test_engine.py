@@ -291,3 +291,57 @@ def test_load_workflow_meta_rejects_non_literal_meta(tmp_path):
     script = _write(tmp_path, "bad_meta.py", src)
     with pytest.raises(MetaError):
         load_workflow_meta(str(script))
+
+
+# ── isolation / agent_type pass-through + per-call fan-out cap ──────────────
+_ISOLATION_SCRIPT = '''
+from swarmflow import agent
+
+META = {"name": "iso", "description": "isolation + agent_type pass-through", "phases": []}
+
+async def run(args):
+    return await agent("hi", label="iso", isolation="worktree", agent_type="Explore")
+'''
+
+_OVERLIMIT_PARALLEL_SCRIPT = '''
+from swarmflow import agent, parallel
+
+META = {"name": "over-par", "description": "parallel beyond the fan-out cap", "phases": []}
+
+async def run(args):
+    return await parallel([(lambda i=i: agent(f"x{i}", label=str(i))) for i in range(4097)])
+'''
+
+_OVERLIMIT_PIPELINE_SCRIPT = '''
+from swarmflow import agent, pipeline
+
+META = {"name": "over-pipe", "description": "pipeline beyond the fan-out cap", "phases": []}
+
+async def run(args):
+    return await pipeline(list(range(4097)), lambda prev, item, i: agent(f"x{item}", label=str(i)))
+'''
+
+
+def test_agent_accepts_isolation_and_agent_type(tmp_path):
+    """isolation / agent_type are accepted on the surface (a no-op in the reference engine)."""
+    script = _write(tmp_path, "iso.py", _ISOLATION_SCRIPT)
+    result = asyncio.run(run_workflow(script, backend=MockBackend()))
+    assert result is not None
+
+
+def test_parallel_rejects_fan_out_beyond_cap(tmp_path):
+    """A single parallel() above the per-call cap is an explicit error, not silent truncation."""
+    from openjiuwen.agent_teams.workflow.engine.errors import WorkflowError
+
+    script = _write(tmp_path, "over_par.py", _OVERLIMIT_PARALLEL_SCRIPT)
+    with pytest.raises(WorkflowError):
+        asyncio.run(run_workflow(script, backend=MockBackend()))
+
+
+def test_pipeline_rejects_fan_out_beyond_cap(tmp_path):
+    """A single pipeline() above the per-call cap is an explicit error too."""
+    from openjiuwen.agent_teams.workflow.engine.errors import WorkflowError
+
+    script = _write(tmp_path, "over_pipe.py", _OVERLIMIT_PIPELINE_SCRIPT)
+    with pytest.raises(WorkflowError):
+        asyncio.run(run_workflow(script, backend=MockBackend()))

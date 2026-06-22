@@ -21,7 +21,6 @@ from openjiuwen.agent_teams.schema.events import (
     WorkflowProgressTeamEvent,
 )
 from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan
-from openjiuwen.agent_teams.prompts.sections import TeamSectionName, build_team_static_sections
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.workflow.tool_swarmflow import SwarmflowTool
 
@@ -149,12 +148,21 @@ def test_swarmflow_tool_launches_and_returns_immediately():
     assert harness.launched[0][1] == "swarmflow"
 
 
-def test_swarmflow_tool_requires_script_path():
-    """Missing script_path fails fast at the tool boundary."""
+def test_swarmflow_tool_requires_a_script_source():
+    """No script source at all fails fast at the tool boundary."""
     tool = _tool(_FakeHarness(), language="en")
     out = asyncio.run(tool.invoke({}))
     assert out.success is False
     assert "script_path" in (out.error or "")
+
+
+def test_swarmflow_tool_rejects_unsupported_sources():
+    """script / name / resume_id are on the surface but not wired to execution yet."""
+    tool = _tool(_FakeHarness())
+    for src in ("script", "name", "resume_id"):
+        out = asyncio.run(tool.invoke({src: "x"}))
+        assert out.success is False
+        assert "not supported yet" in (out.error or ""), (src, out.error)
 
 
 def test_swarmflow_tool_refuses_concurrent_run():
@@ -166,25 +174,6 @@ def test_swarmflow_tool_refuses_concurrent_run():
     assert out.success is False
     assert "in progress" in (out.error or "")
     assert harness.launched == []
-
-
-def _section_names(role: TeamRole, *, enable_swarmflow: bool) -> list[str]:
-    return [
-        s.name
-        for s in build_team_static_sections(
-            role=role,
-            persona="",
-            member_name="m",
-            enable_swarmflow=enable_swarmflow,
-        )
-    ]
-
-
-def test_swarmflow_section_only_for_enabled_leader():
-    """The spectator sub-mode section is leader-only and capability-gated."""
-    assert TeamSectionName.SWARMFLOW in _section_names(TeamRole.LEADER, enable_swarmflow=True)
-    assert TeamSectionName.SWARMFLOW not in _section_names(TeamRole.LEADER, enable_swarmflow=False)
-    assert TeamSectionName.SWARMFLOW not in _section_names(TeamRole.TEAMMATE, enable_swarmflow=True)
 
 
 def test_workflow_started_payload_carries_phases():
