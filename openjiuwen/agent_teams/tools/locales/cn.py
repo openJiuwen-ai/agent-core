@@ -229,4 +229,13 @@ STRINGS: dict[str, str] = {
         "【重要提醒】你必须通过调用 `structured_output` 工具来提交结果，不要把结果"
         "写在文本中。这是唯一的结果提交方式，不调用该工具=任务失败。"
     ),
+    # ===== async control tools (list / output / cancel) =======================
+    # async_tasks_list._desc / async_task_output._desc / async_task_cancel._desc
+    # live in descs/cn/*.md
+    "async_task_output.task_id": "要查询的后台任务 id（来自启动工具返回的 task_id）。",
+    "async_task_output.block": (
+        "是否阻塞等待任务进入终态：true 时轮询至完成/失败或超时，默认 false 立即返回当前状态。"
+    ),
+    "async_task_output.timeout": "block=true 时的最大等待毫秒数（默认 30000，上限 600000）。",
+    "async_task_cancel.task_id": "要取消的后台任务 id。",
 }

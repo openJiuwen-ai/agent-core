@@ -8,6 +8,11 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import MappedToolOutput, TeamTool
+from openjiuwen.agent_teams.tools.tool_async import (
+    AsyncTaskCancelTool,
+    AsyncTaskOutputTool,
+    AsyncTasksListTool,
+)
 from openjiuwen.agent_teams.tools.tool_member import (
     ApprovePlanTool,
     ApproveToolCallTool,
@@ -141,6 +146,13 @@ def create_team_tools(
             t=t,
             language=lang,
         ),
+        # Async-tool control tools (list / output / cancel background tasks).
+        # Leader-only (in LEADER_ONLY_TOOLS); always wired — harmless when the
+        # registry is empty. ``parent_agent`` is the harness whose runtime they
+        # query; None for harness-less callers (filtered out by role anyway).
+        "async_tasks_list": AsyncTasksListTool(parent_agent, t, language=lang),
+        "async_task_output": AsyncTaskOutputTool(parent_agent, t, language=lang),
+        "async_task_cancel": AsyncTaskCancelTool(parent_agent, t, language=lang),
     }
 
     if role == "human_agent":

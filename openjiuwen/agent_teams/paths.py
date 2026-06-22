@@ -161,3 +161,19 @@ def workflow_journal_path(team_name: str, session_id: str, workflow_name: str) -
         workflow_name: Workflow name from the script ``META``.
     """
     return workflow_run_dir(team_name, session_id, workflow_name) / "journal.jsonl"
+
+
+def async_tool_output_dir(team_name: str, session_id: str) -> Path:
+    """Return the directory holding async-tool spilled outputs for a session.
+
+    Layout: ``{team_home}/sessions/{session_id}/async_tools/``
+
+    Oversized async-tool results spill here as ``{task_id}.output`` files so a
+    large report does not blow the leader's context. The directory is removed
+    on team cleanup via ``TeamBackend.register_cleanup_path``.
+
+    Args:
+        team_name: Team identifier.
+        session_id: Session identifier (sanitized into one path segment).
+    """
+    return team_session_dir(team_name, session_id) / "async_tools"

@@ -331,4 +331,14 @@ STRINGS: dict[str, str] = {
         "Do NOT write the result in your text. This is the ONLY way to submit — "
         "not calling the tool = task failure."
     ),
+    # ===== async control tools (list / output / cancel) =======================
+    # async_tasks_list._desc / async_task_output._desc / async_task_cancel._desc
+    # live in descs/en/*.md
+    "async_task_output.task_id": "Id of the background task to query (the task_id returned by the launching tool).",
+    "async_task_output.block": (
+        "Whether to block until the task reaches a terminal state: when true, poll until "
+        "completed/failed or timeout; default false returns the current status immediately."
+    ),
+    "async_task_output.timeout": "Maximum wait in milliseconds when block=true (default 30000, capped at 600000).",
+    "async_task_cancel.task_id": "Id of the background task to cancel.",
 }

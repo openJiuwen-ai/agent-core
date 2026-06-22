@@ -160,6 +160,10 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "async_tool.completed": "[后台任务完成] 工具={tool}\n{result}",
         "async_tool.failed": "[后台任务失败] 工具={tool}，错误={error}",
+        "async_tool.spilled_notice": (
+            "[完整输出过大，已写入磁盘 {path}。"
+            "调用 async_task_output(task_id='{task_id}') 取回全文。]"
+        ),
     },
     "en": {
         # timefmt.py — relative-time buckets ({value} is the bucket count)
@@ -322,6 +326,10 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "async_tool.completed": "[Background task completed] tool={tool}\n{result}",
         "async_tool.failed": "[Background task failed] tool={tool}, error={error}",
+        "async_tool.spilled_notice": (
+            "[Full output was large and written to disk at {path}. "
+            "Call async_task_output(task_id='{task_id}') to retrieve it.]"
+        ),
     },
 }
 
