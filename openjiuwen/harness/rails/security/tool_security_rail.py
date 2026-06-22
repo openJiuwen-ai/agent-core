@@ -248,13 +248,27 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     def _persist_allow_always(
         self, normalized_name: str, tool_args: dict
     ) -> bool:
-        """工具级「始终允许」与 external_directory 白名单：先合并内存，再写盘。"""
-        cfg = cast(
-            PermissionsSection,
-            deepcopy(self._engine.config),
-        )
+        """工具级「始终允许」与 external_directory 白名单：先合并磁盘，再写盘。"""
+        # Read from on-disk snapshot first (via host callback) so that
+        # entries the user already deleted from config.yaml are NOT
+        # restored.  Fall back to engine.config only when snapshot is
+        # unavailable.
+        base_cfg: PermissionsSection | None = None
+        if self._host.get_permissions_snapshot is not None:
+            try:
+                snap = self._host.get_permissions_snapshot()
+                if isinstance(snap, dict):
+                    base_cfg = cast(PermissionsSection, snap)
+            except Exception:
+                logger.debug(
+                    "[PermissionEngine] permission.persist.snapshot_failed",
+                    exc_info=True,
+                )
+        if base_cfg is None:
+            base_cfg = cast(PermissionsSection, deepcopy(self._engine.config))
+
         cfg, ok_tool = merge_permission_allow_rule_into_permissions(
-            cfg, normalized_name, tool_args
+            base_cfg, normalized_name, tool_args
         )
         ext_paths = self._collect_external_directory_persist_paths(
             normalized_name, tool_args, cfg
