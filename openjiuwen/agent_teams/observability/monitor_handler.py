@@ -83,21 +83,6 @@ _MEMBER_TYPES = frozenset(
 )
 _MESSAGE_TYPES = frozenset({TeamEvent.MESSAGE, TeamEvent.BROADCAST})
 
-# Events that need special handling (not generic child span)
-# - CREATED/CLEANED/TEAM_COMPLETED: team span lifecycle management
-# - TASK_*: task span lifecycle management
-# - MEMBER_*: member-specific attributes
-# - MESSAGE/BROADCAST: message routing attributes
-_SPECIAL_HANDLED_TYPES = frozenset(
-    {
-        TeamEvent.CREATED,
-        TeamEvent.CLEANED,
-        TeamEvent.TEAM_COMPLETED,
-        TeamEvent.STANDBY,
-        TeamEvent.PLAN_APPROVAL,
-    }
-)
-
 # All known TeamEvent types (auto-synced via reflection)
 _ALL_TEAM_EVENT_TYPES: frozenset[str] = frozenset(
     getattr(TeamEvent, name)
@@ -128,6 +113,16 @@ class OtelTeamMonitorHandler:
             return self._injected_tracer
         from openjiuwen.agent_teams.observability.setup import get_tracer
         return get_tracer(_TRACER_NAME)
+
+    @staticmethod
+    def _get_ctx_session_id() -> str:
+        """Get session_id from ContextVar, or empty string on failure."""
+        try:
+            from openjiuwen.agent_teams.context import get_session_id as get_ctx_session_id
+            return get_ctx_session_id() or ""
+        except Exception as exc:
+            team_logger.warning("monitor_handler: failed to get session_id: {}", exc)
+            return ""
 
     def close_all_spans(self) -> None:
         """Close every open task span, then force-flush."""
@@ -206,18 +201,17 @@ class OtelTeamMonitorHandler:
     def _record_team_created(team_name: str, payload: dict[str, Any]) -> None:
         team_span = get_team_span()
         if team_span is None:
+            team_logger.warning(
+                "monitor_handler:_record_team_created: team_span is None! "
+                "TeamCreatedEvent arrived BEFORE _maybe_attach_observability. "
+                "team={}", team_name,
+            )
             return
 
         team_span.set_attribute(AT_TEAM_DISPLAY_NAME, str(payload.get("display_name", team_name)))
         team_span.set_attribute(AT_EVENT_TYPE, TeamEvent.CREATED)
 
-        session_id = payload.get("session_id")
-        if not session_id:
-            try:
-                from openjiuwen.agent_teams.context import get_session_id as get_ctx_session_id
-                session_id = get_ctx_session_id()
-            except Exception as exc:
-                team_logger.warning("monitor_handler: failed to get session_id: {}", exc)
+        session_id = payload.get("session_id") or OtelTeamMonitorHandler._get_ctx_session_id()
         if session_id:
             team_span.set_attribute(LANGFUSE_SESSION_ID, str(session_id))
 
@@ -230,22 +224,19 @@ class OtelTeamMonitorHandler:
             team_span.set_attribute(LANGFUSE_OBSERVATION_INPUT, str(team_input))
 
     def _record_team_cleaned(self, team_name: str) -> None:
+        """Record team.cleaned event span and close dangling agent spans.
+
+        Does NOT close the team span — that is owned by Runner's
+        _maybe_finalize_trace (finally block).  Closing it here would
+        prematurely end the shared team span while the leader may still
+        be running, causing all subsequent LLM/tool spans to become
+        orphans.
+        """
         self._record_team_event(team_name, "team.cleaned", attrs={AT_EVENT_TYPE: TeamEvent.CLEANED})
 
+        # Close any dangling agent span for this member.
         from openjiuwen.agent_teams.observability.span_context import close_team_agent_spans
         close_team_agent_spans(team_name)
-
-        team_span = get_team_span()
-        if team_span is not None and team_span.is_recording():
-            if not team_span.attributes.get(LANGFUSE_OBSERVATION_OUTPUT):
-                team_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, "team_cleaned")
-            team_span.set_status(Status(StatusCode.OK))
-            team_span.end()
-            team_logger.info("otel: team span closed for team_name={}", team_name)
-            from openjiuwen.agent_teams.observability.span_context import remove_team_span
-            remove_team_span()
-
-        self._force_flush_provider()
 
     def _record_team_completed(self, team_name: str, payload: dict[str, Any]) -> None:
         member_count = payload.get("member_count")
@@ -345,13 +336,9 @@ class OtelTeamMonitorHandler:
             import json as _json
             span.set_attribute(LANGFUSE_OBSERVATION_INPUT,
                                _json.dumps(payload, ensure_ascii=False, default=str))
-        try:
-            from openjiuwen.agent_teams.context import get_session_id as get_ctx_session_id
-            sid = get_ctx_session_id()
-            if sid:
-                span.set_attribute(LANGFUSE_SESSION_ID, sid)
-        except Exception as exc:
-            team_logger.warning("monitor_handler: failed to get session_id: {}", exc)
+        sid = self._get_ctx_session_id()
+        if sid:
+            span.set_attribute(LANGFUSE_SESSION_ID, sid)
         self._task_spans[task_id] = span
 
         created_attrs: dict[str, Any] = {
@@ -437,16 +424,15 @@ class OtelTeamMonitorHandler:
                     task_span.set_attribute(AT_TASK_STATUS, str(status))
 
         status_label = etype.replace("task_", "")
-        span_name = f"task.{task_id}.{status_label}" if task_id else f"task.{status_label}"
         attrs: dict[str, Any] = {
             AT_EVENT_TYPE: etype,
             AT_TASK_STATUS: status_label,
+            AT_TASK_ID: task_id,
         }
-        if task_id:
-            attrs[AT_TASK_ID] = task_id
         if member:
             attrs[AT_TASK_ASSIGNEE] = str(member)
-        in_val = f"task:{task_id}" if task_id else status_label
+        span_name = f"task.{task_id}.{status_label}"
+        in_val = f"task:{task_id}"
         out_val = f"{status_label}" + (f" by {member}" if member else "")
 
         if task_span is not None and task_span.is_recording():

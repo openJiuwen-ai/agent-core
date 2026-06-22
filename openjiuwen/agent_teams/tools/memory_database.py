@@ -297,6 +297,9 @@ class InMemoryTeamDatabase:
             team_logger.info("Team %s created", team_name)
             return True
 
+    async def team_exists(self, team_name: str) -> bool:
+        return team_name in self._teams
+
     async def get_team(self, team_name: str) -> Optional[Team]:
         return self._teams.get(team_name)
 

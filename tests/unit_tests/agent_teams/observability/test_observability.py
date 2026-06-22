@@ -144,6 +144,10 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
 ) -> None:
     """Streaming LLM produces one llm.call span with TTFT and a reasoning child."""
     fw = Runner.callback_framework
+
+    # Team span is required as parent for LLM spans.
+    _create_team_span("test_team")
+
     messages = [
         {"role": "system", "content": "You are a friendly helper."},
         {"role": "user", "content": "Compute 6 * 7."},
@@ -199,7 +203,8 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
     reasoning_spans = _spans_by_name(in_memory_exporter, "llm.reasoning")
     assert reasoning_spans, "no llm.reasoning child span emitted"
     rs = reasoning_spans[0]
-    assert "forty-two" in _attr(rs, "gen_ai.reasoning.content", "")
+    assert "forty-two" in _attr(rs, "gen_ai.completion.0.content", "")
+    assert _attr(rs, "langfuse.observation.input") == "llm reasoning"
     assert rs.parent is not None and rs.parent.span_id == span.context.span_id
 
 
@@ -313,6 +318,10 @@ async def test_llm_response_with_content_and_tool_calls(
 ) -> None:
     """When LLM returns both content and tool_calls, both should be recorded."""
     fw = Runner.callback_framework
+
+    # Team span is required as parent for LLM spans.
+    _create_team_span("test_team")
+
     messages = [{"role": "user", "content": "What is the weather?"}]
 
     # Simulate LLM response with both content and tool_calls
@@ -358,6 +367,9 @@ async def test_llm_call_error_marks_span_error(
 ) -> None:
     """LLM_CALL_ERROR closes the open span with ERROR status and exception."""
     fw = Runner.callback_framework
+
+    # Team span is required as parent for LLM spans.
+    _create_team_span("test_team")
 
     await fw.trigger(
         LLMCallEvents.LLM_INVOKE_INPUT,
@@ -449,6 +461,13 @@ async def test_team_monitor_handler_emits_team_and_task_spans(
             EventMessage.from_event(TaskCompletedEvent(team_name="alpha", task_id="t1")),
         )
         await handler(EventMessage.from_event(TeamCleanedEvent(team_name="alpha")))
+
+        # Team span is owned by Runner's finally block, not by monitor_handler.
+        # Close it manually here so it appears in the exporter.
+        if team_span.is_recording():
+            from opentelemetry.trace import Status, StatusCode
+            team_span.set_status(Status(StatusCode.OK))
+            team_span.end()
 
         team_spans = _spans_by_name(in_memory_exporter, "team.alpha")
         assert team_spans, "team root span missing"
@@ -629,6 +648,9 @@ async def test_redaction_replaces_prompt_and_completion_text() -> None:
         span_exporter_override=exporter,
     )
     try:
+        # Team span is required as parent for LLM spans.
+        _create_team_span("test_team")
+
         fw = Runner.callback_framework
         await fw.trigger(
             LLMCallEvents.LLM_INVOKE_INPUT,
