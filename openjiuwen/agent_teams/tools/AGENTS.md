@@ -89,6 +89,9 @@ PostgreSQL / MySQL backend (`engine.py`), not SQLite.
 | `send_message` | ✓ | ✓ | `to == "*"` → broadcast; leader call auto-starts UNSTARTED members. Also attached to `human_agent` as a user-driven relay channel — the HITT prompt section forbids autonomous use; only user-issued "tell `<member>` …" instructions may trigger it. |
 | `member_complete_task` | | | `human_agent` only — self-only task completion |
 | `workspace_meta` | ✓ | ✓ | workspace lock + version history |
+| `async_tasks_list` | ✓ | | list background async tasks; leader-only, always wired |
+| `async_task_output` | ✓ | | fetch a task's full output (`block`/`timeout`; reads disk spill) |
+| `async_task_cancel` | ✓ | | cancel a still-running background async task |
 
 Plan-mode gating is enforced in the factory:
 
@@ -256,7 +259,7 @@ Long `_desc` entries can live in Markdown files under `locales/descs/<lang>/<too
 - Supports `{{placeholder}}` interpolation — pass keyword arguments through `t("tool", param="value")`.
 - When migrating a `_desc` from `STRINGS` to a `.md` file, delete the dict entry and leave a comment.
 
-Current `descs/` population: `approve_plan`, `approve_tool`, `build_team`, `claim_task`, `clean_team`, `create_task`, `enter_worktree`, `exit_worktree`, `list_members`, `send_message`, `shutdown_member`, `spawn_bridge_agent`, `spawn_external_cli`, `spawn_human_agent`, `spawn_teammate`, `update_task`, `view_task`, `workspace_meta`.
+Current `descs/` population: `approve_plan`, `approve_tool`, `build_team`, `claim_task`, `clean_team`, `create_task`, `enter_worktree`, `exit_worktree`, `list_members`, `send_message`, `shutdown_member`, `spawn_bridge_agent`, `spawn_external_cli`, `spawn_human_agent`, `spawn_teammate`, `update_task`, `view_task`, `workspace_meta`, `async_tasks_list`, `async_task_output`, `async_task_cancel`.
 
 ## Prompt Layering: Tool Description vs System Prompt
 
