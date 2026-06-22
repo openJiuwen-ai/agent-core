@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -130,6 +131,149 @@ class TestEvolutionStoreLogCRUD:
         evo_log = await store.load_evolution_log("skill-a")
         assert [item.id for item in evo_log.entries] == ["ev_new"]
         assert evo_log.entries[0].change.content == "new"
+
+
+class TestEvolutionStoreArchive:
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_append_record_archives_existing_skill_body(tmp_path: Path):
+        root = tmp_path / "skills"
+        skill_dir = prepare_skill(root, "skill-a", "# Skill\n\nold body\n")
+        store = EvolutionStore(str(root))
+
+        await store.append_record("skill-a", make_record("ev_1"))
+
+        archive = skill_dir / "archive"
+        body_archives = list(archive.glob("SKILL.v*.md"))
+        evo_archives = list(archive.glob("evolutions.v*.json"))
+        assert len(body_archives) == 1
+        assert body_archives[0].read_text(encoding="utf-8") == "# Skill\n\nold body\n"
+        assert evo_archives == []
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_append_record_archives_previous_evolution_log_with_matching_suffix(tmp_path: Path):
+        root = tmp_path / "skills"
+        skill_dir = prepare_skill(root, "skill-a")
+        store = EvolutionStore(str(root))
+
+        await store.append_record("skill-a", make_record("ev_1", content="first"))
+        await store.append_record("skill-a", make_record("ev_2", content="second"))
+
+        archive = skill_dir / "archive"
+        evo_archives = sorted(archive.glob("evolutions.v*.json"))
+        assert len(evo_archives) == 1
+        archived_log = json.loads(evo_archives[0].read_text(encoding="utf-8"))
+        assert [entry["id"] for entry in archived_log["entries"]] == ["ev_1"]
+
+        suffix = evo_archives[0].name.removeprefix("evolutions.").removesuffix(".json")
+        assert (archive / f"SKILL.{suffix}.md").exists()
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_solidify_archives_before_writing_skill_body_and_log(tmp_path: Path):
+        root = tmp_path / "skills"
+        skill_dir = prepare_skill(root, "skill-a", "# Skill\n\n## Troubleshooting\n- old\n")
+        store = EvolutionStore(str(root))
+        await store.append_record("skill-a", make_record("ev_body_1", content="- check logs"))
+
+        before_solidify_body = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        before_solidify_log = json.loads((skill_dir / "evolutions.json").read_text(encoding="utf-8"))
+        archive = skill_dir / "archive"
+        existing_archives = {path.name for path in archive.iterdir()}
+
+        await store.solidify("skill-a")
+
+        new_archives = [path for path in archive.iterdir() if path.name not in existing_archives]
+        body_archives = [path for path in new_archives if path.name.startswith("SKILL.v")]
+        evo_archives = [path for path in new_archives if path.name.startswith("evolutions.v")]
+        assert len(body_archives) == 1
+        assert len(evo_archives) == 1
+        assert body_archives[0].read_text(encoding="utf-8") == before_solidify_body
+        assert json.loads(evo_archives[0].read_text(encoding="utf-8")) == before_solidify_log
+
+        body_suffix = body_archives[0].name.removeprefix("SKILL.").removesuffix(".md")
+        evo_suffix = evo_archives[0].name.removeprefix("evolutions.").removesuffix(".json")
+        assert body_suffix == evo_suffix
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_archive_public_helpers_read_and_restore_log(tmp_path: Path):
+        root = tmp_path / "skills"
+        skill_dir = prepare_skill(root, "skill-a", "# Current\n")
+        archive = skill_dir / "archive"
+        archive.mkdir(parents=True)
+        archived_log = {
+            "skill_id": "skill-a",
+            "version": "1.0",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "entries": [],
+        }
+        (archive / "SKILL.v20260622T123456.md").write_text("# Archived\n", encoding="utf-8")
+        (archive / "evolutions.v20260622T123456.json").write_text(
+            json.dumps(archived_log, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (skill_dir / "evolutions.json").write_text("{}", encoding="utf-8")
+        store = EvolutionStore(str(root))
+
+        assert store.get_skill_archive_dir("skill-a") == archive
+        assert store.get_skill_archive_file("skill-a", "SKILL.v20260622T123456.md") == archive / "SKILL.v20260622T123456.md"
+        assert store.get_skill_archive_file("skill-a", "../SKILL.md") is None
+        assert await store.read_archive_text("skill-a", "SKILL.v20260622T123456.md") == "# Archived\n"
+        assert await store.read_archive_text("skill-a", "../SKILL.md") == ""
+        assert await store.restore_evolution_log_from_archive("skill-a", "evolutions.v20260622T123456.json") is True
+        assert json.loads((skill_dir / "evolutions.json").read_text(encoding="utf-8")) == archived_log
+        assert await store.restore_evolution_log_from_archive("skill-a", "missing.json") is False
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_public_archive_operations_directly(tmp_path: Path):
+        root = tmp_path / "skills"
+        skill_dir = prepare_skill(root, "skill-a", "# Skill\n")
+        store = EvolutionStore(str(root))
+        await store.append_record("skill-a", make_record("ev_1", content="first"))
+
+        suffix = "20260622T123456"
+        body_archive = await store.archive_skill_body("skill-a", suffix=suffix)
+        evo_archive = await store.archive_evolutions("skill-a", suffix=suffix)
+        assert body_archive == "SKILL.v20260622T123456.md"
+        assert evo_archive == "evolutions.v20260622T123456.json"
+        archives = store.list_archives("skill-a")
+        assert body_archive in archives
+        assert evo_archive in archives
+
+        assert await store.write_skill_content("skill-a", "# Rewritten\n") is True
+        assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == "# Rewritten\n"
+        await store.clear_evolutions("skill-a")
+        assert (await store.load_evolution_log("skill-a")).entries == []
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_archive_current_state_uses_paired_suffix(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a", "# Skill\n")
+        store = EvolutionStore(str(root))
+        await store.append_record("skill-a", make_record("ev_1", content="first"))
+
+        body_archive, evo_archive = await store.archive_current_state("skill-a")
+
+        assert body_archive is not None
+        assert evo_archive is not None
+        body_suffix = body_archive.removeprefix("SKILL.").removesuffix(".md")
+        evo_suffix = evo_archive.removeprefix("evolutions.").removesuffix(".json")
+        assert body_suffix == evo_suffix
+
+    @staticmethod
+    def test_archive_name_helpers_validate_and_pair():
+        assert EvolutionStore.is_valid_skill_archive_name("SKILL.v20260622T123456.md") is True
+        assert EvolutionStore.is_valid_skill_archive_name("../SKILL.v20260622T123456.md") is False
+        assert EvolutionStore.is_valid_skill_archive_name("nested/SKILL.v20260622T123456.md") is False
+        assert (
+            EvolutionStore.paired_evolution_archive_name("SKILL.v20260622T123456.md")
+            == "evolutions.v20260622T123456.json"
+        )
+        assert EvolutionStore.paired_evolution_archive_name("bad.md") is None
 
 
 class TestEvolutionStoreSolidifyAndFormatting:

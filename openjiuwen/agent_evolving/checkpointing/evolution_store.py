@@ -194,6 +194,8 @@ class EvolutionStore:
         if skill_dir is None:
             return
 
+        await self._archive_current_state(name, skill_dir)
+
         if record.change.target == EvolutionTarget.SCRIPT:
             await self._persist_script(skill_dir, record)
 
@@ -289,6 +291,8 @@ class EvolutionStore:
         if skill_md_path is None:
             logger.warning("[EvolutionStore] solidify: SKILL.md not found (skill=%s)", name)
             return 0
+
+        await self._archive_current_state(name, skill_dir)
 
         content = await self._read_file_text(skill_md_path)
         for record in pending:
@@ -857,3 +861,158 @@ description: {description}
             if line.startswith("description:"):
                 return line.split(":", 1)[1].strip().strip('"').strip("'")
         return ""
+
+    @staticmethod
+    def _archive_dir(skill_dir: Path) -> Path:
+        archive = skill_dir / "archive"
+        archive.mkdir(parents=True, exist_ok=True)
+        return archive
+
+    @staticmethod
+    def _ts_suffix() -> str:
+        return datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
+
+    @staticmethod
+    def _archive_paths(archive: Path, suffix: str) -> Tuple[Path, Path]:
+        return archive / f"SKILL.v{suffix}.md", archive / f"evolutions.v{suffix}.json"
+
+    def _available_archive_suffix(self, archive: Path, suffix: Optional[str] = None) -> str:
+        base = suffix or self._ts_suffix()
+        candidate = base
+        for index in range(100):
+            body_path, evo_path = self._archive_paths(archive, candidate)
+            if not body_path.exists() and not evo_path.exists():
+                return candidate
+            candidate = f"{base}_{index + 1:02d}"
+        raise RuntimeError(f"No available archive suffix under {archive}")
+
+    @staticmethod
+    def is_valid_skill_archive_name(archive_name: str) -> bool:
+        path = Path(archive_name)
+        return bool(archive_name) and path.name == archive_name and ".." not in path.parts
+
+    @classmethod
+    def paired_evolution_archive_name(cls, body_archive_name: str) -> Optional[str]:
+        if not cls.is_valid_skill_archive_name(body_archive_name):
+            return None
+        if not body_archive_name.startswith("SKILL.v") or not body_archive_name.endswith(".md"):
+            return None
+        suffix = body_archive_name.removeprefix("SKILL.").removesuffix(".md")
+        return f"evolutions.{suffix}.json"
+
+    async def _archive_current_state(self, name: str, skill_dir: Path) -> Tuple[Optional[str], Optional[str]]:
+        archive = self._archive_dir(skill_dir)
+        suffix = self._available_archive_suffix(archive)
+        body_archive = await self._archive_skill_body_at(name, skill_dir, suffix)
+        evo_archive = await self._archive_evolutions_at(skill_dir, suffix)
+        return body_archive, evo_archive
+
+    async def archive_current_state(self, name: str) -> Tuple[Optional[str], Optional[str]]:
+        skill_dir = self._resolve_skill_dir(name)
+        if skill_dir is None:
+            return None, None
+        return await self._archive_current_state(name, skill_dir)
+
+    async def _archive_skill_body_at(self, name: str, skill_dir: Path, suffix: str) -> Optional[str]:
+        md_path = self._find_skill_md(skill_dir)
+        if md_path is None:
+            return None
+        archive = self._archive_dir(skill_dir)
+        dest, _ = self._archive_paths(archive, suffix)
+        content = await self._read_file_text(md_path)
+        await self._write_file_text(dest, content)
+        logger.info("[EvolutionStore] archived %s -> %s for skill=%s", md_path.name, dest.name, name)
+        return dest.name
+
+    async def _archive_evolutions_at(self, skill_dir: Path, suffix: str) -> Optional[str]:
+        evo_path = skill_dir / _EVOLUTION_FILENAME
+        if not evo_path.is_file():
+            return None
+        archive = self._archive_dir(skill_dir)
+        _, dest = self._archive_paths(archive, suffix)
+        content = await self._read_file_text(evo_path)
+        await self._write_file_text(dest, content)
+        logger.info("[EvolutionStore] archived evolutions -> %s", dest.name)
+        return dest.name
+
+    async def archive_skill_body(self, name: str, suffix: Optional[str] = None) -> Optional[str]:
+        skill_dir = self._resolve_skill_dir(name)
+        if skill_dir is None:
+            return None
+        archive = self._archive_dir(skill_dir)
+        archive_suffix = suffix if suffix is not None else self._available_archive_suffix(archive)
+        return await self._archive_skill_body_at(name, skill_dir, archive_suffix)
+
+    async def archive_evolutions(self, name: str, suffix: Optional[str] = None) -> Optional[str]:
+        skill_dir = self._resolve_skill_dir(name)
+        if skill_dir is None:
+            return None
+        evo_path = skill_dir / _EVOLUTION_FILENAME
+        if not evo_path.is_file():
+            return None
+        archive = self._archive_dir(skill_dir)
+        archive_suffix = suffix if suffix is not None else self._available_archive_suffix(archive)
+        return await self._archive_evolutions_at(skill_dir, archive_suffix)
+
+    async def clear_evolutions(self, name: str) -> None:
+        empty_log = EvolutionLog.empty(skill_id=name)
+        await self._save_evolution_log(name, empty_log)
+        await self.render_evolution_markdown(name)
+        logger.info("[EvolutionStore] cleared evolutions for skill=%s", name)
+
+    def list_archives(self, name: str) -> List[str]:
+        skill_dir = self._resolve_skill_dir(name)
+        if skill_dir is None:
+            return []
+        archive = skill_dir / "archive"
+        if not archive.is_dir():
+            return []
+        files = sorted(archive.iterdir(), key=lambda p: p.name, reverse=True)
+        return [f.name for f in files if f.is_file()]
+
+    def get_skill_archive_dir(self, name: str) -> Optional[Path]:
+        skill_dir = self._resolve_skill_dir(name)
+        if skill_dir is None:
+            return None
+        archive = skill_dir / "archive"
+        return archive if archive.is_dir() else None
+
+    def get_skill_archive_file(self, name: str, archive_name: str) -> Optional[Path]:
+        archive = self.get_skill_archive_dir(name)
+        if archive is None or not self.is_valid_skill_archive_name(archive_name):
+            return None
+        archive_path = archive / archive_name
+        return archive_path if archive_path.is_file() else None
+
+    async def read_archive_text(self, name: str, archive_name: str) -> str:
+        archive_path = self.get_skill_archive_file(name, archive_name)
+        if archive_path is None:
+            return ""
+        return await self._read_file_text(archive_path)
+
+    async def restore_evolution_log_from_archive(self, name: str, archive_name: str) -> bool:
+        archive_path = self.get_skill_archive_file(name, archive_name)
+        skill_dir = self._resolve_skill_dir(name)
+        if archive_path is None or skill_dir is None:
+            return False
+        content = await self._read_file_text(archive_path)
+        if not content:
+            return False
+        await self._write_file_text(skill_dir / _EVOLUTION_FILENAME, content)
+        return True
+
+    async def write_skill_content(self, name: str, content: str) -> bool:
+        skill_dir = self._resolve_skill_dir(name)
+        if skill_dir is None:
+            logger.warning("[EvolutionStore] write_skill_content: skill '%s' not found", name)
+            return False
+        md_path = self._find_skill_md(skill_dir)
+        if md_path is None:
+            md_path = skill_dir / "SKILL.md"
+        try:
+            await self._write_file_text(md_path, content)
+            logger.info("[EvolutionStore] wrote SKILL.md for skill='%s'", name)
+            return True
+        except Exception as exc:
+            logger.error("[EvolutionStore] write_skill_content failed for '%s': %s", name, exc)
+            return False

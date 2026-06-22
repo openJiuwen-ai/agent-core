@@ -1113,5 +1113,58 @@ class SkillEvolutionRail(EvolutionRail):
                 pending.name,
             )
 
+    async def rollback_skill(self, skill_name: str, version: Optional[str] = None) -> bool:
+        """Rollback skill to an archived version (no approval required)."""
+        store = self._evolution_store
+        archive = store.get_skill_archive_dir(skill_name)
+        if archive is None:
+            logger.warning("[SkillEvolutionRail] no archive dir for %s", skill_name)
+            return False
+
+        if version:
+            body_archive = store.get_skill_archive_file(skill_name, version)
+            if body_archive is None:
+                logger.warning("[SkillEvolutionRail] invalid archive version for %s: %s", skill_name, version)
+                return False
+            evo_version = store.paired_evolution_archive_name(body_archive.name)
+            if evo_version is None:
+                logger.warning("[SkillEvolutionRail] invalid archived body version for %s: %s", skill_name, version)
+                return False
+            evo_archive = store.get_skill_archive_file(skill_name, evo_version)
+        else:
+            body_files = sorted(
+                [f for f in archive.iterdir() if f.name.startswith("SKILL.v")],
+                key=lambda p: p.name,
+                reverse=True,
+            )
+            if not body_files:
+                logger.warning("[SkillEvolutionRail] no archived body for %s", skill_name)
+                return False
+            body_archive = body_files[0]
+            evo_version = store.paired_evolution_archive_name(body_archive.name)
+            if evo_version is None:
+                logger.warning("[SkillEvolutionRail] invalid archived body for %s: %s", skill_name, body_archive.name)
+                return False
+            evo_archive = archive / evo_version
+
+        old_body = await store.read_archive_text(skill_name, body_archive.name)
+        if not old_body:
+            logger.warning("[SkillEvolutionRail] archived body is empty for %s: %s", skill_name, body_archive.name)
+            return False
+
+        await store.archive_current_state(skill_name)
+        await store.write_skill_content(skill_name, old_body)
+
+        if evo_archive is not None:
+            restored = await store.restore_evolution_log_from_archive(skill_name, evo_archive.name)
+            if not restored:
+                return False
+        else:
+            await store.clear_evolutions(skill_name)
+
+        await store.render_evolution_markdown(skill_name)
+        logger.info("[SkillEvolutionRail] rollback completed for %s -> %s", skill_name, body_archive.name)
+        return True
+
 
 __all__ = ["SkillEvolutionRail"]
