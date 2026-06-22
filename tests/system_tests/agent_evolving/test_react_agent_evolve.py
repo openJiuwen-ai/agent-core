@@ -115,6 +115,9 @@ def _create_react_agent(agent_id: str = "demo_agent") -> ReActAgentEvolve:
 
     agent = ReActAgentEvolve(card=agent_card)
     agent.configure(config)
+    # Re-initialize operators so they pick up the configured prompt_template
+    # (operators were first created in __init__ with default empty config).
+    agent._init_operators()
     return agent
 
 
@@ -163,12 +166,20 @@ class TrainingMonitor(Callbacks):
 
 @pytest.fixture
 def runner():
-    """Pytest fixture for Runner setup/teardown"""
+    """Pytest fixture for Runner setup/teardown with persistent event loop.
+
+    Uses a single long-lived event loop so that Runner's background tasks
+    (task groups, connector pools) are not cancelled between setup and
+    test execution.
+    """
     from openjiuwen.core.runner import Runner
 
-    asyncio.run(Runner.start())
-    yield
-    asyncio.run(Runner.stop())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(Runner.start())
+    yield loop
+    loop.run_until_complete(Runner.stop())
+    loop.close()
 
 
 @pytest.mark.skipif(not _has_llm_config(), reason="Requires LLM API configuration")
@@ -177,7 +188,7 @@ def test_agent_creation(runner):
     agent = _create_react_agent("test_agent")
     assert agent.card.id == "test_agent"
 
-    result = asyncio.run(agent.invoke({"query": "What is Python?"}))
+    result = runner.run_until_complete(agent.invoke({"query": "What is Python?"}))
     assert result is not None
 
 
@@ -261,7 +272,7 @@ def test_evolved_agent_inference(runner):
     ]
 
     for query in test_queries:
-        result = asyncio.run(evolved.invoke({"query": query}))
+        result = runner.run_until_complete(evolved.invoke({"query": query}))
         assert result is not None
 
 
