@@ -42,6 +42,6 @@ workflow/
 ## 跟其它子目录的边界
 
 - 进度事件类型 `WORKFLOW_PROGRESS` / `WorkflowProgressTeamEvent` 在 `schema/events.py`；leader 播报由 `agent/coordination/handlers/workflow.py:WorkflowHandler` 消费。
-- `TeamRole.WORKER` 在 `schema/team.py`；`enable_swarmflow` 在 `schema/blueprint.py`；leader 子模式提示词在 `prompts/{cn,en}/leader_swarmflow.md`（经 `sections.build_team_swarmflow_section` 注入）。
+- `TeamRole.WORKER` 在 `schema/team.py`；`enable_swarmflow` 在 `schema/blueprint.py`（仍是 `swarmflow` 工具注入 + worker-model resolver 的开关）。swarmflow 的全部编排指引（何时用 / 异步旁观契约 / 脚本结构 / 原语 / 编排模式 / 代码骨架）集中在**工具描述** `tools/locales/descs/{cn,en}/swarmflow.md`——对齐 Claude Code「一切内嵌工具 description」的设计；不再有独立的 `leader_swarmflow.md` system-prompt section（`build_team_swarmflow_section` / `TeamSectionName.SWARMFLOW` 已移除）。详见 `F_42`。
 - `SwarmflowTool` 是 `harness/async_tools.py` 框架的第一个实现：持 `parent_agent`(NativeHarness) 引用，后台执行 + 完成/失败回灌全部走框架（NativeHarness 的 `launch_async_tool` + `send`），**不经 TeamAgent**。worker model 解析（`model_resolver`）、`messager`、`team_backend` 等 team 资源由装配（`agent_configurator` → `BuildContext.extras` → `TeamToolRail` → `create_team_tools`）注入工具。详见 `harness/AGENTS.md`、`F_35` / `S_20`。
 - swarmflow resume journal 落盘路径由 `paths.py` 统一管理（`workflow_journal_path` → `{team_home}/sessions/{session_id}/workflows/{workflow_name}/journal.jsonl`）；`run_swarmflow` 用 `load_workflow_meta`（脚本 `META["name"]` 必填）算路径，`resume`/`journal_path` 指向同一文件实现重放，`preprocess_swarmflow` 不落盘。详见 `F_38` / `S_18`。
