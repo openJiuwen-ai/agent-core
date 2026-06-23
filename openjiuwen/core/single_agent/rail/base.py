@@ -250,6 +250,14 @@ class AgentCallbackContext:
                 trailing env block and onward recompute. pop() clears the
                 list after each model call to prevent multi-turn
                 accumulation.
+              - ``memory_prefetch``: list of dicts ``[{content: str,
+                source: str}]`` injected by rails (e.g.
+                ``ExternalMemoryRail``); consumed (popped) by
+                ``_railed_model_call`` via ``_consume_memory_prefetch``
+                and appended as a tail ``UserMessage``. The ``content``
+                is already wrapped in ``<memory-context>`` XML tags by
+                the producing rail. Same KV-cache-stability rationale
+                as ``environment_context``.
         exception: Exception object (set on error events)
         retry_attempt: Current failed-attempt index
     """

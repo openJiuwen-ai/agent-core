@@ -24,8 +24,9 @@ class MockInputs:
 class MockCallbackContext:
     """测试用 Mock AgentCallbackContext"""
 
-    def __init__(self, inputs):
+    def __init__(self, inputs, extra=None):
         self.inputs = inputs
+        self.extra = extra if extra is not None else {}
 
 
 class MockMemoryProvider(MemoryProvider):
@@ -202,3 +203,113 @@ class TestBuildMemoryContextBlock:
         assert "Previous conversation context" in result
         assert "</memory-context>" in result
         assert "NOT new user input" in result
+
+
+class TestBeforeModelCallInjection:
+    """before_model_call 注入路径测试（重定位到 ctx.extra）。"""
+
+    @pytest.mark.asyncio
+    async def test_prefetch_writes_to_ctx_extra(self):
+        """prefetch 成功时，结果写入 ctx.extra['memory_prefetch']。"""
+        provider = MockMemoryProvider()
+        await provider.initialize()
+        rail = ExternalMemoryRail(provider)
+        rail._initialized = True
+
+        inputs = MockInputs(query="what is project X")
+        ctx = MockCallbackContext(inputs)
+
+        await rail.before_model_call(ctx)
+
+        assert "memory_prefetch" in ctx.extra
+        entries = ctx.extra["memory_prefetch"]
+        assert len(entries) == 1
+        entry = entries[0]
+        assert "content" in entry
+        assert "source" in entry
+        assert entry["source"] == "mock_provider"
+        assert "<memory-context>" in entry["content"]
+        assert "Memory context for: what is project X" in entry["content"]
+        assert "NOT new user input" in entry["content"]
+
+    @pytest.mark.asyncio
+    async def test_does_not_register_prefetch_section_on_system_prompt_builder(self):
+        """before_model_call 不应往 system_prompt_builder 注册 prefetch section。"""
+        provider = MockMemoryProvider()
+        await provider.initialize()
+        rail = ExternalMemoryRail(provider)
+        rail._initialized = True
+
+        spb = MagicMock()
+        rail.system_prompt_builder = spb
+
+        inputs = MockInputs(query="hello")
+        ctx = MockCallbackContext(inputs)
+
+        await rail.before_model_call(ctx)
+
+        spb.add_section.assert_not_called()
+        spb.remove_section.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_not_initialized_skips(self):
+        """rail 未初始化时，不应写 ctx.extra。"""
+        provider = MockMemoryProvider()
+        rail = ExternalMemoryRail(provider)
+        rail._initialized = False
+
+        ctx = MockCallbackContext(MockInputs(query="hello"))
+        await rail.before_model_call(ctx)
+
+        assert "memory_prefetch" not in ctx.extra
+
+    @pytest.mark.asyncio
+    async def test_empty_query_skips(self):
+        """query 解析为空时，不应写 ctx.extra。"""
+        provider = MockMemoryProvider()
+        await provider.initialize()
+        rail = ExternalMemoryRail(provider)
+        rail._initialized = True
+
+        ctx = MockCallbackContext(MockInputs(query=""))
+        await rail.before_model_call(ctx)
+
+        assert "memory_prefetch" not in ctx.extra
+        assert provider.prefetch_calls == []
+
+    @pytest.mark.asyncio
+    async def test_prefetch_timeout_skips_ctx_extra(self):
+        """prefetch 超时时，不应写 ctx.extra。"""
+        provider = MockMemoryProvider()
+        await provider.initialize()
+
+        async def _hang(*args, **kwargs):
+            await asyncio.sleep(60)
+        provider.prefetch = _hang
+
+        rail = ExternalMemoryRail(provider)
+        rail._initialized = True
+        rail.PREFETCH_TIMEOUT = 0.05
+
+        ctx = MockCallbackContext(MockInputs(query="hello"))
+        await rail.before_model_call(ctx)
+
+        assert "memory_prefetch" not in ctx.extra
+
+    @pytest.mark.asyncio
+    async def test_prefetch_exception_skips_ctx_extra(self):
+        """prefetch 抛异常时，不应写 ctx.extra。"""
+        provider = MockMemoryProvider()
+        await provider.initialize()
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("boom")
+        provider.prefetch = _boom
+
+        rail = ExternalMemoryRail(provider)
+        rail._initialized = True
+
+        ctx = MockCallbackContext(MockInputs(query="hello"))
+        await rail.before_model_call(ctx)
+
+        assert "memory_prefetch" not in ctx.extra
