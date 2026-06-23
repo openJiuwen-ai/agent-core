@@ -313,6 +313,17 @@ class TeamAgent(BaseAgent):
             return
         await harness.send(content, immediate=use_steer)
 
+    def set_background_task_controller(self, controller: Any) -> None:
+        """Attach the embedder's background task controller to this member's brain.
+
+        Forwarded to the runtime (TeamHarness), which keeps it across native
+        rebuilds; the leader's SwarmflowTool reads it to register run handles for
+        external pause/resume. No-op when no runtime is built yet.
+        """
+        harness = self.harness
+        if harness is not None:
+            harness.set_background_task_controller(controller)
+
     def has_pending_interrupt(self) -> bool:
         return self._stream_controller.has_pending_interrupt()
 

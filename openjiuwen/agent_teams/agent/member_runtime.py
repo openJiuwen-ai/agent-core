@@ -140,6 +140,14 @@ class MemberRuntime(Protocol):
         """Inject loaded memory into the agent's system prompt."""
         ...
 
+    def set_background_task_controller(self, controller: Any) -> None:
+        """Attach an external background task controller (pause/resume surface).
+
+        Drives the leader's background swarmflow run; non-DeepAgent runtimes that
+        launch no background tools implement it as a no-op.
+        """
+        ...
+
     # ---- config snapshots ----
 
     @property

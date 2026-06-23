@@ -42,7 +42,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence, TypeVar, overload
 
-from .errors import WorkflowError
+from .errors import WorkflowAborted, WorkflowError
 from .journal import call_signature, key_str
 from .progress import ProgressKind, WorkflowProgressEvent
 from .schema import coerce, resolve_schema
@@ -166,6 +166,20 @@ def _preview(value: Any) -> str | None:
     except Exception:
         body = str(value)
     return body
+
+
+def _check_abort(rt) -> None:
+    """Raise ``WorkflowAborted`` when an external pause signal is set.
+
+    Called twice per ``agent()`` / session ``send()``: an entry gate (before the
+    concurrency permit / backend) stops a queued call; a pre-journal guard (after
+    the backend succeeds, before ``journal.use``) ensures a call that finished
+    inside the pause window does NOT persist to the WAL — so a resume reruns it.
+    A ``None`` event disables both checks (the back-compat default).
+    """
+    ev = rt.abort_event
+    if ev is not None and ev.is_set():
+        raise WorkflowAborted()
 
 
 def _emit_agent_started(rt, opts: dict, prompt: str) -> None:
@@ -334,6 +348,8 @@ async def agent(
         _emit_agent_completed(rt, opts, outcome_text)
         return result
 
+    _check_abort(rt)  # entry gate: a paused run starts no new agent()
+
     if rt.spawn_count >= rt.spawn_limit:
         rt.log_sink(f"[wf] spawn limit {rt.spawn_limit} reached; skipping {opts.get('label')!r}")
         _emit_agent_failed(rt, opts, f"spawn limit {rt.spawn_limit} reached; skipping {opts.get('label')!r}")
@@ -356,6 +372,8 @@ async def agent(
             msg = f"{msg}: {call_result.error_detail}"
         _emit_agent_failed(rt, opts, msg)
         return None
+
+    _check_abort(rt)  # pre-journal guard: a call finished mid-pause does not persist
 
     await rt.journal.use(
         ks,
@@ -592,6 +610,8 @@ class AgentSession:
                 _emit_agent_completed(rt, opts, outcome_text)
                 return None if notify else result
 
+            _check_abort(rt)  # entry gate: a paused run starts no new turn
+
             # A human turn carries a deterministic correlation id (phase:label:turn)
             # so a person's reply matches even across a resume — never a uuid.
             correlation_id = self._correlation_id(opts) if self._human else None
@@ -609,6 +629,7 @@ class AgentSession:
                 return None
 
             result = call_result.result
+            _check_abort(rt)  # pre-journal guard: an interrupted turn does not persist
             await rt.journal.use(
                 ks,
                 _make_record(

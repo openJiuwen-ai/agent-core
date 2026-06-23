@@ -22,6 +22,7 @@ import uuid
 from typing import Any, Callable
 
 from openjiuwen.agent_teams.harness.async_tools import AsyncTool, render_result_text
+from openjiuwen.agent_teams.id_generator import generate_id
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool import ToolCard
@@ -119,12 +120,14 @@ class SwarmflowTool(AsyncTool):
     async def run_background(self, task_id: str, inputs: dict[str, Any]) -> str:
         """Run the swarmflow and return its final result as model-facing text."""
         from openjiuwen.agent_teams.context import get_session_id
+        from openjiuwen.agent_teams.runtime.background_task_controller import SwarmflowRunHandle
         from openjiuwen.agent_teams.schema.events import (
             EventMessage,
             TeamEvent,
             TeamTopic,
             WorkflowProgressTeamEvent,
         )
+        from openjiuwen.agent_teams.workflow.engine.errors import WorkflowAborted
         from openjiuwen.agent_teams.workflow.observer import WorkflowObserver, summarize_run
         from openjiuwen.agent_teams.workflow.runner import run_swarmflow
 
@@ -135,6 +138,23 @@ class SwarmflowTool(AsyncTool):
         team_name = self._team_name
         run_id = f"wf_{uuid.uuid4().hex[:12]}"
         name_box: dict[str, Any] = {"name": None, "description": None}
+
+        controller = getattr(self._parent_agent, "background_task_controller", None)
+        abort_event = asyncio.Event()
+
+        def _on_backend_ready(backend: Any) -> None:
+            """Register this run's control handle once its backend exists (pause path)."""
+            if controller is None:
+                return
+            controller.register(
+                SwarmflowRunHandle(
+                    task_id=task_id,
+                    abort_event=abort_event,
+                    backend=backend,
+                    native=self._parent_agent,
+                    relaunch=lambda: self._relaunch(inputs),
+                )
+            )
 
         def _publish(progress: Any) -> None:
             if messager is None:
@@ -173,26 +193,54 @@ class SwarmflowTool(AsyncTool):
                 team_logger.debug("[swarmflow] no running loop to publish workflow progress")
 
         observer = WorkflowObserver(on_event=_publish)
-        result = await run_swarmflow(
-            script_path,
-            model=model,
-            observer=observer,
-            args=args,
-            team_backend=self._team_backend,
-            team_name=team_name,
-            language=self._language,
-            model_resolver=self._model_resolver,
-            worker_base_spec=self._worker_base_spec,
-            human_base_spec=self._human_base_spec,
-            build_context=getattr(self._parent_agent, "build_context", None),
-            messager=messager,
-            session_id=get_session_id(),
-        )
+        try:
+            result = await run_swarmflow(
+                script_path,
+                model=model,
+                observer=observer,
+                args=args,
+                team_backend=self._team_backend,
+                team_name=team_name,
+                language=self._language,
+                model_resolver=self._model_resolver,
+                worker_base_spec=self._worker_base_spec,
+                human_base_spec=self._human_base_spec,
+                build_context=getattr(self._parent_agent, "build_context", None),
+                messager=messager,
+                session_id=get_session_id(),
+                abort_event=abort_event,
+                on_backend_ready=_on_backend_ready,
+            )
+        except WorkflowAborted:
+            # Paused at an abort checkpoint: the WAL holds the completed prefix.
+            # Re-raise as CancelledError so the async-tool runtime treats it as a
+            # silent cancellation (no completion injected) — matching the cancel
+            # the controller triggers as pause's third step.
+            raise asyncio.CancelledError()
+        finally:
+            if controller is not None:
+                controller.deregister(task_id)
         parts = [summarize_run(observer.run)]
         body = render_result_text(result)
         if body:
             parts.append(body)
         return "\n".join(parts)
+
+    def _relaunch(self, inputs: dict[str, Any]) -> None:
+        """Re-launch the paused swarmflow with the SAME inputs (resume path).
+
+        A fresh task id + a new background task; the journal path is unchanged
+        (same team / session / name), so the completed prefix is a cache hit and
+        only the interrupted call reruns live. Bypasses ``invoke`` — resume is a
+        control-plane action, not a new tool_use decided by the LLM.
+        """
+        new_task_id = generate_id(self.card.name)
+        self._parent_agent.launch_async_tool(
+            new_task_id,
+            lambda: self.run_background(new_task_id, inputs),
+            tool_name=self.card.name,
+            description=f"{self.launched_description(inputs)} (resumed)",
+        )
 
 
 __all__ = ["SwarmflowTool", "WorkerModelResolver"]

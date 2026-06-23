@@ -14,6 +14,7 @@ bare ``swarmflow`` the loader always maps), so a script may import either.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable
 
 from openjiuwen.agent_teams import paths
@@ -84,6 +85,8 @@ async def run_swarmflow(
     build_context: Any = None,
     messager: Any = None,
     session_id: str | None = None,
+    abort_event: asyncio.Event | None = None,
+    on_backend_ready: Callable[[Any], None] | None = None,
 ) -> Any:
     """Execute a swarmflow script with real LLM workers.
 
@@ -114,6 +117,12 @@ async def run_swarmflow(
         messager: The team messager, used by human sessions to receive a real
             person's reply on the dedicated reply topic.
         session_id: The current session id, used to build the human-reply topic.
+        abort_event: Optional engine pause signal; when set mid-run, ``agent()``
+            abort checkpoints raise so the run unwinds without journaling the
+            in-flight call (resume reruns it). ``None`` disables pausing.
+        on_backend_ready: Optional callback invoked with the constructed
+            ``TeamWorkerBackend`` before the run starts — the launcher uses it to
+            register a control handle (so pause can reach ``abort_sessions``).
 
     Returns:
         Whatever the script's ``run(args)`` returned.
@@ -153,6 +162,8 @@ async def run_swarmflow(
         on_human_prompt=_on_human_prompt,
         on_human_replied=_on_human_replied,
     )
+    if on_backend_ready is not None:
+        on_backend_ready(backend)
     journal_path = _resolve_journal_path(script_path, team_name, session_id)
     return await run_workflow(
         script_path,
@@ -162,6 +173,7 @@ async def run_swarmflow(
         log_sink=log_sink or _team_log_sink,
         resume=journal_path,
         journal_path=journal_path,
+        abort_event=abort_event,
     )
 
 

@@ -243,6 +243,30 @@ class AvatarSessionManager:
         for session_id in list(self._sessions.keys()):
             await self.close_session(session_id)
 
+    async def abort_all(self) -> None:
+        """Hard-abort every live session's in-flight round (pause path).
+
+        Both agent and human sessions run a supervisor-mode avatar harness, so
+        each is stopped via ``TeamHarness.abort(immediate=True)`` (cancel the
+        scheduler task, roll back to the round baseline). A human session may
+        instead be blocked in ``_await_human_reply`` waiting on a person, so its
+        pending future is cancelled first. The interrupted turn never journals,
+        so a resume reruns it (a human turn's ``correlation_id`` is stable across
+        resume, so a person's reply still matches). Avatars are disposed by
+        ``aclose`` on the run's unwind; an aborted-but-not-disposed harness is
+        harmless — resume rebuilds fresh avatars, and journal-hit turns build none.
+        """
+        for fut in list(self._pending_human.values()):
+            if not fut.done():
+                fut.cancel()
+        self._pending_human.clear()
+        for state in list(self._sessions.values()):
+            if state.harness is not None:
+                try:
+                    await state.harness.abort(immediate=True)
+                except Exception:  # noqa: BLE001 - best effort during pause
+                    team_logger.debug("[swarmflow] session abort failed for %s", state.member_name)
+
     def submit_human_reply(self, correlation_id: str, answer: str) -> bool:
         """Resolve a pending human turn with the person's raw reply.
 

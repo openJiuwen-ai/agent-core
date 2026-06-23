@@ -166,6 +166,11 @@ class NativeHarness(DeepAgent):
         # injects their completion via this harness's ``send``. None until first
         # async tool launches; ``stop`` cancels any in-flight tasks.
         self._async_tool_runtime: "AsyncToolRuntime | None" = None
+        # External pause/resume control surface, attached by TeamHarness when a
+        # BackgroundTaskController is threaded through run_agent_team_streaming.
+        # None unless an embedder supplied one; SwarmflowTool reads it to register
+        # its run handle for pause/resume.
+        self.background_task_controller: Any = None
 
         # Apply config + tools + spec rails directly onto this instance — no
         # throwaway template DeepAgent.

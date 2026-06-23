@@ -42,6 +42,11 @@ class Runtime:
     spawn_limit: int = 1000
     budget_total: int | None = None
     cap_override: int | None = None  # force the concurrency cap (tests)
+    abort_event: asyncio.Event | None = field(default=None, repr=False)
+    """External cooperative pause signal. When set, the ``agent()`` /
+    ``AgentSession.send()`` abort checkpoints raise ``WorkflowAborted`` — the
+    in-flight call does not journal and the run unwinds (resume reruns it).
+    ``None`` disables the checkpoints (default; full back-compat)."""
 
     # Mutable run state (created/advanced inside the running loop).
     sem: asyncio.Semaphore | None = field(default=None, repr=False)

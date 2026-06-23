@@ -398,6 +398,10 @@ class _CliRuntimeBase(ABC):
         """No-op: external CLI members do not use team memory injection."""
         return None
 
+    def set_background_task_controller(self, controller: Any) -> None:
+        """No-op: external CLI members launch no background tools to control."""
+        return None
+
     @property
     def workspace(self) -> Optional[Any]:
         """External CLI runtime exposes no team workspace handle."""

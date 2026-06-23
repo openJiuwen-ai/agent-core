@@ -70,6 +70,7 @@ class TeamHarness:
         self._initial_plan_mode_seeded = False
         self._active_agent_session: Optional[Any] = None
         self._native_session_id: Optional[str] = None
+        self._bg_controller: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Construction
@@ -119,6 +120,8 @@ class TeamHarness:
         """
         if self._native is None or self._native.state is HarnessState.TERMINATED:
             self._native = NativeHarness(self._agent_spec, self._build_context)
+        if self._bg_controller is not None:
+            self._native.background_task_controller = self._bg_controller
         child = self._make_child_session(team_session)
         await child.pre_run()
         await self._native.start(session=child)
@@ -410,6 +413,18 @@ class TeamHarness:
         """Inject loaded memory into the agent's system prompt."""
         if self._native is not None:
             await memory_manager.load_and_inject(self._native, query=query)
+
+    def set_background_task_controller(self, controller: Any) -> None:
+        """Attach the embedder's background task controller (pause/resume surface).
+
+        Stored on the adapter so it survives native rebuilds across run cycles
+        (``start`` re-pushes it to the freshly built native); also pushed to the
+        current native immediately so a controller attached after start takes
+        effect without waiting for the next cycle.
+        """
+        self._bg_controller = controller
+        if self._native is not None:
+            self._native.background_task_controller = controller
 
     # ------------------------------------------------------------------
     # Internal access

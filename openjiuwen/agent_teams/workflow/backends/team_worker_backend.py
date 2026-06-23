@@ -209,6 +209,17 @@ class TeamWorkerBackend(AgentBackend):
         if self._session_mgr is not None:
             await self._session_mgr.aclose()
 
+    async def abort_sessions(self) -> None:
+        """Abort every live avatar session's in-flight turn (pause path).
+
+        Delegates to the session manager when one exists; a workflow that used
+        only single-shot ``agent()`` has none, so this is a no-op there. The
+        single-shot ``run_once`` workers are NOT touched here — they have no
+        supervisor and are stopped by the top-level task cancel instead.
+        """
+        if self._session_mgr is not None:
+            await self._session_mgr.abort_all()
+
     def _resolve_model(self, model_name: str | None) -> Any:
         """Resolve a per-call ``model`` hint to a worker ``TeamModelConfig``.
 

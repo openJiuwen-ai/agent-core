@@ -110,6 +110,7 @@ async def run_workflow(
     progress_sink: ProgressSink | None = None,
     cap: int | None = None,
     budget_total: int | None = None,
+    abort_event: asyncio.Event | None = None,
 ) -> Any:
     # The ``swarmflow`` name a script imports the primitives under is registered
     # in ``sys.modules`` once at facade import time; the mapping is fixed for the
@@ -140,6 +141,7 @@ async def run_workflow(
         strict=strict,
         cap_override=cap,
         budget_total=budget_total,
+        abort_event=abort_event,
     )
     rt.sem = asyncio.Semaphore(rt.make_cap())  # created inside the running loop
     try:
