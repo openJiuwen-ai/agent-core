@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from openjiuwen.core.foundation.llm.model import Model
@@ -68,9 +69,7 @@ def _capture_create_deep_agent():
 
 def _patch_all(fake_create, *, runtime_mock=None, fake_tools=None):
     stack = ExitStack()
-    mock_runtime_cls = stack.enter_context(
-        patch("openjiuwen.harness.subagents.browser_agent.BrowserAgentRuntime")
-    )
+    mock_runtime_cls = stack.enter_context(patch("openjiuwen.harness.subagents.browser_agent.BrowserAgentRuntime"))
     if runtime_mock is not None:
         mock_runtime_cls.return_value = runtime_mock
     tools = fake_tools if fake_tools is not None else _make_fake_tools()
@@ -183,7 +182,46 @@ def test_settings_forwarded_to_runtime_constructor() -> None:
         model_name=settings.model_name,
         mcp_cfg=settings.mcp_cfg,
         guardrails=settings.guardrails,
+        instance=settings.instance,
     )
+
+
+def _model_without_client_config() -> SimpleNamespace:
+    # model_client_config=None routes _resolve_runtime_settings through
+    # build_runtime_settings(instance), exercising the keyed-instance path.
+    return SimpleNamespace(model_client_config=None, model_config=None)
+
+
+def test_browser_key_threads_keyed_instance_to_runtime() -> None:
+    """A bare browser_key becomes a keyed BrowserInstanceConfig on the runtime."""
+    calls, fake = _capture_create_deep_agent()
+    ctx, mock_runtime_cls, _mock_build, _tools = _patch_all(fake)
+    with ctx:
+        create_browser_agent(_model_without_client_config(), browser_key="teammate-A")
+
+    del calls
+    instance = mock_runtime_cls.call_args.kwargs["instance"]
+    assert instance is not None
+    assert instance.key == "teammate-A"
+    # The MCP server_id carried into the runtime must be isolated by the key.
+    assert mock_runtime_cls.call_args.kwargs["mcp_cfg"].server_id.endswith("__teammate-A")
+
+
+def test_browser_instance_dict_threads_port_to_runtime() -> None:
+    """A serializable instance dict (teams-wire form) rebuilds into the runtime."""
+    calls, fake = _capture_create_deep_agent()
+    ctx, mock_runtime_cls, _mock_build, _tools = _patch_all(fake)
+    with ctx:
+        create_browser_agent(
+            _model_without_client_config(),
+            browser_instance={"key": "B", "managed_port": 9502, "driver_mode": "managed"},
+        )
+
+    del calls
+    instance = mock_runtime_cls.call_args.kwargs["instance"]
+    assert instance.key == "B"
+    assert instance.managed_port == 9502
+    assert instance.driver_mode == "managed"
 
 
 def test_language_en_uses_english_prompt() -> None:

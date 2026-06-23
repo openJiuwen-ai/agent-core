@@ -84,6 +84,59 @@ def _common_kwargs(inp: SubAgentInput) -> dict[str, Any]:
     }
 
 
+class BrowserSubAgentInput(SubAgentInput):
+    """Browser sub-agent inputs: per-teammate browser identity (port + profile).
+
+    All fields default to empty/0 → legacy single shared-browser behavior. Set
+    ``browser_key`` (and optionally an explicit port/profile) to give a teammate
+    its own isolated managed browser. Distinct keys across teammates isolate
+    browsers; a shared key shares one browser.
+    """
+
+    browser_key: str = param_field(
+        default="",
+        description="Per-teammate browser identity key. Distinct keys isolate browsers.",
+    )
+    browser_port: int = param_field(
+        default=0,
+        description="Explicit managed Chrome debug port. 0 auto-allocates a free port.",
+    )
+    browser_profile: str = param_field(
+        default="",
+        description="Managed browser profile name. Defaults to the browser key.",
+    )
+    browser_driver: str = param_field(
+        default="",
+        description="Driver mode: managed / remote / extension. Defaults to managed.",
+    )
+    browser_cdp_url: str = param_field(
+        default="",
+        description="Remote-mode CDP endpoint URL (implies driver=remote).",
+    )
+
+
+def _browser_instance_dict(inp: BrowserSubAgentInput) -> dict[str, Any] | None:
+    """Build a serializable browser-instance dict, or None for legacy behavior.
+
+    Returns None when no browser identity is configured (preserves the single
+    shared-browser path). Otherwise returns a dict that survives the spawn wire
+    payload and reconstructs into ``BrowserInstanceConfig`` in the child process.
+    """
+    if not any((inp.browser_key, inp.browser_port, inp.browser_profile, inp.browser_driver, inp.browser_cdp_url)):
+        return None
+    data: dict[str, Any] = {}
+    if inp.browser_key:
+        data["key"] = inp.browser_key
+    if inp.browser_port:
+        data["managed_port"] = inp.browser_port
+    if inp.browser_profile:
+        data["profile_name"] = inp.browser_profile
+    if inp.browser_cdp_url:
+        data["cdp_url"] = inp.browser_cdp_url
+    data["driver_mode"] = inp.browser_driver or ("remote" if inp.browser_cdp_url else "managed")
+    return data
+
+
 @harness_element(
     kind=ElementKind.SUBAGENT,
     name=EXPLORE_AGENT,
@@ -116,19 +169,26 @@ def build_plan_agent(factory_kwargs: dict[str, Any], context: Any) -> Any:
     kind=ElementKind.SUBAGENT,
     name=BROWSER_AGENT,
     description="Browser automation sub-agent (requires a model; defaults BROWSER_DRIVER=managed).",
-    input_model=SubAgentInput,
+    input_model=BrowserSubAgentInput,
 )
 def build_browser_agent(factory_kwargs: dict[str, Any], context: Any) -> Any:
     """Build the browser sub-agent config (model required; skipped when absent)."""
-    inp = SubAgentInput.resolve(factory_kwargs, context)
+    inp = BrowserSubAgentInput.resolve(factory_kwargs, context)
     model = _parent_model(context)
     if model is None:
         logger.warning("[browser_agent] skipped: no parent model on build context")
         return None
-    if not str(os.getenv("BROWSER_DRIVER") or "").strip():
-        os.environ["BROWSER_DRIVER"] = "managed"
     spec = build_browser_agent_config(model, **_common_kwargs(inp))
-    spec.factory_kwargs = {"auto_create_workspace": False}
+    instance_dict = _browser_instance_dict(inp)
+    if instance_dict is None:
+        # Legacy single shared-browser behavior: managed driver via global env.
+        if not str(os.getenv("BROWSER_DRIVER") or "").strip():
+            os.environ["BROWSER_DRIVER"] = "managed"
+        spec.factory_kwargs = {"auto_create_workspace": False}
+    else:
+        # Per-teammate isolation: carry browser identity as serializable
+        # factory_kwargs (driver mode set on the instance, not global env).
+        spec.factory_kwargs = {"auto_create_workspace": False, "browser_instance": instance_dict}
     return spec
 
 

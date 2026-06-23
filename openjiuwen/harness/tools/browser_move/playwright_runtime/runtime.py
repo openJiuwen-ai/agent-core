@@ -7,26 +7,25 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any, Dict, Optional
-import logging
 
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
-    PromptAttachmentManager,
     PromptAttachmentKind,
+    PromptAttachmentManager,
 )
 
 from ..controllers import ActionController, BaseController
-from .browser_tools import ensure_browser_runtime_client_patch
-from .config import BrowserRunGuardrails
-from .service import BrowserService, BrowserTaskProgressState, MAX_ITERATION_MESSAGE
-
 from ..utils.parsing import extract_json_object
+from .browser_tools import ensure_browser_runtime_client_patch
+from .config import BrowserInstanceConfig, BrowserRunGuardrails
 from .probes import build_card_probe_js, build_interactive_probe_js
+from .service import MAX_ITERATION_MESSAGE, BrowserService, BrowserTaskProgressState
 from .site_profiles import builtin_site_profiles, get_selector_cache
 
 logger = logging.getLogger(__name__)
@@ -68,8 +67,10 @@ class BrowserAgentRuntime:
         model_name: str,
         mcp_cfg: McpServerConfig,
         guardrails: BrowserRunGuardrails,
+        instance: Optional[BrowserInstanceConfig] = None,
     ) -> None:
         ensure_browser_runtime_client_patch()
+        self._instance = instance
         self._service = BrowserService(
             provider=provider,
             api_key=api_key,
@@ -77,6 +78,7 @@ class BrowserAgentRuntime:
             model_name=model_name,
             mcp_cfg=mcp_cfg,
             guardrails=guardrails,
+            instance=instance,
         )
         self._browser_custom_action_tool = None
         self._browser_list_actions_tool = None
@@ -96,11 +98,11 @@ class BrowserAgentRuntime:
     @property
     def browser_list_actions_tool(self) -> Any:
         return self._browser_list_actions_tool
-    
+
     @property
     def browser_probe_interactives_tool(self) -> Any:
         return self._browser_probe_interactives_tool
-    
+
     @property
     def browser_probe_cards_tool(self) -> Any:
         return self._browser_probe_cards_tool
@@ -140,7 +142,7 @@ class BrowserAgentRuntime:
             "request_id": request_id,
             "error": None,
         }
-    
+
     def _playwright_client_lookup_keys(self) -> list[str]:
         """Return likely registry keys for the active Playwright MCP client."""
         server_id = str(getattr(self._service.mcp_cfg, "server_id", "") or "").strip()
@@ -155,14 +157,16 @@ class BrowserAgentRuntime:
             server_name.replace("_", "-"),
         ]
 
-        # Common IDs seen in the direct Playwright runtime path.
-        candidates.extend(
-            [
-                "playwright_official_stdio",
-                "playwright-official",
-                "playwright",
-            ]
-        )
+        # Common IDs seen in the direct Playwright runtime path. Skipped for a
+        # keyed instance so its lookup never resolves the legacy/unkeyed client.
+        if not (self._instance and self._instance.key):
+            candidates.extend(
+                [
+                    "playwright_official_stdio",
+                    "playwright-official",
+                    "playwright",
+                ]
+            )
 
         result: list[str] = []
         seen: set[str] = set()
@@ -201,23 +205,34 @@ class BrowserAgentRuntime:
         server_id = str(getattr(self._service.mcp_cfg, "server_id", "") or "").strip()
         server_name = str(getattr(self._service.mcp_cfg, "server_name", "") or "").strip()
 
+        # When this runtime is bound to a specific browser identity, the cfg
+        # server_id is already unique; the generic fallbacks below could resolve
+        # the legacy/unkeyed server, so they are skipped to keep isolation.
+        keyed = bool(self._instance and self._instance.key)
+
         server_id_candidates = [
             server_id,
             server_id.replace("-", "_"),
             server_id.replace("_", "-"),
-            "playwright_official_stdio",
-            "playwright-official-stdio",
-            "playwright",
         ]
+        if not keyed:
+            server_id_candidates += [
+                "playwright_official_stdio",
+                "playwright-official-stdio",
+                "playwright",
+            ]
 
         server_name_candidates = [
             server_name,
             server_name.replace("-", "_"),
             server_name.replace("_", "-"),
-            "playwright-official",
-            "playwright_official",
-            "playwright",
         ]
+        if not keyed:
+            server_name_candidates += [
+                "playwright-official",
+                "playwright_official",
+                "playwright",
+            ]
 
         def _first_tool(value: Any) -> Any:
             if isinstance(value, list):
@@ -278,10 +293,7 @@ class BrowserAgentRuntime:
             if tool is not None:
                 return tool
 
-        raise RuntimeError(
-            f"Registered Playwright MCP tool not found: {tool_name}. "
-            f"Tried {', '.join(tried)}"
-        )
+        raise RuntimeError(f"Registered Playwright MCP tool not found: {tool_name}. Tried {', '.join(tried)}")
 
     async def _get_playwright_run_code_tool(self) -> tuple[Any, str]:
         """Resolve browser_run_code_unsafe, with browser_run_code as compatibility fallback."""
@@ -360,18 +372,10 @@ class BrowserAgentRuntime:
         # Legacy browser_run_task compatibility: let the worker agent call
         # deterministic controller helpers without introducing another planner.
         if self._service.browser_agent is not None:
-            self._service.browser_agent.ability_manager.add(
-                self._browser_custom_action_tool.card
-            )
-            self._service.browser_agent.ability_manager.add(
-                self._browser_list_actions_tool.card
-            )
-            self._service.browser_agent.ability_manager.add(
-                self._browser_probe_interactives_tool.card
-            )
-            self._service.browser_agent.ability_manager.add(
-                self._browser_probe_cards_tool.card
-            )
+            self._service.browser_agent.ability_manager.add(self._browser_custom_action_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_list_actions_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_probe_interactives_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_probe_cards_tool.card)
 
     async def run_browser_task(
         self,
@@ -406,7 +410,7 @@ class BrowserAgentRuntime:
             request_id=request_id,
             **(params or {}),
         )
-    
+
     async def probe_interactives(
         self,
         *,
@@ -453,7 +457,7 @@ class BrowserAgentRuntime:
         parsed.setdefault("error", None)
         parsed.setdefault("elements", [])
         return parsed
-    
+
     async def probe_cards(
         self,
         *,
@@ -525,7 +529,7 @@ class BrowserAgentRuntime:
                     "Failed to record card probe result in selector cache",
                     exc_info=True,
                 )
-        
+
         return parsed
 
     async def list_actions(self) -> Dict[str, Any]:
@@ -654,9 +658,7 @@ class BrowserRuntimeRail(AgentRail):
         tool_name = str(getattr(getattr(ctx, "inputs", None), "tool_name", "") or "").strip()
         if not self._is_browser_progress_tool(tool_name):
             return
-        tool_result = self._normalize_tool_result(
-            getattr(getattr(ctx, "inputs", None), "tool_result", None)
-        )
+        tool_result = self._normalize_tool_result(getattr(getattr(ctx, "inputs", None), "tool_result", None))
         session_id = session.get_session_id()
         self._runtime.service.record_tool_progress(
             session_id=session_id,
@@ -707,9 +709,7 @@ class BrowserRuntimeRail(AgentRail):
             result["result_type"] = "error"
             result["failure_summary"] = failure_summary
             result["progress_state"] = exported
-            result["output"] = (
-                failure_summary if not clean_output else f"{clean_output}\n\n{failure_summary}"
-            )
+            result["output"] = failure_summary if not clean_output else f"{clean_output}\n\n{failure_summary}"
             self._persist_service_progress_to_session(session)
             return
 
