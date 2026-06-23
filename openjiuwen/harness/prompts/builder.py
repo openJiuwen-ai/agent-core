@@ -26,6 +26,7 @@ class SystemPromptBuilder(BaseSystemPromptBuilder):
     """DeepAgent prompt builder with mode filtering and diagnostics."""
 
     _MINIMAL_SECTIONS = frozenset({
+        SectionName.SYSTEM_AUTHORITY,
         SectionName.IDENTITY,
         SectionName.SAFETY,
         SectionName.SKILLS,

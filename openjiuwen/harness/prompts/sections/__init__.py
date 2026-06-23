@@ -6,6 +6,7 @@
 class SectionName:
     """Centralized section name constants used by PromptSection and Rails."""
 
+    SYSTEM_AUTHORITY = "system_authority"
     IDENTITY = "identity"
     SAFETY = "safety"
     SKILLS = "skills"
