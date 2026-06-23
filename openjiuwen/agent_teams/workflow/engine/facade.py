@@ -23,7 +23,7 @@ simulated, local vs. distributed) without touching script code.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence, TypeVar, overload
 
 from .seam import (
     BudgetView,
@@ -59,8 +59,7 @@ M = TypeVar("M", bound="BaseModel")
 async def agent(
     prompt: str, *, schema: type[M],
     label: str | None = ..., phase: str | None = ...,
-    model: str | None = ..., timeout: float | None = ...,
-    isolation: Literal["worktree"] | None = ..., agent_type: str | None = ...,
+    options: dict | None = ...,
 ) -> "M | None":
     """Overload: ``schema=<pydantic model>`` narrows the result to that model."""
     ...
@@ -70,8 +69,7 @@ async def agent(
 async def agent(
     prompt: str, *, schema: dict,
     label: str | None = ..., phase: str | None = ...,
-    model: str | None = ..., timeout: float | None = ...,
-    isolation: Literal["worktree"] | None = ..., agent_type: str | None = ...,
+    options: dict | None = ...,
 ) -> "dict | None":
     """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
     ...
@@ -81,8 +79,7 @@ async def agent(
 async def agent(
     prompt: str, *, schema: None = ...,
     label: str | None = ..., phase: str | None = ...,
-    model: str | None = ..., timeout: float | None = ...,
-    isolation: Literal["worktree"] | None = ..., agent_type: str | None = ...,
+    options: dict | None = ...,
 ) -> "str | None":
     """Overload: no ``schema`` returns the agent's raw text."""
     ...
@@ -94,27 +91,22 @@ async def agent(
     label: str | None = None,
     phase: str | None = None,
     schema: Any = None,
-    model: str | None = None,
-    timeout: float | None = None,
-    isolation: Literal["worktree"] | None = None,
-    agent_type: str | None = None,
+    options: dict | None = None,
 ) -> Any:
     """Spawn a sub-agent. Delegates to the current provider's ``agent``.
 
-    ``isolation`` (run the sub-agent in a fresh git worktree) and ``agent_type``
-    (use a named specialist sub-agent) mirror the reference tool's surface so
-    scripts can be written against the full API. The reference engine accepts
-    them but does not act on them yet — execution is identical to omitting them.
+    Orchestration/identity params (``label`` / ``phase`` / ``schema``) are
+    explicit; tuning and forward-compat params ride in the validated ``options``
+    bag — e.g. ``options={"model": "...", "timeout": 30, "isolation": "worktree",
+    "agent_type": "..."}`` — so a new knob needs no signature change. Keys are
+    whitelisted against the engine + backend option sets; an unknown key raises.
     """
     return await current_provider().agent(
         prompt,
         label=label,
         phase=phase,
         schema=schema,
-        model=model,
-        timeout=timeout,
-        isolation=isolation,
-        agent_type=agent_type,
+        options=options,
     )
 
 

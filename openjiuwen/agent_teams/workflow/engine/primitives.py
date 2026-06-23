@@ -275,8 +275,7 @@ def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
 async def agent(
     prompt: str, *, schema: type[M],
     label: str | None = ..., phase: str | None = ...,
-    model: str | None = ..., timeout: float | None = ...,
-    isolation: Literal["worktree"] | None = ..., agent_type: str | None = ...,
+    options: dict | None = ...,
 ) -> "M | None":
     """Overload: ``schema=<pydantic model>`` narrows the result to that model."""
     ...
@@ -286,8 +285,7 @@ async def agent(
 async def agent(
     prompt: str, *, schema: dict,
     label: str | None = ..., phase: str | None = ...,
-    model: str | None = ..., timeout: float | None = ...,
-    isolation: Literal["worktree"] | None = ..., agent_type: str | None = ...,
+    options: dict | None = ...,
 ) -> "dict | None":
     """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
     ...
@@ -297,8 +295,7 @@ async def agent(
 async def agent(
     prompt: str, *, schema: None = ...,
     label: str | None = ..., phase: str | None = ...,
-    model: str | None = ..., timeout: float | None = ...,
-    isolation: Literal["worktree"] | None = ..., agent_type: str | None = ...,
+    options: dict | None = ...,
 ) -> "str | None":
     """Overload: no ``schema`` returns the agent's raw text."""
     ...
@@ -310,27 +307,16 @@ async def agent(
     label: str | None = None,
     phase: str | None = None,
     schema: Any = None,
-    model: str | None = None,
-    timeout: float | None = None,
-    isolation: Literal["worktree"] | None = None,
-    agent_type: str | None = None,
+    options: dict | None = None,
 ) -> Any:
     rt = _rt.get()
-    if isolation is not None and isolation != "worktree":
-        raise WorkflowError("agent(isolation=...) only supports 'worktree'")
-    opts: dict = {}
-    # ``isolation`` / ``agent_type`` are carried in opts for forward-compat with
-    # the reference tool's surface, but the reference engine's backend does not
-    # act on them yet (a worktree-isolated or typed sub-agent is not spawned);
-    # they are accepted, not silently rejected. TODO: wire them into the backend
-    # and into ``call_signature`` once isolated / typed execution lands.
-    for _k, _v in (
-        ("label", label), ("phase", phase), ("schema", schema),
-        ("model", model), ("timeout", timeout),
-        ("isolation", isolation), ("agent_type", agent_type),
-    ):
-        if _v is not None:
-            opts[_k] = _v
+    # Orchestration/identity params (label/phase/schema) are explicit; tuning and
+    # forward-compat params (model/timeout/isolation/agent_type) ride in the
+    # validated ``options`` bag, mirroring ``AgentSession.send``. ``_build_opts``
+    # whitelists every key against ``_ENGINE_OPTIONS | backend.KNOWN_OPTIONS``.
+    opts = _build_opts(rt, {"label": label, "phase": phase, "schema": schema}, options)
+    if opts.get("isolation") not in (None, "worktree"):
+        raise WorkflowError("agent(options={'isolation': ...}) only supports 'worktree'")
     json_schema, model_cls = resolve_schema(opts.get("schema"))
 
     ks = key_str(_path.get() + (("call", _next_ordinal()),))

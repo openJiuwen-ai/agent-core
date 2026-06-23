@@ -24,7 +24,6 @@ from typing import (
     Any,
     Awaitable,
     Callable,
-    Literal,
     Protocol,
     Sequence,
     runtime_checkable,
@@ -50,10 +49,7 @@ class Provider(Protocol):
         label: str | None = ...,
         phase: str | None = ...,
         schema: Any = ...,
-        model: str | None = ...,
-        timeout: float | None = ...,
-        isolation: Literal["worktree"] | None = ...,
-        agent_type: str | None = ...,
+        options: dict | None = ...,
     ) -> Any:
         """Spawn a sub-agent and return its result (typed per ``schema``)."""
         ...

@@ -38,12 +38,12 @@ class SwarmflowWorkerWorktrees:
         manager = get_worktree_manager(self._build_context)
         if manager is None:
             raise BackendError(
-                "agent(isolation='worktree') requires a host-provided worktree manager"
+                "agent(options={'isolation': 'worktree'}) requires a host-provided worktree manager"
             )
         return manager
 
     async def ensure(self, member_name: str, opts: dict) -> MemberWorktreeInfo | None:
-        """Create an owner-scoped worktree for ``agent(isolation="worktree")``."""
+        """Create an owner-scoped worktree for ``agent(options={"isolation": "worktree"})``."""
         if not self.needs_worktree(opts):
             return None
         slug = build_teammate_worktree_name(

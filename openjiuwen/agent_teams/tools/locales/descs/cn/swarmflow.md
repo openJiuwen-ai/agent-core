@@ -57,13 +57,15 @@ async def run(args):
 - **返回值语义**：worker 被告知"它的最终文本**就是**返回值"（不是给人看的消息），所以它返回**原始数据**。`run(args)` 的返回值（通常是 dict）即工作流最终结果，自动回灌给调用者。
 
 ## 编排原语（`from swarmflow import ...`）
-- `await agent(prompt, *, schema=None, label=None, phase=None, model=None, isolation=None, agent_type=None, timeout=None)` —— 派生一次性 worker subagent。
+- `await agent(prompt, *, schema=None, label=None, phase=None, options=None)` —— 派生一次性 worker subagent。编排 / 身份参数（`label` / `phase` / `schema`）显式，调优 / 前向兼容参数走 `options` 袋（与 `agent_session().send` 一致）。
   - 无 `schema` 返回文本；`schema` 给 JSON Schema dict 返回校验过的 dict、给 pydantic 模型返回模型实例（校验在工具调用层，不匹配时模型自动重试）；失败（重试耗尽 / 超 spawn 上限）返回 `None`——用 `compact()` 过滤。
   - `label` 覆盖进度显示里的标签。
   - `phase` 显式把这次 `agent()` 归入某进度组——在 `pipeline`/`parallel` 的 stage **内部**务必显式传 `phase`，避免对全局 `phase()` 状态产生竞态；相同 `phase` 字符串归入同一进度组。
-  - `model` 覆盖本次 worker 的模型。**默认省略**——worker 继承团队 teammate 模型（几乎总是正确）；只有当你高度确信某 worker 需要不同档位时才设。
-  - `isolation='worktree'`：在全新 git worktree 里跑 worker，**昂贵**（每 worker 约 200-500ms 设置 + 磁盘开销），**仅当** worker 并行改文件且会互相冲突时才用；worktree 若无更改则自动回收。（接口就位、执行推进中——传入不报错，但当前不改变执行。）
-  - `agent_type`：用具名专家 subagent（如团队里某类 teammate）替代默认 worker，从与团队相同的注册表解析；与 `schema` 组合使用（专家系统提示词会被追加结构化输出指令）。（接口就位、执行推进中。）
+  - `options` 是调优 / 前向兼容参数袋（dict），键经引擎 + backend 白名单校验，未知键 fail-fast。当前可用键：
+    - `model` 覆盖本次 worker 的模型。**默认省略**——worker 继承团队 teammate 模型（几乎总是正确）；只有当你高度确信某 worker 需要不同档位时才设。
+    - `timeout` 本次 worker 调用的超时秒数。
+    - `isolation='worktree'`：在全新 git worktree 里跑 worker，**昂贵**（每 worker 约 200-500ms 设置 + 磁盘开销），**仅当** worker 并行改文件且会互相冲突时才用；worktree 若无更改则自动回收。
+    - `agent_type`：用具名专家 subagent（如团队里某类 teammate）替代默认 worker，从与团队相同的注册表解析；与 `schema` 组合使用（专家系统提示词会被追加结构化输出指令）。（接口就位、执行推进中。）
 - `agent_session(label=, phase=, instructions=, options=)` + `await s.send(prompt, *, schema=, notify=False)` —— **有状态**多轮 agent，跨轮记忆，第二轮无需重述第一轮上下文。`notify=True` 单向推送、返回 `None`。
 - `await human(prompt, *, schema=)` / `human_session()` + `.send()` —— 一次性 / 有状态的**人类参与**（HITL），等真人不占并发 permit、不计 spawn 预算，可被 journal 重放。
 - `await parallel([thunk, ...])` —— fork-join **栅栏**：并发跑、等齐才返回；分支抛错落 `None`，调用**永不抛**（用前 `compact` 过滤）。thunk 是 `lambda: agent(...)` 这样的零参可调用。

@@ -356,7 +356,7 @@ class TeamWorkerBackend(AgentBackend):
         """
         worktree = self._worktrees.get(member_name)
         workspace_is_worktree = worktree is not None
-        # Compute worker's workspace path. With ``agent(isolation="worktree")``,
+        # Compute worker's workspace path. With ``agent(options={"isolation": "worktree"})``,
         # the worker starts directly inside the owner-scoped worktree.
         ws_root = (
             worktree.worktree_path

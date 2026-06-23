@@ -300,7 +300,7 @@ from swarmflow import agent
 META = {"name": "iso", "description": "isolation + agent_type pass-through", "phases": []}
 
 async def run(args):
-    return await agent("hi", label="iso", isolation="worktree", agent_type="Explore")
+    return await agent("hi", label="iso", options={"isolation": "worktree", "agent_type": "Explore"})
 '''
 
 _OVERLIMIT_PARALLEL_SCRIPT = '''

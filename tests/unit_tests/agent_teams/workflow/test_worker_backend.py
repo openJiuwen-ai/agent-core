@@ -122,8 +122,8 @@ from swarmflow import agent
 META = {"name": "route", "description": "model routing", "phases": []}
 
 async def run(args):
-    a = await agent("task a", label="a", model="fast")
-    b = await agent("task b", label="b", model="unknown")
+    a = await agent("task a", label="a", options={"model": "fast"})
+    b = await agent("task b", label="b", options={"model": "unknown"})
     c = await agent("task c", label="c")
     return [a, b, c]
 '''
@@ -154,7 +154,7 @@ from swarmflow import agent
 META = {"name": "iso", "description": "isolation routing", "phases": []}
 
 async def run(args):
-    return await agent("task", label="w", isolation="worktree")
+    return await agent("task", label="w", options={"isolation": "worktree"})
 '''
     seen: list[dict] = []
 
@@ -177,7 +177,7 @@ from swarmflow import agent
 META = {"name": "bad-iso", "description": "bad isolation", "phases": []}
 
 async def run(args):
-    return await agent("task", label="w", isolation="container")
+    return await agent("task", label="w", options={"isolation": "container"})
 '''
     import pytest
     from openjiuwen.agent_teams.workflow.engine.errors import WorkflowError
@@ -191,7 +191,7 @@ def test_worktree_isolation_requires_host_worktree_manager():
     import pytest
     from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 
-    backend = TeamWorkerBackend(model=None, team_backend=None)
+    backend = TeamWorkerBackend(model=None)
 
     with pytest.raises(BackendError, match="host-provided worktree manager"):
         asyncio.run(backend.run("write code", {"label": "sum", "isolation": "worktree"}, None))
@@ -369,7 +369,6 @@ def test_worktree_isolation_sets_worker_workspace_and_removes_clean_worktree(tmp
 
     backend = TeamWorkerBackend(
         model=None,
-        team_backend=None,
         team_name="code-team",
         worker_base_spec=DeepAgentSpec(tools=[]),
         build_context=_build_context_with_worktree_manager(manager),
@@ -399,7 +398,7 @@ from swarmflow import agent
 META = {"name": "iso-meta", "description": "worktree isolation", "phases": []}
 
 async def run(args):
-    return await agent("write code", label="sum", isolation="worktree")
+    return await agent("write code", label="sum", options={"isolation": "worktree"})
 '''
     worktree_path = tmp_path / "worker-wt"
     worktree_path.mkdir()
@@ -441,7 +440,6 @@ async def run(args):
 
     backend = TeamWorkerBackend(
         model=None,
-        team_backend=None,
         team_name="code-team",
         worker_base_spec=DeepAgentSpec(tools=[]),
         build_context=_build_context_with_worktree_manager(manager),
