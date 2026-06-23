@@ -138,7 +138,6 @@ def create_team_tools(
         "swarmflow": SwarmflowTool(
             parent_agent=parent_agent,
             messager=messager,
-            team_backend=agent_team,
             team_name=team_name,
             model_resolver=swarmflow_model_resolver,
             worker_base_spec=swarmflow_worker_base_spec,

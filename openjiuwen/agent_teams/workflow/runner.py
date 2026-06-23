@@ -75,7 +75,6 @@ async def run_swarmflow(
     model: Any,
     observer: WorkflowObserver,
     args: Any = None,
-    team_backend: Any = None,
     team_name: str = "swarmflow",
     language: str = "cn",
     log_sink: Callable[[str], None] | None = None,
@@ -97,7 +96,6 @@ async def run_swarmflow(
         observer: Receives the progress-event stream; the caller reads
             ``observer.run`` afterwards for the 4-layer structure.
         args: Value passed to the script's ``run(args)``.
-        team_backend: Optional ``TeamBackend`` for worker roster rows.
         team_name: Namespacing for worker member ids.
         language: Prompt language hint.
         log_sink: Optional plain-text diagnostics sink.
@@ -150,7 +148,6 @@ async def run_swarmflow(
 
     backend = TeamWorkerBackend(
         model=model,
-        team_backend=team_backend,
         team_name=team_name,
         language=language,
         model_resolver=model_resolver,

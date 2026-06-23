@@ -46,7 +46,6 @@ class SwarmflowTool(AsyncTool):
         *,
         parent_agent: Any,
         messager: Any,
-        team_backend: Any,
         team_name: str,
         model_resolver: WorkerModelResolver | None,
         worker_base_spec: Any = None,
@@ -66,7 +65,6 @@ class SwarmflowTool(AsyncTool):
             language=lang,
         )
         self._messager = messager
-        self._team_backend = team_backend
         self._team_name = team_name or "swarmflow"
         self._model_resolver = model_resolver
         self._worker_base_spec = worker_base_spec
@@ -204,7 +202,6 @@ class SwarmflowTool(AsyncTool):
                 model=model,
                 observer=observer,
                 args=args,
-                team_backend=self._team_backend,
                 team_name=team_name,
                 language=self._language,
                 model_resolver=self._model_resolver,
