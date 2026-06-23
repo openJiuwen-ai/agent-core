@@ -138,6 +138,11 @@ class SwarmflowTool(AsyncTool):
         team_name = self._team_name
         run_id = f"wf_{uuid.uuid4().hex[:12]}"
         name_box: dict[str, Any] = {"name": None, "description": None}
+        # Capture the session once. A resume relaunch runs from an external
+        # coroutine (the controller) that lacks the leader's session contextvar,
+        # so ``_relaunch`` restores it — otherwise the resumed run would publish
+        # progress on the wrong topic and resume from the wrong journal path.
+        session_id = get_session_id()
 
         controller = getattr(self._parent_agent, "background_task_controller", None)
         abort_event = asyncio.Event()
@@ -152,7 +157,7 @@ class SwarmflowTool(AsyncTool):
                     abort_event=abort_event,
                     backend=backend,
                     native=self._parent_agent,
-                    relaunch=lambda: self._relaunch(inputs),
+                    relaunch=lambda: self._relaunch(inputs, session_id),
                 )
             )
 
@@ -185,7 +190,7 @@ class SwarmflowTool(AsyncTool):
                 payload=team_event.model_dump(),
                 sender_id="swarmflow",  # non-leader sender so kernel does not self-filter
             )
-            topic = TeamTopic.TEAM.build(get_session_id(), team_name)
+            topic = TeamTopic.TEAM.build(session_id, team_name)
             try:
                 team_logger.debug("[swarmflow] workflow progress message: {}", message)
                 asyncio.create_task(messager.publish(topic_id=topic, message=message))
@@ -207,7 +212,7 @@ class SwarmflowTool(AsyncTool):
                 human_base_spec=self._human_base_spec,
                 build_context=getattr(self._parent_agent, "build_context", None),
                 messager=messager,
-                session_id=get_session_id(),
+                session_id=session_id,
                 abort_event=abort_event,
                 on_backend_ready=_on_backend_ready,
             )
@@ -226,21 +231,34 @@ class SwarmflowTool(AsyncTool):
             parts.append(body)
         return "\n".join(parts)
 
-    def _relaunch(self, inputs: dict[str, Any]) -> None:
+    def _relaunch(self, inputs: dict[str, Any], session_id: str) -> None:
         """Re-launch the paused swarmflow with the SAME inputs (resume path).
 
         A fresh task id + a new background task; the journal path is unchanged
         (same team / session / name), so the completed prefix is a cache hit and
         only the interrupted call reruns live. Bypasses ``invoke`` — resume is a
         control-plane action, not a new tool_use decided by the LLM.
+
+        Restores the original ``session_id`` contextvar before launching: resume
+        is driven from an external coroutine that lacks the leader's session
+        context, and the new task inherits the context at ``create_task`` time —
+        so without this the resumed run resolves an empty session (wrong progress
+        topic + wrong journal path, i.e. no cache hit).
         """
+        from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+
         new_task_id = generate_id(self.card.name)
-        self._parent_agent.launch_async_tool(
-            new_task_id,
-            lambda: self.run_background(new_task_id, inputs),
-            tool_name=self.card.name,
-            description=f"{self.launched_description(inputs)} (resumed)",
-        )
+        token = set_session_id(session_id) if session_id else None
+        try:
+            self._parent_agent.launch_async_tool(
+                new_task_id,
+                lambda: self.run_background(new_task_id, inputs),
+                tool_name=self.card.name,
+                description=f"{self.launched_description(inputs)} (resumed)",
+            )
+        finally:
+            if token is not None:
+                reset_session_id(token)
 
 
 __all__ = ["SwarmflowTool", "WorkerModelResolver"]
