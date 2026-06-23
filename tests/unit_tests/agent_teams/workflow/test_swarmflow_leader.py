@@ -90,7 +90,6 @@ def _tool(harness: _FakeHarness, language: str = "cn") -> SwarmflowTool:
     return SwarmflowTool(
         parent_agent=harness,
         messager=None,
-        team_backend=None,
         team_name="t",
         model_resolver=None,
         language=language,

@@ -73,7 +73,7 @@ def _build_context_with_worktree_manager(manager: Any) -> BuildContext:
 def test_schema_path_returns_structured_and_free_path_returns_text(tmp_path):
     """Schema agent() -> structured_output capture; no-schema agent() -> free text."""
     script = _write(tmp_path, _SCRIPT)
-    backend = _FakeWorkerBackend(model=None, team_backend=None)
+    backend = _FakeWorkerBackend(model=None)
     events: list = []
 
     result = asyncio.run(run_workflow(str(script), backend=backend, progress_sink=events.append))
@@ -104,7 +104,7 @@ def test_missing_submit_makes_agent_return_none(tmp_path):
             return ""  # never fills structured_output
 
     script = _write(tmp_path, _SCRIPT)
-    backend = _SilentWorker(model=None, team_backend=None)
+    backend = _SilentWorker(model=None)
     result = asyncio.run(run_workflow(str(script), backend=backend))
     assert result["a"] is None  # structured call gave up after retries
     assert result["b"] == ""  # free-text call returns the empty final message
@@ -136,7 +136,6 @@ async def run(args):
 
     backend = _RecordingBackend(
         model="leader-model",
-        team_backend=None,
         model_resolver=lambda name: "fast-cfg" if name == "fast" else None,
     )
     result = asyncio.run(run_workflow(_write(tmp_path, script), backend=backend))
@@ -239,7 +238,7 @@ def test_execute_worker_derives_teammate_spec_without_team_tools(tmp_path, monke
 
     monkeypatch.setattr(th_mod.TeamHarness, "build", _fake_build)
 
-    backend = TeamWorkerBackend(model=None, team_backend=None, worker_base_spec=base)
+    backend = TeamWorkerBackend(model=None, worker_base_spec=base)
     schema = {"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]}
 
     # Free path: no structured_output tool, base capabilities preserved.
@@ -298,7 +297,6 @@ def test_execute_worker_derives_build_context_from_leader_base(monkeypatch):
 
     backend = TeamWorkerBackend(
         model=None,
-        team_backend=None,
         worker_base_spec=base,
         build_context=leader_ctx,
         language="en",
