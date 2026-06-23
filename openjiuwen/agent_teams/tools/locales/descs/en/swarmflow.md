@@ -1,34 +1,36 @@
-Run a swarmflow orchestration script (a multi-agent workflow). The script spawns and coordinates a fleet of worker subagents — to be **comprehensive** (decompose and cover in parallel), to be **confident** (verify with independent perspectives before concluding), or to take on **scale one context can't hold** (migrations, audits, deep research). The script is where you encode that structure: **what fans out, what verifies, what synthesizes**.
+Run a swarmflow orchestration script (a multi-agent workflow) that orchestrates a fleet of worker subagents **deterministically**. The script spawns and coordinates those workers — to be **comprehensive** (decompose and cover in parallel), to be **confident** (verify with independent perspectives before concluding), or to take on **scale one context can't hold** (migrations, audits, deep research). The script is where you encode that structure: **what fans out, what verifies, what synthesizes**. This tool **returns immediately** with a run_id (the workflow runs asynchronously in the background); that run_id is the handle for a later `resume_id`, and phase progress plus the final result are fed back into your context automatically.
 
 ## When to call / when not to
+- **Explicit opt-in only**: a workflow can spawn dozens of workers and burn a lot of tokens, so **the user must ask for that scale — you must not infer it**. Any one of: the user asks in their own words ("use a workflow", "fan out agents", "orchestrate with subagents", "thoroughly audit"); the message contains `swarmflow` / `workflow`; or the hosting team has `enable_swarmflow` on AND the task genuinely needs multi-agent collaboration.
 - **Use it**: complex, multi-step, parallel / pipeline, adversarial-verification, large-scale ranking, root-cause, exploration, triage work — high-value tasks where the compute cost is justified.
-- **Don't**: a simple single-agent task does not need a workflow — most ordinary tasks don't need a five-member panel. First ask "does this really need more compute?"
-- **Trigger**: the user's message contains `swarmflow` / `workflow`, or describes work that genuinely needs several agents in parallel / pipeline.
+- **Don't**: a simple single-agent task does not need a workflow — most ordinary tasks don't need a five-member panel. **Even when a task would clearly benefit from parallelism, do not orchestrate unless the user asked**: use a single `agent()`, or briefly describe in the main loop what a multi-agent workflow could do and roughly how much compute it would cost, then ask the user whether to run it (you may add that they can say "use a workflow" next time to skip this ask). First ask "does this really need more compute?"
 - **Hybrid is best**: before orchestrating, scout inline first (list the relevant files, find the data sources, scope the diff) to discover the work-list, then have the script pipeline over it. You don't need to know the shape before the *task* — only before the *orchestration step*.
+
+> Whether to orchestrate is decided by the `enable_swarmflow` capability bit plus the user's request this turn, not a standing session-level flag.
 
 ## Common workflow shapes (chainable across turns)
 - **Understand**: parallel readers over relevant subsystems → a structured map.
 - **Design**: a judge panel of N independent approaches → scored synthesis.
 - **Review**: findings by dimension → adversarial verify (see skeleton below).
 - **Research**: multi-modal sweep → deep read → a synthesized, cited conclusion.
-- **Migrate**: discover sites → transform each → verify.
+- **Migrate**: discover sites → transform each (with `isolation='worktree'` when needed) → verify.
 
 Larger work can be **split into several scripts run in sequence** (start the next after one finishes), or staged within one script via `phase()`. Read each stage's result before deciding the next — you stay in the loop, and each script is one well-scoped fan-out.
 
 ## Behavior contract (must follow)
-- This tool **returns immediately** — the workflow runs asynchronously in the background; **do not poll** or call it repeatedly.
+- This tool **returns immediately** (with a run_id) — the workflow runs asynchronously in the background; **do not poll** or call it repeatedly.
 - Phase progress arrives **automatically** as notifications in your context; when the workflow **completes or fails, the final result is fed back to you automatically** — no need to query.
 - You are a **spectator**: the script orchestrates all the workers itself. On each progress notification, relay it to the user in brief natural language; staying quiet between notifications is the normal state.
 - **Do not** spawn members, `create_task`, or orchestrate yourself — the script owns all orchestration; and do not rewrite a worker's intermediate results.
 
 ## Script sources (one of) and args
-- `script_path` (**available today**): path to a script file on disk.
+- `script_path` (**available today**): path to a script file on disk. Highest precedence.
 - `script` (interface in place, execution coming): inline script source.
-- `name` (interface in place, execution coming): a saved / named workflow.
+- `name` (interface in place, execution coming): a saved / named workflow, resolved to a self-contained script.
 - `resume_id` (interface in place, execution coming): a prior run's run_id, to resume.
-- `args`: a **string** argument passed to the script's `run(args)` (e.g. a question, a target path).
+- `args`: a **string** argument passed to the script's `run(args)` (e.g. a question, a target path). For structured input, `json.loads(args)` inside the script.
 
-> Only `script_path` is wired to execution today; the other three are rejected with an **explicit error** (never a silent no-op). With no existing script, the `swarmskill-creator` skill can author one — get its path, then call this tool; if that skill is unavailable, tell the user honestly rather than forcing the call or hand-writing a script.
+> Only `script_path` is wired to execution today; the other three are rejected with an **explicit error** (never a silent no-op). **To iterate**: edit the script file on disk and re-invoke with the same `script_path` — no need to resend the source. With no existing script, the `swarmskill-creator` skill can author one — get its path, then call this tool; if that skill is unavailable, tell the user honestly rather than forcing the call or hand-writing a script.
 
 ## Script structure (Python)
 A script is a Python module: a top-level `META` (pure literal) plus `async def run(args)`, importing the primitives from `swarmflow`.
@@ -39,7 +41,8 @@ from swarmflow import agent, agent_session, human, parallel, pipeline, map_paral
 META = {
     "name": "deep-research",
     "description": "one line, shown in the permission dialog",
-    "phases": [{"title": "Search", "detail": "parallel retrieval"}, {"title": "Verify"}],  # plain strings also ok
+    "whenToUse": "what it's for (optional, shown in the workflow list)",
+    "phases": [{"title": "Search", "detail": "parallel retrieval"}, {"title": "Verify", "model": "..."}],  # title may be a plain string
 }
 
 async def run(args):
@@ -49,18 +52,25 @@ async def run(args):
 ```
 
 - `META` must be a **pure literal** — no variables, function calls, f-strings, or string concatenation (extracted statically at load time).
-- `phases[].title` must match the `phase()` calls exactly; a phase with no matching call forms its own progress group.
+- Required `name` / `description`; optional `whenToUse` (shown in the workflow list), `phases`.
+- `phases[].title` must match the `phase()` calls exactly; a phase with no matching call forms its own progress group. A phase entry may carry `model` to override that phase's default model (`{"title": "Verify", "model": "..."}`).
 - **Return-value semantics**: a worker is told its final text **IS** the return value (not a human-facing message), so it returns **raw data**. The value `run(args)` returns (usually a dict) is the workflow's final result, fed back to the caller automatically.
 
 ## Orchestration primitives (`from swarmflow import ...`)
-- `await agent(prompt, *, schema=None, label=None, phase=None, model=None, isolation=None, agent_type=None, timeout=None)` — spawn a one-shot worker subagent. No `schema` returns text; a JSON Schema dict returns a validated dict, a pydantic model returns a model instance (validation is at the tool-call layer, the model retries on mismatch); failure (retries exhausted / spawn cap hit) returns `None` — filter with `compact()`. `isolation='worktree'` (own git worktree) and `agent_type` (named specialist subagent) have their interface in place but execution coming — passing them does not error but does not change execution today.
+- `await agent(prompt, *, schema=None, label=None, phase=None, model=None, isolation=None, agent_type=None, timeout=None)` — spawn a one-shot worker subagent.
+  - No `schema` returns text; a JSON Schema dict returns a validated dict, a pydantic model returns a model instance (validation is at the tool-call layer, the model retries on mismatch); failure (retries exhausted / spawn cap hit) returns `None` — filter with `compact()`.
+  - `label` overrides the label shown in progress.
+  - `phase` explicitly assigns this `agent()` to a progress group — **inside** a `pipeline`/`parallel` stage, always pass `phase` explicitly to avoid racing on the global `phase()` state; the same `phase` string groups into the same box.
+  - `model` overrides this worker's model. **Default to omitting it** — a worker inherits the team's teammate model (almost always correct); set it only when you're highly confident a worker needs a different tier.
+  - `isolation='worktree'`: run the worker in a fresh git worktree, **EXPENSIVE** (~200-500ms setup + disk per worker), use **ONLY** when workers mutate files in parallel and would otherwise conflict; the worktree is auto-removed if unchanged. (Interface in place, execution coming — passing it does not error but does not change execution today.)
+  - `agent_type`: use a named specialist subagent (e.g. a class of teammate on the team) instead of the default worker, resolved from the same registry as the team; composes with `schema` (the specialist's system prompt gets a structured-output instruction appended). (Interface in place, execution coming.)
 - `agent_session(label=, phase=, instructions=, options=)` + `await s.send(prompt, *, schema=, notify=False)` — a **stateful** multi-turn agent that remembers across turns; the second turn need not restate the first. `notify=True` pushes one-way, returns `None`.
 - `await human(prompt, *, schema=)` / `human_session()` + `.send()` — one-shot / stateful **human-in-the-loop**; waiting on a person holds no concurrency permit and costs no spawn budget, and is replayable from the journal.
 - `await parallel([thunk, ...])` — a fork-join **barrier**: runs concurrently, returns once all finish; a throwing branch resolves to `None` and the call **never raises** (filter with `compact` first). A thunk is a zero-arg callable like `lambda: agent(...)`.
 - `await pipeline(items, stage1, stage2, ...)` — a **no-barrier** stream: each item flows through all stages independently (A can be in stage 3 while B is still in stage 1); each stage callback receives `(prev, item, index)` — later stages can use `item`/`index` to label work without threading context through `prev`; a throwing stage drops only that item to `None` and skips its remaining stages.
 - `await map_parallel(items, fn)` (alias `pmap`) — closure-trap-free fan-out, `fn` is `async def fn(item)` or `fn(item, i)`, binding each item correctly.
 - `phase(title)` / `log(message)` — progress (open a phase / a narration line).
-- `await workflow(name_or_path, args)` — run another workflow inline, **one level only** (a sub-workflow calling it again raises); unknown name / unreadable path / syntax error raise, catch with try/except.
+- `await workflow(name_or_path, args)` — run another workflow inline as a sub-step and return its return value. The sub-workflow **shares** this run's concurrency cap, agent counter, abort signal, and token budget (its agents count toward `budget.spent()`). Nesting is **one level only** (a sub-workflow calling it again raises); unknown name / unreadable path / syntax error raise, catch with try/except.
 - `budget.total` / `budget.spent()` / `budget.remaining()` — token budget (see below).
 - `compact(xs)` / `flatten_filter(xs)` — pure list helpers: drop falsy (None/''/0/[]) / flatten one level and drop falsy.
 
@@ -74,11 +84,21 @@ Each worker spawned by `agent()` / a session (one-shot, or multi-turn within a s
 - **early-exit** when the count is zero ("0 findings → skip verification entirely");
 - the next stage's prompt **compares against** "all the other findings".
 
-These do NOT justify a barrier: "I need to flatten / map / filter first" (do it inside a pipeline stage), "the stages are conceptually separate" (that's what pipeline models — separate ≠ synchronized), "it's cleaner" (barrier latency is real: if the slowest of 5 finders takes 3× the fastest, a barrier wastes 2/3 of the fast finders' idle time). Smell test: if you `parallel(...)`, then just flatten / map / filter, then `parallel(...)` again, the middle step needs no barrier — rewrite as `pipeline(items, stageA, transform, stageB)`. When in doubt: pipeline.
+These do NOT justify a barrier: "I need to flatten / map / filter first" (do it inside a pipeline stage), "the stages are conceptually separate" (that's what pipeline models — separate ≠ synchronized), "it's cleaner" (barrier latency is real: if the slowest of 5 finders takes 3× the fastest, a barrier wastes 2/3 of the fast finders' idle time).
+
+**Smell test**: if you wrote
+
+```python
+a = await parallel([...])
+b = transform(a)                      # flatten / map / filter — no cross-item dependency
+c = await parallel([... for x in b])
+```
+
+that middle `transform` needs no barrier — rewrite as a pipeline with the transform inside a stage: `pipeline(items, stageA, lambda r, *_: transform([r]), stageB)`. When in doubt: pipeline.
 
 ## Determinism constraints (scripting rules)
 - `META` is a pure literal.
-- Load-time lint **rejects** nondeterministic sources: `time.time()` / `time.monotonic()` / `random.*` / `*.now()` / `*.today()`. Pass timestamps via `args` and stamp afterwards; for randomness, vary the prompt / label by index.
+- A script is plain Python, running in an async context — `await` directly. The standard library is available, **but** load-time lint **rejects** nondeterministic sources: `time.time()` / `time.monotonic()` / `random.*` / `*.now()` / `*.today()` (they would break resume). Pass timestamps via `args` and stamp afterwards; for randomness, vary the prompt / label by index.
 - **Closure trap**: `lambda: agent(...)` inside a comprehension makes every lambda capture the same (last) variable. Bind it — `lambda x=x: agent(...)` — or use `map_parallel`.
 - No filesystem, no out-of-band network — everything goes through the primitives.
 
@@ -93,21 +113,22 @@ These do NOT justify a barrier: "I need to flatten / map / filter first" (do it 
 - Validation failure is retried by the model; on exhaustion it returns `None`. Filter `None` with `compact()` / `.filter` before use.
 
 ## Budget (hard ceiling)
-- `budget.total` (the turn's token target, `None` if unset), `budget.spent()` (output tokens spent, shared across the main loop and all workflows), `budget.remaining()`.
-- **Hard ceiling**: once `spent()` reaches `total`, further `agent()` calls raise. Drive depth dynamically or scale fan-out statically (see skeletons). With no `total` set, `remaining()` is infinite — a dynamic loop MUST guard on `budget.total`, else it runs to the 1000 cap. (Note: the pre-call hard cutoff is coming; today it counts and the script self-checks.)
+- `budget.total` (the turn's token target, `None` if unset), `budget.spent()` (output tokens spent, shared across the main loop and all workflows — not per-workflow), `budget.remaining()` (`max(0, total - spent())`, infinite when no target).
+- **Hard ceiling**: once `spent()` reaches `total`, further `agent()` calls raise. Drive depth dynamically (`while budget.total and budget.remaining() > N`) or scale fan-out statically (`FLEET = budget.total // 100_000 if budget.total else 5`). With no `total` set, `remaining()` is infinite — a dynamic loop MUST guard on `budget.total`, else it runs to the 1000 cap. (Note: the pre-call hard cutoff is coming; today it counts and the script self-checks.)
 
 ## Resume
-- `resume_id` = a prior run's **run_id**. On resume it is **content-addressed**: unchanged `agent()` calls reuse cached results instantly; an upstream prompt change flips the downstream signature and re-runs it automatically (no manual marking). **Same script + same args → 100% cache hit.**
-- Maintained by the async-tool execution framework (same model as the reference tool's runId). (Execution coming.)
+- `resume_id` = a prior run's **run_id** (the handle this tool returns). On resume it is **content-addressed**: unchanged `agent()` calls reuse cached results instantly; an upstream prompt change flips the downstream signature and re-runs it automatically (no manual marking). **Same script + same args → 100% cache hit.**
+- Maintained by the async-tool execution framework via a content-addressed journal (same model as the reference tool's runId). (Execution coming.)
 
 ## Orchestration pattern library (compose by scale)
 - **Adversarial verify**: spawn N independent skeptics per finding, each told to **refute**; kill it if a majority refute — stops plausible-but-wrong findings.
 - **Perspective-diverse verify**: give each verifier a distinct lens (correctness / security / performance / does-it-reproduce) instead of N identical refuters.
 - **Judge panel**: generate N independent attempts from different angles → score in parallel → synthesize from the winner, grafting the runners-up's best ideas.
+- **Loop-until-count**: accumulate to a target — `while len(bugs) < 10: ...`, pushing fresh findings each round.
 - **Loop-until-dry**: for unknown-size discovery, keep spawning finders until K consecutive rounds add nothing new (simple counters miss the tail).
 - **Multi-modal sweep**: parallel agents each searching a different way (by container / content / entity / time), each blind to the others.
-- **Completeness critic**: a final agent that asks "what's missing — a modality not run, a claim unverified, a source unread?"
-- **No silent caps**: if you bound coverage (top-N / sampling), `log()` what was dropped.
+- **Completeness critic**: a final agent that asks "what's missing — a modality not run, a claim unverified, a source unread?"; what it finds becomes the next round.
+- **No silent caps**: if you bound coverage (top-N / sampling), `log()` what was dropped — a silent truncation reads as "covered everything".
 - Scale to the user's wording: "find a few bugs" → a few finders, single-vote verify; "thoroughly audit / be comprehensive" → a larger finder pool, 3–5 vote adversarial pass, a synthesis stage.
 
 These patterns are **not exhaustive** — compose novel harnesses when the task calls for it (tournament brackets, self-repair loops, staged escalation, and so on).
@@ -142,6 +163,18 @@ async def run(args):
     return await parallel([(lambda f=f: agent(verify_prompt(f), schema=VERDICT)) for f in deduped])
 ```
 
+Loop-until-count — accumulate to a target:
+
+```python
+async def run(args):
+    bugs = []
+    while len(bugs) < 10:
+        r = await agent("Find bugs in this codebase.", schema=BUGS)
+        bugs.extend(r["bugs"] if r else [])
+        log(f"{len(bugs)}/10 found")
+    return {"bugs": bugs}
+```
+
 Loop-until-budget — scale depth to the budget (guard on `budget.total`):
 
 ```python
@@ -154,13 +187,13 @@ async def run(args):
     return {"bugs": bugs}
 ```
 
-Loop-until-dry — keep spawning finders until two consecutive rounds add nothing (dedup against `seen`, not `confirmed`, or judge-rejected findings reappear every round and it never converges):
+Composing patterns — exhaustive review (find → dedup vs `seen` → diverse-lens panel → loop-until-dry). Keep spawning finders until two consecutive rounds add nothing; judge each fresh finding concurrently, each via 3 distinct lenses, confirm only on a majority. **Dedup against `seen`, not `confirmed`**, or judge-rejected findings reappear every round and it never converges. Note `parallel` can nest `parallel`:
 
 ```python
 async def run(args):
     seen, confirmed, dry = set(), [], 0
-    while dry < 2:
-        found = compact(await parallel([(lambda p=p: agent(p, schema=BUGS)) for p in FINDERS]))
+    while dry < 2:                                  # stop after two empty rounds
+        found = compact(await parallel([(lambda p=p: agent(p, phase="Find", schema=BUGS)) for p in FINDERS]))
         fresh = [b for r in found for b in (r["bugs"] if r else []) if b["id"] not in seen]
         if not fresh:
             dry += 1
@@ -168,7 +201,15 @@ async def run(args):
         dry = 0
         for b in fresh:
             seen.add(b["id"])
-        confirmed.extend(fresh)
+
+        async def judge(bug):                       # per finding: 3 lenses vote concurrently, real if >= 2
+            votes = compact(await parallel([
+                (lambda lens=lens: agent(f'Judge "{bug["desc"]}" via the {lens} lens — real?', phase="Verify", schema=VERDICT))
+                for lens in ("correctness", "security", "repro")
+            ]))
+            return bug if sum(1 for v in votes if v.get("real")) >= 2 else None
+
+        confirmed.extend(compact(await parallel([(lambda b=b: judge(b)) for b in fresh])))
     return {"confirmed": confirmed}
 ```
 
