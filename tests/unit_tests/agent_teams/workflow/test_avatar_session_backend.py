@@ -34,6 +34,7 @@ class _FakeHarness:
         self.disposed = False
         self._round = 0
         self.interrupt_next = False
+        self.aborted_immediate = None
 
     async def start(self, *, team_session=None) -> None:
         return None
@@ -70,6 +71,9 @@ class _FakeHarness:
 
     async def dispose(self) -> None:
         self.disposed = True
+
+    async def abort(self, *, immediate: bool = False) -> None:
+        self.aborted_immediate = immediate
 
 
 def _patch_build(monkeypatch, harnesses: list) -> None:
@@ -156,6 +160,44 @@ def test_agent_session_interrupt_raises_backend_error(monkeypatch):
         await mgr.aclose()
 
     asyncio.run(scenario())
+
+
+def test_abort_all_terminates_every_session_and_pending_human(monkeypatch):
+    """abort_all hard-aborts every live session (agent AND human) and cancels a
+    pending human-reply wait — the pause path that stops all sub-sessions.
+
+    This is the deterministic guarantee behind ``BackgroundTaskController.pause``'s
+    second step (``backend.abort_sessions``): the engine MockBackend path answers
+    humans instantly so it cannot exercise a *waiting* human, and the real-LLM e2e
+    is not CI-verifiable — so the contract is pinned here.
+    """
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+    base = DeepAgentSpec(enable_task_loop=True, enable_task_planning=True, tools=[])
+
+    async def scenario():
+        mgr = AvatarSessionManager(
+            worker_base_spec=base, human_base_spec=base, team_name="t", language="en"
+        )
+        await mgr.open_session(kind="agent", instructions=None, opts={"label": "chef"})
+        await mgr.open_session(kind="human", instructions=None, opts={"label": "guest"})
+        # Simulate a human turn parked on a pending reply (as _await_human_reply does).
+        pending = asyncio.get_running_loop().create_future()
+        mgr._pending_human["guest:0"] = pending
+        await mgr.abort_all()
+        return mgr, pending
+
+    mgr, pending = asyncio.run(scenario())
+
+    # Both live sessions — agent and human — had their supervisor harness hard-aborted.
+    assert len(harnesses) == 2
+    assert all(h.aborted_immediate is True for h in harnesses)
+    # The pending human wait was cancelled and the registry cleared (turn won't journal).
+    assert pending.cancelled()
+    assert mgr._pending_human == {}
+    # abort stops but does not dispose — sessions stay for the run's own aclose teardown.
+    assert all(h.disposed is False for h in harnesses)
+    assert len(mgr._sessions) == 2
 
 
 def test_open_human_session_without_base_spec_fails_clearly(monkeypatch):
