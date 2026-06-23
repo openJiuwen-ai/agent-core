@@ -68,6 +68,19 @@ class Session:
     def get_agent_description(self):
         return self._card.description
 
+    def tracer(self):
+        """Return the tracer bound to this session."""
+        return self._inner.tracer()
+
+    @property
+    def agent_span(self):
+        """Current agent root span (set by agent invoke / OtelRail)."""
+        return self._inner.span()
+
+    @agent_span.setter
+    def agent_span(self, value) -> None:
+        self._inner.set_span(value)
+
     def update_state(self, data: dict):
         return self._inner.state().update_global(data)
 
