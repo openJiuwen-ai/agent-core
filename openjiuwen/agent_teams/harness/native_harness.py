@@ -54,6 +54,11 @@ from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    AgentCallbackEvent,
+    InvokeInputs,
+)
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.state import DeepAgentState
 from openjiuwen.agent_teams.harness.control import (
@@ -981,42 +986,61 @@ class NativeHarness(DeepAgent):
         """
         error: BaseException | None = None
         result: dict | None = None
+        # Per-round BEFORE/AFTER_INVOKE lifecycle. The supervisor drives outer
+        # rounds directly (bypassing DeepAgent.invoke), so the invoke-level
+        # callbacks have no other firing site here — each outer round is one
+        # logical invoke. The task-iteration callbacks still fire independently
+        # inside the shared TaskLoopEventExecutor; this wraps a separate ctx.
+        inv_inputs = InvokeInputs(
+            query=active.original_query,
+            conversation_id=self._session.get_session_id(),
+        )
+        ctx = AgentCallbackContext(agent=self, inputs=inv_inputs, session=self._session)
         try:
-            await self.loop_controller.submit_round(
-                self._session,
-                active.original_query,
-                is_follow_up=is_follow_up,
-                task_id=active.task_id,
-            )
-            result = await self.loop_controller.wait_round_completion(self._timeout)
-            # wait_completion returns a control-error dict ({"error": "cancelled"
-            # / "completion_timeout" / "no active round"}) when the wait itself
-            # was cancelled/timed out rather than the round producing a real
-            # result — notably, an immediate abort/pause cancels this wait task
-            # and the handler swallows the CancelledError into {"error":
-            # "cancelled"}. Streaming that as an (empty) answer is noise: an
-            # aborted/paused round emits its own round_aborted marker, and a
-            # timed-out round has no answer to show. Only stream genuine round
-            # results (normal answers / HITL / workflow interrupts) so harness
-            # output matches a plain DeepAgent run.
-            if isinstance(result, dict) and result.get("error") == "completion_timeout":
-                # The harness gave up waiting, but the TaskScheduler task may
-                # still be running (e.g. a slow API call).  Cancel it now so
-                # it doesn't linger as a zombie that concurrently writes to the
-                # context buffer when the next round starts, causing
-                # interleaved messages and 400 errors.
-                controller = self.loop_controller
-                if controller is not None and controller.task_scheduler is not None:
-                    try:
-                        await controller.task_scheduler.cancel_task(active.task_id)
-                    except Exception:
-                        logger.exception(
-                            "[NativeHarness] cancel_task failed after "
-                            "completion_timeout, round_id=%s",
-                            active.round_id,
-                        )
-            if not (isinstance(result, dict) and result.get("error")):
-                await self._write_round_result_to_stream(result, self._session)
+            async with ctx.lifecycle(
+                AgentCallbackEvent.BEFORE_INVOKE,
+                AgentCallbackEvent.AFTER_INVOKE,
+            ):
+                await self.loop_controller.submit_round(
+                    self._session,
+                    active.original_query,
+                    is_follow_up=is_follow_up,
+                    task_id=active.task_id,
+                )
+                result = await self.loop_controller.wait_round_completion(self._timeout)
+                # wait_completion returns a control-error dict ({"error":
+                # "cancelled" / "completion_timeout" / "no active round"}) when
+                # the wait itself was cancelled/timed out rather than the round
+                # producing a real result — notably, an immediate abort/pause
+                # cancels this wait task and the handler swallows the
+                # CancelledError into {"error": "cancelled"}. Streaming that as
+                # an (empty) answer is noise: an aborted/paused round emits its
+                # own round_aborted marker, and a timed-out round has no answer
+                # to show. Only stream genuine round results (normal answers /
+                # HITL / workflow interrupts) so harness output matches a plain
+                # DeepAgent run.
+                if isinstance(result, dict) and result.get("error") == "completion_timeout":
+                    # The harness gave up waiting, but the TaskScheduler task
+                    # may still be running (e.g. a slow API call).  Cancel it
+                    # now so it doesn't linger as a zombie that concurrently
+                    # writes to the context buffer when the next round starts,
+                    # causing interleaved messages and 400 errors.
+                    controller = self.loop_controller
+                    if controller is not None and controller.task_scheduler is not None:
+                        try:
+                            await controller.task_scheduler.cancel_task(active.task_id)
+                        except Exception:
+                            logger.exception(
+                                "[NativeHarness] cancel_task failed after "
+                                "completion_timeout, round_id=%s",
+                                active.round_id,
+                            )
+                if not (isinstance(result, dict) and result.get("error")):
+                    await self._write_round_result_to_stream(result, self._session)
+                # Expose the round result to AFTER_INVOKE rails (fired in the
+                # lifecycle's finally). Control-error dicts carry no real answer,
+                # so leave result as None for them.
+                inv_inputs.result = result if isinstance(result, dict) and not result.get("error") else None
         except asyncio.CancelledError:
             logger.info("[NativeHarness] round_id=%s cancelled", active.round_id)
             raise

@@ -123,6 +123,10 @@ class FakeReactAgent:
         self.seen_steers: list[str] = []
         self.sleep_seconds: float = 0.0
         self.answer_output: str = ""
+        # When set, ``invoke`` raises this after its sleep window — models an
+        # inner-round failure so tests can exercise the executor's error path
+        # (e.g. AFTER_TASK_ITERATION firing on failure).
+        self.raise_exc: BaseException | None = None
         # Set the moment ``invoke`` enters its sleep window; lets tests wait for
         # the real inner work to actually be in-flight before aborting/pausing,
         # instead of racing the phase transition (RUNNING is set when the round
@@ -181,6 +185,9 @@ class FakeReactAgent:
             raise
         finally:
             self.invoke_running.clear()
+
+        if self.raise_exc is not None:
+            raise self.raise_exc
 
         await session.write_stream(
             OutputSchema(type="mock_chunk", index=0, payload={"query": str(query)}),
