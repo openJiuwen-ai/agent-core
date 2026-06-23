@@ -32,7 +32,7 @@ Wait for all services to become healthy (~30-60s on first start).
 ### Access Langfuse UI
 
 - URL: http://localhost:3000
-- Default user: `jiuwensarm` / `jiuwensarm`
+- Default user: `jiuwenswarm` / `jiuwenswarm`
 - Project keys: `pk-lf-jiuwen` / `sk-lf-jiuwen`
 
 ### Stop and Clean Up

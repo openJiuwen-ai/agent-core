@@ -109,7 +109,7 @@ team.{team_name}                                    ROOT
 | `gen_ai.request.message_count` | `len(messages)` | 消息总数 |
 | `gen_ai.prompt.{i}.role` | messages | 消息角色（全量） |
 | `gen_ai.prompt.{i}.content` | messages | 消息内容（全量） |
-| `langfuse.observation.input` | 最后一条消息 `{role, content}` | Langfuse UI 输入显示（精简） |
+| `langfuse.observation.input` | delta：上次 LLM 调用之后新增的消息 | Langfuse UI 输入显示（精简）。首次调用/压缩后展示去 system 全量 |
 | `gen_ai.completion.0.role` | 固定 `"assistant"` | 响应角色 |
 | `gen_ai.completion.0.content` | response | 响应内容 |
 | `gen_ai.usage.input_tokens` | usage | 输入 token |
@@ -131,6 +131,7 @@ team.{team_name}                                    ROOT
 | `agentteam.agent.id` | `{team_name}_{member_name}` |
 | `agentteam.agent.name` | member_name |
 | `agentteam.agent.role` | leader / teammate |
+| `gen_ai.request.message_count` | 上一次 LLM 调用的消息数（用于 delta 输入计算，见关键机制） |
 
 ## 后端兼容性
 
@@ -189,5 +190,5 @@ _ALL_TEAM_EVENT_TYPES = frozenset(
 - **`_finalize_llm_span_output` 共享方法**：`_close_llm_span`（非流式）与 `on_llm_output`（流式）共用同一份 completion/output/ reasoning/close 逻辑，消除 ~130 行重复。
 - **ActiveSpanTracker**：OTel SpanProcessor，使用**强引用 set** 追踪所有活跃 span。`on_start` 时添加 → `on_end` 时移除（正常关闭的不堆积）。在 `finalize_trace` 和 `shutdown_observability` 中兜底关闭残留 span。`force_flush` 为 no-op（避免 `close_team_spans` 时误关其他 trace 的 span）。
 - **级联关闭 cancelled 标记**：`after_task_iteration` 和 `close_team_agent_spans` 的级联排空逻辑中，已为未正常产出 output 的 LLM/tool span 设置 `langfuse.observation.output = "cancelled"`，便于在 Langfuse 中识别被中断的调用。
-- **LLM input 精简**：`langfuse.observation.input` 仅展示**最后一条**消息 `{role, content}`，全量消息通过 `gen_ai.prompt.{i}.*` 保留。消息总数记录在 `gen_ai.request.message_count` 属性中。
+- **LLM input delta**：`langfuse.observation.input` 采用基于消息计数的增量展示策略。同一个 agent span 内 LLM 调用是顺序的——将当前消息数 `gen_ai.request.message_count` 写入 agent span 的 attribute，下次 LLM 调用读取上一次的计数，仅展示 `messages[prev_count:]` 的增量消息。首次调用或上下文压缩导致消息数减少时展示去 system 的全量消息，确保 input 始终有值。全量消息通过 `gen_ai.prompt.{i}.*` 保留。
 - **team span 创建前清理**：`_maybe_attach_observability` 检测到已结束的 team span 时先 `clear_team_span()` 再创建新的，避免复用已关闭的 span 对象。
