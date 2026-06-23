@@ -18,6 +18,10 @@ def _builtin_model_client(provider, client_config: ModelClientConfig, model_conf
         from openjiuwen.core.foundation.llm.model_clients.openrouter_model_client import OpenRouterModelClient
         return OpenRouterModelClient(model_config=model_config, model_client_config=client_config)
 
+    if provider == ProviderType.Anthropic.value:
+        from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import AnthropicModelClient
+        return AnthropicModelClient(model_config=model_config, model_client_config=client_config)
+
     if provider == ProviderType.SiliconFlow.value:
         from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import \
             SiliconFlowModelClient
