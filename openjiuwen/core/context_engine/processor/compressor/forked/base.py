@@ -62,6 +62,30 @@ def adjust_keep_recent_for_tool_boundaries(messages: list[BaseMessage], keep_rec
     return len(messages) - start
 
 
+def find_last_real_user_message_index(messages: list[BaseMessage]) -> int:
+    for index in range(len(messages) - 1, -1, -1):
+        if _is_real_user_message(messages[index]):
+            return index
+    return -1
+
+
+def _is_real_user_message(message: BaseMessage) -> bool:
+    if not isinstance(message, UserMessage):
+        return False
+    content = getattr(message, "content", "")
+    if not isinstance(content, str):
+        return True
+    stripped = content.lstrip()
+    internal_prefixes = (
+        "<system-reminder>",
+        "<memory_block_current>",
+        "<memory_block_dialogue>",
+        "<memory_block_round>",
+        "[STATE_REINJECTION]",
+    )
+    return not stripped.startswith(internal_prefixes)
+
+
 class ForkedPrefixCompactProcessor(ContextProcessor):
     memory_block_open: str = "<memory_block>"
     memory_block_close: str = "</memory_block>"
@@ -90,18 +114,29 @@ class ForkedPrefixCompactProcessor(ContextProcessor):
 
         total_tokens = self._count_context_window_tokens(context_window, context)
         context_max = self._resolve_context_max(context, kwargs)
-        if total_tokens < int(context_max * self.config.trigger_context_ratio):
+        absolute_threshold = self._resolve_trigger_tokens_threshold(context_max)
+        if total_tokens < absolute_threshold:
             return False
 
         span = self._build_span(context_window.context_messages)
         if not span.has_target:
             return False
+        target_tokens = self._count_messages_tokens(span.messages_to_compress, context)
+        min_target_tokens = int(context_max * getattr(self.config, "min_target_context_ratio", 0.0))
+        if target_tokens < min_target_tokens:
+            logger.info(
+                "[%s skipped] compression target tokens %s below min target %s",
+                self.processor_type(),
+                target_tokens,
+                min_target_tokens,
+            )
+            return False
 
         logger.info(
-            "[%s triggered] context tokens %s reached %.2f of max %s",
+            "[%s triggered] context tokens %s reached threshold %s of max %s",
             self.processor_type(),
             total_tokens,
-            self.config.trigger_context_ratio,
+            absolute_threshold,
             context_max,
         )
         return True
@@ -167,6 +202,15 @@ class ForkedPrefixCompactProcessor(ContextProcessor):
 
     def _build_span(self, messages: list[BaseMessage]) -> PrefixCompactSpan:
         raise NotImplementedError
+
+    def _resolve_trigger_tokens_threshold(self, context_max: int) -> int:
+        tokens_threshold = getattr(self.config, "tokens_threshold", None)
+        if tokens_threshold is not None:
+            return int(tokens_threshold)
+        trigger_total_tokens = getattr(self.config, "trigger_total_tokens", None)
+        if trigger_total_tokens is not None:
+            return int(trigger_total_tokens)
+        return int(context_max * self.config.trigger_context_ratio)
 
     def _build_prompt(self, span: PrefixCompactSpan) -> str:
         return self.config.custom_compression_prompt or self.default_prompt

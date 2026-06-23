@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import List, Tuple, Union, Dict, Any
 
 from pydantic import BaseModel
@@ -13,6 +14,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.foundation.llm import ModelRequestConfig
 from openjiuwen.core.context_engine import (
+    MessageOffloaderConfig,
     MessageSummaryOffloaderConfig,
     DialogueCompressorConfig,
     CurrentRoundCompressorConfig,
@@ -22,6 +24,11 @@ from openjiuwen.core.context_engine import (
 )
 from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
     RoundLevelCompressorConfig,
+)
+from openjiuwen.core.context_engine.processor.compressor.forked import (
+    ForkedCurrentRoundCompressorConfig,
+    ForkedDialogueCompressorConfig,
+    ForkedRoundLevelCompressorConfig,
 )
 from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig, SessionMemoryManager
 from openjiuwen.harness.schema.state import (
@@ -45,6 +52,20 @@ class ContextProcessorRail(DeepAgentRail):
     """
 
     priority = 85
+    _PRESET_LEGACY = "legacy"
+    _PRESET_FORKED = "forked"
+    _PRESET_SESSION_MEMORY = "session_memory"
+    _VALID_PRESET_NAMES = {
+        _PRESET_LEGACY,
+        _PRESET_FORKED,
+        _PRESET_SESSION_MEMORY,
+    }
+    _PRESET_ENV_VAR = "OPENJIUWEN_CONTEXT_PROCESSOR_PRESET"
+    _FORKED_LEGACY_PROCESSOR_ALIASES = {
+        "DialogueCompressor": "ForkedDialogueCompressor",
+        "CurrentRoundCompressor": "ForkedCurrentRoundCompressor",
+        "RoundLevelCompressor": "ForkedRoundLevelCompressor",
+    }
 
     def __init__(
             self,
@@ -56,6 +77,7 @@ class ContextProcessorRail(DeepAgentRail):
                 None,
             ] = None,
             preset: bool = True,
+            preset_name: str | None = None,
             session_memory: SessionMemoryConfig | Dict[str, Any] | None = None,
     ):
         """Initialize ContextProcessorRail.
@@ -63,16 +85,24 @@ class ContextProcessorRail(DeepAgentRail):
         Args:
             processors: One or more (processor_key, config) pairs.
             preset: Whether to enable preset default processor config. Defaults to True.
+            preset_name: Optional preset processor set name. Supported values are
+                "legacy", "forked", and "session_memory".
             session_memory: Session memory configuration.
         """
         super().__init__()
         self._preset = preset
+        self._preset_name = self._resolve_preset_name(preset_name, session_memory is not None)
         self._user_processors: List[Tuple[str, Union[BaseModel, Dict]]] = []
         if processors is not None:
             if isinstance(processors, tuple):
                 self._user_processors = [processors]
             else:
                 self._user_processors = list(processors)
+            if self._preset_name == self._PRESET_FORKED:
+                self._user_processors = [
+                    (self._FORKED_LEGACY_PROCESSOR_ALIASES.get(key, key), cfg)
+                    for key, cfg in self._user_processors
+                ]
 
         self._session_memory_enabled = session_memory is not None
         self._session_memory_config: SessionMemoryConfig | None = None
@@ -86,6 +116,23 @@ class ContextProcessorRail(DeepAgentRail):
 
         self._system_prompt_builder = None
         self._all_processors: List[Tuple[str, BaseModel]] = []
+
+    @classmethod
+    def _resolve_preset_name(cls, preset_name: str | None, session_memory_enabled: bool) -> str:
+        if preset_name is None:
+            preset_name = os.getenv(cls._PRESET_ENV_VAR)
+        if preset_name is None or not preset_name.strip():
+            if session_memory_enabled:
+                return cls._PRESET_SESSION_MEMORY
+            return cls._PRESET_LEGACY
+        preset_name = preset_name.strip()
+        if preset_name not in cls._VALID_PRESET_NAMES:
+            valid_names = ", ".join(sorted(cls._VALID_PRESET_NAMES))
+            raise ValueError(
+                f"Unknown context processor preset '{preset_name}'. "
+                f"Supported presets: {valid_names}."
+            )
+        return preset_name
 
     @staticmethod
     def _merge_config_with_overrides(
@@ -139,6 +186,12 @@ class ContextProcessorRail(DeepAgentRail):
 
         for key, override_cfg in overrides:
             if key not in base_override_keys:
+                if base and isinstance(override_cfg, dict):
+                    logger.warning(
+                        "Skip context processor override for '%s' because it does not exist in current preset.",
+                        key,
+                    )
+                    continue
                 merged_cfg = _build_merged_cfg(key, override_cfg)
                 result.append((key, merged_cfg))
 
@@ -153,8 +206,8 @@ class ContextProcessorRail(DeepAgentRail):
             model_cfg = ModelRequestConfig.model_copy(model_config)
         else:
             model_cfg = None
-        if self._session_memory_enabled:
-            presets: List[Tuple[str, BaseModel]] = [
+        if self._preset_name == self._PRESET_SESSION_MEMORY:
+            return [
                 (
                     "ToolResultBudgetProcessor",
                     ToolResultBudgetProcessorConfig(),
@@ -171,50 +224,79 @@ class ContextProcessorRail(DeepAgentRail):
                     ),
                 )
             ]
-        else:
-            presets: List[Tuple[str, BaseModel]] = [
+        if self._preset_name == self._PRESET_FORKED:
+            return [
                 (
-                    "MessageSummaryOffloader",
-                    MessageSummaryOffloaderConfig(
-                        large_message_threshold=10000,
-                        offload_message_type=["tool"],
+                    "MessageOffloader",
+                    MessageOffloaderConfig(
                         protected_tool_names=["read_file:*SKILL.md", "reload_original_context_messages"],
+                    ),
+                ),
+                (
+                    "ForkedDialogueCompressor",
+                    ForkedDialogueCompressorConfig(
                         model=model_cfg,
                         model_client=model_client_config,
                     ),
                 ),
                 (
-                    "DialogueCompressor",
-                    DialogueCompressorConfig(
-                        tokens_threshold=100000,
-                        messages_to_keep=10,
-                        keep_last_round=False,
-                        compression_target_tokens=1800,
+                    "ForkedCurrentRoundCompressor",
+                    ForkedCurrentRoundCompressorConfig(
                         model=model_cfg,
                         model_client=model_client_config,
                     ),
                 ),
                 (
-                    "CurrentRoundCompressor",
-                    CurrentRoundCompressorConfig(
-                        tokens_threshold=100000,
-                        messages_to_keep=3,
-                        model=model_cfg,
-                        model_client=model_client_config,
-                    ),
-                ),
-                (
-                    "RoundLevelCompressor",
-                    RoundLevelCompressorConfig(
-                        trigger_total_tokens=230000,
-                        target_total_tokens=160000,
-                        keep_recent_messages=6,
+                    "ForkedRoundLevelCompressor",
+                    ForkedRoundLevelCompressorConfig(
+                        keep_recent_messages=3,
                         model=model_cfg,
                         model_client=model_client_config,
                     )
                 ),
             ]
-        return presets
+        return [
+            (
+                "MessageSummaryOffloader",
+                MessageSummaryOffloaderConfig(
+                    large_message_threshold=10000,
+                    offload_message_type=["tool"],
+                    protected_tool_names=["read_file:*SKILL.md", "reload_original_context_messages"],
+                    model=model_cfg,
+                    model_client=model_client_config,
+                ),
+            ),
+            (
+                "DialogueCompressor",
+                DialogueCompressorConfig(
+                    tokens_threshold=100000,
+                    messages_to_keep=10,
+                    keep_last_round=False,
+                    compression_target_tokens=1800,
+                    model=model_cfg,
+                    model_client=model_client_config,
+                ),
+            ),
+            (
+                "CurrentRoundCompressor",
+                CurrentRoundCompressorConfig(
+                    tokens_threshold=100000,
+                    messages_to_keep=3,
+                    model=model_cfg,
+                    model_client=model_client_config,
+                ),
+            ),
+            (
+                "RoundLevelCompressor",
+                RoundLevelCompressorConfig(
+                    trigger_total_tokens=230000,
+                    target_total_tokens=160000,
+                    keep_recent_messages=6,
+                    model=model_cfg,
+                    model_client=model_client_config,
+                )
+            ),
+        ]
 
     def init(self, agent) -> None:
         """Inject / merge processors into agent.react_agent._config.context_processors."""

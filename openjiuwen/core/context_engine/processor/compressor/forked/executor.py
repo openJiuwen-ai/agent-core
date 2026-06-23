@@ -1,10 +1,72 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
+
+
+class ForkedCompressionErrorKind(str, Enum):
+    CONTEXT_OVERFLOW = "context_overflow"
+    RATE_LIMIT = "rate_limit"
+    AUTHENTICATION = "authentication"
+    TIMEOUT = "timeout"
+    SERVER_UNSTABLE = "server_unstable"
+    API_REQUEST_ERROR = "api_request_error"
+    UNKNOWN = "unknown"
+
+
+class ForkedCompressionError(Exception):
+    """Structured error raised when a forked compression model call fails."""
+
+    def __init__(
+        self,
+        *,
+        kind: ForkedCompressionErrorKind,
+        message: str,
+        original_error: BaseException,
+    ) -> None:
+        self.kind = kind
+        self.message = message
+        self.original_error = original_error
+        super().__init__(message)
+
+    @property
+    def is_context_overflow(self) -> bool:
+        return self.kind == ForkedCompressionErrorKind.CONTEXT_OVERFLOW
+
+
+_CONTEXT_OVERFLOW_MARKERS = (
+    "context length",
+    "context_length",
+    "maximum context",
+    "max context",
+    "token limit",
+    "too many tokens",
+    "prompt is too long",
+    "input is too long",
+    "request too large",
+    "413",
+)
+
+_RATE_LIMIT_MARKERS = ("rate_limit", "rate limit", "too many requests", "429")
+_AUTHENTICATION_MARKERS = ("authentication", "unauthorized", "invalid api key", "api key invalid", "401", "403")
+_TIMEOUT_MARKERS = ("timeout", "timed out", "read timeout", "connect timeout")
+_SERVER_UNSTABLE_MARKERS = (
+    "internal server error",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "overloaded",
+    "temporarily unavailable",
+    "500",
+    "502",
+    "503",
+    "504",
+)
+_API_REQUEST_MARKERS = ("bad request", "invalid request", "400")
 
 
 @dataclass(frozen=True)
@@ -67,7 +129,10 @@ class ForkedCompressionExecutor:
         kwargs: dict[str, Any] = {"messages": messages, "tools": request.tools}
         if request.output_parser is not None:
             kwargs["output_parser"] = request.output_parser
-        response = await self._model.invoke(**kwargs)
+        try:
+            response = await self._model.invoke(**kwargs)
+        except Exception as exc:
+            raise classify_forked_compression_error(exc) from exc
         self._last_response = response
         return ForkedCompressionResult(
             response=response,
@@ -85,3 +150,87 @@ class ForkedCompressionExecutor:
             *context_messages,
             UserMessage(content=request.prompt),
         ]
+
+
+def classify_forked_compression_error(error: BaseException) -> ForkedCompressionError:
+    message = _error_text(error)
+    return ForkedCompressionError(
+        kind=_classify_error_kind(error, message),
+        message=message or error.__class__.__name__,
+        original_error=error,
+    )
+
+
+def _classify_error_kind(error: BaseException, message: str) -> ForkedCompressionErrorKind:
+    normalized = message.lower()
+    status_code = _extract_status_code(error)
+    if _contains_any(normalized, _CONTEXT_OVERFLOW_MARKERS):
+        return ForkedCompressionErrorKind.CONTEXT_OVERFLOW
+    if status_code == 413:
+        return ForkedCompressionErrorKind.CONTEXT_OVERFLOW
+    if _contains_any(normalized, _RATE_LIMIT_MARKERS) or status_code == 429:
+        return ForkedCompressionErrorKind.RATE_LIMIT
+    if _contains_any(normalized, _AUTHENTICATION_MARKERS) or status_code in {401, 403}:
+        return ForkedCompressionErrorKind.AUTHENTICATION
+    if isinstance(error, TimeoutError) or _contains_any(normalized, _TIMEOUT_MARKERS):
+        return ForkedCompressionErrorKind.TIMEOUT
+    if _contains_any(normalized, _SERVER_UNSTABLE_MARKERS) or status_code in {500, 502, 503, 504}:
+        return ForkedCompressionErrorKind.SERVER_UNSTABLE
+    if _contains_any(normalized, _API_REQUEST_MARKERS) or status_code == 400:
+        return ForkedCompressionErrorKind.API_REQUEST_ERROR
+    return ForkedCompressionErrorKind.UNKNOWN
+
+
+def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _error_text(error: BaseException) -> str:
+    parts: list[str] = []
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(str(current))
+        status = getattr(current, "status", None)
+        if status is not None:
+            parts.append(str(status))
+            parts.append(str(getattr(status, "name", "")))
+            parts.append(str(getattr(status, "errmsg", "")))
+        for attr in ("code", "status_code", "request_id", "type"):
+            value = getattr(current, attr, None)
+            if value is not None:
+                parts.append(str(value))
+        for attr in ("params", "details"):
+            value = getattr(current, attr, None)
+            if value:
+                parts.append(str(value))
+        current = getattr(current, "cause", None) or getattr(current, "__cause__", None)
+    return " ".join(part for part in parts if part).strip()
+
+
+def _extract_status_code(error: BaseException) -> int | None:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        for attr in ("status_code", "status"):
+            value = getattr(current, attr, None)
+            code = _coerce_status_code(value)
+            if code is not None:
+                return code
+        response = getattr(current, "response", None)
+        if response is not None:
+            code = _coerce_status_code(getattr(response, "status_code", None))
+            if code is not None:
+                return code
+        current = getattr(current, "cause", None) or getattr(current, "__cause__", None)
+    return None
+
+
+def _coerce_status_code(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None

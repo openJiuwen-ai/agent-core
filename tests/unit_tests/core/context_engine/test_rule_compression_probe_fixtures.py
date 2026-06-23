@@ -93,3 +93,47 @@ def test_numbered_python_source_with_diff_markers_is_not_routed_as_git_diff():
     )
 
     assert RuleContentRouter().detect(content) == ContentType.SOURCE_CODE
+
+
+def test_article_text_with_failure_words_is_not_routed_as_build_output():
+    content = "\n".join(
+        [
+            "URL: https://example.test/news/world",
+            "Middle East leaders warned that negotiations could fail without a durable ceasefire.",
+            "Analysts described the failure of previous talks as a warning sign for civilians.",
+            "The report includes background, regional reactions, and humanitarian updates.",
+        ]
+        * 20
+    )
+
+    assert RuleContentRouter().detect(content) == ContentType.PLAIN_TEXT
+
+
+def test_pytest_output_is_routed_as_build_output():
+    content = "\n".join(
+        [
+            "============================= test session starts =============================",
+            "platform win32 -- Python 3.11.13, pytest-9.0.2",
+            "collected 3 items",
+            "tests/unit/test_demo.py::test_ok PASSED",
+            "tests/unit/test_demo.py::test_bad FAILED",
+            "================================== FAILURES ===================================",
+            "FAILED tests/unit/test_demo.py::test_bad - AssertionError: boom",
+        ]
+    )
+
+    assert RuleContentRouter().detect(content) == ContentType.BUILD_OUTPUT
+
+
+def test_structured_application_log_is_routed_as_build_output():
+    content = "\n".join(
+        [
+            "2026-06-19 00:00:01 INFO service started",
+            "2026-06-19 00:00:02 WARNING retrying connector after timeout",
+            "2026-06-19 00:00:03 ERROR request failed with status 500",
+            "2026-06-19 00:00:04 INFO service recovered",
+        ]
+        * 20
+    )
+
+    assert RuleContentRouter().detect(content) == ContentType.BUILD_OUTPUT

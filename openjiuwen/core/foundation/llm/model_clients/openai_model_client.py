@@ -28,6 +28,7 @@ from openjiuwen.core.foundation.llm.headers_helper import (
     merge_request_headers,
 )
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.request_trace import LLMRequestTrace
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
@@ -201,6 +202,14 @@ class OpenAIModelClient(BaseModelClient):
             extra_body["return_token_ids"] = params.pop("return_token_ids")
             params["extra_body"] = extra_body
 
+        request_trace = LLMRequestTrace.start(
+            provider=self.model_client_config.client_provider,
+            api_base=self.model_client_config.api_base,
+            api_key=self.model_client_config.api_key,
+            stream=False,
+            request=params,
+        )
+
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -244,6 +253,8 @@ class OpenAIModelClient(BaseModelClient):
                 metadata={"output_parser": str(output_parser)}
             )
             assistant_message = await self._parse_response(response, output_parser)
+            if request_trace is not None:
+                request_trace.record_response(self._trace_message_payload(assistant_message))
 
             if tracer_record_data:
                 await tracer_record_data(llm_response=assistant_message)
@@ -259,6 +270,8 @@ class OpenAIModelClient(BaseModelClient):
             return assistant_message
 
         except Exception as e:
+            if request_trace is not None:
+                request_trace.record_error(e)
             await trigger(
                 LLMCallEvents.LLM_CALL_ERROR,
                 model_name=params.get("model"),
@@ -353,6 +366,14 @@ class OpenAIModelClient(BaseModelClient):
             extra_body["return_token_ids"] = params.pop("return_token_ids")
             params["extra_body"] = extra_body
 
+        request_trace = LLMRequestTrace.start(
+            provider=self.model_client_config.client_provider,
+            api_base=self.model_client_config.api_base,
+            api_key=self.model_client_config.api_key,
+            stream=True,
+            request=params,
+        )
+
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -403,6 +424,8 @@ class OpenAIModelClient(BaseModelClient):
 
             if tracer_record_data:
                 await tracer_record_data(llm_response=final_message)
+            if request_trace is not None:
+                request_trace.record_response(self._trace_message_payload(final_message))
 
             await trigger(
                 LLMCallEvents.LLM_OUTPUT,
@@ -414,6 +437,8 @@ class OpenAIModelClient(BaseModelClient):
                 tool_calls=final_message.tool_calls if final_message else None)
 
         except Exception as e:
+            if request_trace is not None:
+                request_trace.record_error(e)
             # Many stream-layer exceptions (httpx.RemoteProtocolError,
             # APIConnectionError wrappers, asyncio.CancelledError) return an
             # empty str(), which leaves the error log unactionable. Always
@@ -670,6 +695,41 @@ class OpenAIModelClient(BaseModelClient):
             completion_token_ids=completion_token_ids,
             logprobs=logprobs,
         )
+
+    @staticmethod
+    def _trace_message_payload(message: Any) -> dict[str, Any]:
+        if message is None:
+            return {}
+        usage = OpenAIModelClient._trace_attr(message, "usage_metadata")
+        usage_payload = None
+        if usage is not None:
+            usage_payload = usage.model_dump(exclude_none=True) if hasattr(usage, "model_dump") else vars(usage)
+        tool_calls = OpenAIModelClient._trace_attr(message, "tool_calls")
+        tool_call_payload = None
+        if tool_calls:
+            tool_call_payload = [
+                tool_call.model_dump(exclude_none=True) if hasattr(tool_call, "model_dump") else vars(tool_call)
+                for tool_call in tool_calls
+            ]
+        return {
+            "content": OpenAIModelClient._trace_attr(message, "content"),
+            "reasoning_content": OpenAIModelClient._trace_attr(message, "reasoning_content"),
+            "tool_calls": tool_call_payload,
+            "usage": usage_payload,
+            "finish_reason": OpenAIModelClient._trace_attr(message, "finish_reason"),
+            "parser_content": OpenAIModelClient._trace_attr(message, "parser_content"),
+            "prompt_token_ids": OpenAIModelClient._trace_attr(message, "prompt_token_ids"),
+            "completion_token_ids": OpenAIModelClient._trace_attr(message, "completion_token_ids"),
+            "logprobs": OpenAIModelClient._trace_attr(message, "logprobs"),
+        }
+
+    @staticmethod
+    def _trace_attr(obj: Any, name: str) -> Any:
+        value = getattr(obj, name, None)
+        value_type = type(value)
+        if value_type.__module__.startswith("unittest.mock"):
+            return None
+        return value
 
     @staticmethod
     def _normalize_logprobs(logprobs_obj: Any) -> Optional[Any]:

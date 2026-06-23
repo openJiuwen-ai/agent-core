@@ -644,6 +644,47 @@ class TestFullCompactProcessor:
         ]
         assert [tool.name for tool in model.invoke.await_args.kwargs["tools"]] == ["tool-a", "tool-b"]
 
+    @pytest.mark.asyncio
+    async def test_forked_compression_executor_classifies_context_overflow_errors(self):
+        from openjiuwen.core.context_engine.processor.compressor.forked.executor import (
+            ForkedCompressionError,
+            ForkedCompressionErrorKind,
+            ForkedCompressionExecutor,
+            ForkedCompressionRequest,
+        )
+
+        model = MagicMock()
+        model.invoke = AsyncMock(side_effect=Exception("context length exceeded: maximum context is 128000 tokens"))
+        executor = ForkedCompressionExecutor(model=model)
+
+        with pytest.raises(ForkedCompressionError) as exc_info:
+            await executor.invoke(ForkedCompressionRequest(prompt="compact now"))
+
+        assert exc_info.value.kind == ForkedCompressionErrorKind.CONTEXT_OVERFLOW
+        assert exc_info.value.is_context_overflow is True
+        assert "context length exceeded" in str(exc_info.value)
+        assert isinstance(exc_info.value.original_error, Exception)
+
+    @pytest.mark.asyncio
+    async def test_forked_compression_executor_does_not_misclassify_timeout_as_context_overflow(self):
+        from openjiuwen.core.context_engine.processor.compressor.forked.executor import (
+            ForkedCompressionError,
+            ForkedCompressionErrorKind,
+            ForkedCompressionExecutor,
+            ForkedCompressionRequest,
+        )
+
+        model = MagicMock()
+        model.invoke = AsyncMock(side_effect=TimeoutError("request timeout while calling model"))
+        executor = ForkedCompressionExecutor(model=model)
+
+        with pytest.raises(ForkedCompressionError) as exc_info:
+            await executor.invoke(ForkedCompressionRequest(prompt="compact now"))
+
+        assert exc_info.value.kind == ForkedCompressionErrorKind.TIMEOUT
+        assert exc_info.value.is_context_overflow is False
+        assert isinstance(exc_info.value.original_error, TimeoutError)
+
     def test_full_compact_registers_reinjection_extension_points(self):
         from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import FullCompactProcessor
 

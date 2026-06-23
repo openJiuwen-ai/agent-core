@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 from dataclasses import dataclass
@@ -24,16 +25,39 @@ class ReadFileSnapshot:
 def build_plan_reinjected_content(ctx: ReinjectContext) -> str:
     plan_mode = _get_plan_mode(ctx.session_state)
     plan_slug = plan_mode.get("plan_slug") if isinstance(plan_mode, dict) else None
-    if not plan_slug or not ctx.workspace_root:
+    if not plan_slug:
         return ""
-    plan_path = Path(ctx.workspace_root) / ".plans" / f"{plan_slug}.md"
-    if not plan_path.exists():
+    plan_path = _resolve_plan_file_path(ctx, str(plan_slug))
+    if plan_path is None:
         return ""
     try:
         plan_text = plan_path.read_text(encoding="utf-8")
     except Exception:
         return ""
     return ctx.truncate(f"Current plan file: {plan_path}\n\n{plan_text}")
+
+
+def _resolve_plan_file_path(ctx: ReinjectContext, plan_slug: str) -> Path | None:
+    candidate_paths: list[Path] = []
+    if ctx.workspace_root:
+        candidate_paths.append(Path(ctx.workspace_root) / ".plans" / f"{plan_slug}.md")
+    for path in _iter_enter_plan_mode_paths(ctx.source_messages, plan_slug):
+        candidate_paths.append(path)
+    for path in candidate_paths:
+        if path.exists():
+            return path
+    return None
+
+
+def _iter_enter_plan_mode_paths(messages: list[BaseMessage], plan_slug: str):
+    for tool_call in iter_tool_calls(messages, name="enter_plan_mode"):
+        result_text = find_tool_result_text(messages, getattr(tool_call, "id", None))
+        match = re.search(r"Plan file created at:\s*(?P<path>.+?\.md)(?:\r?\n|$)", result_text)
+        if not match:
+            continue
+        plan_path = Path(match.group("path").strip())
+        if plan_path.stem == plan_slug:
+            yield plan_path
 
 
 def build_skill_reinjected_content(ctx: ReinjectContext) -> list[UserMessage]:
@@ -190,6 +214,8 @@ def build_plan_mode_reinjected_content(ctx: ReinjectContext) -> str:
     mode = plan_mode.get("mode") or "normal"
     pre_plan_mode = plan_mode.get("pre_plan_mode")
     plan_slug = plan_mode.get("plan_slug")
+    if mode == "normal" and not plan_slug and pre_plan_mode in {None, "", "normal"}:
+        return ""
 
     lines = [
         "Current plan-mode status for this session:",
@@ -257,8 +283,13 @@ def _read_todo_file(ctx: ReinjectContext) -> list[dict[str, Any]]:
     if not session_id:
         return []
 
-    todo_path = Path(workspace_root) / session_id / "todo.json"
-    if not todo_path.exists():
+    workspace_path = Path(workspace_root)
+    candidate_paths = [
+        workspace_path / session_id / "todo.json",
+        workspace_path / "todo" / session_id / "todo.json",
+    ]
+    todo_path = next((path for path in candidate_paths if path.exists()), None)
+    if todo_path is None:
         return []
     try:
         data = json.loads(todo_path.read_text(encoding="utf-8"))
@@ -352,13 +383,22 @@ def parse_read_file_result(tool_call: Any, result_text: str) -> ReadFileSnapshot
     args_text = getattr(tool_call, "arguments", "") or ""
     args = parse_tool_arguments(args_text)
     result = parse_jsonish_tool_result(result_text)
-    if not isinstance(result, dict):
-        return None
-    file_path = result.get("file_path") or extract_argument_value(args, args_text, ("file_path", "path"))
-    content = result.get("content")
+    file_path = ""
+    content: Any = None
+    line_count: Any = None
+    if isinstance(result, dict):
+        file_path = result.get("file_path") or ""
+        content = result.get("content")
+        line_count = result.get("line_count")
+    else:
+        content = result_text
+    file_path = file_path or extract_argument_value(args, args_text, ("file_path", "path"))
+    if not isinstance(content, str) and result_text:
+        content = result_text
     if not isinstance(file_path, str) or not isinstance(content, str):
         return None
-    line_count = result.get("line_count")
+    if line_count is None:
+        line_count = len(content.splitlines())
     offset = args.get("offset")
     limit = args.get("limit")
     partial = offset is not None or limit is not None
@@ -414,7 +454,15 @@ def parse_jsonish_tool_result(result_text: str) -> Any:
     try:
         return json.loads(result_text)
     except Exception:
+        pass
+    match = re.search(r"\bdata=(?P<data>\{.*?\})(?:\s+\w+=|$)", result_text, flags=re.DOTALL)
+    if not match:
         return {}
+    try:
+        parsed = ast.literal_eval(match.group("data"))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def extract_argument_value(parsed_arguments: dict[str, Any], arguments_text: str, keys: tuple[str, ...]) -> str:

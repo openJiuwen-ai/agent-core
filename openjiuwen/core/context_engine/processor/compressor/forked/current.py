@@ -7,10 +7,11 @@ from openjiuwen.core.context_engine.processor.compressor.forked.base import (
     ForkedPrefixCompactProcessor,
     PrefixCompactSpan,
     adjust_keep_recent_for_tool_boundaries,
+    find_last_real_user_message_index,
 )
 from openjiuwen.core.context_engine.processor.compressor.forked.dialogue import ForkedDialogueCompressorConfig
 from openjiuwen.core.context_engine.processor.compressor.prompts.forked import CURRENT_COMPACT_PROMPT
-from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
+from openjiuwen.core.foundation.llm import BaseMessage
 
 
 MEMORY_BLOCK_CURRENT_OPEN = "<memory_block_current>"
@@ -21,7 +22,7 @@ DEFAULT_CURRENT_COMPRESSION_PROMPT = CURRENT_COMPACT_PROMPT
 
 
 class ForkedCurrentRoundCompressorConfig(ForkedDialogueCompressorConfig):
-    keep_recent_messages: int = Field(default=3, ge=0)
+    keep_recent_messages: int = Field(default=0, ge=0)
     custom_compression_prompt: str | None = DEFAULT_CURRENT_COMPRESSION_PROMPT
 
 
@@ -43,7 +44,7 @@ class ForkedCurrentRoundCompressor(ForkedPrefixCompactProcessor):
     def _build_span(self, messages: list[BaseMessage]) -> PrefixCompactSpan:
         effective_keep = adjust_keep_recent_for_tool_boundaries(messages, self.config.keep_recent_messages)
         split_index = max(len(messages) - effective_keep, 0)
-        last_user_index = self._find_last_user_message_index(messages)
+        last_user_index = find_last_real_user_message_index(messages)
         if last_user_index < 0:
             return PrefixCompactSpan([], [], list(messages[split_index:]))
         target_start = last_user_index + 1
@@ -54,10 +55,3 @@ class ForkedCurrentRoundCompressor(ForkedPrefixCompactProcessor):
             messages_to_compress=list(messages[target_start:split_index]),
             protected_tail=list(messages[split_index:]),
         )
-
-    @staticmethod
-    def _find_last_user_message_index(messages: list[BaseMessage]) -> int:
-        for index in range(len(messages) - 1, -1, -1):
-            if isinstance(messages[index], UserMessage):
-                return index
-        return -1

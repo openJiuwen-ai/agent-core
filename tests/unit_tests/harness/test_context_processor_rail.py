@@ -10,6 +10,14 @@ import pytest
 from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
     DialogueCompressorConfig,
 )
+from openjiuwen.core.context_engine.processor.compressor.forked import (
+    ForkedCurrentRoundCompressorConfig,
+    ForkedDialogueCompressorConfig,
+    ForkedRoundLevelCompressorConfig,
+)
+from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
+    MessageOffloaderConfig,
+)
 from openjiuwen.core.foundation.llm import (
     SystemMessage,
     AssistantMessage,
@@ -188,6 +196,33 @@ async def test_init_preset_defaults(tmp_path: Path):
     assert round_lvl.trigger_total_tokens == 230000
     assert round_lvl.target_total_tokens == 160000
     assert round_lvl.keep_recent_messages == 6
+
+
+@pytest.mark.asyncio
+async def test_forked_preset_accepts_legacy_compressor_override_names(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("OPENJIUWEN_CONTEXT_PROCESSOR_PRESET", "forked")
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+    rail = ContextProcessorRail(
+        preset=True,
+        processors=[
+            ("DialogueCompressor", {"tokens_threshold": 100000}),
+            ("CurrentRoundCompressor", {"tokens_threshold": 110000}),
+            ("RoundLevelCompressor", {"trigger_total_tokens": 120000}),
+        ],
+    )
+
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    procs = dict(agent.react_config.context_processors)
+    assert "DialogueCompressor" not in procs
+    assert "CurrentRoundCompressor" not in procs
+    assert "RoundLevelCompressor" not in procs
+    assert procs["ForkedDialogueCompressor"].tokens_threshold == 100000
+    assert procs["ForkedCurrentRoundCompressor"].tokens_threshold == 110000
+    assert procs["ForkedRoundLevelCompressor"].trigger_total_tokens == 120000
 
 
 
@@ -506,6 +541,22 @@ def test_merge_processors_dict_override_new_processor_error():
         ContextProcessorRail._merge_processors(base, overrides)
 
 
+def test_merge_processors_skips_unknown_dict_override_when_preset_exists():
+    """Legacy dict overrides should not break alternate presets."""
+    base = [
+        ("MessageOffloader", MessageOffloaderConfig()),
+        ("ForkedDialogueCompressor", ForkedDialogueCompressorConfig()),
+    ]
+    overrides = [
+        ("MessageSummaryOffloader", {"large_message_threshold": 5000}),
+    ]
+
+    result = ContextProcessorRail._merge_processors(base, overrides)
+
+    keys = [k for k, _ in result]
+    assert keys == ["MessageOffloader", "ForkedDialogueCompressor"]
+
+
 def test_merge_processors_with_model_config():
     """_merge_processors should inject model config into processors that need it."""
     from openjiuwen.core.foundation.llm import ModelRequestConfig
@@ -545,6 +596,54 @@ def test_build_preset_processors_without_session_memory(tmp_path: Path):
     assert "FullCompactProcessor" not in keys
 
 
+def test_build_preset_processors_with_forked_preset(tmp_path: Path):
+    """_build_preset_processors should return forked processors when requested."""
+    rail = ContextProcessorRail(preset=True, preset_name="forked")
+    presets = rail._build_preset_processors()
+
+    keys = [k for k, _ in presets]
+    assert keys == [
+        "MessageOffloader",
+        "ForkedDialogueCompressor",
+        "ForkedCurrentRoundCompressor",
+        "ForkedRoundLevelCompressor",
+    ]
+
+    configs = dict(presets)
+    assert isinstance(configs["MessageOffloader"], MessageOffloaderConfig)
+    assert isinstance(configs["ForkedDialogueCompressor"], ForkedDialogueCompressorConfig)
+    assert isinstance(configs["ForkedCurrentRoundCompressor"], ForkedCurrentRoundCompressorConfig)
+    assert isinstance(configs["ForkedRoundLevelCompressor"], ForkedRoundLevelCompressorConfig)
+
+
+def test_build_preset_processors_uses_env_preset(monkeypatch, tmp_path: Path):
+    """ContextProcessorRail should use OPENJIUWEN_CONTEXT_PROCESSOR_PRESET by default."""
+    monkeypatch.setenv("OPENJIUWEN_CONTEXT_PROCESSOR_PRESET", "forked")
+
+    rail = ContextProcessorRail(preset=True)
+    presets = rail._build_preset_processors()
+
+    keys = [k for k, _ in presets]
+    assert keys == [
+        "MessageOffloader",
+        "ForkedDialogueCompressor",
+        "ForkedCurrentRoundCompressor",
+        "ForkedRoundLevelCompressor",
+    ]
+
+
+def test_explicit_preset_name_overrides_env_preset(monkeypatch, tmp_path: Path):
+    """Explicit preset_name should take precedence over the environment variable."""
+    monkeypatch.setenv("OPENJIUWEN_CONTEXT_PROCESSOR_PRESET", "forked")
+
+    rail = ContextProcessorRail(preset=True, preset_name="legacy")
+    presets = rail._build_preset_processors()
+
+    keys = [k for k, _ in presets]
+    assert "MessageSummaryOffloader" in keys
+    assert "ForkedDialogueCompressor" not in keys
+
+
 def test_build_preset_processors_with_session_memory(tmp_path: Path):
     """_build_preset_processors should return session memory presets when enabled."""
     session_config = SessionMemoryConfig()
@@ -569,6 +668,25 @@ def test_build_preset_processors_with_session_memory_dict(tmp_path: Path):
     assert "FullCompactProcessor" in keys
 
 
+def test_build_preset_processors_with_explicit_session_memory_preset(tmp_path: Path):
+    """_build_preset_processors should return session memory processors when explicitly requested."""
+    rail = ContextProcessorRail(preset=True, preset_name="session_memory")
+    presets = rail._build_preset_processors()
+
+    keys = [k for k, _ in presets]
+    assert keys == [
+        "ToolResultBudgetProcessor",
+        "MicroCompactProcessor",
+        "FullCompactProcessor",
+    ]
+
+
+def test_build_preset_processors_rejects_unknown_preset_name(tmp_path: Path):
+    """ContextProcessorRail should reject unknown processor preset names."""
+    with pytest.raises(ValueError, match="Unknown context processor preset"):
+        ContextProcessorRail(preset=True, preset_name="unknown")
+
+
 # =============================================================================
 # ContextProcessorRail - init/uninit Tests
 # =============================================================================
@@ -589,6 +707,26 @@ async def test_context_processor_rail_init_with_preset(tmp_path: Path):
     assert "DialogueCompressor" in keys
     assert "CurrentRoundCompressor" in keys
     assert "RoundLevelCompressor" in keys
+
+
+@pytest.mark.asyncio
+async def test_context_processor_rail_init_with_forked_preset(tmp_path: Path):
+    """ContextProcessorRail.init should inject forked preset processors into agent config."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    rail = ContextProcessorRail(preset=True, preset_name="forked")
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    keys = [k for k, _ in agent.react_config.context_processors or []]
+    assert keys == [
+        "MessageOffloader",
+        "ForkedDialogueCompressor",
+        "ForkedCurrentRoundCompressor",
+        "ForkedRoundLevelCompressor",
+    ]
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,6 @@
 from openjiuwen.core.context_engine.processor.compressor.forked.executor import (
+    ForkedCompressionError,
+    ForkedCompressionErrorKind,
     ForkedCompressionExecutor,
     ForkedCompressionRequest,
     ForkedCompressionResult,
@@ -18,6 +20,8 @@ from openjiuwen.core.context_engine.processor.compressor.forked.round import (
 
 __all__ = [
     "ForkedCompressionExecutor",
+    "ForkedCompressionError",
+    "ForkedCompressionErrorKind",
     "ForkedCompressionRequest",
     "ForkedCompressionResult",
     "ForkedDialogueCompressor",
