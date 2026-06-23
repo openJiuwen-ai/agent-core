@@ -116,10 +116,12 @@ class Tracer:
                 writer, built-in TraceSchema handlers are registered for chunk output.
         """
         self._stream_writer_manager = stream_writer_manager
-        # Pick up globally registered extension handlers
+        # Pick up globally registered extension handlers and inject trace_id
         for name, handler in TracerHandlerRegistry.get_agent_handlers().items():
+            handler.set_trace_id(self._trace_id)
             self._agent_handlers[name] = handler
         for name, handler in TracerHandlerRegistry.get_workflow_handlers().items():
+            handler.set_trace_id(self._trace_id)
             self._workflow_handlers[name] = handler
 
         # Register built-in TraceSchema handlers only when trace writer is available

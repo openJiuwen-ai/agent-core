@@ -37,6 +37,18 @@ class TraceExtAgentHandler(ABC):
     span management approach (e.g., OpenTelemetry Tracer).
     """
 
+    def __init__(self):
+        self._trace_id: str = ""
+
+    def set_trace_id(self, trace_id: str) -> None:
+        """Inject the tracer UUID into this handler.
+
+        Called by ``Tracer.init()`` to associate extension handlers with
+        the current tracer session. Subclasses can use ``self._trace_id``
+        to bridge OTel traces with tracer's UUID.
+        """
+        self._trace_id = trace_id
+
     # --- LLM events ---
     @abstractmethod
     async def on_llm_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
@@ -141,6 +153,18 @@ class TraceExtWorkflowHandler(ABC):
     or tracer's SpanManager. External handlers can freely choose their own
     span management approach (e.g., OpenTelemetry Tracer).
     """
+
+    def __init__(self):
+        self._trace_id: str = ""
+
+    def set_trace_id(self, trace_id: str) -> None:
+        """Inject the tracer UUID into this handler.
+
+        Called by ``Tracer.init()`` to associate extension handlers with
+        the current tracer session. Subclasses can use ``self._trace_id``
+        to bridge OTel traces with tracer's UUID.
+        """
+        self._trace_id = trace_id
 
     # --- Lifecycle events ---
     @abstractmethod
