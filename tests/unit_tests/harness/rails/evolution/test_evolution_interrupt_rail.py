@@ -18,8 +18,13 @@ from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptExcept
 from openjiuwen.core.single_agent.interrupt.response import ToolCallInterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
-from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import EvolutionInterruptRail
+from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import (
+    EVOLUTION_APPROVAL_INTERRUPT_KIND,
+    EVOLUTION_RESUME_USER_INPUT_KEY,
+    EvolutionInterruptRail,
+)
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
+from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
 
 
 class _StateSession:
@@ -214,6 +219,9 @@ async def test_evolve_interrupt_uses_generic_request_message():
     assert "approved" not in request.payload_schema["properties"]
     assert "kind" not in request.payload_schema["properties"]
     assert "approval_detail" not in request.metadata
+    assert request.metadata["interrupt_kind"] == EVOLUTION_APPROVAL_INTERRUPT_KIND
+    assert request.metadata["evolution_approval"] is True
+    assert request.metadata["resume_user_input_key"] == EVOLUTION_RESUME_USER_INPUT_KEY
     assert request.ui_options == [
         {"label": "本次允许", "value": "allow_once", "description": "允许本次技能演进变更执行"},
         {"label": "总是允许", "value": "allow_always", "description": "自动允许后续匹配的技能演进变更"},
@@ -430,7 +438,39 @@ async def test_evolve_resume_allow_once_continues_with_frozen_args():
     assert "Mutated content." not in exc_info.value.cause.tool_call.arguments
     assert ctx.inputs.tool_call.arguments == exc_info.value.cause.tool_call.arguments
 
+    ctx.extra[EVOLUTION_RESUME_USER_INPUT_KEY] = {"action": "allow_once"}
+    await rail.before_tool_call(ctx)
+
+    assert "_skip_tool" not in ctx.extra
+
+
+@pytest.mark.asyncio
+async def test_evolve_resume_ignores_generic_resume_key():
+    runtime, review_ref = _runtime_with_completed_proposal()
+    rail = _make_rail(runtime)
+    ctx = _evolve_ctx(review_ref)
+
+    with pytest.raises(AbortError):
+        await rail.before_tool_call(ctx)
+
     ctx.extra[RESUME_USER_INPUT_KEY] = {"action": "allow_once"}
+    with pytest.raises(AbortError) as exc_info:
+        await rail.before_tool_call(ctx)
+
+    assert exc_info.value.cause.request.metadata["resume_user_input_key"] == EVOLUTION_RESUME_USER_INPUT_KEY
+    assert "_skip_tool" not in ctx.extra
+
+
+@pytest.mark.asyncio
+async def test_evolve_resume_accepts_payload_wrapped_by_tool_call_id():
+    runtime, review_ref = _runtime_with_completed_proposal()
+    rail = _make_rail(runtime)
+    ctx = _evolve_ctx(review_ref)
+
+    with pytest.raises(AbortError):
+        await rail.before_tool_call(ctx)
+
+    ctx.extra[EVOLUTION_RESUME_USER_INPUT_KEY] = {"call_001": {"action": "allow_once"}}
     await rail.before_tool_call(ctx)
 
     assert "_skip_tool" not in ctx.extra
@@ -446,10 +486,64 @@ async def test_evolve_resume_allow_always_stores_auto_confirm():
     with pytest.raises(AbortError):
         await rail.before_tool_call(ctx)
 
-    ctx.extra[RESUME_USER_INPUT_KEY] = {"action": "allow_always"}
+    ctx.extra[EVOLUTION_RESUME_USER_INPUT_KEY] = {"action": "allow_always"}
     await rail.before_tool_call(ctx)
 
     assert session.state["__interrupt_auto_confirm__"] == {"evolution:evolve_skill_experiences:skill:skill-a": True}
+
+
+@pytest.mark.asyncio
+async def test_permission_rail_passes_evolution_allow_always_resume_to_evolution_rail():
+    runtime, review_ref = _runtime_with_completed_proposal()
+    permission_rail = PermissionInterruptRail(
+        config={
+            "enabled": True,
+            "schema": "tiered_policy",
+            "permission_mode": "normal",
+            "defaults": {"*": "allow"},
+            "rules": [],
+            "approval_overrides": [],
+        }
+    )
+    evolution_rail = _make_rail(runtime)
+    session = _StateSession()
+    ctx = _evolve_ctx(review_ref, session=session)
+
+    await permission_rail.before_tool_call(ctx)
+    with pytest.raises(AbortError):
+        await evolution_rail.before_tool_call(ctx)
+
+    ctx.extra[EVOLUTION_RESUME_USER_INPUT_KEY] = {"action": "allow_always"}
+    await permission_rail.before_tool_call(ctx)
+    await evolution_rail.before_tool_call(ctx)
+
+    assert session.state["__interrupt_auto_confirm__"] == {"evolution:evolve_skill_experiences:skill:skill-a": True}
+
+
+@pytest.mark.asyncio
+async def test_permission_rail_does_not_let_evolution_resume_payload_bypass_tool_ask():
+    runtime, review_ref = _runtime_with_completed_proposal()
+    permission_rail = PermissionInterruptRail(
+        config={
+            "enabled": True,
+            "schema": "tiered_policy",
+            "permission_mode": "normal",
+            "defaults": {"*": "allow"},
+            "tools": {"evolve_skill_experiences": "ask"},
+            "rules": [],
+            "approval_overrides": [],
+        }
+    )
+    ctx = _evolve_ctx(review_ref, session=_StateSession())
+    ctx.extra[EVOLUTION_RESUME_USER_INPUT_KEY] = {"action": "allow_always"}
+
+    with pytest.raises(AbortError) as exc_info:
+        await permission_rail.before_tool_call(ctx)
+
+    request = exc_info.value.cause.request
+    assert "approved" in request.payload_schema["properties"]
+    assert "action" not in request.payload_schema["properties"]
+    assert "__interrupt_auto_confirm__" not in ctx.session.state
 
 
 @pytest.mark.asyncio
@@ -461,7 +555,7 @@ async def test_evolve_resume_reject_skips_tool_with_named_tool_message():
     with pytest.raises(AbortError):
         await rail.before_tool_call(ctx)
 
-    ctx.extra[RESUME_USER_INPUT_KEY] = {"action": "reject"}
+    ctx.extra[EVOLUTION_RESUME_USER_INPUT_KEY] = {"action": "reject"}
     await rail.before_tool_call(ctx)
 
     assert ctx.extra["_skip_tool"] is True
@@ -584,7 +678,7 @@ async def test_evolve_gate_failure_does_not_create_resume_trap():
     await rail.before_tool_call(ctx)
     ctx.extra.pop("_skip_tool")
     ctx.inputs.tool_args = json.dumps(ctx.inputs.tool_args, ensure_ascii=False, sort_keys=True)
-    ctx.extra[RESUME_USER_INPUT_KEY] = {"action": "allow_once"}
+    ctx.extra[EVOLUTION_RESUME_USER_INPUT_KEY] = {"action": "allow_once"}
 
     await rail.before_tool_call(ctx)
 

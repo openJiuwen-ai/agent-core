@@ -10,6 +10,7 @@ from typing import Any, Literal
 from openjiuwen.agent_evolving.experience.draft_schema import normalize_subject
 from openjiuwen.core.foundation.llm.schema.message import ToolMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -28,6 +29,8 @@ _ACTIVE_EVOLUTION_TOOL_OPERATIONS: dict[str, Literal["evolve", "simplify"]] = {
     "evolve_skill_experiences": "evolve",
     "simplify_skill_experiences": "simplify",
 }
+EVOLUTION_APPROVAL_INTERRUPT_KIND = "skill_evolution_approval"
+EVOLUTION_RESUME_USER_INPUT_KEY = "_evolution_resume_user_input"
 
 
 class EvolutionInterruptRail(BaseInterruptRail):
@@ -72,6 +75,26 @@ class EvolutionInterruptRail(BaseInterruptRail):
     def auto_save(self, value: bool) -> None:
         self._auto_save = bool(value)
 
+    async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Intercept active evolution tools using the evolution-specific resume input slot."""
+        tool_call: ToolCall | None = ctx.inputs.tool_call
+        tool_name = ctx.inputs.tool_name
+
+        if tool_name not in self._tool_names:
+            return
+
+        tool_call_id = self._resolve_tool_call_id(tool_call)
+        user_input = self._get_evolution_user_input(ctx, tool_call_id)
+
+        auto_confirm_config = None
+        if ctx.session:
+            auto_confirm_config = ctx.session.get_state(INTERRUPT_AUTO_CONFIRM_KEY)
+            if not isinstance(auto_confirm_config, dict):
+                auto_confirm_config = {}
+
+        decision = await self.resolve_interrupt(ctx, tool_call, user_input, auto_confirm_config)
+        self._apply_decision(ctx, tool_call, tool_name, decision)
+
     async def resolve_interrupt(
         self,
         ctx: AgentCallbackContext,
@@ -106,6 +129,7 @@ class EvolutionInterruptRail(BaseInterruptRail):
                 payload_schema=self._action_payload_schema(),
                 auto_confirm_key=auto_confirm_key,
                 ui_options=self._approval_ui_options(),
+                metadata=self._approval_metadata(),
             )
         )
 
@@ -157,8 +181,25 @@ class EvolutionInterruptRail(BaseInterruptRail):
                 message="Invalid evolution approval action.",
                 payload_schema=self._action_payload_schema(),
                 ui_options=self._approval_ui_options(),
+                metadata=self._approval_metadata(),
             )
         )
+
+    @staticmethod
+    def _get_evolution_user_input(ctx: AgentCallbackContext, tool_call_id: str) -> Any | None:
+        raw_input = ctx.extra.get(EVOLUTION_RESUME_USER_INPUT_KEY)
+        if raw_input is None:
+            return None
+
+        if isinstance(raw_input, InteractiveInput):
+            return raw_input.user_inputs.get(tool_call_id)
+
+        if isinstance(raw_input, dict):
+            if tool_call_id in raw_input:
+                return raw_input[tool_call_id]
+            return raw_input
+
+        return raw_input
 
     def _reject_tool(
         self,
@@ -274,6 +315,14 @@ class EvolutionInterruptRail(BaseInterruptRail):
         }
 
     @staticmethod
+    def _approval_metadata() -> dict[str, Any]:
+        return {
+            "interrupt_kind": EVOLUTION_APPROVAL_INTERRUPT_KIND,
+            "evolution_approval": True,
+            "resume_user_input_key": EVOLUTION_RESUME_USER_INPUT_KEY,
+        }
+
+    @staticmethod
     def _active_tool_args(ctx: AgentCallbackContext) -> dict[str, Any]:
         raw_args = getattr(ctx.inputs, "tool_args", {}) or {}
         return json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
@@ -339,4 +388,8 @@ class EvolutionInterruptRail(BaseInterruptRail):
         }
 
 
-__all__ = ["EvolutionInterruptRail"]
+__all__ = [
+    "EVOLUTION_APPROVAL_INTERRUPT_KIND",
+    "EVOLUTION_RESUME_USER_INPUT_KEY",
+    "EvolutionInterruptRail",
+]
