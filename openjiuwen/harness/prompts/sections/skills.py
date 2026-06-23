@@ -44,13 +44,15 @@ SKILL_RAIL_LIST_SKILL_SYSTEM_PROMPT: Dict[str, str] = {
 SKILL_RAIL_ALL_MODE_HEADER_CN = (
     "# 技能\n\n"
     "执行前先用 read_file 阅读相关 SKILL.md。\n\n"
-    "可用技能：\n"
+    "可用技能列表在本次模型调用附带的 "
+    '<prompt-attachment type="skill">...</prompt-attachment> 中提供。\n'
 )
 
 SKILL_RAIL_ALL_MODE_HEADER_EN = (
     "# Skills\n\n"
     "Read the relevant SKILL.md using read_file before execution.\n\n"
-    "Available skills:\n"
+    "The available skill list is provided in the "
+    '<prompt-attachment type="skill">...</prompt-attachment> attached to this model call.\n'
 )
 
 SKILL_RAIL_ALL_MODE_HEADER: Dict[str, str] = {
@@ -137,14 +139,21 @@ def build_skill_lines(lines: Iterable[str]) -> str:
     return "\n\n".join(items)
 
 
-def build_all_mode_skill_prompt(skill_lines: str, language: str = "cn") -> str:
+def build_all_mode_skill_prompt(language: str = "cn") -> str:
     """Build prompt for all mode."""
-    text = (skill_lines or "").strip()
-    if not text:
-        return SKILL_RAIL_NO_SKILL_PROMPT.get(language, SKILL_RAIL_NO_SKILL_PROMPT_CN)
     header = SKILL_RAIL_ALL_MODE_HEADER.get(language, SKILL_RAIL_ALL_MODE_HEADER_CN)
     instruction = SKILL_RAIL_ALL_MODE_INSTRUCTION.get(language, SKILL_RAIL_ALL_MODE_INSTRUCTION_CN)
-    return header + text + instruction
+    return header + instruction
+
+
+def build_all_mode_skill_attachment(skill_lines: str, language: str = "cn") -> str:
+    """Build dynamic skill list attachment content for all mode."""
+    text = (skill_lines or "").strip()
+    if not text:
+        return ""
+    if language == "en":
+        return "# Available Skills\n\n" + text
+    return "# 可用技能\n\n" + text
 
 
 def build_auto_list_mode_skill_prompt(language: str = "cn") -> str:
@@ -158,16 +167,16 @@ def get_list_skill_system_prompt(language: str = "cn") -> str:
 
 
 def build_skills_section(
-    skill_lines: str,
     language: str = "cn",
     mode: str = "all",
+    has_skills: bool = True,
 ) -> Optional["PromptSection"]:
     """Build a PromptSection for skills.
 
     Args:
-        skill_lines: Pre-rendered skill lines (only used in 'all' mode).
         language: 'cn' or 'en'.
         mode: 'all' or 'auto_list'.
+        has_skills: Whether all mode has dynamic skill entries in attachment.
 
     Returns:
         A PromptSection instance, or None if mode is unrecognised.
@@ -175,7 +184,10 @@ def build_skills_section(
     from openjiuwen.harness.prompts.builder import PromptSection
 
     if mode == "all":
-        content = build_all_mode_skill_prompt(skill_lines, language)
+        if has_skills:
+            content = build_all_mode_skill_prompt(language)
+        else:
+            content = SKILL_RAIL_NO_SKILL_PROMPT.get(language, SKILL_RAIL_NO_SKILL_PROMPT_CN)
     elif mode == "auto_list":
         content = build_auto_list_mode_skill_prompt(language)
     else:

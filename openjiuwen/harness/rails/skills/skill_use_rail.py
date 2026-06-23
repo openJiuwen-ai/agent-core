@@ -16,10 +16,14 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.skills import (
+    build_all_mode_skill_attachment,
     build_all_mode_skill_prompt,
     build_skill_line,
     build_skill_lines,
     build_skills_section,
+)
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachmentKind,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools import BashTool, CodeTool, ReadFileTool, ListSkillTool, SkillTool
@@ -83,6 +87,7 @@ class SkillUseRail(DeepAgentRail):
 
         self.skills: List[Skill] = []
         self.system_prompt_builder = None
+        self.attachment_manager = None
 
         # Cache loaded skills across invokes.
         self._skill_cache: Dict[str, Skill] = {}
@@ -245,6 +250,7 @@ class SkillUseRail(DeepAgentRail):
     def init(self, agent):
         """Register tool cards into agent and concrete tools into resource manager."""
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
+        self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
 
         tools = []
 
@@ -349,6 +355,7 @@ class SkillUseRail(DeepAgentRail):
 
         self._owned_tool_names.clear()
         self._owned_tool_ids.clear()
+        self.attachment_manager = None
 
     async def refresh_skill_prompt(self, ctx: AgentCallbackContext) -> None:
         """Regenerate the skills system prompt"""
@@ -400,8 +407,10 @@ class SkillUseRail(DeepAgentRail):
         skills_section = self._build_skills_section()
         if skills_section is not None:
             self.system_prompt_builder.add_section(skills_section)
+            await self._sync_all_mode_skill_attachment(ctx)
         else:
             self.system_prompt_builder.remove_section(SectionName.SKILLS)
+            await self._clear_all_mode_skill_attachment(ctx)
 
     async def _refresh_skill_prompt_if_changed(self, ctx: AgentCallbackContext) -> None:
         """Refresh skills when visible skill directories or SKILL.md mtimes changed."""
@@ -436,32 +445,20 @@ class SkillUseRail(DeepAgentRail):
     def _build_skills_section(self):
         """Build PromptSection from current skills."""
         if self.skill_mode == self.SKILL_MODE_ALL:
-            body_lines: List[str] = []
-            for idx, skill in enumerate(self.skills):
-                body_lines.append(
-                    build_skill_line(
-                        index=idx,
-                        skill_name=skill.name,
-                        description=self._get_skill_description(skill),
-                        # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
-                    )
-                )
             return build_skills_section(
-                skill_lines=build_skill_lines(body_lines),
                 language=self.system_prompt_builder.language,
                 mode="all",
+                has_skills=bool(self.skills),
             )
         else:
             return build_skills_section(
-                skill_lines="",
                 language=self.system_prompt_builder.language,
                 mode="auto_list",
             )
 
-    def _build_all_mode_prompt(self) -> str:
-        """Build skill prompt for all mode."""
+    def _build_all_mode_skill_lines(self) -> str:
+        """Build dynamic skill list text for all mode."""
         body_lines: List[str] = []
-
         for idx, skill in enumerate(self.skills):
             body_lines.append(
                 build_skill_line(
@@ -471,8 +468,48 @@ class SkillUseRail(DeepAgentRail):
                     # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
                 )
             )
+        return build_skill_lines(body_lines)
 
-        return build_all_mode_skill_prompt(build_skill_lines(body_lines), language=self.system_prompt_builder.language)
+    async def _sync_all_mode_skill_attachment(self, ctx: AgentCallbackContext) -> None:
+        """Put dynamic all-mode skill lines into prompt attachment."""
+        if self.skill_mode != self.SKILL_MODE_ALL:
+            await self._clear_all_mode_skill_attachment(ctx)
+            return
+        if self.attachment_manager is None:
+            return
+        language = self.system_prompt_builder.language
+        content = build_all_mode_skill_attachment(
+            self._build_all_mode_skill_lines(),
+            language=language,
+        )
+        writer = self.attachment_manager.bind_context(ctx)
+        try:
+            if content:
+                await writer.add_section(
+                    section=SectionName.SKILLS,
+                    content=content,
+                    kind=PromptAttachmentKind.SKILL,
+                    source="agent_core.skill_use_rail",
+                    priority=40,
+                    content_kind="text/markdown",
+                )
+            else:
+                await writer.clear_section(SectionName.SKILLS)
+        except ValueError as exc:
+            logger.warning("[SkillUseRail] skip skills prompt attachment: %s", exc)
+
+    async def _clear_all_mode_skill_attachment(self, ctx: AgentCallbackContext) -> None:
+        if self.attachment_manager is None:
+            return
+        writer = self.attachment_manager.bind_context(ctx)
+        try:
+            await writer.clear_section(SectionName.SKILLS)
+        except ValueError:
+            return
+
+    def _build_all_mode_prompt(self) -> str:
+        """Build skill prompt for all mode."""
+        return build_all_mode_skill_prompt(language=self.system_prompt_builder.language)
 
     @staticmethod
     def _normalize_name_list(raw: Optional[Union[str, List[str]]]) -> List[str]:

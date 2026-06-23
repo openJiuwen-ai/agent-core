@@ -259,7 +259,7 @@ class DeepAgent(BaseAgent):
             self._hot_reload_system_prompt(config)
 
         self._queue_pending_rails(config)
-        self._sync_builder_to_active_rails()
+        self._sync_prompt_builder_references()
 
     def _hot_reload_rails(self, config: DeepAgentConfig) -> None:
         """Cycle stale rails out and prepare replacement rails during hot-reconfigure.
@@ -320,10 +320,7 @@ class DeepAgent(BaseAgent):
         if config.context_engine_config is not None:
             new_react_config.context_engine_config = config.context_engine_config
         self._react_agent.configure(new_react_config)
-        if self.system_prompt_builder is not None:
-            self._react_agent.prompt_builder = self.system_prompt_builder
-            self._react_agent.system_prompt_builder = self.system_prompt_builder
-        self._react_agent.prompt_attachment_manager = self.prompt_attachment_manager
+        self._sync_prompt_builder_references()
         logger.info("[DeepAgent] Model configuration hot reloaded")
 
     def _hot_reload_tools(
@@ -395,21 +392,31 @@ class DeepAgent(BaseAgent):
         new_react_config.prompt_template = [{"role": "system", "content": prompt}]
         self._react_agent.configure(new_react_config)
         self.system_prompt_builder = prompt_builder
-        self._react_agent.prompt_builder = prompt_builder
-        self._react_agent.system_prompt_builder = prompt_builder
-        self._react_agent.prompt_attachment_manager = self.prompt_attachment_manager
+        self._sync_prompt_builder_references()
         logger.info("[DeepAgent] System prompt hot reloaded")
 
-    def _sync_builder_to_active_rails(self) -> None:
-        """Push the current system_prompt_builder reference to active rails.
+    def _sync_prompt_builder_references(self) -> None:
+        """Push the current system_prompt_builder reference everywhere.
 
-        Syncs to _registered_rails and _stale_rails only.  _pending_rails do not
-        need syncing because they will acquire the correct builder from the agent
-        during init() in _ensure_initialized.
+        ReActAgent.configure() may rebuild its prompt_builder, and rails can be
+        registered, pending, or stale across hot-reconfigure cycles.  Keep every
+        mutable prompt participant on the same builder object so callbacks never
+        write to a builder different from the one used for the final model call.
         """
-        for rail in (*self._registered_rails, *self._stale_rails):
+        builder = self.system_prompt_builder
+        if builder is None:
+            return
+
+        if self._react_agent is not None:
+            self._react_agent.prompt_builder = builder
+            self._react_agent.system_prompt_builder = builder
+            self._react_agent.prompt_attachment_manager = self.prompt_attachment_manager
+
+        for rail in (*self._pending_rails, *self._registered_rails, *self._stale_rails):
             if hasattr(rail, "system_prompt_builder"):
-                rail.system_prompt_builder = self.system_prompt_builder
+                rail.system_prompt_builder = builder
+            if hasattr(rail, "_system_prompt_builder"):
+                setattr(rail, "_system_prompt_builder", builder)
 
     def _queue_pending_rails(self, config: DeepAgentConfig) -> None:
         """Append config-driven rails to _pending_rails for lazy registration."""
@@ -841,6 +848,8 @@ class DeepAgent(BaseAgent):
         if self._needs_workspace_init():
             await self.init_workspace()
 
+        self._sync_prompt_builder_references()
+
         # Unregister stale rails left over from a previous configure() cycle.
         # Skip rails that are also in pending (same instance): they will be
         # re-initialized by the pending loop below without needing a full retire.
@@ -858,6 +867,7 @@ class DeepAgent(BaseAgent):
             rail_inst.init(self)
             await self._register_rail_selective(rail_inst)
         self._pending_rails.clear()
+        self._sync_prompt_builder_references()
         self._initialized = True
 
     def _needs_workspace_init(self) -> bool:
@@ -1210,8 +1220,10 @@ class DeepAgent(BaseAgent):
         if isinstance(rail, DeepAgentRail):
             rail.set_sys_operation(self.deep_config.sys_operation)
             rail.set_workspace(self.deep_config.workspace)
+        self._sync_prompt_builder_references()
         rail.init(self)
         await self._register_rail_selective(rail)
+        self._sync_prompt_builder_references()
         return self
 
     async def unregister_rail(self, rail: AgentRail) -> "DeepAgent":
