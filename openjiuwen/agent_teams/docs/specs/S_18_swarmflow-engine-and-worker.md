@@ -120,11 +120,16 @@ async_tool_runtime.cancel(task_id)`。
    human 还 cancel `_pending_human` 在等真人的 future）。abort_all 在 controller 协程内**完整**执行，
    故必须排在 cancel 之前，否则顶层 cancel 解栈时 session supervisor 泄漏。
 
-**resume 契约**：`controller.resume()` → `SwarmflowTool._relaunch(inputs)`（新 task_id +
+**resume 契约**：`controller.resume()` → `SwarmflowTool._relaunch(inputs, session_id)`（新 task_id +
 `launch_async_tool(同一 inputs)`，绕过 `invoke`）。journal 路径由 `(team,session,name)` 唯一决定 →
 命中 pause 前完成的 agent、断点后 live。SwarmflowTool 把 engine 抛的 `WorkflowAborted` 转
 `CancelledError`，让 async-tool runtime 静默取消（不注入完成）。human turn 的 `correlation_id` 跨
-resume 稳定，真人回复仍能匹配重跑的那轮。
+resume 稳定，真人回复仍能匹配重跑的那轮。**resume 必须恢复 `session_id` contextvar**：relaunch 由
+外部协程（controller）驱动、不在 leader round 上下文里，而 `launch_async_tool` 的新 task 在
+`create_task` 时继承当前 context；故 `run_background` 捕获 `session_id` 一次（贯穿 `_publish` topic
+/ `run_swarmflow` / relaunch 闭包），`_relaunch` 在 launch 前 `set_session_id(原 session)`、`finally`
+复位。缺这一步 resume 会解析到空 session → 用错 journal 路径（不命中缓存、全部重跑）+ 进度事件发到
+错 topic（外部 monitor/drain 收不到）。
 
 **接线**：`team_runner.run_agent_team_streaming(background_task_controller=)` →
 `TeamAgent.set_background_task_controller` → `TeamHarness`（存 `_bg_controller`，`start` 跨 native

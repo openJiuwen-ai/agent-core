@@ -6,7 +6,7 @@
 |---|---|
 | 日期 | 2026-06-23 |
 | 范围 | `runtime/background_task_controller.py`(新)、`workflow/engine/{errors,runtime,primitives,runner}.py`、`workflow/runner.py`、`workflow/backends/{team_worker_backend,avatar_session_backend}.py`、`workflow/tool_swarmflow.py`、`harness/{native_harness,team_harness}.py`、`agent/{member_runtime,team_agent}.py`、`external/runtime.py`、`core/runner/team_runner.py` |
-| 测试基线 | engine 单测 `test_pause_resume.py` 3 passed;e2e `agent_team_swarmflow_pause_resume_e2e.py` 1 passed;回归 workflow+async 104 passed、harness+team_tools 161 passed |
+| 测试基线 | 确定性单测 `test_pause_resume.py`(engine 3)+ `test_avatar_session_backend.py::test_abort_all_*`(session 终止)+ `test_background_task_controller.py`(controller 三步)→ workflow 全套 90 passed;真实 LLM e2e `agent_team_swarmflow_pause_resume_runner_e2e.py` 每特性点 pause/resume `pauses=6 resumes=6 phases=6 human_replies=7` PASSED |
 | Refs | #1047 |
 
 ## 背景
@@ -74,6 +74,13 @@ leader.async_tool_runtime._tasks[task_id]  (asyncio.Task)
 7. **SwarmflowTool 接住 `WorkflowAborted` 转 `CancelledError`**:pause 时 abort_event 可能让 engine
    raise WorkflowAborted(BaseException),run_background `except WorkflowAborted: raise
    asyncio.CancelledError()`,让 async-tool runtime 当作静默取消(不注入完成),与第三步 cancel 一致。
+8. **resume relaunch 必须恢复 `session_id` contextvar**。resume 由外部协程(controller)驱动,不在
+   leader round 上下文里;`launch_async_tool` 的新 task 在 `create_task` 时继承当前 context,故
+   `_relaunch` 在 launch 前 `set_session_id(原 session)`、`finally` 复位。否则 resume 解析到空
+   session → 用错 journal 路径(等于不命中缓存、全部重跑)+ 进度事件发到错 topic(monitor 收不到、
+   外部 drain 卡死、human 永等到超时)。`run_background` 捕获 session_id 一次,贯穿 `_publish` topic
+   / `run_swarmflow` / relaunch 闭包。**此 bug 由真实 LLM 每特性点 e2e 抓出**——确定性单测 stub 了
+   relaunch、覆盖不到 contextvar 跨 task 继承。
 
 ## 拒绝的方案
 
@@ -96,17 +103,21 @@ leader.async_tool_runtime._tasks[task_id]  (asyncio.Task)
 
 - engine 单测 `tests/unit_tests/agent_teams/workflow/test_pause_resume.py`(3):`abort_event` 预设
   挡所有 agent;A 完成后 set、B 在 pre-journal guard raise、WAL 仅 A;resume 命中前缀只重跑 B/C。
-- e2e `tests/system_tests/agent_swarm/agent_team_swarmflow_pause_resume_e2e.py`(1,确定性、无 LLM,
-  monkeypatch gated `_execute_worker`):真实 SwarmflowTool + BackgroundTaskController + run_swarmflow
-  全链路——启动→A 落 WAL→pause(task cancelled、WAL 仅 A)→resume(A 缓存命中不重跑、B/C live、完成
-  注入)。
-- 回归:workflow+async 104 passed、harness+team_tools 161 passed。未跑 ruff/mypy(项目约定)。
+- 确定性单测(CI):`test_avatar_session_backend.py::test_abort_all_...`(session `abort_all` 终止
+  agent+human harness、cancel 等真人回复的 future)+ `test_background_task_controller.py`(`pause()`
+  三步顺序 event→abort_sessions→cancel、`resume()` relaunch、空集 no-op);workflow 全套 90 passed。
+- 真实 LLM e2e(手动)`tests/system_tests/agent_swarm/agent_team_swarmflow_pause_resume_runner_e2e.py`
+  (仿 `agent_team_swarmflow_e2e.py`,真 leader LLM + `run_agent_team_streaming(background_task_controller=)`):
+  party_planner 全原语,**每个 phase 边界都 pause+resume 一次**(构思/征询嘉宾/拟菜单/筹备/审批/
+  邀请函,human session 阶段 pause 即 `abort_all` 中断在途真人会话),human 立即应答不留等待。结果
+  `pauses=6 resumes=6 phases=6 human_replies=7` PASSED——并抓出修复了 resume 的 session-context bug(决策 #8)。
+- 未跑 ruff/mypy(项目约定)。
 
 ## 已知遗留
 
-- **真实 LLM e2e**:确定性 e2e 覆盖全部 pause/resume 控制逻辑;真实 leader LLM 经
-  `run_agent_team_streaming(background_task_controller=...)` 驱动的端到端(仿
-  `agent_team_swarmflow_e2e.py`)未加(需 model endpoint,手动跑)。
+- **真实 LLM e2e:已补**(`agent_team_swarmflow_pause_resume_runner_e2e.py`,每特性点 pause/resume,
+  PASSED)——并抓出修复了 resume 的 session-context bug(决策 #8)。需 model endpoint,手动跑、不进 CI。
+  原确定性 `agent_team_swarmflow_pause_resume_e2e.py`(stub 版)已删除,被它 + 上述确定性单测取代。
 - **多并发 swarmflow run 的 pause**:controller 遍历所有 active handle(已支持),但 e2e 只覆盖单 run。
 - **pause 期间真人回复**:human session 被 abort 后,pause 窗口内真人用同 correlation_id 提交的回复
   在 resume 后能否稳定匹配,逻辑已设计(correlation_id 稳定),未做专门 e2e。
