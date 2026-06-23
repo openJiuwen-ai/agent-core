@@ -32,17 +32,17 @@ override it without standing up a real LLM.
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Any, Callable, Sequence
 
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
-from openjiuwen.agent_teams.paths import team_home, independent_member_workspace
 from openjiuwen.agent_teams.tools.locales import make_translator
+from openjiuwen.agent_teams.workspace_layout import ensure_team_member_workspace_link
 from openjiuwen.agent_teams.workflow.backends.structured_output_tool import StructuredOutputTool
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
+from openjiuwen.agent_teams.workflow.worktree import SwarmflowWorkerWorktrees
 from openjiuwen.core.common.logging import team_logger
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -95,6 +95,7 @@ class TeamWorkerBackend(AgentBackend):
         self._model_resolver = model_resolver
         self._worker_base_spec = worker_base_spec
         self._build_context = build_context
+        self._worktrees = SwarmflowWorkerWorktrees(team_name=team_name, build_context=build_context)
         self._t = make_translator(language if language in ("cn", "en") else "cn")
         self._counter = 0
 
@@ -103,6 +104,7 @@ class TeamWorkerBackend(AgentBackend):
         model = self._resolve_model(opts.get("model"))
         await self._open_worker_row(member_name, opts)
         try:
+            await self._worktrees.ensure(member_name, opts)
             if schema_json is not None:
                 # The harness's ability manager re-qualifies the tool id per owner
                 # (``structured_output_{worker_owner_id}``), so concurrent workers
@@ -133,6 +135,7 @@ class TeamWorkerBackend(AgentBackend):
             )
             return AgentResult(text=text, tokens=self._estimate_tokens(prompt, text))
         finally:
+            await self._worktrees.finalize(member_name)
             await self._close_worker_row(member_name)
 
     def _resolve_model(self, model_name: str | None) -> Any:
@@ -272,36 +275,31 @@ class TeamWorkerBackend(AgentBackend):
         Returns:
             A ``WorkspaceSpec`` with the worker's resolved root_path.
         """
-        # Compute worker's independent workspace path.
-        ws_root = str(team_home(self._team_name) / "workspaces" / f"{member_name}_workspace")
+        worktree = self._worktrees.get(member_name)
+        workspace_is_worktree = worktree is not None
+        # Compute worker's workspace path. With ``agent(isolation="worktree")``,
+        # the worker starts directly inside the owner-scoped worktree.
+        ws_root = (
+            worktree.worktree_path
+            if worktree is not None
+            else ensure_team_member_workspace_link(self._team_name, member_name)
+        )
 
         if self._worker_base_spec.workspace is not None:
             # Inherit language / stable_base from the base spec, only override root_path.
             worker_workspace = self._worker_base_spec.workspace.model_copy(
-                update={"root_path": ws_root, "stable_base": True}
+                update={"root_path": ws_root, "stable_base": not workspace_is_worktree}
             )
         else:
             # Base spec has no workspace — create a fresh one for this worker.
             worker_workspace = WorkspaceSpec(
                 root_path=ws_root,
                 language=self._language,
-                stable_base=True,
-            )
-
-        # Symlink the independent member workspace (if it exists) into the
-        # team workspaces tree — same logic as agent_configurator.
-        base_dir = team_home(self._team_name) / "workspaces"
-        independent_ws = independent_member_workspace(member_name)
-        if independent_ws.is_dir() and not (base_dir / f"{member_name}_workspace").exists():
-            base_dir.mkdir(parents=True, exist_ok=True)
-            os.symlink(
-                str(independent_ws),
-                str(base_dir / f"{member_name}_workspace"),
-                target_is_directory=True,
+                stable_base=not workspace_is_worktree,
             )
 
         # Register workspace for team cleanup — mirrors agent_configurator.
-        if self._team_backend is not None:
+        if self._team_backend is not None and not workspace_is_worktree:
             self._team_backend.register_cleanup_path(ws_root)
 
         # Mount team workspace into worker workspace so it can access shared

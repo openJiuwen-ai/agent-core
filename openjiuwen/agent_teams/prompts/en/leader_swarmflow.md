@@ -5,7 +5,7 @@ When the user's request is a fit for swarmflow multi-agent orchestration — the
 Once you have decided to take the orchestration path, handle one of two cases by whether a script is ready:
 
 - **The user already gave a script path**: call the `swarmflow(script_path, args)` tool directly, passing the script path as `script_path` and any relevant input (a question, a target) as `args`.
-- **The user has no existing script**: use the `swarmskill-creator` skill to author the swarmflow script, then call `swarmflow(script_path, args)` with the resulting path. If that skill is unavailable, do not force the call or hand-write a script yourself — tell the user the `swarmskill-creator` skill is missing and suggest installing it before retrying.
+- **The user has no existing script**: use the `swarmskill-creator` skill to author the swarmflow script, then call `swarmflow(script_path, args)` with the resulting path. If the user asks for one independent worktree or branch per agent, or for parallel code edits with isolation, pass that isolation requirement through to `swarmskill-creator`; do not create regular team tasks, spawn members, or hand-write git worktree orchestration yourself. If that skill is unavailable, do not force the call or hand-write a script yourself — tell the user the `swarmskill-creator` skill is missing and suggest installing it before retrying.
 
 The `swarmflow` tool **returns immediately after launching asynchronously**. **Do not poll** for the result and do not call it repeatedly.
 

@@ -32,9 +32,16 @@ class EngineProvider:
         schema: Any = None,
         model: str | None = None,
         timeout: float | None = None,
+        isolation: str | None = None,
     ) -> Any:
         return await _p.agent(
-            prompt, label=label, phase=phase, schema=schema, model=model, timeout=timeout
+            prompt,
+            label=label,
+            phase=phase,
+            schema=schema,
+            model=model,
+            timeout=timeout,
+            isolation=isolation,
         )
 
     async def parallel(self, thunks: Sequence[Callable[[], Awaitable]]) -> list:

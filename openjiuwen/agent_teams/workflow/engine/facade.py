@@ -59,6 +59,7 @@ async def agent(
     prompt: str, *, schema: type[M],
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
+    isolation: str | None = ...,
 ) -> "M | None":
     """Overload: ``schema=<pydantic model>`` narrows the result to that model."""
     ...
@@ -69,6 +70,7 @@ async def agent(
     prompt: str, *, schema: dict,
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
+    isolation: str | None = ...,
 ) -> "dict | None":
     """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
     ...
@@ -79,6 +81,7 @@ async def agent(
     prompt: str, *, schema: None = ...,
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
+    isolation: str | None = ...,
 ) -> "str | None":
     """Overload: no ``schema`` returns the agent's raw text."""
     ...
@@ -92,10 +95,17 @@ async def agent(
     schema: Any = None,
     model: str | None = None,
     timeout: float | None = None,
+    isolation: str | None = None,
 ) -> Any:
     """Spawn a sub-agent. Delegates to the current provider's ``agent``."""
     return await current_provider().agent(
-        prompt, label=label, phase=phase, schema=schema, model=model, timeout=timeout
+        prompt,
+        label=label,
+        phase=phase,
+        schema=schema,
+        model=model,
+        timeout=timeout,
+        isolation=isolation,
     )
 
 

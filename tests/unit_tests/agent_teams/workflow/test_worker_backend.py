@@ -13,9 +13,13 @@ A separate test exercises the real ``_execute_worker`` spec-derivation path with
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Sequence
 
+from openjiuwen.agent_teams.rails.team_context import inject_team_handles
+from openjiuwen.agent_teams.schema.build_context import BuildContext
 from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
+from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine import run_workflow
 from openjiuwen.agent_teams.workflow.runner import preprocess_swarmflow
 from openjiuwen.agent_teams.workflow.schema import build_workflow_run_from_events
@@ -58,6 +62,12 @@ def _write(tmp_path, src: str) -> str:
     path = tmp_path / "wk.py"
     path.write_text(src, encoding="utf-8")
     return str(path)
+
+
+def _build_context_with_worktree_manager(manager: Any) -> BuildContext:
+    context = BuildContext()
+    inject_team_handles(context.extras, worktree_manager=manager)
+    return context
 
 
 def test_schema_path_returns_structured_and_free_path_returns_text(tmp_path):
@@ -135,6 +145,57 @@ async def run(args):
     # worker then inherits its base spec's model, not exercised by this stub).
     assert result == ["ran::fast-cfg", "ran::None", "ran::None"]
     assert seen == ["fast-cfg", None, None]
+
+
+def test_agent_isolation_option_is_forwarded_to_backend(tmp_path):
+    """agent(isolation='worktree') is part of the backend call options."""
+    script = '''
+from swarmflow import agent
+
+META = {"name": "iso", "description": "isolation routing", "phases": []}
+
+async def run(args):
+    return await agent("task", label="w", isolation="worktree")
+'''
+    seen: list[dict] = []
+
+    class _Backend(AgentBackend):
+        async def run(self, prompt, opts, schema_json):
+            seen.append(dict(opts))
+            return AgentResult(text="ok")
+
+    result = asyncio.run(run_workflow(_write(tmp_path, script), backend=_Backend()))
+
+    assert result == "ok"
+    assert seen[0]["isolation"] == "worktree"
+
+
+def test_agent_rejects_unknown_isolation(tmp_path):
+    """Only worktree isolation is supported by the swarmflow DSL."""
+    script = '''
+from swarmflow import agent
+
+META = {"name": "bad-iso", "description": "bad isolation", "phases": []}
+
+async def run(args):
+    return await agent("task", label="w", isolation="container")
+'''
+    import pytest
+    from openjiuwen.agent_teams.workflow.engine.errors import WorkflowError
+
+    with pytest.raises(WorkflowError, match="only supports 'worktree'"):
+        asyncio.run(run_workflow(_write(tmp_path, script), backend=_FakeWorkerBackend(model=None)))
+
+
+def test_worktree_isolation_requires_host_worktree_manager():
+    """Worktree isolation must use the host-provided manager, not a fallback."""
+    import pytest
+    from openjiuwen.agent_teams.workflow.engine.errors import BackendError
+
+    backend = TeamWorkerBackend(model=None, team_backend=None)
+
+    with pytest.raises(BackendError, match="host-provided worktree manager"):
+        asyncio.run(backend.run("write code", {"label": "sum", "isolation": "worktree"}, None))
 
 
 def test_preprocess_builds_four_layer_offline(tmp_path):
@@ -247,3 +308,142 @@ def test_execute_worker_derives_build_context_from_leader_base(monkeypatch):
     assert ctx.language == "en"
     assert ctx.extras == {"team_key": "leader-only"}
     assert ctx is not leader_ctx
+
+
+def test_worktree_isolation_sets_worker_workspace_and_removes_clean_worktree(tmp_path, monkeypatch):
+    """agent(isolation='worktree') creates an owner worktree for the worker cwd."""
+    from openjiuwen.agent_teams.harness import team_harness as th_mod
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.harness.tools.worktree.models import (
+        WorktreeChangeSummary,
+        WorktreeCreateResult,
+    )
+
+    worktree_path = tmp_path / "worker-wt"
+    worktree_path.mkdir()
+    captured: dict = {}
+
+    class _Manager:
+        def __init__(self):
+            self.created: list[str] = []
+            self.removed: list[tuple[str, str]] = []
+
+        async def create_owner_worktree(self, slug):
+            self.created.append(slug)
+            return WorktreeCreateResult(
+                worktree_path=str(worktree_path),
+                worktree_branch=f"worktree-{slug}",
+                head_commit="base",
+            )
+
+        async def count_changes(self, session):
+            captured["session"] = session
+            return WorktreeChangeSummary(changed_files=0, commits=0)
+
+        async def remove_worktree(self, path, repo_root):
+            self.removed.append((path, repo_root))
+            return True
+
+    class _FakeHarness:
+        async def run_once(self, content, **kw):
+            return "ok"
+
+        async def dispose(self):
+            return None
+
+    def _fake_build(*, agent_spec, role, member_name, build_context=None, **kw):
+        captured["spec"] = agent_spec
+        captured["member_name"] = member_name
+        return _FakeHarness()
+
+    async def _fake_root(path):
+        return str(tmp_path)
+
+    manager = _Manager()
+    monkeypatch.setattr(th_mod.TeamHarness, "build", _fake_build)
+    monkeypatch.setattr("openjiuwen.harness.tools.worktree.git.find_canonical_git_root", _fake_root)
+
+    backend = TeamWorkerBackend(
+        model=None,
+        team_backend=None,
+        team_name="code-team",
+        worker_base_spec=DeepAgentSpec(tools=[]),
+        build_context=_build_context_with_worktree_manager(manager),
+    )
+    result = asyncio.run(backend.run("write code", {"label": "sum", "isolation": "worktree"}, None))
+
+    assert result.text == "ok"
+    assert manager.created and manager.created[0].startswith("agent-code-team-wf-sum-0-")
+    assert captured["spec"].workspace.root_path == str(worktree_path)
+    assert captured["spec"].workspace.stable_base is False
+    assert manager.removed == [(str(worktree_path), str(tmp_path))]
+    assert captured["session"].worktree_path == str(worktree_path)
+
+
+def test_worktree_isolation_keeps_changed_worktree_without_return_metadata(tmp_path, monkeypatch):
+    """Changed isolated worktrees are kept, but not injected into agent results."""
+    from openjiuwen.agent_teams.harness import team_harness as th_mod
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.harness.tools.worktree.models import (
+        WorktreeChangeSummary,
+        WorktreeCreateResult,
+    )
+
+    script = '''
+from swarmflow import agent
+
+META = {"name": "iso-meta", "description": "worktree isolation", "phases": []}
+
+async def run(args):
+    return await agent("write code", label="sum", isolation="worktree")
+'''
+    worktree_path = tmp_path / "worker-wt"
+    worktree_path.mkdir()
+
+    class _Manager:
+        def __init__(self):
+            self.removed: list[tuple[str, str]] = []
+
+        async def create_owner_worktree(self, slug):
+            return WorktreeCreateResult(
+                worktree_path=str(worktree_path),
+                worktree_branch=f"worktree-{slug}",
+                head_commit="base",
+            )
+
+        async def count_changes(self, session):
+            return WorktreeChangeSummary(changed_files=1, commits=0)
+
+        async def remove_worktree(self, path, repo_root):
+            self.removed.append((path, repo_root))
+            return True
+
+    class _FakeHarness:
+        async def run_once(self, content, **kw):
+            return '{"status": "done"}'
+
+        async def dispose(self):
+            return None
+
+    def _fake_build(*, agent_spec, role, member_name, build_context=None, **kw):
+        return _FakeHarness()
+
+    async def _fake_root(path):
+        return str(tmp_path)
+
+    manager = _Manager()
+    monkeypatch.setattr(th_mod.TeamHarness, "build", _fake_build)
+    monkeypatch.setattr("openjiuwen.harness.tools.worktree.git.find_canonical_git_root", _fake_root)
+
+    backend = TeamWorkerBackend(
+        model=None,
+        team_backend=None,
+        team_name="code-team",
+        worker_base_spec=DeepAgentSpec(tools=[]),
+        build_context=_build_context_with_worktree_manager(manager),
+    )
+    result = asyncio.run(run_workflow(_write(tmp_path, script), backend=backend))
+
+    parsed = json.loads(result)
+    assert parsed == {"status": "done"}
+    assert manager.removed == []

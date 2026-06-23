@@ -204,6 +204,7 @@ async def agent(
     prompt: str, *, schema: type[M],
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
+    isolation: str | None = ...,
 ) -> "M | None":
     """Overload: ``schema=<pydantic model>`` narrows the result to that model."""
     ...
@@ -214,6 +215,7 @@ async def agent(
     prompt: str, *, schema: dict,
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
+    isolation: str | None = ...,
 ) -> "dict | None":
     """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
     ...
@@ -224,6 +226,7 @@ async def agent(
     prompt: str, *, schema: None = ...,
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
+    isolation: str | None = ...,
 ) -> "str | None":
     """Overload: no ``schema`` returns the agent's raw text."""
     ...
@@ -237,12 +240,15 @@ async def agent(
     schema: Any = None,
     model: str | None = None,
     timeout: float | None = None,
+    isolation: str | None = None,
 ) -> Any:
     rt = _rt.get()
+    if isolation is not None and isolation != "worktree":
+        raise WorkflowError("agent(isolation=...) only supports 'worktree'")
     opts: dict = {}
     for _k, _v in (
         ("label", label), ("phase", phase), ("schema", schema),
-        ("model", model), ("timeout", timeout),
+        ("model", model), ("timeout", timeout), ("isolation", isolation),
     ):
         if _v is not None:
             opts[_k] = _v

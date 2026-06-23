@@ -19,10 +19,7 @@ without interfering.
 from __future__ import annotations
 
 from contextvars import ContextVar, Token
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, Sequence, runtime_checkable
-
-if TYPE_CHECKING:
-    from pydantic import BaseModel
+from typing import Any, Awaitable, Callable, Protocol, Sequence, runtime_checkable
 
 
 @runtime_checkable
@@ -43,6 +40,7 @@ class Provider(Protocol):
         schema: Any = ...,
         model: str | None = ...,
         timeout: float | None = ...,
+        isolation: str | None = ...,
     ) -> Any:
         """Spawn a sub-agent and return its result (typed per ``schema``)."""
         ...

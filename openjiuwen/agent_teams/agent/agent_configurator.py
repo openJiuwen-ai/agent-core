@@ -22,10 +22,7 @@ from openjiuwen.agent_teams.messager import (
     Messager,
     create_messager,
 )
-from openjiuwen.agent_teams.paths import (
-    independent_member_workspace,
-    team_home,
-)
+from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.paths import (
     team_memory_dir as default_team_memory_dir,
 )
@@ -40,6 +37,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.agent_teams.workspace_layout import ensure_team_member_workspace_link
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.spawn.agent_config import (
     SpawnAgentConfig,
@@ -375,13 +373,9 @@ class AgentConfigurator:
             )
         if ws_spec and ws_spec.stable_base:
             team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
-            base = team_home(team_name) / "workspaces"
-            team_ws_path = base / f"{member_name}_workspace"
-            independent_ws = independent_member_workspace(member_name)
-            if independent_ws.is_dir() and not team_ws_path.exists():
-                base.mkdir(parents=True, exist_ok=True)
-                os.symlink(str(independent_ws), str(team_ws_path), target_is_directory=True)
-            ws_spec = ws_spec.model_copy(update={"root_path": str(team_ws_path)})
+            ws_spec = ws_spec.model_copy(
+                update={"root_path": ensure_team_member_workspace_link(team_name, member_name)}
+            )
 
         workspace_root_path = ws_spec.root_path if ws_spec is not None else None
         should_register_cleanup_path = (
@@ -613,6 +607,7 @@ class AgentConfigurator:
             swarmflow_worker_base_spec=swarmflow_worker_base_spec,
             reliability_components=reliability_components,
             permissions_override=ctx.permissions_override,
+            worktree_manager=self.worktree_manager,
         )
 
         # Fold the team rails into the spec rails (after the user rails, to keep

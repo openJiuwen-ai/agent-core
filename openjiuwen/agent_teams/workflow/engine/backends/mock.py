@@ -45,7 +45,7 @@ _MAX_DEPTH = 8  # guard against self-referential schemas
 
 def _opt_sig(opts: dict) -> dict:
     """Deterministic, JSON-able slice of opts for the seed/identity."""
-    return {k: opts[k] for k in ("label", "phase", "model") if k in opts}
+    return {k: opts[k] for k in ("label", "phase", "model", "isolation") if k in opts}
 
 
 def _seed(prompt: str, opts: dict, schema_json: dict | None) -> int:

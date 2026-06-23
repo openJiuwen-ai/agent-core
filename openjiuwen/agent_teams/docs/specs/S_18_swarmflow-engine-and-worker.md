@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/`（engine / backends / observer / schema / runner / tool_swarmflow）、`schema/team.py`、`schema/events.py`、`schema/blueprint.py`、`agent/team_agent.py`、`agent/coordination/handlers/workflow.py`、`rails/team_policy_rail.py`、`prompts/sections.py` |
-| 最近一次修订日期 | 2026-06-05 |
-| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md` |
+| 最近一次修订日期 | 2026-06-22 |
+| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_39_swarmflow-agent-worktree-isolation.md` |
 
 ## 范围 / 边界
 
@@ -31,6 +31,9 @@
 - **业务无关**：engine 子包不得 import 任何 `openjiuwen.agent_teams` 业务模块（schema/agent/tools/...）。它只依赖 stdlib + 可选 pydantic/jsonschema。这保证可用 `MockBackend` 独立单测，也保证未来可与上游 `dw/wf` 同步。
 - **脚本格式**：合法 Python 模块，顶层 `META={...}`(纯字面量，`ast.literal_eval` 强制) + `async def run(args)`(或 `run()`)。脚本用 `from swarmflow import agent, parallel, ...`（facade 模块导入时一次性把唯一包名 `swarmflow` 注册进 `sys.modules` 指向 facade；进程内固定映射、无 per-run 安装/卸载，故顶层 import 与 `run` 体内延迟 import 同样生效）。
 - **接缝**：`agent()`/`parallel()`/`pipeline()`/... 经 contextvar provider 转发；`Provider` 实现可整体替换。唯一 IO 接缝是 `AgentBackend.run(prompt, opts, schema_json) -> AgentResult`。
+  `agent()` 的 option 集合包含 `label` / `phase` / `schema` / `model` /
+  `timeout` / `isolation`。`isolation` 当前只允许 `None` 或 `"worktree"`；
+  engine 只校验与透传，具体隔离语义由 backend 实现。
 - **可观测性**：`Runtime` 有两个 sink。`log_sink: Callable[[str], None]`（诊断文本，默认 no-op）；`progress_sink: Callable[[WorkflowProgressEvent], None]`（结构化进度，默认 no-op）。`phase()`/`log()`/`agent()` 起止发 `WorkflowProgressEvent`；引擎不读 wall-clock（保持 resume 确定性），事件**无时间戳**——消费方在 agent_teams 层补时。
 
 ## WORKER 不变量（`TeamRole.WORKER`）
@@ -40,6 +43,16 @@
 3. **不进 coordination 协作循环**：worker 不订阅消息总线、不认领任务、不被 dispatcher 唤醒。它经 **`TeamHarness.run_once`** 执行——`run_once` = `DeepAgent.invoke`（按 spec 的 `enable_task_loop` 自动单轮或自驱 task-loop），**不开 supervisor → 无 steer / 无 outputs 流**，返回值与 `Runner.run_agent` 一致；**不经** `TeamAgent.invoke` / `CoordinationKernel.start`。结束 `harness.dispose()` 释放 sys_operation（工具由 `run_once` 的 `teardown_tools` 自动清理）。
 4. **有 roster 身份**：`TeamWorkerBackend` 经 `spawn_member(role=WORKER, status=BUSY)` 开 DB row（member_name 形如 `wf-<label-slug>-<n>`，满足 `_MEMBER_NAME_PATTERN`，也用作 worker card / owner id），完成标 `SHUTDOWN`。row 操作 best-effort，失败不阻断执行。
 5. **model**：worker 默认继承 base spec（teammate/leader）的 `model`（`TeamModelConfig`）。`agent(model="X")` 的 per-call hint 经注入的 `model_resolver` 回调解析为**配置而非实例**——`agent_configurator` 在 leader+`enable_swarmflow` 时构造闭包，用 `resolve_member_model(ctx.team_spec, model_name="X", model_index=None)` 对 team model pool 做**纯位置查找**（无 allocator 轮转、无状态），返回 `TeamModelConfig`；命中则覆盖 worker spec.model，未命中（pool 未配 / 名字缺失 / 无 hint）返回 `None` → 继承 base spec model。resolver 经 `BuildContext.extras` 的 `SWARMFLOW_MODEL_RESOLVER` 注入，`TeamWorkerBackend` 只持 `(name) -> TeamModelConfig | None` 回调，engine 对接层不耦合 pool/allocator 结构。
+6. **worktree isolation**：`agent(isolation="worktree")` 给该 worker 创建
+   owner-scoped worktree。`TeamWorkerBackend` 调
+   `WorktreeManager.create_owner_worktree(slug)`，slug 固定为
+   `agent-{team_name}-{worker_member_name}-{hash8}`；worker 的
+   `WorkspaceSpec.root_path` 覆盖为 `worktree_path`，`stable_base=False`，且不
+   注册到 `cleanup_path`。worker 完成后检查变更：干净则
+   `remove_worktree`，有修改 / 有提交 / 状态不可确认则保留 worktree 给 leader
+   后续集成。`agent()` 返回值保持 worker 原始输出，不附加 worktree path / branch；
+   后续集成阶段由明确的 merge agent 基于真实仓库的 git 状态、`git worktree list`、
+   分支和提交信息完成提交、合并和冲突处理。
 
 ## 结构化输出工具协议（`StructuredOutputTool`）
 

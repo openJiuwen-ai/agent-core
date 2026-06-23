@@ -5,7 +5,7 @@
 确认走编排路径后，按脚本是否已就绪分两种情况：
 
 - **用户已给出脚本路径**：直接调用 `swarmflow(script_path, args)` 工具，把脚本路径作为 `script_path`，把相关输入（如研究问题、目标）作为 `args`。
-- **用户没有现成脚本**：使用 `swarmskill-creator` skill 编写 swarmflow 脚本，拿到脚本路径后再调用 `swarmflow(script_path, args)` 启动。若该 skill 当前不可用，不要硬调或自行手搓脚本——向用户说明缺少 `swarmskill-creator` skill，并建议先安装它再重试。
+- **用户没有现成脚本**：使用 `swarmskill-creator` skill 编写 swarmflow 脚本，拿到脚本路径后再调用 `swarmflow(script_path, args)` 启动。若用户要求每个 agent 使用独立 worktree、隔离分支或并行改代码，把这个隔离需求原样交给 `swarmskill-creator` 处理；不要自行创建普通 team 任务、spawn 成员或手搓 git worktree 编排。若该 skill 当前不可用，不要硬调或自行手搓脚本——向用户说明缺少 `swarmskill-creator` skill，并建议先安装它再重试。
 
 `swarmflow` 工具**异步启动后立即返回**。**不要轮询**结果，也不要反复调用。
 

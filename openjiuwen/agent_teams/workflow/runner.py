@@ -61,7 +61,9 @@ async def run_swarmflow(
             team's teammate spec, or the leader spec) — gives workers
             teammate-equivalent capabilities without the team tools.
         build_context: Optional ``BuildContext`` from the leader harness,
-            forwarded to each worker's ``NativeHarness`` build.
+            forwarded to each worker's ``NativeHarness`` build. Runtime-only
+            handles such as the owner-scoped worktree manager ride in
+            ``build_context.extras``.
 
     Returns:
         Whatever the script's ``run(args)`` returned.
