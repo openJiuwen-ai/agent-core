@@ -194,8 +194,6 @@ class EvolutionStore:
         if skill_dir is None:
             return
 
-        await self._archive_current_state(name, skill_dir)
-
         if record.change.target == EvolutionTarget.SCRIPT:
             await self._persist_script(skill_dir, record)
 
@@ -255,6 +253,10 @@ class EvolutionStore:
             logger.warning("[EvolutionStore] parse %s failed: %s", evo_path.name, exc)
             return EvolutionLog.empty(skill_id=name)
 
+    async def load_full_evolution_log(self, name: str) -> EvolutionLog:
+        """Load the complete evolution log for one skill."""
+        return await self._load_full_evolution_log(name)
+
     async def _save_evolution_log(
         self,
         name: str,
@@ -291,8 +293,6 @@ class EvolutionStore:
         if skill_md_path is None:
             logger.warning("[EvolutionStore] solidify: SKILL.md not found (skill=%s)", name)
             return 0
-
-        await self._archive_current_state(name, skill_dir)
 
         content = await self._read_file_text(skill_md_path)
         for record in pending:

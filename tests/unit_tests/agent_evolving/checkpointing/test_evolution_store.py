@@ -136,7 +136,7 @@ class TestEvolutionStoreLogCRUD:
 class TestEvolutionStoreArchive:
     @staticmethod
     @pytest.mark.asyncio
-    async def test_append_record_archives_existing_skill_body(tmp_path: Path):
+    async def test_append_record_does_not_archive_existing_skill_body(tmp_path: Path):
         root = tmp_path / "skills"
         skill_dir = prepare_skill(root, "skill-a", "# Skill\n\nold body\n")
         store = EvolutionStore(str(root))
@@ -144,15 +144,11 @@ class TestEvolutionStoreArchive:
         await store.append_record("skill-a", make_record("ev_1"))
 
         archive = skill_dir / "archive"
-        body_archives = list(archive.glob("SKILL.v*.md"))
-        evo_archives = list(archive.glob("evolutions.v*.json"))
-        assert len(body_archives) == 1
-        assert body_archives[0].read_text(encoding="utf-8") == "# Skill\n\nold body\n"
-        assert evo_archives == []
+        assert not archive.exists() or list(archive.glob("SKILL.v*.md")) == []
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_append_record_archives_previous_evolution_log_with_matching_suffix(tmp_path: Path):
+    async def test_append_record_does_not_archive_previous_evolution_log(tmp_path: Path):
         root = tmp_path / "skills"
         skill_dir = prepare_skill(root, "skill-a")
         store = EvolutionStore(str(root))
@@ -161,40 +157,30 @@ class TestEvolutionStoreArchive:
         await store.append_record("skill-a", make_record("ev_2", content="second"))
 
         archive = skill_dir / "archive"
-        evo_archives = sorted(archive.glob("evolutions.v*.json"))
-        assert len(evo_archives) == 1
-        archived_log = json.loads(evo_archives[0].read_text(encoding="utf-8"))
-        assert [entry["id"] for entry in archived_log["entries"]] == ["ev_1"]
-
-        suffix = evo_archives[0].name.removeprefix("evolutions.").removesuffix(".json")
-        assert (archive / f"SKILL.{suffix}.md").exists()
+        assert not archive.exists() or list(archive.glob("evolutions.v*.json")) == []
+        current_log = json.loads((skill_dir / "evolutions.json").read_text(encoding="utf-8"))
+        assert [entry["id"] for entry in current_log["entries"]] == ["ev_1", "ev_2"]
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_solidify_archives_before_writing_skill_body_and_log(tmp_path: Path):
+    async def test_solidify_does_not_archive_before_writing_skill_body_and_log(tmp_path: Path):
         root = tmp_path / "skills"
         skill_dir = prepare_skill(root, "skill-a", "# Skill\n\n## Troubleshooting\n- old\n")
         store = EvolutionStore(str(root))
         await store.append_record("skill-a", make_record("ev_body_1", content="- check logs"))
 
-        before_solidify_body = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
-        before_solidify_log = json.loads((skill_dir / "evolutions.json").read_text(encoding="utf-8"))
         archive = skill_dir / "archive"
-        existing_archives = {path.name for path in archive.iterdir()}
+        existing_archives = {path.name for path in archive.iterdir()} if archive.is_dir() else set()
 
         await store.solidify("skill-a")
 
-        new_archives = [path for path in archive.iterdir() if path.name not in existing_archives]
-        body_archives = [path for path in new_archives if path.name.startswith("SKILL.v")]
-        evo_archives = [path for path in new_archives if path.name.startswith("evolutions.v")]
-        assert len(body_archives) == 1
-        assert len(evo_archives) == 1
-        assert body_archives[0].read_text(encoding="utf-8") == before_solidify_body
-        assert json.loads(evo_archives[0].read_text(encoding="utf-8")) == before_solidify_log
-
-        body_suffix = body_archives[0].name.removeprefix("SKILL.").removesuffix(".md")
-        evo_suffix = evo_archives[0].name.removeprefix("evolutions.").removesuffix(".json")
-        assert body_suffix == evo_suffix
+        new_archives = []
+        if archive.is_dir():
+            new_archives = [path for path in archive.iterdir() if path.name not in existing_archives]
+        assert new_archives == []
+        assert "- check logs" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        solidified_log = json.loads((skill_dir / "evolutions.json").read_text(encoding="utf-8"))
+        assert solidified_log["entries"][0]["applied"] is True
 
     @staticmethod
     @pytest.mark.asyncio
