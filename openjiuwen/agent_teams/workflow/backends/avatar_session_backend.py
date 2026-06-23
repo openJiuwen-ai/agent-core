@@ -331,7 +331,8 @@ class AvatarSessionManager:
             raise BackendError(f"session avatar build/start failed for {state.member_name}: {e}") from e
         state.harness = harness
 
-    def _make_state_cb(self, state: _SessionState):
+    @staticmethod
+    def _make_state_cb(state: _SessionState):
         """Callback resolving the turn future when the harness settles to IDLE.
 
         Runs inside the harness supervisor coroutine, so it stays cheap: a
@@ -349,7 +350,8 @@ class AvatarSessionManager:
 
         return on_state
 
-    def _make_round_cb(self, state: _SessionState):
+    @staticmethod
+    def _make_round_cb(state: _SessionState):
         """Callback caching each round's outcome (the last one wins per turn)."""
 
         async def on_round(*, kind: str, round_id: int, result: Any) -> None:
@@ -399,7 +401,8 @@ class AvatarSessionManager:
         text = _output_text(result)
         return AgentResult(text=text, tokens=_estimate_tokens(prompt, text))
 
-    async def _drive_round(self, state: _SessionState, prompt: str) -> dict | None:
+    @staticmethod
+    async def _drive_round(state: _SessionState, prompt: str) -> dict | None:
         """Send one round and await the harness settling back to IDLE."""
         loop = asyncio.get_running_loop()
         state.last_finished = None
@@ -411,7 +414,8 @@ class AvatarSessionManager:
         await state.harness.send(prompt, immediate=False)
         return await fut
 
-    def _raise_on_interrupt_or_fail(self, state: _SessionState, result: Any) -> None:
+    @staticmethod
+    def _raise_on_interrupt_or_fail(state: _SessionState, result: Any) -> None:
         """Reject a failed or HITL-interrupted round rather than return a partial."""
         if state.failed:
             raise BackendError(f"session '{state.member_name}' round failed")
@@ -506,7 +510,8 @@ class AvatarSessionManager:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _session_system_prompt(self, state: _SessionState) -> str:
+    @staticmethod
+    def _session_system_prompt(state: _SessionState) -> str:
         """Compose the avatar's system prompt: role persona + caller instructions."""
         base = _SESSION_SYS_PROMPT_HUMAN if state.kind == "human" else _SESSION_SYS_PROMPT_AGENT
         if state.instructions:

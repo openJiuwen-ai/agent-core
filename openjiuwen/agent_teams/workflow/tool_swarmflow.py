@@ -213,12 +213,12 @@ class SwarmflowTool(AsyncTool):
                 abort_event=abort_event,
                 on_backend_ready=_on_backend_ready,
             )
-        except WorkflowAborted:
+        except WorkflowAborted as exc:
             # Paused at an abort checkpoint: the WAL holds the completed prefix.
             # Re-raise as CancelledError so the async-tool runtime treats it as a
             # silent cancellation (no completion injected) — matching the cancel
             # the controller triggers as pause's third step.
-            raise asyncio.CancelledError()
+            raise asyncio.CancelledError() from exc
         finally:
             if controller is not None:
                 controller.deregister(task_id)

@@ -422,8 +422,6 @@ class TeamRuntimeManager:
         pending swarmflow human turn (the correlation id rode out on the
         ``human_prompt`` progress event).
         """
-        from openjiuwen.agent_teams.interaction.payload import HumanAgentMessage
-
         prefix = "swarmflow:"
         if len(payloads) != 1:
             return None

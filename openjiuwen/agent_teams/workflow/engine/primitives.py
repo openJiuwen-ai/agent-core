@@ -498,6 +498,21 @@ def _warn_concurrent_session(rt) -> None:
     )
 
 
+@dataclass
+class _TurnRequest:
+    """One session turn's request payload, threaded through ``_drive``/``_turn``.
+
+    Bundles the per-turn parameters so the drive/turn helpers take a single
+    request object instead of a long positional list.
+    """
+
+    prompt: str
+    opts: dict
+    json_schema: dict | None
+    model_cls: Any
+    correlation_id: str | None
+
+
 class AgentSession:
     """A stateful, multi-turn handle over one agent — or one human.
 
@@ -601,9 +616,14 @@ class AgentSession:
             # A human turn carries a deterministic correlation id (phase:label:turn)
             # so a person's reply matches even across a resume — never a uuid.
             correlation_id = self._correlation_id(opts) if self._human else None
-            call_result = await self._drive(
-                rt, prompt, opts, json_schema, model_cls, correlation_id
+            req = _TurnRequest(
+                prompt=prompt,
+                opts=opts,
+                json_schema=json_schema,
+                model_cls=model_cls,
+                correlation_id=correlation_id,
             )
+            call_result = await self._drive(rt, req)
             if not call_result.succeeded:
                 attempts = rt.retries + 1
                 who = "human" if self._human else "agent"
@@ -644,33 +664,38 @@ class AgentSession:
         sid, self._sid = self._sid, None
         await rt.backend.close_session(sid)
 
-    async def _drive(self, rt, prompt, opts, json_schema, model_cls, correlation_id):
+    async def _drive(self, rt, req: _TurnRequest):
         """Open the session lazily, then run one turn through the retry helper.
 
         Agent turns mirror ``agent()`` (spawn-budget gate + LLM permit); human
         turns skip both — waiting on a person must not hold a concurrency permit.
         """
         if self._human:
-            await self._ensure_open(rt, opts)
-            return await self._turn(rt, prompt, opts, json_schema, model_cls, correlation_id)
+            await self._ensure_open(rt, req.opts)
+            return await self._turn(rt, req)
         if rt.spawn_count >= rt.spawn_limit:
             detail = f"spawn limit {rt.spawn_limit} reached"
-            rt.log_sink(f"[wf] {detail}; skipping {opts.get('label')!r}")
+            rt.log_sink(f"[wf] {detail}; skipping {req.opts.get('label')!r}")
             return _BackendCallResult(result=None, succeeded=False, error_detail=detail)
         if rt.sem is None:  # safety net; normally created in run_workflow
             rt.sem = asyncio.Semaphore(rt.make_cap())
         async with rt.sem:
-            await self._ensure_open(rt, opts)
-            return await self._turn(rt, prompt, opts, json_schema, model_cls, correlation_id)
+            await self._ensure_open(rt, req.opts)
+            return await self._turn(rt, req)
 
-    async def _turn(self, rt, prompt, opts, json_schema, model_cls, correlation_id):
+    async def _turn(self, rt, req: _TurnRequest):
         """Run one ``send_turn`` (the prior history is what the backend may replay)."""
         hist = list(self._history)
         sid = self._sid
         return await _attempt_calls(
-            rt, opts, json_schema, model_cls,
+            rt, req.opts, req.json_schema, req.model_cls,
             lambda: rt.backend.send_turn(
-                sid, prompt, opts, json_schema, history=hist, correlation_id=correlation_id
+                sid,
+                req.prompt,
+                req.opts,
+                req.json_schema,
+                history=hist,
+                correlation_id=req.correlation_id,
             ),
         )
 
