@@ -241,12 +241,19 @@ def build_plan_mode_reinjected_content(ctx: ReinjectContext) -> str:
 
 
 def _get_plan_mode(session_state: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(session_state, dict):
+        return None
     plan_mode = session_state.get("plan_mode")
     if isinstance(plan_mode, dict):
         return plan_mode
-    deepagent = session_state.get("deepagent")
-    if isinstance(deepagent, dict) and isinstance(deepagent.get("plan_mode"), dict):
-        return deepagent["plan_mode"]
+    for key in ("deepagent", "task_state"):
+        nested = session_state.get(key)
+        if isinstance(nested, dict) and isinstance(nested.get("plan_mode"), dict):
+            return nested["plan_mode"]
+    for key in ("global_state", "agent_state", "trace_state"):
+        nested_plan_mode = _get_plan_mode(session_state.get(key))
+        if isinstance(nested_plan_mode, dict):
+            return nested_plan_mode
     return None
 
 

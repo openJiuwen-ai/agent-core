@@ -12,7 +12,7 @@ from openjiuwen.core.context_engine.processor.compressor.forked.round import (
     ForkedRoundLevelCompressor,
     ForkedRoundLevelCompressorConfig,
 )
-from openjiuwen.core.context_engine.processor.compressor.prompts.forked import (
+from openjiuwen.core.context_engine.processor.compressor.prompts.prompts import (
     CURRENT_COMPACT_PROMPT,
     DIALOGUE_COMPACT_PROMPT,
     ROUND_COMPACT_PROMPT,

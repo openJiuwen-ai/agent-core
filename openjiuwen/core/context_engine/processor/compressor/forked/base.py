@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
@@ -20,6 +20,8 @@ from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     BaseMessage,
     Model,
+    ModelClientConfig,
+    ModelRequestConfig,
     ToolMessage,
     UserMessage,
 )
@@ -35,6 +37,13 @@ class PrefixCompactSpan:
     @property
     def has_target(self) -> bool:
         return bool(self.messages_to_compress)
+
+
+class ForkedPrefixCompactProcessorConfig(BaseModel):
+    trigger_context_ratio: float = Field(default=0.4, gt=0.0, lt=1.0)
+    min_target_context_ratio: float = Field(default=0.1, ge=0.0, lt=1.0)
+    model: ModelRequestConfig | None = None
+    model_client: ModelClientConfig | None = None
 
 
 def adjust_keep_recent_for_tool_boundaries(messages: list[BaseMessage], keep_recent: int) -> int:
@@ -162,6 +171,7 @@ class ForkedPrefixCompactProcessor(ContextProcessor):
                 ForkedCompressionRequest.from_context_window(
                     prompt=prompt,
                     context_window=context_window,
+                    trace_context=self._build_trace_context(context),
                     exclude_recent_messages=len(span.protected_tail),
                 )
             )
@@ -202,6 +212,44 @@ class ForkedPrefixCompactProcessor(ContextProcessor):
 
     def _build_span(self, messages: list[BaseMessage]) -> PrefixCompactSpan:
         raise NotImplementedError
+
+    def _build_trace_context(self, context: ModelContext) -> dict[str, Any]:
+        trace_context: dict[str, Any] = {
+            "call_site": "forked_compressor",
+            "compression_processor": self.processor_type(),
+        }
+        if hasattr(context, "session_id"):
+            try:
+                trace_context["session_id"] = context.session_id()
+            except Exception:
+                pass
+        if hasattr(context, "context_id"):
+            try:
+                trace_context["context_id"] = context.context_id()
+            except Exception:
+                pass
+        if hasattr(context, "get_session_ref"):
+            try:
+                session = context.get_session_ref()
+            except Exception:
+                session = None
+            if session is not None and hasattr(session, "get_session_id") and "session_id" not in trace_context:
+                try:
+                    trace_context["session_id"] = session.get_session_id()
+                except Exception:
+                    pass
+            if session is not None and hasattr(session, "dump_state"):
+                try:
+                    trace_context["session_state"] = session.dump_state()
+                    trace_context["session_state_source"] = "session.dump_state"
+                except Exception:
+                    pass
+            if session is not None and hasattr(session, "get_state"):
+                try:
+                    trace_context["session_global_state"] = session.get_state()
+                except Exception:
+                    pass
+        return trace_context
 
     def _resolve_trigger_tokens_threshold(self, context_max: int) -> int:
         tokens_threshold = getattr(self.config, "tokens_threshold", None)

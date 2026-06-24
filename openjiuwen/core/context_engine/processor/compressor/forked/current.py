@@ -4,13 +4,13 @@ from pydantic import Field
 
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.compressor.forked.base import (
+    ForkedPrefixCompactProcessorConfig,
     ForkedPrefixCompactProcessor,
     PrefixCompactSpan,
     adjust_keep_recent_for_tool_boundaries,
     find_last_real_user_message_index,
 )
-from openjiuwen.core.context_engine.processor.compressor.forked.dialogue import ForkedDialogueCompressorConfig
-from openjiuwen.core.context_engine.processor.compressor.prompts.forked import CURRENT_COMPACT_PROMPT
+from openjiuwen.core.context_engine.processor.compressor.prompts.prompts import CURRENT_COMPACT_PROMPT
 from openjiuwen.core.foundation.llm import BaseMessage
 
 
@@ -21,9 +21,10 @@ MEMORY_BLOCK_CURRENT_CLOSE = "</memory_block_current>"
 DEFAULT_CURRENT_COMPRESSION_PROMPT = CURRENT_COMPACT_PROMPT
 
 
-class ForkedCurrentRoundCompressorConfig(ForkedDialogueCompressorConfig):
+class ForkedCurrentRoundCompressorConfig(ForkedPrefixCompactProcessorConfig):
+    trigger_context_ratio: float = Field(default=0.4, gt=0.0, lt=1.0)
+    min_target_context_ratio: float = Field(default=0.1, ge=0.0, lt=1.0)
     keep_recent_messages: int = Field(default=0, ge=0)
-    custom_compression_prompt: str | None = DEFAULT_CURRENT_COMPRESSION_PROMPT
 
 
 @ContextEngine.register_processor()
