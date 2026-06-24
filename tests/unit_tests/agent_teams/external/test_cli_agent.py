@@ -88,6 +88,9 @@ def test_codex_mcp_launch_args_use_config_override():
     # Hyphen in the server name is normalised to an underscore for the TOML key.
     assert 'mcp_servers.openjiuwen_team.command="openjiuwen-team-mcp"' == args[1]
     assert 'mcp_servers.openjiuwen_team.args=["--flag"]' == args[3]
+    assert 'mcp_servers.openjiuwen_team.env_vars=["OPENJIUWEN_TEAM_JOIN"]' in args
+    assert "mcp_servers.openjiuwen_team.startup_timeout_sec=120" in args
+    assert "mcp_servers.openjiuwen_team.required=true" in args
 
 
 @pytest.mark.level1

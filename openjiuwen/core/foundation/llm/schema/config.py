@@ -14,6 +14,7 @@ class ProviderType(str, Enum):
     """ModelClientProvider type"""
     OpenAI = "OpenAI"
     OpenRouter = "OpenRouter"
+    Anthropic = "Anthropic"
     SiliconFlow = "SiliconFlow"
     DashScope = "DashScope"
     DeepSeek = "DeepSeek"

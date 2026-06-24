@@ -217,6 +217,7 @@ class _TeamRunnerMixin:
         stream_modes: Optional[list[BaseStreamMode]] = None,
         envs: Optional[dict[str, Any]] = None,
         stream_logger: Optional["TeamStreamLogger"] = None,
+        background_task_controller: Optional[Any] = None,
     ) -> AsyncIterator[Any]:
         """Stream-run an agent_teams TeamAgent identified by spec or team_name.
 
@@ -263,6 +264,10 @@ class _TeamRunnerMixin:
                     stream_logger.feed(ready_chunk)
                 yield ready_chunk
                 self._maybe_attach_observability(activation.agent)
+                if background_task_controller is not None:
+                    # Attach the embedder's pause/resume control surface to the
+                    # leader brain; SwarmflowTool reads it to register run handles.
+                    activation.agent.set_background_task_controller(background_task_controller)
                 async for chunk in activation.agent.stream(inputs, session=activation.session):
                     if stream_logger is not None:
                         stream_logger.feed(chunk)
@@ -894,6 +899,7 @@ class _TeamRunnerClassMixin:
         stream_modes: Optional[list[BaseStreamMode]] = None,
         envs: Optional[dict[str, Any]] = None,
         stream_logger: Optional["TeamStreamLogger"] = None,
+        background_task_controller: Optional[Any] = None,
     ) -> AsyncIterator[Any]:
         """Stream-run a team. ``base=True`` switches to the multi_agent
         ``BaseTeam`` path (``str | BaseTeam``); default goes through the
@@ -927,6 +933,7 @@ class _TeamRunnerClassMixin:
             stream_modes=stream_modes,
             envs=envs,
             stream_logger=stream_logger,
+            background_task_controller=background_task_controller,
         ):
             yield chunk
 

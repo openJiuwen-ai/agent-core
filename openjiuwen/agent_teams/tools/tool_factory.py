@@ -8,6 +8,11 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import MappedToolOutput, TeamTool
+from openjiuwen.agent_teams.tools.tool_async import (
+    AsyncTaskCancelTool,
+    AsyncTaskOutputTool,
+    AsyncTasksListTool,
+)
 from openjiuwen.agent_teams.tools.tool_member import (
     ApprovePlanTool,
     ApproveToolCallTool,
@@ -58,6 +63,7 @@ def create_team_tools(
     team_name: str = "default",
     swarmflow_model_resolver: Callable[[str], Any] | None = None,
     swarmflow_worker_base_spec: Any = None,
+    swarmflow_human_base_spec: Any = None,
     team_permissions_enabled: bool = False,
 ) -> list[Tool]:
     """Create role-appropriate tool instances filtered by permission sets.
@@ -132,13 +138,20 @@ def create_team_tools(
         "swarmflow": SwarmflowTool(
             parent_agent=parent_agent,
             messager=messager,
-            team_backend=agent_team,
             team_name=team_name,
             model_resolver=swarmflow_model_resolver,
             worker_base_spec=swarmflow_worker_base_spec,
+            human_base_spec=swarmflow_human_base_spec,
             t=t,
             language=lang,
         ),
+        # Async-tool control tools (list / output / cancel background tasks).
+        # Leader-only (in LEADER_ONLY_TOOLS); always wired — harmless when the
+        # registry is empty. ``parent_agent`` is the harness whose runtime they
+        # query; None for harness-less callers (filtered out by role anyway).
+        "async_tasks_list": AsyncTasksListTool(parent_agent, t, language=lang),
+        "async_task_output": AsyncTaskOutputTool(parent_agent, t, language=lang),
+        "async_task_cancel": AsyncTaskCancelTool(parent_agent, t, language=lang),
     }
 
     if role == "human_agent":

@@ -6,23 +6,25 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from openjiuwen.core.foundation.tool import McpServerConfig
+
 from ..utils.env import (
     DEFAULT_BROWSER_TIMEOUT_S,
     DEFAULT_GUARDRAIL_MAX_FAILURES,
     DEFAULT_GUARDRAIL_MAX_STEPS,
     DEFAULT_GUARDRAIL_RETRY_ONCE,
-    DEFAULT_MODEL_NAME,
+    DEFAULT_MODEL_NAME,  # noqa: F401  (re-exported for main.py / mcp_server / tests)
     DEFAULT_PLAYWRIGHT_MCP_ARGS,
     DEFAULT_PLAYWRIGHT_MCP_COMMAND,
-    MISSING_API_KEY_MESSAGE,
+    MISSING_API_KEY_MESSAGE,  # noqa: F401  (re-exported for main.py / mcp_server)
     first_non_empty_env,
     is_truthy_env,
-    load_repo_dotenv,
+    load_repo_dotenv,  # noqa: F401  (re-exported for main.py / mcp_server)
     parse_command_args,
     resolve_bool_env,
     resolve_browser_timeout_s,
@@ -42,6 +44,30 @@ class BrowserRunGuardrails:
 
 
 @dataclass(frozen=True)
+class BrowserInstanceConfig:
+    """Per-instance browser identity, used to isolate one browser per agent.
+
+    All fields default to empty/0, which reproduces the legacy process-global
+    (env-driven) behavior. When ``key`` is non-empty the browser is isolated:
+    the Playwright MCP ``server_id`` is suffixed with the key and the managed
+    profile / port / user-data-dir are derived from it instead of shared env.
+    Agents sharing the same ``key`` intentionally share one browser.
+    """
+
+    key: str = ""
+    driver_mode: str = ""  # "", "managed", "remote", "extension"; "" -> env/default
+    managed_port: int = 0  # 0 -> auto-allocate (keyed) or env/default (legacy)
+    user_data_dir: str = ""  # "" -> derived from key under mcp_cwd/.browser-profiles
+    profile_name: str = ""  # "" -> key, then env BROWSER_PROFILE_NAME
+    cdp_url: str = ""  # remote mode: explicit CDP endpoint
+    browser_binary: str = ""  # optional Chrome path override
+
+    def sanitized_key(self) -> str:
+        """Return the key reduced to id-safe characters (``[A-Za-z0-9_-]``)."""
+        return re.sub(r"[^A-Za-z0-9_-]+", "-", (self.key or "").strip()).strip("-")
+
+
+@dataclass(frozen=True)
 class RuntimeSettings:
     provider: str
     api_key: str
@@ -49,6 +75,7 @@ class RuntimeSettings:
     model_name: str
     mcp_cfg: McpServerConfig
     guardrails: BrowserRunGuardrails
+    instance: Optional[BrowserInstanceConfig] = None
 
 
 def resolve_playwright_mcp_cwd() -> str:
@@ -88,11 +115,10 @@ def build_browser_guardrails() -> BrowserRunGuardrails:
     )
 
 
-def build_playwright_mcp_config() -> McpServerConfig:
-    command = (	 
-         os.getenv("PLAYWRIGHT_MCP_COMMAND", DEFAULT_PLAYWRIGHT_MCP_COMMAND).strip() 
-         or DEFAULT_PLAYWRIGHT_MCP_COMMAND 
-     )
+def build_playwright_mcp_config(instance: Optional[BrowserInstanceConfig] = None) -> McpServerConfig:
+    command = (
+        os.getenv("PLAYWRIGHT_MCP_COMMAND", DEFAULT_PLAYWRIGHT_MCP_COMMAND).strip() or DEFAULT_PLAYWRIGHT_MCP_COMMAND
+    )
     args = parse_command_args(os.getenv("PLAYWRIGHT_MCP_ARGS", DEFAULT_PLAYWRIGHT_MCP_ARGS))
     cwd = resolve_playwright_mcp_cwd()
     driver_mode = (os.getenv("BROWSER_DRIVER") or "").strip().lower()
@@ -133,8 +159,10 @@ def build_playwright_mcp_config() -> McpServerConfig:
         if "--extension" not in args:
             args.append("--extension")
     else:
-        # CDP support for official Playwright MCP server.
-        cdp_endpoint = first_non_empty_env("PLAYWRIGHT_MCP_CDP_ENDPOINT", "PLAYWRIGHT_CDP_URL")
+        # CDP support for official Playwright MCP server. An explicit per-instance
+        # cdp_url (remote mode) wins over the shared env endpoint.
+        instance_cdp = instance.cdp_url.strip() if instance and instance.cdp_url else ""
+        cdp_endpoint = instance_cdp or first_non_empty_env("PLAYWRIGHT_MCP_CDP_ENDPOINT", "PLAYWRIGHT_CDP_URL")
         cdp_headers = first_non_empty_env("PLAYWRIGHT_MCP_CDP_HEADERS", "PLAYWRIGHT_CDP_HEADERS")
         cdp_timeout = first_non_empty_env("PLAYWRIGHT_MCP_CDP_TIMEOUT", "PLAYWRIGHT_CDP_TIMEOUT_MS")
         browser_name = first_non_empty_env("PLAYWRIGHT_MCP_BROWSER")
@@ -162,22 +190,32 @@ def build_playwright_mcp_config() -> McpServerConfig:
     if env_map:
         params["env"] = env_map
 
+    # Isolate the MCP registration per browser identity. Same key -> same
+    # server_id (intentional sharing); different key -> isolated server.
+    server_id = "playwright_official_stdio"
+    server_name = "playwright-official"
+    instance_key = instance.sanitized_key() if instance else ""
+    if instance_key:
+        server_id = f"{server_id}__{instance_key}"
+        server_name = f"{server_name}-{instance_key}"
+
     return McpServerConfig(
-        server_id="playwright_official_stdio",
-        server_name="playwright-official",
+        server_id=server_id,
+        server_name=server_name,
         server_path="stdio://playwright",
         client_type="stdio",
         params=params,
     )
 
 
-def build_runtime_settings() -> RuntimeSettings:
+def build_runtime_settings(instance: Optional[BrowserInstanceConfig] = None) -> RuntimeSettings:
     provider, api_key, api_base = resolve_model_settings()
     return RuntimeSettings(
         provider=provider,
         api_key=api_key,
         api_base=api_base,
         model_name=resolve_model_name(),
-        mcp_cfg=build_playwright_mcp_config(),
+        mcp_cfg=build_playwright_mcp_config(instance),
         guardrails=build_browser_guardrails(),
+        instance=instance,
     )

@@ -40,9 +40,9 @@ import inspect
 import json
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence, TypeVar, overload
 
-from .errors import WorkflowError
+from .errors import WorkflowAborted, WorkflowError
 from .journal import call_signature, key_str
 from .progress import ProgressKind, WorkflowProgressEvent
 from .schema import coerce, resolve_schema
@@ -57,6 +57,20 @@ M = TypeVar("M", bound="BaseModel")
 _rt: ContextVar = ContextVar("wf_runtime")
 _path: ContextVar[tuple] = ContextVar("wf_path", default=())
 _seq: ContextVar[dict | None] = ContextVar("wf_seq", default=None)
+# Nesting depth of the *current execution path* (how many ``workflow()`` frames
+# this call chain is inside). A ContextVar — not a shared Runtime counter — so it
+# is copied per asyncio Task: parallel()/pipeline() branches each inherit the
+# parent depth and advance their OWN copy, which lets sibling ``workflow()`` calls
+# run concurrently while still capping genuine recursion (a sub-workflow calling
+# ``workflow()`` again runs in the same Task, so it sees the incremented depth).
+_wf_depth: ContextVar[int] = ContextVar("wf_depth", default=0)
+# Max nesting of ``workflow()`` calls along one path. 1 = a script may call a
+# sub-workflow, but that sub-workflow may not call another (recursion guard).
+_MAX_WORKFLOW_DEPTH = 1
+# Max items in a single ``parallel()`` / ``pipeline()`` call. Exceeding it raises
+# rather than silently truncating — a bounded fan-out keeps one call from
+# spawning an unbounded agent fleet by accident.
+_MAX_FANOUT = 4096
 
 
 @dataclass
@@ -154,6 +168,20 @@ def _preview(value: Any) -> str | None:
     return body
 
 
+def _check_abort(rt) -> None:
+    """Raise ``WorkflowAborted`` when an external pause signal is set.
+
+    Called twice per ``agent()`` / session ``send()``: an entry gate (before the
+    concurrency permit / backend) stops a queued call; a pre-journal guard (after
+    the backend succeeds, before ``journal.use``) ensures a call that finished
+    inside the pause window does NOT persist to the WAL — so a resume reruns it.
+    A ``None`` event disables both checks (the back-compat default).
+    """
+    ev = rt.abort_event
+    if ev is not None and ev.is_set():
+        raise WorkflowAborted()
+
+
 def _emit_agent_started(rt, opts: dict, prompt: str) -> None:
     rt.progress_sink(
         WorkflowProgressEvent(
@@ -194,6 +222,50 @@ def _emit_agent_failed(rt, opts: dict, message: str) -> None:
     )
 
 
+# ─────────────────────────── options bag ───────────────────────────
+#: Engine-owned ``options`` keys. A backend may widen this via its
+#: ``KNOWN_OPTIONS``; anything outside the union is a typo and fails fast.
+_ENGINE_OPTIONS = frozenset(
+    {"label", "phase", "schema", "model", "timeout", "isolation", "agent_type"}
+)
+
+
+def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
+    """Merge explicit kwargs over an ``options`` bag, drop ``None``, validate keys.
+
+    The session primitives accept tuning knobs through a single ``options`` dict
+    (so new knobs need no signature change), with explicit keyword arguments
+    taking precedence. Every resulting key must be in
+    ``_ENGINE_OPTIONS | rt.backend.KNOWN_OPTIONS`` — an unknown key raises rather
+    than silently no-opping, which is the whole point of the bag.
+
+    Args:
+        rt: The active runtime (its ``backend`` declares extra allowed keys).
+        explicit: Keyword arguments passed directly to the primitive.
+        options: The optional ``options`` bag.
+
+    Returns:
+        The merged, validated, ``None``-stripped options dict.
+
+    Raises:
+        WorkflowError: If any key is outside the allowed set.
+    """
+    merged: dict = {}
+    for key, value in (options or {}).items():
+        if value is not None:
+            merged[key] = value
+    for key, value in explicit.items():
+        if value is not None:
+            merged[key] = value
+    allowed = _ENGINE_OPTIONS | getattr(rt.backend, "KNOWN_OPTIONS", frozenset())
+    unknown = sorted(k for k in merged if k not in allowed)
+    if unknown:
+        raise WorkflowError(
+            f"unknown option(s) {unknown}; allowed: {sorted(allowed)}"
+        )
+    return merged
+
+
 # ─────────────────────────── agent ───────────────────────────
 # Typed return per schema kind:
 #   schema=MyModel (pydantic) -> MyModel | None   (attribute access, static types)
@@ -203,7 +275,7 @@ def _emit_agent_failed(rt, opts: dict, message: str) -> None:
 async def agent(
     prompt: str, *, schema: type[M],
     label: str | None = ..., phase: str | None = ...,
-    model: str | None = ..., timeout: float | None = ...,
+    options: dict | None = ...,
 ) -> "M | None":
     """Overload: ``schema=<pydantic model>`` narrows the result to that model."""
     ...
@@ -213,7 +285,7 @@ async def agent(
 async def agent(
     prompt: str, *, schema: dict,
     label: str | None = ..., phase: str | None = ...,
-    model: str | None = ..., timeout: float | None = ...,
+    options: dict | None = ...,
 ) -> "dict | None":
     """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
     ...
@@ -223,7 +295,7 @@ async def agent(
 async def agent(
     prompt: str, *, schema: None = ...,
     label: str | None = ..., phase: str | None = ...,
-    model: str | None = ..., timeout: float | None = ...,
+    options: dict | None = ...,
 ) -> "str | None":
     """Overload: no ``schema`` returns the agent's raw text."""
     ...
@@ -235,17 +307,16 @@ async def agent(
     label: str | None = None,
     phase: str | None = None,
     schema: Any = None,
-    model: str | None = None,
-    timeout: float | None = None,
+    options: dict | None = None,
 ) -> Any:
     rt = _rt.get()
-    opts: dict = {}
-    for _k, _v in (
-        ("label", label), ("phase", phase), ("schema", schema),
-        ("model", model), ("timeout", timeout),
-    ):
-        if _v is not None:
-            opts[_k] = _v
+    # Orchestration/identity params (label/phase/schema) are explicit; tuning and
+    # forward-compat params (model/timeout/isolation/agent_type) ride in the
+    # validated ``options`` bag, mirroring ``AgentSession.send``. ``_build_opts``
+    # whitelists every key against ``_ENGINE_OPTIONS | backend.KNOWN_OPTIONS``.
+    opts = _build_opts(rt, {"label": label, "phase": phase, "schema": schema}, options)
+    if opts.get("isolation") not in (None, "worktree"):
+        raise WorkflowError("agent(options={'isolation': ...}) only supports 'worktree'")
     json_schema, model_cls = resolve_schema(opts.get("schema"))
 
     ks = key_str(_path.get() + (("call", _next_ordinal()),))
@@ -255,13 +326,15 @@ async def agent(
 
     cached = rt.journal.get_cached(ks, sig)
     if cached is not None:  # resume hit — no semaphore, no backend
-        rt.journal.use(ks, cached)
+        await rt.journal.use(ks, cached)
         result = _rehydrate(cached, model_cls)
         # Prefer stored raw_text; if absent (old journal), fall back to
         # preamble + structured data via _preview()
         outcome_text = cached.get("raw_text") or _preview(result)
         _emit_agent_completed(rt, opts, outcome_text)
         return result
+
+    _check_abort(rt)  # entry gate: a paused run starts no new agent()
 
     if rt.spawn_count >= rt.spawn_limit:
         rt.log_sink(f"[wf] spawn limit {rt.spawn_limit} reached; skipping {opts.get('label')!r}")
@@ -286,7 +359,9 @@ async def agent(
         _emit_agent_failed(rt, opts, msg)
         return None
 
-    rt.journal.use(
+    _check_abort(rt)  # pre-journal guard: a call finished mid-pause does not persist
+
+    await rt.journal.use(
         ks,
         _make_record(
             _JournalRecordInput(
@@ -305,7 +380,23 @@ async def agent(
 
 
 async def _call_backend(rt, prompt, opts, json_schema, model) -> _BackendCallResult:
-    """Call the backend with retries. Returns a ``_BackendCallResult``."""
+    """Run the single-shot ``agent()`` call (``backend.run``) with retries."""
+    return await _attempt_calls(
+        rt, opts, json_schema, model,
+        lambda: rt.backend.run(prompt, opts, json_schema),
+    )
+
+
+async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCallResult:
+    """Run ``make_call()`` with retries + schema validation.
+
+    Shared by the single-shot ``agent()`` path (``backend.run``) and the stateful
+    session path (``backend.send_turn``); the only difference between them is the
+    bound ``make_call`` closure. Returns a ``_BackendCallResult``: a
+    backend/timeout error or schema-validation failure retries up to
+    ``rt.retries`` extra times; a ``skipped`` result short-circuits to a
+    non-success with no retry.
+    """
     timeout = opts.get("timeout")
     attempts = rt.retries + 1
     last_err: Exception | None = None
@@ -314,9 +405,9 @@ async def _call_backend(rt, prompt, opts, json_schema, model) -> _BackendCallRes
         try:
             if timeout is not None:
                 async with asyncio.timeout(timeout):  # py3.11+
-                    res = await rt.backend.run(prompt, opts, json_schema)
+                    res = await make_call()
             else:
-                res = await rt.backend.run(prompt, opts, json_schema)
+                res = await make_call()
         except Exception as e:  # backend / timeout error -> retry, then skip
             last_err = e
             rt.log_sink(
@@ -385,11 +476,341 @@ def _make_record(spec: _JournalRecordInput) -> dict:
     }
 
 
+# ─────────────────────── stateful sessions ───────────────────────
+def _jsonable(result: Any, model) -> Any:
+    """A JSON-able form of a turn result for the history mirror (cf. ``_make_record``)."""
+    if result is None:
+        return None
+    if model is not None and isinstance(result, model):
+        return result.model_dump(mode="json")
+    return result
+
+
+def _warn_concurrent_session(rt) -> None:
+    """Emitted once if a single session object receives overlapping ``send()``s."""
+    if getattr(rt, "warned_concurrent_session", False):
+        return
+    rt.warned_concurrent_session = True
+    rt.log_sink(
+        "[wf] WARNING: a single session received concurrent send()s (e.g. the same "
+        "session used from two parallel() branches). A session is a serial "
+        "conversation — await its turns in order, or use one session per entity."
+    )
+
+
+@dataclass
+class _TurnRequest:
+    """One session turn's request payload, threaded through ``_drive``/``_turn``.
+
+    Bundles the per-turn parameters so the drive/turn helpers take a single
+    request object instead of a long positional list.
+    """
+
+    prompt: str
+    opts: dict
+    json_schema: dict | None
+    model_cls: Any
+    correlation_id: str | None
+
+
+class AgentSession:
+    """A stateful, multi-turn handle over one agent — or one human.
+
+    Created by :func:`agent_session` / :func:`human_session`; scripts never
+    construct it directly. Each :meth:`send` advances the conversation and keeps
+    context across turns. The backend owns the real state (a long-lived avatar
+    harness); this object keeps a light ``(user, assistant)`` history mirror used
+    for the resume signature and lazy-open bookkeeping.
+
+    A human session (``_human=True``) sources each turn's input from a real
+    person (the backend formats it into the requested shape) and does not hold
+    the LLM concurrency permit while waiting; it is otherwise identical to an
+    agent session.
+    """
+
+    __slots__ = (
+        "_label", "_phase", "_instructions", "_options", "_human",
+        "_history", "_sid", "_in_flight",
+    )
+
+    def __init__(
+        self,
+        *,
+        label: str | None = None,
+        phase: str | None = None,
+        instructions: str | None = None,
+        options: dict | None = None,
+        _human: bool = False,
+    ) -> None:
+        self._label = label
+        self._phase = phase
+        self._instructions = instructions
+        self._options = dict(options or {})
+        self._human = _human
+        self._history: list[dict] = []
+        self._sid: str | None = None
+        self._in_flight = False
+
+    @overload
+    async def send(self, prompt: str, *, notify: Literal[True], options: dict | None = ...) -> None:
+        """Overload: ``notify=True`` is a one-way push and returns ``None``."""
+        ...
+
+    @overload
+    async def send(self, prompt: str, *, schema: type[M], options: dict | None = ...) -> "M | None":
+        """Overload: ``schema=<pydantic model>`` narrows the reply to that model."""
+        ...
+
+    @overload
+    async def send(self, prompt: str, *, schema: dict, options: dict | None = ...) -> "dict | None":
+        """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
+        ...
+
+    @overload
+    async def send(self, prompt: str, *, schema: None = ..., options: dict | None = ...) -> "str | None":
+        """Overload: no ``schema`` returns the reply's raw text."""
+        ...
+
+    async def send(self, prompt, *, schema=None, notify=False, options=None):
+        """Advance the conversation one turn (or push a one-way ``notify``).
+
+        With ``schema`` the reply is validated/coerced to it (``MyModel | None``
+        for a pydantic model, ``dict | None`` for a JSON-Schema dict); without,
+        the raw text (``str | None``). ``notify=True`` pushes a one-way message
+        (still recorded so context continues, still journaled for resume) and
+        returns ``None``; it is text-only and rejects a ``schema``.
+        """
+        rt = _rt.get()
+        if notify and schema is not None:
+            raise WorkflowError("send(notify=True) is text-only; don't also pass a schema")
+        # Phase is run-global orchestration state: the active phase() wins, so a
+        # session naturally spans phases; fall back to the session's own default.
+        phase_val = rt.current_phase if rt.current_phase is not None else self._phase
+        opts = _build_opts(
+            rt,
+            {"label": self._label, "phase": phase_val, "schema": schema},
+            {**self._options, **(options or {})},
+        )
+        json_schema, model_cls = resolve_schema(opts.get("schema"))
+
+        ks = key_str(_path.get() + (("call", _next_ordinal()),))
+        sig = call_signature(prompt, opts, json_schema, history=self._history)
+
+        if self._in_flight:
+            _warn_concurrent_session(rt)
+        self._in_flight = True
+        try:
+            _emit_agent_started(rt, opts, prompt)
+
+            cached = rt.journal.get_cached(ks, sig)
+            if cached is not None:  # resume hit — no backend, no harness, no person
+                await rt.journal.use(ks, cached)
+                result = _rehydrate(cached, model_cls)
+                self._append_history(prompt, result, model_cls)
+                outcome_text = cached.get("raw_text") or _preview(result)
+                _emit_agent_completed(rt, opts, outcome_text)
+                return None if notify else result
+
+            _check_abort(rt)  # entry gate: a paused run starts no new turn
+
+            # A human turn carries a deterministic correlation id (phase:label:turn)
+            # so a person's reply matches even across a resume — never a uuid.
+            correlation_id = self._correlation_id(opts) if self._human else None
+            req = _TurnRequest(
+                prompt=prompt,
+                opts=opts,
+                json_schema=json_schema,
+                model_cls=model_cls,
+                correlation_id=correlation_id,
+            )
+            call_result = await self._drive(rt, req)
+            if not call_result.succeeded:
+                attempts = rt.retries + 1
+                who = "human" if self._human else "agent"
+                label = opts.get("label") or who
+                msg = f"{who} session {label!r} failed after {attempts} attempts"
+                if call_result.error_detail:
+                    msg = f"{msg}: {call_result.error_detail}"
+                _emit_agent_failed(rt, opts, msg)
+                return None
+
+            result = call_result.result
+            _check_abort(rt)  # pre-journal guard: an interrupted turn does not persist
+            await rt.journal.use(
+                ks,
+                _make_record(
+                    _JournalRecordInput(
+                        key=ks,
+                        sig=sig,
+                        opts=opts,
+                        result=result,
+                        model=model_cls,
+                        raw_text=call_result.raw_text,
+                    )
+                ),
+            )
+            self._append_history(prompt, result, model_cls)
+            outcome_text = call_result.raw_text or _preview(result)
+            _emit_agent_completed(rt, opts, outcome_text)
+            return None if notify else result
+        finally:
+            self._in_flight = False
+
+    async def aclose(self) -> None:
+        """Close the backing session if it was ever opened (idempotent)."""
+        if self._sid is None:
+            return
+        rt = _rt.get()
+        sid, self._sid = self._sid, None
+        await rt.backend.close_session(sid)
+
+    async def _drive(self, rt, req: _TurnRequest):
+        """Open the session lazily, then run one turn through the retry helper.
+
+        Agent turns mirror ``agent()`` (spawn-budget gate + LLM permit); human
+        turns skip both — waiting on a person must not hold a concurrency permit.
+        """
+        if self._human:
+            await self._ensure_open(rt, req.opts)
+            return await self._turn(rt, req)
+        if rt.spawn_count >= rt.spawn_limit:
+            detail = f"spawn limit {rt.spawn_limit} reached"
+            rt.log_sink(f"[wf] {detail}; skipping {req.opts.get('label')!r}")
+            return _BackendCallResult(result=None, succeeded=False, error_detail=detail)
+        if rt.sem is None:  # safety net; normally created in run_workflow
+            rt.sem = asyncio.Semaphore(rt.make_cap())
+        async with rt.sem:
+            await self._ensure_open(rt, req.opts)
+            return await self._turn(rt, req)
+
+    async def _turn(self, rt, req: _TurnRequest):
+        """Run one ``send_turn`` (the prior history is what the backend may replay)."""
+        hist = list(self._history)
+        sid = self._sid
+        return await _attempt_calls(
+            rt, req.opts, req.json_schema, req.model_cls,
+            lambda: rt.backend.send_turn(
+                sid,
+                req.prompt,
+                req.opts,
+                req.json_schema,
+                history=hist,
+                correlation_id=req.correlation_id,
+            ),
+        )
+
+    def _correlation_id(self, opts: dict) -> str:
+        """Deterministic id for a human turn: ``{phase}:{label}:{turn}``.
+
+        The script flow is deterministic, so this is stable across a resume — the
+        same interaction point yields the same id, which keeps a person's reply
+        valid even if the run was interrupted while waiting. ``turn`` is this
+        session's send index (``len(history) // 2``); it advances on every send
+        (hit or miss) because history is appended each turn, so replay matches.
+        """
+        phase = opts.get("phase") or "_"
+        label = opts.get("label") or "human"
+        turn = len(self._history) // 2
+        return f"{phase}:{label}:{turn}"
+
+    async def _ensure_open(self, rt, opts) -> None:
+        """Open the backend session on the first real turn (one avatar per session)."""
+        if self._sid is not None:
+            return
+        if not self._human:
+            rt.spawn_count += 1  # the avatar is this session's one spawned agent
+        self._sid = await rt.backend.open_session(
+            kind="human" if self._human else "agent",
+            instructions=self._instructions,
+            opts=opts,
+        )
+
+    def _append_history(self, prompt: str, result: Any, model_cls) -> None:
+        """Append the ``(user, assistant)`` pair so the next turn carries context."""
+        self._history.append({"role": "user", "content": prompt})
+        self._history.append({"role": "assistant", "content": _jsonable(result, model_cls)})
+
+
+def agent_session(
+    *,
+    label: str | None = None,
+    phase: str | None = None,
+    instructions: str | None = None,
+    options: dict | None = None,
+) -> AgentSession:
+    """Open a stateful, multi-turn agent — ``send()`` it repeatedly; context persists."""
+    return AgentSession(label=label, phase=phase, instructions=instructions, options=options)
+
+
+def human_session(
+    *,
+    label: str | None = None,
+    phase: str | None = None,
+    instructions: str | None = None,
+    options: dict | None = None,
+) -> AgentSession:
+    """Open a stateful, multi-turn human participant (each turn's input from a person)."""
+    return AgentSession(
+        label=label, phase=phase, instructions=instructions, options=options, _human=True
+    )
+
+
+#: Annotation alias: ``human_session()`` returns the same class with ``_human`` set.
+HumanSession = AgentSession
+
+
+@overload
+async def human(
+    prompt: str, *, schema: type[M],
+    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
+) -> "M | None":
+    """Overload: ``schema=<pydantic model>`` narrows the answer to that model."""
+    ...
+
+
+@overload
+async def human(
+    prompt: str, *, schema: dict,
+    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
+) -> "dict | None":
+    """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
+    ...
+
+
+@overload
+async def human(
+    prompt: str, *, schema: None = ...,
+    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
+) -> "str | None":
+    """Overload: no ``schema`` returns the person's answer as raw text."""
+    ...
+
+
+async def human(prompt, *, schema=None, label=None, phase=None, options=None):
+    """One-shot human turn: ask a person once, return their (typed) answer.
+
+    Sugar over an ephemeral :func:`human_session` opened, asked once, and closed —
+    use :func:`human_session` when you need multiple turns with memory. ``label`` /
+    ``phase`` mirror :func:`agent` / :func:`human_session`: they name the turn in
+    progress events and the deterministic human correlation id.
+    """
+    s = AgentSession(_human=True, label=label, phase=phase)
+    try:
+        return await s.send(prompt, schema=schema, options=options)
+    finally:
+        await s.aclose()
+
+
 # ─────────────────────── parallel (barrier) ───────────────────────
 async def parallel(thunks: Sequence[Callable[[], Awaitable]]) -> list:
     k = _next_ordinal()  # this block's slot in the parent scope
     base = _path.get()
     thunks = list(thunks)
+    if len(thunks) > _MAX_FANOUT:
+        raise WorkflowError(
+            f"parallel() got {len(thunks)} thunks; the per-call limit is "
+            f"{_MAX_FANOUT}. Split into batches instead of one giant fan-out."
+        )
 
     async def branch(i: int, th: Callable[[], Awaitable]):
         # Runs in a Task-copied context; sets are private to this branch.
@@ -411,6 +832,11 @@ async def pipeline(items: Sequence, *stages: Callable) -> list:
     k = _next_ordinal()  # this block's slot in the parent scope
     base = _path.get()
     items = list(items)
+    if len(items) > _MAX_FANOUT:
+        raise WorkflowError(
+            f"pipeline() got {len(items)} items; the per-call limit is "
+            f"{_MAX_FANOUT}. Split into batches instead of one giant fan-out."
+        )
 
     async def chain(i: int, item: Any):
         prev = item
@@ -500,15 +926,26 @@ budget = _Budget()
 
 # ─────────────────────── inline sub-workflow ───────────────────────
 async def workflow(name_or_path: str, args: Any = None) -> Any:
+    """Run a sub-workflow inline and return its ``run()`` result.
+
+    Safe to fan out concurrently via ``parallel`` / ``pipeline``: depth is tracked
+    per execution path (a ContextVar copied per Task), so concurrent sibling
+    ``workflow()`` calls each get their own depth budget and all run. Only genuine
+    recursion — a sub-workflow's ``run()`` calling ``workflow()`` again on the same
+    path — is capped at ``_MAX_WORKFLOW_DEPTH`` (returns ``None``, logged).
+    """
     rt = _rt.get()
-    if rt.wf_depth >= 1:
-        rt.log_sink("[wf] nested workflow depth > 1 not allowed; skipping")
+    depth = _wf_depth.get()
+    if depth >= _MAX_WORKFLOW_DEPTH:
+        rt.log_sink(
+            f"[wf] nested workflow depth > {_MAX_WORKFLOW_DEPTH} not allowed; skipping"
+        )
         return None
     from .loader import load_workflow_source  # lazy: avoid import cycle
 
     loaded = load_workflow_source(name_or_path)
     k = _next_ordinal()
-    rt.wf_depth += 1
+    tok_d = _wf_depth.set(depth + 1)
     tok_p = _path.set(_path.get() + (("wf", k, loaded.meta.get("name", str(name_or_path))),))
     tok_s = _seq.set(_fresh_holder())
     try:
@@ -516,7 +953,7 @@ async def workflow(name_or_path: str, args: Any = None) -> Any:
     finally:
         _seq.reset(tok_s)
         _path.reset(tok_p)
-        rt.wf_depth -= 1
+        _wf_depth.reset(tok_d)
 
 
 # ─────────────────────── list helpers (JS idioms) ───────────────────────

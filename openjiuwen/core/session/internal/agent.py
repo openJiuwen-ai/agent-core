@@ -56,6 +56,10 @@ class AgentSession(BaseSession):
     def span(self):
         return self._agent_span
 
+    def set_span(self, span) -> None:
+        """Set the current agent span (e.g. root span for an invocation)."""
+        self._agent_span = span
+
     def stream_writer_manager(self) -> StreamWriterManager:
         return self._stream_writer_manager
 

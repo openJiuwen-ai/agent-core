@@ -42,14 +42,19 @@ class Runtime:
     spawn_limit: int = 1000
     budget_total: int | None = None
     cap_override: int | None = None  # force the concurrency cap (tests)
+    abort_event: asyncio.Event | None = field(default=None, repr=False)
+    """External cooperative pause signal. When set, the ``agent()`` /
+    ``AgentSession.send()`` abort checkpoints raise ``WorkflowAborted`` — the
+    in-flight call does not journal and the run unwinds (resume reruns it).
+    ``None`` disables the checkpoints (default; full back-compat)."""
 
     # Mutable run state (created/advanced inside the running loop).
     sem: asyncio.Semaphore | None = field(default=None, repr=False)
     spawn_count: int = 0
     tokens_spent: int = 0
     current_phase: str | None = None
-    wf_depth: int = 0
     warned_concurrent_scope: bool = False  # one-shot guard for the raw-gather warning
+    warned_concurrent_session: bool = False  # one-shot guard for overlapping session sends
 
     def make_cap(self) -> int:
         """Concurrent ``agent()`` calls allowed. Clamped to >= 1."""

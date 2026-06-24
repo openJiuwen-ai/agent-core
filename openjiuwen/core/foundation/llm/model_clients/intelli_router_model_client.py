@@ -1,8 +1,9 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """
-IntelliRouter Model Client - uses intelli_router's ReliableRouter as the underlying implementation
+IntelliRouter Model Client — wraps intelli_router.ReliableRouter.
 """
+import atexit
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -19,9 +20,13 @@ from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, Mod
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import llm_logger, LogEventType
-from openjiuwen.core.common.security.user_config import UserConfig
+from openjiuwen.core.common.exception.errors import build_error, ModelError, ValidationError
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.schema.generation_response import (
+    ImageGenerationResponse,
+    AudioGenerationResponse,
+    VideoGenerationResponse,
+)
 
 try:
     from intelli_router import ReliableRouter, Deployment
@@ -41,6 +46,8 @@ class IntelliRouterClientConfig:
     enable_health_check: bool = False
     health_check_interval: float = 300.0
     verify_ssl: bool = True
+    enable_observability: bool = False
+    web_dashboard_port: int = 0
 
     @classmethod
     def from_model_client_config(cls, config: ModelClientConfig) -> "IntelliRouterClientConfig":
@@ -55,26 +62,43 @@ class IntelliRouterClientConfig:
             enable_health_check=extra.get("intelli_router_enable_health_check", False),
             health_check_interval=extra.get("intelli_router_health_check_interval", 300.0),
             verify_ssl=config.verify_ssl,
+            enable_observability=extra.get("intelli_router_enable_observability", False),
+            web_dashboard_port=extra.get("intelli_router_web_dashboard_port", 0),
         )
 
 
-# Module-level router cache: same router config → same ReliableRouter instance
-# Key = md5 hash of (deployments + strategy + strategy_kwargs + ...)
+# Module-level router cache: same config -> same ReliableRouter instance
 _router_cache: dict[str, "ReliableRouter"] = {}
 _router_cache_lock: Lock = Lock()
+
+# Track web servers for lifecycle management (keyed by router cache key)
+_web_servers: dict[str, Any] = {}
+
+
+def _shutdown_web_servers():
+    """Stop all active MetricsWebServer instances on process exit."""
+    for server in _web_servers.values():
+        try:
+            server.stop()
+        except Exception as e:
+            logger.error(f"shutdown web server failed: {e}")
+    _web_servers.clear()
+
+
+atexit.register(_shutdown_web_servers)
+
+# Map each provider to the generation APIs it supports
+_GENERATION_SUPPORT: Dict[str, set] = {
+    "dashscope": {"image", "speech", "video"},
+}
 
 
 class IntelliRouterModelClient(BaseModelClient):
     """
-    IntelliRouter ModelClient using intelli_router's ReliableRouter as the underlying implementation
+    IntelliRouter Model Client — wraps intelli_router.ReliableRouter.
 
-    Features:
-    - API pooling: one model name maps to multiple deployment endpoints
-    - Smart routing: supports multiple routing strategies (random, lowest-latency, tag-based, adaptive, etc.)
-    - Auto retry: automatically switches to another deployment on failure
-    - State management: tracks deployment health status and latency statistics
-    - Streaming support: supports streaming responses
-    - Router sharing: clients with identical deployment configs share the same router instance
+    Provides API pooling, smart routing, auto retry, streaming support,
+    and multimodal generation (image/speech/video).
     """
     __client_name__ = "intelli_router"
 
@@ -84,16 +108,6 @@ class IntelliRouterModelClient(BaseModelClient):
         model_client_config: ModelClientConfig,
         router: Optional["ReliableRouter"] = None,
     ):
-        """
-        Initialize IntelliRouterModelClient
-
-        Args:
-            model_config: Model request config
-            model_client_config: Client config; extra fields (intelli_router_*) extracted from __pydantic_extra__
-            router: Optional pre-built ReliableRouter. When provided, skips cache lookup
-                    and uses this router directly. Useful for advanced scenarios where
-                    router lifecycle is managed externally.
-        """
         super().__init__(model_config, model_client_config)
         if router is not None:
             self._router = router
@@ -110,23 +124,24 @@ class IntelliRouterModelClient(BaseModelClient):
             f"{deployments_json}|{config.strategy}|{kwargs_json}|"
             f"{config.num_retries}|{config.timeout}|"
             f"{config.enable_health_check}|{config.health_check_interval}|"
-            f"{config.verify_ssl}"
+            f"{config.verify_ssl}|{config.enable_observability}|"
+            f"{config.web_dashboard_port}"
         )
         return hashlib.md5(raw.encode()).hexdigest()
 
     @classmethod
     def _get_or_create_router(cls, config: IntelliRouterClientConfig) -> "ReliableRouter":
-        """Get a router from cache or create & cache a new one."""
+        """Get a ReliableRouter from cache or create & cache a new one."""
         key = cls._make_router_key(config)
         if key not in _router_cache:
             with _router_cache_lock:
                 if key not in _router_cache:
-                    _router_cache[key] = cls._create_router(config)
+                    _router_cache[key] = cls._create_router(config, cache_key=key)
         return _router_cache[key]
 
     @classmethod
-    def _create_router(cls, config: IntelliRouterClientConfig):
-        """Create a ReliableRouter from IntelliRouterClientConfig"""
+    def _create_router(cls, config: IntelliRouterClientConfig, cache_key: str = ""):
+        """Create a ReliableRouter from IntelliRouterClientConfig."""
         if ReliableRouter is None or Deployment is None:
             raise build_error(
                 StatusCode.MODEL_SERVICE_CONFIG_ERROR,
@@ -140,26 +155,68 @@ class IntelliRouterModelClient(BaseModelClient):
                 model_name=dep_cfg.get("model_name"),
                 api_key=dep_cfg.get("api_key"),
                 api_base=dep_cfg.get("api_base"),
-                tpm=dep_cfg.get("tpm", 100000),
-                rpm=dep_cfg.get("rpm", 60),
+                provider=dep_cfg.get("provider", "openai"),
+                tpm=dep_cfg.get("tpm"),
+                rpm=dep_cfg.get("rpm"),
                 tags=dep_cfg.get("tags", []),
-                timeout=dep_cfg.get("timeout", 30.0),
+                timeout=dep_cfg.get("timeout"),
                 verify_ssl=dep_cfg.get("verify_ssl", config.verify_ssl),
             )
             deployments.append(dep)
 
-        router_kwargs = config.strategy_kwargs
-        return ReliableRouter(
+        event_bus = None
+        metrics_collector = None
+        if config.enable_observability:
+            try:
+                from intelli_router import EventBus, LoggingHook, MetricsCollector
+                event_bus = EventBus()
+                event_bus.register(LoggingHook(format="text"))
+                metrics_collector = MetricsCollector()
+                event_bus.register(metrics_collector)
+            except ImportError:
+                logger.warning("intelli_router observability modules not available, skipping")
+                if config.web_dashboard_port > 0:
+                    logger.warning("web dashboard will also be skipped due to missing observability modules")
+
+        if config.web_dashboard_port > 0 and not config.enable_observability:
+            logger.warning(
+                "intelli_router_web_dashboard_port is set but enable_observability is False, "
+                "web dashboard requires observability enabled"
+            )
+
+        router = ReliableRouter(
             deployments=deployments,
             strategy=config.strategy,
             num_retries=config.num_retries,
             timeout=config.timeout,
-            **router_kwargs
+            enable_health_check=config.enable_health_check,
+            health_check_interval=config.health_check_interval,
+            event_bus=event_bus,
+            **config.strategy_kwargs,
         )
 
+        if config.web_dashboard_port > 0 and metrics_collector is not None:
+            try:
+                from intelli_router import MetricsWebServer
+                web_server = MetricsWebServer(metrics=metrics_collector, port=config.web_dashboard_port)
+                web_server.start()
+                if cache_key:
+                    _web_servers[cache_key] = web_server
+                logger.info("IntelliRouter web dashboard started at %s", web_server.url)
+            except ImportError:
+                logger.warning("intelli_router MetricsWebServer not available, skipping web dashboard")
+            except OSError as e:
+                logger.warning("Failed to start web dashboard on port %d: %s", config.web_dashboard_port, e)
+
+        return router
+
     def _validate_config(self):
-        """Override config validation — intelli_router does not require api_key or api_base"""
+        """Override — intelli_router does not require api_key or api_base at top level."""
         pass
+
+    # ------------------------------------------------------------------
+    # Chat completion
+    # ------------------------------------------------------------------
 
     async def invoke(
         self,
@@ -175,48 +232,22 @@ class IntelliRouterModelClient(BaseModelClient):
         timeout: float = None,
         **kwargs
     ) -> AssistantMessage:
-        """
-        Async LLM invocation
-
-        Args:
-            messages: List of messages
-            tools: List of tools
-            temperature: Temperature parameter
-            top_p: Top-p sampling parameter
-            max_tokens: Maximum number of tokens to generate
-            stop: Stop sequence
-            model: Model name
-            output_parser: Output parser
-            timeout: Timeout in seconds
-            **kwargs: Additional parameters
-
-        Returns:
-            AssistantMessage: Assistant response message
-        """
         converted_messages = self._convert_messages_to_dict(messages)
+        model_name = model or self.model_config.model_name or "*"
 
-        model_name = model or self.model_config.model_name
-
-        request_params = self._build_request_params(
+        result = await self._router.invoke(
             messages=converted_messages,
+            tools=self._convert_tools_to_dict(tools),
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
             stop=stop,
-            tools=tools,
             model=model_name,
-            stream=False,
-            timeout=timeout,
             **kwargs
         )
 
-        response = await self._router.completion(
-            model=model_name,
-            messages=converted_messages,
-            **request_params
-        )
-
-        return await self._convert_response(response, output_parser)
+        # Map intelli_router types -> openjiuwen types
+        return await self._to_ow_assistant_message(result, output_parser)
 
     async def stream(
         self,
@@ -232,221 +263,20 @@ class IntelliRouterModelClient(BaseModelClient):
         timeout: float = None,
         **kwargs
     ) -> AsyncIterator[AssistantMessageChunk]:
-        """
-        Async streaming LLM invocation
-
-        Args:
-            messages: List of messages
-            tools: List of tools
-            temperature: Temperature parameter
-            top_p: Top-p sampling parameter
-            max_tokens: Maximum number of tokens to generate
-            stop: Stop sequence
-            model: Model name
-            output_parser: Output parser
-            timeout: Timeout in seconds
-            **kwargs: Additional parameters
-
-        Yields:
-            AssistantMessageChunk: Streaming response chunk
-        """
         converted_messages = self._convert_messages_to_dict(messages)
+        model_name = model or self.model_config.model_name or "*"
 
-        model_name = model or self.model_config.model_name
-
-        request_params = self._build_request_params(
+        async for chunk in self._router.stream(
             messages=converted_messages,
+            tools=self._convert_tools_to_dict(tools),
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
             stop=stop,
-            tools=tools,
             model=model_name,
-            stream=True,
-            timeout=timeout,
             **kwargs
-        )
-
-        async for chunk in self._router.stream_completion(
-            model=model_name,
-            messages=converted_messages,
-            **request_params
         ):
-            yield self._convert_chunk(chunk)
-
-    def _build_request_params(
-        self,
-        *,
-        messages: Union[str, List[dict]],
-        tools: Union[List[ToolInfo], List[dict], None] = None,
-        temperature: Optional[float] = None,
-        top_p: Optional[float] = None,
-        model: str = None,
-        stop: Union[Optional[str], None] = None,
-        max_tokens: Optional[int] = None,
-        stream: bool = False,
-        timeout: Optional[float] = None,
-        **kwargs
-    ) -> Dict[str, Any]:
-        params = {}
-
-        final_temperature = temperature if temperature is not None else self.model_config.temperature
-        final_top_p = top_p if top_p is not None else self.model_config.top_p
-        final_max_tokens = max_tokens if max_tokens is not None else self.model_config.max_tokens
-
-        if final_temperature is not None:
-            params["temperature"] = final_temperature
-        if final_top_p is not None:
-            params["top_p"] = final_top_p
-        if final_max_tokens is not None:
-            params["max_tokens"] = final_max_tokens
-        if stop is not None:
-            params["stop"] = stop
-        if timeout is not None:
-            params["timeout"] = timeout
-
-        tools_dict = self._convert_tools_to_dict(tools)
-        if tools_dict:
-            params["tools"] = tools_dict
-
-        params.update(kwargs)
-
-        client_name = self._get_client_name()
-        final_model = model if model else self.model_config.model_name
-        if UserConfig.is_sensitive():
-            llm_logger.info(
-                "Before request chat model, LLM request params ready.",
-                event_type=LogEventType.LLM_CALL_START,
-                model_name=final_model,
-                model_provider=self.model_client_config.client_provider,
-                temperature=final_temperature,
-                top_p=final_top_p,
-                max_tokens=final_max_tokens,
-                is_stream=stream,
-                stop=stop,
-                metadata={"client_name": client_name},
-            )
-        else:
-            llm_logger.info(
-                "Before request chat model, LLM request params ready.",
-                event_type=LogEventType.LLM_CALL_START,
-                model_name=final_model,
-                model_provider=self.model_client_config.client_provider,
-                messages=messages,
-                tools=tools_dict,
-                temperature=final_temperature,
-                top_p=final_top_p,
-                max_tokens=final_max_tokens,
-                is_stream=stream,
-                metadata={"client_name": client_name},
-            )
-
-        return params
-
-    async def _convert_response(
-        self,
-        response: Dict[str, Any],
-        output_parser: Optional[BaseOutputParser] = None
-    ) -> AssistantMessage:
-        """
-        Convert an intelli_router response to AssistantMessage
-
-        Args:
-            response: intelli_router response
-            output_parser: Output parser
-
-        Returns:
-            AssistantMessage: Assistant response message
-        """
-        choices = response.get("choices", [])
-        if not choices:
-            content = ""
-            message = {}
-        else:
-            message = choices[0].get("message", {})
-            content = message.get("content", "") or ""
-
-        # Get reasoning_content (if exists, e.g. DeepSeek thinking mode)
-        reasoning_content = message.get("reasoning_content", None)
-
-        # Parse tool_calls
-        tool_calls = []
-        if message.get("tool_calls"):
-            for idx, tc in enumerate(message.get("tool_calls", [])):
-                function = tc.get("function", {})
-                tool_call = ToolCall(
-                    id=tc.get("id", "") or "",
-                    type="function",
-                    name=function.get("name", "") or "",
-                    arguments=function.get("arguments", "") or "",
-                    index=tc.get("index", idx)
-                )
-                tool_calls.append(tool_call)
-
-        usage_metadata = None
-        usage = response.get("usage")
-        if usage:
-            usage_metadata = UsageMetadata(
-                model_name=self.model_config.model_name,
-                input_tokens=usage.get("prompt_tokens", 0) or 0,
-                output_tokens=usage.get("completion_tokens", 0) or 0,
-                total_tokens=usage.get("total_tokens", 0) or 0,
-                cache_tokens=self._extract_cache_tokens(usage),
-            )
-
-        if output_parser and content:
-            try:
-                parsed = await output_parser.parse(content)
-                if isinstance(parsed, str):
-                    content = parsed
-                else:
-                    content = str(parsed)
-            except Exception as e:
-                llm_logger.warning(
-                    "Output parser failed to parse content, using raw content as fallback.",
-                    event_type=LogEventType.LLM_CALL_ERROR,
-                    model_name=self.model_config.model_name,
-                    model_provider=self.model_client_config.client_provider,
-                    exception=str(e),
-                )
-
-        return AssistantMessage(
-            content=content,
-            tool_calls=tool_calls if tool_calls else None,
-            usage_metadata=usage_metadata,
-            finish_reason="tool_calls" if tool_calls else "stop",
-            reasoning_content=reasoning_content,
-        )
-
-    def _convert_chunk(self, chunk: Dict[str, Any]) -> AssistantMessageChunk:
-        """
-        Convert a streaming response chunk to AssistantMessageChunk
-
-        Args:
-            chunk: Streaming response chunk
-
-        Returns:
-            AssistantMessageChunk: Assistant message chunk
-        """
-        choices = chunk.get("choices", [])
-        if not choices:
-            content = ""
-        else:
-            delta = choices[0].get("delta", {})
-            content = delta.get("content", "") or ""
-
-        usage_metadata = None
-        usage = chunk.get("usage")
-        if usage:
-            usage_metadata = UsageMetadata(
-                model_name=self.model_config.model_name,
-                input_tokens=usage.get("prompt_tokens", 0) or 0,
-                output_tokens=usage.get("completion_tokens", 0) or 0,
-                total_tokens=usage.get("total_tokens", 0) or 0,
-                cache_tokens=self._extract_cache_tokens(usage),
-            )
-
-        return AssistantMessageChunk(content=content, usage_metadata=usage_metadata)
+            yield self._to_ow_chunk(chunk)
 
     async def generate_image(
         self,
@@ -460,11 +290,18 @@ class IntelliRouterModelClient(BaseModelClient):
         watermark: bool = False,
         seed: int = 0,
         **kwargs
-    ):
-        """IntelliRouter does not support image generation"""
-        raise build_error(
-            StatusCode.MODEL_CALL_FAILED,
-            error_msg="IntelliRouter does not support image generation"
+    ) -> ImageGenerationResponse:
+        provider = self._resolve_generation_provider(model)
+        if "image" not in _GENERATION_SUPPORT.get(provider, set()):
+            raise NotImplementedError(
+                f"Provider '{provider}' does not support image generation. "
+                f"Supported: {_GENERATION_SUPPORT}"
+            )
+        return await self._generate_image_dashscope(
+            messages, model=model, size=size,
+            negative_prompt=negative_prompt, n=n,
+            prompt_extend=prompt_extend, watermark=watermark,
+            seed=seed, **kwargs,
         )
 
     async def generate_speech(
@@ -475,11 +312,16 @@ class IntelliRouterModelClient(BaseModelClient):
         voice: Optional[str] = "Cherry",
         language_type: Optional[str] = "Auto",
         **kwargs
-    ):
-        """IntelliRouter does not support speech generation"""
-        raise build_error(
-            StatusCode.MODEL_CALL_FAILED,
-            error_msg="IntelliRouter does not support speech generation"
+    ) -> AudioGenerationResponse:
+        provider = self._resolve_generation_provider(model)
+        if "speech" not in _GENERATION_SUPPORT.get(provider, set()):
+            raise NotImplementedError(
+                f"Provider '{provider}' does not support speech generation."
+                f"Supported: {_GENERATION_SUPPORT}"
+            )
+        return await self._generate_speech_dashscope(
+            messages, model=model, voice=voice,
+            language_type=language_type, **kwargs,
         )
 
     async def generate_video(
@@ -497,9 +339,435 @@ class IntelliRouterModelClient(BaseModelClient):
         negative_prompt: Optional[str] = None,
         seed: Optional[int] = None,
         **kwargs
-    ):
-        """IntelliRouter does not support video generation"""
-        raise build_error(
-            StatusCode.MODEL_CALL_FAILED,
-            error_msg="IntelliRouter does not support video generation"
+    ) -> VideoGenerationResponse:
+        provider = self._resolve_generation_provider(model)
+        if "video" not in _GENERATION_SUPPORT.get(provider, set()):
+            raise NotImplementedError(
+                f"Provider '{provider}' does not support video generation."
+                f"Supported: {_GENERATION_SUPPORT}"
+            )
+        return await self._generate_video_dashscope(
+            messages, img_url=img_url, audio_url=audio_url,
+            model=model, size=size, resolution=resolution,
+            duration=duration, prompt_extend=prompt_extend,
+            watermark=watermark, negative_prompt=negative_prompt,
+            seed=seed, **kwargs,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal: type conversion helpers
+    # ------------------------------------------------------------------
+
+    async def _to_ow_assistant_message(
+        self,
+        msg: Any,
+        output_parser: Optional[BaseOutputParser] = None,
+    ) -> AssistantMessage:
+        """Convert intelli_router AssistantMessage -> openjiuwen AssistantMessage."""
+        content = msg.content or ""
+
+        # Apply output parser (openjiuwen's parser)
+        if output_parser and content:
+            try:
+                parsed = await output_parser.parse(content)
+                if isinstance(parsed, str):
+                    content = parsed
+                elif parsed is not None:
+                    content = str(parsed)
+            except Exception as e:
+                logger.error(f"parse content failed: {e}")
+
+        # Convert tool_calls
+        tool_calls = None
+        if msg.tool_calls:
+            tool_calls = [
+                ToolCall(id=tc.id, type=tc.type, name=tc.name, arguments=tc.arguments, index=tc.index)
+                for tc in msg.tool_calls
+            ]
+
+        # Convert usage metadata
+        usage_metadata = None
+        if msg.usage_metadata:
+            usage_metadata = UsageMetadata(
+                input_tokens=msg.usage_metadata.input_tokens,
+                output_tokens=msg.usage_metadata.output_tokens,
+                total_tokens=msg.usage_metadata.total_tokens,
+                cache_tokens=msg.usage_metadata.cache_tokens,
+                model_name=msg.usage_metadata.model_name or "",
+            )
+
+        return AssistantMessage(
+            content=content,
+            tool_calls=tool_calls,
+            usage_metadata=usage_metadata,
+            finish_reason=msg.finish_reason or "stop",
+            reasoning_content=msg.reasoning_content,
+        )
+
+    @staticmethod
+    def _to_ow_chunk(chunk: Any) -> AssistantMessageChunk:
+        """Convert intelli_router AssistantMessageChunk -> openjiuwen AssistantMessageChunk."""
+        tool_calls = None
+        if chunk.tool_calls:
+            tool_calls = [
+                ToolCall(id=tc.id, type=tc.type, name=tc.name, arguments=tc.arguments, index=tc.index)
+                for tc in chunk.tool_calls
+            ]
+        return AssistantMessageChunk(
+            content=chunk.content or "",
+            tool_calls=tool_calls,
+            finish_reason=chunk.finish_reason or "null",
+            reasoning_content=chunk.reasoning_content,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal: generation helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_generation_provider(self, model: Optional[str] = None) -> str:
+        """Resolve the provider name used for generation APIs."""
+        for dep in self._router.deployments:
+            if model and dep.model_name != model:
+                continue
+            return dep.provider
+        return "unknown"
+
+    def _get_api_key_for_provider(self, provider: str) -> Optional[str]:
+        """Return the api_key of the first deployment matching the provider."""
+        for dep in self._router.deployments:
+            if dep.provider == provider:
+                return dep.api_key
+        return None
+
+    def _get_api_base_for_provider(self, provider: str) -> Optional[str]:
+        """Return the api_base of the first deployment matching the provider."""
+        for dep in self._router.deployments:
+            if dep.provider == provider:
+                return dep.api_base
+        return None
+
+    # ------------------------------------------------------------------
+    # DashScope generation implementations
+    # ------------------------------------------------------------------
+
+    async def _generate_image_dashscope(
+        self,
+        messages: list,
+        *,
+        model: Optional[str] = None,
+        size: Optional[str] = "1664*928",
+        negative_prompt: Optional[str] = None,
+        n: Optional[int] = 1,
+        prompt_extend: bool = True,
+        watermark: bool = False,
+        seed: int = 0,
+        **kwargs,
+    ) -> ImageGenerationResponse:
+        try:
+            import dashscope
+            from dashscope import MultiModalConversation
+        except ImportError as e:
+            raise ImportError(
+                "dashscope package is required for image generation. "
+                "Install it with: pip install dashscope"
+            ) from e
+
+        if not messages or len(messages) != 1:
+            raise ValidationError(
+                StatusCode.MODEL_INVOKE_PARAM_ERROR,
+                msg=f"Image generation requires exactly one message, but got {len(messages) if messages else 0}."
+            )
+
+        api_base = self._get_api_base_for_provider("dashscope")
+        api_key = self._get_api_key_for_provider("dashscope")
+
+        if api_base:
+            dashscope.base_http_api_url = api_base
+
+        if model is None:
+            model = "qwen-image-max"
+
+        # Convert messages to DashScope format
+        msg = messages[0]
+        content_list = []
+
+        if isinstance(msg, UserMessage):
+            if isinstance(msg.content, str):
+                content_list.append({"text": msg.content})
+            elif isinstance(msg.content, list):
+                for item in msg.content:
+                    if isinstance(item, str):
+                        content_list.append({"text": item})
+                    elif isinstance(item, dict):
+                        if "text" in item:
+                            content_list.append({"text": item["text"]})
+                        elif "image" in item:
+                            content_list.append({"image": item["image"]})
+        elif isinstance(msg, dict):
+            if "text" in msg:
+                content_list.append({"text": msg["text"]})
+            elif "image" in msg:
+                content_list.append({"image": msg["image"]})
+            elif "content" in msg:
+                content_list.append({"text": msg["content"]})
+
+        if not content_list:
+            raise ValidationError(
+                StatusCode.MODEL_INVOKE_PARAM_ERROR,
+                msg="Image generation requires non-empty content."
+            )
+
+        dashscope_messages = [{"role": "user", "content": content_list}]
+
+        api_params = {
+            "api_key": api_key,
+            "model": model,
+            "messages": dashscope_messages,
+            "result_format": "message",
+            "stream": False,
+            "watermark": watermark,
+            "prompt_extend": prompt_extend,
+            "size": size,
+            "n": n,
+        }
+        if negative_prompt:
+            api_params["negative_prompt"] = negative_prompt
+        if seed:
+            api_params["seed"] = seed
+        api_params.update(kwargs)
+
+        logger.info(f"Calling DashScope image generation API with model: {model}, size: {size}")
+
+        response = MultiModalConversation.call(**api_params)
+
+        if response.status_code != 200:
+            error_msg = (
+                f"DashScope image generation failed: {response.message} "
+                f"(code={response.code}, status={response.status_code})"
+            )
+            logger.error(error_msg)
+            raise ModelError(StatusCode.MODEL_CALL_FAILED, msg=error_msg)
+
+        # Extract image URLs
+        image_urls = []
+        if response.output and response.output.get("choices"):
+            for choice in response.output["choices"]:
+                if choice.get("message") and choice["message"].get("content"):
+                    for content_item in choice["message"]["content"]:
+                        if isinstance(content_item, dict) and "image" in content_item:
+                            image_urls.append(content_item["image"])
+
+        if not image_urls:
+            raise ModelError(StatusCode.MODEL_CALL_FAILED, msg="No images returned from DashScope API.")
+
+        logger.info(f"DashScope image generation succeeded. Generated {len(image_urls)} image(s).")
+        return ImageGenerationResponse(model=model, images=image_urls)
+
+    async def _generate_speech_dashscope(
+        self,
+        messages: list,
+        *,
+        model: Optional[str] = None,
+        voice: Optional[str] = "Cherry",
+        language_type: Optional[str] = "Auto",
+        **kwargs,
+    ) -> AudioGenerationResponse:
+        try:
+            import dashscope
+            from dashscope import MultiModalConversation
+        except ImportError as e:
+            raise ImportError(
+                "dashscope package is required for speech generation."
+            ) from e
+
+        if not messages or len(messages) != 1:
+            raise ValidationError(
+                StatusCode.MODEL_INVOKE_PARAM_ERROR,
+                msg=f"Speech generation requires exactly one message, but got {len(messages) if messages else 0}."
+            )
+
+        api_base = self._get_api_base_for_provider("dashscope")
+        api_key = self._get_api_key_for_provider("dashscope")
+
+        if api_base:
+            dashscope.base_http_api_url = api_base
+
+        if model is None:
+            model = "cosyvoice-v1"
+
+        # Extract text from message
+        msg = messages[0]
+        text = ""
+        if isinstance(msg, UserMessage):
+            text = msg.content if isinstance(msg.content, str) else ""
+        elif isinstance(msg, dict):
+            text = msg.get("content", msg.get("text", ""))
+
+        if not text or not text.strip():
+            raise ValidationError(
+                StatusCode.MODEL_INVOKE_PARAM_ERROR,
+                msg="Speech generation requires non-empty text content."
+            )
+
+        api_params = {
+            "api_key": api_key,
+            "model": model,
+            "text": text,
+            "voice": voice,
+            "language_type": language_type,
+        }
+        api_params.update(kwargs)
+
+        logger.info(f"Calling DashScope speech generation API with model: {model}, voice: {voice}")
+
+        response = MultiModalConversation.call(**api_params)
+
+        if response.status_code != 200:
+            error_msg = (
+                f"DashScope speech generation failed: {response.message} "
+                f"(code={response.code}, status={response.status_code})"
+            )
+            logger.error(error_msg)
+            raise ModelError(StatusCode.MODEL_CALL_FAILED, msg=error_msg)
+
+        # Extract audio info
+        audio_url = None
+        audio_data = None
+        audio_format = None
+
+        if response.output and response.output.get("audio"):
+            audio_info = response.output["audio"]
+            audio_url = audio_info.get("url")
+            data_str = audio_info.get("data")
+            if data_str:
+                audio_data = data_str.encode("utf-8") if isinstance(data_str, str) else data_str
+            if audio_url:
+                if audio_url.endswith(".wav"):
+                    audio_format = "wav"
+                elif audio_url.endswith(".mp3"):
+                    audio_format = "mp3"
+                elif audio_url.endswith(".pcm"):
+                    audio_format = "pcm"
+
+        if not audio_url and not audio_data:
+            raise ModelError(StatusCode.MODEL_CALL_FAILED, msg="No audio returned from DashScope API.")
+
+        logger.info(f"DashScope speech generation succeeded. Format: {audio_format or 'unknown'}")
+        return AudioGenerationResponse(
+            model=model,
+            audio_url=audio_url,
+            audio_data=audio_data,
+            format=audio_format,
+        )
+
+    async def _generate_video_dashscope(
+        self,
+        messages: list,
+        *,
+        img_url: Optional[str] = None,
+        audio_url: Optional[str] = None,
+        model: Optional[str] = None,
+        size: Optional[str] = None,
+        resolution: Optional[str] = None,
+        duration: Optional[int] = 5,
+        prompt_extend: bool = True,
+        watermark: bool = False,
+        negative_prompt: Optional[str] = None,
+        seed: Optional[int] = None,
+        **kwargs,
+    ) -> VideoGenerationResponse:
+        try:
+            import dashscope
+            from dashscope import VideoSynthesis
+        except ImportError as e:
+            raise ImportError(
+                "dashscope package is required for video generation"
+            ) from e
+
+        if not messages or len(messages) != 1:
+            raise ValidationError(
+                StatusCode.MODEL_INVOKE_PARAM_ERROR,
+                msg=f"Video generation requires exactly one message, but got {len(messages) if messages else 0}."
+            )
+
+        api_base = self._get_api_base_for_provider("dashscope")
+        api_key = self._get_api_key_for_provider("dashscope")
+
+        if api_base:
+            dashscope.base_http_api_url = api_base
+
+        if model is None:
+            model = "wan2.6-t2v"
+
+        # Extract prompt from message
+        msg = messages[0]
+        prompt = ""
+        if isinstance(msg, UserMessage):
+            prompt = msg.content if isinstance(msg.content, str) else ""
+        elif isinstance(msg, dict):
+            prompt = msg.get("content", msg.get("text", ""))
+
+        if not prompt or not prompt.strip():
+            raise ValidationError(
+                StatusCode.MODEL_INVOKE_PARAM_ERROR,
+                msg="Video generation requires non-empty text content."
+            )
+
+        api_params = {
+            "api_key": api_key,
+            "model": model,
+            "prompt": prompt,
+            "prompt_extend": prompt_extend,
+            "watermark": watermark,
+        }
+        if duration is not None:
+            api_params["duration"] = duration
+        if negative_prompt:
+            api_params["negative_prompt"] = negative_prompt
+        if seed is not None:
+            api_params["seed"] = seed
+        if audio_url:
+            api_params["audio_url"] = audio_url
+        if img_url:
+            api_params["img_url"] = img_url
+            if resolution:
+                api_params["resolution"] = resolution
+        else:
+            if size:
+                api_params["size"] = size
+        api_params.update(kwargs)
+
+        logger.info(f"Calling DashScope video generation API with model: {model}, duration: {duration}")
+
+        response = VideoSynthesis.call(**api_params)
+
+        if response.status_code != 200:
+            error_msg = (
+                f"DashScope video generation failed: {response.message} "
+                f"(code={response.code}, status={response.status_code})"
+            )
+            logger.error(error_msg)
+            raise ModelError(StatusCode.MODEL_CALL_FAILED, msg=error_msg)
+
+        video_url = None
+        video_duration = None
+        video_resolution = None
+
+        if response.output:
+            video_url = getattr(response.output, "video_url", None)
+
+        if response.usage:
+            video_duration = response.usage.get('duration') or response.usage.get('output_video_duration')
+            video_resolution = response.usage.get('size')
+
+        if not video_url:
+            raise ModelError(StatusCode.MODEL_CALL_FAILED, msg="No video URL returned from DashScope API.")
+
+        logger.info(f"DashScope video generation succeeded. Video URL: {video_url[:100]}...")
+        return VideoGenerationResponse(
+            model=model,
+            video_url=video_url,
+            duration=video_duration,
+            resolution=video_resolution,
+            format="mp4",
         )

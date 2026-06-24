@@ -27,6 +27,7 @@ import uuid
 from dataclasses import dataclass, replace
 from typing import Any
 
+from openjiuwen.agent_teams.external.descriptor import TEAM_JOIN_ENV
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 
@@ -50,6 +51,9 @@ MCP_INJECT_NONE = "none"
 MCP_INJECT_CLAUDE_FLAG = "claude_flag"
 # Codex: set config keys via repeated ``-c mcp_servers.<name>.<key>=<value>``.
 MCP_INJECT_CODEX_OVERRIDE = "codex_override"
+# Concurrent external members can make the Python MCP server cold start exceed
+# Codex's default ten-second startup timeout.
+_CODEX_MCP_STARTUP_TIMEOUT_S = 120
 # Gemini CLI: register out of band via ``gemini mcp add <name> <bin> <args>``.
 # There is no launch flag, so ``mcp_launch_args`` is empty and the spawn path
 # runs ``mcp_register_command`` once before the member's first turn instead.
@@ -271,6 +275,14 @@ class CliAgentAdapter:
             argv = ["-c", f"mcp_servers.{key}.command={json.dumps(binary)}"]
             if args:
                 argv += ["-c", f"mcp_servers.{key}.args={json.dumps(args)}"]
+            argv += [
+                "-c",
+                f"mcp_servers.{key}.env_vars={json.dumps([TEAM_JOIN_ENV])}",
+                "-c",
+                f"mcp_servers.{key}.startup_timeout_sec={_CODEX_MCP_STARTUP_TIMEOUT_S}",
+                "-c",
+                f"mcp_servers.{key}.required=true",
+            ]
             return argv
         return []
 

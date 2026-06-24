@@ -42,6 +42,8 @@ class ProgressKind:
     AGENT_STARTED = "agent_started"
     AGENT_COMPLETED = "agent_completed"
     AGENT_FAILED = "agent_failed"
+    HUMAN_PROMPT = "human_prompt"
+    HUMAN_REPLIED = "human_replied"
     LOG = "log"
     WORKFLOW_COMPLETED = "workflow_completed"
     WORKFLOW_FAILED = "workflow_failed"
@@ -71,6 +73,13 @@ class WorkflowProgressEvent:
       ``AGENT_FAILED``.
     * ``phases``              — the static phase plan from the script's ``META``
       dict (``WORKFLOW_STARTED``); ``None`` on all other kinds.
+    * ``correlation_id``      — a pending human turn's id (``HUMAN_PROMPT`` /
+      ``HUMAN_REPLIED``), so a UI can route the person's reply back. The id is
+      **deterministic** (``{phase}:{label}:{turn}``, assigned by the engine), so it
+      stays valid across a resume. The event itself fires from the backend wait
+      path (only when actually waiting on a person), so it is absent on cache-hit
+      replays; ``HUMAN_PROMPT`` also carries ``label`` (the avatar member) and
+      ``prompt`` (the question).
     """
 
     kind: str
@@ -83,6 +92,7 @@ class WorkflowProgressEvent:
     outcome: str | None = None
     message: str | None = None
     phases: list[PhasePlan] | None = None
+    correlation_id: str | None = None
 
 
 #: Signature of ``Runtime.progress_sink``. Default is a no-op so the engine has

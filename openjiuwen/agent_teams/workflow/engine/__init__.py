@@ -22,10 +22,15 @@ from .errors import LintError, MetaError, SchemaError, WorkflowError
 from .journal import Journal
 from .loader import LoadedWorkflow, load_workflow_source
 from .primitives import (
+    AgentSession,
+    HumanSession,
     agent,
+    agent_session,
     budget,
     compact,
     flatten_filter,
+    human,
+    human_session,
     log,
     map_parallel,
     parallel,
@@ -53,6 +58,11 @@ __all__ = [
     "LoadedWorkflow",
     # injected/importable DSL primitives
     "agent",
+    "agent_session",
+    "human_session",
+    "human",
+    "AgentSession",
+    "HumanSession",
     "parallel",
     "pipeline",
     "map_parallel",

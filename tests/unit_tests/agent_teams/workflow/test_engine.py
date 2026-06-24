@@ -169,6 +169,75 @@ def test_nested_parallel_does_not_deadlock_under_cap_one(tmp_path):
     assert all(len(inner) == 2 for inner in result)
 
 
+_CONCURRENT_WF_CHILD = '''
+from swarmflow import agent
+
+META = {"name": "wf-child", "description": "leaf sub-workflow", "phases": []}
+
+async def run(args):
+    return await agent(f"echo:{args}", label="leaf")
+'''
+
+
+def _concurrent_parent_src(child_path: str) -> str:
+    """Parent source that fans out three sub-workflows concurrently via parallel."""
+    return (
+        "from swarmflow import parallel, workflow\n"
+        'META = {"name": "wf-parent", "description": "concurrent subs", "phases": []}\n'
+        f"_CHILD = {child_path!r}\n"
+        "async def run(args):\n"
+        "    return await parallel([(lambda i=i: workflow(_CHILD, i)) for i in range(3)])\n"
+    )
+
+
+def test_workflow_runs_concurrently_via_parallel(tmp_path):
+    """parallel([workflow(...), ...]) runs every sub-workflow — none are skipped.
+
+    Regression guard: nesting depth is tracked per execution path (a ContextVar
+    copied per Task), not as a single shared Runtime counter. So concurrent
+    sibling ``workflow()`` calls each keep their own depth budget and all run,
+    instead of all-but-one tripping the nesting guard and returning None.
+    """
+    child = _write(tmp_path, "child.py", _CONCURRENT_WF_CHILD)
+    parent = _write(tmp_path, "parent.py", _concurrent_parent_src(child))
+
+    result = asyncio.run(run_workflow(parent, backend=MockBackend()))
+
+    assert isinstance(result, list) and len(result) == 3
+    assert all(r is not None for r in result), result
+
+
+_NESTING_DEEP_CHILD = '''
+from swarmflow import workflow
+
+META = {"name": "wf-deep-child", "description": "tries to nest one level deeper", "phases": []}
+
+async def run(args):
+    # Already at depth 1 on this path; nesting another workflow() must be skipped.
+    return await workflow(args, None)
+'''
+
+
+def test_workflow_nesting_depth_still_capped(tmp_path):
+    """Genuine recursion (a sub-workflow calling workflow() again) is still capped."""
+    leaf = _write(tmp_path, "leaf.py", _CONCURRENT_WF_CHILD)
+    deep = _write(tmp_path, "deep.py", _NESTING_DEEP_CHILD)
+    top_src = (
+        "from swarmflow import workflow\n"
+        'META = {"name": "wf-top", "description": "top", "phases": []}\n'
+        f"_DEEP = {deep!r}\n"
+        f"_LEAF = {leaf!r}\n"
+        "async def run(args):\n"
+        "    return await workflow(_DEEP, _LEAF)\n"
+    )
+    top = _write(tmp_path, "top.py", top_src)
+
+    result = asyncio.run(run_workflow(top, backend=MockBackend()))
+
+    # top -> deep (depth 1) -> deep's workflow(leaf) is depth 2 -> skipped -> None.
+    assert result is None
+
+
 def test_lazy_import_inside_run_resolves(tmp_path):
     """`from swarmflow import ...` resolves in run's body, not only at module top.
 
@@ -194,3 +263,85 @@ def test_workflow_failed_emitted_on_crash(tmp_path):
     assert ProgressKind.WORKFLOW_COMPLETED not in kinds
     failed = [e for e in events if e.kind == ProgressKind.WORKFLOW_FAILED]
     assert "boom" in failed[0].message
+
+
+def test_load_workflow_meta_reads_name_without_importing(tmp_path):
+    """load_workflow_meta extracts META via AST only — it does not import."""
+    import sys
+
+    from openjiuwen.agent_teams.workflow.engine.loader import load_workflow_meta
+
+    src = 'META = {"name": "metaonly", "description": "d"}\nasync def run(args):\n    return 1\n'
+    script = _write(tmp_path, "meta_only.py", src)
+    before = {k for k in sys.modules if k.startswith("wf_flow__")}
+
+    meta = load_workflow_meta(str(script))
+
+    after = {k for k in sys.modules if k.startswith("wf_flow__")}
+    assert meta["name"] == "metaonly"
+    assert before == after  # no importlib import happened
+
+
+def test_load_workflow_meta_rejects_non_literal_meta(tmp_path):
+    """A non-pure-literal META is rejected with MetaError."""
+    from openjiuwen.agent_teams.workflow.engine.errors import MetaError
+    from openjiuwen.agent_teams.workflow.engine.loader import load_workflow_meta
+
+    src = 'NAME = "x"\nMETA = {"name": NAME}\n'
+    script = _write(tmp_path, "bad_meta.py", src)
+    with pytest.raises(MetaError):
+        load_workflow_meta(str(script))
+
+
+# ── isolation / agent_type pass-through + per-call fan-out cap ──────────────
+_ISOLATION_SCRIPT = '''
+from swarmflow import agent
+
+META = {"name": "iso", "description": "isolation + agent_type pass-through", "phases": []}
+
+async def run(args):
+    return await agent("hi", label="iso", options={"isolation": "worktree", "agent_type": "Explore"})
+'''
+
+_OVERLIMIT_PARALLEL_SCRIPT = '''
+from swarmflow import agent, parallel
+
+META = {"name": "over-par", "description": "parallel beyond the fan-out cap", "phases": []}
+
+async def run(args):
+    return await parallel([(lambda i=i: agent(f"x{i}", label=str(i))) for i in range(4097)])
+'''
+
+_OVERLIMIT_PIPELINE_SCRIPT = '''
+from swarmflow import agent, pipeline
+
+META = {"name": "over-pipe", "description": "pipeline beyond the fan-out cap", "phases": []}
+
+async def run(args):
+    return await pipeline(list(range(4097)), lambda prev, item, i: agent(f"x{item}", label=str(i)))
+'''
+
+
+def test_agent_accepts_isolation_and_agent_type(tmp_path):
+    """isolation / agent_type are accepted on the surface (a no-op in the reference engine)."""
+    script = _write(tmp_path, "iso.py", _ISOLATION_SCRIPT)
+    result = asyncio.run(run_workflow(script, backend=MockBackend()))
+    assert result is not None
+
+
+def test_parallel_rejects_fan_out_beyond_cap(tmp_path):
+    """A single parallel() above the per-call cap is an explicit error, not silent truncation."""
+    from openjiuwen.agent_teams.workflow.engine.errors import WorkflowError
+
+    script = _write(tmp_path, "over_par.py", _OVERLIMIT_PARALLEL_SCRIPT)
+    with pytest.raises(WorkflowError):
+        asyncio.run(run_workflow(script, backend=MockBackend()))
+
+
+def test_pipeline_rejects_fan_out_beyond_cap(tmp_path):
+    """A single pipeline() above the per-call cap is an explicit error too."""
+    from openjiuwen.agent_teams.workflow.engine.errors import WorkflowError
+
+    script = _write(tmp_path, "over_pipe.py", _OVERLIMIT_PIPELINE_SCRIPT)
+    with pytest.raises(WorkflowError):
+        asyncio.run(run_workflow(script, backend=MockBackend()))

@@ -52,6 +52,28 @@ class LoadedWorkflow:
     warnings: list[str] = field(default_factory=list)
 
 
+def load_workflow_meta(path: str) -> dict:
+    """Extract a workflow's ``META`` without importing the script.
+
+    Parses the source and statically reads the top-level ``META`` literal
+    (AST + :func:`ast.literal_eval` only, no ``importlib`` import). Lets a
+    caller learn the workflow's name cheaply before the full
+    :func:`load_workflow_source` import runs during execution.
+
+    Args:
+        path: Path to the ``.py`` swarmflow script.
+
+    Returns:
+        The ``META`` dict literal.
+
+    Raises:
+        MetaError: If ``META`` is missing or not a pure dict literal.
+    """
+    src = Path(path).read_text(encoding="utf-8")
+    tree = ast.parse(src, filename=path)
+    return _extract_meta(tree, path)
+
+
 def load_workflow_source(path: str) -> LoadedWorkflow:
     src = Path(path).read_text(encoding="utf-8")
     tree = ast.parse(src, filename=path)

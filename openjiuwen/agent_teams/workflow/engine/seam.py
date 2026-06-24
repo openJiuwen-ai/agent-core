@@ -19,7 +19,15 @@ without interfering.
 from __future__ import annotations
 
 from contextvars import ContextVar, Token
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, Sequence, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Protocol,
+    Sequence,
+    runtime_checkable,
+)
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -41,8 +49,7 @@ class Provider(Protocol):
         label: str | None = ...,
         phase: str | None = ...,
         schema: Any = ...,
-        model: str | None = ...,
-        timeout: float | None = ...,
+        options: dict | None = ...,
     ) -> Any:
         """Spawn a sub-agent and return its result (typed per ``schema``)."""
         ...
@@ -69,6 +76,40 @@ class Provider(Protocol):
 
     async def workflow(self, name_or_path: str, args: Any = ...) -> Any:
         """Run another workflow inline (one level deep)."""
+        ...
+
+    def agent_session(
+        self,
+        *,
+        label: str | None = ...,
+        phase: str | None = ...,
+        instructions: str | None = ...,
+        options: dict | None = ...,
+    ) -> Any:
+        """Open a stateful, multi-turn agent session (returns an ``AgentSession``)."""
+        ...
+
+    def human_session(
+        self,
+        *,
+        label: str | None = ...,
+        phase: str | None = ...,
+        instructions: str | None = ...,
+        options: dict | None = ...,
+    ) -> Any:
+        """Open a stateful, multi-turn human session (returns an ``AgentSession``)."""
+        ...
+
+    async def human(
+        self,
+        prompt: str,
+        *,
+        schema: Any = ...,
+        label: str | None = ...,
+        phase: str | None = ...,
+        options: dict | None = ...,
+    ) -> Any:
+        """One-shot human turn: ask a person once and return the (typed) answer."""
         ...
 
     @property

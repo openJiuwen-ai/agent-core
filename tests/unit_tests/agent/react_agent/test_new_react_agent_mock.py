@@ -435,7 +435,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(agent.system_prompt_builder, agent.prompt_builder)
         identity = agent.prompt_builder.get_section("identity")
-        skills = agent.prompt_builder.get_section("skills")
+        skills = agent.prompt_builder.get_section("legacy_skills")
         self.assertIsNotNone(identity)
         self.assertIsNotNone(skills)
         self.assertEqual(identity.render("cn"), "你当前处理的任务是：计算1+2")

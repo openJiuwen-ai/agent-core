@@ -39,6 +39,7 @@ from .backends import AgentBackend, AgentResult, MockBackend
 from .errors import LintError, MetaError, SchemaError, WorkflowError
 from .journal import Journal
 from .loader import LoadedWorkflow, load_workflow_source
+from .primitives import AgentSession, HumanSession
 from .runner import run_workflow
 from .runtime import Runtime
 
@@ -58,7 +59,7 @@ M = TypeVar("M", bound="BaseModel")
 async def agent(
     prompt: str, *, schema: type[M],
     label: str | None = ..., phase: str | None = ...,
-    model: str | None = ..., timeout: float | None = ...,
+    options: dict | None = ...,
 ) -> "M | None":
     """Overload: ``schema=<pydantic model>`` narrows the result to that model."""
     ...
@@ -68,7 +69,7 @@ async def agent(
 async def agent(
     prompt: str, *, schema: dict,
     label: str | None = ..., phase: str | None = ...,
-    model: str | None = ..., timeout: float | None = ...,
+    options: dict | None = ...,
 ) -> "dict | None":
     """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
     ...
@@ -78,7 +79,7 @@ async def agent(
 async def agent(
     prompt: str, *, schema: None = ...,
     label: str | None = ..., phase: str | None = ...,
-    model: str | None = ..., timeout: float | None = ...,
+    options: dict | None = ...,
 ) -> "str | None":
     """Overload: no ``schema`` returns the agent's raw text."""
     ...
@@ -90,12 +91,22 @@ async def agent(
     label: str | None = None,
     phase: str | None = None,
     schema: Any = None,
-    model: str | None = None,
-    timeout: float | None = None,
+    options: dict | None = None,
 ) -> Any:
-    """Spawn a sub-agent. Delegates to the current provider's ``agent``."""
+    """Spawn a sub-agent. Delegates to the current provider's ``agent``.
+
+    Orchestration/identity params (``label`` / ``phase`` / ``schema``) are
+    explicit; tuning and forward-compat params ride in the validated ``options``
+    bag — e.g. ``options={"model": "...", "timeout": 30, "isolation": "worktree",
+    "agent_type": "..."}`` — so a new knob needs no signature change. Keys are
+    whitelisted against the engine + backend option sets; an unknown key raises.
+    """
     return await current_provider().agent(
-        prompt, label=label, phase=phase, schema=schema, model=model, timeout=timeout
+        prompt,
+        label=label,
+        phase=phase,
+        schema=schema,
+        options=options,
     )
 
 
@@ -130,6 +141,73 @@ def log(message: Any) -> None:
 async def workflow(name_or_path: str, args: Any = None) -> Any:
     """Run another workflow inline (one level). Delegates to the current provider."""
     return await current_provider().workflow(name_or_path, args)
+
+
+def agent_session(
+    *,
+    label: str | None = None,
+    phase: str | None = None,
+    instructions: str | None = None,
+    options: dict | None = None,
+) -> AgentSession:
+    """Open a stateful, multi-turn agent. Delegates to the current provider."""
+    return current_provider().agent_session(
+        label=label, phase=phase, instructions=instructions, options=options
+    )
+
+
+def human_session(
+    *,
+    label: str | None = None,
+    phase: str | None = None,
+    instructions: str | None = None,
+    options: dict | None = None,
+) -> AgentSession:
+    """Open a stateful, multi-turn human participant. Delegates to the current provider."""
+    return current_provider().human_session(
+        label=label, phase=phase, instructions=instructions, options=options
+    )
+
+
+@overload
+async def human(
+    prompt: str, *, schema: type[M],
+    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
+) -> "M | None":
+    """Overload: ``schema=<pydantic model>`` narrows the answer to that model."""
+    ...
+
+
+@overload
+async def human(
+    prompt: str, *, schema: dict,
+    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
+) -> "dict | None":
+    """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
+    ...
+
+
+@overload
+async def human(
+    prompt: str, *, schema: None = ...,
+    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
+) -> "str | None":
+    """Overload: no ``schema`` returns the person's answer as raw text."""
+    ...
+
+
+async def human(
+    prompt: str,
+    *,
+    schema: Any = None,
+    label: str | None = None,
+    phase: str | None = None,
+    options: dict | None = None,
+) -> Any:
+    """One-shot human turn. Delegates to the current provider."""
+    return await current_provider().human(
+        prompt, schema=schema, label=label, phase=phase, options=options
+    )
 
 
 class _BudgetProxy:
@@ -172,6 +250,11 @@ def flatten_filter(xs: Sequence) -> list:
 __all__ = [
     # script-facing primitives (the contract)
     "agent",
+    "agent_session",
+    "human_session",
+    "human",
+    "AgentSession",
+    "HumanSession",
     "parallel",
     "pipeline",
     "map_parallel",

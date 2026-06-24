@@ -22,10 +22,7 @@ from openjiuwen.agent_teams.messager import (
     Messager,
     create_messager,
 )
-from openjiuwen.agent_teams.paths import (
-    independent_member_workspace,
-    team_home,
-)
+from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.paths import (
     team_memory_dir as default_team_memory_dir,
 )
@@ -40,6 +37,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.agent_teams.workspace_layout import ensure_team_member_workspace_link
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.spawn.agent_config import (
     SpawnAgentConfig,
@@ -375,13 +373,9 @@ class AgentConfigurator:
             )
         if ws_spec and ws_spec.stable_base:
             team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
-            base = team_home(team_name) / "workspaces"
-            team_ws_path = base / f"{member_name}_workspace"
-            independent_ws = independent_member_workspace(member_name)
-            if independent_ws.is_dir() and not team_ws_path.exists():
-                base.mkdir(parents=True, exist_ok=True)
-                os.symlink(str(independent_ws), str(team_ws_path), target_is_directory=True)
-            ws_spec = ws_spec.model_copy(update={"root_path": str(team_ws_path)})
+            ws_spec = ws_spec.model_copy(
+                update={"root_path": ensure_team_member_workspace_link(team_name, member_name)}
+            )
 
         workspace_root_path = ws_spec.root_path if ws_spec is not None else None
         should_register_cleanup_path = (
@@ -480,7 +474,6 @@ class AgentConfigurator:
                     "team_workspace_mount": team_workspace_mount,
                     "team_workspace_path": team_workspace_path,
                     "expose_human_agents_to_teammates": spec.expose_human_agents_to_teammates,
-                    "enable_swarmflow": spec.enable_swarmflow,
                 },
             ),
         ]
@@ -568,6 +561,7 @@ class AgentConfigurator:
         # leader-only async ``swarmflow`` tool is gated on this being non-None.
         swarmflow_model_resolver: Optional[Callable[[str], Any]] = None
         swarmflow_worker_base_spec = None
+        swarmflow_human_base_spec = None
         if ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
             team_spec_for_models = ctx.team_spec
 
@@ -592,6 +586,10 @@ class AgentConfigurator:
             # straight from it has no team tools by construction.
             base_specs = spec.agents
             swarmflow_worker_base_spec = base_specs.get("teammate") or base_specs.get("leader")
+            # Human-session avatars derive from the human_agent spec; fall back to
+            # the worker base spec so human_session still works when no dedicated
+            # human_agent spec is configured (it just lacks human-tuned persona).
+            swarmflow_human_base_spec = base_specs.get("human_agent") or swarmflow_worker_base_spec
 
             # Workers also need the observability rail for agent spans.
             if swarmflow_worker_base_spec is not None:
@@ -611,8 +609,10 @@ class AgentConfigurator:
             on_teammate_created=self._on_teammate_created,
             swarmflow_model_resolver=swarmflow_model_resolver,
             swarmflow_worker_base_spec=swarmflow_worker_base_spec,
+            swarmflow_human_base_spec=swarmflow_human_base_spec,
             reliability_components=reliability_components,
             permissions_override=ctx.permissions_override,
+            worktree_manager=self.worktree_manager,
         )
 
         # Fold the team rails into the spec rails (after the user rails, to keep

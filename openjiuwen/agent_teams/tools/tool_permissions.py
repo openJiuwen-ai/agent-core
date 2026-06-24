@@ -23,6 +23,10 @@ LEADER_ONLY_TOOLS: set[str] = {
     "update_task",        # Update task content / cancel tasks
     "list_members",       # List all members
     "swarmflow",          # Run a swarmflow orchestration script (gated by enable_swarmflow)
+    # Async-tool control — inspect / fetch / cancel background async tasks
+    "async_tasks_list",
+    "async_task_output",
+    "async_task_cancel",
 }
 
 # Tools that only members can use

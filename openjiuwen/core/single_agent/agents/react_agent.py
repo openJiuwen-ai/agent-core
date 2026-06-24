@@ -65,7 +65,7 @@ from openjiuwen.core.single_agent.prompts.builder import (
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 _IDENTITY_SECTION = "identity"
-_SKILLS_SECTION = "skills"
+_SKILLS_SECTION = "legacy_skills"
 _IDENTITY_SECTION_PRIORITY = 10
 _SKILLS_SECTION_PRIORITY = 90
 
@@ -619,7 +619,10 @@ class ReActAgent(BaseAgent):
             rendered_system_prompt: str,
     ) -> None:
         """Update skills section on prompt_builder in the invoke-stage flow."""
-        if not rendered_system_prompt or self._skill_util is None or not self._skill_util.has_skill():
+        if self._skill_util is None:
+            return
+
+        if not rendered_system_prompt or not self._skill_util.has_skill():
             self.prompt_builder.remove_section(_SKILLS_SECTION)
             return
 
@@ -637,7 +640,6 @@ class ReActAgent(BaseAgent):
         if preview_system_prompt:
             preview_messages.insert(0, SystemMessage(content=preview_system_prompt))
         return preview_messages
-
 
     async def _call_model(
             self,
@@ -907,8 +909,8 @@ class ReActAgent(BaseAgent):
             logger.info(f"Executing tool: {tool_call.name} with args: {tool_call.arguments}")
 
         results = await self.ability_manager.execute(
-            ctx=ctx, 
-            tool_call=tool_calls, 
+            ctx=ctx,
+            tool_call=tool_calls,
             session=session,
             parallel_tool_calls=self._config.parallel_tool_calls,
         )

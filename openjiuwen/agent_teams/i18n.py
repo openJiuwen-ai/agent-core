@@ -151,6 +151,8 @@ STRINGS: dict[str, dict[str, str]] = {
         # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
         "workflow.started": "[工作流] 「{name}」编排已启动，我将在每个阶段向你汇报进展。",
         "workflow.phase": "[工作流] 进入阶段：{phase}",
+        "workflow.human_prompt": "[工作流] 正在等待人工回复 [{label}]：{prompt}（correlation_id={corr}）",
+        "workflow.human_replied": "[工作流] 人工已回复 [{label}]，编排继续。",
         # harness/async_tools.py — async background-tool framework feedback
         "async_tool.launched": (
             "[后台任务] {tool} 已启动（task_id={task_id}）。完成后结果会自动回灌给你，"
@@ -158,6 +160,10 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "async_tool.completed": "[后台任务完成] 工具={tool}\n{result}",
         "async_tool.failed": "[后台任务失败] 工具={tool}，错误={error}",
+        "async_tool.spilled_notice": (
+            "[完整输出过大，已写入磁盘 {path}。"
+            "调用 async_task_output(task_id='{task_id}') 取回全文。]"
+        ),
     },
     "en": {
         # timefmt.py — relative-time buckets ({value} is the bucket count)
@@ -310,6 +316,8 @@ STRINGS: dict[str, dict[str, str]] = {
             "report progress to you at each phase."
         ),
         "workflow.phase": "[Workflow] Entering phase: {phase}",
+        "workflow.human_prompt": "[Workflow] Awaiting a human reply [{label}]: {prompt} (correlation_id={corr})",
+        "workflow.human_replied": "[Workflow] The human replied [{label}]; orchestration continues.",
         # harness/async_tools.py — async background-tool framework feedback
         "async_tool.launched": (
             "[Background task] {tool} started (task_id={task_id}). The result will be "
@@ -318,6 +326,10 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "async_tool.completed": "[Background task completed] tool={tool}\n{result}",
         "async_tool.failed": "[Background task failed] tool={tool}, error={error}",
+        "async_tool.spilled_notice": (
+            "[Full output was large and written to disk at {path}. "
+            "Call async_task_output(task_id='{task_id}') to retrieve it.]"
+        ),
     },
 }
 
