@@ -22,6 +22,10 @@ MESSAGE_OFFLOADER_DEBUG_LOG_DIR_ENV = "OPENJIUWEN_MESSAGE_OFFLOADER_DEBUG_LOG_DI
 MESSAGE_OFFLOADER_DEBUG_LOG_FILE = "message_offloader_debug.jsonl"
 OffloadStrategy = Literal["rule_then_truncate", "rule_only", "truncate_only"]
 
+_ENABLE_RULE_COMPRESSION_DUMP = True
+_OFFLOAD_STRATEGY: OffloadStrategy = "rule_then_truncate"
+_OFFLOAD_PREVIEW_HEAD_TAIL_CHARS = 2000
+
 
 class MessageOffloaderConfig(BaseModel):
     """Minimal configuration for context-relative tool-result offloading."""
@@ -46,21 +50,6 @@ class MessageOffloaderConfig(BaseModel):
     )
     """Context-capacity ratio above which one TTL tool message is processed."""
 
-    offload_preview_head_tail_chars: int = Field(
-        default=2000,
-        ge=0,
-    )
-    """Characters kept from both head and tail in direct/offload-reuse previews."""
-
-    enable_rule_compression: bool = True
-    """Whether deterministic rule compression runs before offload fallback."""
-
-    enable_rule_compression_dump: bool = True
-    """Whether successful rule compression writes before/after debug payloads to the workspace."""
-
-    offload_strategy: OffloadStrategy = "rule_then_truncate"
-    """Offload behavior: rule compression with truncation fallback, rule-only, or truncation-only."""
-
     protected_tool_names: list[str] = Field(
         default_factory=lambda: ["reload_original_context_messages"]
     )
@@ -72,7 +61,7 @@ class MessageOffloader(ContextProcessor):
     def __init__(self, config: MessageOffloaderConfig):
         super().__init__(config)
         self._rule_pipeline = RuleCompressionPipeline(
-            enable_dump=bool(config.enable_rule_compression_dump)
+            enable_dump=_ENABLE_RULE_COMPRESSION_DUMP
         )
 
     async def trigger_add_messages(
@@ -480,14 +469,11 @@ class MessageOffloader(ContextProcessor):
             f"{content[-keep_chars:]}"
         )
 
-    def _enable_rule_compression(self) -> bool:
-        return bool(getattr(self.config, "enable_rule_compression", True))
-
     def _offload_strategy(self) -> OffloadStrategy:
-        return getattr(self.config, "offload_strategy", "rule_then_truncate")
+        return _OFFLOAD_STRATEGY
 
     def _should_try_rule_compression(self) -> bool:
-        return self._enable_rule_compression() and self._offload_strategy() != "truncate_only"
+        return self._offload_strategy() != "truncate_only"
 
     def _should_fallback_to_plain_offload(self) -> bool:
         return self._offload_strategy() != "rule_only"
@@ -505,7 +491,7 @@ class MessageOffloader(ContextProcessor):
         return float(getattr(self.config, "ttl_message_threshold_ratio", 0.1))
 
     def _offload_preview_head_tail_chars(self) -> int:
-        return int(getattr(self.config, "offload_preview_head_tail_chars", 2000))
+        return _OFFLOAD_PREVIEW_HEAD_TAIL_CHARS
 
     def _write_debug_log(
         self,

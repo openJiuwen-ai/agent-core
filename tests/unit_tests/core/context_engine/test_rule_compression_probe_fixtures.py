@@ -43,6 +43,67 @@ def test_json_probe_preserves_low_cardinality_value_counts():
     assert summary["value_counts"]["status"] == {"active": 96, "error": 24}
 
 
+def test_numbered_json_array_is_routed_to_json_array_compressor():
+    scenario = next(item for item in SCENARIOS if item.name == "json_array")
+    content = "\n".join(
+        f"{line_number:6}\t{line}"
+        for line_number, line in enumerate(scenario.build_content().splitlines(), 1)
+    )
+
+    result = RuleContentRouter().compress(
+        content,
+        RuleContext(
+            max_tokens=1600,
+            count_tokens=lambda text: max(len(text) // 3, 1),
+        ),
+    )
+
+    assert result.content_type == ContentType.JSON_ARRAY
+    assert result.modified is True
+    assert "_omitted" in result.content
+    assert "     1\t[" not in result.content
+
+
+def test_space_numbered_json_array_is_routed_to_json_array_compressor():
+    scenario = next(item for item in SCENARIOS if item.name == "json_array")
+    content = "\n".join(
+        f"{line_number} {line}"
+        for line_number, line in enumerate(scenario.build_content().splitlines(), 1)
+    )
+
+    result = RuleContentRouter().compress(
+        content,
+        RuleContext(
+            max_tokens=1600,
+            count_tokens=lambda text: max(len(text) // 3, 1),
+        ),
+    )
+
+    assert result.content_type == ContentType.JSON_ARRAY
+    assert result.modified is True
+    assert "_omitted" in result.content
+    assert "1 [" not in result.content
+
+
+def test_truncated_space_numbered_json_array_is_routed_to_json_array_compressor():
+    scenario = next(item for item in SCENARIOS if item.name == "json_array")
+    pretty_content = json.dumps(json.loads(scenario.build_content()), ensure_ascii=False, indent=2)
+    lines = pretty_content.splitlines()[:-3]
+    content = "\n".join(f"{line_number} {line}" for line_number, line in enumerate(lines, 1))
+
+    result = RuleContentRouter().compress(
+        content,
+        RuleContext(
+            max_tokens=1600,
+            count_tokens=lambda text: max(len(text) // 3, 1),
+        ),
+    )
+
+    assert result.content_type == ContentType.JSON_ARRAY
+    assert result.modified is True
+    assert "_omitted" in result.content
+
+
 def test_numbered_python_source_is_routed_to_source_code_compressor():
     content = "\n".join(
         [
@@ -71,9 +132,10 @@ def test_numbered_python_source_is_routed_to_source_code_compressor():
 
     assert result.content_type == ContentType.SOURCE_CODE
     assert result.modified is True
-    assert "     1\tfrom" not in result.content
+    assert "     1\tfrom" in result.content
     assert "def compute_value" in result.content
-    assert "# [function body omitted; reload original source for details]" in result.content
+    assert "     4\t    # [function body omitted; original lines 4-9, reload original source for details]" in result.content
+    assert "     5\t" not in result.content
 
 
 def test_numbered_python_source_with_diff_markers_is_not_routed_as_git_diff():
@@ -119,6 +181,31 @@ def test_pytest_output_is_routed_as_build_output():
             "tests/unit/test_demo.py::test_bad FAILED",
             "================================== FAILURES ===================================",
             "FAILED tests/unit/test_demo.py::test_bad - AssertionError: boom",
+        ]
+    )
+
+    assert RuleContentRouter().detect(content) == ContentType.BUILD_OUTPUT
+
+
+def test_pytest_output_with_embedded_diff_is_routed_as_build_output():
+    content = "\n".join(
+        [
+            "============================= test session starts =============================",
+            "platform win32 -- Python 3.11.13, pytest-9.0.2",
+            "collected 1 item",
+            "tests/unit/test_demo.py::test_bad FAILED",
+            "================================== FAILURES ===================================",
+            "FAILED tests/unit/test_demo.py::test_bad - AssertionError: boom",
+            "Captured stdout call",
+            "diff --git a/pkg/demo.py b/pkg/demo.py",
+            "index 1111111..2222222 100644",
+            "--- a/pkg/demo.py",
+            "+++ b/pkg/demo.py",
+            "@@ -1,2 +1,2 @@",
+            "-old",
+            "+new",
+            "=========================== short test summary info ===========================",
+            "1 failed in 0.01s",
         ]
     )
 

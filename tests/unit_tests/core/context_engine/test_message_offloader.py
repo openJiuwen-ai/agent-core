@@ -72,14 +72,21 @@ def _large_diff() -> str:
     return "\n".join(chunks)
 
 
+def _python_function_for_offload(name: str, *, line_count: int) -> list[str]:
+    return [
+        f"def {name}(base: int) -> int:",
+        "    total = base",
+        *[f"    total += {index}" for index in range(line_count)],
+        "    return total",
+    ]
+
+
 class TestMessageOffloaderConfig:
-    def test_only_exposes_ttl_and_protected_tools(self):
+    def test_only_exposes_ttl_threshold_ratios_and_protected_tools(self):
         assert set(MessageOffloaderConfig.model_fields) == {
-            "enable_rule_compression",
             "add_message_threshold_ratio",
             "ttl_context_occupancy_ratio",
             "ttl_message_threshold_ratio",
-            "offload_preview_head_tail_chars",
             "ttl_seconds",
             "protected_tool_names",
         }
@@ -87,6 +94,10 @@ class TestMessageOffloaderConfig:
     @pytest.mark.parametrize(
         "removed_field",
         [
+            "enable_rule_compression",
+            "enable_rule_compression_dump",
+            "offload_strategy",
+            "offload_preview_head_tail_chars",
             "messages_threshold",
             "tokens_threshold",
             "large_message_threshold",
@@ -267,34 +278,6 @@ class TestMessageOffloaderAddTrigger:
         assert message.content == "x" * 100
         assert not isinstance(message, OffloadMixin)
 
-    @pytest.mark.asyncio
-    async def test_add_without_rule_compression_offloads_head_and_tail_preview(self):
-        context = await create_context(
-            MessageOffloaderConfig(
-                enable_rule_compression=False,
-                offload_preview_head_tail_chars=2000,
-            ),
-            context_window_tokens=100,
-        )
-        content = "h" * 2100 + "middle" + "t" * 2100
-
-        await context.add_messages(ToolMessage(content=content, tool_call_id="tc-direct"))
-
-        message = context.get_messages()[0]
-        assert isinstance(message, OffloadMixin)
-        assert message.content.startswith("h" * 2000)
-        assert "[Content truncated and offloaded." in message.content
-        assert "middle" not in message.content
-        assert f"{'t' * 2000}[[OFFLOAD: handle={message.offload_handle}, type=in_memory]]" in message.content
-        reloaded = await context.reloader_tool().invoke(
-            {
-                "offload_handle": message.offload_handle,
-                "offload_type": message.offload_type,
-            }
-        )
-        assert content in reloaded
-
-
 class TestMessageOffloaderTtl:
     @pytest.mark.asyncio
     async def test_ttl_requires_idle_timeout_and_half_context_occupancy(self):
@@ -450,6 +433,38 @@ class TestMessageOffloaderTtl:
         )
         assert "same line" in reloaded
         assert context.save_state()["offload_messages"][message.offload_handle][0].content == content
+
+    @pytest.mark.asyncio
+    async def test_writes_absolute_debug_log_for_rule_compression_and_offload(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        debug_dir = tmp_path / "debug"
+        monkeypatch.setenv("OPENJIUWEN_MESSAGE_OFFLOADER_DEBUG_LOG_DIR", str(debug_dir))
+        context = await create_context(context_window_tokens=100)
+        content = "\n".join(["same line"] * 10000)
+
+        await context.add_messages(ToolMessage(content=content, tool_call_id="tc-debug"))
+
+        log_path = debug_dir / "message_offloader_debug.jsonl"
+        assert log_path.is_absolute()
+        records = [
+            json.loads(line)
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert [record["event"] for record in records] == [
+            "add_message_triggered_offload",
+            "rule_compression_triggered",
+            "rule_compression_completed",
+            "message_offloaded",
+        ]
+        completed = records[2]
+        assert completed["tool_call_id"] == "tc-debug"
+        assert completed["original_content"] == content
+        assert completed["compressed_content"].startswith("same line")
+        assert len(completed["compressed_content"]) < len(content)
+        assert records[3]["offloaded_content"] == context.get_messages()[0].content
 
     @pytest.mark.asyncio
     async def test_ttl_traverses_full_model_context_not_only_returned_window(self):

@@ -37,6 +37,10 @@ def _python_function(name: str, body_marker: str = "value") -> str:
     )
 
 
+def _numbered(content: str, *, start: int = 10) -> str:
+    return "\n".join(f"{line_no:6}\t{line}" for line_no, line in enumerate(content.splitlines(), start))
+
+
 def test_python_compression_outputs_compileable_omission_body():
     content = "\n".join(
         [
@@ -124,3 +128,53 @@ def test_savings_gate_preserves_original_when_candidate_is_not_worthwhile():
     assert result.lossy is False
     assert result.content == content
     assert result.details["syntax_valid"] is True
+
+
+def test_numbered_python_compression_preserves_original_line_numbers():
+    content = _numbered(
+        "\n".join(
+            [
+                "def keep_line_numbers(base: int) -> int:",
+                "    total = base",
+                "    for step in range(20):",
+                "        total += step",
+                "        if total % 7 == 0:",
+                "            total += 1",
+                "    return total",
+                "",
+                "def next_function() -> int:",
+                "    return 1",
+            ]
+        ),
+        start=40,
+    )
+
+    result = SourceCodeCompressor().compress(content, _ctx())
+
+    assert result.modified is True
+    assert "    40\tdef keep_line_numbers" in result.content
+    assert "    41\t    # [function body omitted; original lines 41-46, reload original source for details]" in result.content
+    assert "    47\t" in result.content
+    assert "    48\tdef next_function" in result.content
+    assert "    42\t" not in result.content
+    assert "    46\t" not in result.content
+    assert result.details["line_numbers_preserved"] is True
+    assert result.details["bodies_compressed"] == 1
+
+
+def test_numbered_python_without_ast_body_compression_returns_original():
+    content = _numbered(
+        "\n".join(
+            [
+                "def small() -> int:",
+                "    return 1",
+            ]
+        ),
+        start=80,
+    )
+
+    result = SourceCodeCompressor().compress(content, _ctx())
+
+    assert result.modified is False
+    assert result.content == content
+    assert result.details["bodies_compressed"] == 0

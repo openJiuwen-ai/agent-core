@@ -116,7 +116,6 @@ def build_context_processors(model: Model) -> list[tuple[str, Any]]:
             "MessageOffloader",
             MessageOffloaderConfig(
                 add_message_threshold_ratio=0.05,
-                enable_rule_compression=True,
                 ttl_seconds=300,
                 protected_tool_names=["reload_original_context_messages", "read_file:*SKILL.md"],
             ),
