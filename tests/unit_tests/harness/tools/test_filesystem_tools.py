@@ -23,6 +23,12 @@ from openjiuwen.harness.tools.filesystem import (
 )
 
 
+def _write_sparse_file(path: str, size_bytes: int) -> None:
+    with open(path, "wb") as fh:
+        fh.seek(size_bytes - 1)
+        fh.write(b"\0")
+
+
 @pytest.fixture
 def temp_dir():
     dir_path = tempfile.mkdtemp()
@@ -107,6 +113,275 @@ async def test_read_file_image_can_disable_multimodal_payload(sys_op, temp_dir):
     assert "base64," not in read_res.data["content"]
     assert read_res.data["multimodal"] == []
     assert "native image multimodal input is disabled" in read_res.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_large_pdf_without_pages_rejects_before_bytes_read(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "large.pdf")
+    _write_sparse_file(file_path, ReadFileTool.MAX_PDF_SIZE_BYTES_WITHOUT_PAGES + 1)
+
+    fs = sys_op.fs()
+    original_read_file = fs.read_file
+    calls = []
+
+    async def tracked_read_file(self, path: str, *args, **kwargs):
+        calls.append((path, kwargs.get("mode", "text")))
+        return await original_read_file(path, *args, **kwargs)
+
+    fs.read_file = MethodType(tracked_read_file, fs)
+    try:
+        res = await read_tool.invoke({"file_path": file_path})
+    finally:
+        fs.read_file = original_read_file
+
+    assert res.success is False
+    assert "[PDF_READ_ERROR] CODE=PDF_TOO_LARGE_NO_PAGES" in res.error
+    assert 'pages="1-10"' in res.error
+    assert "Do NOT call read_file without pages" in res.error
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_read_file_local_pdf_with_pages_uses_path_not_bytes(sys_op, temp_dir, monkeypatch):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "large_paged.pdf")
+    _write_sparse_file(file_path, 11 * 1024 * 1024)
+
+    fs = sys_op.fs()
+    original_read_file = fs.read_file
+    calls = []
+
+    async def tracked_read_file(self, path: str, *args, **kwargs):
+        calls.append((path, kwargs.get("mode", "text")))
+        return await original_read_file(path, *args, **kwargs)
+
+    def fake_extract(self, file_path_arg: str, *, pages: str | None, pdf_bytes=None) -> str:
+        assert file_path_arg == file_path
+        assert pages == "1-10"
+        assert pdf_bytes is None
+        return "## Page 1\nhello"
+
+    monkeypatch.setattr(ReadFileTool, "_extract_pdf_pages_sync", fake_extract, raising=False)
+    fs.read_file = MethodType(tracked_read_file, fs)
+    try:
+        res = await read_tool.invoke({"file_path": file_path, "pages": "1-10"})
+    finally:
+        fs.read_file = original_read_file
+
+    assert res.success is True
+    assert "hello" in res.data["content"]
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_read_file_sandbox_large_pdf_with_pages_rejects_without_bytes_read(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "sandbox_large.pdf")
+    _write_sparse_file(file_path, 11 * 1024 * 1024)
+
+    fs = sys_op.fs()
+    original_read_file = fs.read_file
+    original_mode = sys_op.mode
+    calls = []
+
+    async def tracked_read_file(self, path: str, *args, **kwargs):
+        calls.append((path, kwargs.get("mode", "text")))
+        return await original_read_file(path, *args, **kwargs)
+
+    fs.read_file = MethodType(tracked_read_file, fs)
+    sys_op.mode = OperationMode.SANDBOX
+    try:
+        res = await read_tool.invoke({"file_path": file_path, "pages": "1-10"})
+    finally:
+        sys_op.mode = original_mode
+        fs.read_file = original_read_file
+
+    assert res.success is False
+    assert "[PDF_READ_ERROR] CODE=PDF_SANDBOX_LARGE_FILE_UNSUPPORTED" in res.error
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_read_file_sandbox_small_pdf_with_pages_uses_bytes_path(sys_op, temp_dir, monkeypatch):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "sandbox_small.pdf")
+    _write_sparse_file(file_path, 5 * 1024 * 1024)
+
+    fs = sys_op.fs()
+    original_read_file = fs.read_file
+    original_mode = sys_op.mode
+    calls = []
+
+    async def tracked_read_file(self, path: str, *args, **kwargs):
+        calls.append((path, kwargs.get("mode", "text")))
+        return await original_read_file(path, *args, **kwargs)
+
+    def fake_extract(self, file_path_arg: str, *, pages: str | None, pdf_bytes=None) -> str:
+        assert file_path_arg == file_path
+        assert pages == "1-10"
+        assert pdf_bytes is not None
+        return "## Page 1\nsandbox"
+
+    monkeypatch.setattr(ReadFileTool, "_extract_pdf_pages_sync", fake_extract, raising=False)
+    fs.read_file = MethodType(tracked_read_file, fs)
+    sys_op.mode = OperationMode.SANDBOX
+    try:
+        res = await read_tool.invoke({"file_path": file_path, "pages": "1-10"})
+    finally:
+        sys_op.mode = original_mode
+        fs.read_file = original_read_file
+
+    assert res.success is True
+    assert "sandbox" in res.data["content"]
+    assert calls and calls[0][1] == "bytes"
+
+
+@pytest.mark.asyncio
+async def test_read_file_sandbox_small_pdf_without_pages_uses_bytes_path(sys_op, temp_dir, monkeypatch):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "sandbox_small_nopages.pdf")
+    _write_sparse_file(file_path, 1 * 1024 * 1024)
+
+    fs = sys_op.fs()
+    original_read_file = fs.read_file
+    original_mode = sys_op.mode
+    calls = []
+
+    async def tracked_read_file(self, path: str, *args, **kwargs):
+        calls.append((path, kwargs.get("mode", "text")))
+        return await original_read_file(path, *args, **kwargs)
+
+    def fake_extract(self, file_path_arg: str, *, pages: str | None, pdf_bytes=None) -> str:
+        assert file_path_arg == file_path
+        assert pages is None
+        assert pdf_bytes is not None
+        return "## Page 1\nsandbox nopages"
+
+    monkeypatch.setattr(ReadFileTool, "_extract_pdf_pages_sync", fake_extract, raising=False)
+    fs.read_file = MethodType(tracked_read_file, fs)
+    sys_op.mode = OperationMode.SANDBOX
+    try:
+        res = await read_tool.invoke({"file_path": file_path})
+    finally:
+        sys_op.mode = original_mode
+        fs.read_file = original_read_file
+
+    assert res.success is True
+    assert "sandbox nopages" in res.data["content"]
+    assert calls and calls[0][1] == "bytes"
+
+
+def test_pdf_page_range_rejects_single_page_beyond_total_pages():
+    result, reason = ReadFileTool._parse_pdf_page_range_with_reason("51", 50)
+    assert result is None
+    assert reason == "out_of_bounds"
+
+
+def test_pdf_page_range_rejects_invalid_format():
+    result, reason = ReadFileTool._parse_pdf_page_range_with_reason("abc", 50)
+    assert result is None
+    assert reason == "invalid_format"
+
+
+def test_validate_pdf_page_range_format_accepts_open_ended_ranges():
+    assert ReadFileTool._validate_pdf_page_range_format("10-") is True
+    assert ReadFileTool._validate_pdf_page_range_format("-5") is True
+    assert ReadFileTool._validate_pdf_page_range_format("0") is False
+
+
+def test_suggest_reduced_pdf_page_range_halves_original_range():
+    read_tool = ReadFileTool.__new__(ReadFileTool)
+    suggested, unreducible = read_tool._suggest_reduced_pdf_page_range("6-10")
+    assert suggested == "6-8"
+    assert unreducible is False
+
+    suggested, unreducible = read_tool._suggest_reduced_pdf_page_range("1-10")
+    assert suggested == "1-5"
+    assert unreducible is False
+
+    suggested, unreducible = read_tool._suggest_reduced_pdf_page_range("6")
+    assert suggested == "6"
+    assert unreducible is True
+
+
+@pytest.mark.asyncio
+async def test_read_file_local_pdf_token_overflow_returns_pdf_error(sys_op, temp_dir, monkeypatch):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "token_heavy.pdf")
+    _write_sparse_file(file_path, 11 * 1024 * 1024)
+
+    def fake_extract(self, file_path_arg: str, *, pages: str | None, pdf_bytes=None) -> str:
+        return "x" * ((read_tool.MAX_TOKENS + 1) * 4)
+
+    monkeypatch.setattr(ReadFileTool, "_extract_pdf_pages_sync", fake_extract, raising=False)
+    res = await read_tool.invoke({"file_path": file_path, "pages": "1-10"})
+
+    assert res.success is False
+    assert "[PDF_READ_ERROR] CODE=PDF_OUTPUT_TOKEN_EXCEEDED" in res.error
+    assert 'pages="1-5"' in res.error
+
+
+@pytest.mark.asyncio
+async def test_read_file_local_pdf_token_overflow_suggests_reduced_original_range(
+        sys_op, temp_dir, monkeypatch
+):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "token_heavy_mid.pdf")
+    _write_sparse_file(file_path, 11 * 1024 * 1024)
+
+    def fake_extract(self, file_path_arg: str, *, pages: str | None, pdf_bytes=None) -> str:
+        return "x" * ((read_tool.MAX_TOKENS + 1) * 4)
+
+    monkeypatch.setattr(ReadFileTool, "_extract_pdf_pages_sync", fake_extract, raising=False)
+    res = await read_tool.invoke({"file_path": file_path, "pages": "6-10"})
+
+    assert res.success is False
+    assert "[PDF_READ_ERROR] CODE=PDF_OUTPUT_TOKEN_EXCEEDED" in res.error
+    assert 'pages="6-8"' in res.error
+    assert 'pages="1-5"' not in res.error
+
+
+@pytest.mark.asyncio
+async def test_read_file_large_text_without_limit_rejects_before_fs_read(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "large.txt")
+    _write_sparse_file(file_path, ReadFileTool.MAX_SIZE_BYTES + 1)
+
+    fs = sys_op.fs()
+    original_read_file = fs.read_file
+    calls = []
+
+    async def tracked_read_file(self, path: str, *args, **kwargs):
+        calls.append((path, kwargs))
+        return await original_read_file(path, *args, **kwargs)
+
+    fs.read_file = MethodType(tracked_read_file, fs)
+    try:
+        res = await read_tool.invoke({"file_path": file_path})
+    finally:
+        fs.read_file = original_read_file
+
+    assert res.success is False
+    assert "exceeds maximum allowed size" in res.error
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_read_file_returns_unchanged_stub_for_same_file_range(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "dedup.txt")
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("alpha\nbeta\n")
+
+    first = await read_tool.invoke({"file_path": file_path, "offset": 0, "limit": 2})
+    second = await read_tool.invoke({"file_path": file_path, "offset": 0, "limit": 2})
+
+    assert first.success is True
+    assert first.data["unchanged"] is False
+    assert second.success is True
+    assert second.data["unchanged"] is True
+    assert ReadFileTool.FILE_UNCHANGED_STUB in second.data["content"]
 
 
 @pytest.mark.asyncio

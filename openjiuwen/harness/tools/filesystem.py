@@ -20,7 +20,7 @@ from typing import Dict, Any, AsyncIterator, List, Optional, Tuple
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import Tool
-from openjiuwen.core.sys_operation import SysOperation
+from openjiuwen.core.sys_operation import OperationMode, SysOperation
 from openjiuwen.core.sys_operation.cwd import get_cwd
 from openjiuwen.harness.prompts.sections.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -64,6 +64,7 @@ class _RawTextState:
 _FILE_READ_REGISTRY: Dict[str, _FileReadState] = {}
 
 _HISTORY_LOCK = asyncio.Lock()
+_PDF_READ_SEMAPHORE = asyncio.Semaphore(1)
 MAX_HISTORY_PER_FILE: int = 100
 
 
@@ -113,6 +114,10 @@ class MaxFileReadTokenExceededError(Exception):
         self.max_tokens = max_tokens
 
 
+class PDFReadError(RuntimeError):
+    """Raised for structured PDF read errors that the model can recover from."""
+
+
 @dataclass
 class _ReadSnapshot:
     mtime_ns: int
@@ -141,8 +146,10 @@ class ReadFileTool(Tool):
     MAX_LINES_TO_READ: int = 2000
     MAX_SIZE_BYTES: int = 256 * 1024   # 256 KB
     MAX_TOKENS: int = 25_000
-    PDF_MAX_PAGES_PER_READ: int = 20
-    PDF_AT_MENTION_INLINE_THRESHOLD: int = 100
+    MAX_PDF_SIZE_BYTES_WITHOUT_PAGES: int = 10 * 1024 * 1024
+    MAX_PDF_ABSOLUTE_SIZE_BYTES: int = 200 * 1024 * 1024
+    PDF_MAX_PAGES_PER_READ: int = 10
+    PDF_AT_MENTION_INLINE_THRESHOLD: int = 10
     FILE_UNCHANGED_STUB: str = "File unchanged since last read. Reuse the previously returned content."
     _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 
@@ -195,32 +202,69 @@ class ReadFileTool(Tool):
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _validate_pdf_page_range_format(pages: str) -> bool:
+        """Return True when *pages* is syntactically valid (ignores document page count)."""
+        raw = str(pages).strip()
+        if not raw:
+            return False
+        try:
+            if "-" not in raw:
+                return int(raw) >= 1
+            start_text, end_text = raw.split("-", 1)
+            if start_text and int(start_text) < 1:
+                return False
+            if end_text and int(end_text) < 1:
+                return False
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    @staticmethod
+    def _parse_pdf_page_range_with_reason(
+            pages: Optional[str],
+            total_pages: int,
+    ) -> Tuple[Optional[Tuple[int, int]], Optional[str]]:
+        """Parse *pages* into an inclusive (start, end) pair.
+
+        Returns (range, None) on success, or (None, reason) where reason is
+        ``invalid_format`` or ``out_of_bounds``.
+        """
+        if not pages:
+            if total_pages <= 0:
+                return None, "invalid_format"
+            return (1, total_pages), None
+
+        if not ReadFileTool._validate_pdf_page_range_format(pages):
+            return None, "invalid_format"
+
+        raw = str(pages).strip()
+        try:
+            if "-" not in raw:
+                page = int(raw)
+                if page > total_pages:
+                    return None, "out_of_bounds"
+                return (page, page), None
+            start_text, end_text = raw.split("-", 1)
+            start = int(start_text) if start_text else 1
+            end = int(end_text) if end_text else total_pages
+            if start > total_pages:
+                return None, "out_of_bounds"
+            end = min(total_pages, end)
+            if start > end:
+                return None, "out_of_bounds"
+            return (start, end), None
+        except (ValueError, TypeError):
+            return None, "invalid_format"
+
+    @staticmethod
     def _parse_pdf_page_range(pages: Optional[str], total_pages: int) -> Optional[Tuple[int, int]]:
         """Parse a PDF page range string into an inclusive (start, end) pair.
 
         Accepts formats: "3", "1-5", "10-", "-5".
         Returns None when the range string is malformed or yields an empty range.
         """
-        if not pages:
-            return (1, total_pages) if total_pages > 0 else None
-        raw = pages.strip()
-        try:
-            if "-" not in raw:
-                page = int(raw)
-                if page < 1:
-                    return None
-                clamped = min(total_pages, page)
-                return (clamped, clamped)
-            start_text, end_text = raw.split("-", 1)
-            start = int(start_text) if start_text else 1
-            end = int(end_text) if end_text else total_pages
-            start = max(1, start)
-            end = min(total_pages, end)
-            if start > end:
-                return None
-            return (start, end)
-        except (ValueError, TypeError):
-            return None
+        result, _reason = ReadFileTool._parse_pdf_page_range_with_reason(pages, total_pages)
+        return result
 
     # ------------------------------------------------------------------
     # Capability flags
@@ -266,6 +310,150 @@ class ReadFileTool(Tool):
     @staticmethod
     def _raw_line_count(text: str) -> int:
         return len(text.splitlines()) if text else 0
+
+    @staticmethod
+    def _format_mb(size_bytes: int) -> int:
+        return max(1, size_bytes // (1024 * 1024))
+
+    @staticmethod
+    def _suggest_page_batches(max_pages: int = 30, batch_size: int = 10) -> List[str]:
+        ranges = []
+        start = 1
+        while start <= max_pages:
+            end = min(max_pages, start + batch_size - 1)
+            ranges.append(f"{start}-{end}")
+            start = end + 1
+        return ranges
+
+    def _build_pdf_too_large_no_pages_error(self, file_path: str, size_bytes: int) -> str:
+        batches = self._suggest_page_batches(max_pages=30, batch_size=self.PDF_MAX_PAGES_PER_READ)
+        examples = "\n".join(
+            f'  {idx}. read_file(file_path="{file_path}", pages="{page_range}")'
+            for idx, page_range in enumerate(batches[:2], 1)
+        )
+        return (
+            "[PDF_READ_ERROR] CODE=PDF_TOO_LARGE_NO_PAGES\n"
+            f"File: {file_path} ({self._format_mb(size_bytes)} MB)\n"
+            f"Reason: Files over {self._format_mb(self.MAX_PDF_SIZE_BYTES_WITHOUT_PAGES)} MB "
+            "cannot be read without the pages parameter.\n\n"
+            "ACTION REQUIRED — retry with paginated reads:\n"
+            f"{examples}\n"
+            f'  3. If more content is needed, continue with pages="{batches[2]}", then "31-40", ...\n'
+            "  4. Stop when read_file returns PDF_PAGE_RANGE_OUT_OF_BOUNDS, then summarize all collected batches.\n"
+            "Do NOT call read_file without pages on this file again."
+        )
+
+    def _build_pdf_too_many_pages_error(self, file_path: str, total_pages: int) -> str:
+        first = f"1-{min(self.PDF_MAX_PAGES_PER_READ, total_pages)}"
+        return (
+            "[PDF_READ_ERROR] CODE=PDF_TOO_MANY_PAGES_NO_PAGES\n"
+            f"File: {file_path} ({total_pages} pages)\n"
+            f"Reason: PDFs with more than {self.PDF_AT_MENTION_INLINE_THRESHOLD} pages require the pages parameter.\n\n"
+            "ACTION REQUIRED — retry with paginated reads:\n"
+            f'  read_file(file_path="{file_path}", pages="{first}")'
+        )
+
+    def _build_pdf_page_range_too_wide_error(self, file_path: str, pages: str, page_count: int) -> str:
+        return (
+            "[PDF_READ_ERROR] CODE=PDF_PAGE_RANGE_TOO_WIDE\n"
+            f"File: {file_path}\n"
+            f'Requested: pages="{pages}" ({page_count} pages)\n'
+            f"Limit: {self.PDF_MAX_PAGES_PER_READ} pages per request.\n\n"
+            "ACTION REQUIRED — split into smaller ranges, for example:\n"
+            f'  read_file(file_path="{file_path}", pages="1-{self.PDF_MAX_PAGES_PER_READ}")'
+        )
+
+    def _build_pdf_page_range_out_of_bounds_error(
+            self, file_path: str, pages: Optional[str], total_pages: int
+    ) -> str:
+        return (
+            "[PDF_READ_ERROR] CODE=PDF_PAGE_RANGE_OUT_OF_BOUNDS\n"
+            f"File: {file_path} ({total_pages} pages)\n"
+            f"Requested: pages={pages!r}\n"
+            "Reason: The requested page range is outside the PDF page count.\n\n"
+            "ACTION REQUIRED — stop reading additional page batches and summarize the content already collected."
+        )
+
+    def _build_pdf_absolute_size_error(self, file_path: str, size_bytes: int, pages: Optional[str]) -> str:
+        return (
+            "[PDF_READ_ERROR] CODE=PDF_ABSOLUTE_SIZE_EXCEEDED\n"
+            f"File: {file_path} ({self._format_mb(size_bytes)} MB)\n"
+            f"Requested pages: {pages!r}\n"
+            f"Limit: {self._format_mb(self.MAX_PDF_ABSOLUTE_SIZE_BYTES)} MB absolute maximum.\n\n"
+            "ACTION REQUIRED — do NOT retry read_file on this file. Ask the user to split the PDF "
+            "or use a dedicated PDF/OCR workflow."
+        )
+
+    def _build_pdf_sandbox_large_file_error(self, file_path: str, pages: Optional[str]) -> str:
+        return (
+            "[PDF_READ_ERROR] CODE=PDF_SANDBOX_LARGE_FILE_UNSUPPORTED\n"
+            f"File: {file_path}\n"
+            f"Requested pages: {pages!r}\n"
+            f"Reason: SANDBOX mode only supports PDF files up to "
+            f"{self._format_mb(self.MAX_PDF_SIZE_BYTES_WITHOUT_PAGES)} MB. "
+            "Paginated reads are allowed within that size limit.\n\n"
+            "ACTION REQUIRED — use LOCAL mode or a dedicated remote PDF parsing workflow "
+            "for larger files."
+        )
+
+    def _build_pdf_invalid_page_range_error(self, pages: str) -> str:
+        return (
+            "[PDF_READ_ERROR] CODE=PDF_INVALID_PAGE_RANGE\n"
+            f"Invalid PDF page range format: '{pages}'. "
+            "Use formats like '3' or '1-10'. Pages are 1-indexed."
+        )
+
+    def _suggest_reduced_pdf_page_range(self, pages: Optional[str]) -> Tuple[str, bool]:
+        """Suggest a narrower pages range after token overflow.
+
+        Returns (suggested_pages, single_page_unreducible).
+        """
+        fallback = f"1-{max(1, self.PDF_MAX_PAGES_PER_READ // 2)}"
+        if not pages or not str(pages).strip():
+            return fallback, False
+
+        parsed = self._parse_pdf_page_range(str(pages).strip(), sys.maxsize)
+        if parsed is None:
+            return fallback, False
+
+        start, end = parsed
+        page_count = end - start + 1
+        if page_count <= 1:
+            return str(start), True
+
+        reduced_count = max(1, (page_count + 1) // 2)
+        new_end = start + reduced_count - 1
+        if start == new_end:
+            return str(start), False
+        return f"{start}-{new_end}", False
+
+    def _build_pdf_output_token_error(
+            self, file_path: str, pages: Optional[str], token_count: int
+    ) -> str:
+        suggested_pages, single_page_unreducible = self._suggest_reduced_pdf_page_range(pages)
+        if single_page_unreducible:
+            action = (
+                "ACTION REQUIRED — this single page exceeds the token limit and cannot be "
+                "split further via pages. Ask the user to split the PDF or use a dedicated OCR workflow."
+            )
+        else:
+            action = (
+                "ACTION REQUIRED — retry with a smaller page range:\n"
+                f'  read_file(file_path="{file_path}", pages="{suggested_pages}")'
+            )
+        return (
+            "[PDF_READ_ERROR] CODE=PDF_OUTPUT_TOKEN_EXCEEDED\n"
+            f"File: {file_path}, pages={pages!r}\n"
+            f"Reason: Extracted text ({token_count} tokens) exceeds {self.MAX_TOKENS} token limit.\n\n"
+            f"{action}"
+        )
+
+    def _use_local_pdf_path(self, file_path: str) -> bool:
+        if self.operation.mode != OperationMode.LOCAL:
+            return False
+        if _is_unc_path(file_path):
+            return False
+        return os.path.isfile(file_path)
 
     def _is_text_read_for_edit(self, file_path: str) -> bool:
         return (
@@ -326,6 +514,17 @@ class ReadFileTool(Tool):
         apply_size_cap: apply MAX_SIZE_BYTES check only when reading without an explicit
         user-supplied limit (mirrors TS: maxSizeBytes is passed only when limit is None).
         """
+        if apply_size_cap and not _is_unc_path(file_path):
+            try:
+                byte_len = os.stat(file_path).st_size
+                if byte_len > self.MAX_SIZE_BYTES:
+                    raise RuntimeError(
+                        f"File content ({byte_len // 1024} KB) exceeds maximum allowed size "
+                        f"({self.MAX_SIZE_BYTES // 1024} KB). "
+                        "Use offset and limit parameters to read specific portions of the file."
+                    )
+            except OSError:
+                pass
         start = max(0, offset) + 1    # convert 0-based skip to 1-indexed start line
         end = start + max(0, limit) - 1
         res = await self.operation.fs().read_file(file_path, line_range=(start, end))
@@ -413,7 +612,13 @@ class ReadFileTool(Tool):
                     blocks.append(text.rstrip("\n"))
         return "\n".join(blocks).strip()
 
-    async def _read_pdf(self, file_path: str, pages: Optional[str]) -> str:
+    def _extract_pdf_pages_sync(
+            self,
+            file_path: str,
+            *,
+            pages: Optional[str],
+            pdf_bytes: Optional[bytes] = None,
+    ) -> str:
         try:
             import pdfplumber
         except ImportError as exc:
@@ -421,42 +626,81 @@ class ReadFileTool(Tool):
                 "Reading PDF files requires the optional dependency 'pdfplumber'."
             ) from exc
 
-        res = await self.operation.fs().read_file(file_path, mode="bytes")
-        if res.code != StatusCode.SUCCESS.code:
-            raise RuntimeError(res.message)
-        content = res.data.content or b""
-        if not isinstance(content, bytes):
-            raise RuntimeError("PDF content is not bytes")
-
-        with pdfplumber.open(io.BytesIO(content)) as pdf:
+        pdf_source = io.BytesIO(pdf_bytes) if pdf_bytes is not None else file_path
+        with pdfplumber.open(pdf_source) as pdf:
             total_pages = len(pdf.pages)
 
             # Require pages param when document is too long to inline safely.
             if not pages and total_pages > self.PDF_AT_MENTION_INLINE_THRESHOLD:
-                raise RuntimeError(
-                    f"This PDF has {total_pages} pages, which is too many to read at once. "
-                    f"Use the pages parameter to specify a range (e.g., pages='1-10'). "
-                    f"Maximum {self.PDF_MAX_PAGES_PER_READ} pages per request."
-                )
+                raise PDFReadError(self._build_pdf_too_many_pages_error(file_path, total_pages))
 
-            result = self._parse_pdf_page_range(pages, total_pages)
+            result, reason = self._parse_pdf_page_range_with_reason(pages, total_pages)
             if result is None:
-                raise RuntimeError(f"Invalid or empty PDF page range: '{pages}'")
+                if reason == "out_of_bounds":
+                    raise PDFReadError(
+                        self._build_pdf_page_range_out_of_bounds_error(file_path, pages, total_pages)
+                    )
+                raise PDFReadError(self._build_pdf_invalid_page_range_error(str(pages or "")))
             start, end = result
 
             page_count = end - start + 1
             if page_count > self.PDF_MAX_PAGES_PER_READ:
-                raise RuntimeError(
-                    f"Requested {page_count} pages exceeds the maximum of "
-                    f"{self.PDF_MAX_PAGES_PER_READ} pages per read. "
-                    "Narrow the pages parameter range."
-                )
+                raise PDFReadError(self._build_pdf_page_range_too_wide_error(file_path, str(pages), page_count))
 
             parts = []
             for page_no in range(start, end + 1):
                 page_text = pdf.pages[page_no - 1].extract_text() or ""
                 parts.append(f"## Page {page_no}\n{page_text}".rstrip())
             return "\n\n".join(parts).strip()
+
+    async def _read_pdf(self, file_path: str, pages: Optional[str]) -> str:
+        size_bytes: int = 0
+        try:
+            size_bytes = os.stat(file_path).st_size
+        except OSError:
+            size_bytes = 0
+
+        if self.operation.mode == OperationMode.SANDBOX:
+            if not size_bytes or size_bytes > self.MAX_PDF_SIZE_BYTES_WITHOUT_PAGES:
+                raise PDFReadError(self._build_pdf_sandbox_large_file_error(file_path, pages))
+
+        if not pages and size_bytes > self.MAX_PDF_SIZE_BYTES_WITHOUT_PAGES:
+            raise PDFReadError(self._build_pdf_too_large_no_pages_error(file_path, size_bytes))
+
+        if pages and size_bytes > self.MAX_PDF_ABSOLUTE_SIZE_BYTES:
+            raise PDFReadError(self._build_pdf_absolute_size_error(file_path, size_bytes, pages))
+
+        started = time.perf_counter()
+        async with _PDF_READ_SEMAPHORE:
+            if self._use_local_pdf_path(file_path):
+                rendered = await asyncio.to_thread(
+                    self._extract_pdf_pages_sync,
+                    file_path,
+                    pages=pages,
+                    pdf_bytes=None,
+                )
+            else:
+                res = await self.operation.fs().read_file(file_path, mode="bytes")
+                if res.code != StatusCode.SUCCESS.code:
+                    raise RuntimeError(res.message)
+                content = res.data.content or b""
+                if not isinstance(content, bytes):
+                    raise RuntimeError("PDF content is not bytes")
+                rendered = await asyncio.to_thread(
+                    self._extract_pdf_pages_sync,
+                    file_path,
+                    pages=pages,
+                    pdf_bytes=content,
+                )
+
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        logger.info("[ReadFileTool] pdf read completed path=%s pages=%s elapsed_ms=%s", file_path, pages, elapsed_ms)
+
+        tokens = self._estimate_tokens(rendered)
+        if tokens > self.MAX_TOKENS:
+            raise PDFReadError(self._build_pdf_output_token_error(file_path, pages, tokens))
+
+        return rendered
 
     @staticmethod
     def _compress_image_bytes(raw: bytes, size: Tuple[int, int], quality: int) -> Optional[bytes]:
@@ -598,23 +842,27 @@ class ReadFileTool(Tool):
 
         # Validate pages format and range size before any I/O (errorCode 7 / 8).
         if pages is not None and self._is_pdf(file_path):
-            # Format check: parse against sys.maxsize to detect structural errors.
-            parsed = self._parse_pdf_page_range(pages, sys.maxsize)
+            pages_text = str(pages)
+            if not self._validate_pdf_page_range_format(pages_text):
+                return ToolOutput(
+                    success=False,
+                    error=self._build_pdf_invalid_page_range_error(pages_text),
+                )
+            # Width check: parse against sys.maxsize so open-ended ranges are bounded.
+            parsed = self._parse_pdf_page_range(pages_text, sys.maxsize)
             if parsed is None:
                 return ToolOutput(
                     success=False,
-                    error=f"Invalid PDF page range format: '{pages}'. "
-                          "Use formats like '3', '1-5', or '10-20'. Pages are 1-indexed.",
+                    error=self._build_pdf_invalid_page_range_error(pages_text),
                 )
             # Open-ended ranges (e.g. "10-") resolve end to sys.maxsize at parse time,
             # which means we cannot bound the size — reject them upfront (errorCode 8).
             start_pg, end_pg = parsed
             if end_pg >= sys.maxsize or (end_pg - start_pg + 1) > self.PDF_MAX_PAGES_PER_READ:
+                requested_count = end_pg - start_pg + 1 if end_pg < sys.maxsize else sys.maxsize
                 return ToolOutput(
                     success=False,
-                    error=f"Page range '{pages}' exceeds the maximum of "
-                          f"{self.PDF_MAX_PAGES_PER_READ} pages per request. "
-                          "Please use a smaller or fully-bounded range (e.g. '1-20').",
+                    error=self._build_pdf_page_range_too_wide_error(file_path, str(pages), requested_count),
                 )
 
         offset: int = int(inputs.get("offset", 0))
@@ -639,24 +887,24 @@ class ReadFileTool(Tool):
         except OSError:
             pass
 
-        # previous = self._snapshots.get(key)
-        # if previous and mtime_ns and previous.mtime_ns == mtime_ns:
-        #     await self._record_read_state(
-        #         file_path=file_path,
-        #         mtime_ns=mtime_ns,
-        #         size_bytes=size_bytes,
-        #         is_partial=user_supplied_limit or offset > 0,
-        #         rendered_line_count=previous.line_count,
-        #     )
-        #     return ToolOutput(
-        #         success=True,
-        #         data={
-        #             "content": self.FILE_UNCHANGED_STUB,
-        #             "file_path": file_path,
-        #             "unchanged": True,
-        #             "line_count": previous.line_count,
-        #         },
-        #     )
+        previous = self._snapshots.get(key)
+        if previous and mtime_ns and previous.mtime_ns == mtime_ns:
+            await self._record_read_state(
+                file_path=file_path,
+                mtime_ns=mtime_ns,
+                size_bytes=size_bytes,
+                is_partial=user_supplied_limit or offset > 0,
+                rendered_line_count=previous.line_count,
+            )
+            return ToolOutput(
+                success=True,
+                data={
+                    "content": self.FILE_UNCHANGED_STUB,
+                    "file_path": file_path,
+                    "unchanged": True,
+                    "line_count": previous.line_count,
+                },
+            )
 
         try:
             if self._is_pdf(file_path):
