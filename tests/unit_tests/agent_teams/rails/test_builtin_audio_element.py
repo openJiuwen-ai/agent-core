@@ -39,3 +39,30 @@ def test_audio_element_builds_all_tools_with_complete_model_config() -> None:
         "audio_question_answering",
         "audio_metadata",
     ]
+
+
+def test_vision_element_skips_incomplete_model_config() -> None:
+    tools = builtin_elements._build_vision_tool_group(  # noqa: SLF001
+        {"vision_model_config": {"base_url": "https://vision.example/v1"}},
+        _Context(),
+    )
+
+    assert tools == []
+
+
+def test_vision_element_builds_tools_with_complete_model_config() -> None:
+    tools = builtin_elements._build_vision_tool_group(  # noqa: SLF001
+        {
+            "vision_model_config": {
+                "api_key": "key",
+                "base_url": "https://vision.example/v1",
+                "model": "vision-model",
+            },
+        },
+        _Context(),
+    )
+
+    assert [tool.card.name for tool in tools] == [
+        "image_ocr",
+        "visual_question_answering",
+    ]

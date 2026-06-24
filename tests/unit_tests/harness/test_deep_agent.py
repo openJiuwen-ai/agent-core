@@ -37,7 +37,11 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import Workspace, create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
-from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
+from openjiuwen.harness.schema.config import (
+    DeepAgentConfig,
+    SubAgentConfig,
+    VisionModelConfig,
+)
 from openjiuwen.harness.subagents import (
     build_code_agent_config,
     build_research_agent_config,
@@ -633,6 +637,37 @@ def test_create_deep_agent_registers_tool_instances() -> None:
         assert Runner.resource_mgr.get_tool(tool.card.id) is not None
     finally:
         Runner.resource_mgr.remove_tool(tool.card.id)
+
+
+def test_create_deep_agent_auto_registers_complete_vision_tools() -> None:
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        vision_model_config=VisionModelConfig(
+            api_key="vision-key",
+            base_url="https://vision.example/v1",
+            model="vision-model",
+        ),
+        auto_create_workspace=False,
+    )
+
+    try:
+        assert agent.ability_manager.get("image_ocr") is not None
+        assert agent.ability_manager.get("visual_question_answering") is not None
+        assert agent.deep_config.enable_read_image_multimodal is False
+    finally:
+        agent.ability_manager.teardown_tools()
+
+
+def test_create_deep_agent_skips_incomplete_vision_tools() -> None:
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        vision_model_config=VisionModelConfig(),
+        auto_create_workspace=False,
+    )
+
+    assert agent.ability_manager.get("image_ocr") is None
+    assert agent.ability_manager.get("visual_question_answering") is None
+    assert agent.deep_config.enable_read_image_multimodal is True
 
 
 def test_create_deep_agent_skips_free_search_when_all_free_engines_disabled(monkeypatch) -> None:

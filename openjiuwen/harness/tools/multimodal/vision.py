@@ -13,7 +13,10 @@ from urllib.parse import urlparse
 from openai import OpenAI
 
 from openjiuwen.core.foundation.tool.base import Tool
-from openjiuwen.harness.schema.config import VisionModelConfig
+from openjiuwen.harness.schema.config import (
+    VisionModelConfig,
+    is_vision_model_config_complete,
+)
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
@@ -284,6 +287,8 @@ def create_vision_tools(
     vision_model_config: Optional[VisionModelConfig] = None,
     agent_id: Optional[str] = None,
 ) -> list[Tool]:
+    if not is_vision_model_config_complete(vision_model_config):
+        return []
     return [
         ImageOCRTool(
             language=language,

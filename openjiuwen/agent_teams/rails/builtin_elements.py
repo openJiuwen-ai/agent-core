@@ -41,7 +41,11 @@ from openjiuwen.harness.rails import (
 from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
-from openjiuwen.harness.schema.config import AudioModelConfig, VisionModelConfig
+from openjiuwen.harness.schema.config import (
+    AudioModelConfig,
+    VisionModelConfig,
+    is_vision_model_config_complete,
+)
 from openjiuwen.harness.tools import (
     AudioMetadataTool,
     WebFetchWebpageTool,
@@ -258,10 +262,13 @@ def _build_vision_tool_group(params: dict[str, Any], context: Any) -> list[Any]:
     inp = VisionToolsInput.resolve(params, context)
     if not inp.vision_model_config:
         return []
+    config = VisionModelConfig(**inp.vision_model_config)
+    if not is_vision_model_config_complete(config):
+        return []
     return list(
         create_vision_tools(
             language=inp.language,
-            vision_model_config=VisionModelConfig(**inp.vision_model_config),
+            vision_model_config=config,
             agent_id=inp.agent_id,
         )
     )
