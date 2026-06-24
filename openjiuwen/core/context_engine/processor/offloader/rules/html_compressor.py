@@ -134,6 +134,11 @@ _NOISE_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 _HIDDEN_STYLE_RE = re.compile(r"(?:display\s*:\s*none|visibility\s*:\s*hidden)", re.IGNORECASE)
+_HTML_CONTENT_START_RE = re.compile(
+    r"^\s*</?(?:article|main|section|div|table|thead|tbody|tr|th|td|ul|ol|li|p|pre|code|strong|span|h[1-6])\b",
+    re.IGNORECASE,
+)
+_CSS_FRAGMENT_LINE_RE = re.compile(r"^\s*(?:[.#:@\w-][^<>]*\{|[-\w]+\s*:\s*[^;]+;|}|/\*|\*/)")
 _BLOCK_TAGS = {
     "article",
     "blockquote",
@@ -159,20 +164,28 @@ class HtmlCompressor:
         self._extractor = extractor or HTMLExtractor()
 
     def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult:
+        if _looks_like_report_html(content):
+            return self._compress_with_beautifulsoup_fallback(
+                content,
+                ctx,
+                extractor_label="beautifulsoup:report",
+            )
+        extractor_content = _remove_extractor_noise_html(content)
         try:
-            extracted = self._extractor.extract(content)
+            extracted = self._extractor.extract(extractor_content)
         except ModuleNotFoundError:
             return self._compress_with_beautifulsoup_fallback(content, ctx)
         except Exception:
             return _unchanged(content)
 
         candidate = extracted.extracted.strip()
+        original_length = len(content)
         details: dict[str, Any] = {
             "extractor": "trafilatura",
-            "original_length": extracted.original_length,
+            "original_length": original_length,
             "extracted_length": extracted.extracted_length,
-            "compression_ratio": extracted.compression_ratio,
-            "reduction_percent": extracted.reduction_percent,
+            "compression_ratio": extracted.extracted_length / max(original_length, 1),
+            "reduction_percent": (1 - extracted.extracted_length / max(original_length, 1)) * 100,
             "title": extracted.title,
             "author": extracted.author,
             "date": extracted.date,
@@ -206,6 +219,8 @@ class HtmlCompressor:
         self,
         content: str,
         ctx: RuleContext,
+        *,
+        extractor_label: str = "beautifulsoup",
     ) -> RuleCompressionResult:
         try:
             soup = _parse_html(content)
@@ -213,8 +228,14 @@ class HtmlCompressor:
             return _unchanged(content)
 
         title = _extract_title(soup)
-        removed_node_count = _remove_noise(soup)
-        main, source = _find_main_content(soup, ctx.html_min_content_chars)
+        is_report = extractor_label.endswith(":report")
+        removed_node_count = _remove_report_noise(soup) if is_report else _remove_noise(soup)
+        if is_report:
+            body = soup.find("body")
+            main = body if isinstance(body, Tag) else None
+            source = "body:report" if main is not None else "none"
+        else:
+            main, source = _find_main_content(soup, ctx.html_min_content_chars)
         if main is None:
             return _unchanged(content)
 
@@ -227,6 +248,7 @@ class HtmlCompressor:
             return _unchanged(content)
 
         details: dict[str, Any] = {
+            "extractor": extractor_label,
             "main_content_source": source,
             "removed_node_count": removed_node_count,
             "duplicate_block_count": duplicate_count,
@@ -261,6 +283,50 @@ def _parse_html(content: str) -> BeautifulSoup:
         return BeautifulSoup(content, "html.parser")
 
 
+def _looks_like_report_html(content: str) -> bool:
+    lowered = content[:20000].lower()
+    report_markers = (
+        "pytest-html",
+        "results-table",
+        "environment",
+        "test results",
+        "tests took",
+        "report generated",
+    )
+    if "pytest-html" in lowered or "results-table" in lowered:
+        return True
+    return lowered.count("<table") >= 2 and sum(marker in lowered for marker in report_markers) >= 2
+
+
+def _remove_extractor_noise_html(content: str) -> str:
+    content = _strip_leading_stylesheet_fragment(content)
+    try:
+        soup = _parse_html(content)
+    except Exception:
+        return content
+    removed = False
+    for node in list(soup.find_all(_NOISE_TAGS)):
+        node.decompose()
+        removed = True
+    return str(soup) if removed else content
+
+
+def _strip_leading_stylesheet_fragment(content: str) -> str:
+    lines = content.splitlines()
+    first_content_index = None
+    for index, line in enumerate(lines):
+        if _HTML_CONTENT_START_RE.search(line):
+            first_content_index = index
+            break
+    if first_content_index is None or first_content_index == 0:
+        return content
+    leading = lines[:first_content_index]
+    css_like_count = sum(1 for line in leading if _CSS_FRAGMENT_LINE_RE.search(line))
+    if css_like_count < 2:
+        return content
+    return "\n".join(lines[first_content_index:])
+
+
 def _extract_title(soup: BeautifulSoup) -> str:
     meta = soup.find("meta", property="og:title")
     if isinstance(meta, Tag):
@@ -290,6 +356,14 @@ def _remove_noise(soup: BeautifulSoup) -> int:
         if is_hidden or _NOISE_NAME_RE.search(classes) or _NOISE_NAME_RE.search(identifier):
             node.decompose()
             removed += 1
+    return removed
+
+
+def _remove_report_noise(soup: BeautifulSoup) -> int:
+    removed = 0
+    for node in list(soup.find_all(_NOISE_TAGS)):
+        node.decompose()
+        removed += 1
     return removed
 
 

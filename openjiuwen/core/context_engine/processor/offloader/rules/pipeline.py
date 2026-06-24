@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+import re
 import time
 from typing import Callable
 
@@ -13,6 +16,7 @@ from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, UserMessage
 
 
 CHARACTERS_PER_TOKEN = 3
+RULE_COMPRESSION_DUMP_DIR_ENV = "OPENJIUWEN_RULE_COMPRESSION_DUMP_DIR"
 
 
 class RuleCompressionPipeline:
@@ -22,9 +26,11 @@ class RuleCompressionPipeline:
         self,
         router: RuleContentRouter | None = None,
         time_func: Callable[[], float] = time.time,
+        enable_dump: bool = False,
     ) -> None:
         self._router = router or RuleContentRouter()
         self._time_func = time_func
+        self._enable_dump = enable_dump
 
     def current_time(self) -> float:
         return self._time_func()
@@ -64,7 +70,7 @@ class RuleCompressionPipeline:
             ),
         )
         content = result.content
-        if content == original:
+        if not result.modified:
             return message
 
         metadata = dict(getattr(message, "metadata", None) or {})
@@ -77,6 +83,17 @@ class RuleCompressionPipeline:
         )
         if result.details:
             metadata["rule_compression_details"] = result.details
+        dump_path = self._dump_result(
+            context,
+            original=original,
+            compressed=content,
+            pass_name=pass_name,
+            content_type=result.content_type.value,
+            tool_call_id=str(getattr(message, "tool_call_id", "unknown") or "unknown"),
+            details=result.details,
+        )
+        if dump_path:
+            metadata["rule_compression_dump_path"] = dump_path
         logger.info(
             "[RuleCompression] applied tool_call_id=%s pass=%s type=%s chars=%s->%s",
             getattr(message, "tool_call_id", "unknown"),
@@ -86,6 +103,98 @@ class RuleCompressionPipeline:
             len(content),
         )
         return message.model_copy(update={"content": content, "metadata": metadata})
+
+    def _dump_result(
+        self,
+        context: ModelContext,
+        *,
+        original: str,
+        compressed: str,
+        pass_name: str,
+        content_type: str,
+        tool_call_id: str,
+        details: dict | None,
+    ) -> str | None:
+        if not self._enable_dump:
+            return None
+        dump_dir = self._dump_dir(context)
+        if not dump_dir:
+            return None
+
+        timestamp = self.current_time()
+        session_id = self._safe_context_value(context, "session_id", "unknown_session")
+        context_id = self._safe_context_value(context, "context_id", "unknown_context")
+        safe_parts = [
+            str(int(timestamp * 1000)),
+            pass_name,
+            content_type,
+            tool_call_id,
+        ]
+        file_name = "_".join(self._safe_filename_part(part) for part in safe_parts) + ".json"
+        dump_path = os.path.join(dump_dir, file_name)
+        payload = {
+            "timestamp": timestamp,
+            "session_id": session_id,
+            "context_id": context_id,
+            "tool_call_id": tool_call_id,
+            "rule_compression_type": content_type,
+            "rule_compression_pass": pass_name,
+            "original_chars": len(original),
+            "compressed_chars": len(compressed),
+            "details": details or {},
+            "original_content": original,
+            "compressed_content": compressed,
+        }
+        try:
+            os.makedirs(dump_dir, exist_ok=True)
+            with open(dump_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            logger.warning("[RuleCompression] failed to dump compression payload: %s", exc)
+            return None
+        logger.info("[RuleCompression] dumped compression payload path=%s", dump_path)
+        return dump_path
+
+    def _dump_dir(self, context: ModelContext) -> str:
+        env_dir = os.getenv(RULE_COMPRESSION_DUMP_DIR_ENV)
+        if env_dir:
+            return env_dir
+        workspace_dir = self._workspace_dir(context)
+        if not workspace_dir:
+            return ""
+        session_id = self._safe_context_value(context, "session_id", "unknown_session")
+        return os.path.join(
+            workspace_dir,
+            "context",
+            f"{session_id}_context",
+            "rule_compression_logs",
+        )
+
+    @staticmethod
+    def _workspace_dir(context: ModelContext) -> str:
+        workspace_dir = getattr(context, "workspace_dir", None)
+        if not callable(workspace_dir):
+            return ""
+        try:
+            return str(workspace_dir() or "")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _safe_context_value(context: ModelContext, method_name: str, fallback: str) -> str:
+        method = getattr(context, method_name, None)
+        if not callable(method):
+            return fallback
+        try:
+            value = method()
+        except Exception:
+            return fallback
+        return str(value or fallback)
+
+    @staticmethod
+    def _safe_filename_part(value: str) -> str:
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-")
+        return safe[:80] or "unknown"
 
     def _query_terms_for_message(
         self,

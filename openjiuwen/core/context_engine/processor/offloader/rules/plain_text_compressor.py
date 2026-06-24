@@ -5,6 +5,7 @@ from openjiuwen.core.context_engine.processor.offloader.rules.types import (
     RuleCompressionResult,
     RuleContext,
 )
+from openjiuwen.core.context_engine.processor.offloader.rules.common import meets_savings_ratio
 
 
 class PlainTextCompressor:
@@ -20,8 +21,14 @@ class PlainTextCompressor:
             elif not normalized and (not lines or lines[-1] != ""):
                 lines.append("")
         compressed = "\n".join(lines).strip()
+        if compressed == content or not meets_savings_ratio(content, compressed, ctx):
+            return RuleCompressionResult(
+                content=content,
+                content_type=ContentType.PLAIN_TEXT,
+                modified=False,
+            )
         return RuleCompressionResult(
             content=compressed,
             content_type=ContentType.PLAIN_TEXT,
-            modified=compressed != content,
+            modified=True,
         )

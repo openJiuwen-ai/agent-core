@@ -22,6 +22,13 @@ class LanguageConfig:
     python_style: bool = False
 
 
+@dataclass(frozen=True)
+class NumberedSourceLine:
+    prefix: str
+    code: str
+    line_number: int
+
+
 _LANGUAGES: dict[str, LanguageConfig] = {
     "python": LanguageConfig(frozenset({"function_definition"}), frozenset({"block"}), "#", True),
     "javascript": LanguageConfig(
@@ -62,6 +69,10 @@ _DETECTION_PATTERNS = {
 
 class SourceCodeCompressor:
     def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult:
+        numbered_lines = _numbered_source_lines(content)
+        if numbered_lines is not None:
+            return _compress_numbered_source(content, numbered_lines, ctx)
+
         if len(content.splitlines()) < ctx.source_min_lines:
             return _unchanged(content)
         language = _detect_language(content)
@@ -111,6 +122,80 @@ class SourceCodeCompressor:
         )
 
 
+def _compress_numbered_source(
+    original: str,
+    numbered_lines: list[NumberedSourceLine],
+    ctx: RuleContext,
+) -> RuleCompressionResult:
+    clean_content = "\n".join(line.code for line in numbered_lines)
+    if len(numbered_lines) < ctx.source_min_lines:
+        return _unchanged_numbered(original)
+    language = _detect_language(clean_content)
+    if language is None:
+        return _unchanged_numbered(original)
+
+    parser = get_parser(language)
+    tree = parser.parse(clean_content)
+    root = tree.root_node()
+    if _has_syntax_error(root):
+        return _unchanged_numbered(original)
+
+    config = _LANGUAGES[language]
+    clean_bytes = clean_content.encode("utf-8")
+    replacements: list[tuple[int, int, bytes]] = []
+    row_replacements: list[tuple[int, int]] = []
+    stats = {"bodies_seen": 0, "bodies_compressed": 0, "query_protected_bodies": 0}
+    _collect_replacements(
+        root,
+        clean_bytes,
+        config,
+        ctx,
+        replacements,
+        stats,
+        row_replacements=row_replacements,
+    )
+    details: dict[str, Any] = {
+        "language": language,
+        **stats,
+        "syntax_valid": True,
+        "line_numbers_preserved": True,
+    }
+    if not replacements:
+        return _unchanged_numbered(original, language=language, details=details)
+
+    clean_candidate_bytes = clean_bytes
+    for start, end, replacement in sorted(replacements, reverse=True):
+        clean_candidate_bytes = clean_candidate_bytes[:start] + replacement + clean_candidate_bytes[end:]
+    clean_candidate = clean_candidate_bytes.decode("utf-8")
+    syntax_valid = _candidate_syntax_valid(language, parser.parse(clean_candidate).root_node(), clean_candidate)
+    details["syntax_valid"] = syntax_valid
+    if not syntax_valid:
+        return RuleCompressionResult(
+            content=original,
+            content_type=ContentType.SOURCE_CODE,
+            modified=False,
+            lossy=False,
+            details=details,
+        )
+
+    candidate = _apply_numbered_row_replacements(numbered_lines, row_replacements, config)
+    if candidate != original and meets_savings_ratio(original, candidate, ctx):
+        return RuleCompressionResult(
+            content=candidate,
+            content_type=ContentType.SOURCE_CODE,
+            modified=True,
+            lossy=True,
+            details=details,
+        )
+    return RuleCompressionResult(
+        content=original,
+        content_type=ContentType.SOURCE_CODE,
+        modified=False,
+        lossy=False,
+        details=details,
+    )
+
+
 def _collect_replacements(
     node: Any,
     content: bytes,
@@ -118,6 +203,8 @@ def _collect_replacements(
     ctx: RuleContext,
     replacements: list[tuple[int, int, bytes]],
     stats: dict[str, int],
+    *,
+    row_replacements: list[tuple[int, int]] | None = None,
 ) -> None:
     if _kind(node) in config.function_nodes:
         body = _body_node(node, config)
@@ -133,10 +220,48 @@ def _collect_replacements(
         if body_lines <= ctx.source_max_body_lines:
             return
         replacements.append((_start(body), _end(body), _omission_body(body, content, config)))
+        if row_replacements is not None:
+            row_replacements.append(
+                (
+                    _position_row(_start_position(body)),
+                    _position_row(_end_position(body)),
+                )
+            )
         stats["bodies_compressed"] += 1
         return
     for child in _named_children(node):
-        _collect_replacements(child, content, config, ctx, replacements, stats)
+        _collect_replacements(
+            child,
+            content,
+            config,
+            ctx,
+            replacements,
+            stats,
+            row_replacements=row_replacements,
+        )
+
+
+def _apply_numbered_row_replacements(
+    numbered_lines: list[NumberedSourceLine],
+    row_replacements: list[tuple[int, int]],
+    config: LanguageConfig,
+) -> str:
+    replacements = sorted(row_replacements, reverse=True)
+    output = list(numbered_lines)
+    for start_row, end_row in replacements:
+        if start_row < 0 or end_row >= len(output) or start_row > end_row:
+            continue
+        first = output[start_row]
+        last = output[end_row]
+        indent = re.match(r"[ \t]*", first.code).group(0)
+        marker = (
+            f"{indent}{config.comment_prefix} [function body omitted; original lines "
+            f"{first.line_number}-{last.line_number}, reload original source for details]"
+        )
+        output[start_row : end_row + 1] = [
+            NumberedSourceLine(prefix=first.prefix, code=marker, line_number=first.line_number)
+        ]
+    return "\n".join(f"{line.prefix}{line.code}" for line in output)
 
 
 def _body_node(node: Any, config: LanguageConfig) -> Any | None:
@@ -232,6 +357,46 @@ def _end_position(node: Any) -> Any:
 def _position_row(point: Any) -> int:
     row = getattr(point, "row", None)
     return int(row() if callable(row) else row)
+
+
+def _numbered_source_lines(content: str) -> list[NumberedSourceLine] | None:
+    lines = content.splitlines()
+    if not lines:
+        return None
+    numbered_lines: list[NumberedSourceLine] = []
+    numbered_count = 0
+    for line in lines:
+        match = re.match(r"^(?P<prefix>\s*(?P<number>\d+)\t)(?P<code>.*)$", line)
+        if match is None:
+            numbered_lines.append(NumberedSourceLine(prefix="", code=line, line_number=0))
+            continue
+        numbered_count += 1
+        numbered_lines.append(
+            NumberedSourceLine(
+                prefix=match.group("prefix"),
+                code=match.group("code"),
+                line_number=int(match.group("number")),
+            )
+        )
+    if numbered_count < 2 or numbered_count / len(lines) < 0.8:
+        return None
+    return numbered_lines
+
+
+def _unchanged_numbered(
+    content: str,
+    *,
+    language: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> RuleCompressionResult:
+    numbered_details = {
+        "bodies_seen": 0,
+        "bodies_compressed": 0,
+        "query_protected_bodies": 0,
+        "line_numbers_preserved": True,
+    }
+    numbered_details.update(details or {})
+    return _unchanged(content, language=language, details=numbered_details)
 
 
 def _unchanged(

@@ -6,6 +6,8 @@ import json
 from collections import Counter
 from typing import Any
 
+from json_repair import loads as repair_json_loads
+
 from openjiuwen.core.context_engine.processor.offloader.rules.common import ERROR_RE, fits_budget_and_saves
 from openjiuwen.core.context_engine.processor.offloader.rules.types import (
     ContentType,
@@ -25,11 +27,10 @@ class JsonArrayCompressor:
         )
 
     def _compress(self, content: str, ctx: RuleContext) -> tuple[str, bool]:
-        try:
-            rows = json.loads(content)
-        except Exception:
+        rows = _load_json_array(content)
+        if rows is None:
             return content, False
-        if not isinstance(rows, list) or not rows:
+        if not rows:
             return content, False
         if all(isinstance(row, dict) for row in rows):
             return self._compress_object_array(content, rows, ctx)
@@ -246,3 +247,17 @@ class JsonArrayCompressor:
             scored.append((score, index, row))
         selected = sorted(sorted(scored, reverse=True)[:12], key=lambda item: item[1])
         return [row for _, _, row in selected]
+
+
+def _load_json_array(content: str) -> list[Any] | None:
+    try:
+        rows = json.loads(content)
+    except Exception:
+        stripped = content.lstrip()
+        if not stripped.startswith("["):
+            return None
+        try:
+            rows = repair_json_loads(content)
+        except Exception:
+            return None
+    return rows if isinstance(rows, list) else None

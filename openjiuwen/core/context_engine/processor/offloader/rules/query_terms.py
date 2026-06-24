@@ -7,6 +7,16 @@ from typing import Any
 
 
 _TERM_RE = re.compile(r"[A-Za-z0-9_]{3,}")
+_PATH_ARGUMENT_KEYS = frozenset(
+    {
+        "file",
+        "file_path",
+        "filepath",
+        "filename",
+        "path",
+        "paths",
+    }
+)
 
 
 def extract_query_terms(
@@ -38,6 +48,8 @@ def _add_terms_from_value(terms: set[str], value: Any) -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
             _add_terms_from_value(terms, key)
+            if isinstance(key, str) and key.lower() in _PATH_ARGUMENT_KEYS:
+                continue
             _add_terms_from_value(terms, item)
         return
     if isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):

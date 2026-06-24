@@ -4,10 +4,11 @@ import fnmatch
 import json
 import os
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context_engine import ContextEngine
@@ -17,6 +18,9 @@ from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
 
 OMIT_STRING = "..."
+MESSAGE_OFFLOADER_DEBUG_LOG_DIR_ENV = "OPENJIUWEN_MESSAGE_OFFLOADER_DEBUG_LOG_DIR"
+MESSAGE_OFFLOADER_DEBUG_LOG_FILE = "message_offloader_debug.jsonl"
+OffloadStrategy = Literal["rule_then_truncate", "rule_only", "truncate_only"]
 
 
 class MessageOffloaderConfig(BaseModel):
@@ -51,6 +55,12 @@ class MessageOffloaderConfig(BaseModel):
     enable_rule_compression: bool = True
     """Whether deterministic rule compression runs before offload fallback."""
 
+    enable_rule_compression_dump: bool = True
+    """Whether successful rule compression writes before/after debug payloads to the workspace."""
+
+    offload_strategy: OffloadStrategy = "rule_then_truncate"
+    """Offload behavior: rule compression with truncation fallback, rule-only, or truncation-only."""
+
     protected_tool_names: list[str] = Field(
         default_factory=lambda: ["reload_original_context_messages"]
     )
@@ -61,7 +71,9 @@ class MessageOffloaderConfig(BaseModel):
 class MessageOffloader(ContextProcessor):
     def __init__(self, config: MessageOffloaderConfig):
         super().__init__(config)
-        self._rule_pipeline = RuleCompressionPipeline()
+        self._rule_pipeline = RuleCompressionPipeline(
+            enable_dump=bool(config.enable_rule_compression_dump)
+        )
 
     async def trigger_add_messages(
         self,
@@ -71,12 +83,25 @@ class MessageOffloader(ContextProcessor):
     ) -> bool:
         _ = kwargs
         threshold = self._add_message_threshold(context)
-        return any(
-            isinstance(message, ToolMessage)
-            and isinstance(getattr(message, "content", None), str)
-            and len(message.content) > threshold
-            for message in messages_to_add
-        )
+        triggered = False
+        for index, message in enumerate(messages_to_add):
+            if (
+                isinstance(message, ToolMessage)
+                and isinstance(getattr(message, "content", None), str)
+                and len(message.content) > threshold
+            ):
+                triggered = True
+                self._write_debug_log(
+                    context,
+                    event="add_message_triggered_offload",
+                    pass_name="add",
+                    message=message,
+                    message_index=index,
+                    threshold=threshold,
+                    content_chars=len(message.content),
+                    original_content=message.content,
+                )
+        return triggered
 
     async def on_add_messages(
         self,
@@ -118,7 +143,15 @@ class MessageOffloader(ContextProcessor):
         if len(message.content) <= threshold:
             return message
 
-        if self._enable_rule_compression():
+        if self._should_try_rule_compression():
+            self._write_debug_log(
+                context,
+                event="rule_compression_triggered",
+                pass_name="add",
+                message=message,
+                threshold=threshold,
+                original_content=message.content,
+            )
             compressed = self._rule_pipeline.compress(
                 message,
                 context,
@@ -127,22 +160,34 @@ class MessageOffloader(ContextProcessor):
                 context_messages=context_messages,
             )
             if self._is_rule_compressed_message(compressed):
+                self._write_debug_log(
+                    context,
+                    event="rule_compression_completed",
+                    pass_name="add",
+                    message=compressed,
+                    threshold=threshold,
+                    original_content=message.content,
+                    compressed_content=compressed.content,
+                    compressed_metadata=getattr(compressed, "metadata", None) or {},
+                )
                 return await self._finalize_rule_compressed_message(
                     compressed,
                     context,
                     original_message=message,
                     max_chars=threshold,
                     offload_original=True,
-                    truncate_offloaded_preview=True,
+                    truncate_offloaded_preview=self._should_truncate_rule_preview(),
                     **kwargs,
                 )
 
-        return await self._offload_message(
-            message,
-            context,
-            original_message=message,
-            **kwargs,
-        )
+        if self._should_fallback_to_plain_offload():
+            return await self._offload_message(
+                message,
+                context,
+                original_message=message,
+                **kwargs,
+            )
+        return message
 
     async def _finalize_rule_compressed_message(
         self,
@@ -234,7 +279,18 @@ class MessageOffloader(ContextProcessor):
         ttl_budget: int,
         **kwargs: Any,
     ) -> BaseMessage:
-        if not self._enable_rule_compression():
+        self._write_debug_log(
+            context,
+            event="ttl_message_triggered_offload",
+            pass_name="ttl",
+            message=message,
+            threshold=ttl_budget,
+            content_chars=len(message.content),
+            original_content=message.content,
+        )
+        if not self._should_try_rule_compression():
+            if not self._should_fallback_to_plain_offload():
+                return message
             return await self._offload_message(
                 message,
                 context,
@@ -243,6 +299,14 @@ class MessageOffloader(ContextProcessor):
             )
         if self._is_rule_compressed_message(message):
             return message
+        self._write_debug_log(
+            context,
+            event="rule_compression_triggered",
+            pass_name="ttl",
+            message=message,
+            threshold=ttl_budget,
+            original_content=message.content,
+        )
         processed = self._rule_pipeline.compress(
             message,
             context,
@@ -252,17 +316,29 @@ class MessageOffloader(ContextProcessor):
             context_messages=context.get_messages(),
         )
         if self._is_rule_compressed_message(processed):
+            self._write_debug_log(
+                context,
+                event="rule_compression_completed",
+                pass_name="ttl",
+                message=processed,
+                threshold=ttl_budget,
+                original_content=message.content,
+                compressed_content=processed.content,
+                compressed_metadata=getattr(processed, "metadata", None) or {},
+            )
             return await self._finalize_rule_compressed_message(
                 processed,
                 context,
                 original_message=message,
                 max_chars=ttl_budget,
                 offload_original=True,
-                truncate_offloaded_preview=True,
+                truncate_offloaded_preview=self._should_truncate_rule_preview(),
                 **kwargs,
             )
         if len(processed.content) <= ttl_budget:
             return processed
+        if not self._should_fallback_to_plain_offload():
+            return message
         return await self._offload_message(
             processed,
             context,
@@ -303,6 +379,17 @@ class MessageOffloader(ContextProcessor):
             **extra_fields,
             **kwargs,
         )
+        if offloaded is not None:
+            self._write_debug_log(
+                context,
+                event="message_offloaded",
+                message=offloaded,
+                original_message=original_message,
+                offload_handle=getattr(offloaded, "offload_handle", None),
+                offload_type=getattr(offloaded, "offload_type", None),
+                offload_path=offload_path,
+                offloaded_content=getattr(offloaded, "content", None),
+            )
         return offloaded or message
 
     def _is_processable_tool_message(
@@ -396,6 +483,18 @@ class MessageOffloader(ContextProcessor):
     def _enable_rule_compression(self) -> bool:
         return bool(getattr(self.config, "enable_rule_compression", True))
 
+    def _offload_strategy(self) -> OffloadStrategy:
+        return getattr(self.config, "offload_strategy", "rule_then_truncate")
+
+    def _should_try_rule_compression(self) -> bool:
+        return self._enable_rule_compression() and self._offload_strategy() != "truncate_only"
+
+    def _should_fallback_to_plain_offload(self) -> bool:
+        return self._offload_strategy() != "rule_only"
+
+    def _should_truncate_rule_preview(self) -> bool:
+        return self._offload_strategy() == "rule_then_truncate"
+
     def _add_message_threshold_ratio(self) -> float:
         return float(getattr(self.config, "add_message_threshold_ratio", 0.2))
 
@@ -407,6 +506,75 @@ class MessageOffloader(ContextProcessor):
 
     def _offload_preview_head_tail_chars(self) -> int:
         return int(getattr(self.config, "offload_preview_head_tail_chars", 2000))
+
+    def _write_debug_log(
+        self,
+        context: ModelContext,
+        *,
+        event: str,
+        message: BaseMessage | None = None,
+        **payload: Any,
+    ) -> None:
+        log_path = self._debug_log_path(context)
+        record = {
+            "event": event,
+            "session_id": self._safe_context_value(context, "session_id", "unknown_session"),
+            "context_id": self._safe_context_value(context, "context_id", "unknown_context"),
+        }
+        if message is not None:
+            record.update(
+                {
+                    "role": getattr(message, "role", None),
+                    "tool_call_id": getattr(message, "tool_call_id", None),
+                    "message_metadata": getattr(message, "metadata", None) or {},
+                }
+            )
+        record.update(payload)
+        try:
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            with open(log_path, "a", encoding="utf-8") as handle:
+                json.dump(record, handle, ensure_ascii=False, default=str)
+                handle.write("\n")
+        except Exception as exc:
+            logger.warning("[MessageOffloader] failed to write debug log: %s", exc)
+
+    def _debug_log_path(self, context: ModelContext) -> str:
+        return os.path.join(self._debug_log_dir(context), MESSAGE_OFFLOADER_DEBUG_LOG_FILE)
+
+    def _debug_log_dir(self, context: ModelContext) -> str:
+        env_dir = os.getenv(MESSAGE_OFFLOADER_DEBUG_LOG_DIR_ENV) or "D:/work/code/agent-core-mr/message_offloader_logs"
+        if env_dir:
+            return os.path.abspath(env_dir)
+        workspace_dir = self._workspace_dir(context)
+        if workspace_dir:
+            return os.path.join(
+                workspace_dir,
+                "context",
+                f"{self._safe_context_value(context, 'session_id', 'unknown_session')}_context",
+                "message_offloader_debug_logs",
+            )
+        return os.path.abspath(os.path.join("context", "message_offloader_debug_logs"))
+
+    @staticmethod
+    def _workspace_dir(context: ModelContext) -> str:
+        workspace_dir = getattr(context, "workspace_dir", None)
+        if not callable(workspace_dir):
+            return ""
+        try:
+            return os.path.abspath(str(workspace_dir() or ""))
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _safe_context_value(context: ModelContext, method_name: str, fallback: str) -> str:
+        method = getattr(context, method_name, None)
+        if not callable(method):
+            return fallback
+        try:
+            value = method()
+        except Exception:
+            return fallback
+        return str(value or fallback)
 
     @staticmethod
     def _replace_window_messages(
