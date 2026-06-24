@@ -20,25 +20,17 @@ def has_complete_registered_vision_tool(agent: Any) -> bool:
     cards = []
     get_ability = getattr(ability_manager, "get", None)
     if callable(get_ability):
-        cards.extend(
-            card
-            for card in (
-                get_ability("visual_question_answering"),
-                get_ability("image_ocr"),
-            )
-            if card is not None
-        )
+        for tool_name in ("visual_question_answering", "image_ocr"):
+            card = get_ability(tool_name)
+            if card is not None:
+                cards.append(card)
 
     card_map = getattr(ability_manager, "cards", None)
     if isinstance(card_map, dict):
-        cards.extend(
-            card
-            for card in (
-                card_map.get("visual_question_answering"),
-                card_map.get("image_ocr"),
-            )
-            if card is not None
-        )
+        for tool_name in ("visual_question_answering", "image_ocr"):
+            card = card_map.get(tool_name)
+            if card is not None:
+                cards.append(card)
 
     for card in cards:
         tool_id = getattr(card, "id", None)
