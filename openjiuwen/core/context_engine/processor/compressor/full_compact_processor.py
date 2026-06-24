@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.context_engine.qa_artifact.schema import IrreducibleContextError, QAArtifactConfig
+from openjiuwen.core.context_engine.qa_artifact.schema import QAArtifactConfig
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context.session_memory_manager import (
@@ -233,6 +233,7 @@ class FullCompactProcessor(ContextProcessor):
         self._session_memory_intro = config.session_memory_intro
         self._force_compact: bool = False
         self._get_path_force_compact: bool = False
+        self._deferred_overflow_recovery: bool = False
         self._state_reinjector = FullCompactStateReinjector()
         self._state_reinjector.register_builder(
             name="skills",
@@ -307,6 +308,30 @@ class FullCompactProcessor(ContextProcessor):
         boundary — the context *must* be shrunk before retrying.
         """
         self._force_compact = value
+
+    def consume_deferred_overflow_recovery(self) -> bool:
+        """Return and clear proactive overflow deferral set by whole-window fallback.
+
+        Cross-repo contract: consumed by Jiuwenclaw's
+        ``ContextOverflowRecoveryRail.before_model_call``. This is a
+        consume-and-clear API: once a ``True`` value is returned, subsequent
+        calls return ``False`` until agent-core sets the deferral again. Do not
+        change this to peek semantics without coordinating the Jiuwenclaw
+        consumer.
+        """
+        deferred = self._deferred_overflow_recovery
+        self._deferred_overflow_recovery = False
+        return deferred
+
+    def is_force_compact_pending(self) -> bool:
+        """Whether the next GET-path should run force_compact recovery.
+
+        Cross-repo contract: peeked by Jiuwenclaw's
+        ``ContextOverflowRecoveryRail.before_model_call`` together with
+        ``consume_deferred_overflow_recovery``. This method does not clear the
+        pending flag; the FullCompact GET path owns clearing it when it runs.
+        """
+        return self._force_compact
 
     @staticmethod
     def _resolve_hard_window_tokens(config: FullCompactProcessorConfig) -> int:
@@ -594,7 +619,7 @@ class FullCompactProcessor(ContextProcessor):
         system_messages: List[BaseMessage],
         tools: List[Any],
     ) -> bool:
-        """整窗 fallback（session_memory / full_compact）并在仍超硬窗时上抛（§5.1）。"""
+        """整窗 fallback（session_memory / full_compact）；仍超硬窗时 defer 给 overflow recovery。"""
         if self._qa_mgr is not None:
             try:
                 await self._archive_fold_slice_before_whole_window_fallback(
@@ -629,11 +654,45 @@ class FullCompactProcessor(ContextProcessor):
             context.get_messages(),
             tools,
             context,
+            use_baseline=False,
+        )
+        remaining_tokens_baseline = self._count_context_window_tokens(
+            system_messages,
+            context.get_messages(),
+            tools,
+            context,
+            use_baseline=True,
         )
         if remaining_tokens > self._hard_window_tokens:
-            raise IrreducibleContextError(
-                "context irreducible: still over hard context window after whole-window compact"
+            logger.warning(
+                "[FullCompact] whole-window compact still over hard window after fallback "
+                "(actual=%s baseline=%s hard=%s messages_applied=%s); "
+                "deferring to overflow recovery chain",
+                remaining_tokens,
+                remaining_tokens_baseline,
+                self._hard_window_tokens,
+                new_messages is not None,
             )
+            self._deferred_overflow_recovery = True
+            self.set_force_compact(True)
+            write_context_trace(
+                "context.processor.full_compact.deferred_overflow_recovery",
+                {
+                    "processor": self.processor_type(),
+                    "context_id": context.context_id(),
+                    "session_id": context.session_id(),
+                    "replacement_kind": (
+                        "session_memory" if session_memory_message is not None else "full_compact"
+                    ),
+                    "message_count_after": len(context.get_messages()),
+                    "qa_artifact_fallback": True,
+                    "remaining_tokens": remaining_tokens,
+                    "remaining_tokens_baseline": remaining_tokens_baseline,
+                    "hard_window_tokens": self._hard_window_tokens,
+                    "messages_applied": new_messages is not None,
+                },
+            )
+            return new_messages is not None
         if new_messages is None:
             return False
         write_context_trace(
@@ -648,6 +707,7 @@ class FullCompactProcessor(ContextProcessor):
                 "message_count_after": len(new_messages),
                 "qa_artifact_fallback": True,
                 "remaining_tokens": remaining_tokens,
+                "remaining_tokens_baseline": remaining_tokens_baseline,
                 "hard_window_tokens": self._hard_window_tokens,
             },
         )

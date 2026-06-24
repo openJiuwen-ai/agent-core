@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from openjiuwen.core.context_engine import ContextEngineConfig
@@ -232,3 +234,217 @@ async def test_hydrate_injects_compact_when_products_ready(tmp_path):
     assert "QA overview text" in messages[0].content
     assert messages[0].metadata.get("qa_artifact_compacted") is True
     assert message_qa_id(messages[0]) == "qa_001"
+
+
+@pytest.mark.asyncio
+async def test_apply_artifact_force_reapply_replaces_rolling_active_qa(tmp_path):
+    from openjiuwen.core.context_engine.qa_artifact.window import (
+        apply_artifact_to_context,
+        compact_replacement_message,
+    )
+    from openjiuwen.core.context_engine.qa_artifact.schema import QAArtifacts, CatalogEntry
+
+    session = FakeSession("session-roll")
+    context = SessionModelContext(
+        "default_context_id",
+        "session-roll",
+        ContextEngineConfig(),
+        history_messages=[],
+    )
+    old_compact = compact_replacement_message("qa_001", "old overview")
+    tail_one = AssistantMessage(content="tool output " * 200, metadata={"qa_id": "qa_001"})
+    tail_two = UserMessage(content="latest user", metadata={"qa_id": "qa_001"})
+    context.set_messages([old_compact, tail_one, tail_two])
+    stored = context.get_messages()
+    tail_one_id = (getattr(stored[1], "metadata", None) or {}).get("context_message_id")
+
+    artifacts = QAArtifacts(
+        overview="new overview",
+        entries=[CatalogEntry(preview="round-1", handle="h1")],
+    )
+    skipped = apply_artifact_to_context(context, "qa_001", artifacts)
+    assert skipped == 0
+
+    reduced = apply_artifact_to_context(
+        context,
+        "qa_001",
+        artifacts,
+        force_reapply=True,
+        covers_upto_message_id=tail_one_id,
+    )
+    assert reduced > 0
+    messages = context.get_messages()
+    assert len(messages) == 2
+    assert "new overview" in messages[0].content
+    assert messages[-1].content == "latest user"
+
+
+@pytest.mark.asyncio
+async def test_compact_to_target_includes_active_qa_with_growing_tail(tmp_path, monkeypatch):
+    from openjiuwen.core.context_engine.qa_artifact.window import compact_replacement_message
+
+    session = FakeSession("session-active")
+    config = QAArtifactConfig(
+        qa_min_worth_tokens=10,
+        full_compact_target_tokens=100,
+    )
+    mgr = QAArtifactManager(config, None, CatalogBuilder(config))
+    store = QAArtifactStore(session, str(tmp_path))
+    state = store.get_or_init("qa_001")
+    state.state = "COMPACTED"
+    state.products_ready = False
+    state.covers_upto_message_id = "msg-old"
+    store.save("qa_001", state)
+    await store.write_atomic(state.overview_path, "overview", state.pending_path)
+    await store.write_atomic(
+        state.catalog_path,
+        json.dumps({"qa_id": "qa_001", "entries": []}),
+        f"{state.pending_path}.catalog",
+    )
+
+    compact = compact_replacement_message("qa_001", "compact block")
+    tail = AssistantMessage(
+        content="growing tail " * 80,
+        metadata={"qa_id": "qa_001"},
+    )
+    context = SessionModelContext(
+        "default_context_id",
+        "session-active",
+        ContextEngineConfig(),
+        history_messages=[compact, tail],
+    )
+    stored = context.get_messages()
+    state.covers_upto_message_id = (getattr(stored[0], "metadata", None) or {}).get("context_message_id")
+    store.save("qa_001", state)
+
+    qa_ref = QARef(
+        qa_id="qa_001",
+        tokens=500,
+        is_history=False,
+        get_messages=lambda: context.get_messages(),
+    )
+    ctx = FakeCtx(session, FakeWorkspace(str(tmp_path)))
+    ctx.context = context
+
+    refreshed = False
+
+    async def _fake_refresh(_ctx, _workspace, _qa_ref):
+        nonlocal refreshed
+        refreshed = True
+        return True
+
+    async def _fake_produce(_ctx, _workspace, qa, *, mark_ready, messages=None):
+        store_local = QAArtifactStore(session, str(tmp_path))
+        st = store_local.get_or_init(qa.qa_id)
+        st.state = "STAGED"
+        st.products_ready = False
+        tail_id = (getattr(context.get_messages()[-1], "metadata", None) or {}).get("context_message_id")
+        st.covers_upto_message_id = tail_id
+        store_local.save(qa.qa_id, st)
+
+    monkeypatch.setattr(mgr, "_refresh_active_qa_products", _fake_refresh)
+    monkeypatch.setattr(mgr, "_produce_impl", _fake_produce)
+    monkeypatch.setattr(mgr, "_claim", lambda *args, **kwargs: True)
+
+    handled = await mgr.compact_to_target(
+        ctx,
+        workspace=ctx.workspace,
+        window_qas=[qa_ref],
+        total_tokens=500,
+        context=context,
+        fallback=AsyncMock(return_value=False),
+    )
+
+    assert refreshed is True
+    assert len(context.get_messages()) <= 2
+
+
+@pytest.mark.asyncio
+async def test_compact_to_target_refreshes_active_qa_when_covered_id_left_live_context(tmp_path, monkeypatch):
+    from openjiuwen.core.context_engine.qa_artifact.window import compact_replacement_message
+
+    session = FakeSession("session-active-stale-cover")
+    config = QAArtifactConfig(
+        qa_min_worth_tokens=10,
+        full_compact_target_tokens=600,
+        active_qa_rolling_keep_tail=1,
+    )
+    mgr = QAArtifactManager(config, None, CatalogBuilder(config))
+    store = QAArtifactStore(session, str(tmp_path))
+    state = store.get_or_init("qa_001")
+    state.state = "STAGED"
+    state.products_ready = False
+    state.covers_upto_message_id = "raw-message-that-was-replaced"
+    store.save("qa_001", state)
+    await store.write_atomic(state.overview_path, "old overview", state.pending_path)
+    await store.write_atomic(
+        state.catalog_path,
+        json.dumps({"qa_id": "qa_001", "entries": []}),
+        f"{state.pending_path}.catalog",
+    )
+
+    compact = compact_replacement_message("qa_001", "old compact block")
+    tail_one = AssistantMessage(
+        content="growing tail one " * 80,
+        metadata={"qa_id": "qa_001"},
+    )
+    tail_two = AssistantMessage(
+        content="growing tail two " * 80,
+        metadata={"qa_id": "qa_001"},
+    )
+    latest = UserMessage(content="latest user", metadata={"qa_id": "qa_001"})
+    context = SessionModelContext(
+        "default_context_id",
+        "session-active-stale-cover",
+        ContextEngineConfig(),
+        history_messages=[compact, tail_one, tail_two, latest],
+    )
+    qa_ref = QARef(
+        qa_id="qa_001",
+        tokens=1000,
+        is_history=False,
+        get_messages=lambda: context.get_messages(),
+    )
+    ctx = FakeCtx(session, FakeWorkspace(str(tmp_path)))
+    ctx.context = context
+
+    produced_messages = []
+
+    async def _fake_produce_impl(_ctx, _workspace, qa, *, mark_ready, messages=None):
+        produced_messages.append(list(messages or []))
+        store_local = QAArtifactStore(session, str(tmp_path))
+        st = store_local.get_or_init(qa.qa_id)
+        st.state = "STAGED"
+        st.products_ready = False
+        st.covers_upto_message_id = (getattr((messages or [])[-1], "metadata", None) or {}).get(
+            "context_message_id"
+        )
+        store_local.save(qa.qa_id, st)
+        await store_local.write_atomic(st.overview_path, "refreshed overview", st.pending_path)
+        await store_local.write_atomic(
+            st.catalog_path,
+            json.dumps({"qa_id": qa.qa_id, "entries": []}),
+            f"{st.pending_path}.catalog",
+        )
+
+    fallback = AsyncMock(return_value=False)
+    monkeypatch.setattr(mgr, "_produce_impl", _fake_produce_impl)
+    monkeypatch.setattr(mgr, "_claim", lambda *args, **kwargs: True)
+
+    handled = await mgr.compact_to_target(
+        ctx,
+        workspace=ctx.workspace,
+        window_qas=[qa_ref],
+        total_tokens=1000,
+        context=context,
+        fallback=fallback,
+    )
+
+    assert handled is True
+    fallback.assert_not_awaited()
+    assert produced_messages
+    assert len(produced_messages[0]) == 3
+    messages = context.get_messages()
+    assert len(messages) == 2
+    assert "refreshed overview" in messages[0].content
+    assert messages[-1].content == "latest user"

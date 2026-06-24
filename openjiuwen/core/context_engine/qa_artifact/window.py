@@ -213,6 +213,7 @@ def apply_artifact_to_context(
     *,
     token_counter: Any | None = None,
     covers_upto_message_id: str | None = None,
+    force_reapply: bool = False,
 ) -> int:
     """Replace in-window QA messages with overview+catalog; return tokens reduced."""
     text = render_artifact_text(qa_id, artifacts)
@@ -222,10 +223,14 @@ def apply_artifact_to_context(
 
     messages = context.get_messages()
     via_tool = _tool_expanded_for_qa(messages, qa_id)
-    if not via_tool and _already_compact_in_window(
-        messages,
-        qa_id,
-        covers_upto_message_id=covers_upto_message_id,
+    if (
+        not via_tool
+        and not force_reapply
+        and _already_compact_in_window(
+            messages,
+            qa_id,
+            covers_upto_message_id=covers_upto_message_id,
+        )
     ):
         logger.info("[QAArtifactWindow] skip already compact qa_id=%s", qa_id)
         return 0

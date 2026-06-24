@@ -37,6 +37,7 @@ class QAArtifactConfig(BaseModel):
     full_compact_target_tokens: int = Field(default=92000, gt=0)
     full_compact_max_qas: int = Field(default=4, gt=0)
     full_compact_max_waves: int = Field(default=8, gt=0)
+    active_qa_rolling_keep_tail: int = Field(default=2, ge=0)
     catalog_long_message_tokens: int = Field(default=800, gt=0)
     catalog_summary_max_tokens: int = Field(default=80, gt=0)
     degrade_max_retries: int = Field(default=2, ge=0)

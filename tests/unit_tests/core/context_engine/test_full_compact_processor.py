@@ -738,3 +738,114 @@ class TestFullCompactQAArtifactManager:
         assert mgr is not None
         assert mgr._overview._sm._update_agent._config.model is None
         assert mgr._catalog._model is None
+
+
+class TestFullCompactHardWindowValidation:
+    @pytest.mark.asyncio
+    async def test_fallback_uses_actual_tokens_not_stale_usage_baseline(self):
+        from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+            FullCompactProcessor,
+        )
+
+        processor = FullCompactProcessor(
+            FullCompactProcessorConfig(
+                trigger_total_tokens=100,
+                compression_call_max_tokens=200,
+                messages_to_keep=1,
+            )
+        )
+        ctx = await create_context_with_full_compact(processor.config)
+        compacted = [
+            SystemMessage(content="compact summary"),
+            AssistantMessage(
+                content="tail",
+                usage_metadata=UsageMetadata(
+                    input_tokens=150,
+                    output_tokens=10,
+                    total_tokens=160,
+                ),
+            ),
+        ]
+
+        with patch.object(
+            processor,
+            "_build_replacement_messages",
+            new=AsyncMock(return_value=(None, compacted, None)),
+        ):
+            ok = await processor._fallback_whole_window_compact(
+                ctx,
+                all_messages=ctx.get_messages(),
+                system_messages=[],
+                tools=[],
+            )
+
+        assert ok is True
+        assert processor.consume_deferred_overflow_recovery() is False
+
+    @pytest.mark.asyncio
+    async def test_fallback_defers_when_still_over_hard_window_after_reduction(self):
+        from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+            FullCompactProcessor,
+        )
+
+        processor = FullCompactProcessor(
+            FullCompactProcessorConfig(
+                trigger_total_tokens=50,
+                compression_call_max_tokens=80,
+                messages_to_keep=1,
+            )
+        )
+        ctx = await create_context_with_full_compact(processor.config)
+        compacted = [
+            UserMessage(content="chunk-a " * 15),
+            UserMessage(content="chunk-b " * 15),
+            UserMessage(content="chunk-c " * 15),
+        ]
+
+        with patch.object(
+            processor,
+            "_build_replacement_messages",
+            new=AsyncMock(return_value=(None, compacted, None)),
+        ):
+            ok = await processor._fallback_whole_window_compact(
+                ctx,
+                all_messages=ctx.get_messages(),
+                system_messages=[],
+                tools=[],
+            )
+
+        assert ok is True
+        assert processor.consume_deferred_overflow_recovery() is True
+        assert processor.is_force_compact_pending() is True
+
+    @pytest.mark.asyncio
+    async def test_fallback_defers_even_for_single_oversized_message(self):
+        from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+            FullCompactProcessor,
+        )
+
+        processor = FullCompactProcessor(
+            FullCompactProcessorConfig(
+                trigger_total_tokens=20,
+                compression_call_max_tokens=30,
+                messages_to_keep=0,
+            )
+        )
+        ctx = await create_context_with_full_compact(processor.config)
+        giant = [UserMessage(content="x" * 5000)]
+
+        with patch.object(
+            processor,
+            "_build_replacement_messages",
+            new=AsyncMock(return_value=(None, giant, None)),
+        ):
+            ok = await processor._fallback_whole_window_compact(
+                ctx,
+                all_messages=ctx.get_messages(),
+                system_messages=[],
+                tools=[],
+            )
+
+        assert ok is True
+        assert processor.consume_deferred_overflow_recovery() is True
+        assert processor.is_force_compact_pending() is True
