@@ -208,24 +208,16 @@ async def test_workdir_from_contextvar(sys_op, tmp_workspace):
 # ────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_background_returns_pid(sys_op):
-    bash_tool = BashTool(sys_op)
-    cmd = "ping -n 5 127.0.0.1 > nul" if os.name == "nt" else "sleep 5"
-    res = await bash_tool.invoke({"command": cmd, "run_in_background": True})
-    assert res.success is True
-    assert res.data["status"] == "started"
-    assert isinstance(res.data["pid"], int)
-    assert res.data["pid"] > 0
-
-
-@pytest.mark.asyncio
 async def test_background_fast_fail_detected(sys_op):
     bash_tool = BashTool(sys_op)
     # exit 1 terminates immediately with non-zero, should be caught within grace period
     res = await bash_tool.invoke({"command": "exit 1", "run_in_background": True})
     assert res.success is False
     assert res.error is not None
-    assert res.data is None
+    assert res.data is not None
+    assert res.data["status"] == "exited"
+    assert res.data["exit_code"] == 1
+    assert isinstance(res.data["pid"], int)
 
 
 # ────────────────────────────────────────────────────────────

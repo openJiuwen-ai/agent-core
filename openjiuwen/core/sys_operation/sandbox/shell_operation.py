@@ -60,7 +60,7 @@ class ShellOperation(BaseShellOperation, BaseSandboxMixin):
             *,
             cwd: Optional[str] = None,
             environment: Optional[Dict[str, str]] = None,
-            grace: float = 3.0,
+            grace: Optional[float] = None,
             shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
     ) -> ExecuteCmdBackgroundResult:
         raw = await self.invoke(

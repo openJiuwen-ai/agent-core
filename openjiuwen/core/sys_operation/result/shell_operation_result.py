@@ -37,6 +37,13 @@ class ExecuteCmdBackgroundData(BaseModel):
     command: str = Field(..., description="Original shell command executed")
     cwd: str = Field(default=".", description="Current working directory")
     pid: Optional[int] = Field(default=None, description="Process ID of the background process")
+    stdout: str = Field(default="", description="Captured stdout during the grace period")
+    stderr: str = Field(default="", description="Captured stderr during the grace period")
+    exit_code: Optional[int] = Field(default=None, description="Early exit code when launch fails")
+    status: Optional[Literal["started", "exited"]] = Field(
+        default=None,
+        description="Background process launch status",
+    )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

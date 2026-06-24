@@ -168,13 +168,30 @@ async def test_no_truncation_within_limit(sys_op) -> None:
 # ── background execution ─────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_background_pid(sys_op) -> None:
+async def test_background_running_process_returns_started_without_output(sys_op) -> None:
     tool = BashTool(sys_op)
     cmd = "ping -n 5 127.0.0.1 > nul" if os.name == "nt" else "sleep 5"
     res = await tool.invoke({"command": cmd, "run_in_background": True})
     assert res.success is True
     assert isinstance(res.data["pid"], int)
     assert res.data["pid"] > 0
+    assert res.data["status"] == "started"
+    assert "stdout" not in res.data
+    assert "stderr" not in res.data
+    assert "exit_code" not in res.data
+    assert "stdout_log" not in res.data
+    assert "persisted_output_path" not in res.data
+
+
+@pytest.mark.asyncio
+async def test_background_early_failure_includes_stderr(sys_op) -> None:
+    tool = BashTool(sys_op)
+    cmd = "python __openjiuwen_missing_script__.py" if os.name == "nt" else "python3 __openjiuwen_missing_script__.py"
+    res = await tool.invoke({"command": cmd, "run_in_background": True})
+    assert res.success is False
+    assert res.data["status"] == "exited"
+    assert res.data["exit_code"] not in (None, 0)
+    assert res.data["stderr"] or res.data["stdout"]
 
 
 # ── description parameter ────────────────────────────────────

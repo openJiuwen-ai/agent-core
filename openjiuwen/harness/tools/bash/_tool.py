@@ -140,9 +140,39 @@ class BashTool(Tool):
             res = await self._operation.shell().execute_cmd_background(
                 p.command, cwd=resolved_cwd, shell_type=p.shell_type,
             )
+            data = res.data
+            # Keep a fallback for non-local/older shell operations that may not populate data.status.
+            if data and data.status:
+                status = data.status
+            elif res.code == StatusCode.SUCCESS.code:
+                status = "started"
+            else:
+                status = "exited"
             if res.code != StatusCode.SUCCESS.code:
-                return ToolOutput(success=False, error=res.message)
-            return ToolOutput(success=True, data={"pid": res.data.pid, "status": "started"})
+                stdout = (data.stdout or "") if data else ""
+                stderr = (data.stderr or "") if data else ""
+                persisted_path: str | None = None
+                persisted_size: int | None = None
+                if len(stdout) + len(stderr) > p.max_output_chars:
+                    persisted_path, persisted_size = persist_large_output(stdout, stderr)
+                payload = {
+                    "pid": data.pid if data else None,
+                    "status": status,
+                    "exit_code": data.exit_code if data else None,
+                    "stdout": truncate_output(stdout, p.max_output_chars),
+                    "stderr": truncate_output(stderr, p.max_output_chars),
+                    "persisted_output_path": persisted_path,
+                    "persisted_output_size": persisted_size,
+                }
+                err_text = payload["stderr"] or res.message
+                return ToolOutput(success=False, data=payload, error=err_text)
+            return ToolOutput(
+                success=True,
+                data={
+                    "pid": data.pid if data else None,
+                    "status": status,
+                },
+            )
 
         # ── normal execution ──────────────────────────────────
         res = await self._operation.shell().execute_cmd(
