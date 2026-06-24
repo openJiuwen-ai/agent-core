@@ -758,6 +758,7 @@ class ReActAgent(BaseAgent):
         # --- End context window finalization ---
 
         session = ctx.session
+        image_input_present = self._messages_contain_image_input(ctx.inputs.messages)
 
         # Build extra kwargs for LLM calls when KV cache release is enabled.
         extra_kwargs: dict = {}
@@ -776,12 +777,18 @@ class ReActAgent(BaseAgent):
             extra_kwargs["top_logprobs"] = self._config.llm_top_logprobs
 
         if not ctx.extra.get("_streaming"):
-            ai_message = await llm.invoke(
-                model=self._config.model_name,
-                messages=ctx.inputs.messages,
-                tools=ctx.inputs.tools or None,
-                **extra_kwargs,
-            )
+            try:
+                ai_message = await llm.invoke(
+                    model=self._config.model_name,
+                    messages=ctx.inputs.messages,
+                    tools=ctx.inputs.tools or None,
+                    **extra_kwargs,
+                )
+            except Exception as exc:
+                if image_input_present and self._is_image_input_unsupported_error(exc):
+                    ai_message = self._build_image_input_unsupported_message()
+                else:
+                    raise
             ctx.inputs.response = ai_message
             return ai_message
 
@@ -793,36 +800,48 @@ class ReActAgent(BaseAgent):
         call_last_token_time = None
         call_chunk_count = 0
 
-        async for chunk in llm.stream(
-                model=self._config.model_name,
-                messages=ctx.inputs.messages,
-                tools=ctx.inputs.tools or None,
-                **extra_kwargs,
-        ):
-            if accumulated_chunk is None:
-                accumulated_chunk = chunk
-            else:
-                accumulated_chunk = accumulated_chunk + chunk
+        try:
+            async for chunk in llm.stream(
+                    model=self._config.model_name,
+                    messages=ctx.inputs.messages,
+                    tools=ctx.inputs.tools or None,
+                    **extra_kwargs,
+            ):
+                if accumulated_chunk is None:
+                    accumulated_chunk = chunk
+                else:
+                    accumulated_chunk = accumulated_chunk + chunk
 
-            if call_first_token_time is None:
-                call_first_token_time = time.monotonic()
-            call_last_token_time = time.monotonic()
-            call_chunk_count += 1
+                if call_first_token_time is None:
+                    call_first_token_time = time.monotonic()
+                call_last_token_time = time.monotonic()
+                call_chunk_count += 1
 
-            if chunk.reasoning_content:
-                await session.write_stream(OutputSchema(
-                    type="llm_reasoning",
-                    index=chunk_index,
-                    payload={"content": chunk.reasoning_content, "result_type": "answer"},
-                ))
-                chunk_index += 1
-            if chunk.content:
+                if chunk.reasoning_content:
+                    await session.write_stream(OutputSchema(
+                        type="llm_reasoning",
+                        index=chunk_index,
+                        payload={"content": chunk.reasoning_content, "result_type": "answer"},
+                    ))
+                    chunk_index += 1
+                if chunk.content:
+                    await session.write_stream(OutputSchema(
+                        type="llm_output",
+                        index=chunk_index,
+                        payload={"content": chunk.content, "result_type": "answer"},
+                    ))
+                    chunk_index += 1
+        except Exception as exc:
+            if image_input_present and self._is_image_input_unsupported_error(exc):
+                ai_message = self._build_image_input_unsupported_message()
+                ctx.inputs.response = ai_message
                 await session.write_stream(OutputSchema(
                     type="llm_output",
                     index=chunk_index,
-                    payload={"content": chunk.content, "result_type": "answer"},
+                    payload={"content": ai_message.content, "result_type": "answer"},
                 ))
-                chunk_index += 1
+                return ai_message
+            raise
 
         if accumulated_chunk is None:
             ai_message = AssistantMessage(content="", tool_calls=[])
@@ -859,6 +878,53 @@ class ReActAgent(BaseAgent):
                 },
             ))
         return ai_message
+
+    @staticmethod
+    def _messages_contain_image_input(messages: Optional[List[Any]]) -> bool:
+        if not messages:
+            return False
+
+        for message in messages:
+            content = getattr(message, "content", None)
+            if isinstance(message, dict):
+                content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") in ("image", "image_url"):
+                    return True
+                if "image_url" in part or "image" in part:
+                    return True
+        return False
+
+    @staticmethod
+    def _is_image_input_unsupported_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        phrases = (
+            "image input",
+            "support image",
+            "supports image",
+            "images are not supported",
+            "image_url is not supported",
+            "unsupported image",
+            "does not accept images",
+            "doesn't accept images",
+            "vision is not supported",
+            "multimodal input is not supported",
+        )
+        return any(phrase in text for phrase in phrases)
+
+    @staticmethod
+    def _build_image_input_unsupported_message() -> AssistantMessage:
+        return AssistantMessage(
+            content=(
+                "当前主模型或模型服务端点不支持图片输入，因此无法直接读取这张图片的内容。"
+                "请切换到支持视觉输入的主模型，或配置专用视觉模型工具后再读取图片。"
+            ),
+            tool_calls=[],
+        )
 
     @staticmethod
     def _render_system_messages(
