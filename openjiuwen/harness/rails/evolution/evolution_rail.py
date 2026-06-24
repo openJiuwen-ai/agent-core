@@ -793,18 +793,30 @@ class EvolutionRail(DeepAgentRail):
         """Register rail-owned runtime tools with Runner and the agent ability manager."""
         if not tools:
             return
-        Runner.resource_mgr.add_tool(tools)
-        if hasattr(agent, "ability_manager"):
+        ability_manager = getattr(agent, "ability_manager", None)
+        if ability_manager is not None and hasattr(ability_manager, "add_ability"):
             for tool in tools:
-                agent.ability_manager.add(tool.card)
+                ability_manager.add_ability(tool.card, tool)
+            return
+        Runner.resource_mgr.add_tool(tools)
+        if ability_manager is not None:
+            for tool in tools:
+                ability_manager.add(tool.card)
 
     @staticmethod
     def _unregister_runtime_tools(agent: Any, tools: list[Any]) -> None:
         """Remove rail-owned runtime tools from Runner and the agent ability manager."""
+        ability_manager = getattr(agent, "ability_manager", None)
+        if ability_manager is not None and hasattr(ability_manager, "remove_ability"):
+            for tool in tools:
+                name = getattr(tool.card, "name", None)
+                if name:
+                    ability_manager.remove_ability(name)
+            return
         for tool in tools:
             name = getattr(tool.card, "name", None)
-            if name and hasattr(agent, "ability_manager"):
-                agent.ability_manager.remove(name)
+            if name and ability_manager is not None:
+                ability_manager.remove(name)
             tool_id = getattr(tool.card, "id", None)
             if tool_id:
                 Runner.resource_mgr.remove_tool(tool_id)

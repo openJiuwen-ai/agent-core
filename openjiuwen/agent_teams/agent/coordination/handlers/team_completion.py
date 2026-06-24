@@ -106,7 +106,14 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         team_backend = self._infra.team_backend
         if team_backend is None:
             return
-        if self._round.has_in_flight_round() or self._round.is_agent_running():
+        if (
+            self._round.has_in_flight_round()
+            or self._round.is_agent_running()
+            or self._round.has_pending_interrupt()
+        ):
+            team_logger.debug(
+                "[leader] skip team completion while round or interrupt is active"
+            )
             return
 
         snapshot = await team_backend.is_team_completed()

@@ -1602,6 +1602,36 @@ async def test_team_completion_skipped_when_round_in_flight():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_team_completion_skipped_when_interrupt_pending():
+    """A pending interrupt is idle at the harness layer but must keep the stream open."""
+    from openjiuwen.agent_teams.agent.coordination.handlers.team_completion import TeamCompletionHandler
+
+    host = MagicMock()
+    host.has_in_flight_round.return_value = False
+    host.is_agent_running.return_value = False
+    host.has_pending_interrupt.return_value = True
+    host.conclude_completed_round = AsyncMock()
+    blueprint = MagicMock()
+    blueprint.role = TeamRole.LEADER
+    blueprint.lifecycle = "persistent"
+    backend = MagicMock()
+    backend.team_name = "test-team"
+    backend.is_team_completed = AsyncMock(return_value=TeamCompletionSnapshot(member_count=1, task_count=1))
+    infra = MagicMock()
+    infra.team_backend = backend
+    infra.messager = AsyncMock()
+    handler = TeamCompletionHandler(host, blueprint, infra, MagicMock())
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await handler.on_poll_task(event)
+
+    infra.messager.publish.assert_not_awaited()
+    backend.is_team_completed.assert_not_awaited()
+    host.conclude_completed_round.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_team_completion_consumers_accept_their_events():
     """on_task_list_drained / on_team_completed decode their payloads cleanly.
 

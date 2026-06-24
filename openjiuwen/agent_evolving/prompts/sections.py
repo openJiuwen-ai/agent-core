@@ -23,6 +23,11 @@ EVOLUTION_PROTOCOL_PROMPT_CN = """## 演进协议
 ### 用户确认询问
 - 询问用户时必须明确说“Skill 演进”，推荐句式：
   “这条反馈可以沉淀为以后处理同类任务时的流程经验，是否需要我发起 Skill 演进？”
+- 如果上一条 assistant 消息刚询问是否发起 Skill 演进，且当前用户回复表示同意
+  （如“发起演进”“可以”“确认”“是的”），且演进目标和意图足够明确，
+  当前轮必须立即进入工具流程，不要只回复确认收到。
+- 如果用户已确认但演进目标、关联 Skill 或意图仍不明确，只做最小必要澄清；
+  澄清完成后必须进入工具流程，不要停留在确认或闲聊回复。
 
 ### 工具流程
 - 所有演进工具都必须使用顶层 subject 参数对象，例如 {"kind":"skill","name":"..."}。
@@ -71,6 +76,12 @@ EVOLUTION_PROTOCOL_PROMPT_EN = """## Evolution Protocol
 - When asking the user, explicitly mention Skill evolution. Recommended wording:
   "This feedback can be distilled into a workflow lesson for similar future tasks.
   Should I start Skill evolution?"
+- If the previous assistant message just asked whether to start Skill evolution and the current user message
+  confirms it (for example "start evolution", "yes", "confirmed", or "go ahead"), and the target and intent are
+  clear enough, immediately enter the tool flow in this turn; do not only acknowledge the confirmation.
+- If the user has confirmed but the evolution target, related Skill, or intent is still unclear, ask only the
+  minimum necessary clarification; after that clarification is answered, enter the tool flow instead of stopping
+  at another acknowledgement or casual reply.
 
 ### Tool Flow
 - Use top-level subject objects for all evolution tools, for example {"kind":"skill","name":"..."}.
@@ -129,6 +140,13 @@ TEAM_EVOLUTION_PROTOCOL_PROMPT_CN = """## 团队 Skill 演进关注点
 - 询问用户时必须明确说“Swarm Skill 演进”，推荐句式：
   “这条反馈可以沉淀为以后处理同类团队任务时的团队协作/交付流程经验，
   是否需要我发起 Swarm Skill 演进？”
+- 如果上一条 assistant 消息刚询问是否发起 Swarm Skill 演进，且当前用户回复表示同意
+  （如“发起演进”“可以”“确认”“是的”），且演进目标和团队经验意图足够明确，
+  当前轮必须立即进入 prepare_skill_evolution → evolve_review_task → evolve_skill_experiences
+  工具流程；不要只回复确认收到。
+- 如果用户已确认但关联 Swarm Skill、团队经验范围或意图仍不明确，只做最小必要澄清；
+  澄清完成后必须进入 prepare_skill_evolution → evolve_review_task → evolve_skill_experiences
+  工具流程，不要停留在确认或闲聊回复。
 """
 
 TEAM_EVOLUTION_PROTOCOL_PROMPT_EN = """## Team Skill Evolution Focus
@@ -156,6 +174,13 @@ TEAM_EVOLUTION_PROTOCOL_PROMPT_EN = """## Team Skill Evolution Focus
 - When asking the user, explicitly mention Swarm Skill evolution. Recommended wording:
   "This feedback can be distilled into a team collaboration or delivery workflow lesson for similar future tasks.
   Should I start Swarm Skill evolution?"
+- If the previous assistant message just asked whether to start Swarm Skill evolution and the current user message
+  confirms it (for example "start evolution", "yes", "confirmed", or "go ahead"), and the target and team lesson
+  intent are clear enough, immediately run prepare_skill_evolution -> evolve_review_task ->
+  evolve_skill_experiences in this turn; do not only acknowledge the confirmation.
+- If the user has confirmed but the related Swarm Skill, team lesson scope, or intent is still unclear, ask only
+  the minimum necessary clarification; after that clarification is answered, run prepare_skill_evolution ->
+  evolve_review_task -> evolve_skill_experiences instead of stopping at another acknowledgement or casual reply.
 """
 
 TEAM_EVOLUTION_PROTOCOL_PROMPT = {

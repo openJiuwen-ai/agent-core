@@ -30,6 +30,7 @@ _ACTIVE_EVOLUTION_TOOL_OPERATIONS: dict[str, Literal["evolve", "simplify"]] = {
     "simplify_skill_experiences": "simplify",
 }
 EVOLUTION_APPROVAL_INTERRUPT_KIND = "skill_evolution_approval"
+EVOLUTION_INTERRUPT_SOURCE = "evolution_interrupt"
 EVOLUTION_RESUME_USER_INPUT_KEY = "_evolution_resume_user_input"
 
 
@@ -317,6 +318,7 @@ class EvolutionInterruptRail(BaseInterruptRail):
     @staticmethod
     def _approval_metadata() -> dict[str, Any]:
         return {
+            "source": EVOLUTION_INTERRUPT_SOURCE,
             "interrupt_kind": EVOLUTION_APPROVAL_INTERRUPT_KIND,
             "evolution_approval": True,
             "resume_user_input_key": EVOLUTION_RESUME_USER_INPUT_KEY,
