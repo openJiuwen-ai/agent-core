@@ -171,7 +171,6 @@ class ForkedPrefixCompactProcessor(ContextProcessor):
                 ForkedCompressionRequest.from_context_window(
                     prompt=prompt,
                     context_window=context_window,
-                    trace_context=self._build_trace_context(context),
                     exclude_recent_messages=len(span.protected_tail),
                 )
             )
@@ -261,7 +260,7 @@ class ForkedPrefixCompactProcessor(ContextProcessor):
         return int(context_max * self.config.trigger_context_ratio)
 
     def _build_prompt(self, span: PrefixCompactSpan) -> str:
-        return self.config.custom_compression_prompt or self.default_prompt
+        return self.default_prompt
 
     def _wrap_memory_block(self, summary: str) -> str:
         return (

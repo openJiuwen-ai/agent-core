@@ -528,7 +528,7 @@ class MessageOffloader(ContextProcessor):
         return os.path.join(self._debug_log_dir(context), MESSAGE_OFFLOADER_DEBUG_LOG_FILE)
 
     def _debug_log_dir(self, context: ModelContext) -> str:
-        env_dir = os.getenv(MESSAGE_OFFLOADER_DEBUG_LOG_DIR_ENV) or "D:/work/code/agent-core-mr/message_offloader_logs"
+        env_dir = os.getenv(MESSAGE_OFFLOADER_DEBUG_LOG_DIR_ENV)
         if env_dir:
             return os.path.abspath(env_dir)
         workspace_dir = self._workspace_dir(context)

@@ -17,7 +17,7 @@ from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, AssistantMe
 
 
 CONTEXT_MESSAGE_ID_KEY = "context_message_id"
-DEFAULT_CONTEXT_MAX_TOKENS = 100000
+DEFAULT_CONTEXT_MAX_TOKENS = 200000
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_MODEL_CACHE_TTL_SECONDS = 3600
 _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {}
@@ -249,7 +249,30 @@ class ContextUtils:
         fallback_context_window_tokens: Optional[int] = None,
         model_context_window_tokens: Optional[Dict[str, int]] = None,
     ) -> int:
-        """Temporarily force every model context window to 100k tokens."""
+        """Resolve the maximum context window size in tokens.
+
+        Priority order:
+        1. Explicit ``fallback_context_window_tokens`` if set and positive.
+        2. Look up ``model_name`` in ``model_context_window_tokens`` dict.
+        3. Look up ``model_name`` in the built-in ``MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS`` dict.
+        4. Look up ``model_name`` in cached OpenRouter metadata.
+        5. Return ``DEFAULT_CONTEXT_MAX_TOKENS`` (200000).
+        """
+        if isinstance(fallback_context_window_tokens, int) and fallback_context_window_tokens > 0:
+            return fallback_context_window_tokens
+
+        if isinstance(model_name, str) and model_name:
+            if model_context_window_tokens:
+                value = model_context_window_tokens.get(model_name)
+                if isinstance(value, int) and value > 0:
+                    return value
+            builtin = MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS.get(model_name)
+            if isinstance(builtin, int) and builtin > 0:
+                return builtin
+            openrouter = _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS.get(model_name)
+            if isinstance(openrouter, int) and openrouter > 0:
+                return openrouter
+
         return DEFAULT_CONTEXT_MAX_TOKENS
 
     @staticmethod

@@ -1,68 +1,57 @@
 # openjiuwen.core.context_engine.processor.offloader.message_offloader
 
-## class openjiuwen.core.context_engine.processor.offloader.message_offloader.MessageOffloaderConfig
+## MessageOffloaderConfig
 
-Configuration class for `MessageOffloader`. When the number of messages or tokens exceeds the threshold, trims and offloads eligible messages to control context size.
+`MessageOffloader` uses context-relative percentage thresholds. Message count and accumulated-token
+thresholds are not configurable.
 
-* **messages_threshold** (int | None, optional): Triggers offload when the number of messages in memory exceeds this value. Default value: `None`.
-* **tokens_threshold** (int, optional): Triggers offload when the cumulative token count exceeds this value. Default value: `20000`.
-* **large_message_threshold** (int, optional): Messages with token count exceeding this value are considered "large messages" and can be offloaded. Default value: `1000`.
-* **offload_message_type** (list[Literal["user", "assistant", "tool"]], optional): List of message roles that can be offloaded. Default value: `["tool"]`.
-* **trim_size** (int, optional): Number of tokens to retain when offloading, the rest are replaced with ellipsis markers. Default value: `100`.
-* **messages_to_keep** (int | None, optional): Guaranteed minimum number of recent messages to keep. Default value: `None`.
-* **keep_last_round** (bool, optional): Whether to always keep the most recent user-assistant dialogue round. Default value: `True`.
+* **ttl_seconds** (int, optional): Idle time between context-window requests before TTL processing
+  is eligible. Set to `0` to disable TTL processing. Default: `300`.
+* **enable_rule_compression** (bool, optional): Whether deterministic rule compression runs before
+  offload fallback. When `False`, oversized tool results are offloaded directly with a head/tail
+  preview. Default: `True`.
+* **add_message_threshold_ratio** (float, optional): During `add_messages`, process one tool
+  message only when it exceeds `context_window_tokens * 3 * add_message_threshold_ratio`.
+  Default: `0.2`.
+* **ttl_context_occupancy_ratio** (float, optional): TTL processing is eligible only when the full
+  ModelContext character occupancy reaches `context_window_tokens * 3 * ttl_context_occupancy_ratio`.
+  Default: `0.5`.
+* **ttl_message_threshold_ratio** (float, optional): During TTL, process one tool message only when
+  it exceeds `context_window_tokens * 3 * ttl_message_threshold_ratio`. Default: `0.1`.
+* **offload_preview_head_tail_chars** (int, optional): Number of head and tail characters retained
+  in inline placeholders for direct offload and reused offload previews. Default: `2000`.
+* **protected_tool_names** (list[str], optional): Tool names, or `tool:argument-pattern` entries,
+  that must remain inline. Default: `["reload_original_context_messages"]`.
 
-**Constraints**: `trim_size` must be less than `large_message_threshold`; if both `messages_to_keep` and `messages_threshold` are set, `messages_to_keep` must be less than `messages_threshold`.
+## MessageOffloader
 
-## class openjiuwen.core.context_engine.processor.offloader.message_offloader.MessageOffloader
+The processor estimates character capacity as `context_window_tokens * 3`.
+
+* During `add_messages`, a single tool result is processed only when its character length is
+  greater than `add_message_threshold_ratio` of that capacity.
+* When rule compression is disabled, oversized tool results are offloaded directly and the inline
+  placeholder keeps a head/tail preview with a truncation notice in the middle.
+* When rule compression still produces content above the threshold, offload is used as fallback.
+  If the compression result is already an offloaded message, the existing handle/type are reused
+  and only the inline placeholder is further truncated.
+* At `get_context_window`, TTL processing runs only when the request has been idle for
+  `ttl_seconds` and the complete persistent model context occupies at least
+  `ttl_context_occupancy_ratio` of capacity.
+* TTL processing traverses the complete model context, not only the returned sliding window.
+* Tool messages carrying `rule_compressed_at` are skipped and are not compressed again.
+* Each eligible TTL pass applies the same rule: process single messages above
+  `ttl_message_threshold_ratio`; keep results that fit the TTL budget and immediately offload
+  results that remain oversized.
 
 ```python
-MessageOffloader(config: MessageOffloaderConfig)
-```
+from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
+from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
+    MessageOffloaderConfig,
+)
 
-`MessageOffloader` inherits from [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor), trimming and offloading large messages that exceed the threshold during `add_messages`. Interface is consistent with the base class, see [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor).
-
-**Parameters**:
-
-* **config** (MessageOffloaderConfig): Processor configuration, see above.
-
-**Example**:
-
-```python
->>> import asyncio
->>> from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
->>> from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
-...     MessageOffloader,
-...     MessageOffloaderConfig,
-... )
->>> from openjiuwen.core.foundation.llm import UserMessage, AssistantMessage, ToolMessage
->>>
->>> async def main():
-...     config = ContextEngineConfig(default_window_message_num=100)
-...     engine = ContextEngine(config)
-...     offloader_config = MessageOffloaderConfig(
-...         messages_threshold=3,
-...         large_message_threshold=50,
-...         trim_size=20,
-...         offload_message_type=["tool"],
-...     )
-...     ctx = await engine.create_context(
-...         "demo_ctx",
-...         None,
-...         history_messages=[],
-...         processors=[("MessageOffloader", offloader_config)],
-...     )
-...     await ctx.add_messages([
-...         UserMessage(content="Call tool to query data"),
-...         AssistantMessage(content="", tool_calls=[{"id": "1", "name": "query", "type": "function", "arguments": "{}"}]),
-...         ToolMessage(content="x" * 100, tool_call_id="1"),
-...         UserMessage(content="Continue"),
-...     ])
-...     msgs = ctx.get_messages()
-...     tool_msg = next(m for m in msgs if m.role == "tool")
-...     assert "[[OFFLOAD:" in tool_msg.content
-...     return len(msgs)
->>>
->>> asyncio.run(main())
-3
+engine = ContextEngine(ContextEngineConfig(context_window_tokens=128_000))
+context = await engine.create_context(
+    "demo",
+    processors=[("MessageOffloader", MessageOffloaderConfig(ttl_seconds=300))],
+)
 ```
