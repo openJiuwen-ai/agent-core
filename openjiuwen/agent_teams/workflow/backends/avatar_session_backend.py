@@ -34,7 +34,7 @@ from openjiuwen.agent_teams.workflow.backends._member_spec import (
     derive_member_build_context,
     derive_member_spec,
 )
-from openjiuwen.agent_teams.workflow.backends.structured_output_tool import (
+from openjiuwen.agent_teams.tools.structured_output_tool import (
     StructuredOutputFinishRail,
     StructuredOutputTool,
 )

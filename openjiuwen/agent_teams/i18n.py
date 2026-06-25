@@ -89,6 +89,11 @@ STRINGS: dict[str, dict[str, str]] = {
             "内容: {content}\n"
             "提示: 如果对方在提问或等待回复，请务必通过 send_message 工具回复 {sender}"
         ),
+        # XML inbound track (inbound_render.py) — note bodies kept separate
+        # from the legacy flat templates above so the original message and
+        # the framework hint land in distinct <team-inbound> / <team-note>
+        # tags. The legacy templates stay for the external/format.py path.
+        "dispatcher.reply_hint": "如果对方在提问或等待回复，请务必通过 send_message 工具回复 {sender}。",
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": ("所有任务已完成。请汇总本轮工作成果。团队继续保持运行，等待新的任务指令。"),
         "dispatcher.all_done_temporary": (
@@ -148,11 +153,24 @@ STRINGS: dict[str, dict[str, str]] = {
             "禁止用纯文本输出表达意图或承诺。\n"
             "**保持静默**，等控制者在 Inbox 里明确指示你转告或回复时再调 send_message。"
         ),
+        # XML inbound track (inbound_render.py) — the HITT silence constraint
+        # carried in a <team-note kind="hitt-silence">. The "strictly
+        # forbidden" framing is load-bearing: without it the avatar LLM
+        # drifts into autonomous replies on send_message. Kept equivalent to
+        # the legacy hitt.* flat templates above, which the external path uses.
+        "hitt.silence_note": (
+            "**这是给控制者看的通知，不是要你执行的指令**，运行时已把它原样转给控制者。\n"
+            "**严格禁止任何自主行为**：禁止主动回复发送方 / 指派方（包括调用 send_message）、"
+            "禁止自主调用 member_complete_task / claim_task / 文件 / shell 等任何工具去回应或推进、"
+            "禁止用纯文本输出表达意图或承诺。\n"
+            "**保持静默**，只有控制者在 Inbox 里下达明确指令后才能行动。"
+        ),
+        "hitt.assigned_event": "你被指派了新任务 [{task_id}] {title}。",
         # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
-        "workflow.started": "[工作流] 「{name}」编排已启动，我将在每个阶段向你汇报进展。",
-        "workflow.phase": "[工作流] 进入阶段：{phase}",
-        "workflow.human_prompt": "[工作流] 正在等待人工回复 [{label}]：{prompt}（correlation_id={corr}）",
-        "workflow.human_replied": "[工作流] 人工已回复 [{label}]，编排继续。",
+        "workflow.started": "「{name}」编排已启动，我将在每个阶段向你汇报进展。",
+        "workflow.phase": "进入阶段：{phase}",
+        "workflow.human_prompt": "正在等待人工回复 [{label}]：{prompt}（correlation_id={corr}）",
+        "workflow.human_replied": "人工已回复 [{label}]，编排继续。",
         # harness/async_tools.py — async background-tool framework feedback
         "async_tool.launched": (
             "[后台任务] {tool} 已启动（task_id={task_id}）。完成后结果会自动回灌给你，"
@@ -235,6 +253,10 @@ STRINGS: dict[str, dict[str, str]] = {
             "content: {content}\n"
             "tip: If the sender is asking or waiting for a reply, make sure to reply to {sender} via send_message"
         ),
+        # XML inbound track (inbound_render.py) — see the cn note above.
+        "dispatcher.reply_hint": (
+            "If the sender is asking or waiting for a reply, be sure to reply to {sender} via send_message."
+        ),
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": (
             "All tasks are complete. Please summarize this round's results. "
@@ -310,14 +332,29 @@ STRINGS: dict[str, dict[str, str]] = {
             "controller explicitly instructs you via the Inbox to relay "
             "or reply."
         ),
+        # XML inbound track (inbound_render.py) — see the cn note above. The
+        # "strictly forbidden" framing is load-bearing.
+        "hitt.silence_note": (
+            "**This is a notification for your controller, NOT an instruction "
+            "for you to act on**; the runtime has already surfaced it to the "
+            "controller as-is.\n"
+            "**Autonomous behavior is strictly forbidden**: do not reply to "
+            "the sender / assigner (including via send_message), do not "
+            "autonomously call member_complete_task / claim_task / file tools "
+            "/ shell tools or any other tool to respond or push work forward, "
+            "and do not emit plain-text intent or promises.\n"
+            "**Stay silent** and act only after the controller issues an "
+            "explicit instruction via the Inbox."
+        ),
+        "hitt.assigned_event": 'You have been assigned task [{task_id}] "{title}".',
         # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
         "workflow.started": (
-            "[Workflow] Orchestration of '{name}' has started; I will "
+            "Orchestration of '{name}' has started; I will "
             "report progress to you at each phase."
         ),
-        "workflow.phase": "[Workflow] Entering phase: {phase}",
-        "workflow.human_prompt": "[Workflow] Awaiting a human reply [{label}]: {prompt} (correlation_id={corr})",
-        "workflow.human_replied": "[Workflow] The human replied [{label}]; orchestration continues.",
+        "workflow.phase": "Entering phase: {phase}",
+        "workflow.human_prompt": "Awaiting a human reply [{label}]: {prompt} (correlation_id={corr})",
+        "workflow.human_replied": "The human replied [{label}]; orchestration continues.",
         # harness/async_tools.py — async background-tool framework feedback
         "async_tool.launched": (
             "[Background task] {tool} started (task_id={task_id}). The result will be "

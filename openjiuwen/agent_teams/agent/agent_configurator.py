@@ -243,6 +243,18 @@ class AgentConfigurator:
         if ctx.role == TeamRole.LEADER and spec.worktree and spec.worktree.enabled:
             self.worktree_manager = self.create_worktree_manager(spec)
 
+        # Tiny-agent model resolver: map a model_name to a TeamModelConfig against
+        # the team pool (None when no pool / unknown name). Stored on infra so
+        # team-scoped tiny agents and ephemeral callers resolve a model name
+        # identically. See openjiuwen.agent_teams.tiny_agent.
+        if ctx.team_spec is not None:
+            from openjiuwen.agent_teams.models.allocator import resolve_member_model
+
+            def _tiny_model_resolver(model_name: str, _team_spec=ctx.team_spec) -> Any:
+                return resolve_member_model(_team_spec, model_name=model_name, model_index=None)
+
+            self._infra.tiny_agent_model_resolver = _tiny_model_resolver
+
     @staticmethod
     def create_workspace_manager(
         spec: TeamAgentSpec,

@@ -253,7 +253,7 @@ def test_execute_worker_derives_teammate_spec_without_team_tools(tmp_path, monke
     assert spec.tools == []  # no team tools
 
     # Schema path: the structured_output tool instance is appended to spec.tools.
-    from openjiuwen.agent_teams.workflow.backends.structured_output_tool import StructuredOutputTool
+    from openjiuwen.agent_teams.tools.structured_output_tool import StructuredOutputTool
 
     tool = StructuredOutputTool(schema)
     asyncio.run(

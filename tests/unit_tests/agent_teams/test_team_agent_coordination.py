@@ -921,8 +921,9 @@ async def test_task_claimed_for_self_uses_human_template_when_human_agent():
     agent._configurator.task_manager.get.assert_awaited_once_with("task-7")
     agent.deliver_input.assert_awaited_once()
     content = agent.deliver_input.await_args.args[0]
-    # Controller-facing HITT prefix and inlined title.
-    assert "[任务指派给控制者]" in content
+    # Controller-facing HITT event tag and inlined title.
+    assert 'kind="task-assigned"' in content
+    assert 'for="controller"' in content
     assert "task-7" in content
     assert "Write design doc" in content
     # Must not show the teammate guidance to autonomously call view_task.
@@ -971,7 +972,8 @@ async def test_task_claimed_for_human_self_swallows_title_lookup_error():
 
     agent.deliver_input.assert_awaited_once()
     content = agent.deliver_input.await_args.args[0]
-    assert "[任务指派给控制者]" in content
+    assert 'kind="task-assigned"' in content
+    assert 'for="controller"' in content
     assert "task-9" in content
 
 
@@ -1017,7 +1019,8 @@ def test_format_message_uses_human_template_when_human_agent():
     direct.timestamp = 1_700_000_000_000
 
     direct_text = handler._format_message(direct, is_human_agent=True, now_ms=1_700_000_000_000)
-    assert "[转发给控制者的单播消息]" in direct_text
+    assert 'type="direct"' in direct_text
+    assert 'for="controller"' in direct_text
     assert "msg-direct" in direct_text
     assert "are you around?" in direct_text
     # Strict prohibition keywords — the body must explicitly forbid
@@ -1036,7 +1039,8 @@ def test_format_message_uses_human_template_when_human_agent():
     bcast.timestamp = 1_700_000_000_000
 
     bcast_text = handler._format_message(bcast, is_human_agent=True, now_ms=1_700_000_000_000)
-    assert "[转发给控制者的广播消息]" in bcast_text
+    assert 'type="broadcast"' in bcast_text
+    assert 'for="controller"' in bcast_text
     assert "严格禁止" in bcast_text
     assert "保持静默" in bcast_text
 

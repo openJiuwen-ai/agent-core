@@ -41,7 +41,7 @@ from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
 from openjiuwen.agent_teams.tools.locales import make_translator
 from openjiuwen.agent_teams.workspace_layout import ensure_team_member_workspace_link
-from openjiuwen.agent_teams.workflow.backends.structured_output_tool import (
+from openjiuwen.agent_teams.tools.structured_output_tool import (
     StructuredOutputFinishRail,
     StructuredOutputTool,
 )

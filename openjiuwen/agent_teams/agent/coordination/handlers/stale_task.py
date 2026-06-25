@@ -24,6 +24,7 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
 from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.i18n import t
+from openjiuwen.agent_teams.inbound_render import render_event
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.timefmt import format_time_context
@@ -138,9 +139,17 @@ class StaleTaskHandler(BaseCoordinationHandler):
         )
 
     async def _self_nudge_stale_claim(self, task: Any, now_ms: int) -> None:
-        """Feed a nudge input into the local agent loop."""
+        """Feed a nudge input into the local agent loop.
+
+        Wrapped as a ``<team-event kind="stale-claim">`` because it is
+        delivered straight into this member's own loop. The leader's
+        cross-member variant (:meth:`_leader_nudge_stale_claim`) instead
+        goes through ``send_message`` and is wrapped as ``<team-inbound>``
+        by the recipient's ``MessageHandler._format_message`` — so it must
+        not be pre-wrapped here, or the tags would nest.
+        """
         content = self._format_stale_claim_nudge(task, now_ms)
-        await self._round.deliver_input(content)
+        await self._round.deliver_input(render_event(kind="stale-claim", body=content, task_id=task.task_id))
         team_logger.info(
             "[{}] self-nudged stale claimed task {}",
             self._blueprint.member_name,
@@ -211,7 +220,7 @@ class StaleTaskHandler(BaseCoordinationHandler):
             lines.append(f"- [{task.task_id}] {task.title}: {task.content} ({time_info})")
         content = "\n".join(lines)
 
-        await self._round.deliver_input(content)
+        await self._round.deliver_input(render_event(kind="stale-pending", body=content))
         team_logger.info(
             "[leader] self-prompted about {} stale pending task(s)",
             len(fresh),

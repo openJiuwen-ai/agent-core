@@ -103,7 +103,10 @@ def test_leader_narrates_started_and_phase_but_not_completion():
     asyncio.run(handler.on_workflow_progress(_event("phase", phase="Search")))
     asyncio.run(handler.on_workflow_progress(_event("workflow_completed", name="research")))
     assert len(host.delivered) == 2
+    # Milestones are wrapped in <team-event kind="workflow"> (F_46 inbound XML).
+    assert '<team-event kind="workflow">' in host.delivered[0]
     assert "research" in host.delivered[0]
+    assert '<team-event kind="workflow">' in host.delivered[1]
     assert "Search" in host.delivered[1]
 
 
@@ -125,6 +128,7 @@ def test_leader_narrates_human_prompt_with_correlation_id():
     )
     assert len(host.delivered) == 1
     line = host.delivered[0]
+    assert '<team-event kind="workflow">' in line
     assert "approve rollout?" in line and "oncall" in line and "c-42" in line
 
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from openjiuwen.agent_teams.workflow.backends.structured_output_tool import (
+from openjiuwen.agent_teams.tools.structured_output_tool import (
     StructuredOutputFinishRail,
     StructuredOutputTool,
 )

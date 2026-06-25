@@ -38,6 +38,8 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.spawn.agent_config import SpawnAgentConfig
 from openjiuwen.core.runner.spawn.process_manager import SpawnConfig
@@ -50,6 +52,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
+    from openjiuwen.agent_teams.tiny_agent import TinyAgent
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
@@ -115,6 +118,71 @@ class TeamAgent(BaseAgent):
     def resources(self):
         """Return the per-instance runtime resources container."""
         return self._configurator.resources
+
+    @property
+    def tiny_agent_model_resolver(self):
+        """Return the team's model-name resolver used to build tiny agents.
+
+        Maps a ``model_name`` to a ``TeamModelConfig`` against the team model
+        pool (None when no pool is configured). Ephemeral callers pass this to
+        ``openjiuwen.agent_teams.tiny_agent.create_tiny_agent`` (or a preset) so a
+        model name resolves the same way as for team-scoped tiny agents.
+        """
+        return self.infra.tiny_agent_model_resolver
+
+    def get_tiny_agent(self, name: str) -> Optional["TinyAgent"]:
+        """Get-or-create the team-scoped tiny agent declared under ``name``.
+
+        Lazily builds it from ``TeamAgentSpec.tiny_agents[name]`` on first access,
+        caches it on infra (one per name, per process), and reuses it afterwards.
+        Returns None when no tiny agent is declared under ``name``. The cached
+        instance is disposed when the team stops.
+
+        Args:
+            name: Logical key of the tiny agent in ``TeamAgentSpec.tiny_agents``.
+
+        Returns:
+            The cached or newly built :class:`TinyAgent`, or None if undeclared.
+        """
+        infra = self.infra
+        existing = infra.tiny_agents.get(name)
+        if existing is not None:
+            return existing
+        spec = self.spec
+        tiny_spec = spec.tiny_agents.get(name) if spec is not None else None
+        if tiny_spec is None:
+            return None
+        if infra.tiny_agent_model_resolver is None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason=f"tiny agent '{name}' needs a team model pool to resolve model '{tiny_spec.model_name}'",
+            )
+        from openjiuwen.agent_teams.tiny_agent import create_tiny_agent
+
+        language = self.blueprint.language if self.blueprint is not None else "cn"
+        agent = create_tiny_agent(
+            system_prompt=tiny_spec.system_prompt,
+            model_name=tiny_spec.model_name,
+            model_resolver=infra.tiny_agent_model_resolver,
+            default_schema=tiny_spec.default_schema,
+            name=tiny_spec.name,
+            language=language,
+            max_iterations=tiny_spec.max_iterations,
+        )
+        infra.tiny_agents[name] = agent
+        return agent
+
+    async def _dispose_tiny_agents(self) -> None:
+        """Dispose every cached team-scoped tiny agent (best-effort, idempotent)."""
+        infra = self.infra
+        for agent in list(infra.tiny_agents.values()):
+            try:
+                await agent.aclose()
+            except Exception:
+                team_logger.debug(
+                    "[{}] tiny agent dispose failed", self._member_name() or "?", exc_info=True
+                )
+        infra.tiny_agents.clear()
 
     @property
     def harness(self) -> Optional["MemberRuntime"]:
@@ -678,6 +746,7 @@ class TeamAgent(BaseAgent):
     async def stop_coordination(self) -> None:
         """Stop coordination and shut down all spawned teammates."""
         await self._stop_coordination()
+        await self._dispose_tiny_agents()
 
     def _close_stream(self) -> None:
         self._coordination.close_stream()
@@ -708,6 +777,7 @@ class TeamAgent(BaseAgent):
                     member_name,
                     e,
                 )
+        await self._dispose_tiny_agents()
         self._close_stream()
 
     async def conclude_completed_round(self, member_count: int, task_count: int) -> None:

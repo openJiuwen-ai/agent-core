@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, ClassVar
 from openjiuwen.agent_teams.agent.coordination.event_bus import CoordinationEvent
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
 from openjiuwen.agent_teams.i18n import t
+from openjiuwen.agent_teams.inbound_render import render_event
 from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
@@ -61,7 +62,11 @@ class WorkflowHandler(BaseCoordinationHandler):
         line = self._render(payload)
         if line is None:
             return
-        await self._round.deliver_input(line, use_steer=True)
+        # Wrap the milestone narration in <team-event kind="workflow"> so the
+        # leader reads it through the same inbound-XML contract as task / message
+        # events (F_46). The body already distinguishes started / phase /
+        # human_prompt / human_replied in prose, so one stable kind suffices.
+        await self._round.deliver_input(render_event(kind="workflow", body=line), use_steer=True)
 
     @staticmethod
     def _render(payload: "WorkflowProgressTeamEvent") -> str | None:

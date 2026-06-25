@@ -170,6 +170,26 @@ class LeaderSpec(BaseModel):
     """
 
 
+class TinyAgentSpec(BaseModel):
+    """Team-scoped tiny-agent specification (one per name, held by TeamInfra).
+
+    A team may declare several independent tiny agents in
+    ``TeamAgentSpec.tiny_agents``; each is lazily built on first access and
+    disposed when the team stops. A tiny agent carries only a system prompt +
+    model (resolved from ``model_name`` against the team model pool) and,
+    optionally, a default output schema — no tools beyond structured output.
+    """
+
+    model_config = {"protected_namespaces": ()}
+
+    system_prompt: str
+    model_name: str
+    name: str = "tiny"
+    max_iterations: int = 6
+    default_schema: Optional[dict[str, Any]] = None
+    """Optional default JSON-Schema applied to structured output on every call."""
+
+
 class TeamAgentSpec(BaseModel):
     """Fully JSON-serializable specification for constructing a TeamAgent.
 
@@ -204,6 +224,13 @@ class TeamAgentSpec(BaseModel):
     type and the CLI identifier — all launch knowledge stays here. A
     ``cli_agent`` not declared here is rejected at spawn time (the non-empty
     set is the capability ceiling for external-CLI members).
+    """
+    tiny_agents: dict[str, TinyAgentSpec] = {}
+    """Team-scoped tiny agents, keyed by logical name.
+
+    Each entry is an independent invisible member (system prompt + model only,
+    no team-collaboration tools), lazily built on first ``TeamAgent.get_tiny_agent``
+    access and disposed when the team stops. Not persisted to the team DB.
     """
     model_pool: list[ModelPoolEntry] = []
     """Optional pool of LLM endpoints shared by every team member.
@@ -723,6 +750,7 @@ __all__ = [
     "PredefinedMemberSpec",
     "StorageSpec",
     "TeamAgentSpec",
+    "TinyAgentSpec",
     "TransportSpec",
     "register_storage",
     "register_transport",

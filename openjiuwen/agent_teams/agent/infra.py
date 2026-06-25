@@ -11,16 +11,18 @@ here is a per-process scope, not a cross-instance singleton.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Optional,
 )
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.messager import Messager
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
+    from openjiuwen.agent_teams.tiny_agent import TinyAgent
     from openjiuwen.agent_teams.tools.team import TeamBackend
 
 
@@ -44,6 +46,12 @@ class TeamInfra:
     workspace_initialized: bool = False
     task_manager: Any = None
     message_manager: Any = None
+    # Tiny-agent support (see openjiuwen.agent_teams.tiny_agent):
+    # ``tiny_agent_model_resolver`` maps a model_name to a TeamModelConfig
+    # (closure over the team spec); ``tiny_agents`` caches lazily-built
+    # team-scoped tiny agents by name, disposed when the team stops.
+    tiny_agent_model_resolver: Optional[Callable[[str], Any]] = None
+    tiny_agents: dict[str, "TinyAgent"] = field(default_factory=dict)
 
 
 __all__ = ["TeamInfra"]

@@ -36,6 +36,7 @@ from openjiuwen.agent_teams.schema.blueprint import (
     LeaderSpec,
     StorageSpec,
     TeamAgentSpec,
+    TinyAgentSpec,
     TransportSpec,
 )
 from openjiuwen.agent_teams.schema.events import TeamEvent
@@ -56,6 +57,14 @@ from openjiuwen.agent_teams.schema.team import (
 )
 from openjiuwen.agent_teams.reliability import ReliabilityConfig
 from openjiuwen.agent_teams.spawn import InProcessSpawnHandle
+from openjiuwen.agent_teams.tiny_agent import (
+    TinyAgent,
+    create_summary_agent,
+    create_tiny_agent,
+    create_title_agent,
+    generate_summary,
+    generate_title,
+)
 from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 
 __all__ = [
@@ -99,4 +108,11 @@ __all__ = [
     "InProcessSpawnHandle",
     "MemoryDatabaseConfig",
     "ReliabilityConfig",
+    "TinyAgent",
+    "TinyAgentSpec",
+    "create_tiny_agent",
+    "create_title_agent",
+    "create_summary_agent",
+    "generate_title",
+    "generate_summary",
 ]

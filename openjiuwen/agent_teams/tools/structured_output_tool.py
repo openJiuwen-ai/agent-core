@@ -1,17 +1,18 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""The structured-output tool a swarmflow worker calls to return its result.
+"""The structured-output tool an agent calls to return a schema-conforming result.
 
 The harness has no native structured-output / ``response_format`` mechanism, so
-a worker that must produce schema-conforming output is given this tool with its
-``ToolCard.input_params`` set to the exact JSON Schema the engine requested. The
+an agent that must produce schema-conforming output is given this tool with its
+``ToolCard.input_params`` set to the exact JSON Schema the caller requested. The
 LLM is instructed to finish by calling ``structured_output`` with the result
 object; the call's arguments — validated against the schema by the model's
-tool-use machinery — are captured here for the worker backend to read back.
+tool-use machinery — are captured here for the caller to read back.
 
-One instance is constructed per ``agent()`` call (the schema differs each time),
-so the captured value is single-use and lives on the instance.
+Used by both swarmflow workers/sessions and tiny agents. One instance is
+constructed per call (the schema differs each time), so the captured value is
+single-use and lives on the instance.
 """
 from __future__ import annotations
 
