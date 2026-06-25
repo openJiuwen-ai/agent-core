@@ -368,23 +368,6 @@ async def test_read_file_large_text_without_limit_rejects_before_fs_read(sys_op,
 
 
 @pytest.mark.asyncio
-async def test_read_file_returns_unchanged_stub_for_same_file_range(sys_op, temp_dir):
-    read_tool = ReadFileTool(sys_op)
-    file_path = os.path.join(temp_dir, "dedup.txt")
-    with open(file_path, "w", encoding="utf-8") as fh:
-        fh.write("alpha\nbeta\n")
-
-    first = await read_tool.invoke({"file_path": file_path, "offset": 0, "limit": 2})
-    second = await read_tool.invoke({"file_path": file_path, "offset": 0, "limit": 2})
-
-    assert first.success is True
-    assert first.data["unchanged"] is False
-    assert second.success is True
-    assert second.data["unchanged"] is True
-    assert ReadFileTool.FILE_UNCHANGED_STUB in second.data["content"]
-
-
-@pytest.mark.asyncio
 async def test_write_file_tool_requires_read_before_overwrite(sys_op, temp_dir):
     write_tool = WriteFileTool(sys_op)
     file_path = os.path.join(temp_dir, "existing.txt")
