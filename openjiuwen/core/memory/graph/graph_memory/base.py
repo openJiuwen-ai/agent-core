@@ -13,7 +13,6 @@ import asyncio
 import datetime
 import gc
 import random
-import threading
 import time
 from math import ceil
 from typing import Literal, Optional, Union
@@ -133,8 +132,8 @@ class GraphMemory:
         self.llm_client = llm_client
         self.llm_extra_kwargs = llm_extra_kwargs
         self.llm_structured_output = llm_structured_output
-        self.thread_lock = threading.Lock()
-        self.user_locks: dict[str, threading.Lock] = dict()
+        self._lock = asyncio.Lock()
+        self._user_locks: dict[str, asyncio.Lock] = {}
         self.debug = debug
         self.time_till_next_gc = 300
         self.metric_is_sim = self.db_backend.return_similarity_score
@@ -199,31 +198,29 @@ class GraphMemory:
                 error_msg="Search config for entity/relation/episode must be an instance of SearchConfig or None",
             )
 
-        with self.thread_lock:
-            if not name:
-                raise build_error(
-                    StatusCode.MEMORY_STORE_VALIDATION_INVALID,
-                    store_type=_STORE_TYPE,
-                    error_msg="Search config cannot be registered as an empty value.",
-                )
-            if name in self._search_strategies and not force:
-                raise build_error(
-                    StatusCode.MEMORY_STORE_VALIDATION_INVALID,
-                    store_type=_STORE_TYPE,
-                    error_msg=f"Search config with name [{name}] already exists.",
-                )
-
-            self._search_strategies[name] = (
-                search_entity or SearchConfig(rank_config=WeightedRankConfig()),
-                search_relation or SearchConfig(min_score=0.02),
-                search_episode or SearchConfig(min_score=0.025),
+        if not name:
+            raise build_error(
+                StatusCode.MEMORY_STORE_VALIDATION_INVALID,
+                store_type=_STORE_TYPE,
+                error_msg="Search config cannot be registered as an empty value.",
+            )
+        if name in self._search_strategies and not force:
+            raise build_error(
+                StatusCode.MEMORY_STORE_VALIDATION_INVALID,
+                store_type=_STORE_TYPE,
+                error_msg=f"Search config with name [{name}] already exists.",
             )
 
-    def ensure_thread_lock(self, user_id: str):
-        """Create and store a per-user lock if not present, so add_memory is serialized per user."""
-        with self.thread_lock:
-            if user_id not in self.user_locks:
-                self.user_locks[user_id] = threading.Lock()
+        self._search_strategies[name] = (
+            search_entity or SearchConfig(rank_config=WeightedRankConfig()),
+            search_relation or SearchConfig(min_score=0.02),
+            search_episode or SearchConfig(min_score=0.025),
+        )
+
+    def _ensure_user_lock(self, user_id: str) -> None:
+        """Create per-user asyncio lock if not present, so add_memory is serialized per user."""
+        if user_id not in self._user_locks:
+            self._user_locks[user_id] = asyncio.Lock()
 
     async def add_memory(
         self,
@@ -247,13 +244,13 @@ class GraphMemory:
         Returns:
             GraphMemUpdate: returns the memory update details
         """
-        self.ensure_thread_lock(user_id=user_id)
+        self._ensure_user_lock(user_id=user_id)
         if not self.embedder:
             raise build_error(
                 StatusCode.MEMORY_GRAPH_EMBED_MODEL_NOT_FOUND,
                 error_msg="use the attach_embedder method to attach one",
             )
-        with self.user_locks[user_id]:
+        async with self._user_locks[user_id]:
             state = self._init_state(reference_time)
 
             content = await self._prepare_episodes(
@@ -360,7 +357,7 @@ class GraphMemory:
             await self.db_backend.refresh(skip_compact=True)
 
         # Check if garbage collection should be manually invoked
-        with self.thread_lock:
+        async with self._lock:
             if self.time_till_next_gc >= 0:
                 if time.time() - self._last_gc > self.time_till_next_gc:
                     gc.collect()
@@ -522,8 +519,7 @@ class GraphMemory:
             sep = f"\n{'=' * 60}\n"
             query = params.get("messages", [{}])[-1].get("content")
             debug_msg = f"TEMPLATE {template.name}{sep}{query}{sep}{response.content}"
-            with self.thread_lock:
-                memory_logger.info("Graph Memory LLM Invoke: %s", debug_msg)
+            memory_logger.info("Graph Memory LLM Invoke: %s", debug_msg)
         return response
 
     def _init_state(self, reference_time: Optional[datetime.datetime] = None) -> GraphMemState:
