@@ -51,6 +51,7 @@ class MemberInfo(BaseModel):
     status: str = Field(description="MemberStatus value")
     execution_status: str | None = Field(default=None, description="ExecutionStatus value")
     mode: str = Field(description="MemberMode value")
+    role: str = Field(description="TeamRole value (leader/teammate/human_agent)")
 
     @classmethod
     def from_internal(cls, member) -> MemberInfo:
@@ -67,6 +68,7 @@ class MemberInfo(BaseModel):
             status=member.status,
             execution_status=member.execution_status,
             mode=member.mode,
+            role=member.role,
         )
 
 
