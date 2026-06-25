@@ -21,6 +21,55 @@ class DockerEnvironment:
             raise RuntimeError("docker executable not found in PATH")
         return docker_path
 
+    @staticmethod
+    def _locale_path() -> str:
+        """Get the full path to the locale executable."""
+        locale_path = shutil.which("locale")
+        if locale_path is None:
+            raise RuntimeError("locale executable not found in PATH")
+        return locale_path
+
+    @staticmethod
+    def _get_utf8_locale_name() -> str:
+        """
+        Get the UTF-8 locale name supported by the system, handling case sensitivity.
+        
+        Linux locale names are case-sensitive. Different systems may support:
+        - C.utf8 or C.UTF-8 (minimal UTF-8 environment, most portable)
+        - en_US.utf8 or en_US.UTF-8 (full locale with English messages)
+        
+        Returns the first valid UTF-8 locale name found on the system.
+        Priority: C.utf8 first as it's available in almost all containers.
+        """
+        preferred_locales = [
+            "C.utf8",          # minimal UTF-8, most portable across containers
+            "C.UTF-8",         # uppercase variant
+            "en_US.utf8",      # full locale with English messages
+            "en_US.UTF-8",     # uppercase variant
+        ]
+        
+        try:
+            locale_cmd = DockerEnvironment._locale_path()
+            result = subprocess.run(
+                [locale_cmd, "-a"],
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace"
+            )
+            available_locales = result.stdout.split()
+            
+            for locale in preferred_locales:
+                if locale in available_locales:
+                    logger.info(f"Found supported UTF-8 locale: {locale}")
+                    return locale
+            
+            # Fallback to most common form if none found
+            logger.warning("No UTF-8 locale found, using default: en_US.utf8")
+            return "en_US.utf8"
+        except Exception as e:
+            logger.warning(f"Failed to detect locale: {e}, using default: en_US.utf8")
+            return "en_US.utf8"
+
     def __init__(
         self,
         image_tag: str,
@@ -104,9 +153,13 @@ class DockerEnvironment:
         memory_limit = f"{self._memory_mb}m"
         cpu_limit = str(self._cpus)
 
+        locale_name = self._get_utf8_locale_name()
+        
         cmd = [
             self._docker_path(), "run",
             "-d",
+            "-e", f"LANG={locale_name}",
+            "-e", f"LC_ALL={locale_name}",
             "--memory", memory_limit,
             "--cpus", cpu_limit,
             self.image_tag,
@@ -120,6 +173,8 @@ class DockerEnvironment:
         self._container_id = result.stdout.strip()
         await asyncio.sleep(2)
         logger.info(f"Container started: {self._container_id[:12]}")
+        
+        await self._check_and_log_encoding()
 
     async def stop(self) -> None:
         if not self._container_id:
@@ -133,6 +188,13 @@ class DockerEnvironment:
             logger.error(f"Error stopping container: {e}")
         finally:
             self._container_id = None
+
+    async def _check_and_log_encoding(self) -> None:
+        result = await self.exec("echo \"LANG: $LANG\" && echo \"LC_ALL: $LC_ALL\" && locale | head -5")
+        if result.returncode == 0:
+            logger.info(f"Container encoding environment:\n{result.stdout}")
+        else:
+            logger.warning(f"Failed to check encoding environment: {result.stderr}")
 
     async def exec(
         self,
