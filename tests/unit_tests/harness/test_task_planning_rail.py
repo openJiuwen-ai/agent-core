@@ -1045,6 +1045,14 @@ def test_build_todo_system_prompt_english() -> None:
     assert "task planning" in prompt
 
 
+def test_todo_prompt_contains_no_use_guidance() -> None:
+    """Todo system prompt includes guidance for list-only / no-execution requests."""
+    en_prompt = build_todo_system_prompt(language="en")
+    cn_prompt = build_todo_system_prompt(language="cn")
+    assert "When NOT to use" in en_prompt
+    assert "何时不使用" in cn_prompt
+
+
 def test_build_progress_reminder_user_prompt_chinese() -> None:
     """build_progress_reminder_user_prompt returns Chinese prompt."""
     prompt = build_progress_reminder_user_prompt(language="cn")

@@ -27,6 +27,9 @@ Use the todo tools (todo_create, todo_modify, todo_list) to break down and manag
 
 Identify the planning need and call todo_create BEFORE starting execution.
 
+**When NOT to use todo tools — do not call todo_create, todo_modify, or todo_list when:**
+- User only wants a task list displayed and explicitly says no execution is needed now (e.g. list only, do not execute, not yet) → present the list in your reply as text or a table; do not call any todo tools
+
 **Task management rules:**
 - Update status in real-time: call todo_modify the moment a task status changes
 - Only one task can be in_progress at a time; complete it before starting the next
@@ -64,6 +67,9 @@ TODO_SYSTEM_PROMPT_CN = """
 - 任务具有规划性质（多步骤实现、功能开发等）
 
 **识别到规划需求后，在开始执行前立即调用 todo_create。**
+
+**何时不使用 todo 工具 — 以下情况不要调用 todo_create、todo_modify、todo_list：**
+- 用户仅要求列出/展示任务清单，且明确表示不需要执行、暂不执行、先不要做等 → 直接在回复中以文本或表格呈现清单，勿调用 todo 工具
 
 **任务管理规则：**
 - 实时更新状态：任务状态变化时立即调用 todo_modify
