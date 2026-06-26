@@ -8,6 +8,7 @@ from typing import Optional
 
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
 from openjiuwen.harness.tools import BashTool, PowerShellTool
 from openjiuwen.harness.tools.code import CodeTool
 from openjiuwen.harness.tools.filesystem import (
@@ -41,12 +42,10 @@ class SysOperationRail(DeepAgentRail):
     def init(self, agent) -> None:
         lang = agent.system_prompt_builder.language
         agent_id = getattr(getattr(agent, "card", None), "id", None)
-        enable_read_image_multimodal = self._enable_read_image_multimodal
-        if enable_read_image_multimodal is None:
-            deep_config = getattr(agent, "deep_config", None)
-            enable_read_image_multimodal = bool(
-                getattr(deep_config, "enable_read_image_multimodal", True)
-            )
+        enable_read_image_multimodal = should_enable_read_image_multimodal(
+            agent,
+            self._enable_read_image_multimodal,
+        )
         read_tool = ReadFileTool(
             self.sys_operation,
             lang,

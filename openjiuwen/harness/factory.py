@@ -31,11 +31,12 @@ from openjiuwen.harness.schema.config import (
     DeepAgentConfig,
     SubAgentConfig,
     VisionModelConfig,
+    is_vision_model_config_complete,
 )
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.prompts.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
-from openjiuwen.harness.tools import is_free_search_enabled
+from openjiuwen.harness.tools import create_vision_tools, is_free_search_enabled
 
 
 def _collect_disabled_skills_from_state(skills_dirs: list[str]) -> list[str]:
@@ -203,6 +204,23 @@ def resolve_deep_agent_parts(
     normalized_tools, tool_instances = _normalize_tools(tools)
 
     resolved_language = resolve_language(language)
+    vision_tools_enabled = is_vision_model_config_complete(vision_model_config)
+    if vision_tools_enabled:
+        existing_tool_names = {card.name for card in normalized_tools}
+        for tool in create_vision_tools(
+            language=resolved_language,
+            vision_model_config=vision_model_config,
+            agent_id=card.id,
+        ):
+            if tool.card.name in existing_tool_names:
+                continue
+            tool_instances.append(tool)
+            normalized_tools.append(tool.card)
+            existing_tool_names.add(tool.card.name)
+
+    effective_enable_read_image_multimodal = (
+        enable_read_image_multimodal and not vision_tools_enabled
+    )
 
     effective_subagents = _inject_general_purpose_subagent(
         subagents,
@@ -263,7 +281,7 @@ def resolve_deep_agent_parts(
         prompt_mode=prompt_mode,
         vision_model_config=vision_model_config,
         audio_model_config=audio_model_config,
-        enable_read_image_multimodal=enable_read_image_multimodal,
+        enable_read_image_multimodal=effective_enable_read_image_multimodal,
         enable_async_subagent=enable_async_subagent,
         add_general_purpose_agent=add_general_purpose_agent,
         default_mode=default_mode,
