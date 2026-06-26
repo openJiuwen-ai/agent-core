@@ -45,15 +45,19 @@ from openjiuwen.extensions.context_evolver import (
 # Environment variables — edit these if you don't have a .env file
 # ---------------------------------------------------------------------------
 _DEFAULTS = {
+    # --- LLM (DeepSeek) ---
     "API_KEY": "your_api_key_here",
-    "API_BASE": "https://api.openai.com/v1",
-    "MODEL_NAME": "gpt-5.2",
-    "MODEL_PROVIDER": "OpenAI",
-    "EMBEDDING_MODEL": "text-embedding-3-small",
-    "EMBEDDING_DIMENSIONS": 2560,
+    "API_BASE": "https://api.deepseek.com/v1",
+    "MODEL_NAME": "deepseek-v4-flash",
+    "MODEL_PROVIDER": "DeepSeek",
     "LLM_TEMPERATURE": 0.7,
     "LLM_SEED": 42,
     "LLM_SSL_VERIFY": False,
+    # --- Embedding (separate provider — DeepSeek has no embedding API) ---
+    "EMBEDDING_MODEL": "text-embedding-3-small",
+    "EMBEDDING_DIMENSIONS": 2560,
+    "EMBEDDING_API_KEY": "your_embedding_api_key_here",
+    "EMBEDDING_API_BASE": "https://api.openai.com/v1",
 }
 for _k, _v in _DEFAULTS.items():
     app_config.set_value(_k, _v)

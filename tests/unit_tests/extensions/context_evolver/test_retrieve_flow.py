@@ -57,14 +57,12 @@ requires_api_key = pytest.mark.skipif(
 )
 
 
-ALGORITHMS = ["ACE", "ReasoningBank", "ReMe", "RefCon", "DivCon"]
+ALGORITHMS = ["ACE", "ReasoningBank", "ReMe", "RefCon", "DivCon", "Cognition"]
 
 
 def _create_service(algorithm):
     """Create a TaskMemoryService configured for the given algorithm."""
     return TaskMemoryService(
-        llm_model="gpt-3.5-turbo",
-        embedding_model="text-embedding-3-small",
         retrieval_algo=algorithm,
         summary_algo=algorithm,
     )
@@ -82,6 +80,11 @@ def _make_add_request(algorithm, content, identifier):
         return AddMemoryRequest(
             content=content,
             when_to_use=f"When to use memory {identifier}",
+        )
+    elif algorithm == "Cognition":
+        return AddMemoryRequest(
+            content=content,
+            description=f"Description for memory {identifier}",
         )
     else:  # ACE
         return AddMemoryRequest(
@@ -121,6 +124,14 @@ async def test_add_and_retrieve_memory(algorithm):
                 when_to_use="When implementing caching in Python",
             ),
         )
+    elif algorithm == "Cognition":
+        await service.add_memory(
+            user_id=user_id,
+            request=AddMemoryRequest(
+                content=content,
+                description="How to implement caching in Python applications",
+            ),
+        )
     else:  # ACE
         await service.add_memory(
             user_id=user_id,
@@ -152,6 +163,12 @@ async def test_add_and_retrieve_memory(algorithm):
     elif algorithm in ("ReMe", "RefCon", "DivCon"):
         assert result["retrieved_memory"][0]["when_to_use"] == "When implementing caching in Python"
         assert result["retrieved_memory"][0]["content"] == content
+    elif algorithm == "Cognition":
+        mem = result["retrieved_memory"][0]
+        assert "experience" in mem
+        assert "description" in mem
+        assert isinstance(mem["experience"], list)
+        assert content in mem["experience"]
     else:  # ACE
         assert content in result["retrieved_memory"][0]["content"]
         assert result["retrieved_memory"][0]["section"] == "python_best_practices"
@@ -228,6 +245,11 @@ async def test_playbook_operations(algorithm):
         memory_contents = [m["content"] for m in playbook["memories"]]
         assert "Content 1" in memory_contents or any("Content 1" in str(m) for m in playbook["memories"])
         assert "Content 2" in memory_contents or any("Content 2" in str(m) for m in playbook["memories"])
+    elif algorithm == "Cognition":
+        assert any("Content 1" in m.get("experience_json", "") for m in playbook["memories"]), \
+            f"Content 1 not found in experience_json of {playbook['memories']}"
+        assert any("Content 2" in m.get("experience_json", "") for m in playbook["memories"]), \
+            f"Content 2 not found in experience_json of {playbook['memories']}"
     else:  # ACE
         memory_contents = [m["content"] for m in playbook["memories"]]
         assert any("Content 1" in c for c in memory_contents), f"Content 1 not found in {memory_contents}"
@@ -277,6 +299,10 @@ class TestAlgorithmNormalization:
         assert TaskMemoryService.normalize_algo_name("DIVCON") == "DivCon"
 
     @staticmethod
+    def test_cognition_normalized():
+        assert TaskMemoryService.normalize_algo_name("COGNITION") == "Cognition"
+
+    @staticmethod
     def test_invalid_algorithm_raises():
         with pytest.raises(Exception):
             TaskMemoryService.normalize_algo_name("INVALID_ALGO")
@@ -293,9 +319,9 @@ class TestServiceConstruction:
             _cfg.set_value("API_KEY", "test-key")
             _cfg.delete("PERSIST_TYPE")
             with patch(
-                "openjiuwen.extensions.context_evolver.service.task_memory_service.OpenAILLMWrapper"
+                "openjiuwen.extensions.context_evolver.service.task_memory_service.LLMWrapper"
             ) as mock_llm_cls, patch(
-                "openjiuwen.extensions.context_evolver.service.task_memory_service.OpenAIEmbeddingWrapper"
+                "openjiuwen.extensions.context_evolver.service.task_memory_service.EmbeddingWrapper"
             ) as mock_emb_cls:
                 mock_llm_cls.return_value = MagicMock()
                 mock_emb_cls.return_value = MagicMock()
@@ -318,7 +344,7 @@ class TestServiceConstruction:
     @staticmethod
     def test_retrieval_algo_stored_correctly():
         for key, expected in [("ACE", "ACE"), ("RB", "ReasoningBank"), ("REME", "ReMe"),
-                               ("REFCON", "RefCon"), ("DIVCON", "DivCon")]:
+                               ("REFCON", "RefCon"), ("DIVCON", "DivCon"), ("COGNITION", "Cognition")]:
             svc = TestServiceConstruction._make_service(retrieval_algo=key, summary_algo=key)
             assert svc.retrieval_algorithm == expected, f"Failed for {key}"
             assert svc.summary_algorithm == expected, f"Failed for {key}"

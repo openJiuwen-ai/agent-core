@@ -20,6 +20,12 @@ from .io_schema import (
     ReMeRetrievedMemory,
     SummarizeResponse,
     RetrieveResponse,
+    CognitionMemory,
+    CognitionRetrievedMemory,
+    CognitionSummarizeRequest,
+    CognitionSummarizeResponse,
+    CognitionRetrieveRequest,
+    CognitionRetrieveResponse,
 )
 
 __all__ = [
@@ -37,4 +43,10 @@ __all__ = [
     "ReMeRetrievedMemory",
     "SummarizeResponse",
     "RetrieveResponse",
+    "CognitionMemory",
+    "CognitionRetrievedMemory",
+    "CognitionSummarizeRequest",
+    "CognitionSummarizeResponse",
+    "CognitionRetrieveRequest",
+    "CognitionRetrieveResponse",
 ]

@@ -46,7 +46,7 @@ class LoadPlaybookOp(BaseOp):
             all_nodes = await self.vector_store.async_search(
                 embedding=[0.0] * 2560,  # Dummy embedding
                 top_k=50,  # Get all bullets
-                metadata_filter={"workspace_id": user_id, "type": "ace_memory"}
+                metadata_filter={"workspace_id": user_id, "type": "exp_memory"}
             )
 
             # Convert nodes to playbook
@@ -648,7 +648,7 @@ class PersistMemoryOp(BaseOp):
 
         # Collect every node that belongs to this user
         all_nodes = self.vector_store.get_all(
-            metadata_filter={"workspace_id": user_id, "type": "ace_memory"}
+            metadata_filter={"workspace_id": user_id, "type": "exp_memory"}
         )
 
         if not all_nodes:

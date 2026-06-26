@@ -49,16 +49,23 @@ class RecallMemoryOp(BaseOp):
         if not self.vector_store:
             raise ValueError("Vector store not configured in ServiceContext")
 
-        # Get query embedding
+        # Get query embedding; fall back to a zero vector so retrieval still runs
+        # if the embedding API is unavailable (all nodes score equally, order preserved).
         logger.debug("Generating query embedding...")
-        query_embedding = await self.embedding_model.async_embed(query)
+        try:
+            query_embedding = await self.embedding_model.async_embed(query)
+        except Exception as embed_exc:
+            logger.warning(
+                "Query embedding failed, falling back to unranked retrieval: %s", embed_exc
+            )
+            query_embedding = [0.0]
 
         # Search vector store with filter for ReMe memories
         logger.debug("Searching ReMe for top %s results...", self.topk_retrieval)
         vector_nodes = await self.vector_store.async_search(
             embedding=query_embedding,
             top_k=self.topk_retrieval,
-            metadata_filter={"workspace_id": user_id, "type": "reme_memory"},
+            metadata_filter={"workspace_id": user_id, "type": "exp_memory"},
         )
 
         # Convert to ReMeRetrievedMemory objects

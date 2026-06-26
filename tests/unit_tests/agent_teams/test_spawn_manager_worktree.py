@@ -12,6 +12,7 @@ import pytest
 
 from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
 from openjiuwen.agent_teams.models.pool import ModelPoolEntry
+from openjiuwen.agent_teams.schema.build_context import BuildContext
 from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, TeamAgentSpec
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
 from openjiuwen.agent_teams.tools.member_options import (
@@ -71,11 +72,21 @@ class _FakeWorktreeManager:
     def __init__(self, path: str = "/tmp/worktree") -> None:
         self.path = path
         self.create_calls: list[str] = []
+        self.create_contexts: list[dict[str, str | None]] = []
         self.count_changes = AsyncMock(return_value=WorktreeChangeSummary())
         self.remove_worktree = AsyncMock(return_value=True)
 
     async def create_owner_worktree(self, slug: str) -> SimpleNamespace:
+        from openjiuwen.core.sys_operation.cwd import get_cwd, get_project_root, get_workspace
+
         self.create_calls.append(slug)
+        self.create_contexts.append(
+            {
+                "cwd": get_cwd(),
+                "project_root": get_project_root(),
+                "workspace": get_workspace(),
+            }
+        )
         return SimpleNamespace(
             worktree_path=self.path,
             worktree_branch=f"worktree-{slug}",
@@ -100,6 +111,7 @@ def _spawn_manager(
     manager: _FakeWorktreeManager,
     *,
     model_pool: list[ModelPoolEntry] | None = None,
+    project_dir: str | None = None,
 ) -> SpawnManager:
     team_spec = TeamSpec(
         team_name=member.team_name,
@@ -107,10 +119,14 @@ def _spawn_manager(
         leader_member_name="leader",
         model_pool=model_pool or [],
     )
+    build_context = BuildContext(project_dir=project_dir) if project_dir else None
+    build_context_seed = {"project_dir": project_dir} if project_dir else None
     spec = TeamAgentSpec(
         agents={"leader": DeepAgentSpec()},
         team_name=member.team_name,
         worktree=WorktreeConfig(enabled=True),
+        build_context=build_context,
+        build_context_seed=build_context_seed,
     )
     ctx = TeamRuntimeContext(role=TeamRole.LEADER, member_name="leader", team_spec=team_spec)
     backend = _FakeTeamBackend(member)
@@ -164,9 +180,11 @@ async def test_build_context_creates_and_persists_explicit_teammate_worktree():
 
 
 @pytest.mark.asyncio
-async def test_build_context_reuses_persisted_worktree_without_recreating():
+async def test_build_context_reuses_persisted_worktree_without_recreating(tmp_path):
+    existing = tmp_path / "existing"
+    existing.mkdir()
     member = _member(
-        options='{"worktree": {"isolation": "worktree", "path": "/tmp/existing"}}',
+        options=f'{{"worktree": {{"isolation": "worktree", "path": "{existing}"}}}}',
     )
     manager = _FakeWorktreeManager()
     spawn_manager = _spawn_manager(member, manager)
@@ -174,14 +192,16 @@ async def test_build_context_reuses_persisted_worktree_without_recreating():
     ctx = await spawn_manager.build_context_from_db("dev-one")
 
     assert ctx is not None
-    assert ctx.worktree_path == "/tmp/existing"
+    assert ctx.worktree_path == str(existing)
     assert manager.create_calls == []
 
 
 @pytest.mark.asyncio
-async def test_build_context_reuses_options_worktree_without_recreating():
+async def test_build_context_reuses_options_worktree_without_recreating(tmp_path):
+    existing = tmp_path / "options-existing"
+    existing.mkdir()
     member = _member(
-        options='{"worktree": {"isolation": "worktree", "path": "/tmp/options-existing"}}',
+        options=f'{{"worktree": {{"isolation": "worktree", "path": "{existing}"}}}}',
     )
     manager = _FakeWorktreeManager()
     spawn_manager = _spawn_manager(member, manager)
@@ -189,17 +209,68 @@ async def test_build_context_reuses_options_worktree_without_recreating():
     ctx = await spawn_manager.build_context_from_db("dev-one")
 
     assert ctx is not None
-    assert ctx.worktree_path == "/tmp/options-existing"
+    assert ctx.worktree_path == str(existing)
     assert manager.create_calls == []
 
 
 @pytest.mark.asyncio
-async def test_build_context_resolves_model_ref_from_options():
+async def test_build_context_recreates_missing_persisted_worktree(tmp_path):
+    stale_path = tmp_path / "missing-worktree"
+    created_path = tmp_path / "created-worktree"
+    member = _member(
+        options=f'{{"worktree": {{"isolation": "worktree", "path": "{stale_path}"}}}}',
+    )
+    manager = _FakeWorktreeManager(path=str(created_path))
+    spawn_manager = _spawn_manager(member, manager)
+
+    ctx = await spawn_manager.build_context_from_db("dev-one")
+
+    assert ctx is not None
+    assert ctx.worktree_path == str(created_path)
+    assert len(manager.create_calls) == 1
+    assert spawn_manager._configurator.team_backend.db.member.updates == [
+        {"isolation": "worktree", "worktree_path": None},
+        {"isolation": "worktree", "worktree_path": str(created_path)},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_build_context_anchors_worktree_creation_to_project_dir(tmp_path):
+    system_workspace = tmp_path / "system-workspace"
+    project_dir = tmp_path / "project"
+    system_workspace.mkdir()
+    project_dir.mkdir()
+    member = _member(options=build_member_options(worktree_isolation="worktree"))
+    manager = _FakeWorktreeManager(path=str(project_dir / ".worktrees" / "created"))
+    spawn_manager = _spawn_manager(member, manager, project_dir=str(project_dir))
+
+    from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace, init_cwd
+
+    init_cwd(str(system_workspace), project_root=str(system_workspace), workspace=str(system_workspace))
+
+    ctx = await spawn_manager.build_context_from_db("dev-one")
+
+    assert ctx is not None
+    assert manager.create_contexts == [
+        {
+            "cwd": str(project_dir),
+            "project_root": str(project_dir),
+            "workspace": str(project_dir),
+        }
+    ]
+    assert get_cwd() == str(system_workspace)
+    assert get_workspace() == str(system_workspace)
+
+
+@pytest.mark.asyncio
+async def test_build_context_resolves_model_ref_from_options(tmp_path):
+    existing = tmp_path / "options-existing"
+    existing.mkdir()
     member = _member(
         options=build_member_options(
             model_ref={"model_name": "gpt-4", "model_index": 1},
             worktree_isolation="worktree",
-            worktree_path="/tmp/options-existing",
+            worktree_path=str(existing),
         ),
     )
     manager = _FakeWorktreeManager()

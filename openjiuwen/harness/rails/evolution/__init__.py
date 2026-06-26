@@ -17,6 +17,13 @@ from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import Evolutio
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import SkillEvolutionRail
 from openjiuwen.harness.rails.evolution.team_skill_evolution_rail import TeamSkillEvolutionRail
+from openjiuwen.harness.rails.evolution.team_context_evolution_rail import (
+    MergedMemoryItem,
+    MergedRetrieveResult,
+    TeamContextEvolutionRail,
+    TeamInsightBuffer,
+    TeamInsightEntry,
+)
 from openjiuwen.harness.rails.evolution.configuration import (
     configure_skill_evolution,
     configure_skill_evolution_runtime,
@@ -31,6 +38,11 @@ __all__ = [
     "ensure_evolution_review_agent_config",
     "remove_evolution_review_agent_config",
     "ContextEvolutionRail",
+    "MergedMemoryItem",
+    "MergedRetrieveResult",
+    "TeamContextEvolutionRail",
+    "TeamInsightBuffer",
+    "TeamInsightEntry",
     "SummarizeTrajectoriesInput",
     "SkillEvolutionRail",
     "TeamSkillEvolutionRail",

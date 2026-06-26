@@ -568,25 +568,28 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
             or self._host_completion_pending_session_id == self._current_builder_session_id()
         )
 
-    async def _on_after_invoke(self, ctx: AgentCallbackContext) -> None:
-        """Enqueue team completion active-review follow-up when configured."""
+    async def _on_after_task_iteration(self, ctx: AgentCallbackContext) -> None:
+        """Enqueue team completion active-review follow-up while the task loop can schedule it."""
         if not self._completion_followup_enabled:
             return
-        session_id = self._current_builder_session_id()
-        if self._completion_followup_pending_session_id != session_id:
+        pending_session_id = self._completion_followup_pending_session_id
+        if pending_session_id is None:
             return
 
-        agent = getattr(ctx, "agent", None)
-        controller = getattr(agent, "_loop_controller", None)
+        session_id = self._current_builder_session_id()
+        if pending_session_id != session_id:
+            return
+
+        enqueued = self._enqueue_task_iteration_followup(
+            ctx,
+            self._build_team_completion_followup_prompt(),
+            log_prefix="team completion",
+        )
+        if not enqueued:
+            return
+
         self._completion_followup_pending_session_id = None
         self._host_completion_pending_session_id = None
-        if controller is None:
-            logger.warning(
-                "[TeamSkillEvolutionRail] completion follow-up dropped: no TaskLoopController available"
-            )
-            return
-
-        controller.enqueue_follow_up(self._build_team_completion_followup_prompt())
 
     async def _on_after_evolution_triggered(
         self,

@@ -35,6 +35,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     InvokeInputs,
     ModelCallInputs,
+    RunKind,
     TaskIterationInputs,
     ToolCallInputs,
 )
@@ -259,6 +260,34 @@ class _DummyToolMsg:
         self.content = content
 
 
+class _RuntimeAbilityManager:
+    def __init__(self, existing_cards: list[Any] | None = None):
+        self.cards = {card.name: card for card in existing_cards or []}
+        self.resources: dict[str, Any] = {}
+        self.add = Mock(side_effect=self._add)
+        self.remove = Mock(side_effect=self._remove)
+        self.add_ability = Mock(side_effect=self._add_ability)
+        self.remove_ability = Mock(side_effect=self._remove_ability)
+
+    def _add(self, card):
+        if card.name in self.cards:
+            return SimpleNamespace(added=False, reason="duplicate")
+        self.cards[card.name] = card
+        return SimpleNamespace(added=True)
+
+    def _remove(self, name):
+        self.cards.pop(name, None)
+
+    def _add_ability(self, card, tool):
+        self.cards[card.name] = card
+        self.resources[card.name] = tool
+        return SimpleNamespace(added=True)
+
+    def _remove_ability(self, name):
+        self.cards.pop(name, None)
+        self.resources.pop(name, None)
+
+
 # =============================================================================
 # Basic Utility Tests
 # =============================================================================
@@ -368,10 +397,7 @@ def test_auto_save_setter_updates_only_local_state(tmp_path):
 
 def test_skill_rail_init_registers_canonical_evolution_tools(tmp_path):
     rail = _make_rail(tmp_path)
-    ability_manager = SimpleNamespace(
-        add=Mock(return_value=SimpleNamespace(added=True)),
-        remove=Mock(),
-    )
+    ability_manager = _RuntimeAbilityManager()
     agent = SimpleNamespace(
         card=SimpleNamespace(id="agent-1"),
         ability_manager=ability_manager,
@@ -390,8 +416,46 @@ def test_skill_rail_init_registers_canonical_evolution_tools(tmp_path):
         "evolve_skill_experiences",
         "simplify_skill_experiences",
     }
-    assert add_tool.called
-    assert {call.args[0].name for call in ability_manager.add.call_args_list} == tool_names
+    add_tool.assert_not_called()
+    registered = {call.args[0].name: call.args[1] for call in ability_manager.add_ability.call_args_list}
+    assert set(registered) == tool_names
+    assert set(registered.values()) == set(rail._evolution_tools)
+
+    rail.uninit(agent)
+
+    assert [call.args[0] for call in ability_manager.remove_ability.call_args_list] == [
+        "prepare_skill_evolution",
+        "evolve_review_task",
+        "list_skill_experiences",
+        "read_skill_experiences",
+        "evolve_skill_experiences",
+        "simplify_skill_experiences",
+    ]
+
+
+def test_skill_rail_init_refreshes_duplicate_runtime_tool_instances(tmp_path):
+    from openjiuwen.agent_evolving.tools.skill import MAIN_EVOLUTION_TOOL_NAMES
+
+    stale_cards = [SimpleNamespace(name=name) for name in MAIN_EVOLUTION_TOOL_NAMES]
+    ability_manager = _RuntimeAbilityManager(existing_cards=stale_cards)
+    rail = _make_rail(tmp_path)
+    agent = SimpleNamespace(
+        card=SimpleNamespace(id="agent-1"),
+        ability_manager=ability_manager,
+        find_rails_by_type=_find_rails_by_type(),
+    )
+
+    with patch("openjiuwen.core.runner.Runner.resource_mgr.add_tool") as add_tool:
+        rail.init(agent)
+
+    add_tool.assert_not_called()
+    ability_manager.add.assert_not_called()
+    assert {call.args[0].name for call in ability_manager.add_ability.call_args_list} == set(MAIN_EVOLUTION_TOOL_NAMES)
+    prepare_tool = ability_manager.resources["prepare_skill_evolution"]
+    evolve_tool = ability_manager.resources["evolve_skill_experiences"]
+    assert prepare_tool._prepare_scope == rail._prepare_evolution_review_scope
+    assert evolve_tool._review_runtime is rail._review_runtime
+    assert evolve_tool._submission_service is rail.experience_manager.experience_submission_service
 
 
 def test_skill_rail_active_review_plumbing_still_uses_skill_subject_kind(tmp_path):
@@ -438,7 +502,7 @@ def test_skill_rail_init_does_not_require_subagent_rail_when_deep_config_present
 
 def test_skill_rail_init_without_evolution_interrupt_rail_still_registers_tools(tmp_path):
     rail = _make_rail(tmp_path)
-    ability_manager = SimpleNamespace(add=Mock(return_value=SimpleNamespace(added=True)), remove=Mock())
+    ability_manager = _RuntimeAbilityManager()
     agent = SimpleNamespace(
         card=SimpleNamespace(id="agent-1"),
         ability_manager=ability_manager,
@@ -457,8 +521,8 @@ def test_skill_rail_init_without_evolution_interrupt_rail_still_registers_tools(
         "evolve_skill_experiences",
         "simplify_skill_experiences",
     }
-    assert add_tool.called
-    assert {call.args[0].name for call in ability_manager.add.call_args_list} == tool_names
+    add_tool.assert_not_called()
+    assert {call.args[0].name for call in ability_manager.add_ability.call_args_list} == tool_names
 
 
 def test_skill_rail_init_refreshes_existing_subagent_rail_after_review_agent_registration(tmp_path):
@@ -503,11 +567,7 @@ def test_skill_rail_init_does_not_refresh_pending_subagent_rail(tmp_path):
 
 def test_skill_rail_init_registers_evolve_review_task_without_subagent_rail(tmp_path):
     rail = _make_rail(tmp_path)
-    registered_cards = []
-    ability_manager = SimpleNamespace(
-        add=Mock(side_effect=lambda card: registered_cards.append(card) or SimpleNamespace(added=True)),
-        remove=Mock(),
-    )
+    ability_manager = _RuntimeAbilityManager()
     agent = SimpleNamespace(
         card=SimpleNamespace(id="agent-1"),
         deep_config=SimpleNamespace(subagents=[]),
@@ -519,7 +579,7 @@ def test_skill_rail_init_registers_evolve_review_task_without_subagent_rail(tmp_
     with patch("openjiuwen.core.runner.Runner.resource_mgr.add_tool"):
         rail.init(agent)
 
-    assert [card.name for card in registered_cards] == [
+    assert [call.args[0].name for call in ability_manager.add_ability.call_args_list] == [
         "prepare_skill_evolution",
         "evolve_review_task",
         "list_skill_experiences",
@@ -889,12 +949,14 @@ async def test_evolution_protocol_section_is_injected_without_command_parsing(tm
     section = builder.get_section(SectionName.EVOLUTION_PROTOCOL)
     assert section is not None
     assert section.name == SectionName.EVOLUTION_PROTOCOL
+    assert "当前轮必须立即进入工具流程" in section.content["cn"]
+    assert "最小必要澄清" in section.content["cn"]
     assert ctx.inputs.messages == original_messages
 
 
 @pytest.mark.asyncio
 async def test_evolution_protocol_section_supports_english(tmp_path):
-    rail = _make_rail(tmp_path)
+    rail = _make_rail(tmp_path, language="en")
     builder = SystemPromptBuilder(language="en")
     agent = SimpleNamespace(system_prompt_builder=builder)
     ctx = AgentCallbackContext(agent=agent, inputs=ModelCallInputs(messages=[]))
@@ -904,20 +966,61 @@ async def test_evolution_protocol_section_supports_english(tmp_path):
     section = builder.get_section(SectionName.EVOLUTION_PROTOCOL)
     assert section is not None
     assert section.name == SectionName.EVOLUTION_PROTOCOL
+    assert "immediately enter the tool" in section.content["en"]
+    assert "minimum necessary clarification" in section.content["en"]
 
 
-def _make_task_iteration_ctx(*, agent=None, is_follow_up: bool = False) -> AgentCallbackContext:
-    return AgentCallbackContext(
+def _make_task_iteration_ctx(
+    *,
+    agent=None,
+    is_follow_up: bool = False,
+    conversation_id: str = "conv-1",
+    run_kind=None,
+) -> AgentCallbackContext:
+    ctx = AgentCallbackContext(
         agent=agent,
         inputs=TaskIterationInputs(
             iteration=1,
             loop_event=SimpleNamespace(),
-            conversation_id="conv-1",
+            conversation_id=conversation_id,
             query="run",
             is_follow_up=is_follow_up,
         ),
         session=None,
     )
+    if run_kind is not None:
+        ctx.extra["run_kind"] = run_kind
+    return ctx
+
+
+def _make_controller_agent():
+    controller = Mock()
+    controller.enqueue_follow_up = Mock()
+    return SimpleNamespace(_loop_controller=controller), controller
+
+
+def test_allow_evolution_trigger_rejects_heartbeat_and_cron_invokes(tmp_path):
+    rail = _make_rail(tmp_path, auto_scan=True)
+
+    for run_kind in (RunKind.HEARTBEAT, RunKind.CRON):
+        ctx = AgentCallbackContext(
+            agent=None,
+            inputs=InvokeInputs(query="run", conversation_id="conv-1", run_kind=run_kind),
+            session=None,
+        )
+
+        assert not rail._allow_evolution_trigger(None, ctx)
+
+
+def test_allow_evolution_trigger_allows_normal_invoke(tmp_path):
+    rail = _make_rail(tmp_path, auto_scan=True)
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=InvokeInputs(query="run", conversation_id="conv-1", run_kind=RunKind.NORMAL),
+        session=None,
+    )
+
+    assert rail._allow_evolution_trigger(None, ctx)
 
 
 @pytest.mark.asyncio
@@ -944,6 +1047,39 @@ async def test_fuzzy_review_enqueues_every_interval_for_non_followup_iterations(
 
     await rail._on_after_task_iteration(ctx)
     assert controller.enqueue_follow_up.call_count == 2
+    assert rail._fuzzy_review_non_followup_count == 0
+
+
+@pytest.mark.asyncio
+async def test_fuzzy_review_skips_heartbeat_task_iterations(tmp_path):
+    rail = _make_rail(tmp_path, fuzzy_review_interval=1)
+    agent, controller = _make_controller_agent()
+
+    await rail._on_after_task_iteration(
+        _make_task_iteration_ctx(
+            agent=agent,
+            conversation_id="heartbeat_19ed9a89354_a8c29c",
+        )
+    )
+
+    controller.enqueue_follow_up.assert_not_called()
+    assert rail._fuzzy_review_non_followup_count == 0
+
+
+@pytest.mark.asyncio
+async def test_fuzzy_review_skips_cron_task_iterations(tmp_path):
+    rail = _make_rail(tmp_path, fuzzy_review_interval=1)
+    agent, controller = _make_controller_agent()
+
+    await rail._on_after_task_iteration(
+        _make_task_iteration_ctx(
+            agent=agent,
+            conversation_id="cron_19ed9a89354_a8c29c",
+            run_kind=RunKind.CRON,
+        )
+    )
+
+    controller.enqueue_follow_up.assert_not_called()
     assert rail._fuzzy_review_non_followup_count == 0
 
 

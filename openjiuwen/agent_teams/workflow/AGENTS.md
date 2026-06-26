@@ -21,8 +21,8 @@ workflow/
 ├── backends/
 │   ├── team_worker_backend.py   # TeamWorkerBackend：把每个 agent() 映射成一个 WORKER TeamHarness（核心对接）；委派会话四方法给 AvatarSessionManager
 │   ├── avatar_session_backend.py # AvatarSessionManager：有状态会话（agent_session/human_session）的长生命周期 NativeHarness + 多轮 send-等-收 + human 推-等-格式化（_pending_human 实例字段，无全局 registry）
-│   ├── _member_spec.py          # derive_member_spec / derive_member_build_context：worker 与 avatar 共享的 spec / build_context 派生
-│   └── structured_output_tool.py # StructuredOutputTool：worker / 会话 schema turn 调它产出结构化结果（i18n 描述走 tools/locales）
+│   └── _member_spec.py          # derive_member_spec / derive_member_build_context：worker 与 avatar 共享的 spec / build_context 派生
+│   # StructuredOutputTool 已下沉到 tools/structured_output_tool.py（通用工具，tiny_agent 也复用）；backends/__init__ 仍 re-export
 ├── schema.py            # 4 层 WorkflowRun → PhaseRecord → AgentActivity{prompt,activity,outcome}
 ├── observer.py          # WorkflowObserver：累积 4 层 + 可选 on_event 回调（republish team 事件）；to_frontend stub
 ├── runner.py            # run_swarmflow（真实 worker，接 resume journal 落盘）/ preprocess_swarmflow（MockBackend 预演，不落 journal）

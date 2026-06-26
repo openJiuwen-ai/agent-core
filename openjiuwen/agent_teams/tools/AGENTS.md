@@ -26,6 +26,7 @@
 | `memory_database.py` | In-memory backend variant for tests |
 | `models.py` | `Team`, `TeamMember` static tables + dynamic per-session `TeamTask*` / `TeamMessage*` factories |
 | `member_options.py` | `TeamMemberOptions` / `MemberModelRef` / `MemberWorktreeOptions` structured options helpers (load/dump/build/merge/get_member_model_ref/get_member_permissions_override). Replaces legacy `model_ref_json` column with unified `options` JSON |
+| `structured_output_tool.py` | `StructuredOutputTool` (`input_params=schema_json`, captures `captured`) + `StructuredOutputFinishRail` (force-finish a round once captured). The generic structured-output tool for any agent with no native `response_format`; reused by swarmflow workers/sessions and tiny agents (`tiny_agent.py`) |
 | `locales/` | i18n strings (`cn.py`, `en.py`) and Markdown description files (`descs/<lang>/<tool>.md`) |
 
 Tools never reach into `TeamDatabase` directly — they go through `TeamBackend` or one of the managers so event publication and state transitions stay centralised.

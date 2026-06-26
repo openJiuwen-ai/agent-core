@@ -925,9 +925,9 @@ def test_hitt_section_human_agent_strictly_forbids_autonomous_behavior_cn():
     )
     assert section is not None
     body = section.content["cn"]
-    # The notification prefixes must be named so the avatar recognises them.
-    assert "[转发给控制者的" in body
-    assert "[任务指派给控制者]" in body
+    # The XML notification tags must be named so the avatar recognises them.
+    assert '<team-inbound for="controller">' in body
+    assert 'kind="task-assigned"' in body
     # Strict-prohibition keywords must appear: both autonomous replies
     # and autonomous tool calls are forbidden until the controller
     # explicitly instructs.
@@ -947,8 +947,8 @@ def test_hitt_section_human_agent_strictly_forbids_autonomous_behavior_en():
     )
     assert section is not None
     body = section.content["en"]
-    assert "[For-Controller" in body
-    assert "[Task Assigned For Controller]" in body
+    assert '<team-inbound for="controller">' in body
+    assert 'kind="task-assigned"' in body
     assert "strictly forbidden" in body
     assert "send_message" in body
     assert "member_complete_task" in body

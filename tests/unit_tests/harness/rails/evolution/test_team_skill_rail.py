@@ -20,7 +20,6 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
-from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionPatch,
     EvolutionRecord,
@@ -50,7 +49,6 @@ from openjiuwen.agent_evolving.trajectory.types import (
     Trajectory,
     TrajectoryStep,
 )
-from openjiuwen.agent_evolving.types import ApplyResult, UpdateValue
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     InvokeInputs,
@@ -69,6 +67,8 @@ from openjiuwen.harness.rails.evolution.team_skill_evolution_rail import (
     infer_team_skill_from_trajectory,
     is_completed_team_task_view,
 )
+from openjiuwen.harness.prompts.builder import SystemPromptBuilder
+from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails.subagent import SubagentRail
 from openjiuwen.harness.rails.skills.team_skill_rail import (
     TeamSkillRail,
@@ -77,6 +77,29 @@ from openjiuwen.harness.rails.skills.team_skill_rail import (
 
 def _team_review_runtime() -> EvolutionReviewRuntime:
     return EvolutionReviewRuntime()
+
+
+@pytest.mark.asyncio
+async def test_team_evolution_protocol_section_handles_confirmation_followup(tmp_path):
+    rail = TeamSkillRail(
+        skills_dir=str(tmp_path),
+        llm=MagicMock(),
+        model="mock-model",
+        auto_scan=False,
+        async_evolution=False,
+    )
+    builder = SystemPromptBuilder(language="cn")
+    ctx = AgentCallbackContext(
+        agent=SimpleNamespace(system_prompt_builder=builder),
+        inputs=ModelCallInputs(messages=[]),
+    )
+
+    await rail.before_model_call(ctx)
+
+    section = builder.get_section(SectionName.EVOLUTION_TEAM_PROTOCOL)
+    assert section is not None
+    assert "prepare_skill_evolution →" in section.content["cn"]
+    assert "最小必要澄清" in section.content["cn"]
 
 
 @pytest.fixture(autouse=True)
@@ -1094,7 +1117,7 @@ async def test_auto_scan_false_disables_passive_view_task_trigger():
 
 
 @pytest.mark.asyncio
-async def test_completion_followup_enabled_view_task_enqueues_followup_without_passive_scan():
+async def test_completion_followup_enabled_view_task_marks_pending_without_passive_scan():
     tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
     try:
         controller = MagicMock()
@@ -1124,20 +1147,39 @@ async def test_completion_followup_enabled_view_task_enqueues_followup_without_p
                 ),
             )
         )
+        assert rail._completion_followup_pending_session_id == "test-session"
+        controller.enqueue_follow_up.assert_not_called()
+
         await rail.after_invoke(
             _MockCtx(agent=agent, inputs=InvokeInputs(query="round 1", conversation_id="test-session"))
         )
 
         assert rail._passive_evolution_pending is False
-        assert rail._completion_followup_pending_session_id is None
+        assert rail._completion_followup_pending_session_id == "test-session"
         assert rail.run_evolution.await_count == 0
+        controller.enqueue_follow_up.assert_not_called()
+
+        await rail.after_task_iteration(
+            _MockCtx(
+                agent=agent,
+                inputs=TaskIterationInputs(
+                    iteration=1,
+                    loop_event=SimpleNamespace(),
+                    conversation_id="test-session",
+                    query="round 1",
+                    is_follow_up=False,
+                ),
+            )
+        )
+
+        assert rail._completion_followup_pending_session_id is None
         controller.enqueue_follow_up.assert_called_once()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 @pytest.mark.asyncio
-async def test_notify_team_completed_enqueues_completion_followup_when_enabled():
+async def test_notify_team_completed_marks_pending_until_task_iteration_when_enabled():
     tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
     try:
         controller = MagicMock()
@@ -1166,19 +1208,39 @@ async def test_notify_team_completed_enqueues_completion_followup_when_enabled()
             )
         )
         result = await rail.notify_team_completed(ctx=None)
+        assert result is True
+        assert rail._completion_followup_pending_session_id == "test-session"
+        controller.enqueue_follow_up.assert_not_called()
+
         await rail.after_invoke(
             _MockCtx(agent=agent, inputs=InvokeInputs(query="round 1", conversation_id="test-session"))
         )
 
-        assert result is True
+        assert rail._completion_followup_pending_session_id == "test-session"
         assert rail.run_evolution.await_count == 0
+        controller.enqueue_follow_up.assert_not_called()
+
+        await rail.after_task_iteration(
+            _MockCtx(
+                agent=agent,
+                inputs=TaskIterationInputs(
+                    iteration=1,
+                    loop_event=SimpleNamespace(),
+                    conversation_id="test-session",
+                    query="round 1",
+                    is_follow_up=False,
+                ),
+            )
+        )
+
+        assert rail._completion_followup_pending_session_id is None
         controller.enqueue_follow_up.assert_called_once()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 @pytest.mark.asyncio
-async def test_completion_followup_missing_loop_controller_clears_pending_state():
+async def test_completion_followup_missing_loop_controller_does_not_enqueue():
     tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
     try:
         rail = TeamSkillRail(
@@ -1201,12 +1263,158 @@ async def test_completion_followup_missing_loop_controller_clears_pending_state(
             )
         )
         result = await rail.notify_team_completed(ctx=None)
-        await rail.after_invoke(_MockCtx(inputs=InvokeInputs(query="round 1", conversation_id="test-session")))
-        await rail.after_invoke(_MockCtx(inputs=InvokeInputs(query="round 2", conversation_id="test-session")))
+        await rail.after_task_iteration(
+            _MockCtx(
+                inputs=TaskIterationInputs(
+                    iteration=1,
+                    loop_event=SimpleNamespace(),
+                    conversation_id="test-session",
+                    query="round 1",
+                    is_follow_up=False,
+                ),
+            )
+        )
 
         assert result is True
-        assert rail._completion_followup_pending_session_id is None
+        assert rail._completion_followup_pending_session_id == "test-session"
         assert rail.run_evolution.await_count == 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_team_completion_followup_does_not_use_fuzzy_review_without_pending_completion():
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        controller = MagicMock()
+        controller.enqueue_follow_up = MagicMock()
+        agent = SimpleNamespace(_loop_controller=controller)
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            auto_scan=False,
+            completion_followup_enabled=True,
+            fuzzy_review=True,
+            fuzzy_review_interval=1,
+            async_evolution=False,
+        )
+
+        await rail.before_invoke(
+            _MockCtx(agent=agent, inputs=InvokeInputs(query="round 1", conversation_id="test-session"))
+        )
+        await rail.after_task_iteration(
+            _MockCtx(
+                agent=agent,
+                inputs=TaskIterationInputs(
+                    iteration=1,
+                    loop_event=SimpleNamespace(),
+                    conversation_id="test-session",
+                    query="round 1",
+                    is_follow_up=False,
+                ),
+            )
+        )
+
+        controller.enqueue_follow_up.assert_not_called()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_completion_followup_skips_followup_and_background_iterations():
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        controller = MagicMock()
+        controller.enqueue_follow_up = MagicMock()
+        agent = SimpleNamespace(_loop_controller=controller)
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            auto_scan=False,
+            completion_followup_enabled=True,
+            async_evolution=False,
+        )
+
+        await rail.before_invoke(
+            _MockCtx(agent=agent, inputs=InvokeInputs(query="round 1", conversation_id="test-session"))
+        )
+        assert await rail.notify_team_completed(ctx=None) is True
+
+        await rail.after_task_iteration(
+            _MockCtx(
+                agent=agent,
+                inputs=TaskIterationInputs(
+                    iteration=1,
+                    loop_event=SimpleNamespace(),
+                    conversation_id="test-session",
+                    query="round 1",
+                    is_follow_up=True,
+                ),
+            )
+        )
+        await rail.after_task_iteration(
+            _MockCtx(
+                agent=agent,
+                inputs=TaskIterationInputs(
+                    iteration=2,
+                    loop_event=SimpleNamespace(),
+                    conversation_id="test-session",
+                    query="round 1",
+                    is_follow_up=False,
+                ),
+                extra={"run_kind": "heartbeat"},
+            )
+        )
+
+        assert rail._completion_followup_pending_session_id == "test-session"
+        controller.enqueue_follow_up.assert_not_called()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_completion_followup_enqueues_once_per_completion_mark():
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        controller = MagicMock()
+        controller.enqueue_follow_up = MagicMock()
+        agent = SimpleNamespace(_loop_controller=controller)
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            auto_scan=False,
+            completion_followup_enabled=True,
+            async_evolution=False,
+        )
+
+        await rail.before_invoke(
+            _MockCtx(agent=agent, inputs=InvokeInputs(query="round 1", conversation_id="test-session"))
+        )
+        assert await rail.notify_team_completed(ctx=None) is True
+        iteration_ctx = _MockCtx(
+            agent=agent,
+            inputs=TaskIterationInputs(
+                iteration=1,
+                loop_event=SimpleNamespace(),
+                conversation_id="test-session",
+                query="round 1",
+                is_follow_up=False,
+            ),
+        )
+
+        await rail.after_task_iteration(iteration_ctx)
+        await rail.after_task_iteration(iteration_ctx)
+        controller.enqueue_follow_up.assert_called_once()
+        assert rail._completion_followup_pending_session_id is None
+
+        assert await rail.notify_team_completed(ctx=None) is True
+        await rail.after_task_iteration(iteration_ctx)
+
+        assert controller.enqueue_follow_up.call_count == 2
+        assert rail._completion_followup_pending_session_id is None
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

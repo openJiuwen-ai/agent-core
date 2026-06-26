@@ -35,6 +35,8 @@ agent_teams/
 ├── context.py           # session_id 跨成员/跨模式共享 contextvars
 ├── i18n.py              # 运行时中/英文字符串（仅装运行时 hard-coded 串）
 ├── timefmt.py           # 毫秒 epoch → "绝对本地时间 + 相对差" 渲染（喂 LLM/观测，文案走 i18n）
+├── inbound_render.py    # 入站消息/框架事件 → <team-inbound>/<team-event>/<team-note> XML 渲染（纯函数，喂 LLM；文案由 handler 从 i18n 取）。见 F_46
+├── tiny_agent.py        # Tiny Agent：随时唤起的极简 NativeHarness（system_prompt + model + 仅结构化输出工具）；run 单轮 / chat 多轮；ephemeral（含 title/summary 预定义）+ team-scoped（TeamAgentSpec.tiny_agents 多实例，TeamInfra 持有）。见 F_45
 ├── paths.py             # 文件系统布局单一真相源
 ├── schema/              # 全部数据模型（Spec / Context / Event / Status / Task）
 ├── models/              # 多模型部署原语（ModelPoolEntry / 池继承 / Allocator）
@@ -87,7 +89,7 @@ customizer 后处理）。
 
 | 文件 | 职责 |
 |---|---|
-| `team_policy_rail.py` | `TeamPolicyRail`：把 prompts/sections 的 `PromptSection` 注入 `SystemPromptBuilder`；含 `MtimeSectionCache` 驱动的 dynamic section 刷新 |
+| `team_policy_rail.py` | `TeamPolicyRail`：静态 `PromptSection` 注入 `SystemPromptBuilder`；3 个 dynamic section（hitt/info/members）经 `MtimeSectionCache` 刷新后改挂 `prompt_attachment_manager`（移出 system prompt → 前缀 KV cache 稳定），不再进 builder；另含 attachment / 入站标签两个静态说明 section。见 F_46 |
 | `confirm_payload.py` | `TeamConfirmPayload` + `TeamPermissionConfirmResponse`：team-specific confirmation payload/response models（extend harness base classes with `decided_by` tracking） |
 | `team_permission_rail.py` | `TeamPermissionRail` + `TeamApprovalOrchestrator`：team-mode permission guardrail；继承 `PermissionInterruptRail`，leader-mediated ASK resolution + session-scoped auto-confirm（`_persist_allow_always=False`）。`enable_permissions=True` 时替代 `TeamToolApprovalRail` |
 | `tool_approval_rail.py` | `TeamToolApprovalRail`：teammate 调工具时通过消息向 leader 申请审批的中断 rail（`enable_permissions=False` 时使用） |

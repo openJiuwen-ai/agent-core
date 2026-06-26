@@ -61,6 +61,52 @@ class TeammateWorktreeLifecycle:
         self._configurator.worktree_manager = manager
         return manager
 
+    def _resolve_project_dir(self) -> str | None:
+        """Return the project directory that should own teammate worktrees."""
+        spec = getattr(self._configurator, "spec", None)
+        build_context = getattr(spec, "build_context", None)
+        project_dir = getattr(build_context, "project_dir", None)
+        if not project_dir:
+            seed = getattr(spec, "build_context_seed", None) or {}
+            if isinstance(seed, dict):
+                project_dir = seed.get("project_dir")
+        if not isinstance(project_dir, str) or not project_dir.strip():
+            return None
+        resolved = os.path.realpath(project_dir)
+        return resolved if os.path.isdir(resolved) else None
+
+    @staticmethod
+    def _enter_project_cwd(project_dir: str) -> tuple[str, str, str, str | None, str | None]:
+        """Temporarily anchor worktree creation to the project git repo."""
+        from openjiuwen.core.sys_operation.cwd import (
+            get_cwd,
+            get_original_cwd,
+            get_project_root,
+            get_team_workspace,
+            get_workspace,
+            init_cwd,
+        )
+
+        snapshot = (
+            get_cwd(),
+            get_original_cwd(),
+            get_project_root(),
+            get_workspace(),
+            get_team_workspace(),
+        )
+        init_cwd(project_dir, project_root=project_dir, workspace=project_dir, team_workspace=snapshot[4])
+        return snapshot
+
+    @staticmethod
+    def _restore_cwd(snapshot: tuple[str, str, str, str | None, str | None]) -> None:
+        """Restore the leader cwd state after worktree creation."""
+        from openjiuwen.core.sys_operation.cwd import init_cwd, set_cwd, set_original_cwd
+
+        cwd, original_cwd, project_root, workspace, team_workspace = snapshot
+        init_cwd(original_cwd, project_root=project_root, workspace=workspace, team_workspace=team_workspace)
+        set_cwd(cwd)
+        set_original_cwd(original_cwd)
+
     async def ensure_member_worktree(
         self,
         teammate: Any,
@@ -72,12 +118,26 @@ class TeammateWorktreeLifecycle:
 
         worktree = get_member_worktree(teammate)
         worktree_path = worktree.path if worktree is not None else None
-        if worktree_path:
-            return worktree_path
-
         team_backend = self._configurator.team_backend
+        if worktree_path:
+            if os.path.isdir(worktree_path):
+                return worktree_path
+            if team_backend is not None:
+                await team_backend.db.member.update_member_worktree(
+                    teammate.member_name,
+                    team_backend.team_name,
+                    isolation="worktree",
+                    worktree_path=None,
+                )
+            self._member_worktree_info.pop(teammate.member_name, None)
+            team_logger.info(
+                "Cleared missing worktree metadata before recreating teammate {}: {}",
+                teammate.member_name,
+                worktree_path,
+            )
+
         if team_backend is None:
-            return worktree_path
+            return None
 
         team_name = team_backend.team_name
         slug = build_teammate_worktree_name(
@@ -85,7 +145,15 @@ class TeammateWorktreeLifecycle:
             member_name=teammate.member_name,
         )
         manager = self._get_worktree_manager()
-        result = await manager.create_owner_worktree(slug)
+        project_dir = self._resolve_project_dir()
+        if project_dir is not None:
+            snapshot = self._enter_project_cwd(project_dir)
+            try:
+                result = await manager.create_owner_worktree(slug)
+            finally:
+                self._restore_cwd(snapshot)
+        else:
+            result = await manager.create_owner_worktree(slug)
         await team_backend.db.member.update_member_worktree(
             teammate.member_name,
             team_name,

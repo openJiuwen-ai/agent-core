@@ -20,6 +20,7 @@ from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import (
     EVOLUTION_APPROVAL_INTERRUPT_KIND,
+    EVOLUTION_INTERRUPT_SOURCE,
     EVOLUTION_RESUME_USER_INPUT_KEY,
     EvolutionInterruptRail,
 )
@@ -219,6 +220,7 @@ async def test_evolve_interrupt_uses_generic_request_message():
     assert "approved" not in request.payload_schema["properties"]
     assert "kind" not in request.payload_schema["properties"]
     assert "approval_detail" not in request.metadata
+    assert request.metadata["source"] == EVOLUTION_INTERRUPT_SOURCE
     assert request.metadata["interrupt_kind"] == EVOLUTION_APPROVAL_INTERRUPT_KIND
     assert request.metadata["evolution_approval"] is True
     assert request.metadata["resume_user_input_key"] == EVOLUTION_RESUME_USER_INPUT_KEY

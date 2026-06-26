@@ -49,7 +49,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.operator.skill_call import SkillExperienceOperator
 from openjiuwen.core.session.stream import OutputSchema
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind, ToolCallInputs
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.agent_evolving.prompts.sections import build_evolution_protocol_section
 from openjiuwen.harness.rails.evolution.approval_events import (
@@ -544,6 +544,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
     ) -> bool:
         if not self._auto_scan:
             return False
+        if self._is_background_run(ctx):
+            return False
         if self._skip_auto_scan_this_invoke:
             logger.info("[SkillEvolutionRail] active evolution activity detected, skip passive auto_scan")
             return False
@@ -557,21 +559,67 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         """Periodically enqueue a fuzzy active-review self-check follow-up."""
         if not self._fuzzy_review:
             return
-        inputs = getattr(ctx, "inputs", None)
-        if getattr(inputs, "is_follow_up", False):
+        if self._task_iteration_followup_blocked(ctx):
             return
         self._fuzzy_review_non_followup_count += 1
         if self._fuzzy_review_non_followup_count < self._fuzzy_review_interval:
             return
         self._fuzzy_review_non_followup_count = 0
 
+        self._enqueue_task_iteration_followup(
+            ctx,
+            self._build_fuzzy_review_followup_prompt(),
+            log_prefix="fuzzy review",
+        )
+
+    def _enqueue_task_iteration_followup(
+        self,
+        ctx: AgentCallbackContext,
+        prompt: str,
+        *,
+        log_prefix: str,
+    ) -> bool:
+        """Enqueue a follow-up from a normal task-loop iteration."""
+        if self._task_iteration_followup_blocked(ctx):
+            return False
+
         agent = getattr(ctx, "agent", None)
         controller = getattr(agent, "_loop_controller", None)
         if controller is None:
-            logger.warning("[SkillEvolutionRail] fuzzy review follow-up dropped: no TaskLoopController available")
-            return
+            logger.warning(
+                "[SkillEvolutionRail] %s follow-up dropped: no TaskLoopController available",
+                log_prefix,
+            )
+            return False
 
-        controller.enqueue_follow_up(self._build_fuzzy_review_followup_prompt())
+        controller.enqueue_follow_up(prompt)
+        return True
+
+    def _task_iteration_followup_blocked(self, ctx: AgentCallbackContext) -> bool:
+        """Return whether a task-loop follow-up must be suppressed."""
+        if self._is_background_run(ctx):
+            return True
+        inputs = getattr(ctx, "inputs", None)
+        return bool(getattr(inputs, "is_follow_up", False))
+
+    @staticmethod
+    def _is_background_run(ctx: AgentCallbackContext) -> bool:
+        inputs = getattr(ctx, "inputs", None)
+        for method_name in ("is_heartbeat", "is_cron"):
+            method = getattr(inputs, method_name, None)
+            if callable(method) and method():
+                return True
+
+        run_kind = getattr(inputs, "run_kind", None)
+        if run_kind is None:
+            run_kind = ctx.extra.get("run_kind")
+        if run_kind in (RunKind.HEARTBEAT, RunKind.CRON):
+            return True
+        if isinstance(run_kind, str) and run_kind in {RunKind.HEARTBEAT.value, RunKind.CRON.value}:
+            return True
+
+        conversation_id = getattr(inputs, "conversation_id", None)
+        return isinstance(conversation_id, str) and conversation_id.startswith(("heartbeat", "cron"))
 
     def _build_fuzzy_review_followup_prompt(self) -> str:
         """Build the active fuzzy review self-check follow-up prompt."""
