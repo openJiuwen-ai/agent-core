@@ -17,6 +17,9 @@ from openjiuwen.harness.rails.evolution import (
     SkillEvolutionRail,
     SummarizeTrajectoriesInput,
     TeamSkillEvolutionRail,
+    TeamContextEvolutionRail,
+    TeamInsightBuffer,
+    TeamInsightEntry,
     TrajectoryRail,
 )
 from openjiuwen.harness.rails.heartbeat_rail import HeartbeatRail
@@ -93,6 +96,9 @@ __all__ = [
     "SubagentRail",
     "SummarizeTrajectoriesInput",
     "SysOperationRail",
+    "TeamContextEvolutionRail",
+    "TeamInsightBuffer",
+    "TeamInsightEntry",
     "TaskCompletionRail",
     "TaskPlanningRail",
     "TeamSkillCreateRail",

@@ -59,6 +59,21 @@ from ..summary.task.reme import (
     PersistMemoryOp as ReMePersistMemoryOp,
 )
 
+# Import Cognition operations
+from ..retrieve.task.cognition import (
+    LoadSchemaOp as CogLoadSchemaOp,
+    ClassifyQueryOp as CogClassifyQueryOp,
+    RecallCognitionOp as CogRecallCognitionOp,
+    RerankCognitionOp as CogRerankCognitionOp,
+    RewriteMemoryOp as CogRewriteMemoryOp,
+)
+from ..summary.task.cognition import (
+    SolutionClassifyOp as CogSolutionClassifyOp,
+    GenerateExperienceOp as CogGenerateExperienceOp,
+    UpdateVectorStoreOp as CogUpdateVectorStoreOp,
+    PersistMemoryOp as CogPersistMemoryOp,
+)
+
 from ..schema import SummarizeResponse, RetrieveResponse
 from ..core.op import SequentialOp
 
@@ -75,6 +90,7 @@ class AddMemoryRequest:
         description: Memory description (ReasoningBank only)
         section: Memory section/category (ACE only), defaults to "general"
         label: Memory label (ReasoningBank only)
+        attributes: Dynamic schema tags (Cognition only)
     """
     content: str
     query: Optional[str] = None
@@ -83,25 +99,29 @@ class AddMemoryRequest:
     description: Optional[str] = None
     section: str = "general"
     label: Optional[str] = None
+    attributes: Optional[Dict[str, Any]] = None
 
 
-class OpenAILLMWrapper:
-    """Wrapper for OpenAIModelClient that provides the same interface as the old OpenAILLM."""
+class LLMWrapper:
+    """Wrapper for OpenAIModelClient supporting OpenAI-compatible APIs (OpenAI, DeepSeek, etc.)."""
 
     def __init__(
         self,
         model_name: str = "gpt-5.2",
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
+        provider: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 2000,
+        max_tokens: int = 4096,
     ):
-        """Initialize OpenAI LLM wrapper.
+        """Initialize LLM wrapper for any OpenAI-compatible API provider.
 
         Args:
-            model_name: Model name (e.g., 'gpt-5.2', 'gpt-3.5-turbo')
-            api_key: OpenAI API key
-            base_url: Base URL for API
+            model_name: Model name (e.g., 'gpt-5.2', 'deepseek-v4-flash')
+            api_key: API key for the provider
+            base_url: Base URL for the API endpoint
+            provider: Client provider name (e.g., 'OpenAI', 'DeepSeek'). Cosmetic only —
+                used for telemetry. Does not affect routing or API call behaviour.
             temperature: Sampling temperature
             max_tokens: Maximum tokens in response
         """
@@ -109,7 +129,7 @@ class OpenAILLMWrapper:
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-        # Check if it's a newer model that requires max_completion_tokens instead of max_tokens
+        # Check if it's a newer OpenAI model that requires max_completion_tokens instead of max_tokens
         model_lower = model_name.lower()
         self._is_newer_model = (
             "gpt-4" in model_lower or
@@ -118,18 +138,15 @@ class OpenAILLMWrapper:
             "o3" in model_lower
         )
 
-        api_key = api_key or config.get("API_KEY")
         if not api_key:
             raise_error(
                 StatusCode.TOOLCHAIN_EVOLVING_MEMORY_CONFIG_INVALID,
                 error_msg="API key not provided and API_KEY not set in config.yaml",
             )
 
-        base_url = base_url or "https://api.openai.com/v1"
-
         # Create model client config
         self.model_client_config = ModelClientConfig(
-            client_provider="OpenAI",
+            client_provider=provider,
             api_key=api_key,
             api_base=base_url,
             verify_ssl=False,
@@ -147,7 +164,7 @@ class OpenAILLMWrapper:
             model_client_config=self.model_client_config,
         )
 
-        logger.info("Initialized OpenAI LLM with model: %s", model_name)
+        logger.info("Initialized LLM wrapper: model=%s, provider=%s", model_name, provider)
 
     async def async_generate(
         self,
@@ -246,10 +263,10 @@ class OpenAILLMWrapper:
 
     def __repr__(self) -> str:
         """String representation."""
-        return f"OpenAILLMWrapper(model={self.model_name})"
+        return f"LLMWrapper(model={self.model_name})"
 
 
-class OpenAIEmbeddingWrapper:
+class EmbeddingWrapper:
     """Wrapper for CoreOpenAIEmbedding that provides the same interface as the old OpenAIEmbedding."""
 
     def __init__(
@@ -267,7 +284,6 @@ class OpenAIEmbeddingWrapper:
         """
         self.model_name = model_name
 
-        api_key = api_key or config.get("API_KEY")
         if not api_key:
             raise_error(
                 StatusCode.TOOLCHAIN_EVOLVING_MEMORY_CONFIG_INVALID,
@@ -344,7 +360,7 @@ class OpenAIEmbeddingWrapper:
 
     def __repr__(self) -> str:
         """String representation."""
-        return f"OpenAIEmbeddingWrapper(model={self.model_name})"
+        return f"EmbeddingWrapper(model={self.model_name})"
 
 
 class TaskMemoryService:
@@ -405,16 +421,28 @@ class TaskMemoryService:
 
             # Load configuration from config file
             llm_model = llm_model or config.get("MODEL_NAME") or config.get("LLM_MODEL", "gpt-5.2")
-            embedding_model = embedding_model or config.get("EMBEDDING_MODEL", "text-embedding-3-small")
+            # config.get returns None when the key exists with a None value; use `or` to fall through
+            embedding_model = embedding_model or config.get("EMBEDDING_MODEL") or "text-embedding-3-small"
             api_key = api_key or config.get("API_KEY")
             api_base = config.get("API_BASE")
+
+            # Support separate embedding API credentials (useful when LLM and embedding use different providers,
+            embedding_api_key = config.get("EMBEDDING_API_KEY") or None
+            embedding_api_base = config.get("EMBEDDING_API_BASE") or None
 
             # Initialize services using wrappers
             logger.info("Initializing TaskMemoryService...")
             logger.info("Configuration: llm_model=%s, embedding_model=%s", llm_model, embedding_model)
 
-            self.llm = OpenAILLMWrapper(model_name=llm_model, api_key=api_key, base_url=api_base)
-            self.embedding = OpenAIEmbeddingWrapper(model_name=embedding_model, api_key=api_key, base_url=api_base)
+            llm_provider = config.get("MODEL_PROVIDER") or "OpenAI"
+            llm_temperature = config.get("LLM_TEMPERATURE") or 0.7
+            self.llm = LLMWrapper(
+                model_name=llm_model, api_key=api_key, base_url=api_base,
+                provider=llm_provider, temperature=llm_temperature,
+            )
+            self.embedding = EmbeddingWrapper(
+                model_name=embedding_model, api_key=embedding_api_key, base_url=embedding_api_base,
+            )
             self.vector_store = MemoryVectorStore()
 
             # Register services in context
@@ -521,7 +549,7 @@ class TaskMemoryService:
         Args:
             algorithm: Target algorithm.  Accepted values (case-insensitive):
                 ``ACE``, ``ReasoningBank`` (alias ``RB``), ``ReMe``,
-                ``RefCon``, ``DivCon``.
+                ``Cognition``, ``RefCon``, ``DivCon``.
 
         Raises:
             ValueError: If *algorithm* is not one of the accepted values.
@@ -549,16 +577,21 @@ class TaskMemoryService:
         algo_map = {
             "RB": "ReasoningBank",
             "REASONINGBANK": "ReasoningBank",
+            "REASONING_BANK": "ReasoningBank",
             "REME": "ReMe",
             "ACE": "ACE",
             "REFCON": "RefCon",
             "DIVCON": "DivCon",
+            "COGNITION": "Cognition",
         }
         normalized = algo_map.get(algo.upper())
         if normalized is None:
             raise_error(
                 StatusCode.TOOLCHAIN_EVOLVING_MEMORY_CONFIG_INVALID,
-                error_msg=f"Invalid algorithm '{algo}'. Must be one of: ACE, ReasoningBank, ReMe, RefCon, DivCon.",
+                error_msg=(
+                    f"Invalid algorithm '{algo}'. "
+                    "Must be one of: ACE, ReasoningBank, ReMe, Cognition, RefCon, DivCon."
+                ),
             )
         return normalized
 
@@ -586,11 +619,22 @@ class TaskMemoryService:
                 ReMeRerankMemoryOp(llm_rerank=llm_rerank, topk_rerank=topk_rerank) >>
                 ReMeRewriteMemoryOp(llm_rewrite=llm_rewrite)
             )
+        elif self.retrieval_algorithm == "Cognition":
+            logger.info("Using Cognition algorithm for retrieval")
+            topk_retrieval = int(config.get("TOPK_RETRIEVAL", 10))
+            topk_rerank = int(config.get("TOPK_RERANK", 5))
+            return (
+                CogLoadSchemaOp() >>
+                CogClassifyQueryOp() >>
+                CogRecallCognitionOp(top_k=topk_retrieval) >>
+                CogRerankCognitionOp(top_k=topk_rerank) >>
+                CogRewriteMemoryOp()
+            )
         elif self.retrieval_algorithm == "RefCon" or self.retrieval_algorithm == "DivCon":
             logger.info("Using %s algorithm for retrieval", self.retrieval_algorithm)
             return (
-                # The values (topk_retrieval, llm_rerank, topk_rerank, llm_rewrite) 
-                # are hardcodes because thay are the best parameters found through experiments.
+                # The values (topk_retrieval, llm_rerank, topk_rerank, llm_rewrite)
+                # are hardcoded because they are the best parameters found through experiments.
                 ReMeRecallMemoryOp(topk_retrieval=10) >>
                 ReMeRerankMemoryOp(llm_rerank=True, topk_rerank=5) >>
                 ReMeRewriteMemoryOp(llm_rewrite=True)
@@ -600,7 +644,7 @@ class TaskMemoryService:
                 StatusCode.TOOLCHAIN_EVOLVING_MEMORY_CONFIG_INVALID,
                 error_msg=(
                     f"Invalid retrieval algorithm '{self.retrieval_algorithm}'. "
-                    "Must be one of: ACE, ReasoningBank, ReMe, RefCon, DivCon."
+                    "Must be one of: ACE, ReasoningBank, ReMe, Cognition, RefCon, DivCon, GMemory."
                 ),
             )
             return None
@@ -671,6 +715,16 @@ class TaskMemoryService:
             persist = self._persist_op(ReMePersistMemoryOp)
             return flow >> persist if persist else flow
 
+        elif self.summary_algorithm == "Cognition":
+            logger.info("Using Cognition algorithm for summary")
+            flow = (
+                CogSolutionClassifyOp() >>
+                CogGenerateExperienceOp() >>
+                CogUpdateVectorStoreOp()
+            )
+            persist = self._persist_op(CogPersistMemoryOp)
+            return flow >> persist if persist else flow
+
         elif self.summary_algorithm == "RefCon" or self.summary_algorithm == "DivCon":
             logger.info("Using %s algorithm for summary", self.summary_algorithm)
             flow = (
@@ -689,7 +743,7 @@ class TaskMemoryService:
                 StatusCode.TOOLCHAIN_EVOLVING_MEMORY_CONFIG_INVALID,
                 error_msg=(
                     f"Invalid summary algorithm '{self.summary_algorithm}'. "
-                    "Must be one of: ACE, ReasoningBank, ReMe, RefCon, DivCon."
+                    "Must be one of: ACE, ReasoningBank, ReMe, Cognition, RefCon, DivCon."
                 ),
             )
             return None
@@ -713,6 +767,7 @@ class TaskMemoryService:
                 "ACE": "ace",
                 "ReasoningBank": "rb",
                 "ReMe": "reme",
+                "Cognition": "cognition",
                 "RefCon": "reme",
                 "DivCon": "reme",
             }
@@ -793,6 +848,8 @@ class TaskMemoryService:
                         for mem in retrieved_memories
                     ]
                     memory_string = "\n\n".join(memory_items)
+                elif self.retrieval_algorithm == "Cognition":
+                    memory_string = context.get("memory_string", "")
                 else:  # ReMe or RefCon or DivCon
                     memory_string = context.get("memory_string", "")
 
@@ -919,19 +976,23 @@ class TaskMemoryService:
         try:
             # Create memory based on summary algorithm
             if self.summary_algorithm == "ReasoningBank":
-                if not request.title or not request.description or not request.content:
+                if not request.content:
                     raise_error(
                         StatusCode.TOOLCHAIN_EVOLVING_MEMORY_INPUT_INVALID,
-                        error_msg="ReasoningBank requires 'title', 'description' and 'content' parameters",
+                        error_msg="ReasoningBank requires 'content' parameter",
                     )
 
+                # Derive title and description from other fields when not explicitly provided
+                rb_title = request.title or request.query or "Memory"
+                rb_description = request.description or request.query or rb_title
+
                 # Use description as default query if not provided (used as embedding index)
-                effective_query = request.query if request.query else request.description
+                effective_query = request.query or rb_description
 
                 # Create memory item
                 memory_item = ReasoningBankMemoryItem(
-                    title=request.title,
-                    description=request.description,
+                    title=rb_title,
+                    description=rb_description,
                     content=request.content
                 )
 
@@ -940,19 +1001,20 @@ class TaskMemoryService:
                     workspace_id=user_id,
                     query=effective_query,
                     memory=[memory_item],
-                    label=request.label  # Manual memories don't have labels
+                    label=request.label
                 )
             elif self.summary_algorithm in ("ReMe", "RefCon", "DivCon"):
-                if not request.when_to_use:
-                    raise_error(
-                        StatusCode.TOOLCHAIN_EVOLVING_MEMORY_INPUT_INVALID,
-                        error_msg="ReMe/RefCon/DivCon algorithm requires 'when_to_use' parameter",
-                    )
-
                 from ..schema import ReMeMemory, ReMeMemoryMetadata
 
+                when_to_use = request.when_to_use or request.query or request.description
+                if not when_to_use:
+                    raise_error(
+                        StatusCode.TOOLCHAIN_EVOLVING_MEMORY_INPUT_INVALID,
+                        error_msg="ReMe/RefCon/DivCon algorithm requires 'when_to_use' (or 'query') parameter",
+                    )
+
                 memory = ReMeMemory(
-                    when_to_use=request.when_to_use,
+                    when_to_use=when_to_use,
                     content=request.content,
                     score=1.0,  # Manual memories get default score
                     created_at=datetime.now(timezone.utc),
@@ -967,21 +1029,62 @@ class TaskMemoryService:
                     ),
                     workspace_id=user_id,
                 )
-            else:  # ACE
-                if not request.section or not request.content:
+
+            elif self.summary_algorithm == "Cognition":
+                if not request.content:
                     raise_error(
                         StatusCode.TOOLCHAIN_EVOLVING_MEMORY_INPUT_INVALID,
-                        error_msg="ACE algorithm requires 'content' and 'section' parameters",
+                        error_msg="Cognition algorithm requires 'content' parameters",
                     )
+                from ..schema import CognitionMemory
+                
+                desc = request.description or request.when_to_use or request.query or "Manual Seed"
+                q = request.query or request.when_to_use or "Manual Seed"
+
+                custom_attrs = request.attributes or {}
+                
+                default_domain = request.section if request.section != "general" else "general"
+                final_attrs = {
+                    "domain": custom_attrs.get("domain", default_domain),
+                    "intent": custom_attrs.get("intent", "general"),
+                    "other": custom_attrs.get("other", None)
+                }
+
+                memory = CognitionMemory(
+                    id=str(hashlib.md5(request.content.encode()).hexdigest())[:8],
+                    workspace_id=user_id,
+                    query=q,
+                    description=desc,
+                    experience=[request.content], 
+                    is_correct=True,
+                    attributes=final_attrs,
+                    created_at=datetime.now(timezone.utc).isoformat()
+                )
+                vector_node = memory.to_vector_node()
+
+            else:  # ACE
+                if not request.content:
+                    raise_error(
+                        StatusCode.TOOLCHAIN_EVOLVING_MEMORY_INPUT_INVALID,
+                        error_msg="ACE algorithm requires 'content' parameter",
+                    )
+
+                # Derive section from explicit field, then attributes domain, then default
+                ace_section = (
+                    request.section
+                    or (request.attributes or {}).get("domain")
+                    or request.query
+                    or "general"
+                )
 
                 # Generate unique ID for ACE memory
                 content_hash = hashlib.md5(request.content.encode()).hexdigest()[:8]
-                memory_id = f"{request.section}-{content_hash}"
+                memory_id = f"{ace_section}-{content_hash}"
 
                 memory = ACEMemory(
                     id=memory_id,
                     workspace_id=user_id,
-                    section=request.section,
+                    section=ace_section,
                     content=request.content,
                     helpful=0,
                     harmful=0,
@@ -1005,6 +1108,7 @@ class TaskMemoryService:
                     "ACE": "ace",
                     "ReasoningBank": "rb",
                     "ReMe": "reme",
+                    "Cognition": "cognition",
                     "RefCon": "reme",
                     "DivCon": "reme",
                 }

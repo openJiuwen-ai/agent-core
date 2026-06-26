@@ -49,15 +49,21 @@ from openjiuwen.harness.rails import ContextEvolutionRail
 # Environment variables — edit these if you don't have a .env file
 # ---------------------------------------------------------------------------
 _DEFAULTS = {
+    # --- LLM (DeepSeek) ---
     "API_KEY": "your_api_key_here",
-    "API_BASE": "https://api.openai.com/v1",
-    "MODEL_NAME": "gpt-5.2",
-    "MODEL_PROVIDER": "OpenAI",
-    "EMBEDDING_MODEL": "text-embedding-3-small",
-    "EMBEDDING_DIMENSIONS": 2560,
-    "LLM_TEMPERATURE": 0.7,
+    "API_BASE": "https://api.deepseek.com/v1",
+    "MODEL_NAME": "deepseek-v4-flash",
+    "MODEL_PROVIDER": "DeepSeek",
+    "LLM_TEMPERATURE": 1.0,
     "LLM_SEED": 42,
     "LLM_SSL_VERIFY": False,
+    # --- Embedding (separate provider — DeepSeek has no embedding API) ---
+    # Set EMBEDDING_API_KEY / EMBEDDING_API_BASE to use a different provider for embeddings.
+    # Example below uses OpenAI; replace with any OpenAI-compatible embedding endpoint.
+    "EMBEDDING_MODEL": "text-embedding-3-small",
+    "EMBEDDING_DIMENSIONS": 2560,
+    "EMBEDDING_API_KEY": "your_embedding_api_key_here",
+    "EMBEDDING_API_BASE": "https://api.openai.com/v1",     # Replace if using a different embedding endpoint
 }
 for _k, _v in _DEFAULTS.items():
     app_config.set_value(_k, _v)
@@ -146,8 +152,8 @@ async def main() -> None:  # noqa: C901
         memory_service = TaskMemoryService(
             persist_type="json",
             persist_path=os.path.join(mem_dir, "{algo_name}", "{user_id}.json"),
-            retrieval_algo="refcon",
-            summary_algo="refcon"
+            retrieval_algo="cognition",
+            summary_algo="cognition"
         )
         content1 = (
             "When debugging Python code, prefer the built-in debugger pdb over "
@@ -156,9 +162,14 @@ async def main() -> None:  # noqa: C901
             "(PYTHONASYNCIODEBUG=1). Always check the full traceback before "
             "adding any print statements."
         )
+        # mem_req1 = AddMemoryRequest(
+        #     when_to_use="When asked how to debug Python code or find bugs",
+        #     content=content1,
+        # )
         mem_req1 = AddMemoryRequest(
-            when_to_use="When asked how to debug Python code or find bugs",
+            query="How to debug Python code or find bugs?",
             content=content1,
+            attributes={"domain": "python", "intent": "debugging", "other": "pdb_asyncio"} 
         )
         await memory_service.add_memory(user_id=user_id, request=mem_req1)
         logger.info("  Memory seeded (topic: Python debugging).")
@@ -170,9 +181,14 @@ async def main() -> None:  # noqa: C901
             "Run tests with pytest -v for verbose output and pytest --tb=short to "
             "see concise tracebacks on failure."
         )
+        # mem_req2 = AddMemoryRequest(
+        #     when_to_use="When asked how to write or structure Python unit tests",
+        #     content=content2,
+        # )
         mem_req2 = AddMemoryRequest(
-            when_to_use="When asked how to write or structure Python unit tests",
+            query="How to write or structure Python unit tests?",
             content=content2,
+            attributes={"domain": "python", "intent": "unit_testing", "other": "pytest_mock"}
         )
         await memory_service.add_memory(user_id=user_id, request=mem_req2)
         logger.info("  Memory seeded (topic: Python unit testing).")
