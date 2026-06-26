@@ -733,11 +733,16 @@ class OpenAIModelClient(BaseModelClient):
                     exception=str(e)
                 )
                 parser_content = None
+        response_finish_reason = getattr(choice, 'finish_reason', None) or "null"
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
-            finish_reason="tool_calls" if tool_calls else "stop",
+            finish_reason=(
+                response_finish_reason
+                if response_finish_reason != "null"
+                else ("tool_calls" if tool_calls else "stop")
+            ),
             reasoning_content=reasoning_content,
             parser_content=parser_content
         )

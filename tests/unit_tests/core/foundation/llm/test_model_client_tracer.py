@@ -60,6 +60,7 @@ class TestOpenAIModelClientTracer:
         mock_response.choices[0].message.content = "Test response"
         mock_response.choices[0].message.tool_calls = None
         mock_response.choices[0].message.reasoning_content = None
+        mock_response.choices[0].finish_reason = "stop"
         mock_response.usage = MagicMock()
         mock_response.usage.prompt_tokens = 10
         mock_response.usage.completion_tokens = 20
@@ -245,6 +246,7 @@ class TestSiliconFlowModelClientTracer:
         mock_response.choices[0].message.content = "Test response"
         mock_response.choices[0].message.tool_calls = None
         mock_response.choices[0].message.reasoning_content = None
+        mock_response.choices[0].finish_reason = "stop"
         mock_response.usage = MagicMock()
         mock_response.usage.prompt_tokens = 10
         mock_response.usage.completion_tokens = 20
