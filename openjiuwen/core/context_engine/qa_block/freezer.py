@@ -7,7 +7,7 @@ import asyncio
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.core.context_engine.base import ModelContext
@@ -316,7 +316,9 @@ class QABlockFreezer:
         persist_mode: Literal["async", "sync"] = "async",
         preloaded_qa_ids: list[str] | None = None,
         summarizer_model: Any | None = None,
+        post_commit: Callable[[FreezeCommitResult], Any] | None = None,
     ) -> QABlockEntry | None:
+        """Freeze QA block. ``post_commit``: host hook (e.g. schedule freeze artifact produce)."""
         commit = await self.freeze_commit(
             session,
             context,
@@ -326,6 +328,17 @@ class QABlockFreezer:
         )
         if commit is None:
             return None
+
+        if post_commit is not None:
+            try:
+                post_commit(commit)
+            except Exception as exc:
+                logger.warning(
+                    "[QABlockFreezer] post_commit hook failed qa_id=%s error=%s",
+                    commit.entry.qa_id,
+                    exc,
+                    exc_info=True,
+                )
 
         if persist_mode == "sync":
             return await self.freeze_persist(

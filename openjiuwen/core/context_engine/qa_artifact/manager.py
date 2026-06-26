@@ -22,6 +22,9 @@ from openjiuwen.core.context_engine.qa_artifact.checkpoint_flush import maybe_pe
 from openjiuwen.core.context_engine.qa_artifact.overview import render_plain
 from openjiuwen.core.context_engine.qa_artifact.schema import QAArtifactConfig, QAArtifacts
 from openjiuwen.core.context_engine.qa_artifact.store import QAArtifactStore, resolve_sys_operation
+from openjiuwen.core.context_engine.qa_artifact.assembly_state import (
+    is_assembly_whole_compact_applied,
+)
 from openjiuwen.core.context_engine.qa_artifact.window import (
     apply_artifact_to_context,
     estimate_context_messages_tokens,
@@ -32,7 +35,7 @@ from openjiuwen.core.context_engine.qa_artifact.window import (
 from openjiuwen.core.context_engine.qa_block.messages import message_qa_id
 from openjiuwen.core.context_engine.qa_ref import QARef
 
-_OVERVIEW_FREEZE_AWAIT_S = 30.0
+_OVERVIEW_FREEZE_AWAIT_S = 3.0
 
 
 class QAArtifactManager:
@@ -379,6 +382,183 @@ class QAArtifactManager:
                 return True
         return False
 
+    @staticmethod
+    def _freeze_artifacts_complete(
+        store: QAArtifactStore,
+        qa_id: str,
+        native_messages: list,
+    ) -> bool:
+        if not native_messages:
+            return True
+        if not QAArtifactManager._has_products(store, qa_id):
+            return False
+        state = store.load(qa_id)
+        if state is None or not state.products_ready:
+            return False
+        last_id = get_context_message_id(native_messages[-1])
+        if not last_id:
+            return True
+        return state.covers_upto_message_id == last_id
+
+    def _cancel_overview_task_for_freeze(self, session_id: str, qa_id: str) -> None:
+        key = (session_id, qa_id)
+        task = self._overview_bg.pop(key, None)
+        if task is None or task.done():
+            return
+        task.cancel()
+        logger.info(
+            "[QAArtifactManager] cancelled overview refresh for freeze produce qa_id=%s",
+            qa_id,
+        )
+
+    def _prepare_freeze_produce_claim(
+        self,
+        store: QAArtifactStore,
+        *,
+        session_id: str,
+        qa_id: str,
+    ) -> bool:
+        self._cancel_overview_task_for_freeze(session_id, qa_id)
+        key = (session_id, qa_id)
+        if key in self._bg:
+            logger.info(
+                "[QAArtifactManager] freeze produce skipped: full produce in flight qa_id=%s",
+                qa_id,
+            )
+            return False
+        state = store.get_or_init(qa_id)
+        if state.is_extracting:
+            state.is_extracting = False
+            store.save(qa_id, state)
+        return self._claim(store, qa_id, stale_refresh=True)
+
+    def schedule_freeze_artifact_produce(
+        self,
+        ctx: Any,
+        *,
+        workspace: Any,
+        qa_id: str,
+        native_messages: list,
+    ) -> bool:
+        """Async full artifact produce after freeze; host freeze rail calls via ``post_commit``.
+
+        Skipped when below ``history_block_compact_tokens`` or artifacts already complete.
+        """
+        if not native_messages:
+            return False
+        proc_ctx = self._produce_ctx(ctx)
+        session_id = self._session_id_from_ctx(proc_ctx)
+        store = self.build_store(proc_ctx, workspace)
+        if self._freeze_artifacts_complete(store, qa_id, native_messages):
+            logger.info(
+                "[QAArtifactManager] freeze produce skipped: artifacts complete qa_id=%s",
+                qa_id,
+            )
+            return False
+
+        token_counter = None
+        context = getattr(proc_ctx, "context", None)
+        if context is not None and callable(getattr(context, "token_counter", None)):
+            token_counter = context.token_counter()
+        tokens = estimate_context_messages_tokens(native_messages, token_counter)
+        if tokens < self._config.history_block_compact_tokens:
+            logger.info(
+                "[QAArtifactManager] freeze produce skipped: below history_block_compact "
+                "qa_id=%s tokens=%s threshold=%s",
+                qa_id,
+                tokens,
+                self._config.history_block_compact_tokens,
+            )
+            return False
+
+        if not self._prepare_freeze_produce_claim(
+            store,
+            session_id=session_id,
+            qa_id=qa_id,
+        ):
+            logger.info(
+                "[QAArtifactManager] freeze produce skipped: claim failed qa_id=%s",
+                qa_id,
+            )
+            return False
+
+        snapshot = [message.model_copy(deep=True) for message in native_messages]
+        qa_ref = QARef(
+            qa_id=qa_id,
+            tokens=tokens,
+            is_history=True,
+            get_messages=lambda msgs=snapshot: list(msgs),
+        )
+
+        async def _run_freeze_produce() -> None:
+            try:
+                await self._produce_impl(
+                    proc_ctx,
+                    workspace,
+                    qa_ref,
+                    mark_ready=True,
+                    messages=list(snapshot),
+                )
+                write_context_trace(
+                    "qa_artifact.freeze_produce",
+                    {
+                        "qa_id": qa_id,
+                        "session_id": session_id,
+                        "message_count": len(snapshot),
+                        "tokens": tokens,
+                        "result": "done",
+                    },
+                )
+                logger.info(
+                    "[QAArtifactManager] freeze produce done qa_id=%s messages=%s",
+                    qa_id,
+                    len(snapshot),
+                )
+            except asyncio.CancelledError:
+                state = store.get_or_init(qa_id)
+                state.is_extracting = False
+                store.save(qa_id, state)
+                raise
+            except Exception as exc:
+                state = store.get_or_init(qa_id)
+                state.is_extracting = False
+                store.save(qa_id, state)
+                logger.warning(
+                    "[QAArtifactManager] freeze produce failed qa_id=%s error=%s",
+                    qa_id,
+                    exc,
+                    exc_info=True,
+                )
+                write_context_trace(
+                    "qa_artifact.freeze_produce",
+                    {
+                        "qa_id": qa_id,
+                        "session_id": session_id,
+                        "result": "failed",
+                        "error": str(exc),
+                    },
+                )
+
+        task = asyncio.create_task(_run_freeze_produce())
+        self._register_bg_task(proc_ctx, qa_id, task)
+        write_context_trace(
+            "qa_artifact.freeze_produce",
+            {
+                "qa_id": qa_id,
+                "session_id": session_id,
+                "message_count": len(snapshot),
+                "tokens": tokens,
+                "result": "scheduled",
+            },
+        )
+        logger.info(
+            "[QAArtifactManager] freeze produce scheduled qa_id=%s messages=%s tokens=%s",
+            qa_id,
+            len(snapshot),
+            tokens,
+        )
+        return True
+
     def _schedule_overview_refresh(
         self,
         ctx: Any,
@@ -447,10 +627,14 @@ class QAArtifactManager:
                 {"qa_id": qa_id, "mode": "failed", "error": str(exc)},
             )
         finally:
+            key = self._task_key(ctx, qa_id)
             state = store.get_or_init(qa_id)
-            state.is_extracting = False
+            # Full produce (e.g. freeze) may have claimed after we were cancelled;
+            # do not clear is_extracting while it is still in flight.
+            if key not in self._bg:
+                state.is_extracting = False
             store.save(qa_id, state)
-            self._overview_bg.pop(self._task_key(ctx, qa_id), None)
+            self._overview_bg.pop(key, None)
 
     async def await_pending_overview(
         self,
@@ -690,13 +874,50 @@ class QAArtifactManager:
         return ready
 
     @staticmethod
-    def has_pending_history(store: QAArtifactStore, window_qas: list[QARef]) -> bool:
+    def has_history_artifacts(store: QAArtifactStore, window_qas: list[QARef]) -> bool:
+        """True when store holds artifact products for any history QA in window_qas."""
         for qa_ref in window_qas:
             if not qa_ref.is_history:
                 continue
             if QAArtifactManager._has_products(store, qa_ref.qa_id):
                 return True
         return False
+
+    @staticmethod
+    def _history_messages_in_window(context: Any, window_qas: list[QARef]) -> bool:
+        history_ids = {qa_ref.qa_id for qa_ref in window_qas if qa_ref.is_history}
+        if not history_ids:
+            return False
+        for message in context.get_messages():
+            qa_id = message_qa_id(message)
+            if qa_id in history_ids:
+                return True
+        return False
+
+    @staticmethod
+    def history_settled(
+        context: Any,
+        store: QAArtifactStore,
+        window_qas: list[QARef],
+    ) -> bool:
+        """History QA needs no further L0 apply work for this assembly round."""
+        if is_assembly_whole_compact_applied(context):
+            return True
+        if not QAArtifactManager.has_history_artifacts(store, window_qas):
+            return True
+        if not QAArtifactManager._history_messages_in_window(context, window_qas):
+            return True
+        return QAArtifactManager._all_ready_history_already_compact(context, store, window_qas)
+
+    @staticmethod
+    def needs_history_artifact_work(
+        context: Any,
+        store: QAArtifactStore,
+        window_qas: list[QARef],
+    ) -> bool:
+        if not QAArtifactManager.has_history_artifacts(store, window_qas):
+            return False
+        return not QAArtifactManager.history_settled(context, store, window_qas)
 
     @staticmethod
     def _all_ready_history_already_compact(
@@ -733,9 +954,7 @@ class QAArtifactManager:
     ) -> bool:
         """每轮应用产物：collect + replace（含已 COMPACTED 重贴）。"""
         store = self.build_store(ctx, workspace)
-        if not self.has_pending_history(store, window_qas):
-            return False
-        if self._all_ready_history_already_compact(context, store, window_qas):
+        if not self.needs_history_artifact_work(context, store, window_qas):
             return False
         ready = await self.collect_ready_history(ctx, workspace=workspace, window_qas=window_qas)
         token_counter = context.token_counter() if hasattr(context, "token_counter") else None
@@ -778,10 +997,12 @@ class QAArtifactManager:
         total_tokens: int,
         context: Any,
         fallback: Any,
+        trigger_total_tokens: int | None = None,
     ) -> bool:
         store = self.build_store(ctx, workspace)
         est = total_tokens
         token_counter = context.token_counter() if hasattr(context, "token_counter") else None
+        trigger_line = trigger_total_tokens or self._config.full_compact_target_tokens
 
         for _ in range(self._config.full_compact_max_waves):
             if est <= self._config.full_compact_target_tokens:
@@ -829,6 +1050,19 @@ class QAArtifactManager:
                     state.products_ready = False
                     store.save(qa_ref.qa_id, state)
             if reduced == 0:
+                est = estimate_context_messages_tokens(context.get_messages(), token_counter)
+                if est <= self._config.full_compact_target_tokens:
+                    logger.info(
+                        "[QAArtifactManager] compact_to_target zero progress but at target est=%s",
+                        est,
+                    )
+                    return True
+                if est <= trigger_line:
+                    logger.info(
+                        "[QAArtifactManager] compact_to_target zero progress but under trigger est=%s",
+                        est,
+                    )
+                    return True
                 logger.info("[QAArtifactManager] compact_to_target zero progress, fallback")
                 return await fallback()
             est = estimate_context_messages_tokens(context.get_messages(), token_counter)

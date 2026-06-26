@@ -15,6 +15,11 @@ class QABlockConfig(BaseModel):
     l1_llm_min_chars: int = Field(default=1500, gt=0)
     history_qa_buffer_size: int = Field(default=3, gt=0)
     async_freeze_persist: bool = True
+    freeze_overview_await_s: float = Field(
+        default=3.0,
+        ge=0.0,
+        description="Overview await before freeze; read by host freeze rail, passed to await_pending_overview.",
+    )
     excerpt_max_chars: int = Field(default=200, gt=0)
     catalog_max_tokens: int = Field(default=8000, gt=0)
     catalog_short_max_chars: int = Field(default=150, gt=0)

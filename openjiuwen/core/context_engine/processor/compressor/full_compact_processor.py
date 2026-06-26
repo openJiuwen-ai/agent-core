@@ -17,6 +17,7 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
     SessionMemoryConfig,
     find_last_completed_api_round_end,
     find_message_index_by_context_message_id,
+    get_context_message_id,
     group_completed_api_rounds,
     invalidate_session_memory_anchor,
 )
@@ -31,6 +32,9 @@ from openjiuwen.core.context_engine.processor.compressor.util import (
     build_todo_reinjected_content,
 )
 from openjiuwen.core.context_engine.qa_artifact import QAArtifactManager, build_qa_artifact_manager
+from openjiuwen.core.context_engine.qa_artifact.assembly_state import (
+    mark_assembly_whole_compact_applied,
+)
 from openjiuwen.core.context_engine.qa_artifact.window import compute_fold_slice
 from openjiuwen.core.context_engine.qa_artifact.store import QAArtifactStore
 from openjiuwen.core.context_engine.qa_artifact.window import (
@@ -235,6 +239,7 @@ class FullCompactProcessor(ContextProcessor):
         self._get_path_force_compact: bool = False
         self._deferred_overflow_recovery: bool = False
         self._overflow_threshold_override: Optional[int] = None  # threshold_override from 413 recovery
+        self._llm_compact_round_signature: tuple[Any, ...] | None = None
         self._state_reinjector = FullCompactStateReinjector()
         self._state_reinjector.register_builder(
             name="skills",
@@ -358,7 +363,7 @@ class FullCompactProcessor(ContextProcessor):
             if window_qas:
                 proc_ctx = make_processor_ctx(context, sys_operation=sys_operation)
                 store = QAArtifactManager.build_store(proc_ctx, proc_ctx.workspace)
-                if self._qa_mgr.has_pending_history(store, window_qas):
+                if self._qa_mgr.needs_history_artifact_work(context, store, window_qas):
                     return True
         if not self._api_round(candidate_messages):
             return False
@@ -391,7 +396,7 @@ class FullCompactProcessor(ContextProcessor):
             if window_qas:
                 proc_ctx = make_processor_ctx(context, sys_operation=sys_operation)
                 store = QAArtifactManager.build_store(proc_ctx, proc_ctx.workspace)
-                if self._qa_mgr.has_pending_history(store, window_qas):
+                if self._qa_mgr.needs_history_artifact_work(context, store, window_qas):
                     return True
         candidate_tokens = self._count_context_window_tokens(
             context_window.system_messages,
@@ -421,6 +426,7 @@ class FullCompactProcessor(ContextProcessor):
                     "session_id": context.session_id(),
                     "trigger_total_tokens": self.config.trigger_total_tokens,
                     "message_count_before": len(all_messages),
+                    "path": "force_compact",
                 },
             )
 
@@ -435,6 +441,7 @@ class FullCompactProcessor(ContextProcessor):
                 return None, context_window
 
             context.set_messages(new_context_messages)
+            mark_assembly_whole_compact_applied(context)
             logger.info(
                 "[FullCompact] on_get_context_window: force_compact succeeded, "
                 "messages_before=%d messages_after=%d replacement_kind=%s",
@@ -468,14 +475,67 @@ class FullCompactProcessor(ContextProcessor):
         sys_operation = kwargs.get("sys_operation") or getattr(context, "_sys_operation", None)
         system_messages = list(context_window.system_messages or [])
         tools = list(context_window.tools or [])
-        await self._run_qa_artifact_window_pass(
+        compact_handled, artifact_applied, wholesale, whole_window_fallback_attempted = (
+            await self._run_qa_artifact_window_pass(
+                context,
+                system_messages=system_messages,
+                tools=tools,
+                sys_operation=sys_operation,
+                messages_to_add=[],
+                allow_whole_window_fallback=True,
+            )
+        )
+        context_messages = context.get_messages()
+        context_window.context_messages = context_messages
+
+        if compact_handled or wholesale:
+            return None, context_window
+
+        if whole_window_fallback_attempted:
+            logger.info(
+                "[FullCompact] GET path skips duplicate L2 whole-window fallback "
+                "after window-pass attempt",
+            )
+            return None, context_window
+
+        candidate_tokens = self._count_context_window_tokens(
+            system_messages,
+            context_messages,
+            tools,
             context,
+        )
+        if candidate_tokens <= self._trigger_total_tokens:
+            return None, context_window
+
+        round_signature = self._llm_round_signature(context_messages)
+        if self._llm_compact_round_signature == round_signature:
+            logger.info(
+                "[FullCompact] GET path skips duplicate L2 whole-window compact signature=%s",
+                round_signature,
+            )
+            return None, context_window
+
+        write_context_trace(
+            "context.processor.full_compact.before",
+            {
+                "processor": self.processor_type(),
+                "context_id": context.context_id(),
+                "session_id": context.session_id(),
+                "trigger_total_tokens": self.config.trigger_total_tokens,
+                "message_count_before": len(context_messages),
+                "path": "get_l2",
+            },
+        )
+        l2_applied = await self._fallback_whole_window_compact(
+            context,
+            all_messages=context_messages,
             system_messages=system_messages,
             tools=tools,
-            sys_operation=sys_operation,
-            messages_to_add=[],
         )
-        context_window.context_messages = context.get_messages()
+        if l2_applied:
+            self._llm_compact_round_signature = round_signature
+            mark_assembly_whole_compact_applied(context)
+            context_window.context_messages = context.get_messages()
         return None, context_window
 
     async def _run_qa_artifact_window_pass(
@@ -486,15 +546,17 @@ class FullCompactProcessor(ContextProcessor):
         tools: List[Any],
         sys_operation: Any,
         messages_to_add: List[BaseMessage],
-    ) -> Tuple[bool, bool, bool]:
-        """Returns (compact_handled, artifact_applied, buffer_wholesale_replaced)."""
+        allow_whole_window_fallback: bool = True,
+    ) -> Tuple[bool, bool, bool, bool]:
+        """Returns (compact_handled, artifact_applied, buffer_wholesale_replaced, whole_window_fallback_attempted)."""
         if self._qa_mgr is None:
-            return False, False, False
+            return False, False, False, False
 
         proc_ctx = make_processor_ctx(context, sys_operation=sys_operation)
         window_qas = self._build_window_qas(context, sys_operation=sys_operation)
         artifact_applied = False
         buffer_wholesale_replaced = False
+        whole_window_fallback_attempted = False
         if window_qas:
             artifact_applied = await self._qa_mgr.apply_artifact_to_context(
                 proc_ctx,
@@ -513,15 +575,23 @@ class FullCompactProcessor(ContextProcessor):
         if candidate_tokens > self._trigger_total_tokens and window_qas:
 
             async def _fallback() -> bool:
-                nonlocal buffer_wholesale_replaced
+                nonlocal buffer_wholesale_replaced, whole_window_fallback_attempted
+                if not allow_whole_window_fallback:
+                    logger.info(
+                        "[FullCompact] ADD path skips whole-window LLM fallback tokens=%s",
+                        candidate_tokens,
+                    )
+                    return False
+                whole_window_fallback_attempted = True
                 ok = await self._fallback_whole_window_compact(
                     context,
-                    all_messages=all_messages,
+                    all_messages=context.get_messages(),
                     system_messages=system_messages,
                     tools=tools,
                 )
                 if ok:
                     buffer_wholesale_replaced = True
+                    mark_assembly_whole_compact_applied(context)
                 return ok
 
             handled = await self._qa_mgr.compact_to_target(
@@ -531,6 +601,7 @@ class FullCompactProcessor(ContextProcessor):
                 total_tokens=candidate_tokens,
                 context=context,
                 fallback=_fallback,
+                trigger_total_tokens=self._trigger_total_tokens,
             )
             if handled:
                 write_context_trace(
@@ -543,8 +614,8 @@ class FullCompactProcessor(ContextProcessor):
                         "message_count_after": len(context.get_messages()),
                     },
                 )
-                return True, artifact_applied, buffer_wholesale_replaced
-        return False, artifact_applied, buffer_wholesale_replaced
+                return True, artifact_applied, buffer_wholesale_replaced, whole_window_fallback_attempted
+        return False, artifact_applied, buffer_wholesale_replaced, whole_window_fallback_attempted
 
     def _build_window_qas(self, context: ModelContext, *, sys_operation: Any) -> list[Any]:
         return build_window_qas_from_context(context, sys_operation=sys_operation)
@@ -652,16 +723,17 @@ class FullCompactProcessor(ContextProcessor):
         )
         if new_messages is not None:
             context.set_messages(new_messages)
+        remaining_messages = context.get_messages()
         remaining_tokens = self._count_context_window_tokens(
             system_messages,
-            context.get_messages(),
+            remaining_messages,
             tools,
             context,
             use_baseline=False,
         )
         remaining_tokens_baseline = self._count_context_window_tokens(
             system_messages,
-            context.get_messages(),
+            remaining_messages,
             tools,
             context,
             use_baseline=True,
@@ -729,12 +801,13 @@ class FullCompactProcessor(ContextProcessor):
         sys_operation = kwargs.get("sys_operation") or getattr(context, "_sys_operation", None)
 
         if self._qa_mgr is not None:
-            compact_handled, artifact_applied, wholesale = await self._run_qa_artifact_window_pass(
+            compact_handled, artifact_applied, wholesale, _ = await self._run_qa_artifact_window_pass(
                 context,
                 system_messages=system_messages,
                 tools=tools,
                 sys_operation=sys_operation,
                 messages_to_add=messages_to_add,
+                allow_whole_window_fallback=False,
             )
             if compact_handled:
                 return None, [] if wholesale else messages_to_add
@@ -752,44 +825,21 @@ class FullCompactProcessor(ContextProcessor):
                 return None, messages_to_add
 
         all_messages = context.get_messages() + list(messages_to_add or [])
-        system_messages = kwargs.get("system_messages") or []
-        tools = kwargs.get("tools") or []
-        write_context_trace(
-            "context.processor.full_compact.before",
-            {
-                "processor": self.processor_type(),
-                "context_id": context.context_id(),
-                "session_id": context.session_id(),
-                "trigger_total_tokens": self.config.trigger_total_tokens,
-                "message_count_before": len(all_messages),
-            },
-        )
-        event, new_context_messages, session_memory_message = await self._build_replacement_messages(
-            context,
-            all_messages,
+        candidate_tokens = self._count_context_window_tokens(
             system_messages,
+            all_messages,
             tools,
+            context,
         )
-        if new_context_messages is None:
+        if candidate_tokens <= self._trigger_total_tokens:
             return None, messages_to_add
-        context.set_messages(new_context_messages)
-        write_context_trace(
-            "context.processor.full_compact.after",
-            {
-                "processor": self.processor_type(),
-                "context_id": context.context_id(),
-                "session_id": context.session_id(),
-                "replacement_kind": "session_memory" if session_memory_message is not None else "full_compact",
-                "event": (
-                    {"event_type": event.event_type, "messages_to_modify": event.messages_to_modify}
-                    if event is not None else None
-                ),
-                "message_count_after": len(new_context_messages),
-            },
+
+        # ADD path never runs whole-window LLM; defer to GET (force_compact only affects GET).
+        logger.info(
+            "[FullCompact] ADD path skips whole-window LLM tokens=%s",
+            candidate_tokens,
         )
-        if session_memory_message is None:
-            self._invalidate_session_memory_anchor(context)
-        return event, []
+        return None, messages_to_add
 
     async def _build_replacement_messages(
         self,
@@ -1610,6 +1660,13 @@ class FullCompactProcessor(ContextProcessor):
     @staticmethod
     def _estimate_message_tokens(message: BaseMessage) -> int:
         return ContextUtils.estimate_message_tokens(message)
+
+    @staticmethod
+    def _llm_round_signature(messages: List[BaseMessage]) -> tuple[Any, ...]:
+        if not messages:
+            return (0, None)
+        last_id = get_context_message_id(messages[-1])
+        return (len(messages), last_id)
 
     def _find_last_compaction_boundary_index(self, messages: List[BaseMessage]) -> int:
         for idx in range(len(messages) - 1, -1, -1):

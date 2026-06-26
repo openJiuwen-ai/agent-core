@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Any, List, Optional
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.foundation.llm import BaseMessage
@@ -119,6 +119,30 @@ class ModelContext(ABC):
         List[BaseMessage]
             The updated message list after insertion.
         """
+
+    def get_processors(self) -> List[Any]:
+        """Return context processors (compression, offload, etc.) attached to this context."""
+        return []
+
+    def get_processor_by_type(self, processor_type: str) -> Any | None:
+        for processor in self.get_processors():
+            ptype_getter = getattr(processor, "processor_type", None)
+            if not callable(ptype_getter):
+                continue
+            ptype = ptype_getter()
+            if isinstance(ptype, str) and ptype == processor_type:
+                return processor
+        return None
+
+    def get_qa_artifact_manager(self) -> Any | None:
+        from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+            FullCompactProcessor,
+        )
+
+        processor = self.get_processor_by_type(FullCompactProcessor.processor_type())
+        if processor is None:
+            return None
+        return getattr(processor, "qa_artifact_manager", None)
 
     @abstractmethod
     async def get_context_window(self,

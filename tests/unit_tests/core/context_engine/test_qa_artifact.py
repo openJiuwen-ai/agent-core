@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from unittest.mock import AsyncMock
@@ -448,3 +449,196 @@ async def test_compact_to_target_refreshes_active_qa_when_covered_id_left_live_c
     assert len(messages) == 2
     assert "refreshed overview" in messages[0].content
     assert messages[-1].content == "latest user"
+
+
+def test_needs_history_artifact_work_false_when_history_already_compact(tmp_path):
+    from openjiuwen.core.context_engine.qa_artifact.window import compact_replacement_message
+
+    session = FakeSession("session-settled")
+    store = QAArtifactStore(session, str(tmp_path))
+    state = store.get_or_init("qa_001")
+    state.state = "COMPACTED"
+    state.products_ready = False
+    store.save("qa_001", state)
+
+    context = SessionModelContext(
+        "default_context_id",
+        "session-settled",
+        ContextEngineConfig(),
+        history_messages=[
+            compact_replacement_message("qa_001", "already compact overview"),
+            UserMessage(content="current question", metadata={"qa_id": "qa_012"}),
+        ],
+    )
+    window_qas = [
+        QARef(qa_id="qa_001", tokens=10, is_history=True, get_messages=lambda: []),
+        QARef(qa_id="qa_012", tokens=5, is_history=False, get_messages=lambda: context.get_messages()),
+    ]
+    mgr = QAArtifactManager(QAArtifactConfig(), None, CatalogBuilder(QAArtifactConfig()))
+
+    assert mgr.has_history_artifacts(store, window_qas) is True
+    assert mgr.history_settled(context, store, window_qas) is True
+    assert mgr.needs_history_artifact_work(context, store, window_qas) is False
+
+
+def test_history_settled_true_after_whole_compact_marker():
+    from openjiuwen.core.context_engine.qa_artifact.assembly_state import (
+        mark_assembly_whole_compact_applied,
+    )
+
+    session = FakeSession("session-l2")
+    store = QAArtifactStore(session, "/tmp/unused")
+    state = store.get_or_init("qa_001")
+    state.products_ready = True
+    store.save("qa_001", state)
+
+    context = SessionModelContext(
+        "default_context_id",
+        "session-l2",
+        ContextEngineConfig(),
+        history_messages=[UserMessage(content="raw history", metadata={"qa_id": "qa_001"})],
+    )
+    window_qas = [QARef(qa_id="qa_001", tokens=100, is_history=True, get_messages=lambda: [])]
+    mgr = QAArtifactManager(QAArtifactConfig(), None, CatalogBuilder(QAArtifactConfig()))
+
+    assert mgr.needs_history_artifact_work(context, store, window_qas) is True
+    mark_assembly_whole_compact_applied(context)
+    assert mgr.history_settled(context, store, window_qas) is True
+    assert mgr.needs_history_artifact_work(context, store, window_qas) is False
+
+
+@pytest.mark.asyncio
+async def test_compact_to_target_zero_progress_reestimates_before_fallback(tmp_path, monkeypatch):
+    from openjiuwen.core.context_engine.qa_artifact.schema import QAArtifacts
+
+    session = FakeSession("session-zero")
+    context = SessionModelContext(
+        "default_context_id",
+        "session-zero",
+        ContextEngineConfig(),
+        history_messages=[UserMessage(content="small", metadata={"qa_id": "qa_001"})],
+    )
+    qa_ref = QARef(
+        qa_id="qa_001",
+        tokens=500,
+        is_history=True,
+        get_messages=lambda: context.get_messages(),
+    )
+    mgr = QAArtifactManager(
+        QAArtifactConfig(full_compact_target_tokens=100000),
+        None,
+        CatalogBuilder(QAArtifactConfig()),
+    )
+    ctx = FakeCtx(session, FakeWorkspace(str(tmp_path)))
+    ctx.context = context
+
+    monkeypatch.setattr(mgr, "_is_compact_to_target_candidate", lambda *args, **kwargs: True)
+    monkeypatch.setattr(mgr, "_refresh_active_qa_products", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        mgr,
+        "ensure_compacted",
+        AsyncMock(return_value=QAArtifacts(overview="overview", entries=[])),
+    )
+    monkeypatch.setattr(
+        "openjiuwen.core.context_engine.qa_artifact.manager.apply_artifact_to_context",
+        lambda *args, **kwargs: 0,
+    )
+
+    fallback = AsyncMock(return_value=True)
+    handled = await mgr.compact_to_target(
+        ctx,
+        workspace=ctx.workspace,
+        window_qas=[qa_ref],
+        total_tokens=120000,
+        context=context,
+        fallback=fallback,
+        trigger_total_tokens=100000,
+    )
+
+    assert handled is True
+    fallback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_schedule_freeze_artifact_produce_schedules_background_task(tmp_path, monkeypatch):
+    session = FakeSession("session-freeze-produce")
+    native = [
+        UserMessage(content="question"),
+        AssistantMessage(content="answer " * 5000),
+    ]
+    context = SessionModelContext(
+        "default_context_id",
+        "session-freeze-produce",
+        ContextEngineConfig(),
+        history_messages=native,
+    )
+    ctx = FakeCtx(session, FakeWorkspace(str(tmp_path)))
+    ctx.context = context
+    mgr = QAArtifactManager(
+        QAArtifactConfig(history_block_compact_tokens=8000),
+        None,
+        CatalogBuilder(QAArtifactConfig()),
+    )
+
+    produce_calls: list[str] = []
+
+    async def _fake_produce_impl(_ctx, _workspace, qa, *, mark_ready, messages=None):
+        produce_calls.append(qa.qa_id)
+        assert mark_ready is True
+        assert len(messages or []) == 2
+
+    monkeypatch.setattr(mgr, "_produce_impl", _fake_produce_impl)
+
+    scheduled = mgr.schedule_freeze_artifact_produce(
+        ctx,
+        workspace=ctx.workspace,
+        qa_id="qa_007",
+        native_messages=native,
+    )
+    assert scheduled is True
+    for _ in range(50):
+        if produce_calls:
+            break
+        await asyncio.sleep(0)
+    assert produce_calls == ["qa_007"]
+
+
+def test_schedule_freeze_artifact_produce_skips_when_already_complete(tmp_path):
+    session = FakeSession("session-freeze-skip")
+    native = [UserMessage(content="q", metadata={"context_message_id": "m1"})]
+    store = QAArtifactStore(session, str(tmp_path))
+    state = store.get_or_init("qa_008")
+    state.products_ready = True
+    state.covers_upto_message_id = "m1"
+    store.save("qa_008", state)
+
+    mgr = QAArtifactManager(QAArtifactConfig(), None, CatalogBuilder(QAArtifactConfig()))
+    ctx = FakeCtx(session, FakeWorkspace(str(tmp_path)))
+
+    scheduled = mgr.schedule_freeze_artifact_produce(
+        ctx,
+        workspace=ctx.workspace,
+        qa_id="qa_008",
+        native_messages=native,
+    )
+    assert scheduled is False
+
+
+def test_schedule_freeze_artifact_produce_skips_below_history_block_threshold(tmp_path):
+    session = FakeSession("session-freeze-small")
+    native = [UserMessage(content="short q"), AssistantMessage(content="short a")]
+    mgr = QAArtifactManager(
+        QAArtifactConfig(history_block_compact_tokens=8000),
+        None,
+        CatalogBuilder(QAArtifactConfig()),
+    )
+    ctx = FakeCtx(session, FakeWorkspace(str(tmp_path)))
+
+    scheduled = mgr.schedule_freeze_artifact_produce(
+        ctx,
+        workspace=ctx.workspace,
+        qa_id="qa_009",
+        native_messages=native,
+    )
+    assert scheduled is False
+

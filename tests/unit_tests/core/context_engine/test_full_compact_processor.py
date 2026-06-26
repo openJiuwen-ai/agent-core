@@ -23,6 +23,16 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.foundation.tool import ToolInfo
 
 
+def _full_compact_from_context(ctx) -> "FullCompactProcessor":
+    from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+        FullCompactProcessor,
+    )
+
+    processor = ctx.get_processor_by_type(FullCompactProcessor.processor_type())
+    assert processor is not None
+    return processor
+
+
 def create_tool_call(tool_call_id: str, name: str, arguments: str = "") -> ToolCall:
     return ToolCall(id=tool_call_id, name=name, type="function", arguments=arguments)
 
@@ -52,7 +62,7 @@ class TestFullCompactProcessor:
             config,
             history_messages=[UserMessage(content="trigger message " * 30)],
         )
-        processor = ctx._processors[0]  # type: ignore[attr-defined]
+        processor = _full_compact_from_context(ctx)
         triggered = await processor.trigger_add_messages(
             ctx,
             [AssistantMessage(content="new assistant " + ("payload " * 20))],
@@ -60,7 +70,7 @@ class TestFullCompactProcessor:
         assert triggered is True
 
     @pytest.mark.asyncio
-    async def test_on_add_messages_uses_session_memory_candidate_after_prior_full_compact(self):
+    async def test_on_add_messages_skips_whole_window_llm_on_add_path(self):
         from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
             FullCompactProcessor,
         )
@@ -81,13 +91,86 @@ class TestFullCompactProcessor:
                 AssistantMessage(content="recent assistant"),
             ],
         )
-        processor._build_session_memory_messages = AsyncMock(return_value=(["should not be used"], None))  # type: ignore[method-assign]
-        processor._build_full_compact_messages = AsyncMock(return_value=ctx.get_messages())  # type: ignore[method-assign]
+        with patch.object(
+            processor,
+            "_build_replacement_messages",
+            new_callable=AsyncMock,
+        ) as mock_build_replacement:
+            event, remaining = await processor.on_add_messages(
+                ctx,
+                [UserMessage(content="new message")],
+            )
 
-        with pytest.raises(Exception, match="messages should be a BaseMessage or a list of BaseMessage"):
-            await processor.on_add_messages(ctx, [UserMessage(content="new message")])
+        assert event is None
+        assert len(remaining) == 1
+        mock_build_replacement.assert_not_awaited()
 
-        processor._build_session_memory_messages.assert_awaited_once()  # type: ignore[attr-defined]
+    @pytest.mark.asyncio
+    async def test_on_get_context_window_runs_l2_when_over_threshold(self):
+        from openjiuwen.core.context_engine.base import ContextWindow
+        from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+            FullCompactProcessor,
+        )
+
+        processor = FullCompactProcessor(
+            FullCompactProcessorConfig(
+                trigger_total_tokens=20,
+                compression_call_max_tokens=2000,
+                messages_to_keep=1,
+            )
+        )
+        ctx = await create_context_with_full_compact(
+            processor.config,
+            history_messages=[UserMessage(content="history " * 50)],
+        )
+        window = ContextWindow(
+            system_messages=[],
+            context_messages=ctx.get_messages(),
+            tools=[],
+        )
+        with patch.object(
+            processor,
+            "_fallback_whole_window_compact",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_fallback:
+            await processor.on_get_context_window(ctx, window)
+
+        mock_fallback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_on_get_context_window_debounces_duplicate_l2_same_signature(self):
+        from openjiuwen.core.context_engine.base import ContextWindow
+        from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+            FullCompactProcessor,
+        )
+
+        processor = FullCompactProcessor(
+            FullCompactProcessorConfig(
+                trigger_total_tokens=20,
+                compression_call_max_tokens=2000,
+                messages_to_keep=1,
+            )
+        )
+        ctx = await create_context_with_full_compact(
+            processor.config,
+            history_messages=[UserMessage(content="history " * 50)],
+        )
+        window = ContextWindow(
+            system_messages=[],
+            context_messages=ctx.get_messages(),
+            tools=[],
+        )
+        with patch.object(
+            processor,
+            "_fallback_whole_window_compact",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_fallback:
+            await processor.on_get_context_window(ctx, window)
+            await processor.on_get_context_window(ctx, window)
+
+        assert mock_fallback.await_count == 1
 
     @pytest.mark.asyncio
     async def test_build_session_memory_messages_uses_committed_notes_while_extraction_in_progress(self):
@@ -108,20 +191,21 @@ class TestFullCompactProcessor:
             "memory_path": "unused",
         }
 
-        processor._load_session_memory_runtime = MagicMock(return_value=runtime)  # type: ignore[method-assign]
-        processor._load_session_memory_text = MagicMock(return_value="committed notes")  # type: ignore[method-assign]
-        processor.build_reinjected_state_messages = MagicMock(return_value=[])  # type: ignore[method-assign]
-
-        candidate_messages, session_memory_message = await processor._build_session_memory_messages(
-            context=MagicMock(),
-            prefix=[],
-            active_messages=active_messages,
-            has_compaction_boundary=False,
-        )
+        with (
+            patch.object(processor, "_load_session_memory_runtime", return_value=runtime),
+            patch.object(processor, "_load_session_memory_text", return_value="committed notes") as mock_load_text,
+            patch.object(processor, "build_reinjected_state_messages", return_value=[]),
+        ):
+            candidate_messages, session_memory_message = await processor._build_session_memory_messages(
+                context=MagicMock(),
+                prefix=[],
+                active_messages=active_messages,
+                has_compaction_boundary=False,
+            )
 
         assert candidate_messages is not None
         assert session_memory_message is not None
-        processor._load_session_memory_text.assert_called_once_with(ANY, runtime)  # type: ignore[attr-defined]
+        mock_load_text.assert_called_once_with(ANY, runtime)
         assert "committed notes" in session_memory_message.content
         assert candidate_messages[2:] == active_messages[2:]
 
@@ -137,18 +221,19 @@ class TestFullCompactProcessor:
             "notes_upto_message_id": "msg-2",
             "memory_path": "unused",
         }
-        processor._load_session_memory_runtime = MagicMock(return_value=runtime)  # type: ignore[method-assign]
-        processor._load_session_memory_text = MagicMock(return_value="")  # type: ignore[method-assign]
-
-        candidate_messages, session_memory_message = await processor._build_session_memory_messages(
-            context=MagicMock(),
-            prefix=[],
-            active_messages=[
-                UserMessage(content="keep-1", metadata={"context_message_id": "msg-3"}),
-                AssistantMessage(content="keep-2", metadata={"context_message_id": "msg-4"}),
-            ],
-            has_compaction_boundary=False,
-        )
+        with (
+            patch.object(processor, "_load_session_memory_runtime", return_value=runtime),
+            patch.object(processor, "_load_session_memory_text", return_value=""),
+        ):
+            candidate_messages, session_memory_message = await processor._build_session_memory_messages(
+                context=MagicMock(),
+                prefix=[],
+                active_messages=[
+                    UserMessage(content="keep-1", metadata={"context_message_id": "msg-3"}),
+                    AssistantMessage(content="keep-2", metadata={"context_message_id": "msg-4"}),
+                ],
+                has_compaction_boundary=False,
+            )
 
         assert candidate_messages is None
         assert session_memory_message is None
@@ -209,27 +294,30 @@ class TestFullCompactProcessor:
                 _ = context_messages, current_notes, is_incremental, trigger_tokens, full_scan_tokens
                 notes_path.write_text("updated notes", encoding="utf-8")
 
-            manager._update_agent.invoke = AsyncMock(side_effect=_fake_invoke)  # type: ignore[method-assign]
-
-            await manager._update_background(
-                ctx,
-                workspace,
-                context_window,
-            )
+            with patch.object(
+                manager._update_agent,
+                "invoke",
+                new_callable=AsyncMock,
+                side_effect=_fake_invoke,
+            ):
+                await manager._update_background(
+                    ctx,
+                    workspace,
+                    context_window,
+                )
 
             runtime = get_session_memory_runtime(session)
             assert runtime["notes_upto_message_id"] == "msg-4"
             assert runtime["last_summarized_message_count"] == 4
             assert runtime["is_extracting"] is False
 
-            processor.build_reinjected_state_messages = MagicMock(return_value=[])  # type: ignore[method-assign]
-
-            candidate_messages, session_memory_message = await processor._build_session_memory_messages(
-                context=context,
-                prefix=[],
-                active_messages=active_messages,
-                has_compaction_boundary=False,
-            )
+            with patch.object(processor, "build_reinjected_state_messages", return_value=[]):
+                candidate_messages, session_memory_message = await processor._build_session_memory_messages(
+                    context=context,
+                    prefix=[],
+                    active_messages=active_messages,
+                    has_compaction_boundary=False,
+                )
 
         assert candidate_messages is not None
         assert session_memory_message is not None
@@ -630,9 +718,6 @@ class TestFullCompactContextWindowAccounting:
             )
         )
         ctx = await create_context_with_full_compact(processor.config)
-        processor._generate_summary = AsyncMock(return_value="Summary:\nshort")  # type: ignore[method-assign]
-        processor.build_reinjected_state_messages = MagicMock(return_value=[])  # type: ignore[method-assign]
-
         system_messages = [SystemMessage(content="s" * 200)]
         tools = [
             ToolInfo(
@@ -642,13 +727,21 @@ class TestFullCompactContextWindowAccounting:
             )
         ]
         all_messages = [UserMessage(content="payload " * 20)]
-
-        result = await processor._build_replacement_messages(
-            ctx,
-            all_messages,
-            system_messages,
-            tools,
-        )
+        with (
+            patch.object(
+                processor,
+                "_generate_summary",
+                new_callable=AsyncMock,
+                return_value="Summary:\nshort",
+            ),
+            patch.object(processor, "build_reinjected_state_messages", return_value=[]),
+        ):
+            result = await processor._build_replacement_messages(
+                ctx,
+                all_messages,
+                system_messages,
+                tools,
+            )
         assert result[1] is None
 
     @pytest.mark.asyncio
@@ -668,9 +761,6 @@ class TestFullCompactContextWindowAccounting:
             processor.config,
             history_messages=[UserMessage(content="history " * 5)],
         )
-        processor._generate_summary = AsyncMock(return_value="Summary:\n" + ("x" * 50))  # type: ignore[method-assign]
-        processor.build_reinjected_state_messages = MagicMock(return_value=[])  # type: ignore[method-assign]
-
         calls: list[int] = []
 
         original_select = processor._select_messages_to_keep
@@ -679,17 +769,25 @@ class TestFullCompactContextWindowAccounting:
             calls.append(keep_recent if keep_recent is not None else processor._messages_to_keep)
             return original_select(messages, context, keep_recent=keep_recent)
 
-        processor._select_messages_to_keep = _tracking_select  # type: ignore[method-assign]
-
         active = [UserMessage(content="u"), AssistantMessage(content="a")]
-        result = await processor._try_full_compact_adaptive_chain(
-            context=ctx,
-            prefix=[],
-            active_messages=active,
-            system_messages=[],
-            tools=[],
-            threshold=500,
-        )
+        with (
+            patch.object(
+                processor,
+                "_generate_summary",
+                new_callable=AsyncMock,
+                return_value="Summary:\n" + ("x" * 50),
+            ),
+            patch.object(processor, "build_reinjected_state_messages", return_value=[]),
+            patch.object(processor, "_select_messages_to_keep", side_effect=_tracking_select),
+        ):
+            result = await processor._try_full_compact_adaptive_chain(
+                context=ctx,
+                prefix=[],
+                active_messages=active,
+                system_messages=[],
+                tools=[],
+                threshold=500,
+            )
         assert result is not None
         assert calls[0] == 2
 
@@ -724,6 +822,23 @@ class TestFullCompactQAArtifactManager:
         assert update_agent._config.model.model_name == "glm-test"
         assert update_agent._config.model_client is model_client
         assert mgr._catalog._model is not None
+
+    @pytest.mark.asyncio
+    async def test_context_exposes_qa_artifact_manager_via_public_api(self):
+        from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+            FullCompactProcessor,
+        )
+        from openjiuwen.core.context_engine.qa_artifact import QAArtifactConfig
+
+        processor = FullCompactProcessor(
+            FullCompactProcessorConfig(
+                qa_artifact=QAArtifactConfig(enabled=True),
+            )
+        )
+        ctx = await create_context_with_full_compact(processor.config)
+        bound_processor = _full_compact_from_context(ctx)
+        mgr = ctx.get_qa_artifact_manager()
+        assert mgr is bound_processor.qa_artifact_manager
 
     def test_qa_artifact_manager_without_model_stays_unbound(self):
         from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (

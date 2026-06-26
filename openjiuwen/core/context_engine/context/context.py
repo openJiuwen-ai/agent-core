@@ -119,6 +119,9 @@ class SessionModelContext(ModelContext):
     def get_session_ref(self):
         return getattr(self, "_session_ref", None)
 
+    def get_processors(self) -> List[ContextProcessor]:
+        return list(self._processors or [])
+
     def _resolve_actor_tags(self) -> Dict[str, Any]:
         """Best-effort actor identity for tracing (team leader/member)."""
         tags: Dict[str, Any] = {
