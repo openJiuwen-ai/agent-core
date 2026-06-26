@@ -14,7 +14,7 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
 
 from pydantic import Field, BaseModel
 
@@ -68,6 +68,31 @@ _IDENTITY_SECTION = "identity"
 _SKILLS_SECTION = "legacy_skills"
 _IDENTITY_SECTION_PRIORITY = 10
 _SKILLS_SECTION_PRIORITY = 90
+_IMAGE_INPUT_SCAN_MAX_DEPTH = 8
+_IMAGE_INPUT_UNSUPPORTED_ERROR_CODES = (
+    "invalid_image_input",
+    "image_input_unsupported",
+    "unsupported_content_type",
+    "unsupported_image",
+    "unsupported_image_input",
+    "unsupported_message_content_type",
+)
+_IMAGE_INPUT_UNSUPPORTED_ERROR_PATTERNS = (
+    "no endpoints found that support image input",
+    "does not accept images",
+    "does not support image",
+    "doesn't accept images",
+    "doesn't support image",
+    "do not support image",
+    "image input is not supported",
+    "image input not supported",
+    "image_url is not supported",
+    "images are not supported",
+    "multimodal input is not supported",
+    "not support image input",
+    "unsupported image",
+    "vision is not supported",
+)
 
 
 def _summarize_tool_call(tc: Any) -> str:
@@ -888,33 +913,102 @@ class ReActAgent(BaseAgent):
             content = getattr(message, "content", None)
             if isinstance(message, dict):
                 content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if not isinstance(part, dict):
-                    continue
-                if part.get("type") in ("image", "image_url"):
-                    return True
-                if "image_url" in part or "image" in part:
-                    return True
+            if ReActAgent._json_like_contains_image_input(content):
+                return True
         return False
 
     @staticmethod
+    def _json_like_contains_image_input(
+            value: Any,
+            depth: int = 0,
+    ) -> bool:
+        if depth > _IMAGE_INPUT_SCAN_MAX_DEPTH:
+            return False
+
+        if isinstance(value, dict):
+            value_type = value.get("type")
+            if value_type in ("image", "image_url"):
+                return True
+            if "image_url" in value or "image" in value:
+                return True
+            for child in value.values():
+                if ReActAgent._json_like_contains_image_input(child, depth + 1):
+                    return True
+            return False
+
+        if isinstance(value, (list, tuple)):
+            for child in value:
+                if ReActAgent._json_like_contains_image_input(child, depth + 1):
+                    return True
+            return False
+
+        return False
+
+    @staticmethod
+    def _iter_exception_error_values(value: Any, depth: int = 0) -> Iterable[str]:
+        if depth > _IMAGE_INPUT_SCAN_MAX_DEPTH or value is None:
+            return
+
+        if isinstance(value, str):
+            yield value
+            return
+
+        if isinstance(value, (int, float)):
+            yield str(value)
+            return
+
+        if isinstance(value, dict):
+            for child in value.values():
+                yield from ReActAgent._iter_exception_error_values(child, depth + 1)
+            return
+
+        if isinstance(value, (list, tuple)):
+            for child in value:
+                yield from ReActAgent._iter_exception_error_values(child, depth + 1)
+            return
+
+    @staticmethod
+    def _extract_exception_error_values(exc: Exception) -> List[str]:
+        values = [str(exc)]
+
+        for attr in ("code", "status_code", "message", "body"):
+            attr_value = getattr(exc, attr, None)
+            values.extend(ReActAgent._iter_exception_error_values(attr_value))
+
+        response = getattr(exc, "response", None)
+        if response is not None:
+            values.extend(
+                ReActAgent._iter_exception_error_values(
+                    getattr(response, "status_code", None)
+                )
+            )
+            json_fn = getattr(response, "json", None)
+            if callable(json_fn):
+                try:
+                    values.extend(ReActAgent._iter_exception_error_values(json_fn()))
+                except (TypeError, ValueError):
+                    pass
+            text = getattr(response, "text", None)
+            values.extend(ReActAgent._iter_exception_error_values(text))
+
+        return values
+
+    @staticmethod
     def _is_image_input_unsupported_error(exc: Exception) -> bool:
-        text = str(exc).lower()
-        phrases = (
-            "image input",
-            "support image",
-            "supports image",
-            "images are not supported",
-            "image_url is not supported",
-            "unsupported image",
-            "does not accept images",
-            "doesn't accept images",
-            "vision is not supported",
-            "multimodal input is not supported",
-        )
-        return any(phrase in text for phrase in phrases)
+        values = ReActAgent._extract_exception_error_values(exc)
+        lowered_values = [value.lower() for value in values if value]
+        for value in lowered_values:
+            normalized = value.replace("-", "_").replace(" ", "_")
+            for code in _IMAGE_INPUT_UNSUPPORTED_ERROR_CODES:
+                if normalized == code or normalized.endswith(f"_{code}"):
+                    return True
+
+        text = "\n".join(lowered_values)
+        for pattern in _IMAGE_INPUT_UNSUPPORTED_ERROR_PATTERNS:
+            if pattern in text:
+                return True
+
+        return False
 
     @staticmethod
     def _build_image_input_unsupported_message() -> AssistantMessage:
