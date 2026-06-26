@@ -234,6 +234,7 @@ class FullCompactProcessor(ContextProcessor):
         self._force_compact: bool = False
         self._get_path_force_compact: bool = False
         self._deferred_overflow_recovery: bool = False
+        self._overflow_threshold_override: Optional[int] = None  # threshold_override from 413 recovery
         self._state_reinjector = FullCompactStateReinjector()
         self._state_reinjector.register_builder(
             name="skills",
@@ -333,6 +334,9 @@ class FullCompactProcessor(ContextProcessor):
         """
         return self._force_compact
 
+    def set_overflow_threshold_override(self, threshold_override: int) -> None:
+        self._overflow_threshold_override = threshold_override
+
     @staticmethod
     def _resolve_hard_window_tokens(config: FullCompactProcessorConfig) -> int:
         """LLM 硬窗上限：与 trigger / compression_call 口径对齐（§5.2）。"""
@@ -425,7 +429,6 @@ class FullCompactProcessor(ContextProcessor):
                 all_messages,
                 system_messages,
                 tools,
-                force=True,
             )
             if new_context_messages is None:
                 logger.warning("[FullCompact] on_get_context_window: force_compact produced no replacement")
@@ -794,22 +797,30 @@ class FullCompactProcessor(ContextProcessor):
         all_messages: List[BaseMessage],
         system_messages: List[BaseMessage],
         tools: List[Any],
-        *,
-        force: bool = False,
     ) -> Tuple[ContextEvent | None, Optional[List[BaseMessage]], Optional[UserMessage]]:
         """Build replacement messages for FullCompact.
 
-        Args:
-            context: The model context.
-            all_messages: All current context messages.
-            system_messages: System messages for token counting.
-            tools: Tool definitions for token counting.
-            force: When True (force_compact / recovery chain), accept a
-                replacement even if it still exceeds ``trigger_total_tokens``.
-                Any reduction is better than none when the context has
-                actually overflowed the model's limit.
+        During 413 recovery (force_compact=True), ``threshold`` comes from
+        ``_overflow_threshold_override`` (= model_limit * RECOVERY_THRESHOLD_RATIO)
+        instead of ``trigger_total_tokens``. This ensures the adaptive chain
+        targets the model's real limit, not the (possibly smaller) preventive
+        threshold.
+
+        SessionMemory path: no force bypass — if tokens > threshold, reject
+        and fall through to adaptive chain for further compression.
         """
-        threshold = self._trigger_total_tokens
+        # 413 recovery: use threshold_override (set by RecoveryRail);
+        # normal path: use trigger_total_tokens.
+        # Note: _overflow_threshold_override is consumed in _truncate_for_prompt_budget
+        # (which runs later and is the critical budget constraint), not here.
+        threshold = self._overflow_threshold_override or self._trigger_total_tokens
+        if self._overflow_threshold_override is not None:
+            logger.info(
+                "[FullCompact] Using overflow_threshold_override=%d as threshold "
+                "(trigger_total_tokens=%d)",
+                self._overflow_threshold_override,
+                self._trigger_total_tokens,
+            )
         boundary_index = self._find_last_compaction_boundary_index(all_messages)
         prefix, active_messages = self._split_messages_at_compaction_boundary(
             all_messages,
@@ -833,10 +844,10 @@ class FullCompactProcessor(ContextProcessor):
                 context,
                 use_baseline=False,
             )
-            if session_memory_tokens <= threshold or force:
-                logger.info(
-                    "[FullCompact] using session_memory replacement (force=%s)", force,
-                )
+            if session_memory_tokens <= threshold:
+                logger.info("[FullCompact] using session_memory replacement, "
+                            "session_memory_tokens=%d threshold=%d",
+                            session_memory_tokens, threshold)
                 return (
                     ContextEvent(
                         event_type=self.processor_type(),
@@ -845,7 +856,9 @@ class FullCompactProcessor(ContextProcessor):
                     session_memory_messages,
                     session_memory_message,
                 )
-            logger.info("[FullCompact] session_memory candidate rejected: token budget exceeded")
+            logger.info("[FullCompact] session_memory candidate rejected: "
+                        "session_memory_tokens=%d > threshold=%d, falling through to adaptive chain",
+                        session_memory_tokens, threshold)
         else:
             logger.info("[FullCompact] session_memory candidate unavailable, fallback to full_compact")
 
@@ -858,13 +871,7 @@ class FullCompactProcessor(ContextProcessor):
             threshold=threshold,
         )
         if new_context_messages is None:
-            if force:
-                logger.warning(
-                    "[FullCompact] all replacement attempts exceeded threshold; "
-                    "returning original buffer unchanged (force=True but no reduction possible)"
-                )
-            else:
-                logger.warning("[FullCompact] all replacement attempts exceeded threshold; keeping original buffer")
+            logger.warning("[FullCompact] all replacement attempts exceeded threshold; keeping original buffer")
             return None, None, None
         logger.info(
             "[FullCompact] using full_compact replacement output_messages=%s",
@@ -1116,13 +1123,25 @@ class FullCompactProcessor(ContextProcessor):
         messages: List[BaseMessage],
         context: ModelContext,
     ) -> List[BaseMessage]:
+        if self._overflow_threshold_override is not None:
+            budget = self._overflow_threshold_override
+            logger.info(
+                "[FullCompact] Using overflow_threshold_override=%d as compression budget "
+                "(config compression_call_max_tokens=%d)",
+                self._overflow_threshold_override,
+                self._compression_call_max_tokens,
+            )
+            self._overflow_threshold_override = None  # consume once
+        else:
+            # 如果_compression_call_max_tokens超过模型窗口大小，压缩动作自身就会溢出，因此取二者最小值
+            budget = min(self._compression_call_max_tokens, self._trigger_total_tokens)
         groups = self._group_messages_by_api_round(messages)
         while groups:
             candidate = [msg for group in groups for msg in group]
-            if self._count_prompt_tokens(candidate, context) <= self._compression_call_max_tokens:
+            if self._count_prompt_tokens(candidate, context) <= budget:
                 return candidate
             if len(groups) == 1:
-                return self._truncate_messages_from_head(candidate, context)
+                return self._truncate_messages_from_head(candidate, context, budget=budget)
             groups = groups[1:]
             if groups and isinstance(groups[0][0], AssistantMessage):
                 groups[0] = [UserMessage(content=self._synthetic_user_marker), *groups[0]]
@@ -1132,10 +1151,13 @@ class FullCompactProcessor(ContextProcessor):
         self,
         messages: List[BaseMessage],
         context: ModelContext,
+        *,
+        budget: int | None = None,
     ) -> List[BaseMessage]:
+        effective_budget = budget or self._compression_call_max_tokens
         candidate = list(messages)
         while candidate:
-            if self._count_prompt_tokens(candidate, context) <= self._compression_call_max_tokens:
+            if self._count_prompt_tokens(candidate, context) <= effective_budget:
                 return candidate
             if self._is_synthetic_marker_message(candidate[0]):
                 if len(candidate) == 1:
