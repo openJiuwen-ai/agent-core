@@ -286,9 +286,45 @@ def _is_sandbox_exec_delivered(
     return not _is_daemon_ipc_unavailable_for_sandbox(result, sandbox_id=sandbox_id)
 
 
+_ENV_API_TOKEN = "JIUWENBOX_API_TOKEN"
+
+
+def _resolve_api_token(api_token: str | None) -> str | None:
+    """Resolve Bearer token from explicit arg or ``JIUWENBOX_API_TOKEN`` env."""
+    raw = api_token if api_token is not None else os.environ.get(_ENV_API_TOKEN)
+    if raw is None:
+        return None
+    token = raw.strip()
+    return token or None
+
+
+def build_jiuwenbox_http_client(
+    base_url: str,
+    timeout_seconds: float = 30.0,
+    api_token: str | None = None,
+) -> httpx.Client:
+    """Build an httpx client for the jiuwenbox HTTP API with optional Bearer auth."""
+    token = _resolve_api_token(api_token)
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    return httpx.Client(
+        base_url=base_url.rstrip("/"),
+        timeout=timeout_seconds,
+        headers=headers,
+    )
+
+
 class _JiuwenBoxClient:
-    def __init__(self, base_url: str, timeout_seconds: float = 30.0) -> None:
-        self._client = httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout_seconds)
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: float = 30.0,
+        api_token: str | None = None,
+    ) -> None:
+        self._client = build_jiuwenbox_http_client(
+            base_url,
+            timeout_seconds=timeout_seconds,
+            api_token=api_token,
+        )
 
     def create_sandbox(
         self,
