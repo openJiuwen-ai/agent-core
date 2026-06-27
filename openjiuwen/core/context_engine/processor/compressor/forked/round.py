@@ -21,8 +21,7 @@ DEFAULT_ROUND_COMPRESSION_PROMPT = ROUND_COMPACT_PROMPT
 
 
 class ForkedRoundLevelCompressorConfig(ForkedPrefixCompactProcessorConfig):
-    trigger_context_ratio: float = Field(default=0.6, gt=0.0, lt=1.0)
-    min_target_context_ratio: float = Field(default=0.1, ge=0.0, lt=1.0)
+    trigger_context_ratio: float = Field(default=0.8, gt=0.0, lt=1.0)
     keep_recent_messages: int = Field(default=4, ge=0)
 
 

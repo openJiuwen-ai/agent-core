@@ -44,6 +44,11 @@ class ForkedPrefixCompactProcessorConfig(BaseModel):
     min_target_context_ratio: float = Field(default=0.1, ge=0.0, lt=1.0)
     model: ModelRequestConfig | None = None
     model_client: ModelClientConfig | None = None
+    # Opt-in: persist each real compression invocation (the request sent to the
+    # compression model plus the post-compression main-agent context) for offline
+    # effect analysis. Disabled by default; zero overhead when off.
+    enable_compression_dump: bool = Field(default=False)
+    compression_dump_dir: str | None = Field(default=None)
 
 
 def adjust_keep_recent_for_tool_boundaries(messages: list[BaseMessage], keep_recent: int) -> int:
@@ -166,14 +171,13 @@ class ForkedPrefixCompactProcessor(ContextProcessor):
             return None, context_window
 
         prompt = self._build_prompt(span)
+        request = ForkedCompressionRequest.from_context_window(
+            prompt=prompt,
+            context_window=context_window,
+            exclude_recent_messages=len(span.protected_tail),
+        )
         try:
-            response = await self._forked_executor.invoke(
-                ForkedCompressionRequest.from_context_window(
-                    prompt=prompt,
-                    context_window=context_window,
-                    exclude_recent_messages=len(span.protected_tail),
-                )
-            )
+            response = await self._forked_executor.invoke(request)
             self._record_compression_usage(response)
         except Exception as exc:
             logger.warning("[%s] forked compression failed: %s", self.processor_type(), exc, exc_info=True)
@@ -199,6 +203,19 @@ class ForkedPrefixCompactProcessor(ContextProcessor):
 
         context_window.context_messages = new_messages
         context.set_messages(new_messages)
+
+        self._dump_compression_artifact(
+            context=context,
+            context_window=context_window,
+            original_messages=original_messages,
+            span=span,
+            prompt=prompt,
+            request=request,
+            response_content=response.content or "",
+            summary=summary,
+            new_messages=new_messages,
+        )
+
         return (
             ContextEvent(
                 event_type=self.processor_type(),
@@ -208,6 +225,46 @@ class ForkedPrefixCompactProcessor(ContextProcessor):
             ),
             context_window,
         )
+
+    def _dump_compression_artifact(
+        self,
+        *,
+        context: ModelContext,
+        context_window: ContextWindow,
+        original_messages: list[BaseMessage],
+        span: PrefixCompactSpan,
+        prompt: str,
+        request: "ForkedCompressionRequest",
+        response_content: str,
+        summary: str,
+        new_messages: list[BaseMessage],
+    ) -> None:
+        if not getattr(self.config, "enable_compression_dump", False):
+            return
+        # Lazy import avoids a circular dependency: compression_dump imports
+        # from this module (ForkedPrefixCompactProcessor, PrefixCompactSpan).
+        from openjiuwen.core.context_engine.processor.compressor.forked.compression_dump import (
+            dump_compression_artifact,
+        )
+
+        try:
+            dump_compression_artifact(
+                processor=self,
+                context=context,
+                context_window=context_window,
+                config=self.config,
+                processor_type=self.processor_type(),
+                original_messages=original_messages,
+                span=span,
+                prompt=prompt,
+                request=request,
+                response_content=response_content,
+                summary=summary,
+                new_messages=new_messages,
+                usage=self._current_compression_usage(),
+            )
+        except Exception as exc:  # pragma: no cover - tracing must not break compression
+            logger.warning("[%s] compression dump failed: %s", self.processor_type(), exc, exc_info=True)
 
     def _build_span(self, messages: list[BaseMessage]) -> PrefixCompactSpan:
         raise NotImplementedError

@@ -32,7 +32,7 @@ class MessageOffloaderConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    add_message_threshold_ratio: float = Field(default=0.2, gt=0)
+    add_message_threshold_ratio: float = Field(default=0.1, gt=0)
     """Context-capacity ratio above which a newly added tool message is processed."""
 
     ttl_seconds: int = Field(default=300, ge=0)
@@ -45,7 +45,7 @@ class MessageOffloaderConfig(BaseModel):
     """Context-capacity ratio above which TTL processing is eligible."""
 
     ttl_message_threshold_ratio: float = Field(
-        default=0.1,
+        default=0.05,
         gt=0,
     )
     """Context-capacity ratio above which one TTL tool message is processed."""

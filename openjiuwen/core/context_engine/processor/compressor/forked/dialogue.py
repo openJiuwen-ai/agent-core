@@ -22,7 +22,7 @@ DEFAULT_DIALOGUE_COMPRESSION_PROMPT = DIALOGUE_COMPACT_PROMPT
 
 
 class ForkedDialogueCompressorConfig(ForkedPrefixCompactProcessorConfig):
-    trigger_context_ratio: float = Field(default=0.4, gt=0.0, lt=1.0)
+    trigger_context_ratio: float = Field(default=0.8, gt=0.0, lt=1.0)
     min_target_context_ratio: float = Field(default=0.1, ge=0.0, lt=1.0)
 
 
