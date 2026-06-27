@@ -48,6 +48,102 @@ from openjiuwen.harness.rails.evolution_rail import EvolutionRail
 _MAX_PROCESSED_SIGNAL_KEYS = 500
 _EVAL_SNIPPET_MAX_MESSAGES = 20
 _EVAL_SNIPPET_MAX_CONTENT_CHARS = 200
+_UI_SUMMARY_RECORD_PREVIEW_CHARS = 400
+_UI_SUMMARY_SIGNAL_PREVIEW_CHARS = 280
+_UI_SUMMARY_LLM_MAX_ATTEMPTS = 3
+_UI_SUMMARY_MIN_BODY_CHARS = 24
+_UI_SUMMARY_MAX_BODY_CHARS = 600
+_UI_SUMMARY_SNIPPET_MAX_MESSAGES = 12
+
+
+def _build_ui_summary_conversation_snippet(
+    messages: List[dict],
+    *,
+    max_messages: int = _UI_SUMMARY_SNIPPET_MAX_MESSAGES,
+    content_preview_chars: int = _EVAL_SNIPPET_MAX_CONTENT_CHARS,
+    language: str = "cn",
+) -> str:
+    """Build a compact dialogue snippet for UI summary LLM prompts."""
+    if not messages:
+        return ""
+
+    def _extract_text(message: dict) -> str:
+        content = message.get("content", "")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: List[str] = []
+            for block in content:
+                if isinstance(block, dict):
+                    parts.append(str(block.get("text", "")))
+                elif isinstance(block, str):
+                    parts.append(block)
+            return "\n".join(parts)
+        return str(content)
+
+    empty_label = "(无文本)" if language == "cn" else "(No text)"
+    lines: List[str] = []
+    for message in messages[-max_messages:]:
+        role = message.get("role", "unknown")
+        text = _extract_text(message).strip() or empty_label
+        if len(text) > content_preview_chars:
+            orig_len = len(text)
+            suffix = (
+                f"\n... [已截断，原始长度 {orig_len} 字符]"
+                if language == "cn"
+                else f"\n... [truncated, original {orig_len} chars]"
+            )
+            text = text[:content_preview_chars] + suffix
+        lines.append(f"[{role}] {text}")
+    return "\n".join(lines)
+
+_UI_SUMMARY_RETRY_SUFFIX_CN = (
+    "\n\n【重试说明】上次输出无效（为空、过短或格式不符）。"
+    "请重新生成 2-4 行中文正文：说明演进的 Skill、改动要点、触发原因；"
+    "不要代码块、不要 JSON、不要标题行。"
+)
+
+_UI_SUMMARY_RETRY_SUFFIX_EN = (
+    "\n\n[Retry] Previous output was invalid (empty, too short, or wrong format). "
+    "Regenerate 2-4 lines covering skill name, change gist, and trigger reason. "
+    "No code fences, no JSON, no title line."
+)
+
+_EVOLUTION_UI_SUMMARY_PROMPT_CN = """\
+你是技能演进助手。根据本轮自动保存的 Skill 演进结果，写一段**极简**中文说明，将直接展示在聊天回复脚注。
+
+## 要求
+1. 正文 2-4 行，总字数不超过 150 字（不要包含标题）
+2. 必须交代清楚三件事：① 演进了哪个 Skill；② 新增/调整了什么要点（一句话概括内容，不要贴全文）；\
+③ 触发原因（用户反馈、执行问题等）
+3. 用自然语言，禁止出现 body/description、records_count 等技术字段
+4. 可用短列表（- 开头），语气客观简洁
+
+## 本轮演进数据（JSON）
+{evolution_json}
+
+## 相关对话片段（供理解原因）
+{conversation_snippet}
+
+只输出正文 Markdown，不要代码块，不要重复写「技能已自动演进」类标题。"""
+
+_EVOLUTION_UI_SUMMARY_PROMPT_EN = """\
+You are a skill evolution assistant. Write a **very brief** English footnote for the user \
+based on this auto-saved skill evolution round.
+
+## Requirements
+1. 2-4 lines, at most 150 words (no title line)
+2. Cover: which Skill evolved; what was added/changed (one-line gist); why (user feedback, failure, etc.)
+3. Plain language; no technical field names like body/description
+4. Short bullets allowed; objective tone
+
+## Evolution data (JSON)
+{evolution_json}
+
+## Conversation snippet (for trigger context)
+{conversation_snippet}
+
+Output Markdown body only. No code fences. Do not repeat a "skill evolved" heading."""
 
 
 class SkillEvolutionRail(EvolutionRail):
@@ -129,6 +225,8 @@ class SkillEvolutionRail(EvolutionRail):
         self._new_skill_tool_threshold = new_skill_tool_threshold
         self._new_skill_tool_diversity = new_skill_tool_diversity
         self._language = language
+        # Last run_evolution summary for host to emit after stream closes (auto_save path).
+        self._run_summary: Optional[Dict[str, Any]] = None
 
     @property
     def store(self) -> EvolutionStore:
@@ -249,6 +347,7 @@ class SkillEvolutionRail(EvolutionRail):
             ctx: Callback context
         """
         logger.info("[SkillEvolutionRail] run_evolution called, auto_scan=%s", self._auto_scan)
+        self._run_summary = None
         if not self._auto_scan:
             logger.info("[SkillEvolutionRail] auto_scan disabled, skipping")
             return
@@ -308,9 +407,15 @@ class SkillEvolutionRail(EvolutionRail):
                     if records:
                         for record in records:
                             await self._evolution_store.append_record(skill_name, record)
+                        self._record_skill_evolution(skill_name, records, skill_signals)
                         logger.info(
                             "[SkillEvolutionRail] persisted %d record(s) for skill=%s",
                             len(records),
+                            skill_name,
+                        )
+                    else:
+                        logger.info(
+                            "[SkillEvolutionRail] auto_save: no records generated for skill=%s",
                             skill_name,
                         )
                 else:
@@ -344,8 +449,274 @@ class SkillEvolutionRail(EvolutionRail):
 
             # Trigger async evaluation if interval reached
             await self._trigger_async_evaluation(ctx, parsed_messages)
+            if self._run_summary:
+                self._run_summary["display_text"] = await self._generate_ui_summary_text(
+                    self._run_summary,
+                    parsed_messages,
+                )
+                logger.info(
+                    "[SkillEvolutionRail] run_evolution summary ready: skills=%d new_skills=%d display_chars=%d",
+                    len(self._run_summary.get("skills", [])),
+                    len(self._run_summary.get("new_skills", [])),
+                    len(self._run_summary.get("display_text") or ""),
+                )
+            else:
+                logger.info("[SkillEvolutionRail] run_evolution finished with no UI summary")
         except Exception as exc:
             logger.warning("[SkillEvolutionRail] auto evolution failed: %s", exc)
+
+    def take_run_summary(self) -> Optional[Dict[str, Any]]:
+        """Return and clear the last run_evolution summary for host UI delivery."""
+        summary = self._run_summary
+        self._run_summary = None
+        if not summary:
+            logger.info("[SkillEvolutionRail] take_run_summary: no summary buffered")
+            return None
+        if not summary.get("skills") and not summary.get("new_skills"):
+            logger.info(
+                "[SkillEvolutionRail] take_run_summary: summary empty after filter, raw=%s",
+                summary,
+            )
+            return None
+        logger.info(
+            "[SkillEvolutionRail] take_run_summary: draining skills=%d new_skills=%d",
+            len(summary.get("skills", [])),
+            len(summary.get("new_skills", [])),
+        )
+        return summary
+
+    def _record_skill_evolution(
+        self,
+        skill_name: str,
+        records: List[EvolutionRecord],
+        signals: List[EvolutionSignal],
+    ) -> None:
+        if not records:
+            return
+        if self._run_summary is None:
+            self._run_summary = {"skills": [], "new_skills": []}
+        body_count = 0
+        desc_count = 0
+        record_items: List[Dict[str, Any]] = []
+        for record in records:
+            target = getattr(record, "target", record.change.target)
+            if target == EvolutionTarget.BODY:
+                body_count += 1
+            elif target == EvolutionTarget.DESCRIPTION:
+                desc_count += 1
+            content = record.change.content or ""
+            record_items.append({
+                "section": record.change.section,
+                "target": target.value if hasattr(target, "value") else str(target),
+                "content_preview": content[:_UI_SUMMARY_RECORD_PREVIEW_CHARS],
+            })
+        signal_items = [
+            {
+                "signal_type": signal.signal_type,
+                "excerpt": (signal.excerpt or "")[:_UI_SUMMARY_SIGNAL_PREVIEW_CHARS],
+            }
+            for signal in signals
+        ]
+        self._run_summary["skills"].append({
+            "skill_name": skill_name,
+            "records_count": len(records),
+            "body_count": body_count,
+            "description_count": desc_count,
+            "records": record_items,
+            "signals": signal_items,
+        })
+        logger.info(
+            "[SkillEvolutionRail] recorded UI summary entry: skill=%s total=%d body=%d description=%d",
+            skill_name,
+            len(records),
+            body_count,
+            desc_count,
+        )
+
+    def _record_new_skill(
+        self,
+        name: str,
+        *,
+        description: str = "",
+        reason: str = "",
+    ) -> None:
+        if not name:
+            return
+        if self._run_summary is None:
+            self._run_summary = {"skills": [], "new_skills": []}
+        self._run_summary["new_skills"].append({
+            "name": name,
+            "description": description,
+            "reason": reason,
+        })
+        logger.info("[SkillEvolutionRail] recorded UI summary entry: new_skill=%s", name)
+
+    async def _invoke_summary_llm(self, prompt: str, *, attempt: int = 1) -> Optional[str]:
+        try:
+            response = await self._optimizer_llm.invoke(
+                model=self._optimizer_model,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content if hasattr(response, "content") else str(response)
+            normalized = self._normalize_ui_summary_body(str(text) if text else "")
+            if not normalized:
+                logger.warning(
+                    "[SkillEvolutionRail] UI summary LLM attempt %d returned empty",
+                    attempt,
+                )
+                return None
+            return normalized
+        except Exception as exc:
+            logger.warning(
+                "[SkillEvolutionRail] UI summary LLM attempt %d failed: %s",
+                attempt,
+                exc,
+            )
+            return None
+
+    @staticmethod
+    def _normalize_ui_summary_body(body: str) -> str:
+        text = body.strip()
+        if not text:
+            return ""
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:markdown|md)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```$", "", text).strip()
+        # Strip accidental heading lines the model was asked to omit.
+        if text.startswith("###"):
+            lines = text.splitlines()
+            text = "\n".join(lines[1:]).strip() if len(lines) > 1 else text
+        return text.strip()
+
+    def _validate_ui_summary_body(self, body: str) -> bool:
+        text = body.strip()
+        if len(text) < _UI_SUMMARY_MIN_BODY_CHARS:
+            return False
+        if len(text) > _UI_SUMMARY_MAX_BODY_CHARS:
+            return False
+        if text.startswith("{") and text.endswith("}"):
+            return False
+        if text.startswith("[") and text.endswith("]"):
+            return False
+        lowered = text.lower()
+        if "records_count" in lowered or "body_count" in lowered:
+            return False
+        return True
+
+    async def _generate_ui_summary_text(
+        self,
+        summary: Dict[str, Any],
+        messages: List[dict],
+    ) -> str:
+        """LLM-generated concise footnote; falls back to rule-based text on failure."""
+        evolution_payload = {
+            "skills": summary.get("skills", []),
+            "new_skills": summary.get("new_skills", []),
+        }
+        evolution_json = json.dumps(evolution_payload, ensure_ascii=False, indent=2)
+        conversation_snippet = _build_ui_summary_conversation_snippet(
+            messages,
+            language=self._language,
+        )
+        prompt_template = (
+            _EVOLUTION_UI_SUMMARY_PROMPT_CN
+            if self._language == "cn"
+            else _EVOLUTION_UI_SUMMARY_PROMPT_EN
+        )
+        retry_suffix = (
+            _UI_SUMMARY_RETRY_SUFFIX_CN
+            if self._language == "cn"
+            else _UI_SUMMARY_RETRY_SUFFIX_EN
+        )
+        base_prompt = prompt_template.format(
+            evolution_json=evolution_json,
+            conversation_snippet=conversation_snippet or ("(无)" if self._language == "cn" else "(none)"),
+        )
+
+        body: Optional[str] = None
+        logger.info(
+            "[SkillEvolutionRail] generating UI summary via LLM (max_attempts=%d)",
+            _UI_SUMMARY_LLM_MAX_ATTEMPTS,
+        )
+        for attempt in range(1, _UI_SUMMARY_LLM_MAX_ATTEMPTS + 1):
+            prompt = base_prompt if attempt == 1 else base_prompt + retry_suffix
+            candidate = await self._invoke_summary_llm(prompt, attempt=attempt)
+            if candidate and self._validate_ui_summary_body(candidate):
+                body = candidate
+                logger.info(
+                    "[SkillEvolutionRail] UI summary LLM ok on attempt %d/%d, preview=%r",
+                    attempt,
+                    _UI_SUMMARY_LLM_MAX_ATTEMPTS,
+                    body[:160],
+                )
+                break
+            logger.warning(
+                "[SkillEvolutionRail] UI summary attempt %d/%d rejected: has_text=%s len=%s",
+                attempt,
+                _UI_SUMMARY_LLM_MAX_ATTEMPTS,
+                bool(candidate),
+                len(candidate or ""),
+            )
+
+        if not body:
+            body = self._build_fallback_ui_summary(summary)
+            logger.info(
+                "[SkillEvolutionRail] UI summary LLM exhausted %d attempts, using fallback",
+                _UI_SUMMARY_LLM_MAX_ATTEMPTS,
+            )
+        return self._wrap_ui_summary_display(body)
+
+    @staticmethod
+    def _wrap_ui_summary_display(body: str) -> str:
+        text = body.strip()
+        if not text:
+            return ""
+        return f"\n\n---\n### 📚 技能演进\n{text}"
+
+    @staticmethod
+    def _build_fallback_ui_summary(summary: Dict[str, Any]) -> str:
+        lines: List[str] = []
+        for item in summary.get("skills", []):
+            if not isinstance(item, dict):
+                continue
+            skill_name = str(item.get("skill_name", "")).strip()
+            if not skill_name:
+                continue
+            reason = ""
+            for sig in item.get("signals", []):
+                if isinstance(sig, dict) and sig.get("excerpt"):
+                    reason = str(sig["excerpt"])[:120]
+                    break
+            what_parts: List[str] = []
+            for rec in item.get("records", []):
+                if not isinstance(rec, dict):
+                    continue
+                section = str(rec.get("section", "")).strip()
+                preview = str(rec.get("content_preview", "")).strip().split("\n")[0][:80]
+                if section and preview:
+                    what_parts.append(f"{section}：{preview}")
+                elif preview:
+                    what_parts.append(preview)
+            what = what_parts[0] if what_parts else "补充了技能经验"
+            line = f"- **{skill_name}**：{what}"
+            if reason:
+                line += f"（原因：{reason[:80]}）"
+            lines.append(line)
+        for item in summary.get("new_skills", []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            desc = str(item.get("description", "")).strip()
+            reason = str(item.get("reason", "")).strip()
+            line = f"- **新建 {name}**"
+            if desc:
+                line += f"：{desc[:80]}"
+            if reason:
+                line += f"（{reason[:60]}）"
+            lines.append(line)
+        return "\n".join(lines)
 
     def drain_pending_approval_events(self) -> list[OutputSchema]:
         """Return and clear buffered approval events.
@@ -996,6 +1367,11 @@ class SkillEvolutionRail(EvolutionRail):
                 )
                 if result:
                     self._pending_skill_proposals.pop(proposal_id, None)
+                    self._record_new_skill(
+                        pending.name,
+                        description=pending.description,
+                        reason=pending.reason,
+                    )
                     logger.info(
                         "[SkillEvolutionRail] auto-created new skill: %s (proposal_id=%s)",
                         pending.name,
