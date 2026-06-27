@@ -167,6 +167,50 @@ def _parse_skill_name(skill_name: str) -> Tuple[str, str, bool]:
     return "", clean, False
 
 
+def _skill_path_prefixes(skill_name: str) -> List[str]:
+    """Return cumulative path prefixes for allowlist matching (e.g. ``a/b`` → ``[a, a/b]``)."""
+    clean = skill_name.replace("\\", "/").strip().strip("/")
+    if not clean:
+        return []
+    parts = [part for part in clean.split("/") if part]
+    return ["/".join(parts[: i + 1]) for i in range(len(parts))]
+
+
+def _skill_allowlist_permits(
+    skill_name: str,
+    *,
+    is_namespaced: bool,
+    leaf: str,
+    enabled_skill_names: Optional[FrozenSet[str]] = None,
+    disabled_skill_names: Optional[FrozenSet[str]] = None,
+) -> bool:
+    """Allowlist semantics for skill paths relative to search roots.
+
+    - Bare ``pptx-craft``: match by full path (same as leaf for bare names).
+    - Namespaced ``pptx-craft/A``: allow when an enabled prefix covers the path
+      from the root (umbrella inheritance); leaf-only matches do not apply.
+    - Namespaced ``A/pptx-craft``: not allowed when only ``pptx-craft`` is enabled.
+    """
+    if disabled_skill_names:
+        if is_namespaced:
+            for prefix in _skill_path_prefixes(skill_name):
+                if prefix in disabled_skill_names:
+                    return False
+        elif leaf in disabled_skill_names:
+            return False
+    if enabled_skill_names is not None and len(enabled_skill_names) > 0:
+        clean = skill_name.replace("\\", "/").strip().strip("/")
+        if clean in enabled_skill_names:
+            return True
+        if is_namespaced:
+            for prefix in _skill_path_prefixes(skill_name):
+                if prefix in enabled_skill_names:
+                    return True
+            return False
+        return False
+    return True
+
+
 def _recursive_find_skill_directory(directory: Path, skill_name: str) -> List[Path]:
     """Depth-first: all directories named ``skill_name`` that contain ``SKILL.md``."""
     if not skill_name:
@@ -241,12 +285,15 @@ def _collect_discovered_skill_names(
     seen: Set[str] = set()
     truncated = False
 
-    def allow_name(basename: str) -> bool:
-        if disabled_skill_names and basename in disabled_skill_names:
-            return False
-        if enabled_skill_names is not None and len(enabled_skill_names) > 0:
-            return basename in enabled_skill_names
-        return True
+    def allow_rel_path(rel_path: str) -> bool:
+        _, leaf, is_namespaced = _parse_skill_name(rel_path)
+        return _skill_allowlist_permits(
+            rel_path,
+            is_namespaced=is_namespaced,
+            leaf=leaf,
+            enabled_skill_names=enabled_skill_names,
+            disabled_skill_names=disabled_skill_names,
+        )
 
     def visit(directory: Path, base: Path) -> None:
         nonlocal truncated
@@ -267,7 +314,7 @@ def _collect_discovered_skill_names(
                 continue
             if (child / "SKILL.md").is_file():
                 rel_path = str(child.relative_to(base)).replace("\\", "/")
-                if rel_path not in seen and allow_name(child.name):
+                if rel_path not in seen and allow_rel_path(rel_path):
                     names.append(rel_path)
                     seen.add(rel_path)
             visit(child, base)
@@ -319,8 +366,12 @@ class SkillTool(Tool):
                 resolve skills by recursive directory search when the name is missing from
                 ``get_skills()``, and to enumerate ``discovered_skill_names``.
             enabled_skill_names: When non-empty, filesystem discovery only returns skills whose
-                basename is in this set (same semantics as SkillUseRail allow-list).
-            disabled_skill_names: Basenames in this set are never returned from filesystem discovery.
+                full path, any path prefix (for namespaced paths), or leaf basename (for bare
+                names) is in this set. Enabling an umbrella skill (e.g. ``pptx-craft``) also
+                permits nested sub-skills (e.g. ``pptx-craft/designer``), but not unrelated
+                paths that only share the leaf name (e.g. ``other/pptx-craft``).
+            disabled_skill_names: Skills whose leaf (bare names) or any path prefix (namespaced
+                paths) is in this set are excluded.
         """
         super().__init__(
             build_tool_card("skill_tool", "SkillTool", language, agent_id=agent_id)
@@ -475,22 +526,31 @@ class SkillTool(Tool):
         skill_map = {skill.name: skill for skill in skills}
         return skill_map.get(skill_name)
 
-    def _reject_leaf_lookup(self, skill_name: str, leaf: str) -> Optional[str]:
-        """Return not-found message when ``leaf`` fails lookup preconditions."""
+    def _reject_leaf_lookup(
+        self,
+        skill_name: str,
+        leaf: str,
+        *,
+        is_namespaced: bool,
+    ) -> Optional[str]:
+        """Return not-found message when allowlist preconditions fail."""
         not_found = f"Skill not found: {skill_name}"
         if not leaf:
             return not_found
-        if self._disabled_skill_names and leaf in self._disabled_skill_names:
+        if not _skill_allowlist_permits(
+            skill_name,
+            is_namespaced=is_namespaced,
+            leaf=leaf,
+            enabled_skill_names=self._enabled_skill_names,
+            disabled_skill_names=self._disabled_skill_names,
+        ):
             return not_found
-        if self._enabled_skill_names is not None and len(self._enabled_skill_names) > 0:
-            if leaf not in self._enabled_skill_names:
-                return not_found
         return None
 
     def _resolve_skill(self, skill_name: str) -> Tuple[Optional[Skill], Optional[str]]:
         """Resolve skill by namespaced path or bare name with ambiguity detection."""
         parent_rel, leaf, is_namespaced = _parse_skill_name(skill_name)
-        rejection = self._reject_leaf_lookup(skill_name, leaf)
+        rejection = self._reject_leaf_lookup(skill_name, leaf, is_namespaced=is_namespaced)
         if rejection:
             return None, rejection
         not_found = f"Skill not found: {skill_name}"

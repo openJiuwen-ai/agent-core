@@ -145,3 +145,78 @@ async def test_skill_tool_invalid_reference_file(sys_op, temp_dir):
     skill_res = await skill_tool.invoke({"skill_name": "test_skill_1", "relative_file_path": "reference/unknown_file.md"})
     assert skill_res.success is False
     assert skill_res.error is not None
+
+
+def _make_fs_skill_tool(
+    sys_op,
+    skills_root: Path,
+    *,
+    enabled: set[str] | None = None,
+    disabled: set[str] | None = None,
+    skills: list[Skill] | None = None,
+) -> SkillTool:
+    registry = skills if skills is not None else []
+    return SkillTool(
+        sys_op,
+        lambda: registry,
+        skill_search_roots=[skills_root],
+        enabled_skill_names=enabled,
+        disabled_skill_names=disabled,
+    )
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_umbrella_allowlist(sys_op, temp_dir):
+    skills_root = Path(temp_dir) / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    umbrella = _write_skill(skills_root, "pptx-craft", "umbrella skill", "umbrella body")
+    designer = _write_skill(
+        skills_root, "pptx-craft/designer", "designer sub-skill", "designer body",
+    )
+    _write_skill(skills_root, "other-skill/pptx-craft", "same leaf name", "nested body")
+    tool = _make_fs_skill_tool(
+        sys_op, skills_root, enabled={"pptx-craft"}, skills=[umbrella],
+    )
+
+    ok = await tool.invoke({"skill_name": "pptx-craft/designer"})
+    assert ok.success is True
+    assert _data_contains_str(ok.data, str(designer.directory))
+    discovered = ok.data.get("discovered_skill_names", [])
+    assert "pptx-craft" in discovered
+    assert "pptx-craft/designer" in discovered
+
+    ok_direct = await tool.invoke({"skill_name": "pptx-craft"})
+    assert ok_direct.success is True
+
+    bare = await tool.invoke({"skill_name": "designer"})
+    assert bare.success is False
+    assert bare.error is not None
+
+    unrelated = await tool.invoke({"skill_name": "other-skill/pptx-craft"})
+    assert unrelated.success is False
+    assert unrelated.error is not None
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_disabled_umbrella_blocks_nested_subskill(sys_op, temp_dir):
+    skills_root = Path(temp_dir) / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "pptx-craft", "umbrella skill", "umbrella body")
+    _write_skill(skills_root, "pptx-craft/designer", "designer sub-skill", "designer body")
+    tool = _make_fs_skill_tool(sys_op, skills_root, disabled={"pptx-craft"})
+
+    res = await tool.invoke({"skill_name": "pptx-craft/designer"})
+    assert res.success is False
+    assert res.error is not None
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_no_whitelist_allows_nested(sys_op, temp_dir):
+    skills_root = Path(temp_dir) / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "pptx-craft", "umbrella skill", "umbrella body")
+    _write_skill(skills_root, "pptx-craft/designer", "designer sub-skill", "designer body")
+    tool = _make_fs_skill_tool(sys_op, skills_root)
+
+    ok = await tool.invoke({"skill_name": "pptx-craft/designer"})
+    assert ok.success is True
