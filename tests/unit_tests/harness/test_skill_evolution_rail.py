@@ -77,8 +77,9 @@ class _MsgContext:
 
 
 class _DummyToolMsg:
-    def __init__(self, content: Any):
+    def __init__(self, content: Any, *, metadata: dict | None = None):
         self.content = content
+        self.metadata = metadata or {}
 
 
 # =============================================================================
@@ -239,6 +240,140 @@ async def test_rollback_skill_clears_evolutions_when_pair_missing(tmp_path):
 
 
 # =============================================================================
+# Skill file resolution helpers
+# (_parse_tool_args_dict, _resolve_skill_file_context, _is_skill_md_path, _resolve_skill_name)
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    ("tool_args", "expected"),
+    [
+        ({"skill_name": "a", "relative_file_path": "SKILL.md"}, {"skill_name": "a", "relative_file_path": "SKILL.md"}),
+        ('{"skill_name":"b","relative_file_path":"SKILL"}', {"skill_name": "b", "relative_file_path": "SKILL"}),
+        ("not-json", {}),
+        ('["array"]', {}),
+        (None, {}),
+        (42, {}),
+    ],
+)
+def test_parse_tool_args_dict(tool_args, expected):
+    assert SkillEvolutionRail._parse_tool_args_dict(tool_args) == expected
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "expected"),
+    [
+        ("SKILL.md", True),
+        ("skill.md", True),
+        ("SKILL", True),
+        ("./SKILL", True),
+        ("./SKILL.md", True),
+        (r"subdir\SKILL.md", True),
+        ("docs/nested/SKILL.md", True),
+        ("docs/REF.md", False),
+        ("README.md", False),
+        ("", True),  # normalize empty -> SKILL.md
+    ],
+)
+def test_is_skill_md_path(relative_path, expected):
+    assert SkillEvolutionRail._is_skill_md_path(relative_path) is expected
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_args", "tool_msg", "expected"),
+    [
+        (
+            "skill_tool",
+            {"skill_name": "invoice-parser", "relative_file_path": "SKILL.md"},
+            None,
+            ("invoice-parser", "SKILL.md"),
+        ),
+        (
+            "skill_tool",
+            {"skill_name": "invoice-parser", "relative_file_path": "SKILL"},
+            None,
+            ("invoice-parser", "SKILL.md"),
+        ),
+        (
+            "skill_tool",
+            {"relative_file_path": "SKILL.md"},
+            _DummyToolMsg("body", metadata={"skill_name": "from-meta", "relative_file_path": "SKILL"}),
+            ("from-meta", "SKILL.md"),
+        ),
+        (
+            "skill_tool",
+            {"skill_name": "invoice-parser", "relative_file_path": "docs/REF.md"},
+            None,
+            ("invoice-parser", "docs/REF.md"),
+        ),
+        (
+            "skill_tool",
+            {"relative_file_path": "SKILL.md"},
+            None,
+            None,
+        ),
+        (
+            "read_file",
+            {"file_path": r"C:\skills\invoice-parser\SKILL.md"},
+            None,
+            ("invoice-parser", "SKILL.md"),
+        ),
+        (
+            "read_file",
+            {"file_path": "/workspace/skills/my-skill/SKILL.md"},
+            None,
+            ("my-skill", "SKILL.md"),
+        ),
+        (
+            "read_file",
+            {"file_path": "/workspace/skills/my-skill/README.md"},
+            None,
+            None,
+        ),
+        (
+            "list_skill",
+            {"file_path": "/a/s/SKILL.md"},
+            None,
+            None,
+        ),
+        (
+            "grep",
+            {"pattern": "foo"},
+            None,
+            None,
+        ),
+    ],
+)
+def test_resolve_skill_file_context(tool_name, tool_args, tool_msg, expected):
+    assert (
+        SkillEvolutionRail._resolve_skill_file_context(tool_name, tool_args, tool_msg)
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_args", "tool_msg", "expected"),
+    [
+        ("skill_tool", {"skill_name": "invoice-parser", "relative_file_path": "SKILL.md"}, None, "invoice-parser"),
+        ("skill_tool", {"skill_name": "invoice-parser", "relative_file_path": "SKILL"}, None, "invoice-parser"),
+        ("skill_tool", {"skill_name": "invoice-parser", "relative_file_path": "./SKILL"}, None, "invoice-parser"),
+        (
+            "skill_tool",
+            {"relative_file_path": "SKILL"},
+            _DummyToolMsg("x", metadata={"skill_name": "meta-skill"}),
+            "meta-skill",
+        ),
+        ("skill_tool", {"skill_name": "invoice-parser", "relative_file_path": "docs/REF.md"}, None, None),
+        ("skill_tool", {"relative_file_path": "SKILL.md"}, None, None),
+        ("read_file", {"file_path": "/skills/demo/SKILL.md"}, None, "demo"),
+        ("read_file", {"file_path": "/skills/demo/README.md"}, None, None),
+    ],
+)
+def test_resolve_skill_name(tool_name, tool_args, tool_msg, expected):
+    assert SkillEvolutionRail._resolve_skill_name(tool_name, tool_args, tool_msg) == expected
+
+
+# =============================================================================
 # after_tool_call Tests
 # =============================================================================
 
@@ -259,6 +394,90 @@ async def test_after_tool_call_injects_body_experience(tmp_path):
 
     assert inputs.tool_msg.content == "original\nnew experience"
     rail._evolution_store.format_body_experience_text.assert_awaited_once_with("invoice-parser")
+
+
+@pytest.mark.asyncio
+async def test_after_tool_call_injects_body_experience_for_skill_tool_bare_skill_path(tmp_path):
+    rail = _make_rail(tmp_path)
+    rail._evolution_store.format_body_experience_text = AsyncMock(return_value="\nnew experience")
+
+    inputs = ToolCallInputs(
+        tool_name="skill_tool",
+        tool_args={"skill_name": "invoice-parser", "relative_file_path": "SKILL"},
+        tool_msg=_DummyToolMsg("original"),
+    )
+    ctx = AgentCallbackContext(agent=None, inputs=inputs, session=None)
+
+    await rail.after_tool_call(ctx)
+
+    assert inputs.tool_msg.content == "original\nnew experience"
+    rail._evolution_store.format_body_experience_text.assert_awaited_once_with("invoice-parser")
+
+
+@pytest.mark.asyncio
+async def test_after_tool_call_injects_body_experience_for_skill_tool_explicit_path(tmp_path):
+    rail = _make_rail(tmp_path)
+    rail._evolution_store.format_body_experience_text = AsyncMock(return_value="\nnew experience")
+
+    inputs = ToolCallInputs(
+        tool_name="skill_tool",
+        tool_args={"skill_name": "invoice-parser", "relative_file_path": "SKILL.md"},
+        tool_msg=_DummyToolMsg("original"),
+    )
+    ctx = AgentCallbackContext(agent=None, inputs=inputs, session=None)
+
+    await rail.after_tool_call(ctx)
+
+    assert inputs.tool_msg.content == "original\nnew experience"
+    rail._evolution_store.format_body_experience_text.assert_awaited_once_with("invoice-parser")
+
+
+@pytest.mark.asyncio
+async def test_after_tool_call_injects_body_experience_for_skill_tool_metadata_fallback(tmp_path):
+    rail = _make_rail(tmp_path)
+    rail._evolution_store.format_body_experience_text = AsyncMock(return_value="\nnew experience")
+
+    inputs = ToolCallInputs(
+        tool_name="skill_tool",
+        tool_args={"relative_file_path": "SKILL"},
+        tool_msg=_DummyToolMsg("original", metadata={"skill_name": "invoice-parser"}),
+    )
+    ctx = AgentCallbackContext(agent=None, inputs=inputs, session=None)
+
+    await rail.after_tool_call(ctx)
+
+    assert inputs.tool_msg.content == "original\nnew experience"
+    rail._evolution_store.format_body_experience_text.assert_awaited_once_with("invoice-parser")
+
+
+@pytest.mark.asyncio
+async def test_after_tool_call_skips_skill_tool_invalid_cases(tmp_path):
+    rail = _make_rail(tmp_path)
+    rail._evolution_store.format_body_experience_text = AsyncMock(return_value="\nnew experience")
+    cases = [
+        ToolCallInputs(
+            tool_name="skill_tool",
+            tool_args={"skill_name": "invoice-parser", "relative_file_path": "docs/REF.md"},
+            tool_msg=_DummyToolMsg("x"),
+        ),
+        ToolCallInputs(
+            tool_name="skill_tool",
+            tool_args={"relative_file_path": "SKILL.md"},
+            tool_msg=_DummyToolMsg("x"),
+        ),
+        ToolCallInputs(
+            tool_name="skill_tool",
+            tool_args='{"skill_name":"invoice-parser","relative_file_path":"docs/REF.md"}',
+            tool_msg=_DummyToolMsg("x"),
+        ),
+    ]
+    for item in cases:
+        ctx = AgentCallbackContext(agent=None, inputs=item, session=None)
+        await rail.after_tool_call(ctx)
+
+    rail._evolution_store.format_body_experience_text.assert_not_awaited()
+    for item in cases:
+        assert item.tool_msg.content == "x"
 
 
 @pytest.mark.asyncio

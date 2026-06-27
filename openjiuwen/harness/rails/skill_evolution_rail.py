@@ -39,6 +39,7 @@ from openjiuwen.agent_evolving.signal import (
 )
 from openjiuwen.agent_evolving.trajectory import Trajectory, TrajectoryStore
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.context_engine.active_skill_bodies import normalize_skill_relative_file_path
 from openjiuwen.core.operator.skill_call import SkillCallOperator
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.sys_operation import SysOperation
@@ -301,19 +302,13 @@ class SkillEvolutionRail(EvolutionRail):
         if not isinstance(inputs, ToolCallInputs):
             return
 
-        tool_name = str(inputs.tool_name or "")
-        if "read" not in tool_name.lower() and "file" not in tool_name.lower():
+        skill_name = self._resolve_skill_name(
+            str(inputs.tool_name or ""),
+            inputs.tool_args,
+            inputs.tool_msg,
+        )
+        if not skill_name:
             return
-
-        file_path = self._extract_file_path(inputs.tool_args)
-        if not file_path:
-            return
-
-        matched = self._SKILL_MD_RE.search(file_path)
-        if not matched:
-            return
-
-        skill_name = matched.group(1)
 
         # Retain: Inject pending body experiences (immediate effect)
         body_text = await self._evolution_store.format_body_experience_text(skill_name)
@@ -1031,6 +1026,77 @@ class SkillEvolutionRail(EvolutionRail):
                 exc,
             )
             return []
+
+    @classmethod
+    def _parse_tool_args_dict(cls, tool_args: Any) -> dict:
+        if isinstance(tool_args, dict):
+            return tool_args
+        if isinstance(tool_args, str):
+            try:
+                parsed = json.loads(tool_args)
+                return parsed if isinstance(parsed, dict) else {}
+            except json.JSONDecodeError:
+                return {}
+        return {}
+
+    @classmethod
+    def _resolve_skill_file_context(
+        cls,
+        tool_name: str,
+        tool_args: Any,
+        tool_msg: Any = None,
+    ) -> Optional[tuple[str, str]]:
+        """Return (skill_name, relative_file_path) when a skill file is read."""
+        name = tool_name.lower()
+        args = cls._parse_tool_args_dict(tool_args)
+
+        if name == "skill_tool":
+            skill = str(args.get("skill_name") or "").strip()
+            rel = normalize_skill_relative_file_path(
+                str(args.get("relative_file_path") or "")
+            )
+            if not skill and tool_msg is not None:
+                meta = getattr(tool_msg, "metadata", None) or {}
+                skill = str(meta.get("skill_name") or "").strip()
+                rel = normalize_skill_relative_file_path(
+                    str(meta.get("relative_file_path") or rel)
+                )
+            if not skill:
+                return None
+            return skill, rel.replace("\\", "/")
+
+        if "read" not in name and "file" not in name:
+            return None
+
+        file_path = cls._extract_file_path(tool_args)
+        if not file_path:
+            return None
+
+        matched = cls._SKILL_MD_RE.search(file_path)
+        if matched:
+            return matched.group(1), "SKILL.md"
+        return None
+
+    @staticmethod
+    def _is_skill_md_path(relative_path: str) -> bool:
+        normalized = normalize_skill_relative_file_path(relative_path)
+        norm = normalized.replace("\\", "/").removeprefix("./").lower()
+        return norm == "skill.md" or norm.endswith("/skill.md")
+
+    @classmethod
+    def _resolve_skill_name(
+        cls,
+        tool_name: str,
+        tool_args: Any,
+        tool_msg: Any = None,
+    ) -> Optional[str]:
+        resolved = cls._resolve_skill_file_context(tool_name, tool_args, tool_msg)
+        if resolved is None:
+            return None
+        skill_name, relative_path = resolved
+        if not cls._is_skill_md_path(relative_path):
+            return None
+        return skill_name
 
     @classmethod
     def _extract_file_path(cls, tool_args: Any) -> str:
