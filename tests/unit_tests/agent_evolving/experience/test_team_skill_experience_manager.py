@@ -12,6 +12,7 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionRecord,
     EvolutionTarget,
 )
+from openjiuwen.agent_evolving.experience.rebuild import ExperienceRebuildService
 from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
 from openjiuwen.agent_evolving.types import ApplyResult
 
@@ -29,13 +30,34 @@ def _make_record(*, content: str = "team experience") -> EvolutionRecord:
     )
 
 
+def _make_archive_pair() -> Mock:
+    pair = Mock()
+    pair.version = "v1"
+    pair.evolution_archive_name = "evolutions.v1.json"
+    pair.to_payload.return_value = {
+        "version": "v1",
+        "skill_archive": "SKILL.v1.md",
+        "evolution_archive": "evolutions.v1.json",
+    }
+    return pair
+
+
+def _make_archive_service() -> Mock:
+    archive_service = Mock()
+    archive_service.archive_current_pair = AsyncMock(return_value=_make_archive_pair())
+    archive_service.prune = Mock()
+    return archive_service
+
+
 def _make_manager(*, language: str = "cn") -> ExperienceManager:
     store = Mock()
     scorer = Mock()
+    rebuild_service = ExperienceRebuildService(store=store, archive_service=_make_archive_service())
     return ExperienceManager(
         store=store,
         scorer=scorer,
         language=language,
+        rebuild_service=rebuild_service,
     )
 
 
@@ -127,8 +149,6 @@ async def test_request_rebuild_uses_shared_helper():
     record = _make_record(content="handoff checklist")
     record.score = 0.8
     manager._store.skill_exists = Mock(return_value=True)
-    manager._store.archive_skill_body = AsyncMock(return_value="SKILL.v1.md")
-    manager._store.archive_evolutions = AsyncMock(return_value="evolutions.v1.json")
     manager._store.load_full_evolution_log = AsyncMock(return_value=Mock(entries=[record]))
     manager._store.clear_evolutions = AsyncMock()
 
@@ -140,6 +160,9 @@ async def test_request_rebuild_uses_shared_helper():
     )
 
     assert context is not None
+    manager.rebuild_service._archive_service.archive_current_pair.assert_awaited_once_with(
+        "team-skill-a", subject_kind="swarm-skill"
+    )
     manager._store.clear_evolutions.assert_awaited_once_with("team-skill-a", subject_kind="swarm-skill")
 
 
@@ -149,8 +172,6 @@ async def test_request_rebuild_prompt_keeps_english_record_labels():
     record = _make_record(content="handoff checklist")
     record.score = 0.8
     manager._store.skill_exists = Mock(return_value=True)
-    manager._store.archive_skill_body = AsyncMock(return_value="SKILL.v1.md")
-    manager._store.archive_evolutions = AsyncMock(return_value="evolutions.v1.json")
     manager._store.load_full_evolution_log = AsyncMock(return_value=Mock(entries=[record]))
     manager._store.clear_evolutions = AsyncMock()
 
@@ -162,6 +183,7 @@ async def test_request_rebuild_prompt_keeps_english_record_labels():
     )
 
     assert prompt
-    manager._store.archive_skill_body.assert_awaited_once_with("team-skill-a", subject_kind="swarm-skill")
-    manager._store.archive_evolutions.assert_awaited_once_with("team-skill-a", subject_kind="swarm-skill")
+    manager.rebuild_service._archive_service.archive_current_pair.assert_awaited_once_with(
+        "team-skill-a", subject_kind="swarm-skill"
+    )
     manager._store.clear_evolutions.assert_awaited_once_with("team-skill-a", subject_kind="swarm-skill")
