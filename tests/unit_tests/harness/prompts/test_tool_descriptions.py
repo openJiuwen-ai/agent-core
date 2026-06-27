@@ -34,6 +34,11 @@ from openjiuwen.harness.prompts.sections.tools.filesystem import (
 from openjiuwen.harness.prompts.sections.tools.list_skill import (
     DESCRIPTION as LIST_SKILL_DESCRIPTION,
 )
+from openjiuwen.harness.prompts.sections.skills import (
+    SKILL_RAIL_ALL_MODE_INSTRUCTION,
+    SKILL_RAIL_AUTO_LIST_MODE_PROMPT,
+    SKILL_RAIL_AUTO_LIST_MODE_PROMPT_EN,
+)
 from openjiuwen.harness.prompts.sections.tools.todo import (
     TODO_CREATE_DESCRIPTION,
     TODO_LIST_DESCRIPTION,
@@ -176,3 +181,36 @@ class TestToolClassesUseBilingualDescriptions:
             == AUDIO_QUESTION_ANSWERING_DESCRIPTION["en"]
         )
         assert metadata_tool.card.description == AUDIO_METADATA_DESCRIPTION["en"]
+
+
+class TestSkillRailPromptGuidance:
+    """Skill rail prompts must retain todo_create guidance."""
+
+    @staticmethod
+    def test_all_mode_instruction_mentions_todo_create():
+        assert "todo_create" in SKILL_RAIL_ALL_MODE_INSTRUCTION["cn"]
+        assert "todo_create" in SKILL_RAIL_ALL_MODE_INSTRUCTION["en"]
+
+    @staticmethod
+    def test_auto_list_mode_prompt_mentions_todo_create():
+        assert "todo_create" in SKILL_RAIL_AUTO_LIST_MODE_PROMPT["cn"]
+        assert "todo_create" in SKILL_RAIL_AUTO_LIST_MODE_PROMPT["en"]
+
+    @staticmethod
+    def test_auto_list_mode_prompt_en_no_dose_typo():
+        assert "dose not" not in SKILL_RAIL_AUTO_LIST_MODE_PROMPT_EN
+        assert "does not update todos" in SKILL_RAIL_AUTO_LIST_MODE_PROMPT_EN
+
+
+class TestTodoCreateDescriptionRules:
+    """Todo-create descriptions must retain content/status separation rule."""
+
+    @staticmethod
+    def test_cn_prohibits_status_in_content():
+        assert "禁止在 todo 条目" in TODO_CREATE_DESCRIPTION["cn"]
+        assert "标注任务状态" in TODO_CREATE_DESCRIPTION["cn"]
+
+    @staticmethod
+    def test_en_prohibits_status_in_content():
+        assert "Do not annotate task status" in TODO_CREATE_DESCRIPTION["en"]
+        assert "todo content field" in TODO_CREATE_DESCRIPTION["en"]

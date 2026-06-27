@@ -44,6 +44,7 @@ TODO_CREATE_DESCRIPTION_CN = """
 ## 规则
 
 - 第一个任务自动设为 in_progress，其余为 pending
+- 禁止在 todo 条目（ content 字段）中标注任务状态 如「已完成」；应创建任务后通过 todo_modify 标记状态（status ）
 - 同一时间只能有一个 in_progress 任务
 - 任务描述必须具体、可执行、清晰明确
 - 调用本工具会覆盖当前会话的任务列表；若需追加任务，请使用 todo_modify
@@ -86,6 +87,7 @@ to overwrite existing pending/in_progress tasks.
 ## Rules
 
 - First task is automatically set to in_progress, others to pending
+- Do not annotate task status (e.g., "completed") in the todo content field; after creating a task, use todo_modify to set its status instead.
 - Only one task can be in_progress at a time
 - Task descriptions must be specific, actionable, and clear
 - Calling this tool replaces the current session's task list; use todo_modify to append tasks

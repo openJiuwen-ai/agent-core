@@ -62,12 +62,13 @@ SKILL_RAIL_ALL_MODE_HEADER: Dict[str, str] = {
 
 SKILL_RAIL_ALL_MODE_INSTRUCTION_CN = (
     "\n选择最相关的技能：用 skill_tool 加载其 SKILL.md 后再执行；"
-    "完成后调用 skill_complete 释放上下文。"
+    "执行任一步骤前先 todo_create，再按 SKILL 逐步执行；完成后调用 skill_complete 释放上下文。"
     "skill_complete 不更新 todo，修改 todo 请用 todo_modify。"
 )
 
 SKILL_RAIL_ALL_MODE_INSTRUCTION_EN = (
     "\nSelect the most relevant skill: load its SKILL.md via skill_tool before executing; "
+    "call todo_create before executing any step; "
     "after finishing, call skill_complete to release context. "
     "skill_complete does not update todos — use todo_modify to modify todos."
 )
@@ -83,6 +84,7 @@ SKILL_RAIL_ALL_MODE_INSTRUCTION: Dict[str, str] = {
 SKILL_RAIL_AUTO_LIST_MODE_PROMPT_CN = """# 技能
 
 需要时先调用 list_skill 查看可用技能，再调用 skill_tool(skill_name=..., relative_file_path="SKILL.md") 加载正文并遵从。
+加载正文后、执行任一步骤前先 todo_create 再逐步执行。
 完成该技能全部步骤、不再需要回看正文时，立即调用 skill_complete(skill_name=...) 释放上下文；之后若需要可重新 skill_tool 加载。
 skill_complete 不更新 todo，改 todo 需调用 todo_modify。
 需要时使用 code 执行 Python 或 JavaScript，使用 bash 执行 shell 命令。
@@ -91,6 +93,7 @@ skill_complete 不更新 todo，改 todo 需调用 todo_modify。
 SKILL_RAIL_AUTO_LIST_MODE_PROMPT_EN = """# Skills
 
 When needed, call list_skill first to see available skills, then call skill_tool(skill_name=..., relative_file_path="SKILL.md") to load the body and follow it.
+After loading, call todo_create before executing any step.
 After finishing all steps and no longer needing the body, immediately call skill_complete(skill_name=...) to release context; re-call skill_tool if you need it again.
 skill_complete does not update todos — call todo_modify to modify todos.
 Use code for Python or JavaScript snippets when needed, and use bash for shell commands.
