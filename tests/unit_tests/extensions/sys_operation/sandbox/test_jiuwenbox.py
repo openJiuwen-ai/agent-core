@@ -7,6 +7,10 @@ on ``RUN_JIUWENBOX_TEST=1`` (per-function via the ``requires_jiuwenbox``
 marker). Each test verifies behaviour by inspecting real sandbox state —
 either through the jiuwenbox HTTP API (``/api/v1/sandboxes/...``) or via
 ``SysOperation.fs()`` / ``shell()`` calls that hit the actual container.
+
+When the jiuwenbox server enables Bearer auth (``JIUWENBOX_API_TOKEN``),
+set the same value in the test environment so direct HTTP fixtures and the
+provider client both send ``Authorization: Bearer ...``.
 """
 
 from __future__ import annotations
@@ -28,7 +32,10 @@ from openjiuwen.core.sys_operation import OperationMode, SandboxGatewayConfig, S
 from openjiuwen.core.sys_operation.config import ContainerScope, PreDeployLauncherConfig, SandboxIsolationConfig
 from openjiuwen.core.sys_operation.sandbox.gateway.gateway_client import SandboxGatewayClient
 from openjiuwen.extensions.sys_operation.sandbox.providers import jiuwenbox as jb
-from openjiuwen.extensions.sys_operation.sandbox.providers.jiuwenbox import clear_jiuwenbox_shared_sandbox
+from openjiuwen.extensions.sys_operation.sandbox.providers.jiuwenbox import (
+    build_jiuwenbox_http_client,
+    clear_jiuwenbox_shared_sandbox,
+)
 
 
 # Single source of truth for "this test needs a real jiuwenbox service".
@@ -86,7 +93,7 @@ async def sys_op_fixture(server_endpoint, monkeypatch) -> AsyncIterator[SysOpera
     monkeypatch.delenv("JIUWENBOX_SANDBOX_ID", raising=False)
     clear_jiuwenbox_shared_sandbox(base_url)
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         before_ids = _list_sandbox_ids(client)
 
         await Runner.start()
@@ -238,7 +245,7 @@ async def test_extra_params_shares_sandbox_id_after_memory_cache_cleared(
     file_path = f"/tmp/jiuwenbox_extra_{marker}.txt"
     file_content = "visible-via-extra-params-fs"
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         before_ids = _list_sandbox_ids(client)
 
     write_res = await sys_op.fs().write_file(file_path, file_content, prepend_newline=False)
@@ -286,7 +293,7 @@ async def test_extra_params_shares_sandbox_id_after_memory_cache_cleared(
         if second_card_added:
             Runner.resource_mgr.remove_sys_operation(sys_operation_id=second_card_id)
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         after_ids = _list_sandbox_ids(client)
     assert sandbox_id in after_ids
     assert len(after_ids - before_ids) == 1
@@ -306,7 +313,7 @@ async def test_extra_params_policy_and_policy_mode_are_used_to_create_sandbox(
     monkeypatch.delenv("JIUWENBOX_SANDBOX_ID", raising=False)
     clear_jiuwenbox_shared_sandbox(base_url)
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         before_ids = _list_sandbox_ids(client)
 
         await Runner.start()
@@ -398,7 +405,7 @@ async def test_force_recreate_creates_new_sandbox_on_remote_and_replaces_stale_c
     original_id = cache.get(base_url.rstrip("/"))
     assert isinstance(original_id, str) and original_id
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         ids_before_recreate = _list_sandbox_ids(client)
         assert original_id in ids_before_recreate
 
@@ -434,7 +441,7 @@ async def test_force_recreate_with_policy_applies_policy_to_new_sandbox(
     policy_name = f"jiuwenbox-force-policy-{marker}"
     extra_dir = f"/tmp/jiuwenbox-force-policy-{marker}"
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         before_ids = _list_sandbox_ids(client)
         try:
             new_id = await jb.force_recreate_jiuwenbox_sandbox(
@@ -489,7 +496,7 @@ async def test_force_recreate_uploads_preserve_files_into_new_sandbox(
     host_file = tmp_path / "AGENT.md"
     host_file.write_bytes(payload)
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         before_ids = _list_sandbox_ids(client)
         try:
             new_id = await jb.force_recreate_jiuwenbox_sandbox(
@@ -546,7 +553,7 @@ async def test_preserve_file_uploaded_when_provider_creates_new_sandbox(
     host_file = tmp_path / "AGENT.md"
     host_file.write_text(payload)
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         before_ids = _list_sandbox_ids(client)
 
         await Runner.start()
@@ -626,7 +633,7 @@ async def test_preserve_directory_recurses_into_sandbox(
     (host_dir / "top.txt").write_text("top-content")
     (host_dir / "sub" / "child.txt").write_text("child-content")
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         before_ids = _list_sandbox_ids(client)
 
         await Runner.start()
@@ -706,7 +713,7 @@ async def test_preserve_file_not_re_uploaded_when_sandbox_id_already_cached(
         ]
     }
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         before_ids = _list_sandbox_ids(client)
 
         await Runner.start()
@@ -802,7 +809,7 @@ async def test_lifecycle_hook_fires_before_after_create_on_provider_sandbox_crea
     recorder = _HookRecorder()
     marker = uuid.uuid4().hex[:8]
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         before_ids = _list_sandbox_ids(client)
 
         await Runner.start()
@@ -922,7 +929,7 @@ async def test_lifecycle_hook_strict_propagates_exception(
 
     marker = uuid.uuid4().hex[:8]
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         before_ids = _list_sandbox_ids(client)
 
         await Runner.start()
@@ -982,7 +989,7 @@ async def test_lifecycle_hook_fires_delete_events_on_teardown(
     monkeypatch.delenv("JIUWENBOX_SANDBOX_ID", raising=False)
     clear_jiuwenbox_shared_sandbox(base_url)
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         before_ids = _list_sandbox_ids(client)
         await Runner.start()
         marker = uuid.uuid4().hex[:8]
@@ -1053,7 +1060,7 @@ async def test_lifecycle_hook_strict_propagates_on_delete(
         if event == "before_delete":
             raise RuntimeError("delete-boom")
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         before_ids = _list_sandbox_ids(client)
         await Runner.start()
         marker = uuid.uuid4().hex[:8]
