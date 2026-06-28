@@ -122,7 +122,23 @@ def build_file_reinjected_content(ctx: ReinjectContext) -> str:
     return render_read_file_snapshots(selected, ctx.truncate, per_file_chars)
 
 
+TEAM_TOOL_CALL_NAMES = ("send_message", "view_task", "claim_task", "member_complete_task")
+
+
 def build_task_status_reinjected_content(ctx: ReinjectContext) -> str:
+    lines: list[str] = []
+
+    team_status = ctx.session_state.get("team_task_status")
+    if isinstance(team_status, dict):
+        lines.extend(_render_team_tool_calls_section(ctx, team_status))
+    else:
+        # Normal mode: reinject background (sub-agent) status from session state.
+        lines.extend(_render_background_tasks_section(ctx))
+
+    return ctx.truncate("\n".join(lines))
+
+
+def _render_background_tasks_section(ctx: ReinjectContext) -> list[str]:
     lines: list[str] = []
     background_tasks = ctx.session_state.get("background_tasks") or []
     if isinstance(background_tasks, list):
@@ -139,32 +155,184 @@ def build_task_status_reinjected_content(ctx: ReinjectContext) -> str:
                     f'Background agent "{description}" ({task_id}) status={status}. '
                     "Check the stored result/error before spawning another task."
                 )
+    return lines
 
-    team_status = ctx.session_state.get("team_task_status")
-    if isinstance(team_status, dict):
-        lines.append(f'Team "{team_status.get("team_name", "unknown")}" current collaboration state:')
-        members = team_status.get("members") or []
-        if members:
-            lines.append("- Active members:")
-            for member in members:
-                if isinstance(member, dict):
-                    lines.append(
-                        f'  - {member.get("member_name", "unknown")}: '
-                        f'role={member.get("role", "")}, status={member.get("status", "unknown")}'
-                    )
-        open_tasks = team_status.get("open_tasks") or []
-        if open_tasks:
-            lines.append("- Open tasks:")
-            for task in open_tasks:
-                if isinstance(task, dict):
-                    assignee = task.get("assignee") or "unassigned"
-                    lines.append(
-                        f'  - #{task.get("task_id", "unknown")} [{task.get("status", "unknown")}] '
-                        f'{task.get("title", "")} ({assignee})'
-                    )
-        if team_status.get("has_unread_messages"):
-            lines.append("- Team has unread messages; use team messaging tools to inspect/continue.")
-    return ctx.truncate("\n".join(lines))
+
+def _render_team_tool_calls_section(ctx: ReinjectContext, team_status: dict) -> list[str]:
+    """Team mode: render the static team board plus recovered collaboration calls.
+
+    Two sources, both emitted under one section so the team's collaboration
+    history survives compaction:
+
+    1. Static snapshot from ``team_status`` (active members, open tasks,
+       unread-messages flag) — always present when the board is non-empty.
+    2. Collaboration tool calls recovered from the compacted dialogue by
+       scanning ``ctx.source_messages`` (the full pre-compaction active
+       window): who messaged whom, which tasks were claimed/completed, and
+       what ``view_task`` returned. Calls whose round already survives in
+       ``messages_to_keep`` are de-duplicated (still verbatim in the
+       post-compaction context).
+    """
+    if not getattr(ctx.config, "reinject_team_tool_calls", True):
+        return []
+
+    keep_signatures = {message_signature(message) for message in ctx.messages_to_keep}
+    max_calls = int(getattr(ctx.config, "reinject_team_tool_call_max", 20) or 0)
+
+    lines: list[str] = [f'Team "{team_status.get("team_name", "unknown")}" current collaboration state:']
+
+    # Static snapshot from session state: active members, open tasks, unread
+    # flag. This survives regardless of whether the dialogue carried team tool
+    # calls, so the team's current board is never lost to compaction.
+    lines.extend(_render_team_static_snapshot(team_status))
+
+    # Recovered collaboration tool calls: re-surface who messaged whom, which
+    # tasks were claimed/completed, and what view_task returned, by scanning
+    # ctx.source_messages (the full pre-compaction active window). Calls whose
+    # round already survives in messages_to_keep are de-duplicated (still
+    # verbatim in the post-compaction context).
+    collected = _collect_team_tool_calls(ctx.source_messages, keep_signatures, max_calls)
+    if collected:
+        lines.append("- Recent collaboration calls (recovered from compacted dialogue):")
+        for tool_call, owner_message, result_text in collected:
+            rendered = _render_team_tool_call_line(tool_call, result_text)
+            if rendered:
+                lines.append(rendered)
+
+    if len(lines) == 1:
+        # Only the header — no static snapshot and no recoverable calls. Drop
+        # it rather than emit an empty section.
+        return []
+    return lines
+
+
+def _render_team_static_snapshot(team_status: dict) -> list[str]:
+    """Render the session-state team board: active members, open tasks, and the
+    unread-messages flag. Mirrors the pre-refactor rendering so callers that
+    relied on the static snapshot still see it."""
+    lines: list[str] = []
+    members = team_status.get("members") or []
+    if members:
+        lines.append("- Active members:")
+        for member in members:
+            if isinstance(member, dict):
+                lines.append(
+                    f'  - {member.get("member_name", "unknown")}: '
+                    f'role={member.get("role", "")}, status={member.get("status", "unknown")}'
+                )
+    open_tasks = team_status.get("open_tasks") or []
+    if open_tasks:
+        lines.append("- Open tasks:")
+        for task in open_tasks:
+            if isinstance(task, dict):
+                assignee = task.get("assignee") or "unassigned"
+                lines.append(
+                    f'  - #{task.get("task_id", "unknown")} [{task.get("status", "unknown")}] '
+                    f'{task.get("title", "")} ({assignee})'
+                )
+    if team_status.get("has_unread_messages"):
+        lines.append("- Team has unread messages; use team messaging tools to inspect/continue.")
+    return lines
+
+
+def _collect_team_tool_calls(
+    messages: list[BaseMessage],
+    keep_signatures: set[str],
+    max_calls: int,
+) -> list[tuple[Any, AssistantMessage, str]]:
+    """Walk messages in order, collect team tool calls not already retained.
+
+    Returns (tool_call, owner_assistant_message, result_text) triples in
+    first-appearance order, de-duplicated against ``keep_signatures`` and
+    capped at ``max_calls``.
+    """
+    collected: list[tuple[Any, AssistantMessage, str]] = []
+    if max_calls <= 0:
+        return collected
+    for message in messages:
+        if not isinstance(message, AssistantMessage):
+            continue
+        if message_signature(message) in keep_signatures:
+            continue
+        for tool_call in getattr(message, "tool_calls", None) or []:
+            tool_name = getattr(tool_call, "name", "") or ""
+            if tool_name not in TEAM_TOOL_CALL_NAMES:
+                continue
+            call_id = getattr(tool_call, "id", None)
+            result_text = find_tool_result_text(messages, call_id)
+            collected.append((tool_call, message, result_text))
+            if len(collected) >= max_calls:
+                return collected
+    return collected
+
+
+def _render_team_tool_call_line(tool_call: Any, result_text: str) -> str:
+    tool_name = getattr(tool_call, "name", "") or ""
+    arguments_text = getattr(tool_call, "arguments", "") or ""
+    args = parse_tool_arguments(arguments_text)
+
+    action_desc = _describe_team_tool_action(tool_name, args)
+    line = f"- {action_desc} [{tool_name}]".rstrip()
+
+    result_text = (result_text or "").strip()
+    if result_text:
+        # Collapse multi-line tool results (e.g. view_task task lists) into a
+        # compact single-line preview so the section stays scannable.
+        compacted = " ".join(part.strip() for part in result_text.splitlines() if part.strip())
+        if len(compacted) > 200:
+            compacted = compacted[:200] + "..."
+        line += f"\n  -> {compacted}"
+    return line
+
+
+def _describe_team_tool_action(tool_name: str, args: dict) -> str:
+    """Concise Chinese description of what this team tool call did, derived
+    from the tool's purpose and its arguments."""
+    if tool_name == "send_message":
+        to_raw = args.get("to")
+        if isinstance(to_raw, list):
+            targets = "、".join(str(item) for item in to_raw if item)
+            base = f"向 {targets} 发送消息" if targets else "发送消息"
+        elif to_raw == "*":
+            base = "向全队广播消息"
+        elif to_raw:
+            base = f"向 {to_raw} 发送消息"
+        else:
+            base = "发送消息"
+        summary = str(args.get("summary") or "").strip()
+        if not summary:
+            content = str(args.get("content") or "")
+            summary = (content[:80] + "...") if len(content) > 80 else content
+        return f"{base}：{summary}" if summary else base
+
+    if tool_name == "view_task":
+        action = args.get("action") or "list"
+        if action == "get":
+            tid = args.get("task_id")
+            return f"查看任务 #{tid} 详情" if tid else "查看任务详情"
+        if action == "claimable":
+            return "查询可领取的任务"
+        status = args.get("status")
+        return f"列出任务（状态={status}）" if status else "列出任务"
+
+    if tool_name == "claim_task":
+        task_id = args.get("task_id") or "?"
+        status = args.get("status")
+        if status == "completed":
+            return f"完成任务 #{task_id}"
+        if status == "claimed":
+            return f"认领任务 #{task_id}"
+        return f"处理任务 #{task_id}（status={status or '?'}）"
+
+    if tool_name == "member_complete_task":
+        task_id = args.get("task_id") or "?"
+        note = str(args.get("note") or "").strip()
+        note_short = (note[:80] + "...") if len(note) > 80 else note
+        if note_short:
+            return f"完成自己负责的任务 #{task_id}，备注：{note_short}"
+        return f"完成自己负责的任务 #{task_id}"
+
+    return f"调用 {tool_name}"
 
 
 def build_tool_result_hint_reinjected_content(ctx: ReinjectContext) -> str:
