@@ -357,7 +357,7 @@ class SkillEvolutionRail(EvolutionRail):
             skill_names = self._evolution_store.list_skill_names()
             logger.info("[SkillEvolutionRail] found %d local skills", len(skill_names))
 
-            signals = self._detect_signals(parsed_messages, skill_names)
+            signals = await self._detect_signals(parsed_messages, skill_names)
             logger.info("[SkillEvolutionRail] detected %d signal(s)", len(signals))
 
             if not signals:
@@ -840,14 +840,19 @@ class SkillEvolutionRail(EvolutionRail):
 
         return self._parse_messages(messages)
 
-    def _detect_signals(
+    async def _detect_signals(
         self,
         parsed_messages: List[dict],
         skill_names: List[str],
     ) -> List[EvolutionSignal]:
         existing_skills = {name for name in skill_names if self._evolution_store.skill_exists(name)}
-        detector = SignalDetector(existing_skills=existing_skills)
-        detected = detector.detect(parsed_messages)
+        detector = SignalDetector(
+            existing_skills=existing_skills,
+            llm=self._optimizer_llm,
+            model=self._optimizer_model,
+            language=self._optimizer_language,
+        )
+        detected = await detector.detect_async(parsed_messages)
 
         new_signals: List[EvolutionSignal] = []
         for signal in detected:

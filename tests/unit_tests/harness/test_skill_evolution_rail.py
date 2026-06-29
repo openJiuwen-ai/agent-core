@@ -65,6 +65,21 @@ def _make_signal(skill_name: str | None, *, excerpt: str = "signal excerpt") -> 
     )
 
 
+def _async_returning(value):
+    """Build an async replacement for ``SignalDetector.detect_async``.
+
+    The real ``detect_async`` may route through the LLM when an optimizer llm
+    is configured; tests that only exercise dedup/clearing logic patch it out
+    with a coroutine that returns a fixed value, matching the sync ``detect``
+    shim used previously.
+    """
+
+    async def _detect_async(self, _):
+        return value
+
+    return _detect_async
+
+
 class _MsgContext:
     def __init__(self, messages=None, *, raise_error: bool = False):
         self._messages = list(messages) if messages else []
@@ -140,9 +155,9 @@ async def test_rollback_skill_uses_public_store_interfaces(tmp_path):
     archive = skill_dir / "archive"
     archive.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("# Current\n", encoding="utf-8")
-    (skill_dir / "evolutions.json").write_text("{\"entries\": [\"current\"]}", encoding="utf-8")
+    (skill_dir / "evolutions.json").write_text('{"entries": ["current"]}', encoding="utf-8")
     (archive / "SKILL.v20260622T123456.md").write_text("# Archived\n", encoding="utf-8")
-    (archive / "evolutions.v20260622T123456.json").write_text("{\"entries\": []}", encoding="utf-8")
+    (archive / "evolutions.v20260622T123456.json").write_text('{"entries": []}', encoding="utf-8")
 
     rail = _make_rail(tmp_path)
     rail._evolution_store = EvolutionStore(str(root))
@@ -168,11 +183,11 @@ async def test_rollback_skill_without_version_uses_latest_archive(tmp_path):
     archive = skill_dir / "archive"
     archive.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("# Current\n", encoding="utf-8")
-    (skill_dir / "evolutions.json").write_text("{\"entries\": [\"current\"]}", encoding="utf-8")
+    (skill_dir / "evolutions.json").write_text('{"entries": ["current"]}', encoding="utf-8")
     (archive / "SKILL.v20260622T123456.md").write_text("# Old\n", encoding="utf-8")
-    (archive / "evolutions.v20260622T123456.json").write_text("{\"entries\": [\"old\"]}", encoding="utf-8")
+    (archive / "evolutions.v20260622T123456.json").write_text('{"entries": ["old"]}', encoding="utf-8")
     (archive / "SKILL.v20260622T223456.md").write_text("# Latest\n", encoding="utf-8")
-    (archive / "evolutions.v20260622T223456.json").write_text("{\"entries\": []}", encoding="utf-8")
+    (archive / "evolutions.v20260622T223456.json").write_text('{"entries": []}', encoding="utf-8")
 
     rail = _make_rail(tmp_path)
     rail._evolution_store = EvolutionStore(str(root))
@@ -241,7 +256,7 @@ async def test_rollback_skill_clears_evolutions_when_pair_missing(tmp_path):
     archive = skill_dir / "archive"
     archive.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("# Current\n", encoding="utf-8")
-    (skill_dir / "evolutions.json").write_text("{\"entries\": [\"current\"]}", encoding="utf-8")
+    (skill_dir / "evolutions.json").write_text('{"entries": ["current"]}', encoding="utf-8")
     (archive / "SKILL.v20260622T123456.md").write_text("# Archived\n", encoding="utf-8")
 
     rail = _make_rail(tmp_path)
@@ -563,7 +578,7 @@ async def test_run_evolution_auto_save_appends_records(tmp_path):
 
     rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hello"}])
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
-    rail._detect_signals = Mock(return_value=signals)
+    rail._detect_signals = AsyncMock(return_value=signals)
     rail._generate_experience_for_skill = AsyncMock(return_value=records)
     rail._evolution_store.append_record = AsyncMock()
     rail._emit_generated_records = AsyncMock()
@@ -585,7 +600,7 @@ async def test_run_evolution_auto_save_false_emits_events(tmp_path):
 
     rail._collect_parsed_messages = AsyncMock(return_value=parsed_messages)
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
-    rail._detect_signals = Mock(return_value=signals)
+    rail._detect_signals = AsyncMock(return_value=signals)
     rail._generate_experience_via_optimizer = AsyncMock(return_value=True)
     rail._emit_generated_records = AsyncMock()
     ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
@@ -601,7 +616,7 @@ async def test_run_evolution_filters_empty_skill_name_and_swallow_exceptions(tmp
     rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
     rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hello"}])
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
-    rail._detect_signals = Mock(return_value=[_make_signal(None), _make_signal("skill-a")])
+    rail._detect_signals = AsyncMock(return_value=[_make_signal(None), _make_signal("skill-a")])
     rail._generate_experience_for_skill = AsyncMock(return_value=[])
     rail._evolution_store.append_record = AsyncMock()
 
@@ -619,30 +634,59 @@ async def test_run_evolution_filters_empty_skill_name_and_swallow_exceptions(tmp
 # =============================================================================
 
 
-def test_detect_signals_deduplicates_with_processed_keys(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_detect_signals_deduplicates_with_processed_keys(tmp_path, monkeypatch):
     rail = _make_rail(tmp_path)
     rail._evolution_store.skill_exists = Mock(return_value=True)
     signal = _make_signal("skill-a", excerpt="same-excerpt")
-    monkeypatch.setattr(SignalDetector, "detect", lambda self, messages: [signal])
+    monkeypatch.setattr(SignalDetector, "detect_async", _async_returning([signal]))
 
-    first = rail._detect_signals([{"role": "user", "content": "x"}], ["skill-a"])
-    second = rail._detect_signals([{"role": "user", "content": "x"}], ["skill-a"])
+    first = await rail._detect_signals([{"role": "user", "content": "x"}], ["skill-a"])
+    second = await rail._detect_signals([{"role": "user", "content": "x"}], ["skill-a"])
 
     assert len(first) == 1
     assert len(second) == 0
     assert ("tool_failure", "bash", "skill-a", "same-excerpt") in rail.processed_signal_keys
 
 
-def test_detect_signals_clears_processed_keys_when_exceed_limit(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_detect_signals_clears_processed_keys_when_exceed_limit(tmp_path, monkeypatch):
     rail = _make_rail(tmp_path)
     rail._evolution_store.skill_exists = Mock(return_value=True)
     rail._processed_signal_keys = {(f"type-{i}", f"excerpt-{i}") for i in range(_MAX_PROCESSED_SIGNAL_KEYS)}
-    monkeypatch.setattr(SignalDetector, "detect", lambda self, messages: [_make_signal("skill-a", excerpt="new-one")])
+    monkeypatch.setattr(SignalDetector, "detect_async", _async_returning([_make_signal("skill-a", excerpt="new-one")]))
 
-    detected = rail._detect_signals([{"role": "user", "content": "x"}], ["skill-a"])
+    detected = await rail._detect_signals([{"role": "user", "content": "x"}], ["skill-a"])
 
     assert len(detected) == 1
     assert rail.processed_signal_keys == set()
+
+
+@pytest.mark.asyncio
+async def test_detect_signals_propagates_optimizer_llm_to_detector(tmp_path, monkeypatch):
+    """_detect_signals must hand the optimizer llm/model/language to SignalDetector
+    so that LLM-based correction judgment (15c68a27) is engaged."""
+    rail = _make_rail(tmp_path)
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    captured: dict = {}
+
+    def spy_init(self: Any, **kwargs: Any) -> None:
+        captured.update(kwargs)
+        # bypass real init to avoid needing a real detector; mark llm so detect_async works
+        self._existing_skills = kwargs.get("existing_skills") or set()
+        self._llm = kwargs.get("llm")
+        self._model = kwargs.get("model")
+        self._language = kwargs.get("language")
+
+    monkeypatch.setattr(SignalDetector, "__init__", spy_init)
+    monkeypatch.setattr(SignalDetector, "detect_async", _async_returning([_make_signal("skill-a", excerpt="x")]))
+
+    await rail._detect_signals([{"role": "user", "content": "x"}], ["skill-a"])
+
+    assert captured["llm"] is rail._optimizer_llm
+    assert captured["model"] == rail._optimizer_model
+    assert captured["language"] == rail._optimizer_language
+    assert captured["existing_skills"] == {"skill-a"}
 
 
 # =============================================================================
@@ -1002,7 +1046,7 @@ async def test_run_evolution_zero_signals_creates_conversation_review(tmp_path):
         ]
     )
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
-    rail._detect_signals = Mock(return_value=[])
+    rail._detect_signals = AsyncMock(return_value=[])
     rail._infer_primary_skill = Mock(return_value="skill-a")
     rail._generate_experience_for_skill = AsyncMock(return_value=[])
     rail._evolution_store.append_record = AsyncMock()
@@ -1023,7 +1067,7 @@ async def test_run_evolution_zero_signals_no_primary_skill_returns(tmp_path):
 
     rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
-    rail._detect_signals = Mock(return_value=[])
+    rail._detect_signals = AsyncMock(return_value=[])
     rail._infer_primary_skill = Mock(return_value=None)
     rail._generate_experience_for_skill = AsyncMock()
 
@@ -1041,7 +1085,7 @@ async def test_run_evolution_unattributed_signals_get_fallback_skill(tmp_path):
 
     rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
-    rail._detect_signals = Mock(return_value=[attributed, unattributed])
+    rail._detect_signals = AsyncMock(return_value=[attributed, unattributed])
     rail._generate_experience_for_skill = AsyncMock(return_value=[])
     rail._evolution_store.append_record = AsyncMock()
 
@@ -1063,7 +1107,7 @@ async def test_run_evolution_multiple_attributed_skills_no_fallback(tmp_path):
 
     rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a", "skill-b"])
-    rail._detect_signals = Mock(return_value=[sig_a, sig_b, sig_none])
+    rail._detect_signals = AsyncMock(return_value=[sig_a, sig_b, sig_none])
     rail._generate_experience_for_skill = AsyncMock(return_value=[])
     rail._evolution_store.append_record = AsyncMock()
 
@@ -1529,7 +1573,7 @@ async def test_run_evolution_path_b_not_reached_when_path_a_handled(tmp_path):
     rail._evolution_store.list_skill_names = Mock(return_value=["my_skill"])
     rail._evolution_store.skill_exists = Mock(return_value=True)
     rail._collect_parsed_messages = AsyncMock(return_value=parsed_messages)
-    rail._detect_signals = Mock(return_value=[dummy_signal])
+    rail._detect_signals = AsyncMock(return_value=[dummy_signal])
     rail._generate_experience_for_skill = AsyncMock(return_value=[])
     rail._trigger_async_evaluation = AsyncMock()
 
@@ -1771,9 +1815,7 @@ async def test_generate_and_emit_experience_returns_true_when_records_staged(tmp
     result = await rail.generate_and_emit_experience("skill-a", signals, messages)
 
     assert result is True
-    rail._generate_experience_via_optimizer.assert_awaited_once_with(
-        "skill-a", signals, messages
-    )
+    rail._generate_experience_via_optimizer.assert_awaited_once_with("skill-a", signals, messages)
     rail._emit_generated_records.assert_awaited_once_with(None, "skill-a")
 
 
@@ -1791,9 +1833,7 @@ async def test_generate_and_emit_experience_returns_false_when_no_records(tmp_pa
     result = await rail.generate_and_emit_experience("skill-a", signals, messages)
 
     assert result is False
-    rail._generate_experience_via_optimizer.assert_awaited_once_with(
-        "skill-a", signals, messages
-    )
+    rail._generate_experience_via_optimizer.assert_awaited_once_with("skill-a", signals, messages)
     rail._emit_generated_records.assert_not_awaited()
 
 
