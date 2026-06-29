@@ -308,6 +308,41 @@ class TestEvolutionStoreArchive:
         assert not (archive / body_name).exists()
         assert (archive / evo_name).exists()
 
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_delete_archive_version_removes_fuzzy_paired_evo(tmp_path: Path):
+        root = tmp_path / "skills"
+        skill_dir = prepare_skill(root, "skill-a", "# Skill\n")
+        archive = skill_dir / "archive"
+        archive.mkdir(parents=True)
+        body_name = "SKILL.v20260622T120000.md"
+        evo_name = "evolutions.v20260622T120001.json"
+        (archive / body_name).write_text("# Archived\n", encoding="utf-8")
+        (archive / evo_name).write_text("{\"entries\": [\"archived\"]}", encoding="utf-8")
+        store = EvolutionStore(str(root))
+
+        assert await store.delete_archive_version("skill-a", body_name) is True
+        assert not (archive / body_name).exists()
+        assert not (archive / evo_name).exists()
+        assert list(archive.iterdir()) == []
+
+    @staticmethod
+    def test_resolve_paired_evolution_archive_picks_closest_older_candidate(tmp_path: Path):
+        root = tmp_path / "skills"
+        skill_dir = prepare_skill(root, "skill-a", "# Skill\n")
+        archive = skill_dir / "archive"
+        archive.mkdir(parents=True)
+        body_name = "SKILL.v20260622T120000.md"
+        (archive / body_name).write_text("# Archived\n", encoding="utf-8")
+        closer = archive / "evolutions.v20260622T115900.json"
+        farther = archive / "evolutions.v20260622T100000.json"
+        closer.write_text("{\"entries\": [\"closer\"]}", encoding="utf-8")
+        farther.write_text("{\"entries\": [\"farther\"]}", encoding="utf-8")
+        store = EvolutionStore(str(root))
+
+        resolved = store.resolve_paired_evolution_archive("skill-a", body_name)
+        assert resolved == closer
+
 
 class TestEvolutionStoreSolidifyAndFormatting:
     @staticmethod

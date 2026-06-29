@@ -8,6 +8,7 @@ import json
 from typing import Any
 
 from openjiuwen.agent_evolving.experience.draft_schema import normalize_subject
+from openjiuwen.core.common.logging import logger
 
 
 def format_rebuild_context(rebuild_context: dict[str, Any] | None) -> str:
@@ -34,12 +35,6 @@ def format_rebuild_context(rebuild_context: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
-def _format_rebuild_target_path(*, skills_base: str | None, skill_name: str) -> str:
-    if skills_base and skills_base.strip():
-        return f"{skills_base.strip().rstrip('/')}/{skill_name}/SKILL.md"
-    return f"{{skills_base}}/{skill_name}/SKILL.md"
-
-
 def _build_rebuild_workflow_instructions(
     *,
     creator: str,
@@ -64,7 +59,6 @@ def build_rebuild_command_prompt(
     subject: dict[str, Any],
     user_intent: str | None = None,
     rebuild_context: dict[str, Any] | None = None,
-    skills_base: str | None = None,
 ) -> str:
     """Build a one-shot host prompt for Skill rebuild."""
     normalized_subject = normalize_subject(subject).to_payload()
@@ -73,20 +67,21 @@ def build_rebuild_command_prompt(
     creator = "swarmskill-creator" if normalized_subject["kind"] == "swarm-skill" else "skill-creator"
     min_score = rebuild_context.get("min_score") if rebuild_context else None
     min_score_line = f"Min score threshold: {min_score}\n" if min_score is not None else ""
-    resolved_skills_base = skills_base
-    if not resolved_skills_base and rebuild_context:
-        raw_base = rebuild_context.get("skills_base")
-        if isinstance(raw_base, str) and raw_base.strip():
-            resolved_skills_base = raw_base.strip()
-    target_skill_md = _format_rebuild_target_path(
-        skills_base=resolved_skills_base,
-        skill_name=skill_name,
-    )
-    skills_base_hint = ""
-    if not resolved_skills_base:
+    raw_md = rebuild_context.get("skill_md_path") if rebuild_context else None
+    if isinstance(raw_md, str) and raw_md.strip():
+        target_skill_md = raw_md.strip()
+        skills_base_hint = ""
+    else:
+        target_skill_md = f"{{skills_base}}/{skill_name}/SKILL.md"
         skills_base_hint = (
             "Resolve `{skills_base}` to the workspace skills root directory before read_file/write_file.\n"
         )
+    logger.info(
+        "[build_rebuild_command_prompt] target_skill_md=%s skill=%s from_context=%s",
+        target_skill_md,
+        skill_name,
+        isinstance(raw_md, str) and bool(raw_md.strip()),
+    )
     return (
         f"Please perform skill evolution operation `evolve_rebuild` for subject "
         f"{json.dumps(normalized_subject, ensure_ascii=False)}.\n"

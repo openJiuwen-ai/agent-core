@@ -1798,11 +1798,6 @@ class SkillEvolutionRail(EvolutionRail):
             if body_archive is None:
                 logger.warning("[SkillEvolutionRail] invalid archive version for %s: %s", skill_name, version)
                 return False
-            evo_version = store.paired_evolution_archive_name(body_archive.name)
-            if evo_version is None:
-                logger.warning("[SkillEvolutionRail] invalid archived body version for %s: %s", skill_name, version)
-                return False
-            evo_archive = store.get_skill_archive_file(skill_name, evo_version)
         else:
             body_files = sorted(
                 [f for f in archive.iterdir() if f.name.startswith("SKILL.v")],
@@ -1813,11 +1808,8 @@ class SkillEvolutionRail(EvolutionRail):
                 logger.warning("[SkillEvolutionRail] no archived body for %s", skill_name)
                 return False
             body_archive = body_files[0]
-            evo_version = store.paired_evolution_archive_name(body_archive.name)
-            if evo_version is None:
-                logger.warning("[SkillEvolutionRail] invalid archived body for %s: %s", skill_name, body_archive.name)
-                return False
-            evo_archive = archive / evo_version
+
+        evo_archive = store.resolve_paired_evolution_archive(skill_name, body_archive.name)
 
         old_body = await store.read_archive_text(skill_name, body_archive.name)
         if not old_body:

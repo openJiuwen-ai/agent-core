@@ -900,6 +900,39 @@ description: {description}
         suffix = body_archive_name.removeprefix("SKILL.").removesuffix(".md")
         return f"evolutions.{suffix}.json"
 
+    def resolve_paired_evolution_archive(self, name: str, body_archive_name: str) -> Optional[Path]:
+        """Resolve the evolution archive paired with a body archive filename."""
+        paired_name = self.paired_evolution_archive_name(body_archive_name)
+        if paired_name is None:
+            return None
+        exact = self.get_skill_archive_file(name, paired_name)
+        if exact is not None:
+            return exact
+
+        archive = self.get_skill_archive_dir(name)
+        if archive is None:
+            return None
+        body_suffix = body_archive_name.removeprefix("SKILL.").removesuffix(".md")
+        candidates = [
+            path
+            for path in archive.iterdir()
+            if path.is_file() and path.name.startswith("evolutions.v") and path.name.endswith(".json")
+        ]
+        if not candidates:
+            return None
+
+        body_day = body_suffix[:8] if len(body_suffix) >= 8 else body_suffix
+
+        def _distance(path: Path) -> tuple[int, int, str]:
+            evo_suffix = path.name.removeprefix("evolutions.").removesuffix(".json")
+            same_day = 0 if evo_suffix[:8] == body_day else 1
+            if evo_suffix >= body_suffix:
+                return (same_day, 0, evo_suffix)
+            inverted = "".join(chr(255 - ord(char)) for char in evo_suffix)
+            return (same_day, 1, inverted)
+
+        return min(candidates, key=_distance)
+
     async def _archive_current_state(self, name: str, skill_dir: Path) -> Tuple[Optional[str], Optional[str]]:
         archive = self._archive_dir(skill_dir)
         suffix = self._available_archive_suffix(archive)
@@ -1012,20 +1045,18 @@ description: {description}
             )
             return False
 
-        evo_name = self.paired_evolution_archive_name(body_archive_name)
-        if evo_name is not None:
-            evo_path = self.get_skill_archive_file(name, evo_name)
-            if evo_path is not None:
-                try:
-                    evo_path.unlink(missing_ok=True)
-                except Exception as exc:
-                    logger.warning(
-                        "[EvolutionStore] deleted body archive but failed to delete %s for skill=%s: %s",
-                        evo_name,
-                        name,
-                        exc,
-                    )
-                    return False
+        evo_path = self.resolve_paired_evolution_archive(name, body_archive_name)
+        if evo_path is not None:
+            try:
+                evo_path.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.warning(
+                    "[EvolutionStore] deleted body archive but failed to delete %s for skill=%s: %s",
+                    evo_path.name,
+                    name,
+                    exc,
+                )
+                return False
 
         logger.info(
             "[EvolutionStore] deleted target archive version %s for skill=%s",

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Optional
 
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
@@ -32,18 +33,15 @@ class ExperienceRebuildService:
         if not self._store.skill_exists(skill_name):
             return None
 
-        try:
-            await self._store.archive_skill_body(skill_name)
-        except Exception as exc:  # pragma: no cover - logging only
-            logger.warning("[ExperienceRebuildService] skill body archive failed for '%s': %s", skill_name, exc)
+        skill_md_path, skills_base = _resolve_skill_paths_from_store(self._store, skill_name)
 
         evo_archive: Optional[str] = None
         archive_error: Optional[Exception] = None
         try:
-            evo_archive = await self._store.archive_evolutions(skill_name)
+            _, evo_archive = await self._store.archive_current_state(skill_name)
         except Exception as exc:
             archive_error = exc
-            logger.warning("[ExperienceRebuildService] evolutions archive failed for '%s': %s", skill_name, exc)
+            logger.warning("[ExperienceRebuildService] archive failed for '%s': %s", skill_name, exc)
 
         records_log = await self._store.load_evolution_log(skill_name)
         filtered_records = _filter_rebuild_records(records_log.entries, min_score=min_score)
@@ -52,16 +50,19 @@ class ExperienceRebuildService:
             max_records=max_context_records,
             max_chars=max_context_chars,
         )
-        context.update(
-            {
-                "subject": normalized_subject.to_payload(),
-                "skill_name": skill_name,
-                "user_intent": user_intent,
-                "min_score": min_score,
-                "archive_path": evo_archive,
-                "archive_error": archive_error,
-            }
-        )
+        context_payload: dict[str, Any] = {
+            "subject": normalized_subject.to_payload(),
+            "skill_name": skill_name,
+            "user_intent": user_intent,
+            "min_score": min_score,
+            "archive_path": evo_archive,
+            "archive_error": archive_error,
+        }
+        if skill_md_path:
+            context_payload["skill_md_path"] = skill_md_path
+        if skills_base:
+            context_payload["skills_base"] = skills_base
+        context.update(context_payload)
 
         return context
 
@@ -79,6 +80,23 @@ class ExperienceRebuildService:
             return False
         await self._store.clear_evolutions(skill_name)
         return True
+
+
+def _resolve_skill_paths_from_store(store: Any, skill_name: str) -> tuple[Optional[str], Optional[str]]:
+    """Resolve absolute skill_md_path and skills_base via store private helpers."""
+    resolve_dir = getattr(store, "_resolve_skill_dir", None)
+    if not callable(resolve_dir):
+        return None, None
+    skill_dir = resolve_dir(skill_name)
+    if skill_dir is None:
+        return None, None
+    resolved_dir = skill_dir.resolve()
+    skills_base = str(resolved_dir.parent)
+    find_md = getattr(store, "_find_skill_md", None)
+    md_path = find_md(skill_dir) if callable(find_md) else None
+    if md_path is None:
+        md_path = Path(skill_dir) / "SKILL.md"
+    return str(md_path.resolve()), skills_base
 
 
 def _filter_rebuild_records(records: list[EvolutionRecord], *, min_score: float) -> list[EvolutionRecord]:

@@ -186,6 +186,27 @@ async def test_rollback_skill_uses_public_store_interfaces(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_rollback_skill_recovers_mismatched_evo_suffix(tmp_path):
+    root = tmp_path / "skills"
+    skill_dir = root / "skill-a"
+    archive = skill_dir / "archive"
+    archive.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Current\n", encoding="utf-8")
+    (skill_dir / "evolutions.json").write_text("{\"entries\": [\"current\"]}", encoding="utf-8")
+    (archive / "SKILL.v20260622T120000.md").write_text("# Archived\n", encoding="utf-8")
+    (archive / "evolutions.v20260622T120001.json").write_text("{\"entries\": [\"archived\"]}", encoding="utf-8")
+
+    rail = _make_rail(tmp_path)
+    rail._evolution_store = EvolutionStore(str(root))
+
+    assert await rail.rollback_skill("skill-a") is True
+    assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == "# Archived\n"
+    assert (skill_dir / "evolutions.json").read_text(encoding="utf-8") == "{\"entries\": [\"archived\"]}"
+    assert not (archive / "SKILL.v20260622T120000.md").exists()
+    assert not (archive / "evolutions.v20260622T120001.json").exists()
+
+
+@pytest.mark.asyncio
 async def test_rollback_skill_without_version_uses_latest_archive(tmp_path):
     root = tmp_path / "skills"
     skill_dir = root / "skill-a"
