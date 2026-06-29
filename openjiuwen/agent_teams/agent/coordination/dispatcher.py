@@ -188,7 +188,7 @@ class EventDispatcher:
 
         self._framework = AsyncCallbackFramework(
             enable_metrics=False,
-            enable_logging=False,
+            enable_logging=True,
         )
         # Register order matters for fan-out on shared event_keys.
         # MEMBER_SHUTDOWN is the example: MemberHandler.on_member_event
