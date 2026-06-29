@@ -98,9 +98,15 @@ def _looks_like_path(token: str) -> bool:
 class ExternalDirectoryChecker:
     """检查命令是否访问 workspace 外路径，若越界则触发 external_directory 权限."""
 
-    def __init__(self, config: Mapping[str, Any], workspace_root: Path | None = None):
+    def __init__(
+        self,
+        config: Mapping[str, Any],
+        workspace_root: Path | None = None,
+        trusted_dirs: list[Path] | None = None,
+    ):
         self.config = config
         self._workspace_root = workspace_root
+        self._trusted_dirs = trusted_dirs or []
 
     def check_external_paths(
             self,
@@ -151,7 +157,15 @@ class ExternalDirectoryChecker:
         else:
             return None
 
-        external = [p for p in paths if not contains_path(workspace, p)]
+        def is_internal(p: Path) -> bool:
+            if contains_path(workspace, p):
+                return True
+            for trusted in self._trusted_dirs:
+                if contains_path(trusted, p):
+                    return True
+            return False
+
+        external = [p for p in paths if not is_internal(p)]
         if not external:
             return None
         ext_paths_str = [str(p).replace("\\", "/") for p in external]

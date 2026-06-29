@@ -89,11 +89,13 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         "[PermissionEngine] permission.rail.workspace_resolve_failed",
                         exc_info=True,
                     )
+            trusted_dirs = []
             self._engine = PermissionEngine(
                 config=self._static_config,
                 llm=llm,
                 model_name=model_name,
                 workspace_root=workspace_root,
+                trusted_dirs=trusted_dirs,
             )
         if self._host.tool_permission_checks_active is not None:
             self._engine.set_permission_checks_active(self._host.tool_permission_checks_active)
@@ -192,6 +194,33 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         ctx.extra["_interrupt_decision"] = decision
         self._apply_decision(ctx, tool_call, tool_name, decision)
 
+    def set_trusted_dirs(self, trusted_dirs: Optional[Iterable[Any]]) -> None:
+        """Per-request hot update of trusted directories.
+
+        Hosts (e.g. JiuWenSwarm adapter) call this when ``trusted_dirs`` arrives
+        with each request so that the external_directory check treats these
+        subtrees as internal and skips ask/deny for them.
+
+        Accepts raw strings (resolved to absolute ``Path``); ``None``/empty
+        clears the list. ``Path`` objects are passed through as-is.
+        """
+        from pathlib import Path as _Path
+
+        normalized: list[_Path] = []
+        if trusted_dirs:
+            for d in trusted_dirs:
+                if not d:
+                    continue
+                try:
+                    normalized.append(_Path(str(d)).expanduser().resolve(strict=False))
+                except (OSError, RuntimeError):
+                    continue
+        self._engine.update_trusted_dirs(normalized)
+        logger.info(
+            "[PermissionEngine] permission.rail.trusted_dirs_updated count=%d",
+            len(normalized),
+        )
+
     def update_config(
         self,
         config: PermissionsSection | dict[str, Any],
@@ -229,9 +258,13 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 exc_info=True,
             )
             return []
+        # Use the engine's per-request trusted_dirs (set via set_trusted_dirs)
+        # so persist-time external-path detection matches the runtime check.
+        trusted_dirs = list(self._engine.trusted_dirs)
         try:
             checker = ExternalDirectoryChecker(
-                permissions_cfg, workspace_root=workspace
+                permissions_cfg, workspace_root=workspace,
+                trusted_dirs=trusted_dirs,
             )
             ext_result = checker.check_external_paths(normalized_name, tool_args)
         except Exception:

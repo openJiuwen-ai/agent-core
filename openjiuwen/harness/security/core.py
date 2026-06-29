@@ -39,6 +39,7 @@ class PermissionEngine:
         llm: Any = None,
         model_name: str | None = None,
         workspace_root: Path | None = None,
+        trusted_dirs: list[Path] | None = None,
     ):
         # 运行时为可变 dict；TypedDict 仅作入参形状说明
         self.config: dict[str, Any] = cast(dict[str, Any], config or {})
@@ -47,8 +48,10 @@ class PermissionEngine:
         self._llm = llm
         self._model_name = model_name
         self._workspace_root = workspace_root
+        self._trusted_dirs = trusted_dirs or []
         self._external_checker = ExternalDirectoryChecker(
-            self.config, workspace_root=self._workspace_root
+            self.config, workspace_root=self._workspace_root,
+            trusted_dirs=self._trusted_dirs,
         )
 
     # ---------- 配置 ----------
@@ -58,8 +61,22 @@ class PermissionEngine:
         self.config = cast(dict[str, Any], config)
         self._enabled = config.get("enabled", True)
         self._external_checker = ExternalDirectoryChecker(
-            config, workspace_root=self._workspace_root
+            config, workspace_root=self._workspace_root,
+            trusted_dirs=self._trusted_dirs,
         )
+
+    def update_trusted_dirs(self, trusted_dirs: list[Path]) -> None:
+        """更新受信任目录列表."""
+        self._trusted_dirs = trusted_dirs
+        self._external_checker = ExternalDirectoryChecker(
+            self.config, workspace_root=self._workspace_root,
+            trusted_dirs=self._trusted_dirs,
+        )
+
+    @property
+    def trusted_dirs(self) -> list[Path]:
+        """获取当前受信任目录列表."""
+        return self._trusted_dirs
 
     def update_llm(self, llm: Any, model_name: str | None) -> None:
         """保留接口供 PermissionInterruptRail 等热更新模型（当前不用于权限路径）。"""
