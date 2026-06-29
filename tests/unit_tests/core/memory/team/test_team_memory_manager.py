@@ -7,11 +7,12 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-from typing import Any, Dict, List
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from openjiuwen.agent_teams.context import get_session_id, reset_session_id, set_session_id
 from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
 from openjiuwen.agent_teams.memory.manager_params import (
     TeamLifecycle,
@@ -75,7 +76,7 @@ class MockPromptBuilder:
     """Mock prompt builder for testing."""
 
     def __init__(self):
-        self._sections: Dict[str, Any] = {}
+        self._sections: dict[str, Any] = {}
 
     def add_section(self, section: Any) -> None:
         self._sections[section.name] = section
@@ -91,7 +92,7 @@ class MockAbilityManager:
     """Mock ability manager for testing."""
 
     def __init__(self):
-        self._abilities: Dict[str, Any] = {}
+        self._abilities: dict[str, Any] = {}
 
     def add(self, tool_card: Any) -> Any:
         result = MagicMock()
@@ -99,7 +100,7 @@ class MockAbilityManager:
         self._abilities[tool_card.name] = tool_card
         return result
 
-    def remove(self, names: List[str]) -> None:
+    def remove(self, names: list[str]) -> None:
         for name in names:
             self._abilities.pop(name, None)
 
@@ -186,6 +187,7 @@ async def test_register_tools_idempotent(temp_dir):
     assert owned_names_after_first == owned_names_after_second
 
 
+
 @pytest.mark.asyncio
 async def test_register_tools_strips_memory_rails(temp_dir):
     """Test that register_tools removes MemoryRail/CodingMemoryRail from DeepAgent."""
@@ -239,6 +241,68 @@ async def test_load_and_inject_with_cached_section(temp_dir):
     second_section = manager._cached_base_section
 
     assert first_section is second_section
+
+
+@pytest.mark.asyncio
+async def test_extract_after_round_rebinds_and_restores_session_context(temp_dir):
+    """Memory manager temporarily rebinds the active team session for extraction."""
+    params = create_test_params(workspace_root=temp_dir)
+    manager = TeamMemoryManager(params)
+    manager.bind_session_id("active-session")
+    seen_session_ids: list[str] = []
+
+    async def extract_bound() -> None:
+        seen_session_ids.append(get_session_id())
+
+    original_token = set_session_id("outer-session")
+    try:
+        with patch.object(manager, "_extract_after_round_bound", new=AsyncMock(side_effect=extract_bound)):
+            await manager.extract_after_round()
+        assert seen_session_ids == ["active-session"]
+        assert get_session_id() == "outer-session"
+    finally:
+        reset_session_id(original_token)
+
+
+@pytest.mark.asyncio
+async def test_extract_after_round_restores_session_context_on_failure(temp_dir):
+    """Memory manager resets session context even when extraction fails."""
+    params = create_test_params(workspace_root=temp_dir)
+    manager = TeamMemoryManager(params)
+    manager.bind_session_id("active-session")
+
+    original_token = set_session_id("outer-session")
+    try:
+        with patch.object(
+            manager,
+            "_extract_after_round_bound",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            with pytest.raises(RuntimeError, match="boom"):
+                await manager.extract_after_round()
+        assert get_session_id() == "outer-session"
+    finally:
+        reset_session_id(original_token)
+
+
+@pytest.mark.asyncio
+async def test_extract_after_round_uses_current_session_context_without_bound_session(temp_dir):
+    """Memory manager leaves the current context untouched without a bound session id."""
+    params = create_test_params(workspace_root=temp_dir)
+    manager = TeamMemoryManager(params)
+    seen_session_ids: list[str] = []
+
+    async def extract_bound() -> None:
+        seen_session_ids.append(get_session_id())
+
+    token = set_session_id("current-session")
+    try:
+        with patch.object(manager, "_extract_after_round_bound", new=AsyncMock(side_effect=extract_bound)):
+            await manager.extract_after_round()
+        assert seen_session_ids == ["current-session"]
+        assert get_session_id() == "current-session"
+    finally:
+        reset_session_id(token)
 
 
 @pytest.mark.asyncio
