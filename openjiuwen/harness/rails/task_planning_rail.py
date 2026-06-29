@@ -378,11 +378,10 @@ class TaskPlanningRail(DeepAgentRail):
 
         plan = TaskPlan(goal="bridged from todo list")
         for todo in todos:
-            if todo.status in (
-                TodoStatus.IN_PROGRESS,
-                TodoStatus.COMPLETED,
-            ):
+            if todo.status == TodoStatus.COMPLETED:
                 task_status = TaskStatus.COMPLETED
+            elif todo.status == TodoStatus.IN_PROGRESS:
+                task_status = TaskStatus.IN_PROGRESS
             elif todo.status == TodoStatus.CANCELLED:
                 task_status = TaskStatus.FAILED
             else:
