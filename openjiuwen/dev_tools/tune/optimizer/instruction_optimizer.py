@@ -24,7 +24,7 @@ PROMPT_INSTRUCTION_OPTIMIZE_TEMPLATE = PromptTemplate(content="""
 {{prompt_instruction}}
 </prompt_base>
 
-你拥有的的工具和API说明如下:
+你拥有的工具和API说明如下:
 <tools_description>
 {{tools_description}}
 </tools_description>
@@ -43,7 +43,7 @@ PROMPT_INSTRUCTION_OPTIMIZE_TEMPLATE = PromptTemplate(content="""
 1. 在<思考>标签中，请根据错误示例及其对应的反思内容，深入、全面地分析提示词中可能导致错误的部分。分析应覆盖：错误原因的识别、原始提示词中存在的问题，以及通过哪些具体修改可以有效规避这些问题。
 2. 在<PROMPT_OPTIMIZED>标签中，基于上述分析，输出优化后的提示词版本。
 3. 分析过程中应聚焦于问题的具体成因，结合模板结构、语意表达和格式规范等方面，系统性地进行优化。
-4. 优化过程中务必信息表达完整、逻辑侵袭，不可遗漏重要内容或引入模糊表达
+4. 优化过程中务必信息表达完整、逻辑清晰，不可遗漏重要内容或引入模糊表达
 5. 不可直接使用给定的示例，也不要在提示词中加入示例中的具体信息，可以通过抽象、改写的方式总结
 
 输出格式：
@@ -68,7 +68,7 @@ PROMPT_INSTRUCTION_OPTIMIZE_BOTH_TEMPLATE = PromptTemplate(content="""
 {{user_prompt}}
 </user_prompt_base>
 
-你拥有的的工具和API说明如下:
+你拥有的工具和API说明如下:
 <tools_description>
 {{tools_description}}
 </tools_description>
@@ -87,7 +87,7 @@ PROMPT_INSTRUCTION_OPTIMIZE_BOTH_TEMPLATE = PromptTemplate(content="""
 1. 在<思考>标签中，请根据错误示例及其对应的反思内容，深入、全面地分析提示词中可能导致错误的部分。分析应覆盖：错误原因的识别、原始提示词中存在的问题，以及通过哪些具体修改可以有效规避这些问题。
 2. 在<SYSTEM_PROMPT_OPTIMIZED>和<USER_PROMPT_OPTIMIZED>标签中，基于上述分析，输出优化后的system和user提示词版本。
 3. 分析过程中应聚焦于问题的具体成因，结合模板结构、语意表达和格式规范等方面，系统性地进行优化。
-4. 优化过程中务必信息表达完整、逻辑侵袭，不可遗漏重要内容或引入模糊表达
+4. 优化过程中务必信息表达完整、逻辑清晰，不可遗漏重要内容或引入模糊表达
 5. 不可直接使用给定的示例，也不要在提示词中加入示例中的具体信息，可以通过抽象、改写的方式总结
 
 输出格式：
@@ -145,7 +145,7 @@ PLACEHOLDER_RESTORE_TEMPLATE = PromptTemplate(content="""
 原始提示词：
 <original_prompt>
 {{original_prompt}}
-</original_prompt>>
+</original_prompt>
 
 修改后的提示词：
 <revised_prompt>
