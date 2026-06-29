@@ -7,11 +7,18 @@ Uses InMemorySpanExporter to verify span creation, attributes, parent-child
 relationships, and error marking.
 """
 
+import json
+
 import pytest
 
 from opentelemetry import trace
 
 from tests.conftest_otel import _EXPORTER, _OTEL_TRACER
+from openjiuwen.core.foundation.llm.schema.message import (
+    AssistantMessage,
+    SystemMessage,
+    UserMessage,
+)
 from openjiuwen.core.session.tracer.handler import TracerHandlerName
 from openjiuwen.core.session.tracer.data import InvokeType
 from openjiuwen.core.session.tracer.span import TraceAgentSpan, SpanManager
@@ -46,6 +53,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_WORKFLOW_COMPONENT_TYPE,
     OJ_WORKFLOW_ERROR_MESSAGE,
     OJ_WORKFLOW_ID,
+    OJ_WORKFLOW_INVOKE_DATA,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -233,6 +241,70 @@ class TestOtelAgentHandler:
         # Completion hashed (redact_completions=True)
         assert finished[0].attributes[GEN_AI_COMPLETION].startswith("sha256:")
 
+    async def test_agent_llm_inputs_normalized_to_dict(self):
+        """Message objects are converted to plain dicts via model_dump().
+
+        Without normalization, GEN_AI_PROMPT would contain class repr like
+        ``SystemMessage(role='system', ...)``.  After normalization it should
+        be standard JSON with ``{"role": "...", "content": "..."}`` entries.
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        inputs = {
+            "inputs": [
+                SystemMessage(role="system", content="you are helpful"),
+                UserMessage(role="user", content="hello"),
+            ]
+        }
+        await handler.on_llm_start(span=agent_span, inputs=inputs, instance_info={"class_name": "M"})
+        await handler.on_llm_end(span=agent_span, outputs="world")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        prompt_attr = finished[0].attributes[GEN_AI_PROMPT]
+
+        # Should be valid JSON, not a Python repr
+        parsed = json.loads(prompt_attr)
+        assert "inputs" in parsed
+        assert isinstance(parsed["inputs"], list)
+        assert len(parsed["inputs"]) == 2
+
+        # Each message is a plain dict — no class names in the output
+        sys_msg = parsed["inputs"][0]
+        assert sys_msg["role"] == "system"
+        assert sys_msg["content"] == "you are helpful"
+        user_msg = parsed["inputs"][1]
+        assert user_msg["role"] == "user"
+        assert user_msg["content"] == "hello"
+        # No Pydantic class repr leaked into the serialized form
+        assert "SystemMessage" not in prompt_attr
+        assert "UserMessage" not in prompt_attr
+
+    async def test_agent_llm_outputs_normalized_to_dict(self):
+        """AssistantMessage outputs are converted to plain dicts via model_dump()."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(span=agent_span, inputs="hi", instance_info={"class_name": "M"})
+        outputs = AssistantMessage(role="assistant", content="world")
+        await handler.on_llm_end(span=agent_span, outputs=outputs)
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        completion_attr = finished[0].attributes[GEN_AI_COMPLETION]
+
+        parsed = json.loads(completion_attr)
+        assert parsed["role"] == "assistant"
+        assert parsed["content"] == "world"
+        assert "AssistantMessage" not in completion_attr
+
     async def test_agent_llm_fields_set_when_span_empty(self):
         """When TraceAgentSpan.invoke_type/name are None, handler sets them itself."""
         config = OtelTracerConfig(redaction_enabled=False)
@@ -365,6 +437,9 @@ class TestOtelWorkflowHandler:
         assert OJ_INVOKE_ID in s.attributes
         assert OJ_PARENT_NODE_ID in s.attributes
         assert OJ_START_TIME in s.attributes
+        # end_time / elapsed_time set by _set_workflow_end_attrs in on_call_done
+        assert OJ_END_TIME in s.attributes
+        assert OJ_ELAPSED_TIME in s.attributes
         assert OJ_STATUS in s.attributes
         assert s.status.status_code == trace.StatusCode.OK
 
@@ -493,6 +568,9 @@ class TestOtelWorkflowHandler:
         # Error dict and status
         assert OJ_ERROR in s.attributes
         assert s.attributes[OJ_STATUS] == "error"
+        # end_time / elapsed_time set by _set_workflow_end_attrs in error path
+        assert OJ_END_TIME in s.attributes
+        assert OJ_ELAPSED_TIME in s.attributes
 
     async def test_workflow_invoke_buffers_data(self):
         """on_invoke_data is buffered and flushed as span attribute on on_call_done."""
@@ -510,7 +588,7 @@ class TestOtelWorkflowHandler:
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
-        assert OJ_AGENT_INPUTS in finished[0].attributes
+        assert OJ_WORKFLOW_INVOKE_DATA in finished[0].attributes
 
     async def test_workflow_stream_buffers_flushed(self):
         """stream_inputs and stream_outputs are buffered and flushed as span attributes."""
