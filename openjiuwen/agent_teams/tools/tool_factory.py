@@ -64,6 +64,7 @@ def create_team_tools(
     swarmflow_model_resolver: Callable[[str], Any] | None = None,
     swarmflow_worker_base_spec: Any = None,
     swarmflow_human_base_spec: Any = None,
+    concurrency_governor: Any = None,
     team_permissions_enabled: bool = False,
 ) -> list[Tool]:
     """Create role-appropriate tool instances filtered by permission sets.
@@ -142,6 +143,7 @@ def create_team_tools(
             model_resolver=swarmflow_model_resolver,
             worker_base_spec=swarmflow_worker_base_spec,
             human_base_spec=swarmflow_human_base_spec,
+            concurrency_governor=concurrency_governor,
             t=t,
             language=lang,
         ),

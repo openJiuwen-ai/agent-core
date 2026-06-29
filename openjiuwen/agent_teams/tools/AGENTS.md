@@ -235,6 +235,17 @@ The ability layer renders tool results with `str(result)` — `MappedToolOutput.
 | **Text + behavior guidance** | `claim_task` (completed) | Append `Call view_task now…` after task completion to sustain the autonomous task loop |
 | **Default JSON** | `TeamTool` base | `json.dumps(output.data)` fallback for anything that forgot to override |
 
+### Async tool two-phase text (`AsyncTool` subclasses, e.g. `SwarmflowTool`)
+
+For sync `TeamTool`, `map_result` is the **only** source of LLM-visible tool text. Async tools add a **second outlet in a later round**:
+
+| Phase | Outlet | When | Copy |
+|---|---|---|---|
+| **Launch** | `map_result` | Synchronously after `invoke`, via `_wrap_invoke_with_logging` | Launched receipt (swarmflow → `swarmflow.launched`, includes `run_id` + `task_id`) |
+| **Terminal** | `format_completed_injection` / `format_failed_injection` | Background run ends; `AsyncToolRuntime._run` calls `AsyncToolRecord.format_*` | `swarmflow.completed` / `swarmflow.failed` (includes `run_id`) |
+
+Terminal callbacks are registered at invoke via `launch_async_tool(..., format_completed=, format_failed=)` (closure captures per-run `run_id` + `completion_ctx`). They return `str | None`: non-`None` overrides default `async_tool.*` copy; `None` or unset falls back to default (no `run_id`, only `tool` + `result`/`error`). `run_background` returns the **raw script result** (no string assembly inside); formatting is the terminal callback's job. See `harness/AGENTS.md` (async tool framework), `workflow/AGENTS.md` (SwarmflowTool), `S_20` / `F_47`.
+
 Design principles:
 - **Token efficiency**: only send what the model needs for its next decision.
 - **Behavior guidance injection**: keep these nudges in `map_result`, not in the descriptor — they fire only when the terminal state is reached.

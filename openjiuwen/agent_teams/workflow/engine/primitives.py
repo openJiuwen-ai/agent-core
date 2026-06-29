@@ -266,6 +266,15 @@ def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
     return merged
 
 
+def _resolve_agent_gate(rt):
+    """Return the active admission gate, lazily constructing the default sem."""
+    from .admission import SemaphoreAdmission
+
+    if rt.agent_gate is None:
+        rt.agent_gate = SemaphoreAdmission(rt.make_cap())
+    return rt.agent_gate
+
+
 # ─────────────────────────── agent ───────────────────────────
 # Typed return per schema kind:
 #   schema=MyModel (pydantic) -> MyModel | None   (attribute access, static types)
@@ -341,10 +350,9 @@ async def agent(
         _emit_agent_failed(rt, opts, f"spawn limit {rt.spawn_limit} reached; skipping {opts.get('label')!r}")
         return None
 
-    if rt.sem is None:  # safety net; normally created in run_workflow
-        rt.sem = asyncio.Semaphore(rt.make_cap())
+    gate = _resolve_agent_gate(rt)
 
-    async with rt.sem:
+    async with gate.acquire():
         rt.spawn_count += 1
         call_result = await _call_backend(
             rt, prompt, opts, json_schema, model_cls
@@ -677,9 +685,8 @@ class AgentSession:
             detail = f"spawn limit {rt.spawn_limit} reached"
             rt.log_sink(f"[wf] {detail}; skipping {req.opts.get('label')!r}")
             return _BackendCallResult(result=None, succeeded=False, error_detail=detail)
-        if rt.sem is None:  # safety net; normally created in run_workflow
-            rt.sem = asyncio.Semaphore(rt.make_cap())
-        async with rt.sem:
+        gate = _resolve_agent_gate(rt)
+        async with gate.acquire():
             await self._ensure_open(rt, req.opts)
             return await self._turn(rt, req)
 

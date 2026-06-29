@@ -92,6 +92,7 @@ class TeamWorkerBackend(AgentBackend):
         session_id: str | None = None,
         on_human_prompt: Callable[[str, str, str], None] | None = None,
         on_human_replied: Callable[[str, str], None] | None = None,
+        run_id: str | None = None,
     ) -> None:
         self._model = model
         self._team_name = team_name
@@ -105,6 +106,8 @@ class TeamWorkerBackend(AgentBackend):
         self._session_id = session_id
         self._on_human_prompt = on_human_prompt
         self._on_human_replied = on_human_replied
+        self._run_id = run_id
+        self._run_prefix = self._run_id_prefix(run_id)
         self._worktrees = SwarmflowWorkerWorktrees(team_name=team_name, build_context=build_context)
         self._t = make_translator(language if language in ("cn", "en") else "cn")
         self._counter = 0
@@ -391,11 +394,12 @@ class TeamWorkerBackend(AgentBackend):
     # ------------------------------------------------------------------
 
     def _next_member_name(self, opts: dict) -> str:
-        """Mint a unique, pattern-valid worker member name from the call label.
+        """Mint a unique worker member name from the call label and run prefix.
 
-        ``wf-<label-slug>-<n>`` — lowercase ASCII, leading letter (the ``wf-``
-        prefix guarantees it), so it satisfies the member-name routing/path
-        constraints. ``n`` is a per-backend counter; the synchronous
+        ``{run_prefix}-{label-slug}-{n}`` (or ``wf-{label-slug}-{n}`` when no
+        run id is set) — lowercase ASCII, the leading run/``wf-`` prefix
+        guarantees it starts with a letter (satisfies member-name routing/path
+        constraints). ``n`` is a per-backend counter; the synchronous
         read-increment between awaits keeps it collision-free under the
         engine's concurrent fan-out.
         """
@@ -403,6 +407,8 @@ class TeamWorkerBackend(AgentBackend):
         self._counter += 1
         label = str(opts.get("label") or "worker")
         slug = _SLUG_RE.sub("-", label.lower()).strip("-") or "worker"
+        if self._run_prefix:
+            return f"{self._run_prefix}-{slug}-{n}"
         return f"wf-{slug}-{n}"
 
     @staticmethod
@@ -412,6 +418,14 @@ class TeamWorkerBackend(AgentBackend):
         except Exception:
             payload = str(result)
         return len(prompt) // 4 + len(payload) // 4
+
+    @staticmethod
+    def _run_id_prefix(run_id: str | None) -> str | None:
+        """Slug the full run id for worker member-name prefixing."""
+        if not run_id:
+            return None
+        slug = _SLUG_RE.sub("-", run_id.lower()).strip("-")
+        return slug or None
 
 
 __all__ = ["TeamWorkerBackend"]

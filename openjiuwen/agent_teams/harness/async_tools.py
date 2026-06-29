@@ -41,6 +41,8 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 # A completion-injection callback: hand the harness the model-facing text. Wired
 # to ``NativeHarness.send(text, immediate=False)`` by the harness itself.
 InjectCallback = Callable[[str], Awaitable[Any]]
+CompletionFormatter = Callable[[Any], str | None]
+FailureFormatter = Callable[[str], str | None]
 
 # Result-spill summary length: how many leading characters of an oversized
 # result stay inline (as a preview) next to the retrieval pointer.
@@ -86,6 +88,8 @@ class AsyncToolRecord:
     result: Any = None
     error: str = ""
     output_file: str | None = None  # set when an oversized result spills to disk
+    format_completed: CompletionFormatter | None = None
+    format_failed: FailureFormatter | None = None
 
 
 @dataclass
@@ -128,6 +132,8 @@ class AsyncToolRuntime:
         *,
         tool_name: str,
         description: str,
+        format_completed: CompletionFormatter | None = None,
+        format_failed: FailureFormatter | None = None,
     ) -> None:
         """Schedule a background task and track it until completion.
 
@@ -138,11 +144,15 @@ class AsyncToolRuntime:
                 task be created on the running loop.
             tool_name: The launching tool's name (for the completion message).
             description: Human-readable task description (for the registry).
+            format_completed: Optional callback to render completion text.
+            format_failed: Optional callback to render failure text.
         """
         self.registry[task_id] = AsyncToolRecord(
             task_id=task_id,
             tool_name=tool_name,
             description=description,
+            format_completed=format_completed,
+            format_failed=format_failed,
         )
         self._events[task_id] = asyncio.Event()
         task = asyncio.create_task(self._run(task_id, coro_factory, tool_name))
@@ -177,7 +187,12 @@ class AsyncToolRuntime:
                 record.status = "error"
                 record.error = str(exc)
             self._signal(task_id)
-            await self._inject(t("async_tool.failed", tool=tool_name, error=str(exc)))
+            failure_text = None
+            if record is not None and record.format_failed is not None:
+                failure_text = record.format_failed(str(exc))
+            if failure_text is None:
+                failure_text = t("async_tool.failed", tool=tool_name, error=str(exc))
+            await self._inject(failure_text)
             return
         if record is not None:
             record.status = "completed"
@@ -186,9 +201,12 @@ class AsyncToolRuntime:
         if record is not None:
             result_text = await self._maybe_spill(task_id, record, result_text)
         self._signal(task_id)
-        await self._inject(
-            t("async_tool.completed", tool=tool_name, result=result_text)
-        )
+        completion_text = None
+        if record is not None and record.format_completed is not None:
+            completion_text = record.format_completed(result)
+        if completion_text is None:
+            completion_text = t("async_tool.completed", tool=tool_name, result=result_text)
+        await self._inject(completion_text)
 
     def _signal(self, task_id: str) -> None:
         """Wake any ``wait`` blocked on this task — its record is now terminal."""
@@ -375,6 +393,8 @@ __all__ = [
     "AsyncToolRecord",
     "AsyncToolRuntime",
     "AsyncTool",
+    "CompletionFormatter",
+    "FailureFormatter",
     "InjectCallback",
     "render_result_text",
 ]

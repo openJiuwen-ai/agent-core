@@ -604,6 +604,8 @@ class NativeHarness(DeepAgent):
         *,
         tool_name: str,
         description: str,
+        format_completed: "Callable[[Any], str | None] | None" = None,
+        format_failed: "Callable[[str], str | None] | None" = None,
     ) -> None:
         """Launch a background async-tool task tracked by this harness.
 
@@ -612,12 +614,16 @@ class NativeHarness(DeepAgent):
             coro_factory: Zero-arg factory returning the coroutine to run.
             tool_name: The launching tool's name (for the completion message).
             description: Human-readable task description (for the registry).
+            format_completed: Optional callback to render completion injection text.
+            format_failed: Optional callback to render failure injection text.
         """
         self.async_tool_runtime.launch(
             task_id,
             coro_factory,
             tool_name=tool_name,
             description=description,
+            format_completed=format_completed,
+            format_failed=format_failed,
         )
 
     # ------------------------------------------------------------------

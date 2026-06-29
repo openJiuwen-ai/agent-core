@@ -449,3 +449,36 @@ async def run(args):
     parsed = json.loads(result)
     assert parsed == {"status": "done"}
     assert manager.removed == []
+
+
+def test_member_names_use_run_id_prefix():
+    """Concurrent runs prefix worker member names with the slugified run_id."""
+    backend = TeamWorkerBackend(model=None, team_name="t", run_id="wf_abc123def456")
+    name_a = backend._next_member_name({"label": "compute"})
+    name_b = backend._next_member_name({"label": "compute"})
+    assert name_a == "wf-abc123def456-compute-0"
+    assert name_b == "wf-abc123def456-compute-1"
+
+    fallback = TeamWorkerBackend(model=None, team_name="t")
+    assert fallback._next_member_name({"label": "compute"}) == "wf-compute-0"
+
+
+def test_concurrent_runs_member_names_do_not_collide():
+    """SDD §7: different run_ids with the same label mint disjoint member names."""
+    label = "compute"
+    run_a = TeamWorkerBackend(model=None, team_name="t", run_id="wf_runaaaaaaa")
+    run_b = TeamWorkerBackend(model=None, team_name="t", run_id="wf_runbbbbbbb")
+    name_a = run_a._next_member_name({"label": label})
+    name_b = run_b._next_member_name({"label": label})
+    assert name_a == "wf-runaaaaaaa-compute-0"
+    assert name_b == "wf-runbbbbbbb-compute-0"
+    assert name_a != name_b
+
+
+def test_long_run_id_slug_is_not_truncated_in_member_names():
+    """SDD §7: slugified run_id prefix keeps the full id (no truncation)."""
+    long_run_id = "wf_" + "a" * 48
+    backend = TeamWorkerBackend(model=None, team_name="t", run_id=long_run_id)
+    name = backend._next_member_name({"label": "w"})
+    assert name.startswith("wf-" + "a" * 48 + "-")
+    assert len(name) > 50

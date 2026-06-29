@@ -167,10 +167,16 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "hitt.assigned_event": "你被指派了新任务 [{task_id}] {title}。",
         # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
-        "workflow.started": "「{name}」编排已启动，我将在每个阶段向你汇报进展。",
-        "workflow.phase": "进入阶段：{phase}",
+        "workflow.started": "编排 [{run_id}]「{name}」已启动，我将在每个阶段向你汇报进展。",
+        "workflow.phase": "编排 [{run_id}] 进入阶段：{phase}",
         "workflow.human_prompt": "正在等待人工回复 [{label}]：{prompt}（correlation_id={corr}）",
         "workflow.human_replied": "人工已回复 [{label}]，编排继续。",
+        "swarmflow.launched": (
+            "[Swarmflow 已启动] run_id={run_id}，task_id={task_id}。"
+            "并行工作流计数请只认 run_id，不要用 task_id 当作新的一局。"
+        ),
+        "swarmflow.completed": "[Swarmflow 完成] run_id={run_id}\n{result}",
+        "swarmflow.failed": "[Swarmflow 失败] run_id={run_id}，错误={error}",
         # harness/async_tools.py — async background-tool framework feedback
         "async_tool.launched": (
             "[后台任务] {tool} 已启动（task_id={task_id}）。完成后结果会自动回灌给你，"
@@ -349,12 +355,18 @@ STRINGS: dict[str, dict[str, str]] = {
         "hitt.assigned_event": 'You have been assigned task [{task_id}] "{title}".',
         # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
         "workflow.started": (
-            "Orchestration of '{name}' has started; I will "
+            "Orchestration [{run_id}] '{name}' has started; I will "
             "report progress to you at each phase."
         ),
-        "workflow.phase": "Entering phase: {phase}",
+        "workflow.phase": "Orchestration [{run_id}] entering phase: {phase}",
         "workflow.human_prompt": "Awaiting a human reply [{label}]: {prompt} (correlation_id={corr})",
         "workflow.human_replied": "The human replied [{label}]; orchestration continues.",
+        "swarmflow.launched": (
+            "[Swarmflow launched] run_id={run_id}, task_id={task_id}. "
+            "Count parallel workflows by run_id only — do not treat task_id as a new run."
+        ),
+        "swarmflow.completed": "[Swarmflow completed] run_id={run_id}\n{result}",
+        "swarmflow.failed": "[Swarmflow failed] run_id={run_id}, error={error}",
         # harness/async_tools.py — async background-tool framework feedback
         "async_tool.launched": (
             "[Background task] {tool} started (task_id={task_id}). The result will be "
