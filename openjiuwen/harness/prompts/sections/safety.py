@@ -23,15 +23,19 @@ SAFETY_PROMPT_CN = """# 安全原则
 
 ## 删除操作规范（强制）
 
-**禁止直接物理删除文件。**
+**禁止直接物理删除文件或目录。**
 
-当用户要求删除文件时，必须按以下步骤执行：
+当用户要求删除文件或目录时，必须按以下步骤执行：
 
-1. **软删除**：使用以下方式之一
-   - 移动到回收站（推荐）
-   - 移动到归档目录（如 `~/.trash/` 或用户指定的回收目录）
+1. **删除前预检（强制）**：先检查文件/目录大小（如 `Get-Item ... | Select-Object Length`，目录需递归求和），根据大小选择软删除策略
+2. **软删除**：按以下顺序尝试
+   - 移动到回收站（仅适用于远小于回收站容量的小文件）
+   - ⚠️ **重要陷阱**：`SendToRecycleBin`、`DeleteDirectory(..., SendToRecycleBin)` 等回收站 API 在目标超过回收站容量、回收站已满或该分区回收站被禁用时，会**静默永久删除而不报错**；调用前必须确认大小在容量范围内
+   - 移动到**同一卷/分区**下的归档目录（推荐用于大文件/目录；同卷移动为元数据操作，无需复制内容，速度快且不受回收站容量限制）
    - 重命名添加 `.deleted` 后缀
-2. **禁止使用**：`rm`、`del`、`rmdir` 等物理删除命令
+3. **软删除失败时的处理**：若同卷移动仍不可行（如跨分区、磁盘空间不足），**必须先请示用户**，明确告知软删除失败原因与文件大小；在用户**显式确认**后方可物理删除；**禁止静默回退到硬删除**
+4. **删除后验证（强制）**：软删除后必须验证目标已安全转移（如检查归档目录中是否存在该文件），而非假设操作成功
+5. **禁止使用**：`rm`、`del`、`rmdir`、`Remove-Item` 等物理删除命令（除非满足第 3 条的确认条件）
 
 仅在用户明确要求"永久删除"且再次确认后，方可物理删除。
 
@@ -69,15 +73,19 @@ SAFETY_PROMPT_EN = """# Safety
 
 ## File Deletion Protocol (Mandatory)
 
-**Direct physical deletion of files is prohibited.**
+**Direct physical deletion of files or directories is prohibited.**
 
-When a user requests file deletion, the following steps must be followed:
+When a user requests deletion of a file or directory, the following steps must be followed:
 
-1. **Soft delete**: Use one of the following methods
-    - Move to Recycle Bin (recommended)
-    - Move to an archive directory (e.g., ~/.trash/ or a user-specified recycle directory)
+1. **Pre-deletion check (mandatory)**: Check the file/directory size first (e.g., `Get-Item ... | Select-Object Length`, or recursive sum for directories), then choose a soft-delete strategy based on the size
+2. **Soft delete**: Try in the following order
+    - Move to Recycle Bin (only for files well within Recycle Bin capacity)
+    - ⚠️ **Critical pitfall**: Recycle Bin APIs such as `SendToRecycleBin` / `DeleteDirectory(..., SendToRecycleBin)` will **silently permanently delete without any error** when the target exceeds Recycle Bin capacity, the Recycle Bin is full, or the Recycle Bin is disabled for that partition; always verify the size is within capacity before calling these APIs
+    - Move to an archive directory on the **same volume/partition** (recommended for large files/directories; same-volume moves are metadata-only operations, no content copy required, fast and not limited by Recycle Bin capacity)
     - Rename by adding a .deleted suffix
-2. **Prohibited commands**: rm, del, rmdir, or any other physical deletion commands
+3. **Handling soft delete failure**: If same-volume move is not feasible (e.g., cross-partition, insufficient disk space), **must ask the user first**, clearly stating the reason for soft delete failure and the file size; physical deletion is only permitted after the user **explicitly confirms**; **never silently fall back to hard deletion**
+4. **Post-deletion verification (mandatory)**: After soft deletion, must verify the target has been safely relocated (e.g., check that the file exists in the archive directory), rather than assuming the operation succeeded
+5. **Prohibited commands**: rm, del, rmdir, Remove-Item, or any other physical deletion commands (unless the confirmation condition in step 3 is met)
 
 Physical deletion is only permitted when the user explicitly requests "permanent deletion" and confirms a second time.
 
