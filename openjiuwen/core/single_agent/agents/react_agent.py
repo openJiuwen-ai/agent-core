@@ -690,7 +690,35 @@ class ReActAgent(BaseAgent):
         falls back to llm.invoke() otherwise.
         """
         # --- Finalize system message and context window (post-rails) ---
-        final_system = [SystemMessage(content=self.prompt_builder.build())]
+        # Build the base system prompt from registered sections, then fold in
+        # environment-context injected by rails via ctx.extra. E is placed at
+        # the END of the system string so that when its content changes (e.g.
+        # a date rollover) the stable base-prompt prefix stays cache-hit; only
+        # the trailing env block and onward recompute. pop() clears ctx.extra
+        # after each model call to prevent multi-turn accumulation. Entries
+        # with empty content are skipped so no hollow <environment_context>
+        # block is folded into the system prompt. Access via .get() for
+        # uniform, robust entry field reads.
+        system_content = self.prompt_builder.build()
+        environment_context = ctx.extra.pop("environment_context", None)
+        context_parts = [
+            r.get("content")
+            for r in (environment_context or [])
+            if r.get("content")
+        ]
+        if context_parts:
+            env_block = (
+                "<environment_context>\n"
+                + "\n\n".join(context_parts)
+                + "\n</environment_context>"
+            )
+            system_content = system_content + "\n\n" + env_block
+            logger.debug(
+                "[ReActAgent] environment_context folded into system "
+                "sources=%s",
+                [r.get("source") for r in (environment_context or [])],
+            )
+        final_system = [SystemMessage(content=system_content)]
 
         # KV cache release:
         # When ContextEngineConfig.enable_kv_cache_release=True and the current
@@ -758,18 +786,6 @@ class ReActAgent(BaseAgent):
         # equally pass context_window.get_*() directly.)
         ctx.inputs.messages = context_window.get_messages()
         ctx.inputs.tools = context_window.get_tools()
-
-        # Append environment-context messages injected by rails via ctx.extra.
-        # Using UserMessage with <environment_context> tag because many LLM
-        # providers merge SystemMessage into the system parameter, breaking
-        # KV cache prefix stability. pop() clears after each model call to
-        # prevent multi-turn accumulation.
-        environment_context = ctx.extra.pop("environment_context", None)
-        if environment_context:
-            context_parts = [r["content"] for r in environment_context]
-            ctx.inputs.messages.append(
-                UserMessage(content="<environment_context>\n" + "\n\n".join(context_parts) + "\n</environment_context>")
-            )
 
         try:
             trace_ids = resolve_context_trace_ids(ctx.session, ctx.context)

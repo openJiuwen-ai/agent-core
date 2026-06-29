@@ -3,9 +3,11 @@
 """Full-coverage tests for environment-context injection via ctx.extra.
 
 Verifies that rails write to ctx.extra["environment_context"], and
-_railed_model_call consumes it with pop(), wraps as UserMessage with
-<environment_context> XML tags — preventing multi-turn accumulation
-and preserving KV cache prefix stability.
+_railed_model_call consumes it with pop() and folds it into the system
+prompt (appended after prompt_builder.build() output, wrapped in
+<environment_context> XML tags). E sits at the end of the system string so
+the stable base-prompt prefix stays KV-cache-hit when env content changes;
+pop() prevents multi-turn accumulation.
 """
 import os
 import unittest
@@ -208,7 +210,7 @@ class TestProtocolStructure(unittest.TestCase):
         assert len(ctx.extra["environment_context"]) == 2
 
     def test_ctx_extra_empty_context_list(self):
-        """Empty environment_context list means no tail message appended."""
+        """Empty environment_context list means no env block folded into system."""
         agent, _ = _make_agent()
         ctx = AgentCallbackContext(agent=agent)
         ctx.extra["environment_context"] = []
@@ -220,10 +222,10 @@ class TestProtocolStructure(unittest.TestCase):
 # ============================================================
 
 class TestSingleContextInjection(unittest.IsolatedAsyncioTestCase):
-    """Tests for single environment_context becoming a tail UserMessage."""
+    """Tests for single environment_context being folded into the system prompt."""
 
-    async def test_single_context_appended_as_tail_user_message(self):
-        """Single environment_context becomes a UserMessage at messages tail."""
+    async def test_single_context_folded_into_system_message(self):
+        """Single environment_context is folded into the system message (messages[0])."""
         agent, _ = _make_agent()
         rail = EnvironmentContextRail("当前时间：2026-05-23 10:00:00")
         await agent.register_rail(rail)
@@ -234,12 +236,12 @@ class TestSingleContextInjection(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail = messages[-1]
-        assert isinstance(tail, UserMessage)
-        assert "当前时间" in tail.content
+        system_msg = messages[0]
+        assert isinstance(system_msg, SystemMessage)
+        assert "当前时间" in system_msg.content
 
-    async def test_single_context_content_has_environment_context_prefix(self):
-        """Context content is wrapped in <environment_context> tags."""
+    async def test_single_context_content_has_environment_context_tag(self):
+        """Context content is wrapped in <environment_context> tags inside system."""
         agent, _ = _make_agent()
         content = "# 当前日期与时间\n\n- 当前时间：2026-05-23 10:00:00\n- 当前年份：2026"
         rail = EnvironmentContextRail(content)
@@ -251,12 +253,12 @@ class TestSingleContextInjection(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail = messages[-1]
-        assert isinstance(tail, UserMessage)
-        assert tail.content == _wrap(content)
+        system_msg = messages[0]
+        assert isinstance(system_msg, SystemMessage)
+        assert _wrap(content) in system_msg.content
 
-    async def test_single_context_role_is_user(self):
-        """Tail message role is 'user', not 'system'."""
+    async def test_single_context_role_is_system(self):
+        """The message carrying context is the system message, role 'system'."""
         agent, _ = _make_agent()
         rail = EnvironmentContextRail("test content")
         await agent.register_rail(rail)
@@ -267,11 +269,12 @@ class TestSingleContextInjection(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail = messages[-1]
-        assert tail.role == "user"
+        system_msg = messages[0]
+        assert isinstance(system_msg, SystemMessage)
+        assert system_msg.role == "system"
 
-    async def test_single_context_is_last_in_messages_list(self):
-        """Context message is the absolute last element of messages."""
+    async def test_single_context_in_system_not_at_tail(self):
+        """Context lives in messages[0] (system); the tail is the user query, not env."""
         agent, _ = _make_agent()
         rail = EnvironmentContextRail("尾部环境信息")
         await agent.register_rail(rail)
@@ -282,11 +285,13 @@ class TestSingleContextInjection(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        assert isinstance(messages[-1], UserMessage)
-        assert "尾部环境信息" in messages[-1].content
+        assert isinstance(messages[0], SystemMessage)
+        assert "尾部环境信息" in messages[0].content
+        # Tail is the user query, not an env-context user message.
+        assert ENV_CTX_TAG_OPEN not in messages[-1].content
 
-    async def test_context_not_in_first_position(self):
-        """Context is NOT at messages[0]; that position is the system prompt."""
+    async def test_context_in_first_position_system(self):
+        """Context is folded into messages[0], which is the system prompt."""
         agent, _ = _make_agent()
         rail = EnvironmentContextRail("时间：10:00")
         await agent.register_rail(rail)
@@ -298,7 +303,7 @@ class TestSingleContextInjection(unittest.IsolatedAsyncioTestCase):
 
         messages = mock_llm.call_history[0]
         assert isinstance(messages[0], SystemMessage)
-        assert "时间：10:00" not in messages[0].content
+        assert "时间：10:00" in messages[0].content
 
 
 # ============================================================
@@ -306,10 +311,10 @@ class TestSingleContextInjection(unittest.IsolatedAsyncioTestCase):
 # ============================================================
 
 class TestMultipleContexts(unittest.IsolatedAsyncioTestCase):
-    """Tests for merging multiple environment_context entries into one UserMessage."""
+    """Tests for merging multiple environment_context entries into the system prompt."""
 
     async def test_two_entries_merged_with_double_newline(self):
-        """Two entries joined with \\n\\n separator inside <environment_context>."""
+        """Two entries joined with \\n\\n separator inside <environment_context> in system."""
         agent, _ = _make_agent()
         rail = MultiContextRail([
             {"content": "时间：10:00", "source": "time_rail"},
@@ -323,14 +328,12 @@ class TestMultipleContexts(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail = messages[-1]
-        assert isinstance(tail, UserMessage)
-        assert "时间：10:00" in tail.content
-        assert "平台：Linux" in tail.content
-        assert tail.content == _wrap("时间：10:00\n\n平台：Linux")
+        system_msg = messages[0]
+        assert isinstance(system_msg, SystemMessage)
+        assert _wrap("时间：10:00\n\n平台：Linux") in system_msg.content
 
     async def test_three_entries_merged_preserving_order(self):
-        """Three entries preserve insertion order when merged."""
+        """Three entries preserve insertion order when merged into system."""
         agent, _ = _make_agent()
         rail = MultiContextRail([
             {"content": "第一", "source": "a"},
@@ -345,9 +348,9 @@ class TestMultipleContexts(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail = messages[-1]
-        assert isinstance(tail, UserMessage)
-        assert tail.content == _wrap("第一\n\n第二\n\n第三")
+        system_msg = messages[0]
+        assert isinstance(system_msg, SystemMessage)
+        assert _wrap("第一\n\n第二\n\n第三") in system_msg.content
 
     async def test_priority_ordering_high_runs_first_in_context(self):
         """High-priority rail appends context before low-priority rail."""
@@ -364,13 +367,17 @@ class TestMultipleContexts(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail = messages[-1]
-        assert isinstance(tail, UserMessage)
-        inner = tail.content.replace(ENV_CTX_TAG_OPEN, "").replace(ENV_CTX_TAG_CLOSE, "")
-        assert inner.startswith("高优先级信息")
+        system_msg = messages[0]
+        assert isinstance(system_msg, SystemMessage)
+        # Extract the env block body (between the XML tags) to check ordering.
+        sys_content = system_msg.content
+        start = sys_content.index(ENV_CTX_TAG_OPEN) + len(ENV_CTX_TAG_OPEN)
+        end = sys_content.index(ENV_CTX_TAG_CLOSE, start)
+        env_body = sys_content[start:end]
+        assert env_body.startswith("高优先级信息")
 
     async def test_two_separate_rails_produce_merged_context(self):
-        """Two independently registered rails each write one entry."""
+        """Two independently registered rails each write one entry, both in system."""
         agent, _ = _make_agent()
         rail_a = EnvironmentContextRail("信息A", source="rail_a")
         rail_b = EnvironmentContextRail("信息B", source="rail_b")
@@ -383,13 +390,13 @@ class TestMultipleContexts(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail = messages[-1]
-        assert isinstance(tail, UserMessage)
-        assert "信息A" in tail.content
-        assert "信息B" in tail.content
+        system_msg = messages[0]
+        assert isinstance(system_msg, SystemMessage)
+        assert "信息A" in system_msg.content
+        assert "信息B" in system_msg.content
 
-    async def test_multiple_entries_produce_single_user_message(self):
-        """Multiple entries result in exactly ONE tail UserMessage, not many."""
+    async def test_multiple_entries_folded_into_single_system_message(self):
+        """Multiple entries result in exactly ONE system message containing all."""
         agent, _ = _make_agent()
         rail = MultiContextRail([
             {"content": "r1", "source": "a"},
@@ -404,11 +411,15 @@ class TestMultipleContexts(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail_user_msgs = [m for m in messages if isinstance(m, UserMessage) and ENV_CTX_TAG_OPEN in m.content]
-        assert len(tail_user_msgs) == 1
-        assert "r1" in tail_user_msgs[0].content
-        assert "r2" in tail_user_msgs[0].content
-        assert "r3" in tail_user_msgs[0].content
+        system_msgs = [m for m in messages if isinstance(m, SystemMessage)]
+        assert len(system_msgs) == 1
+        sys_content = system_msgs[0].content
+        assert "r1" in sys_content
+        assert "r2" in sys_content
+        assert "r3" in sys_content
+        # No env-context user message is appended at the tail.
+        env_user_msgs = [m for m in messages if isinstance(m, UserMessage) and ENV_CTX_TAG_OPEN in m.content]
+        assert len(env_user_msgs) == 0
 
 
 # ============================================================
@@ -418,8 +429,8 @@ class TestMultipleContexts(unittest.IsolatedAsyncioTestCase):
 class TestNoContextBaseline(unittest.IsolatedAsyncioTestCase):
     """Tests for zero side effects when no environment_context is present."""
 
-    async def test_no_context_no_extra_user_message(self):
-        """Without environment_context, no tail UserMessage is appended."""
+    async def test_no_context_no_env_block_in_system(self):
+        """Without environment_context, no env block is folded into system."""
         agent, _ = _make_agent()
         mock_llm = MockLLMModel()
         mock_llm.set_responses([create_text_response("ok")])
@@ -427,11 +438,12 @@ class TestNoContextBaseline(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        user_msgs_with_tag = [m for m in messages if isinstance(m, UserMessage) and ENV_CTX_TAG_OPEN in m.content]
-        assert len(user_msgs_with_tag) == 0
+        assert ENV_CTX_TAG_OPEN not in messages[0].content
+        env_user_msgs = [m for m in messages if isinstance(m, UserMessage) and ENV_CTX_TAG_OPEN in m.content]
+        assert len(env_user_msgs) == 0
 
-    async def test_empty_context_list_no_tail_message(self):
-        """Empty environment_context list produces no tail message."""
+    async def test_empty_context_list_no_env_block(self):
+        """Empty environment_context list produces no env block in system."""
         agent, _ = _make_agent()
 
         class EmptyContextRail(AgentRail):
@@ -445,9 +457,8 @@ class TestNoContextBaseline(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        # pop() returns empty list, which is truthy-ish but len==0 → no append
-        user_msgs_with_tag = [m for m in messages if isinstance(m, UserMessage) and ENV_CTX_TAG_OPEN in m.content]
-        assert len(user_msgs_with_tag) == 0
+        # pop() returns empty list, which is falsy → no env block appended.
+        assert ENV_CTX_TAG_OPEN not in messages[0].content
 
     async def test_no_context_message_count_unchanged(self):
         """Without environment_context, messages length matches context window output."""
@@ -460,8 +471,8 @@ class TestNoContextBaseline(unittest.IsolatedAsyncioTestCase):
         messages = mock_llm.call_history[0]
         assert len(messages) == 2  # [SystemMessage(prompt), UserMessage(query)]
 
-    async def test_no_context_system_prompt_content_unchanged(self):
-        """System prompt content is unaffected when no environment_context."""
+    async def test_no_context_base_system_prompt_preserved(self):
+        """Base system prompt content is unaffected when no environment_context."""
         agent, _ = _make_agent()
         mock_llm = MockLLMModel()
         mock_llm.set_responses([create_text_response("ok")])
@@ -472,17 +483,113 @@ class TestNoContextBaseline(unittest.IsolatedAsyncioTestCase):
         system_msg = messages[0]
         assert isinstance(system_msg, SystemMessage)
         assert "测试助手" in system_msg.content
+        assert ENV_CTX_TAG_OPEN not in system_msg.content
 
 
 # ============================================================
-# 5. Context Engine Bypass Tests
+# 4b. No-Accumulation Regression Tests
 # ============================================================
 
-class TestContextEngineBypass(unittest.IsolatedAsyncioTestCase):
-    """Tests that context appended after context window, bypassing trimming."""
+class TestNoAccumulation(unittest.IsolatedAsyncioTestCase):
+    """Env block must NOT accumulate in the system string across turns.
 
-    async def test_context_appended_after_get_context_window(self):
-        """Context is not part of context_window output; appended separately."""
+    Each model call rebuilds system = prompt_builder.build() + ONE env block
+    (sourced from ctx.extra, cleared by pop()). The context window treats
+    system_messages as a per-call replacement, not append state. So the env
+    block must appear exactly once in every call's system message, regardless
+    of how many model calls or invokes precede it.
+    """
+
+    @staticmethod
+    def _env_block_count(system_content: str) -> int:
+        return system_content.count(ENV_CTX_TAG_OPEN)
+
+    async def test_no_accumulation_across_tool_call_loop(self):
+        """Two model calls in one invoke: each system has exactly one env block."""
+        agent, _ = _make_agent()
+        rail = EnvironmentContextRail("环境信息")
+        await agent.register_rail(rail)
+
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([
+            create_tool_call_response("add", '{"a": 1, "b": 2}'),
+            create_text_response("3"),
+        ])
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
+            await agent.invoke({"query": "1+2"})
+
+        assert mock_llm.call_count == 2
+        for call_messages in mock_llm.call_history:
+            system_msg = call_messages[0]
+            assert isinstance(system_msg, SystemMessage)
+            assert self._env_block_count(system_msg.content) == 1
+
+    async def test_no_accumulation_across_separate_invokes(self):
+        """Two separate invokes: each system has exactly one env block."""
+        agent, _ = _make_agent()
+        rail = EnvironmentContextRail("环境信息")
+        await agent.register_rail(rail)
+
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([
+            create_text_response("answer 1"),
+            create_text_response("answer 2"),
+        ])
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
+            await agent.invoke({"query": "q1"})
+            await agent.invoke({"query": "q2"})
+
+        assert mock_llm.call_count == 2
+        for call_messages in mock_llm.call_history:
+            system_msg = call_messages[0]
+            assert isinstance(system_msg, SystemMessage)
+            assert self._env_block_count(system_msg.content) == 1
+
+    async def test_no_accumulation_with_dynamic_content(self):
+        """Changing env content each call still yields exactly one block per call."""
+        agent, _ = _make_agent()
+        call_count = {"n": 0}
+
+        class DynamicContextRail(AgentRail):
+            async def before_model_call(self, ctx):
+                idx = min(call_count["n"], 2)
+                ctx.extra.setdefault("environment_context", []).append({
+                    "content": f"第{idx + 1}次信息",
+                    "source": "dynamic",
+                })
+                call_count["n"] += 1
+
+        await agent.register_rail(DynamicContextRail())
+
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([
+            create_tool_call_response("add", '{"a": 1, "b": 2}'),
+            create_tool_call_response("add", '{"a": 3, "b": 4}'),
+            create_text_response("done"),
+        ])
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
+            await agent.invoke({"query": "1+2"})
+
+        assert mock_llm.call_count == 3
+        for call_messages in mock_llm.call_history:
+            system_msg = call_messages[0]
+            assert isinstance(system_msg, SystemMessage)
+            assert self._env_block_count(system_msg.content) == 1
+
+
+# ============================================================
+# 5. System Prompt Delivery (not subject to history trimming)
+# ============================================================
+
+class TestSystemDelivery(unittest.IsolatedAsyncioTestCase):
+    """Tests that environment_context folded into system is always delivered.
+
+    The system message is separate from context-window history trimming, so
+    the env block survives even when earlier history is trimmed.
+    """
+
+    async def test_context_folded_into_system_message(self):
+        """Context content is present inside the system message."""
         agent, _ = _make_agent()
         rail = EnvironmentContextRail("不可裁剪的内容")
         await agent.register_rail(rail)
@@ -493,12 +600,12 @@ class TestContextEngineBypass(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail = messages[-1]
-        assert isinstance(tail, UserMessage)
-        assert "不可裁剪的内容" in tail.content
+        system_msg = messages[0]
+        assert isinstance(system_msg, SystemMessage)
+        assert "不可裁剪的内容" in system_msg.content
 
-    async def test_context_not_in_context_window_system_messages(self):
-        """Context is NOT inside context_window.system_messages."""
+    async def test_context_only_in_system_not_in_user_messages(self):
+        """Context lives in the system message; no env user message is appended."""
         agent, _ = _make_agent()
         rail = EnvironmentContextRail("独立信息")
         await agent.register_rail(rail)
@@ -510,13 +617,12 @@ class TestContextEngineBypass(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail = messages[-1]
-        assert "独立信息" in tail.content
-        non_tail_system_msgs = [m for m in messages[:-1] if isinstance(m, SystemMessage)]
-        assert all("独立信息" not in m.content for m in non_tail_system_msgs)
+        assert "独立信息" in messages[0].content
+        env_user_msgs = [m for m in messages if isinstance(m, UserMessage) and ENV_CTX_TAG_OPEN in m.content]
+        assert len(env_user_msgs) == 0
 
     async def test_context_survives_even_if_context_trims_history(self):
-        """Context always delivered, even if context engine trims earlier messages."""
+        """Context always delivered via system, even if context engine trims earlier messages."""
         agent, _ = _make_agent()
         rail = EnvironmentContextRail("始终送达的信息")
         await agent.register_rail(rail)
@@ -530,9 +636,9 @@ class TestContextEngineBypass(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "1+2"})
 
         for call_messages in mock_llm.call_history:
-            tail = call_messages[-1]
-            assert isinstance(tail, UserMessage)
-            assert "始终送达的信息" in tail.content
+            system_msg = call_messages[0]
+            assert isinstance(system_msg, SystemMessage)
+            assert "始终送达的信息" in system_msg.content
 
 
 # ============================================================
@@ -540,7 +646,7 @@ class TestContextEngineBypass(unittest.IsolatedAsyncioTestCase):
 # ============================================================
 
 class TestEdgeCaseContent(unittest.IsolatedAsyncioTestCase):
-    """Tests for edge-case environment_context content."""
+    """Tests for edge-case environment_context content folded into system."""
 
     async def test_context_with_xml_tags_in_content(self):
         """Content with XML tags is preserved as-is inside <environment_context>."""
@@ -555,9 +661,9 @@ class TestEdgeCaseContent(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail = messages[-1]
-        assert "<system-reminder>" in tail.content
-        assert "当前时间" in tail.content
+        system_msg = messages[0]
+        assert "<system-reminder>" in system_msg.content
+        assert "当前时间" in system_msg.content
 
     async def test_context_with_unicode_content(self):
         """Unicode content in context is preserved without corruption."""
@@ -572,12 +678,12 @@ class TestEdgeCaseContent(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail = messages[-1]
-        assert "2026年5月23日" in tail.content
-        assert "日本語テスト" in tail.content
+        system_msg = messages[0]
+        assert "2026年5月23日" in system_msg.content
+        assert "日本語テスト" in system_msg.content
 
     async def test_context_with_newlines_in_content(self):
-        """Content with embedded newlines is preserved in the UserMessage."""
+        """Content with embedded newlines is preserved in the system message."""
         agent, _ = _make_agent()
         content = "# 时间\n\n- 当前时间：10:00\n- 当前年份：2026"
         rail = EnvironmentContextRail(content)
@@ -589,12 +695,12 @@ class TestEdgeCaseContent(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail = messages[-1]
-        assert "# 时间" in tail.content
-        assert "当前时间：10:00" in tail.content
+        system_msg = messages[0]
+        assert "# 时间" in system_msg.content
+        assert "当前时间：10:00" in system_msg.content
 
-    async def test_context_with_empty_string_content(self):
-        """Empty-string context content still produces a UserMessage with tags."""
+    async def test_context_with_empty_string_content_skipped(self):
+        """Empty-string context content is skipped; no env block folded into system."""
         agent, _ = _make_agent()
         rail = EnvironmentContextRail("")
         await agent.register_rail(rail)
@@ -605,12 +711,33 @@ class TestEdgeCaseContent(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail = messages[-1]
-        assert isinstance(tail, UserMessage)
-        assert tail.content == _wrap("")
+        system_msg = messages[0]
+        assert isinstance(system_msg, SystemMessage)
+        assert ENV_CTX_TAG_OPEN not in system_msg.content
+
+    async def test_mixed_empty_and_non_empty_entries_only_non_empty_folded(self):
+        """Entries with empty content are dropped; non-empty ones are folded in order."""
+        agent, _ = _make_agent()
+        rail = MultiContextRail([
+            {"content": "有效信息", "source": "a"},
+            {"content": "", "source": "b"},
+            {"content": "另一条有效信息", "source": "c"},
+        ])
+        await agent.register_rail(rail)
+
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([create_text_response("ok")])
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
+            await agent.invoke({"query": "hello"})
+
+        messages = mock_llm.call_history[0]
+        system_msg = messages[0]
+        assert isinstance(system_msg, SystemMessage)
+        # Only the two non-empty entries are joined (empty dropped), in order.
+        assert _wrap("有效信息\n\n另一条有效信息") in system_msg.content
 
     async def test_context_with_long_content(self):
-        """Long context content (1000+ chars) is preserved intact."""
+        """Long context content (1000+ chars) is preserved intact in system."""
         agent, _ = _make_agent()
         long_content = "详细信息：" + "A" * 1000
         rail = EnvironmentContextRail(long_content)
@@ -622,13 +749,13 @@ class TestEdgeCaseContent(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail = messages[-1]
-        assert isinstance(tail, UserMessage)
-        inner = tail.content.replace(ENV_CTX_TAG_OPEN, "").replace(ENV_CTX_TAG_CLOSE, "")
+        system_msg = messages[0]
+        assert isinstance(system_msg, SystemMessage)
+        inner = system_msg.content.replace(ENV_CTX_TAG_OPEN, "").replace(ENV_CTX_TAG_CLOSE, "")
         assert len(inner) >= 1000
 
     async def test_context_with_markdown_table_content(self):
-        """Markdown table content in context is preserved."""
+        """Markdown table content in context is preserved in system."""
         agent, _ = _make_agent()
         content = (
             "# 运行时\n\n"
@@ -645,9 +772,9 @@ class TestEdgeCaseContent(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail = messages[-1]
-        assert "| 操作" in tail.content
-        assert "|------" in tail.content
+        system_msg = messages[0]
+        assert "| 操作" in system_msg.content
+        assert "|------" in system_msg.content
 
     async def test_merge_separator_between_entries_with_newlines(self):
         """When entries have internal newlines, merge uses \\n\\n."""
@@ -664,8 +791,8 @@ class TestEdgeCaseContent(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "hello"})
 
         messages = mock_llm.call_history[0]
-        tail = messages[-1]
-        assert tail.content == _wrap("第一行\n第二行\n\n第三行\n第四行")
+        system_msg = messages[0]
+        assert _wrap("第一行\n第二行\n\n第三行\n第四行") in system_msg.content
 
 
 # ============================================================
@@ -676,7 +803,7 @@ class TestMultiCallLifecycle(unittest.IsolatedAsyncioTestCase):
     """Tests for environment_context across tool-call loops and multiple invocations."""
 
     async def test_context_in_tool_call_loop_first_and_second_model_call(self):
-        """Context present in both model calls of a tool-call loop."""
+        """Context present in system of both model calls of a tool-call loop."""
         agent, _ = _make_agent()
         rail = EnvironmentContextRail("时间：10:00")
         await agent.register_rail(rail)
@@ -691,12 +818,12 @@ class TestMultiCallLifecycle(unittest.IsolatedAsyncioTestCase):
 
         assert mock_llm.call_count == 2
         for call_messages in mock_llm.call_history:
-            tail = call_messages[-1]
-            assert isinstance(tail, UserMessage)
-            assert "时间：10:00" in tail.content
+            system_msg = call_messages[0]
+            assert isinstance(system_msg, SystemMessage)
+            assert "时间：10:00" in system_msg.content
 
     async def test_context_refreshes_on_each_model_call_no_accumulation(self):
-        """pop() clears after each call; no stale content from previous call."""
+        """pop() clears after each call; no stale content from previous call in system."""
         agent, _ = _make_agent()
         call_contents = ["第一次信息", "第二次信息"]
         call_count = {"n": 0}
@@ -721,15 +848,15 @@ class TestMultiCallLifecycle(unittest.IsolatedAsyncioTestCase):
             await agent.invoke({"query": "1+2"})
 
         first_call = mock_llm.call_history[0]
-        assert "第一次信息" in first_call[-1].content
+        assert "第一次信息" in first_call[0].content
         # Only first info in first call (pop cleared it)
-        assert "第二次信息" not in first_call[-1].content
+        assert "第二次信息" not in first_call[0].content
 
         second_call = mock_llm.call_history[1]
-        assert "第二次信息" in second_call[-1].content
+        assert "第二次信息" in second_call[0].content
 
     async def test_context_in_separate_invoke_calls(self):
-        """Each separate invoke gets its own context (ctx.extra is per-invoke)."""
+        """Each separate invoke gets its own context folded into system."""
         agent, _ = _make_agent()
         rail = EnvironmentContextRail("独立信息")
         await agent.register_rail(rail)
@@ -745,9 +872,9 @@ class TestMultiCallLifecycle(unittest.IsolatedAsyncioTestCase):
 
         assert mock_llm.call_count == 2
         for call_messages in mock_llm.call_history:
-            tail = call_messages[-1]
-            assert isinstance(tail, UserMessage)
-            assert "独立信息" in tail.content
+            system_msg = call_messages[0]
+            assert isinstance(system_msg, SystemMessage)
+            assert "独立信息" in system_msg.content
 
     async def test_ctx_extra_is_per_invoke_not_persistent(self):
         """ctx.extra['environment_context'] does not persist across invokes."""
@@ -778,14 +905,19 @@ class TestMultiCallLifecycle(unittest.IsolatedAsyncioTestCase):
 
 
 # ============================================================
-# 8. Prompt Builder Separation Tests
+# 8. Base Prompt Preservation Tests
 # ============================================================
 
-class TestPromptBuilderSeparation(unittest.IsolatedAsyncioTestCase):
-    """Tests that environment_context content is NOT in system prompt builder output."""
+class TestBasePromptPreservation(unittest.IsolatedAsyncioTestCase):
+    """Tests that folding env context into system preserves the base prompt prefix.
 
-    async def test_context_content_not_in_system_prompt(self):
-        """Context content does NOT appear in the system prompt (messages[0])."""
+    The base prompt (prompt_builder output) must remain a stable prefix of the
+    system string; the env block is appended after it so cache prefix stability
+    is maintained when env content changes.
+    """
+
+    async def test_context_folded_into_system_after_base_prompt(self):
+        """Context content appears in the system message alongside the base prompt."""
         agent, _ = _make_agent()
         rail = EnvironmentContextRail("时间信息：2026-05-23")
         await agent.register_rail(rail)
@@ -798,10 +930,10 @@ class TestPromptBuilderSeparation(unittest.IsolatedAsyncioTestCase):
         messages = mock_llm.call_history[0]
         system_msg = messages[0]
         assert isinstance(system_msg, SystemMessage)
-        assert "时间信息" not in system_msg.content
+        assert "时间信息" in system_msg.content
 
-    async def test_context_and_builder_section_both_present(self):
-        """A rail can inject both a PromptSection AND environment_context."""
+    async def test_context_and_builder_section_both_in_system(self):
+        """A rail can inject both a PromptSection AND environment_context into system."""
         agent, _ = _make_agent()
         rail = ContextPlusBuilderRail(
             ctx_content="独立信息内容",
@@ -817,14 +949,12 @@ class TestPromptBuilderSeparation(unittest.IsolatedAsyncioTestCase):
 
         messages = mock_llm.call_history[0]
         system_msg = messages[0]
+        assert isinstance(system_msg, SystemMessage)
         assert "额外的section内容" in system_msg.content
-        tail = messages[-1]
-        assert isinstance(tail, UserMessage)
-        assert "独立信息内容" in tail.content
-        assert "独立信息内容" not in system_msg.content
+        assert "独立信息内容" in system_msg.content
 
-    async def test_original_system_prompt_unaffected_by_context(self):
-        """Original system prompt content is unchanged when context is added."""
+    async def test_base_system_prompt_prefix_preserved_with_context(self):
+        """With context, system = base_prefix + env_block; base prefix is unchanged."""
         agent, _ = _make_agent()
         rail = EnvironmentContextRail("外部信息")
         await agent.register_rail(rail)
@@ -845,7 +975,11 @@ class TestPromptBuilderSeparation(unittest.IsolatedAsyncioTestCase):
 
         sys_with = mock_llm_1.call_history[0][0].content
         sys_without = mock_llm_2.call_history[0][0].content
-        assert sys_with == sys_without
+        # Base prefix is preserved: system-with starts with system-without,
+        # and the env block is appended after it.
+        assert sys_with.startswith(sys_without)
+        assert "外部信息" in sys_with
+        assert "外部信息" not in sys_without
 
 
 # ============================================================
@@ -853,10 +987,10 @@ class TestPromptBuilderSeparation(unittest.IsolatedAsyncioTestCase):
 # ============================================================
 
 class TestAfterModelCallVisibility(unittest.IsolatedAsyncioTestCase):
-    """Tests that after_model_call hooks can inspect the appended context."""
+    """Tests that after_model_call hooks can inspect the context in ctx.inputs.messages."""
 
-    async def test_after_model_call_sees_context_in_messages(self):
-        """after_model_call hook can see the context in ctx.inputs.messages."""
+    async def test_after_model_call_sees_context_in_system(self):
+        """after_model_call hook can see the context in ctx.inputs.messages[0] (system)."""
         agent, _ = _make_agent()
         rail = EnvironmentContextRail("可见信息")
         inspect_rail = InspectAfterModelCallRail()
@@ -870,9 +1004,9 @@ class TestAfterModelCallVisibility(unittest.IsolatedAsyncioTestCase):
 
         assert len(inspect_rail.captured_messages) == 1
         messages = inspect_rail.captured_messages[0]
-        tail = messages[-1]
-        assert isinstance(tail, UserMessage)
-        assert "可见信息" in tail.content
+        system_msg = messages[0]
+        assert isinstance(system_msg, SystemMessage)
+        assert "可见信息" in system_msg.content
 
     async def test_after_model_call_messages_matches_llm_call(self):
         """ctx.inputs.messages in after_model_call matches what LLM received."""
@@ -890,7 +1024,7 @@ class TestAfterModelCallVisibility(unittest.IsolatedAsyncioTestCase):
         llm_messages = mock_llm.call_history[0]
         hook_messages = inspect_rail.captured_messages[0]
         assert len(hook_messages) == len(llm_messages)
-        assert hook_messages[-1].content == llm_messages[-1].content
+        assert hook_messages[0].content == llm_messages[0].content
 
 
 if __name__ == "__main__":

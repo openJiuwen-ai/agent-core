@@ -242,12 +242,14 @@ class AgentCallbackContext:
             Recognised keys:
               - ``environment_context``: list of dicts ``[{content: str,
                 source: str}]`` injected by rails; consumed (popped) by
-                ``_railed_model_call`` and appended as a tail
-                ``UserMessage`` wrapped in ``<environment_context>`` XML
-                tags after context-window trimming. Using UserMessage
-                instead of SystemMessage because many LLM providers
-                merge SystemMessage into the system parameter, breaking
-                KV cache prefix stability.
+                ``_railed_model_call`` and folded into the system prompt
+                (appended after ``prompt_builder.build()`` output, wrapped
+                in ``<environment_context>`` XML tags). E is placed at the
+                END of the system string so that when its content changes
+                the stable base-prompt prefix stays KV-cache-hit; only the
+                trailing env block and onward recompute. pop() clears the
+                list after each model call to prevent multi-turn
+                accumulation.
         exception: Exception object (set on error events)
         retry_attempt: Current failed-attempt index
     """
