@@ -150,6 +150,15 @@ async def test_rollback_skill_uses_public_store_interfaces(tmp_path):
     assert await rail.rollback_skill("skill-a", "SKILL.v20260622T123456.md") is True
     assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == "# Archived\n"
     assert (skill_dir / "evolutions.json").read_text(encoding="utf-8") == "{\"entries\": []}"
+    assert not (archive / "SKILL.v20260622T123456.md").exists()
+    assert not (archive / "evolutions.v20260622T123456.json").exists()
+    current_archives = [
+        archive / name
+        for name in rail._evolution_store.list_archives("skill-a")
+        if name.startswith("SKILL.v")
+    ]
+    assert len(current_archives) == 1
+    assert current_archives[0].read_text(encoding="utf-8") == "# Current\n"
 
 
 @pytest.mark.asyncio
@@ -171,6 +180,10 @@ async def test_rollback_skill_without_version_uses_latest_archive(tmp_path):
     assert await rail.rollback_skill("skill-a") is True
     assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == "# Latest\n"
     assert (skill_dir / "evolutions.json").read_text(encoding="utf-8") == "{\"entries\": []}"
+    assert not (archive / "SKILL.v20260622T223456.md").exists()
+    assert not (archive / "evolutions.v20260622T223456.json").exists()
+    assert (archive / "SKILL.v20260622T123456.md").exists()
+    assert (archive / "evolutions.v20260622T123456.json").exists()
 
 
 @pytest.mark.asyncio
@@ -237,6 +250,28 @@ async def test_rollback_skill_clears_evolutions_when_pair_missing(tmp_path):
     assert await rail.rollback_skill("skill-a", "SKILL.v20260622T123456.md") is True
     assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == "# Archived\n"
     assert (await rail._evolution_store.load_evolution_log("skill-a")).entries == []
+    assert not (archive / "SKILL.v20260622T123456.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_rollback_skill_keeps_target_archive_when_restore_fails(tmp_path):
+    root = tmp_path / "skills"
+    skill_dir = root / "skill-a"
+    archive = skill_dir / "archive"
+    archive.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Current\n", encoding="utf-8")
+    (skill_dir / "evolutions.json").write_text("{\"entries\": [\"current\"]}", encoding="utf-8")
+    (archive / "SKILL.v20260622T123456.md").write_text("# Archived\n", encoding="utf-8")
+    (archive / "evolutions.v20260622T123456.json").write_text("{\"entries\": []}", encoding="utf-8")
+
+    rail = _make_rail(tmp_path)
+    store = EvolutionStore(str(root))
+    store.restore_evolution_log_from_archive = AsyncMock(return_value=False)
+    rail._evolution_store = store
+
+    assert await rail.rollback_skill("skill-a", "SKILL.v20260622T123456.md") is False
+    assert (archive / "SKILL.v20260622T123456.md").exists()
+    assert (archive / "evolutions.v20260622T123456.json").exists()
 
 
 # =============================================================================

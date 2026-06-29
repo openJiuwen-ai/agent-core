@@ -261,6 +261,53 @@ class TestEvolutionStoreArchive:
         )
         assert EvolutionStore.paired_evolution_archive_name("bad.md") is None
 
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_delete_archive_version_removes_paired_files(tmp_path: Path):
+        root = tmp_path / "skills"
+        skill_dir = prepare_skill(root, "skill-a", "# Skill\n")
+        archive = skill_dir / "archive"
+        archive.mkdir(parents=True)
+        body_name = "SKILL.v20260622T123456.md"
+        evo_name = "evolutions.v20260622T123456.json"
+        (archive / body_name).write_text("# Archived\n", encoding="utf-8")
+        (archive / evo_name).write_text("{\"entries\": []}", encoding="utf-8")
+        store = EvolutionStore(str(root))
+
+        assert await store.delete_archive_version("skill-a", body_name) is True
+        assert not (archive / body_name).exists()
+        assert not (archive / evo_name).exists()
+
+        assert await store.delete_archive_version("skill-a", "../SKILL.v20260622T123456.md") is False
+        assert await store.delete_archive_version("skill-a", "missing.md") is False
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_delete_archive_version_returns_false_when_paired_evo_delete_fails(tmp_path: Path):
+        root = tmp_path / "skills"
+        skill_dir = prepare_skill(root, "skill-a", "# Skill\n")
+        archive = skill_dir / "archive"
+        archive.mkdir(parents=True)
+        body_name = "SKILL.v20260622T123456.md"
+        evo_name = "evolutions.v20260622T123456.json"
+        (archive / body_name).write_text("# Archived\n", encoding="utf-8")
+        (archive / evo_name).write_text("{\"entries\": []}", encoding="utf-8")
+        store = EvolutionStore(str(root))
+
+        original_unlink = Path.unlink
+
+        def unlink_side_effect(self, *args, **kwargs):
+            if self.name.startswith("evolutions."):
+                raise PermissionError("denied")
+            return original_unlink(self, *args, **kwargs)
+
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr(Path, "unlink", unlink_side_effect)
+            assert await store.delete_archive_version("skill-a", body_name) is False
+
+        assert not (archive / body_name).exists()
+        assert (archive / evo_name).exists()
+
 
 class TestEvolutionStoreSolidifyAndFormatting:
     @staticmethod

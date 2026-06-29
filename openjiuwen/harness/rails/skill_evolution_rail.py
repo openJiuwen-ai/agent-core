@@ -1605,6 +1605,15 @@ class SkillEvolutionRail(EvolutionRail):
             await store.clear_evolutions(skill_name)
 
         await store.render_evolution_markdown(skill_name)
+
+        deleted = await store.delete_archive_version(skill_name, body_archive.name)
+        if not deleted:
+            logger.warning(
+                "[SkillEvolutionRail] rollback succeeded but failed to remove target archive for %s: %s",
+                skill_name,
+                body_archive.name,
+            )
+
         logger.info("[SkillEvolutionRail] rollback completed for %s -> %s", skill_name, body_archive.name)
         return True
 

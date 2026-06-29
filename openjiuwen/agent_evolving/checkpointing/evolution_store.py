@@ -990,6 +990,50 @@ description: {description}
             return ""
         return await self._read_file_text(archive_path)
 
+    async def delete_archive_version(self, name: str, body_archive_name: str) -> bool:
+        """Remove a body archive and its paired evolution archive after rollback.
+
+        Returns True only when the body archive is deleted and any existing paired
+        evolution archive is also deleted successfully.
+        """
+        if not self.is_valid_skill_archive_name(body_archive_name):
+            return False
+        body_path = self.get_skill_archive_file(name, body_archive_name)
+        if body_path is None:
+            return False
+        try:
+            body_path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning(
+                "[EvolutionStore] failed to delete body archive %s for skill=%s: %s",
+                body_archive_name,
+                name,
+                exc,
+            )
+            return False
+
+        evo_name = self.paired_evolution_archive_name(body_archive_name)
+        if evo_name is not None:
+            evo_path = self.get_skill_archive_file(name, evo_name)
+            if evo_path is not None:
+                try:
+                    evo_path.unlink(missing_ok=True)
+                except Exception as exc:
+                    logger.warning(
+                        "[EvolutionStore] deleted body archive but failed to delete %s for skill=%s: %s",
+                        evo_name,
+                        name,
+                        exc,
+                    )
+                    return False
+
+        logger.info(
+            "[EvolutionStore] deleted target archive version %s for skill=%s",
+            body_archive_name,
+            name,
+        )
+        return True
+
     async def restore_evolution_log_from_archive(self, name: str, archive_name: str) -> bool:
         archive_path = self.get_skill_archive_file(name, archive_name)
         skill_dir = self._resolve_skill_dir(name)
