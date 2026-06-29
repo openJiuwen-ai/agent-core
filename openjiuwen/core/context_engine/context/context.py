@@ -15,7 +15,11 @@ from openjiuwen.core.foundation.tool import ToolInfo, Tool, ToolCard, tool
 from openjiuwen.core.context_engine.base import ModelContext, ContextWindow, ContextStats
 from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
 from openjiuwen.core.context_engine.context.kv_cache_manager import KVCacheManager
-from openjiuwen.core.context_engine.observability import write_context_trace, snapshot_messages
+from openjiuwen.core.context_engine.observability import (
+    write_context_trace,
+    snapshot_messages,
+    context_trace_enabled,
+)
 from openjiuwen.core.context_engine.qa_artifact.schema import IrreducibleContextError
 from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import ContextEvents
@@ -183,26 +187,28 @@ class SessionModelContext(ModelContext):
             try:
                 if await processor.trigger_add_messages(self, messages_to_add, **kwargs):
                     logger.info(f"trigger context processor {processor.processor_type()} on ADD")
-                    before_buffer = self.get_messages()
-                    before_add = list(messages_to_add)
+                    _trace = context_trace_enabled()
+                    before_buffer = self.get_messages() if _trace else None
+                    before_add = list(messages_to_add) if _trace else None
                     event, messages_to_add = await processor.on_add_messages(self, messages_to_add, **kwargs)
-                    write_context_trace(
-                        "context.add_messages.processor",
-                        {
-                            "session_id": self._session_id,
-                            "context_id": self._context_id,
-                            **self._resolve_actor_tags(),
-                            "processor": processor.processor_type(),
-                            "event": (
-                                {"event_type": event.event_type, "messages_to_modify": event.messages_to_modify}
-                                if event is not None else None
-                            ),
-                            "buffer_before": snapshot_messages(before_buffer),
-                            "incoming_before": snapshot_messages(before_add),
-                            "buffer_after": snapshot_messages(self.get_messages()),
-                            "incoming_after": snapshot_messages(messages_to_add),
-                        },
-                    )
+                    if _trace:
+                        write_context_trace(
+                            "context.add_messages.processor",
+                            {
+                                "session_id": self._session_id,
+                                "context_id": self._context_id,
+                                **self._resolve_actor_tags(),
+                                "processor": processor.processor_type(),
+                                "event": (
+                                    {"event_type": event.event_type, "messages_to_modify": event.messages_to_modify}
+                                    if event is not None else None
+                                ),
+                                "buffer_before": snapshot_messages(before_buffer),
+                                "incoming_before": snapshot_messages(before_add),
+                                "buffer_after": snapshot_messages(self.get_messages()),
+                                "incoming_after": snapshot_messages(messages_to_add),
+                            },
+                        )
             except IrreducibleContextError:
                 raise
             except Exception as e:
@@ -301,31 +307,37 @@ class SessionModelContext(ModelContext):
             try:
                 if await processor.trigger_get_context_window(self, window):
                     logger.info(f"trigger context processor {processor.processor_type()} on GET")
-                    before_window = {
-                        "system_messages": snapshot_messages(window.system_messages),
-                        "context_messages": snapshot_messages(window.context_messages),
-                        "tool_count": len(window.tools or []),
-                    }
-                    event, window = await processor.on_get_context_window(self, window, **kwargs)
-                    write_context_trace(
-                        "context.get_window.processor",
+                    _trace = context_trace_enabled()
+                    before_window = (
                         {
-                            "session_id": self._session_id,
-                            "context_id": self._context_id,
-                            **self._resolve_actor_tags(),
-                            "processor": processor.processor_type(),
-                            "event": (
-                                {"event_type": event.event_type, "messages_to_modify": event.messages_to_modify}
-                                if event is not None else None
-                            ),
-                            "window_before": before_window,
-                            "window_after": {
-                                "system_messages": snapshot_messages(window.system_messages),
-                                "context_messages": snapshot_messages(window.context_messages),
-                                "tool_count": len(window.tools or []),
-                            },
-                        },
+                            "system_messages": snapshot_messages(window.system_messages),
+                            "context_messages": snapshot_messages(window.context_messages),
+                            "tool_count": len(window.tools or []),
+                        }
+                        if _trace
+                        else None
                     )
+                    event, window = await processor.on_get_context_window(self, window, **kwargs)
+                    if _trace:
+                        write_context_trace(
+                            "context.get_window.processor",
+                            {
+                                "session_id": self._session_id,
+                                "context_id": self._context_id,
+                                **self._resolve_actor_tags(),
+                                "processor": processor.processor_type(),
+                                "event": (
+                                    {"event_type": event.event_type, "messages_to_modify": event.messages_to_modify}
+                                    if event is not None else None
+                                ),
+                                "window_before": before_window,
+                                "window_after": {
+                                    "system_messages": snapshot_messages(window.system_messages),
+                                    "context_messages": snapshot_messages(window.context_messages),
+                                    "tool_count": len(window.tools or []),
+                                },
+                            },
+                        )
             except IrreducibleContextError:
                 raise
             except Exception as e:
@@ -354,18 +366,19 @@ class SessionModelContext(ModelContext):
         if self._kv_cache_manager:
             await self._kv_cache_manager.release(window, **kwargs)
         window.statistic = self._stat_context_window(window)
-        write_context_trace(
-            "context.get_window.final",
-            {
-                "session_id": self._session_id,
-                "context_id": self._context_id,
-                **self._resolve_actor_tags(),
-                "system_messages": snapshot_messages(window.system_messages),
-                "context_messages": snapshot_messages(window.context_messages),
-                "tool_count": len(window.tools or []),
-                "statistics": window.statistic.model_dump() if window.statistic is not None else None,
-            },
-        )
+        if context_trace_enabled():
+            write_context_trace(
+                "context.get_window.final",
+                {
+                    "session_id": self._session_id,
+                    "context_id": self._context_id,
+                    **self._resolve_actor_tags(),
+                    "system_messages": snapshot_messages(window.system_messages),
+                    "context_messages": snapshot_messages(window.context_messages),
+                    "tool_count": len(window.tools or []),
+                    "statistics": window.statistic.model_dump() if window.statistic is not None else None,
+                },
+            )
         return window
 
     def _get_window_messages(

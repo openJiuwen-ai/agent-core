@@ -102,7 +102,13 @@ class ModelCallInputs:
     """Input data for BEFORE/AFTER_MODEL_CALL events.
 
     Attributes:
-        messages: Preview message list before the final LLM window is rebuilt
+        messages: Read-only preview of the messages that will be sent to the
+            LLM. A shallow snapshot; BEFORE_MODEL_CALL rails may read it for
+            decisions, but mutations here do NOT reach the LLM — the final
+            window is rebuilt from ``model_context`` via ``get_context_window``
+            and overwrites this field. To alter history, operate on
+            ``model_context``; to alter the system prompt, mutate the agent's
+            ``prompt_builder``.
         tools: Optional tool definitions
         model_context: Current ModelContext used to build the final LLM window
         response: LLM response (filled after call)
@@ -486,7 +492,13 @@ class AgentRail(ABC):
     async def before_model_call(
         self, ctx: AgentCallbackContext
     ) -> None:
-        """Called before LLM is invoked with preview messages and model_context."""
+        """Called before the LLM is invoked.
+
+        ``ctx.inputs.messages`` is a read-only preview snapshot; mutating it
+        does not affect the LLM input. To change history, use
+        ``ctx.inputs.model_context``; to change the system prompt, mutate the
+        agent's ``prompt_builder``.
+        """
         pass
 
     async def after_model_call(

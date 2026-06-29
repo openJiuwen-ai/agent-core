@@ -36,6 +36,7 @@ from openjiuwen.core.context_engine.observability import (
     resolve_context_trace_ids,
     snapshot_messages,
     write_context_trace,
+    context_trace_enabled,
 )
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
@@ -616,8 +617,18 @@ class ReActAgent(BaseAgent):
         )
 
     def _build_preview_messages(self, context: ModelContext) -> List[Any]:
-        """Build a lightweight preview of the current model input messages."""
-        preview_messages = copy.deepcopy(context.get_messages())
+        """Build a read-only preview of the current model input messages.
+
+        ``get_messages()`` returns a shallow slice of the buffer, so list-level
+        mutations by BEFORE_MODEL_CALL rails won't pollute the context buffer.
+        The preview is read-only by contract: mutations here do NOT reach the
+        LLM — ``_railed_model_call`` rebuilds the final window from
+        ``ctx.context`` via ``get_context_window`` and overwrites
+        ``ctx.inputs.messages``. To alter history, operate on
+        ``model_context``; to alter the system prompt, mutate
+        ``self.prompt_builder``.
+        """
+        preview_messages = context.get_messages()
         preview_system_prompt = self.prompt_builder.build()
         if preview_system_prompt:
             preview_messages.insert(0, SystemMessage(content=preview_system_prompt))
@@ -775,15 +786,16 @@ class ReActAgent(BaseAgent):
                 total_chars += len(_c) if isinstance(_c, str) else len(str(_c))
                 if isinstance(_meta, dict) and _meta.get("active_skill_pin"):
                     active_skill_pin_count += 1
-            write_context_trace(
-                "llm.context.messages_for_model",
-                {
-                    **trace_ids,
-                    "message_count": len(msgs_for_log),
-                    "messages": snapshot_messages(ctx.inputs.messages),
-                    "tool_count": len(ctx.inputs.tools or []),
-                },
-            )
+            if context_trace_enabled():
+                write_context_trace(
+                    "llm.context.messages_for_model",
+                    {
+                        **trace_ids,
+                        "message_count": len(msgs_for_log),
+                        "messages": snapshot_messages(ctx.inputs.messages),
+                        "tool_count": len(ctx.inputs.tools or []),
+                    },
+                )
             logger.info(
                 "[LLM] context_for_model session_id=%s context_id=%s message_count=%s "
                 "tool_count=%s total_content_chars=%s active_skill_pin_messages=%s",
