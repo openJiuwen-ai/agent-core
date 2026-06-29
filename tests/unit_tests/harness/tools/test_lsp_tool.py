@@ -1079,6 +1079,29 @@ class TestNearestRoot:
         result = await find(str(test_file))
         assert result is None
 
+    async def test_stop_dir_not_bypassed_when_parent_has_include(self, tmp_path, monkeypatch):
+        """When start_dir == stop_dir, ancestor include_patterns must not match."""
+        monkeypatch.chdir(tmp_path)
+
+        from openjiuwen.harness.lsp.servers.registry import nearest_root
+
+        ancestor = tmp_path / "ancestor"
+        ancestor.mkdir()
+        (ancestor / ".git").mkdir()
+        stop = ancestor / "workspace"
+        stop.mkdir()
+        test_file = stop / "file.py"
+        test_file.write_text("x = 1\n")
+
+        find = nearest_root(
+            include_patterns=[".git"],
+            exclude_patterns=None,
+            stop_dir=str(stop),
+        )
+
+        result = await find(str(test_file))
+        assert result is None
+
     async def test_file_directly_in_root(self, tmp_path, monkeypatch):
         """File directly in project root should also find the root"""
         monkeypatch.chdir(tmp_path)
