@@ -33,14 +33,19 @@ class UrlUtils:
     @staticmethod
     def get_global_proxy_url(url: str) -> Optional[str]:
         """get global proxy url"""
+        return UrlUtils.get_proxy_url(url)
+
+    @staticmethod
+    def get_proxy_url(url: str, configured_proxy: Optional[str] = None) -> Optional[str]:
+        """get configured proxy url unless the target URL matches NO_PROXY"""
         if url and UrlUtils.should_bypass_proxy(url):
             return None
 
-        global_proxy_url = os.getenv("http_proxy") or os.getenv("https_proxy") \
-                           or os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
-        if global_proxy_url:
-            return global_proxy_url.strip()
-        return global_proxy_url
+        proxy_url = configured_proxy or os.getenv("http_proxy") or os.getenv("https_proxy") \
+            or os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
+        if proxy_url:
+            return proxy_url.strip()
+        return proxy_url
 
     @staticmethod
     def get_global_proxies(url: str) -> Optional[dict]:
@@ -76,8 +81,7 @@ class UrlUtils:
     @staticmethod
     def should_bypass_proxy(url: str) -> bool:
         """check if URL should bypass proxy based on NO_PROXY environment variable"""
-        parsed_url = urlparse(url)
-        hostname = parsed_url.hostname
+        hostname = UrlUtils._extract_hostname(url)
         if not hostname:
             return False
 
@@ -85,6 +89,14 @@ class UrlUtils:
         if not no_proxy_list:
             return False
         return UrlUtils._hostname_matches_no_proxy(hostname, no_proxy_list)
+
+    @staticmethod
+    def _extract_hostname(url: str) -> Optional[str]:
+        """extract hostname from normal URLs and scheme-less host:port values"""
+        parsed_url = urlparse(url)
+        if parsed_url.hostname:
+            return parsed_url.hostname
+        return urlparse(f"//{url}").hostname
 
     @staticmethod
     def _get_no_proxy_list() -> List[str]:
