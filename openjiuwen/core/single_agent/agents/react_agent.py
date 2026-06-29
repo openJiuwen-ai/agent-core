@@ -889,9 +889,10 @@ class ReActAgent(BaseAgent):
             perf_metrics["total_latency_ms"] = round(call_latency, 2)
             if call_first_token_time is not None:
                 perf_metrics["ttft_ms"] = round((call_first_token_time - call_start_time) * 1000, 2)
-            if call_first_token_time is not None and call_last_token_time is not None and call_chunk_count > 1:
+            output_tokens = ai_message.usage_metadata.output_tokens
+            if call_first_token_time is not None and call_last_token_time is not None and output_tokens > 1:
                 perf_metrics["tpot_ms"] = round(
-                    (call_last_token_time - call_first_token_time) / (call_chunk_count - 1) * 1000, 2
+                    (call_last_token_time - call_first_token_time) / (output_tokens - 1) * 1000, 2
                 )
 
             await session.write_stream(OutputSchema(
