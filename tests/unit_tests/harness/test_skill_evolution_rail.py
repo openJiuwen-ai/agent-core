@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -21,11 +22,19 @@ from openjiuwen.agent_evolving.signal import (
     EvolutionSignal,
     EvolutionCategory,
 )
+from openjiuwen.core.context_engine.qa_block.registry import save_registry
+from openjiuwen.core.context_engine.qa_block.schema import (
+    QABlockEntry,
+    QABlockRegistry,
+)
+from openjiuwen.core.context_engine.qa_block.store import QABlockStore
+from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 from openjiuwen.harness.rails.skill_evolution_rail import (
     SkillEvolutionRail,
     _MAX_PROCESSED_SIGNAL_KEYS,
 )
+from openjiuwen.harness.workspace.workspace import Workspace
 
 
 def _make_rail(tmp_path, *, auto_scan: bool = True, auto_save: bool = True) -> SkillEvolutionRail:
@@ -1848,3 +1857,364 @@ async def test_generate_and_emit_experience_with_empty_inputs(tmp_path):
 
     assert result is False
     rail._generate_experience_via_optimizer.assert_awaited_once_with("skill-a", [], [])
+
+
+# =============================================================================
+# QA block history loading & prepend (PR #1777) Tests
+# =============================================================================
+
+
+class _QAHistorySession:
+    """Minimal session backing ``load_registry``/``QABlockStore`` semantics."""
+
+    def __init__(self, session_id: str = "session-qa"):
+        self._session_id = session_id
+        self.state: dict = {}
+
+    def get_session_id(self) -> str:
+        return self._session_id
+
+    def get_state(self, key: str | None = None) -> Any:
+        if key is None:
+            return self.state
+        return self.state.get(key)
+
+    def update_state(self, updates: dict) -> None:
+        self.state.update(updates)
+
+
+def _make_qa_history_rail(tmp_path: Path) -> SkillEvolutionRail:
+    rail = _make_rail(tmp_path)
+    # workspace defaults to None on the rail; wire a real one so QABlockStore
+    # resolves L0 files under tmp_path.
+    rail.workspace = Workspace(root_path=str(tmp_path))
+    rail.sys_operation = None
+    return rail
+
+
+async def _seed_qa_l0(tmp_path: Path, session_id: str, qa_id: str, messages: list[Any]) -> None:
+    store = QABlockStore(str(tmp_path), session_id)
+    await store.write_l0(qa_id, list(messages))
+
+
+def _history_entry(qa_id: str, qa_index: int, *, is_history: bool = True) -> QABlockEntry:
+    return QABlockEntry(
+        qa_id=qa_id,
+        qa_index=qa_index,
+        status="completed",
+        is_history=is_history,
+    )
+
+
+def test_dedup_messages_keeps_first_occurrence_and_preserves_order():
+    """Pure function: identical fingerprints collapse to the first occurrence."""
+    rail = SkillEvolutionRail(skills_dir="skills", llm=Mock(), model="dummy")
+    a = {"role": "user", "content": "hi"}
+    b = {"role": "assistant", "content": "ok"}
+    dup_a = {"role": "user", "content": "hi"}  # same fingerprint as `a`
+    messages = [a, b, dup_a, b]
+
+    result = SkillEvolutionRail._dedup_messages(messages)
+
+    assert result == [a, b]
+    # Originals must be kept by identity (first occurrence retained)
+    assert result[0] is a
+    assert result[1] is b
+
+
+def test_dedup_messages_empty_or_all_unique_returns_unchanged():
+    rail = SkillEvolutionRail(skills_dir="skills", llm=Mock(), model="dummy")
+    assert SkillEvolutionRail._dedup_messages([]) == []
+
+    unique = [
+        {"role": "user", "content": "q1"},
+        {"role": "user", "content": "q2"},
+        {"role": "assistant", "content": "a1"},
+    ]
+    assert SkillEvolutionRail._dedup_messages(unique) == unique
+
+
+def test_dedup_messages_fingerprint_includes_role_content_name():
+    """Same content but different role/name must NOT be treated as duplicate."""
+    rail = SkillEvolutionRail(skills_dir="skills", llm=Mock(), model="dummy")
+    messages = [
+        {"role": "user", "content": "same"},
+        {"role": "assistant", "content": "same"},
+        {"role": "user", "content": "same", "name": "caller"},
+        {"role": "user", "content": "same", "name": "caller"},  # dup of prev
+    ]
+    result = SkillEvolutionRail._dedup_messages(messages)
+    assert len(result) == 3
+    assert result[0] == {"role": "user", "content": "same"}
+    assert result[1] == {"role": "assistant", "content": "same"}
+    assert result[2] == {"role": "user", "content": "same", "name": "caller"}
+
+
+def test_dedup_messages_tool_calls_order_invariant_and_missing_ok():
+    """tool_calls fingerprint is sort_keys-stable; absence is its own fingerprint."""
+    rail = SkillEvolutionRail(skills_dir="skills", llm=Mock(), model="dummy")
+    tc_a = {"id": "1", "name": "read", "arguments": "{}"}
+    tc_b = {"id": "2", "name": "write", "arguments": "{}"}
+    messages = [
+        {"role": "assistant", "content": "", "tool_calls": [tc_a, tc_b]},
+        {"role": "assistant", "content": "", "tool_calls": [tc_b, tc_a]},  # same (sorted)
+        {"role": "assistant", "content": "", "tool_calls": [tc_a]},  # different
+        {"role": "assistant", "content": ""},  # no tool_calls, distinct fingerprint
+        {"role": "assistant", "content": ""},  # dup of prev
+    ]
+    result = SkillEvolutionRail._dedup_messages(messages)
+    assert len(result) == 4
+    assert result[0]["tool_calls"] == [tc_a, tc_b]
+    assert "tool_calls" not in result[3]
+
+
+def test_dedup_messages_multimodal_content_key_order_invariant():
+    """content as a list (OpenAI multimodal) fingerprints stably regardless of
+    dict key ordering, matching the tool_calls handling."""
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        {"role": "user", "content": [{"text": "hi", "type": "text"}]},  # same, reordered keys
+        {"role": "user", "content": [{"type": "text", "text": "bye"}]},  # different text
+    ]
+    result = SkillEvolutionRail._dedup_messages(messages)
+    assert len(result) == 2
+    assert result[0] is messages[0]
+    assert result[1] is messages[2]
+
+
+@pytest.mark.asyncio
+async def test_load_qa_block_history_returns_empty_when_no_workspace(tmp_path):
+    rail = _make_rail(tmp_path)
+    assert rail.workspace is None
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=_QAHistorySession())
+    assert await rail._load_qa_block_history(ctx) == []
+
+
+@pytest.mark.asyncio
+async def test_load_qa_block_history_returns_empty_when_no_session(tmp_path):
+    rail = _make_qa_history_rail(tmp_path)
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    assert await rail._load_qa_block_history(ctx) == []
+
+
+@pytest.mark.asyncio
+async def test_load_qa_block_history_returns_empty_when_registry_empty(tmp_path):
+    rail = _make_qa_history_rail(tmp_path)
+    session = _QAHistorySession()
+    # No registry saved -> load_registry returns empty registry
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=session)
+    assert await rail._load_qa_block_history(ctx) == []
+
+
+@pytest.mark.asyncio
+async def test_load_qa_block_history_returns_empty_when_no_history_blocks(tmp_path):
+    """Blocks present but none flagged is_history -> skipped."""
+    rail = _make_qa_history_rail(tmp_path)
+    session = _QAHistorySession()
+    registry = QABlockRegistry(
+        session_id=session.get_session_id(),
+        blocks={"qa_001": _history_entry("qa_001", 1, is_history=False)},
+    )
+    save_registry(session, registry)
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=session)
+    assert await rail._load_qa_block_history(ctx) == []
+
+
+@pytest.mark.asyncio
+async def test_load_qa_block_history_loads_history_blocks_in_qa_index_order(tmp_path):
+    """History blocks are read from L0 and parsed, ordered by qa_index."""
+    rail = _make_qa_history_rail(tmp_path)
+    session = _QAHistorySession(session_id="session-qa")
+    sid = session.get_session_id()
+
+    # Seed two L0 files out of order to verify sort by qa_index
+    await _seed_qa_l0(
+        tmp_path, sid, "qa_002",
+        [UserMessage(content="second q"), AssistantMessage(content="second a")],
+    )
+    await _seed_qa_l0(
+        tmp_path, sid, "qa_001",
+        [UserMessage(content="first q"), AssistantMessage(content="first a")],
+    )
+
+    registry = QABlockRegistry(
+        session_id=sid,
+        blocks={
+            "qa_002": _history_entry("qa_002", 2, is_history=True),
+            "qa_001": _history_entry("qa_001", 1, is_history=True),
+            # A non-history block must be ignored even if it has L0 on disk
+            "qa_003": _history_entry("qa_003", 3, is_history=False),
+        },
+    )
+    save_registry(session, registry)
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=session)
+
+    result = await rail._load_qa_block_history(ctx)
+
+    assert [m["content"] for m in result] == [
+        "first q", "first a", "second q", "second a",
+    ]
+    assert [m["role"] for m in result] == ["user", "assistant", "user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_load_qa_block_history_caps_to_most_recent_n_blocks(tmp_path):
+    """When history exceeds _MAX_QA_HISTORY_BLOCKS, only the most recent N
+    blocks (by qa_index) are loaded — early blocks are dropped."""
+    from openjiuwen.harness.rails.skill_evolution_rail import _MAX_QA_HISTORY_BLOCKS
+
+    rail = _make_qa_history_rail(tmp_path)
+    session = _QAHistorySession(session_id="session-qa")
+    sid = session.get_session_id()
+
+    total = _MAX_QA_HISTORY_BLOCKS + 5  # 25 blocks when cap is 20
+    blocks: dict[str, QABlockEntry] = {}
+    for i in range(1, total + 1):
+        qa_id = f"qa_{i:03d}"
+        await _seed_qa_l0(
+            tmp_path, sid, qa_id,
+            [UserMessage(content=f"q{i}")],
+        )
+        blocks[qa_id] = _history_entry(qa_id, i, is_history=True)
+
+    save_registry(session, QABlockRegistry(session_id=sid, blocks=blocks))
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=session)
+
+    result = await rail._load_qa_block_history(ctx)
+
+    # Only the last _MAX_QA_HISTORY_BLOCKS blocks (qa_index 6..25) survive,
+    # in ascending qa_index order.
+    expected = [f"q{i}" for i in range(6, total + 1)]
+    assert [m["content"] for m in result] == expected
+    assert len(result) == _MAX_QA_HISTORY_BLOCKS
+
+
+
+@pytest.mark.asyncio
+async def test_load_qa_block_history_skips_block_when_read_raises(tmp_path):
+    """A failing read_l0 for one block must not abort the whole load."""
+    rail = _make_qa_history_rail(tmp_path)
+    session = _QAHistorySession(session_id="session-qa")
+    sid = session.get_session_id()
+
+    # qa_001 has a valid L0 file; qa_002 has no file on disk -> read returns []
+    await _seed_qa_l0(
+        tmp_path, sid, "qa_001",
+        [UserMessage(content="ok q"), AssistantMessage(content="ok a")],
+    )
+
+    registry = QABlockRegistry(
+        session_id=sid,
+        blocks={
+            "qa_001": _history_entry("qa_001", 1, is_history=True),
+            "qa_002": _history_entry("qa_002", 2, is_history=True),
+        },
+    )
+    save_registry(session, registry)
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=session)
+
+    result = await rail._load_qa_block_history(ctx)
+    assert [m["content"] for m in result] == ["ok q", "ok a"]
+
+
+@pytest.mark.asyncio
+async def test_collect_parsed_messages_prepends_qa_history(tmp_path):
+    """QA history is prepended to buffer messages with dedup applied."""
+    rail = _make_qa_history_rail(tmp_path)
+    session = _QAHistorySession(session_id="session-qa")
+    sid = session.get_session_id()
+
+    await _seed_qa_l0(
+        tmp_path, sid, "qa_001",
+        [UserMessage(content="old question"), AssistantMessage(content="old answer")],
+    )
+    registry = QABlockRegistry(
+        session_id=sid,
+        blocks={"qa_001": _history_entry("qa_001", 1, is_history=True)},
+    )
+    save_registry(session, registry)
+
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=None,
+        session=session,
+        context=_MsgContext(messages=[
+            {"role": "user", "content": "current question"},
+            {"role": "assistant", "content": "current answer"},
+        ]),
+    )
+
+    parsed = await rail._collect_parsed_messages(ctx)
+    assert [m["content"] for m in parsed] == [
+        "old question", "old answer",
+        "current question", "current answer",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_collect_parsed_messages_dedupes_overlap_between_history_and_buffer(tmp_path):
+    """When buffer already contains the same history message, duplicates are removed."""
+    rail = _make_qa_history_rail(tmp_path)
+    session = _QAHistorySession(session_id="session-qa")
+    sid = session.get_session_id()
+
+    shared_user = UserMessage(content="repeated question")
+    await _seed_qa_l0(
+        tmp_path, sid, "qa_001",
+        [shared_user, AssistantMessage(content="old answer")],
+    )
+    registry = QABlockRegistry(
+        session_id=sid,
+        blocks={"qa_001": _history_entry("qa_001", 1, is_history=True)},
+    )
+    save_registry(session, registry)
+
+    # Buffer contains the same user content again -> dedup keeps the history one
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=None,
+        session=session,
+        context=_MsgContext(messages=[
+            {"role": "user", "content": "repeated question"},
+            {"role": "assistant", "content": "current answer"},
+        ]),
+    )
+
+    parsed = await rail._collect_parsed_messages(ctx)
+    contents = [m["content"] for m in parsed]
+    assert contents.count("repeated question") == 1
+    assert contents == ["repeated question", "old answer", "current answer"]
+
+
+@pytest.mark.asyncio
+async def test_collect_parsed_messages_falls_back_to_buffer_when_qa_history_unavailable(tmp_path):
+    """No workspace/session QA history must not break message collection."""
+    rail = _make_rail(tmp_path)  # workspace stays None
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=None,
+        session=None,
+        context=_MsgContext(messages=[{"role": "user", "content": "only buffer"}]),
+    )
+    parsed = await rail._collect_parsed_messages(ctx)
+    assert parsed == [{"role": "user", "content": "only buffer"}]
+
+
+@pytest.mark.asyncio
+async def test_collect_parsed_messages_proceeds_when_load_qa_history_raises(tmp_path):
+    """If _load_qa_block_history raises, buffer messages are still returned."""
+    rail = _make_qa_history_rail(tmp_path)
+
+    async def _boom(ctx):
+        raise RuntimeError("qa history load failed")
+
+    rail._load_qa_block_history = _boom
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=None,
+        session=None,
+        context=_MsgContext(messages=[{"role": "user", "content": "buffer only"}]),
+    )
+
+    parsed = await rail._collect_parsed_messages(ctx)
+    assert parsed == [{"role": "user", "content": "buffer only"}]

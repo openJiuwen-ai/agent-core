@@ -40,6 +40,8 @@ from openjiuwen.agent_evolving.signal import (
 from openjiuwen.agent_evolving.trajectory import Trajectory, TrajectoryStore
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.active_skill_bodies import normalize_skill_relative_file_path
+from openjiuwen.core.context_engine.qa_block.registry import load_registry
+from openjiuwen.core.context_engine.qa_block.store import QABlockStore
 from openjiuwen.core.operator.skill_call import SkillCallOperator
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.sys_operation import SysOperation
@@ -49,6 +51,10 @@ from openjiuwen.harness.rails.evolution_rail import EvolutionRail
 _MAX_PROCESSED_SIGNAL_KEYS = 500
 _EVAL_SNIPPET_MAX_MESSAGES = 20
 _EVAL_SNIPPET_MAX_CONTENT_CHARS = 200
+# Cap on how many recent history QA blocks are loaded for evolution context.
+# Bounds memory/disk-IO/token cost in long sessions; only the most recent N
+# blocks (by qa_index) participate in evolution signal detection.
+_MAX_QA_HISTORY_BLOCKS = 20
 _UI_SUMMARY_RECORD_PREVIEW_CHARS = 400
 _UI_SUMMARY_SIGNAL_PREVIEW_CHARS = 280
 _UI_SUMMARY_LLM_MAX_ATTEMPTS = 3
@@ -814,6 +820,76 @@ class SkillEvolutionRail(EvolutionRail):
             skill_name,
         )
 
+    async def _load_qa_block_history(self, ctx: AgentCallbackContext) -> List[dict]:
+        """Load historical QA block messages from disk for evolution context.
+
+        Reads completed QA blocks (``is_history=True``) from the QA Block
+        filesystem store and returns their messages as parsed dicts, ordered
+        chronologically by ``qa_index``.
+
+        Returns an empty list when the QA Block system is unavailable
+        (no workspace, no session, empty registry, or I/O errors).
+        """
+        if self.workspace is None:
+            logger.debug("[SkillEvolutionRail] workspace not available, skip QA history")
+            return []
+        if ctx.session is None:
+            logger.debug("[SkillEvolutionRail] session not available, skip QA history")
+            return []
+
+        try:
+            registry = load_registry(ctx.session)
+            if not registry.blocks:
+                logger.debug("[SkillEvolutionRail] no QA blocks in registry")
+                return []
+
+            all_history = sorted(
+                [e for e in registry.blocks.values() if e.is_history],
+                key=lambda e: e.qa_index,
+            )
+            total_history_blocks = len(all_history)
+            # Keep only the most recent N blocks to bound memory/IO/token cost.
+            history_blocks = all_history[-_MAX_QA_HISTORY_BLOCKS:]
+            if not history_blocks:
+                logger.debug("[SkillEvolutionRail] no history blocks found")
+                return []
+
+            session_id = ctx.session.get_session_id()
+            store = QABlockStore(
+                workspace_root=str(self.workspace.root_path),
+                session_id=session_id,
+                sys_operation=self.sys_operation,
+            )
+
+            all_messages: list[Any] = []
+            loaded_count = 0
+            for entry in history_blocks:
+                try:
+                    messages = await store.read_l0(entry.qa_id)
+                    if messages:
+                        all_messages.extend(messages)
+                        loaded_count += 1
+                except Exception as exc:
+                    logger.warning(
+                        "[SkillEvolutionRail] read QA block %s failed: %s",
+                        entry.qa_id, exc,
+                    )
+
+            result = self._parse_messages(all_messages)
+            logger.debug(
+                "[SkillEvolutionRail] loaded %d QA history message(s) "
+                "from %d block(s) (capped to last %d of %d total history blocks)",
+                len(result), loaded_count,
+                _MAX_QA_HISTORY_BLOCKS, total_history_blocks,
+            )
+            return result
+
+        except Exception as exc:
+            logger.warning(
+                "[SkillEvolutionRail] QA block history loading failed: %s", exc,
+            )
+            return []
+
     async def _collect_parsed_messages(self, ctx: AgentCallbackContext) -> List[dict]:
         messages: List[Any] = []
 
@@ -838,7 +914,54 @@ class SkillEvolutionRail(EvolutionRail):
                         exc,
                     )
 
-        return self._parse_messages(messages)
+        parsed_messages = self._parse_messages(messages)
+        logger.debug(
+            "[SkillEvolutionRail] _parse_messages result full content:\n%s",
+            parsed_messages,
+        )
+        logger.info(
+            "[SkillEvolutionRail] buffer messages: %d (before QA history prepend)",
+            len(parsed_messages),
+        )
+
+        # 3) prepend QA block history for full cross-QA conversation context
+        try:
+            logger.debug("[SkillEvolutionRail] loading QA block history...")
+            qa_history = await self._load_qa_block_history(ctx)
+            logger.info(
+                "[SkillEvolutionRail] QA block history loaded: %d messages",
+                len(qa_history),
+            )
+            logger.debug(
+                "[SkillEvolutionRail] QA block history full content:\n%s",
+                qa_history,
+            )
+            if qa_history:
+                merged = qa_history + parsed_messages
+                before_dedup = len(merged)
+                parsed_messages = self._dedup_messages(merged)
+                removed = before_dedup - len(parsed_messages)
+                logger.debug(
+                    "[SkillEvolutionRail] merged parsed_messages full content (after dedup):\n%s",
+                    parsed_messages,
+                )
+                logger.info(
+                    "[SkillEvolutionRail] prepended %d QA history messages "
+                    "to %d buffer messages, before dedup: %d, "
+                    "removed %d duplicates, after dedup: %d",
+                    len(qa_history),
+                    before_dedup - len(qa_history),
+                    before_dedup,
+                    removed,
+                    len(parsed_messages),
+                )
+        except Exception as exc:
+            logger.warning(
+                "[SkillEvolutionRail] QA history prepend failed, "
+                "proceeding with buffer only: %s", exc,
+            )
+
+        return parsed_messages
 
     async def _detect_signals(
         self,
@@ -1147,6 +1270,33 @@ class SkillEvolutionRail(EvolutionRail):
                 item["name"] = name
 
             result.append(item)
+        return result
+
+    @staticmethod
+    def _dedup_messages(messages: List[dict]) -> List[dict]:
+        """Remove duplicate messages while preserving order (keep first occurrence).
+
+        Fingerprint is based on (role, content, tool_calls, name).
+        """
+        seen: set = set()
+        result: List[dict] = []
+        for msg in messages:
+            # Build a stable fingerprint. content may be a str or a list
+            # (OpenAI multimodal parts, e.g. [{"type": "text", "text": "..."}]);
+            # json.dumps(sort_keys=True) keeps the fingerprint stable regardless
+            # of dict key ordering, matching how tool_calls is fingerprinted.
+            fp_parts = [
+                msg.get("role", ""),
+                json.dumps(msg.get("content", ""), sort_keys=True, ensure_ascii=False),
+                msg.get("name", ""),
+            ]
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                fp_parts.append(json.dumps(tool_calls, sort_keys=True, ensure_ascii=False))
+            fingerprint = "||".join(str(p) for p in fp_parts)
+            if fingerprint not in seen:
+                seen.add(fingerprint)
+                result.append(msg)
         return result
 
     # Session-level state isolation helpers
