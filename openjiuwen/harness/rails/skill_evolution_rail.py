@@ -14,7 +14,7 @@ import json
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.types import (
@@ -51,6 +51,7 @@ from openjiuwen.harness.rails.evolution_rail import EvolutionRail
 _MAX_PROCESSED_SIGNAL_KEYS = 500
 _EVAL_SNIPPET_MAX_MESSAGES = 20
 _EVAL_SNIPPET_MAX_CONTENT_CHARS = 200
+_EVAL_SNIPPET_POST_PRESENT_MAX_CHARS = 800
 # Cap on how many recent history QA blocks are loaded for evolution context.
 # Bounds memory/disk-IO/token cost in long sessions; only the most recent N
 # blocks (by qa_index) participate in evolution signal detection.
@@ -167,6 +168,7 @@ class SkillEvolutionRail(EvolutionRail):
 
     priority = 80
     _SKILL_MD_RE = re.compile(r"[/\\]([^/\\]+)[/\\]SKILL\.md", re.IGNORECASE)
+    _SKILL_MD_FILE_READ_TOOLS = frozenset({"read", "read_file", "read_file_stream"})
 
     def __init__(
         self,
@@ -178,7 +180,7 @@ class SkillEvolutionRail(EvolutionRail):
         auto_save: bool = True,
         language: str = "cn",
         trajectory_store: Optional[TrajectoryStore] = None,
-        eval_interval: int = 5,
+        eval_interval: int = 1,
         new_skill_detection: bool = True,
         new_skill_tool_threshold: int = 5,
         new_skill_tool_diversity: int = 2,
@@ -326,15 +328,9 @@ class SkillEvolutionRail(EvolutionRail):
                 inputs.tool_msg = tool_msg
                 logger.info("[SkillEvolutionRail] injected body experience for skill=%s", skill_name)
 
-            # Track only the body records that were actually injected into this tool result.
-            # Build a lightweight snippet bound to the current conversation so the scorer
-            # evaluates each record against the context in which it was shown.
-            current_messages = await self._collect_parsed_messages(ctx)
-            presentation_snippet = "\n".join(
-                f"[{m.get('role', 'unknown')}] {m.get('content', '')[:_EVAL_SNIPPET_MAX_CONTENT_CHARS]}"
-                for m in current_messages[-_EVAL_SNIPPET_MAX_MESSAGES:]
-            )
-            await self._track_presented_records(ctx, skill_name, presentation_snippet)
+            # times_presented is tracked here; evaluation snippet is rebuilt at
+            # after_invoke from the full conversation (see _build_evaluation_snippet).
+            await self._track_presented_records(ctx, skill_name, "")
 
     async def run_evolution(self, trajectory: Trajectory, ctx: AgentCallbackContext) -> None:
         """Run skill evolution based on the collected trajectory.
@@ -1193,7 +1189,7 @@ class SkillEvolutionRail(EvolutionRail):
                 return None
             return skill, rel.replace("\\", "/")
 
-        if "read" not in name and "file" not in name:
+        if not cls._is_skill_md_file_read_tool(name):
             return None
 
         file_path = cls._extract_file_path(tool_args)
@@ -1272,6 +1268,71 @@ class SkillEvolutionRail(EvolutionRail):
             result.append(item)
         return result
 
+    @classmethod
+    def _find_skill_load_anchor(cls, messages: List[dict], skill_name: str) -> int:
+        """Return the index of the last SKILL.md load for *skill_name*, or -1."""
+        anchor = -1
+        for index, msg in enumerate(messages):
+            role = msg.get("role", "")
+            if role == "assistant":
+                for tool_call in msg.get("tool_calls", []) or []:
+                    tool = str(tool_call.get("name") or "").lower()
+                    arguments = tool_call.get("arguments", "")
+                    if tool == "skill_tool":
+                        args = cls._parse_tool_args_dict(arguments)
+                        if str(args.get("skill_name") or "").strip() != skill_name:
+                            continue
+                        rel = normalize_skill_relative_file_path(
+                            str(args.get("relative_file_path") or "")
+                        )
+                        if cls._is_skill_md_path(rel):
+                            anchor = index
+                    elif cls._is_skill_md_file_read_tool(tool):
+                        file_path = cls._extract_file_path(arguments)
+                        matched = cls._SKILL_MD_RE.search(file_path)
+                        if matched and matched.group(1) == skill_name:
+                            anchor = index
+        return anchor
+
+    @classmethod
+    def _is_skill_md_file_read_tool(cls, tool_name: str) -> bool:
+        """True for known filesystem read tools that may load SKILL.md by path."""
+        return tool_name.lower() in cls._SKILL_MD_FILE_READ_TOOLS
+
+    @classmethod
+    def _format_messages_snippet(
+        cls,
+        messages: List[dict],
+        *,
+        start: int = 0,
+        max_messages: int = _EVAL_SNIPPET_MAX_MESSAGES,
+        max_content_chars: int = _EVAL_SNIPPET_POST_PRESENT_MAX_CHARS,
+    ) -> str:
+        """Format conversation messages into a scorer-friendly snippet."""
+        lines: List[str] = []
+        window = messages[start:][-max_messages:]
+        for msg in window:
+            role = msg.get("role", "unknown")
+            content = str(msg.get("content") or "")[:max_content_chars]
+            if content:
+                lines.append(f"[{role}] {content}")
+            if role == "assistant":
+                for tool_call in msg.get("tool_calls", []) or []:
+                    tool = str(tool_call.get("name") or "")
+                    args = str(tool_call.get("arguments") or "")[:max_content_chars]
+                    if tool:
+                        lines.append(f"[assistant/tool_call] {tool} {args}")
+        return "\n".join(lines)
+
+    @classmethod
+    def _build_evaluation_snippet(cls, messages: List[dict], skill_name: str) -> str:
+        """Build post-presentation snippet: from last SKILL.md load through turn end."""
+        if not messages:
+            return ""
+        anchor = cls._find_skill_load_anchor(messages, skill_name)
+        start = anchor if anchor >= 0 else max(0, len(messages) - _EVAL_SNIPPET_MAX_MESSAGES)
+        return cls._format_messages_snippet(messages, start=start)
+
     @staticmethod
     def _dedup_messages(messages: List[dict]) -> List[dict]:
         """Remove duplicate messages while preserving order (keep first occurrence).
@@ -1342,9 +1403,9 @@ class SkillEvolutionRail(EvolutionRail):
         """Track presented records for scoring statistics.
 
         Updates times_presented and stores (skill_name, record, snippet) in
-        session for later evaluation.  The snippet is captured at presentation
-        time so that the scorer always evaluates each record against the
-        conversation in which it was actually shown, not a later one.
+        session for later evaluation.  The snippet placeholder is ignored at
+        evaluation time; ``_trigger_async_evaluation`` rebuilds the snippet
+        from the full after-invoke conversation anchored at the last SKILL.md load.
 
         Builds the update payload from snapshots of current stats to avoid
         mutating records before a successful DB write.
@@ -1417,13 +1478,13 @@ class SkillEvolutionRail(EvolutionRail):
     async def _trigger_async_evaluation(
         self,
         ctx: AgentCallbackContext,
-        parsed_messages: List[dict],  # noqa: ARG002  kept for API compatibility
+        parsed_messages: List[dict],
     ) -> None:
         """Trigger async evaluation of presented experiences.
 
         Evaluates whether presented experiences were effectively used.
-        Each record is evaluated against the snippet captured when it was
-        presented, not the current conversation, to avoid cross-turn data leakage.
+        Each record is evaluated against the conversation **after** the last
+        SKILL.md load for that skill (assistant replies and tool calls included).
         """
         session = ctx.session if hasattr(ctx, "session") else None
         counter = self._get_session_eval_counter(session)
@@ -1442,14 +1503,28 @@ class SkillEvolutionRail(EvolutionRail):
             return
 
         try:
-            # Group by (skill_name, snippet) so each batch is evaluated against
-            # the conversation in which those records were actually presented.
-            by_skill_snippet: Dict[tuple[str, str], List[EvolutionRecord]] = {}
-            for skill_name, record, snippet in presented_entries:
-                key = (skill_name, snippet)
-                by_skill_snippet.setdefault(key, []).append(record)
+            eval_messages = parsed_messages
+            if not eval_messages:
+                eval_messages = await self._collect_parsed_messages(ctx)
 
-            for (skill_name, snippet), records in by_skill_snippet.items():
+            by_skill_records: Dict[str, List[EvolutionRecord]] = {}
+            seen_ids: Dict[str, Set[str]] = {}
+            for skill_name, record, _ in presented_entries:
+                seen = seen_ids.setdefault(skill_name, set())
+                if record.id in seen:
+                    continue
+                seen.add(record.id)
+                by_skill_records.setdefault(skill_name, []).append(record)
+
+            by_skill_snippet: Dict[str, str] = {}
+            for skill_name in by_skill_records:
+                by_skill_snippet[skill_name] = self._build_evaluation_snippet(
+                    eval_messages,
+                    skill_name,
+                )
+
+            for skill_name, records in by_skill_records.items():
+                snippet = by_skill_snippet.get(skill_name, "")
                 eval_results = await self._scorer.evaluate(snippet, records)
                 if not eval_results:
                     continue

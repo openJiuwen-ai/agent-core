@@ -401,6 +401,18 @@ def test_is_skill_md_path(relative_path, expected):
             None,
             None,
         ),
+        (
+            "read_all",
+            {"file_path": "/skills/invoice-parser/SKILL.md"},
+            None,
+            None,
+        ),
+        (
+            "file_upload",
+            {"file_path": "/skills/invoice-parser/SKILL.md"},
+            None,
+            None,
+        ),
     ],
 )
 def test_resolve_skill_file_context(tool_name, tool_args, tool_msg, expected):
@@ -1606,29 +1618,122 @@ async def test_run_evolution_path_b_not_reached_when_path_a_handled(tmp_path):
 
 
 # =============================================================================
-# Fix #2: Presented records carry per-presentation snippet
+# Async evaluation snippet (rebuilt at after_invoke from full conversation)
 # =============================================================================
 
 
-def test_session_presented_records_store_snippet(tmp_path):
-    """Each entry stored in session must include the presentation-time snippet."""
-    rail = _make_rail(tmp_path)
-    session = SimpleNamespace()
+def test_build_evaluation_snippet_anchors_after_skill_load(tmp_path):
+    """Snippet starts at last SKILL.md load and includes subsequent assistant/tool turns."""
+    messages = [
+        {"role": "user", "content": "before load"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": "skill_tool",
+                    "arguments": '{"skill_name":"my_skill","relative_file_path":"SKILL"}',
+                }
+            ],
+        },
+        {"role": "tool", "name": "skill_tool", "content": "SKILL body for my_skill"},
+        {"role": "assistant", "content": "after load reply"},
+    ]
+    snippet = SkillEvolutionRail._build_evaluation_snippet(messages, "my_skill")
+    assert "after load reply" in snippet
+    assert "before load" not in snippet
 
-    record = _make_record("sk")
-    rail._set_session_presented_records(session, [("sk", record, "my_snippet")])
 
-    entries = rail._get_session_presented_records(session)
-    assert len(entries) == 1
-    skill_name, stored_record, snippet = entries[0]
-    assert skill_name == "sk"
-    assert stored_record is record
-    assert snippet == "my_snippet"
+def test_find_skill_load_anchor_uses_assistant_tool_call_not_substring_tool_content():
+    """tool/function responses must not set anchor via skill_name substring match."""
+    messages = [
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": "skill_tool",
+                    "arguments": '{"skill_name":"test","relative_file_path":"SKILL"}',
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "skill_tool",
+            "content": "latest testing results (no exact skill_name field here)",
+        },
+        {"role": "assistant", "content": "done"},
+    ]
+    anchor = SkillEvolutionRail._find_skill_load_anchor(messages, "test")
+    assert anchor == 1
+
+
+def test_find_skill_load_anchor_not_overwritten_by_later_substring_false_positive():
+    """A later tool response containing skill_name as substring must not move the anchor."""
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": "skill_tool",
+                    "arguments": '{"skill_name":"test","relative_file_path":"SKILL"}',
+                }
+            ],
+        },
+        {"role": "tool", "name": "skill_tool", "content": "SKILL body"},
+        {"role": "assistant", "content": "correct post-load context"},
+        {
+            "role": "tool",
+            "name": "skill_tool",
+            "content": "contest leaderboard update",
+        },
+    ]
+    anchor = SkillEvolutionRail._find_skill_load_anchor(messages, "test")
+    assert anchor == 0
+    snippet = SkillEvolutionRail._build_evaluation_snippet(messages, "test")
+    assert "correct post-load context" in snippet
+    # Wrong anchor at the contest tool message would drop the assistant context above it.
+    assert snippet.index("correct post-load context") < snippet.index("contest")
+
+
+def test_find_skill_load_anchor_read_file_path(tmp_path):
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": "read_file",
+                    "arguments": '{"file_path":"/workspace/skills/invoice-parser/SKILL.md"}',
+                }
+            ],
+        },
+        {"role": "tool", "name": "read_file", "content": "# Invoice parser"},
+    ]
+    anchor = SkillEvolutionRail._find_skill_load_anchor(messages, "invoice-parser")
+    assert anchor == 0
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["read_all", "file_upload", "bread_crumb", "profile_reader"],
+)
+def test_find_skill_load_anchor_rejects_non_file_read_tools(tool_name):
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": tool_name,
+                    "arguments": '{"file_path":"/skills/my-skill/SKILL.md"}',
+                }
+            ],
+        },
+    ]
+    assert SkillEvolutionRail._find_skill_load_anchor(messages, "my-skill") == -1
 
 
 @pytest.mark.asyncio
-async def test_trigger_async_evaluation_uses_per_record_snippet(tmp_path):
-    """Scorer must be called with the snippet bound to each record, not current messages."""
+async def test_trigger_async_evaluation_builds_snippet_from_messages(tmp_path):
+    """Scorer must use snippet rebuilt from after-invoke messages, not session placeholders."""
     rail = _make_rail(tmp_path)
     rail._eval_interval = 1
 
@@ -1636,12 +1741,12 @@ async def test_trigger_async_evaluation_uses_per_record_snippet(tmp_path):
     record_b = _make_record("skill_b")
 
     session = SimpleNamespace()
-    # Two records from different conversations with different snippets
+    # Production path stores "" at presentation time; legacy non-empty values are ignored.
     rail._set_session_presented_records(
         session,
         [
-            ("skill_a", record_a, "snippet_from_turn_1"),
-            ("skill_b", record_b, "snippet_from_turn_2"),
+            ("skill_a", record_a, ""),
+            ("skill_b", record_b, "stale_snippet_should_be_ignored"),
         ],
     )
     rail._set_session_eval_counter(session, 0)
@@ -1658,13 +1763,28 @@ async def test_trigger_async_evaluation_uses_per_record_snippet(tmp_path):
     ctx = Mock()
     ctx.session = session
 
-    # Pass a completely different current-round messages list
-    await rail._trigger_async_evaluation(ctx, [{"role": "user", "content": "new unrelated message"}])
+    messages = [
+        {"role": "user", "content": "unrelated preamble"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": "skill_tool",
+                    "arguments": '{"skill_name":"skill_a","relative_file_path":"SKILL"}',
+                }
+            ],
+        },
+        {"role": "tool", "name": "skill_tool", "content": "SKILL body skill_a"},
+        {"role": "assistant", "content": "post-present skill_a behavior"},
+    ]
 
-    # Must have evaluated with the stored snippets, not the current messages
-    assert "snippet_from_turn_1" in captured_snippets
-    assert "snippet_from_turn_2" in captured_snippets
-    assert not any("new unrelated" in s for s in captured_snippets)
+    await rail._trigger_async_evaluation(ctx, messages)
+
+    assert len(captured_snippets) == 2
+    assert not any("stale_snippet" in s for s in captured_snippets)
+    skill_a_snippet = captured_snippets[0]
+    assert "post-present skill_a behavior" in skill_a_snippet
+    assert "unrelated preamble" not in skill_a_snippet
 
 
 # =============================================================================
