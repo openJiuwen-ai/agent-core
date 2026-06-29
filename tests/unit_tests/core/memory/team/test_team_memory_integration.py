@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-from typing import Any, Dict
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -53,7 +53,7 @@ class MockPromptBuilder:
     """Mock prompt builder for testing."""
 
     def __init__(self):
-        self._sections: Dict[str, Any] = {}
+        self._sections: dict[str, Any] = {}
 
     def add_section(self, section: Any) -> None:
         self._sections[section.name] = section
@@ -69,7 +69,7 @@ class MockAbilityManager:
     """Mock ability manager for testing."""
 
     def __init__(self):
-        self._abilities: Dict[str, Any] = {}
+        self._abilities: dict[str, Any] = {}
 
     def add(self, tool_card: Any) -> Any:
         result = MagicMock()
@@ -77,7 +77,7 @@ class MockAbilityManager:
         self._abilities[tool_card.name] = tool_card
         return result
 
-    def remove(self, names: list) -> None:
+    def remove(self, names: list[str]) -> None:
         for name in names:
             self._abilities.pop(name, None)
 
@@ -264,8 +264,6 @@ async def test_lifecycle_extract_does_not_run_twice_in_same_round(temp_dir, temp
 @pytest.mark.asyncio
 async def test_lifecycle_read_only_mode(temp_dir):
     """Test lifecycle with read_only_source_workspace."""
-    from openjiuwen.harness.workspace.workspace import Workspace
-
     read_only_source = os.path.join(temp_dir, "source")
     os.makedirs(read_only_source, exist_ok=True)
 
@@ -273,7 +271,7 @@ async def test_lifecycle_read_only_mode(temp_dir):
     params.read_only_source_workspace = read_only_source
     manager = TeamMemoryManager(params)
 
-    init_result = await manager.init_toolkit()
+    await manager.init_toolkit()
 
     assert manager._workspace is not None
 

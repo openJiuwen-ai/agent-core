@@ -1091,9 +1091,10 @@ class TeamAgent(BaseAgent):
             team_name: Identifies which team's bucket to load. A session can
                 hold state for multiple teams; the caller must specify which.
             runtime_spec: Optional live spec from the current process. Used to
-                reinject ``build_context``, which is ``Field(exclude=True)`` and
-                never survives the checkpoint round-trip. When omitted the
-                recovered spec is used as-is (rebuilding context from its seed).
+                reinject ``build_context`` and ``memory.embedding_config``, which
+                are ``Field(exclude=True)`` and never survive the checkpoint
+                round-trip. When omitted the recovered spec is used as-is
+                (rebuilding context from its seed).
 
         Raises:
             ValueError: When the session has no bucket for ``team_name`` or
@@ -1115,6 +1116,11 @@ class TeamAgent(BaseAgent):
         # members survive a cold restart. No-op for legacy.
         if runtime_spec is not None and runtime_spec.build_context is not None:
             spec.build_context = runtime_spec.build_context
+        # embedding_config is also Field(exclude=True) — reinject from the
+        # live spec so resolve_embedding_config can find it during configure.
+        if runtime_spec is not None and runtime_spec.memory and runtime_spec.memory.embedding_config:
+            if spec.memory:
+                spec.memory.embedding_config = runtime_spec.memory.embedding_config
         spec.materialize_build_context()
         context = TeamRuntimeContext.model_validate(bucket["context"])
 

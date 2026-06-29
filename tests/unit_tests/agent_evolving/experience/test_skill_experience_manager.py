@@ -36,14 +36,35 @@ def _make_record(*, content: str = "experience content") -> EvolutionRecord:
     )
 
 
+def _make_archive_pair() -> Mock:
+    pair = Mock()
+    pair.version = "v1"
+    pair.evolution_archive_name = "evolutions.v1.json"
+    pair.to_payload.return_value = {
+        "version": "v1",
+        "skill_archive": "SKILL.v1.md",
+        "evolution_archive": "evolutions.v1.json",
+    }
+    return pair
+
+
+def _make_archive_service() -> Mock:
+    archive_service = Mock()
+    archive_service.archive_current_pair = AsyncMock(return_value=_make_archive_pair())
+    archive_service.prune = Mock()
+    return archive_service
+
+
 def _make_manager(*, language: str = "cn") -> ExperienceManager:
     store = Mock()
     store.append_record = AsyncMock()
     scorer = Mock()
+    rebuild_service = ExperienceRebuildService(store=store, archive_service=_make_archive_service())
     manager = ExperienceManager(
         store=store,
         scorer=scorer,
         language=language,
+        rebuild_service=rebuild_service,
     )
     return manager
 
@@ -879,8 +900,6 @@ async def test_request_rebuild_uses_shared_helper_and_template():
     record = _make_record(content="good experience")
     record.score = 0.8
     manager._store.skill_exists = Mock(return_value=True)
-    manager._store.archive_skill_body = AsyncMock(return_value="SKILL.v1.md")
-    manager._store.archive_evolutions = AsyncMock(return_value="evolutions.v1.json")
     manager._store.load_full_evolution_log = AsyncMock(return_value=Mock(entries=[record]))
     manager._store.clear_evolutions = AsyncMock()
 
@@ -889,6 +908,9 @@ async def test_request_rebuild_uses_shared_helper_and_template():
     assert prompt is not None
     assert "good experience" in prompt
     assert "skill-creator" in prompt.lower()
+    manager.rebuild_service._archive_service.archive_current_pair.assert_awaited_once_with(
+        "skill-a", subject_kind="skill"
+    )
     manager._store.clear_evolutions.assert_awaited_once_with("skill-a", subject_kind="skill")
 
 
@@ -900,8 +922,6 @@ async def test_request_rebuild_inlines_deterministic_context_and_clears_archived
     record.summary = "Prefer strict validation."
     record.score = 0.9
     manager._store.skill_exists.return_value = True
-    manager._store.archive_skill_body = AsyncMock(return_value="SKILL.archive.md")
-    manager._store.archive_evolutions = AsyncMock(return_value="evolutions.archive.json")
     manager._store.clear_evolutions = AsyncMock()
     manager._store.load_full_evolution_log = AsyncMock(return_value=Mock(entries=[record]))
 

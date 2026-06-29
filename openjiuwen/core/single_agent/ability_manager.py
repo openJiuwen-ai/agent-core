@@ -96,11 +96,18 @@ class AbilityManager:
         error = getattr(result, "error", None)
         success = getattr(result, "success", None)
 
-        if isinstance(data, dict) and "content" in data:
-            return str(data.get("content") or "")
-
         if success is False and error:
             return str(error)
+
+        if isinstance(data, dict) and "content" in data:
+            content = str(data.get("content") or "")
+            if content:
+                return content
+            if success is True:
+                path = data.get("path")
+                suffix = f" path={path}" if path else ""
+                return f"Tool succeeded but returned empty content.{suffix}"
+            return ""
 
         return str(result)
 
