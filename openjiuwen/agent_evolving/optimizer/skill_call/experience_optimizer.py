@@ -20,6 +20,35 @@ from openjiuwen.agent_evolving.signal.base import EvolutionSignal
 from openjiuwen.agent_evolving.trajectory.types import Updates
 from openjiuwen.core.common.logging import logger
 
+
+def _assistant_text_from_response(response: Any) -> str:
+    """Normalize assistant output; fall back to reasoning_content when content is empty."""
+    content = getattr(response, "content", None)
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and part.get("type") == "text":
+                parts.append(str(part.get("text", "")))
+        text = "".join(parts).strip()
+    elif content is None:
+        text = ""
+    else:
+        text = str(content).strip()
+
+    if text:
+        return text
+
+    reasoning = getattr(response, "reasoning_content", None)
+    if reasoning and str(reasoning).strip():
+        logger.warning(
+            "[SkillExperienceOptimizer] falling back to reasoning_content "
+            "(empty content; reasoning_content is not the expected JSON output channel)",
+        )
+        return str(reasoning).strip()
+    return ""
+
 # Initial score mapping by signal type
 INITIAL_SCORE_BY_SIGNAL = {
     "execution_failure": 0.65,
@@ -577,6 +606,9 @@ _TOOL_CHAIN_CORRECTION_RE = re.compile(
 _TOOL_CHAIN_ARGS_MAX_CHARS = 120
 _TOOL_CHAIN_RESULT_MAX_CHARS = 100
 _ANALYZER_LOG_MAX_CHARS = 500
+# Reasoning models (e.g. GLM-5.1) may spend the entire default output budget on
+# reasoning_content before emitting JSON in content; raise the cap for optimizer calls.
+_OPTIMIZER_LLM_MAX_TOKENS = 8192
 
 
 def _extract_message_text(message: dict) -> str:
@@ -895,7 +927,8 @@ def _parse_single_patch(data: dict) -> Optional[EvolutionPatch]:
 
 def _parse_analyzer_response(raw: str) -> Optional[dict]:
     """Parse analyzer-stage JSON object. Returns None on failure."""
-    data = _extract_json(raw)
+    extracted = _extract_json(raw)
+    data = extracted
     if not isinstance(data, dict):
         return None
     if "candidates" not in data:
@@ -1064,8 +1097,9 @@ class SkillExperienceOptimizer(BaseOptimizer):
             response = await self._llm.invoke(
                 model=self._model,
                 messages=[{"role": "user", "content": prompt}],
+                max_tokens=_OPTIMIZER_LLM_MAX_TOKENS,
             )
-            return response.content if hasattr(response, "content") else str(response)
+            return _assistant_text_from_response(response)
         except Exception as exc:
             logger.error("[SkillExperienceOptimizer] LLM call failed: %s", exc)
             return None
@@ -1237,14 +1271,8 @@ class SkillExperienceOptimizer(BaseOptimizer):
             )
             retry_prompt = _JSON_FIX_PROMPT.format(broken_output=broken_raw)
 
-        try:
-            response = await self._llm.invoke(
-                model=self._model,
-                messages=[{"role": "user", "content": retry_prompt}],
-            )
-            retry_raw = response.content if hasattr(response, "content") else str(response)
-        except Exception as exc:
-            logger.error("[SkillExperienceOptimizer] retry LLM call failed: %s", exc)
+        retry_raw = await self._invoke_llm(retry_prompt)
+        if retry_raw is None:
             return []
 
         patches = _parse_llm_response(retry_raw)

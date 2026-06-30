@@ -17,6 +17,8 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionRecord,
 )
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
+    _assistant_text_from_response,
+    _OPTIMIZER_LLM_MAX_TOKENS,
     SkillExperienceOptimizer,
     _build_conversation_snippet,
     _build_context,
@@ -550,6 +552,36 @@ class TestConversationSnippetTruncation:
         assert len(last_line) > len(first_line)
 
 
+class TestAssistantTextFromResponse:
+    @staticmethod
+    def test_prefers_content_over_reasoning():
+        response = SimpleNamespace(
+            content='{"candidates": []}',
+            reasoning_content="internal thoughts",
+        )
+        assert _assistant_text_from_response(response) == '{"candidates": []}'
+
+    @staticmethod
+    def test_falls_back_to_reasoning_when_content_empty():
+        response = SimpleNamespace(
+            content="",
+            reasoning_content='{"candidates": [{"action": "append"}]}',
+        )
+        assert "candidates" in _assistant_text_from_response(response)
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_invoke_llm_passes_optimizer_max_tokens():
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            return_value=SimpleNamespace(content='{"candidates": []}', reasoning_content=None)
+        )
+        optimizer = SkillExperienceOptimizer(llm=llm, model="glm", language="cn")
+        result = await optimizer._invoke_llm("prompt")
+        assert result == '{"candidates": []}'
+        assert llm.invoke.call_args.kwargs["max_tokens"] == _OPTIMIZER_LLM_MAX_TOKENS
+
+
 class TestRetryParse:
     @staticmethod
     @pytest.mark.asyncio
@@ -565,11 +597,28 @@ class TestRetryParse:
             broken_raw='[{"action":"append" invalid json}]',
             original_prompt="original prompt here",
         )
+        
         assert len(patches) == 1
         assert patches[0].content == "fixed"
         call_args = llm.invoke.call_args
         prompt_sent = call_args.kwargs["messages"][0]["content"]
         assert "修复" in prompt_sent or "invalid json" in prompt_sent
+        assert call_args.kwargs["max_tokens"] == _OPTIMIZER_LLM_MAX_TOKENS
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_retry_falls_back_to_reasoning_content():
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            return_value=SimpleNamespace(
+                content="",
+                reasoning_content='[{"action":"append","target":"body","section":"Troubleshooting","content":"from-reasoning"}]',
+            )
+        )
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
+        patches = await optimizer.retry_parse("bad", original_prompt="p")
+        assert len(patches) == 1
+        assert patches[0].content == "from-reasoning"
 
     @staticmethod
     @pytest.mark.asyncio
