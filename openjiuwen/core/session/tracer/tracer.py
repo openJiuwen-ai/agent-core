@@ -198,3 +198,9 @@ class Tracer:
         if parent_node_id not in self.tracer_workflow_span_manager_dict:
             return
         self.tracer_workflow_span_manager_dict.get(parent_node_id).pop_span(invoke_id)
+
+    def workflow_handler_valid(self) -> bool:
+        return len(self._workflow_handlers) > 0
+
+    def agent_handler_valid(self) -> bool:
+        return len(self._agent_handlers) > 0
