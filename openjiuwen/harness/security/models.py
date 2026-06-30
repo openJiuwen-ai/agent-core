@@ -50,15 +50,20 @@ class PermissionResult:
 
 @dataclass(frozen=True)
 class PermissionConfirmResponse:
-    """工具权限 ASK 场景下用户对「允许一次 / 记住并写回策略 / 拒绝」的确认结果。
+    """工具权限 ASK 场景下用户对「允许一次 / 会话内记住 / 永久记住 / 拒绝」的确认结果。
 
-    ``approved`` 且 ``auto_confirm`` 时，护栏走合并 ``permissions``、更新内存并写盘的路径
-    （与 ``PermissionInterruptRail._persist_allow_always`` 一致）；仅 ``approved`` 则为本次放行。
+    - ``approved and auto_confirm and persist_allow``：永久记住，走合并 ``permissions``、
+      更新内存并写盘的路径（与 ``PermissionInterruptRail._persist_allow_always`` 一致）。
+    - ``approved and auto_confirm and not persist_allow``：会话内记住，仅写入 session state
+      的 ``__interrupt_auto_confirm__``，不写磁盘。
+    - ``approved and not auto_confirm``：仅本次放行。
+    - ``not approved``：拒绝。
     """
 
     approved: bool
     feedback: str = ""
     auto_confirm: bool = False
+    persist_allow: bool = False
 
 
 class ApprovalOverrideEntry(TypedDict, total=False):
