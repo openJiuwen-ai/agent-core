@@ -144,6 +144,8 @@ class OffloadMessageBuffer:
 
     def _filesystem_reload_paths(self, offload_handle: str) -> List[str]:
         """Return candidate filesystem paths for an offload handle."""
+        if os.path.isabs(offload_handle):
+            return [offload_handle]
         if not (self._workspace_dir and self._session_id):
             return [offload_handle]
 
