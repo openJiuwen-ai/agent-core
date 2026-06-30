@@ -806,8 +806,12 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         call_ability = self._stream_abilities()
         return len(call_ability) > 0
 
+    def _trace_enable(self):
+        return (self._session.tracer() and self._session.tracer().workflow_handler_valid()
+                and not self._executable.skip_trace())
+
     async def __trace_component_inputs__(self, inputs: Optional[dict]) -> None:
-        if (not self._session.tracer()) or self._executable.skip_trace():
+        if not self._trace_enable():
             return
         self._is_call_started.set()
         need_send = (not self._has_stream_call) or self._stream_done.done()
@@ -816,34 +820,34 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             self._session.tracer().register_workflow_span_manager(self._session.executable_id())
 
     async def __trace_component_outputs__(self, outputs: Optional[dict] = None) -> None:
-        if (not self._session.tracer()) or self._executable.skip_trace():
+        if not self._trace_enable():
             return
         await TracerWorkflowUtils.trace_component_outputs(self._session, outputs)
 
     async def __trace_component_begin__(self) -> None:
-        if (not self._session.tracer()) or self._executable.skip_trace():
+        if not self._trace_enable():
             return
         if not self._is_started.is_set():
             self._is_started.set()
             await TracerWorkflowUtils.trace_component_begin(self._session)
 
     async def __trace_component_done__(self) -> None:
-        if (not self._session.tracer()) or self._executable.skip_trace():
+        if not self._trace_enable():
             return
         await TracerWorkflowUtils.trace_component_done(self._session)
 
     async def __trace_component_stream_output__(self, chunk) -> None:
-        if (not self._session.tracer()) or self._executable.skip_trace():
+        if not self._trace_enable():
             return
         await TracerWorkflowUtils.trace_component_stream_output(self._session, chunk)
 
     async def __trace_error__(self, error: Exception) -> None:
-        if (not self._session.tracer()) or self._executable.skip_trace():
+        if not self._trace_enable():
             return
         await TracerWorkflowUtils.trace_error(self._session, error)
 
     async def __trace_inner_error__(self, error: Exception) -> None:
-        if (not self._session.tracer()) or self._executable.skip_trace():
+        if not self._trace_enable():
             return
         if isinstance(error, BaseError):
             inner_error_info = {"error_code": error.code, "message": error.message}
@@ -856,7 +860,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         })
 
     async def __trace_component_stream_input_send__(self) -> None:
-        if (not self._session.tracer()) or self._executable.skip_trace():
+        if not self._trace_enable():
             return
         if (not self._has_call) or self._is_call_started.is_set():
             await TracerWorkflowUtils.trace_component_stream_input(self._session, {}, send=True)

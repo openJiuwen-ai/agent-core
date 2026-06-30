@@ -67,6 +67,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_WORKFLOW_EXECUTION_ID,
     OJ_WORKFLOW_ID,
     OJ_WORKFLOW_INPUTS,
+    OJ_WORKFLOW_INVOKE_DATA,
     OJ_WORKFLOW_LOOP_INDEX,
     OJ_WORKFLOW_LOOP_NODE_ID,
     OJ_WORKFLOW_NAME,
@@ -99,6 +100,25 @@ def _serialize(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, default=str)
     return str(value)
+
+
+def _normalize_llm_payload(value: Any) -> Any:
+    """Recursively convert Pydantic models to plain dicts via ``model_dump()``.
+
+    LLM inputs/outputs contain message objects (``BaseMessage`` subclasses).
+    Their default ``str()`` includes class names and empty fields, producing
+    non-standard repr output like ``SystemMessage(role='system', content='x', name=None, metadata={})``.
+    Calling ``model_dump()`` yields clean ``{"role": "...", "content": "..."}`` dicts
+    that serialize to standard JSON.  Uses duck typing so any Pydantic v2 model
+    (and the custom ``AssistantMessage.model_dump``) is handled uniformly.
+    """
+    if hasattr(value, "model_dump"):
+        return _normalize_llm_payload(value.model_dump())
+    if isinstance(value, dict):
+        return {str(k): _normalize_llm_payload(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_llm_payload(v) for v in value]
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -245,8 +265,10 @@ class OtelAgentHandler(TraceExtAgentHandler):
             meta_data = span.meta_data or instance_info
             state.span.set_attribute(OJ_META_DATA, _serialize(meta_data))
             if inputs is not None:
-                state.span.set_attribute(GEN_AI_PROMPT, redact(inputs, self._config, field="prompts"))
-                state.span.set_attribute(OJ_AGENT_INPUTS, redact(inputs, self._config))
+                # Normalize message objects to plain dicts before serialization,
+                # so GEN_AI_PROMPT carries standard JSON instead of class repr.
+                payload = _serialize(_normalize_llm_payload(inputs))
+                state.span.set_attribute(GEN_AI_PROMPT, redact(payload, self._config, field="prompts"))
         except Exception as exc:
             session_logger.warning("otel agent handler: on_llm_start failed: %s", exc)
 
@@ -265,8 +287,9 @@ class OtelAgentHandler(TraceExtAgentHandler):
             if state is None:
                 return
             if outputs is not None:
-                state.span.set_attribute(GEN_AI_COMPLETION, redact(outputs, self._config, field="completions"))
-                state.span.set_attribute(OJ_AGENT_OUTPUTS, redact(outputs, self._config))
+                # Normalize message objects (e.g. AssistantMessage) to plain dicts.
+                payload = _serialize(_normalize_llm_payload(outputs))
+                state.span.set_attribute(GEN_AI_COMPLETION, redact(payload, self._config, field="completions"))
             self._set_end_attrs(state.span, span)
             self._end_and_pop(span.invoke_id)
         except Exception as exc:
@@ -540,7 +563,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
 
         on_invoke_data = self._span_manager.get_on_invoke_data(invoke_id)
         if on_invoke_data:
-            state.span.set_attribute(OJ_AGENT_INPUTS, _serialize(on_invoke_data))
+            state.span.set_attribute(OJ_WORKFLOW_INVOKE_DATA, _serialize(on_invoke_data))
 
         stream_inputs = self._span_manager.get_stream_inputs(invoke_id)
         if stream_inputs:
@@ -549,6 +572,22 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         stream_outputs = self._span_manager.get_stream_outputs(invoke_id)
         if stream_outputs:
             state.span.set_attribute(OJ_STREAM_OUTPUTS, _serialize(stream_outputs))
+
+    # --- helper: set end-time attributes before closing a workflow span ---
+
+    def _set_workflow_end_attrs(self, state: OtelSpanState) -> None:
+        """Set end_time / elapsed_time before closing a workflow span.
+
+        Mirrors the Agent handler's ``_set_end_attrs`` for consistency.
+        Uses the cached ``start_time`` on ``OtelSpanState`` (set in ``on_call_start``).
+        """
+        if state.start_time is None:
+            return
+        end_time = datetime.now(tz=tzlocal()).replace(tzinfo=None)
+        state.span.set_attribute(OJ_END_TIME, str(end_time))
+        elapsed_ms = (end_time - state.start_time).total_seconds() * 1000
+        elapsed_str = f"{elapsed_ms:.0f}ms" if elapsed_ms < 1000 else f"{(elapsed_ms / 1000):.2f}s"
+        state.span.set_attribute(OJ_ELAPSED_TIME, elapsed_str)
 
     # ================================================================
     # Lifecycle events
@@ -584,11 +623,12 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 context=parent_ctx,
             )
             # OTel standard + base attributes
+            start_time = datetime.now(tz=tzlocal()).replace(tzinfo=None)
             otel_span.set_attribute(GEN_AI_SYSTEM, GEN_AI_SYSTEM_VALUE)
             otel_span.set_attribute(OJ_TRACE_ID, self._trace_id)
             otel_span.set_attribute(OJ_INVOKE_ID, invoke_id)
             otel_span.set_attribute(OJ_PARENT_NODE_ID, parent_node_id)
-            otel_span.set_attribute(OJ_START_TIME, str(datetime.now(tz=tzlocal()).replace(tzinfo=None)))
+            otel_span.set_attribute(OJ_START_TIME, str(start_time))
             if source_ids is not None:
                 otel_span.set_attribute(OJ_SOURCE_IDS, _serialize(source_ids))
             # LLM component: gen_ai attributes
@@ -600,8 +640,9 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             if inputs is not None:
                 otel_span.set_attribute(OJ_WORKFLOW_INPUTS, redact(inputs, self._config))
 
-            context_token = otel_context.attach(trace.set_span_in_context(otel_span))
-            state = OtelSpanState(span=otel_span, context_token=context_token, invoke_id=invoke_id)
+            state = OtelSpanState(
+                span=otel_span, context_token=None, invoke_id=invoke_id, start_time=start_time,
+            )
             self._span_manager.push(invoke_id, state)
 
             # Register in layer / component mappings
@@ -629,10 +670,10 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             if outputs is not None:
                 state.span.set_attribute(OJ_WORKFLOW_OUTPUTS, redact(outputs, self._config))
 
+            self._set_workflow_end_attrs(state)
             state.span.set_attribute(OJ_STATUS, NodeStatus.FINISH.value)
             state.span.set_status(Status(StatusCode.OK))
             state.span.end()
-            otel_context.detach(state.context_token)
 
             # Clean up layer / component mappings
             # Remove from _layer_root_spans if this invoke_id is a root
@@ -706,8 +747,8 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
 
                 pop_state = self._span_manager.pop(invoke_id)
                 if pop_state is not None:
+                    self._set_workflow_end_attrs(pop_state)
                     pop_state.span.end()
-                    otel_context.detach(pop_state.context_token)
                     for key, val in list(self._layer_root_spans.items()):
                         if val.invoke_id == invoke_id:
                             self._layer_root_spans.pop(key, None)

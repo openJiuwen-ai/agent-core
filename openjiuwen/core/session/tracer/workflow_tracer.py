@@ -46,7 +46,7 @@ class TracerWorkflowUtils:
     @staticmethod
     async def trace_workflow_start(session, inputs: Optional[dict]):
         tracer = session.tracer()
-        if tracer is None:
+        if tracer is None or not tracer.workflow_handler_valid():
             return
         await tracer.trigger(TracerHandlerName.TRACER_WORKFLOW.value, event_name="on_call_start",
                              invoke_id=session.workflow_id(),
@@ -58,7 +58,7 @@ class TracerWorkflowUtils:
     @staticmethod
     async def trace_component_begin(session, source_ids: list = None):
         tracer = session.tracer()
-        if tracer is None:
+        if tracer is None or not tracer.workflow_handler_valid():
             return
         executable_id = session.executable_id()
         parent_id = session.parent_id()
@@ -71,7 +71,7 @@ class TracerWorkflowUtils:
     @staticmethod
     async def trace_component_inputs(session, inputs: Optional[dict], send: bool = True):
         tracer = session.tracer()
-        if tracer is None:
+        if tracer is None or not tracer.workflow_handler_valid():
             return
         executable_id = session.executable_id()
         parent_id = session.parent_id()
@@ -85,7 +85,7 @@ class TracerWorkflowUtils:
     @staticmethod
     async def trace_component_stream_input(session, chunk, send: bool = True):
         tracer = session.tracer()
-        if tracer is None:
+        if tracer is None or not tracer.workflow_handler_valid():
             return
         executable_id = session.executable_id()
         parent_id = session.parent_id()
@@ -100,7 +100,7 @@ class TracerWorkflowUtils:
     @staticmethod
     async def trace_component_outputs(session, outputs: Optional[dict]):
         tracer = session.tracer()
-        if tracer is None:
+        if tracer is None or not tracer.workflow_handler_valid():
             return
         executable_id = session.executable_id()
         parent_id = session.parent_id()
@@ -112,7 +112,7 @@ class TracerWorkflowUtils:
     @staticmethod
     async def trace_component_stream_output(session, chunk):
         tracer = session.tracer()
-        if tracer is None:
+        if tracer is None or not tracer.workflow_handler_valid():
             return
         executable_id = session.executable_id()
         parent_id = session.parent_id()
@@ -126,7 +126,7 @@ class TracerWorkflowUtils:
     @staticmethod
     async def trace_workflow_done(session, outputs: Optional[dict]):
         tracer = session.tracer()
-        if tracer is None:
+        if tracer is None or not tracer.workflow_handler_valid():
             return
         executable_id = session.workflow_id()
         parent_id = ""
@@ -139,7 +139,7 @@ class TracerWorkflowUtils:
     @staticmethod
     async def trace_component_done(session):
         tracer = session.tracer()
-        if tracer is None:
+        if tracer is None or not tracer.workflow_handler_valid():
             return
         executable_id = session.executable_id()
         parent_id = session.parent_id()
@@ -155,7 +155,7 @@ class TracerWorkflowUtils:
     @staticmethod
     async def trace(session, data: dict = None):
         tracer = session.tracer()
-        if tracer is None:
+        if tracer is None or not tracer.workflow_handler_valid():
             return
         invoke_id = session.executable_id()
         parent_id = session.parent_id()
@@ -167,7 +167,7 @@ class TracerWorkflowUtils:
     @staticmethod
     async def trace_error(session, error: Exception):
         tracer = session.tracer()
-        if tracer is None:
+        if tracer is None or not tracer.workflow_handler_valid():
             return
         if error is None:
             raise build_error(StatusCode.TRACER_WORKFLOW_TRACE_ERROR, reason="'trace_error''s error is None")
@@ -181,7 +181,7 @@ class TracerWorkflowUtils:
     @staticmethod
     async def trace_component_interactive_inputs(session, inputs: Optional[dict], send: bool = True):
         tracer = session.tracer()
-        if tracer is None:
+        if tracer is None or not tracer.workflow_handler_valid():
             return
         executable_id = session.executable_id()
         parent_id = session.parent_id()

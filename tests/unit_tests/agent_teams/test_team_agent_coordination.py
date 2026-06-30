@@ -618,6 +618,71 @@ async def test_mailbox_messages_deferred_while_interrupt_pending():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_process_unread_collects_only_newest_broadcast_for_watermark():
+    """A batch of broadcasts marks only the newest id; directs all pass through.
+
+    Broadcast read state is a per-member watermark (one row per ``(member,
+    team)``). Collecting more than one broadcast id in one batch would make
+    ``mark_messages_read`` insert duplicate primary keys in the same
+    transaction and the commit would raise ``UNIQUE constraint failed``,
+    rolling back the whole batch and stalling the watermark — the mailbox
+    reprocessing loop. The handler delivers every broadcast to the agent but
+    only collects the newest (the unread list is newest-first) for the
+    read-state write; the watermark then covers the older broadcasts too.
+    """
+    agent = _make_leader()
+    agent._configurator.message_manager = MagicMock()
+    mark_messages_read = AsyncMock(return_value=3)
+    agent._configurator.message_manager.mark_messages_read = mark_messages_read
+    # deliver_input is a no-op so delivered_ids collection is exercised
+    # without a live harness.
+    agent.deliver_input = AsyncMock()
+    agent._start_agent = AsyncMock()
+    agent.has_pending_interrupt = lambda: False
+
+    def _bc(msg_id: str, ts: int):
+        msg = MagicMock()
+        msg.message_id = msg_id
+        msg.from_member_name = "dev-2"
+        msg.broadcast = True
+        msg.timestamp = ts
+        msg.content = f"broadcast {msg_id}"
+        return msg
+
+    def _dm(msg_id: str, ts: int):
+        msg = MagicMock()
+        msg.message_id = msg_id
+        msg.from_member_name = "dev-2"
+        msg.broadcast = False
+        msg.timestamp = ts
+        msg.content = f"direct {msg_id}"
+        return msg
+
+    # Newest-first ordering (as _read_all_unread returns). Two directs both
+    # pass through; three broadcasts collapse to the newest one.
+    agent._coordination.dispatcher.message._read_all_unread = AsyncMock(
+        side_effect=[
+            [_bc("b3", 3000), _dm("dm-2", 2500), _bc("b2", 2000), _dm("dm-1", 1500), _bc("b1", 1000)],
+            [],
+        ]
+    )
+
+    await agent._coordination.dispatcher.message._process_unread_messages("leader-1")
+
+    # mark_messages_read called once. Both directs are collected (each flips
+    # its own is_read row); only the newest broadcast is collected (the
+    # watermark then covers the older broadcasts).
+    mark_messages_read.assert_called_once()
+    marked_ids = mark_messages_read.call_args.args[0]
+    assert "dm-1" in marked_ids
+    assert "dm-2" in marked_ids
+    assert "b3" in marked_ids
+    assert "b1" not in marked_ids
+    assert "b2" not in marked_ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_resume_interrupt_forwards_to_runtime_send():
     """A valid interrupt resume is forwarded to the runtime via send.
 

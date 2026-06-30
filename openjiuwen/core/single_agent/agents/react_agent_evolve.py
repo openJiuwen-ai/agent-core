@@ -1,18 +1,16 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from openjiuwen.core.operator import (
-    Operator,
-    LLMCallOperator,
-    ToolCallOperator,
-)
 from openjiuwen.core.single_agent.agents.react_agent import (
     ReActAgent,
     ReActAgentConfig,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+if TYPE_CHECKING:
+    from openjiuwen.core.operator import Operator
 
 
 class ReActAgentEvolve(ReActAgent):
@@ -63,6 +61,9 @@ class ReActAgentEvolve(ReActAgent):
         Agent execution is inherited from ReActAgent.
         Parameter changes are synced back to agent config via callbacks.
         """
+        from openjiuwen.core.operator.llm_call import LLMCallOperator
+        from openjiuwen.core.operator.tool_call import ToolCallOperator
+
         # LLMCallOperator: manages prompt templates
         system_prompt = getattr(self._config, "prompt_template", []) or []
         self._llm_op = LLMCallOperator(

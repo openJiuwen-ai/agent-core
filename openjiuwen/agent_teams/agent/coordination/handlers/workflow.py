@@ -79,9 +79,17 @@ class WorkflowHandler(BaseCoordinationHandler):
         """
         kind = payload.kind
         if kind == _KIND_WORKFLOW_STARTED:
-            return t("workflow.started", name=payload.workflow_name or "workflow")
+            return t(
+                "workflow.started",
+                run_id=payload.run_id or "?",
+                name=payload.workflow_name or "workflow",
+            )
         if kind == _KIND_PHASE:
-            return t("workflow.phase", phase=payload.phase or "?")
+            return t(
+                "workflow.phase",
+                run_id=payload.run_id or "?",
+                phase=payload.phase or "?",
+            )
         if kind == _KIND_HUMAN_PROMPT:
             return t(
                 "workflow.human_prompt",

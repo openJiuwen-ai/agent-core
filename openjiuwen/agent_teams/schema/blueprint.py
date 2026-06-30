@@ -47,6 +47,7 @@ from openjiuwen.agent_teams.schema.team import (
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.tools.worktree import WorktreeConfig
+from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyLimits, validate_swarmflow_concurrency
 
 if TYPE_CHECKING:
     # Resolved for type-checkers only; the runtime import lives in ``build()``
@@ -374,6 +375,9 @@ class TeamAgentSpec(BaseModel):
     tool. Workers reuse the leader's model; no separate worker spec is required
     for the MVP. See ``openjiuwen/agent_teams/workflow``.
     """
+    swarmflow_concurrency: ConcurrencyLimits = Field(default_factory=ConcurrencyLimits)
+    """Three-layer Swarmflow concurrency caps (L1/L2/L3). Used when ``enable_swarmflow``."""
+
     enable_permissions: bool = False
     """Team-specific permission control."""
 
@@ -529,6 +533,8 @@ class TeamAgentSpec(BaseModel):
         self._validate_reserved_names()
         self._validate_hitt_consistency()
         self._validate_bridge_consistency()
+        if self.enable_swarmflow:
+            validate_swarmflow_concurrency(self.swarmflow_concurrency)
 
         resolved_language = resolve_language(self.language)
         for role_spec in self.agents.values():

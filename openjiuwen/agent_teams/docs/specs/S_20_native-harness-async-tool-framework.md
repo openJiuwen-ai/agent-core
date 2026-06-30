@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `harness/async_tools.py`、`harness/native_harness.py`、`id_generator.py`、`tools/tool_async.py`、`tools/tool_factory.py`、`tools/tool_permissions.py`、`paths.py`、`rails/team_tool_rail.py`、`workflow/tool_swarmflow.py`、`workflow/observer.py` |
-| 最近一次修订日期 | 2026-06-22 |
-| 关联 feature | `F_35_native-harness-async-tool-framework.md`、`F_41_async-tool-control-and-spill.md` |
+| 最近一次修订日期 | 2026-06-26 |
+| 关联 feature | `F_35_native-harness-async-tool-framework.md`、`F_41_async-tool-control-and-spill.md`、`F_47_swarmflow-concurrency-governor.md` |
 
 ## 范围 / 边界
 
@@ -57,7 +57,13 @@ openjiuwen 工具循环与 Anthropic API 一样**强配对**：每个 `tool_call
 ## `AsyncToolRecord`
 
 - 字段：`task_id` / `tool_name` / `description` / `status`（running|completed|error）/
-  `result` / `error` / `output_file`（溢写时为磁盘路径字符串，否则 `None`）。
+  `result` / `error` / `output_file`（溢写时为磁盘路径字符串，否则 `None`）/
+  `format_completed` / `format_failed`（可选回调，见下）。
+- `format_completed(result) -> str | None` / `format_failed(error) -> str | None`（类型别名
+  `CompletionFormatter` / `FailureFormatter`，`async_tools.__all__` 导出）：per-task 自定义终态注入文案。
+  `AsyncToolRuntime._run` 在回调存在且**返回非 `None`** 时用回调文本 inject；回调返回 `None`（或未设回调）
+  视同未设，回退 `async_tool.completed` / `async_tool.failed`（默认文案**不含 run_id**，仅 `tool` + `result`/`error`）。
+  swarmflow 用闭包捕获 `run_id` 注入 `swarmflow.completed` / `swarmflow.failed`（含 `run_id`，`S_21`）。
 
 ## `AsyncToolRuntime`（挂在 NativeHarness）
 
@@ -66,13 +72,13 @@ openjiuwen 工具循环与 Anthropic API 一样**强配对**：每个 `tool_call
   `spill_threshold: int = 32768`、`_tasks: dict[task_id, asyncio.Task]`（id 映射，支持按 id
   取消，取代起步版的无标识 `set`）、`_events: dict[task_id, asyncio.Event]`（per-task 完成
   信号，供 `wait` 阻塞唤醒）。
-- `launch(task_id, coro_factory, *, tool_name, description)`：建 `running` 记录 + per-task
-  event → `asyncio.create_task` 入 `_tasks[task_id]`（防 GC）+ done callback `pop(task_id)` →
-  `_run`。
-- `_run`：`await coro_factory()`；成功 → 记录 `completed` + `_maybe_spill` 决定注入文本 →
-  `_signal` → `inject(t("async_tool.completed", ...))`；异常 → 记录 `error` +
-  `team_logger.error` → `_signal` → `inject(t("async_tool.failed", ...))`；`CancelledError` →
-  记录 `error="cancelled"` → `_signal` → 重抛（**不注入**）。
+- `launch(task_id, coro_factory, *, tool_name, description, format_completed=None,
+  format_failed=None)`：建 `running` 记录（含 format 回调）+ per-task event →
+  `asyncio.create_task` 入 `_tasks[task_id]`（防 GC）+ done callback `pop(task_id)` → `_run`。
+- `_run`：`await coro_factory()`；成功 → 记录 `completed` + 注入文本 =
+  `format_completed(result)` 若存在，否则 `_maybe_spill` + `async_tool.completed`；异常 →
+  记录 `error` + `team_logger.error` → `format_failed(str(exc))` 若存在，否则
+  `async_tool.failed`；`CancelledError` → 记录 `error="cancelled"` → `_signal` → 重抛（**不注入**）。
 - `_signal(task_id)`：set per-task event，唤醒阻塞的 `wait`。
 - `_maybe_spill(task_id, record, text) -> str`：`len(text) <= spill_threshold` 或 resolver 为
   空 / 返回 `None` → 完整内联（保持"完整回灌"）；否则 `asyncio.to_thread` 写盘 +
@@ -83,7 +89,8 @@ openjiuwen 工具循环与 Anthropic API 一样**强配对**：每个 `tool_call
   未知 id 返 `False`；已完成幂等（返 `True` 不改终态）。
 - `wait(task_id, timeout) -> AsyncToolRecord|None`：终态 / 未知立即返回；否则
   `asyncio.wait_for(event.wait(), timeout)`（秒），超时返回 running record（**不 raise**）。
-- `has_running(tool_name)`：是否有该工具的 running 记录（供单实例约束）。
+- `has_running(tool_name)`：registry 中是否有该工具的 running 记录（观测 / 管控工具用；
+  **不作** swarmflow L1 门禁，见 `S_21` / `F_47`）。
 - `cancel_all()`：teardown 取消 `_tasks` 全部未完成。
 
 ## 管控工具（`tools/tool_async.py`）
@@ -120,7 +127,8 @@ openjiuwen 工具循环与 Anthropic API 一样**强配对**：每个 `tool_call
   self._inject_async_completion)`。
 - `_inject_async_completion(text)`：`await self.send(text, immediate=False)`——IDLE 起新轮、
   RUNNING 排 follow-up。**统一 immediate=False，不分 active/idle。**
-- `launch_async_tool(...)`：转发到 `async_tool_runtime.launch`。
+- `launch_async_tool(...)`：转发到 `async_tool_runtime.launch`（透传 `format_completed` /
+  `format_failed`）。
 - `stop()`：teardown 前先 `cancel_all()`，避免完成注入打到正在停止的 harness。
 
 ## 结果渲染（不截断）
@@ -133,19 +141,25 @@ openjiuwen 工具循环与 Anthropic API 一样**强配对**：每个 `tool_call
 ## swarmflow 接入约束
 
 - `SwarmflowTool(AsyncTool)` 构造注入：`parent_agent`(NativeHarness)、`messager`、
-  `team_backend`、`team_name`、`model_resolver`（worker model 解析）。model 取
+  `team_name`、`model_resolver`（worker model 解析）、`concurrency_governor`（`F_47`）。
+  worker 不是 teammate、不写 team DB，**不**注入 `team_backend`（`F_44`）。model 取
   `parent_agent.model`。
-- `invoke` 前置校验：`script_path` 必填；`has_running("swarmflow")` 为真则拒绝（单实例）。
-- `run_background` 返回 `summarize_run(observer.run)` + `render_result_text(脚本返回值)`；
+- `invoke` 前置校验：`script_path` 必填；`ConcurrencyGovernor.admit_workflow()` 满则拒绝（L1，
+  文案 `Swarmflow concurrent limit reached (n/m)`）。`has_running` 仅作 registry 观测，
+  **不作** L1 门禁（见 `S_21`）。
+- `run_background` 返回脚本原始结果；终态经 `format_completed` / `format_failed` 闭包注入
+  `swarmflow.completed` / `swarmflow.failed`（含 `run_id` + `summarize_run` 摘要）。
   phase 进度仍发 `WORKFLOW_PROGRESS`（中途叙述，`WorkflowHandler` 只渲染 `workflow_started`
-  / `phase`，**不再渲染** `workflow_completed`）。
-- 装配 gate：`agent_configurator` 仅 leader+`enable_swarmflow` 时注入
-  `TeamHandleKey.SWARMFLOW_MODEL_RESOLVER`，`create_team_tools` 以其非空作 swarmflow gate。
+  / `phase`（含 `run_id`），**不再渲染** `workflow_completed`）。
+- 装配：`agent_configurator` 在 leader+`enable_swarmflow` 时注入
+  `SWARMFLOW_MODEL_RESOLVER` 与 `SWARMFLOW_CONCURRENCY_GOVERNOR`；`create_team_tools` 以
+  `model_resolver is not None` 作 swarmflow 工具 gate。
 
 ## 边界 / 错误语义
 
 - 框架零 `TeamAgent` 依赖（仅依赖 NativeHarness 公共表面）。
-- 后台任务失败不上抛到主循环，统一经完成段以 `async_tool.failed` 文本回灌 leader。
+- 后台任务失败不上抛到主循环：无 `format_failed` 时统一经 `async_tool.failed` 回灌；有自定义
+  回调时走回调文本（swarmflow → `swarmflow.failed`）。
 - 不走 TaskScheduler 的 `SESSION_SPAWN` 路径，不写 DeepAgent `pending_follow_ups`
   checkpoint 状态。
 - 溢写输出文件生命周期随 team —— `register_cleanup_path` 注册后由 `clean_team` 清理，不单独

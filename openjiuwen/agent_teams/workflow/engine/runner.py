@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable
 
+from .admission import AgentAdmission
 from .backends import MockBackend
 from .backends.base import AgentBackend
 from .journal import Journal
@@ -109,6 +110,7 @@ async def run_workflow(
     log_sink: Callable[[str], None] | None = None,
     progress_sink: ProgressSink | None = None,
     cap: int | None = None,
+    agent_gate: AgentAdmission | None = None,
     budget_total: int | None = None,
     abort_event: asyncio.Event | None = None,
 ) -> Any:
@@ -142,8 +144,8 @@ async def run_workflow(
         cap_override=cap,
         budget_total=budget_total,
         abort_event=abort_event,
+        agent_gate=agent_gate,
     )
-    rt.sem = asyncio.Semaphore(rt.make_cap())  # created inside the running loop
     try:
         result = await _exec_loaded(loaded, rt)
     finally:

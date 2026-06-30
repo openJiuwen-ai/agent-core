@@ -131,20 +131,37 @@ class TestParseAllRelations:
         assert relations[0].content == "rel"
 
     @staticmethod
-    def test_duplicate_content_emptied():
-        """Duplicate relation content is detected; second dict has content key cleared before dict2relation"""
+    def test_duplicate_fact_deduplicated():
+        """Relations with duplicate facts are dropped so identical relations are not produced (issue #1032)"""
         declarations = [
             EntityDeclaration(name="A", entity_type_id=0),
             EntityDeclaration(name="B", entity_type_id=0),
         ]
         types = [EntityDef()]
         relations_data = [
-            {"source_id": 1, "target_id": 2, "name": "R", "fact": "same", "content": "same"},
-            {"source_id": 1, "target_id": 2, "name": "R2", "fact": "same", "content": "same"},
+            {"source_id": 1, "target_id": 2, "name": "R", "fact": "same"},
+            {"source_id": 1, "target_id": 2, "name": "R2", "fact": "same"},
         ]
         relations, _ = parse_all_relations(relations_data, declarations, types, created_at=0, user_id="u1")
-        # Code clears relation["content"] for duplicate; dict2relation uses "fact", so we get 2 relations
-        assert len(relations) == 2
+        # dict2relation derives content from "fact"; the duplicate fact is dropped, leaving one relation
+        assert len(relations) == 1
+        assert relations[0].content == "same"
+
+    @staticmethod
+    def test_empty_fact_dropped():
+        """Relations with an empty fact carry no content and are skipped entirely"""
+        declarations = [
+            EntityDeclaration(name="A", entity_type_id=0),
+            EntityDeclaration(name="B", entity_type_id=0),
+        ]
+        types = [EntityDef()]
+        relations_data = [
+            {"source_id": 1, "target_id": 2, "name": "R", "fact": ""},
+            {"source_id": 1, "target_id": 2, "name": "R2", "fact": "real"},
+        ]
+        relations, _ = parse_all_relations(relations_data, declarations, types, created_at=0, user_id="u1")
+        assert len(relations) == 1
+        assert relations[0].content == "real"
 
 
 class TestResolveEntities:

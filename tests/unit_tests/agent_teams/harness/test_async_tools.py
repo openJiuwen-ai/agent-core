@@ -281,3 +281,78 @@ def test_runtime_spill_disabled_without_resolver():
     runtime = asyncio.run(_scenario())
     assert runtime.get("s3").output_file is None
     assert "z" * 5000 in injected[0]
+
+
+def test_runtime_uses_custom_completion_formatters():
+    """Record format callbacks override generic async_tool.* injection text."""
+    injected: list[str] = []
+
+    async def _inject(text: str) -> None:
+        injected.append(text)
+
+    async def _scenario() -> None:
+        runtime = AsyncToolRuntime(inject=_inject)
+
+        async def _work() -> str:
+            return "payload"
+
+        runtime.launch(
+            "fmt1",
+            _work,
+            tool_name="swarmflow",
+            description="d",
+            format_completed=lambda result: f"custom-ok:{result}",
+            format_failed=lambda err: f"custom-fail:{err}",
+        )
+        while runtime.registry["fmt1"].status == "running":
+            await asyncio.sleep(0.005)
+        await asyncio.sleep(0.005)
+
+    asyncio.run(_scenario())
+    assert injected == ["custom-ok:payload"]
+
+
+def test_runtime_ignores_run_id_without_custom_i18n_keys():
+    """Without format callbacks the generic completion text has no run_id."""
+    injected: list[str] = []
+
+    async def _inject(text: str) -> None:
+        injected.append(text)
+
+    async def _scenario() -> None:
+        runtime = AsyncToolRuntime(inject=_inject)
+
+        async def _work() -> str:
+            return "payload"
+
+        runtime.launch("fmt2", _work, tool_name="demo", description="d")
+        while runtime.registry["fmt2"].status == "running":
+            await asyncio.sleep(0.005)
+        await asyncio.sleep(0.005)
+
+    asyncio.run(_scenario())
+    assert "run_id" not in injected[0]
+
+
+def test_swarmflow_completion_formatters_include_run_id():
+    """SwarmflowTool terminal formatters embed run_id in completion and failure text."""
+    from openjiuwen.agent_teams.workflow.tool_swarmflow import SwarmflowTool
+
+    class _Harness:
+        model = None
+
+    tool = SwarmflowTool(
+        parent_agent=_Harness(),
+        messager=None,
+        team_name="t",
+        model_resolver=None,
+        concurrency_governor=None,
+        language="en",
+    )
+    run_id = "wf_abc123def456"
+    completed = tool.format_completed_injection("payload", run_id=run_id)
+    failed = tool.format_failed_injection("boom", run_id=run_id)
+    assert run_id in completed
+    assert "payload" in completed
+    assert run_id in failed
+    assert "boom" in failed

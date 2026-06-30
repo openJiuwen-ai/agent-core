@@ -181,16 +181,22 @@ class AbilityManager:
         surfaces this message back to the LLM so it can self-correct instead
         of silently receiving an empty argument dict.
         """
+        parsed, _ = cls._parse_tool_arguments_with_repair(arguments)
+        return parsed
+
+    @classmethod
+    def _parse_tool_arguments_with_repair(cls, arguments: Any) -> Tuple[Any, Optional[str]]:
+        """Parse tool-call arguments and return any repaired JSON string."""
         if not isinstance(arguments, str):
-            return arguments
+            return arguments, None
         try:
-            return json.loads(arguments)
+            return json.loads(arguments), None
         except (json.JSONDecodeError, AttributeError, TypeError) as exc:
             repaired = cls._repair_tool_arguments_json(arguments)
             if repaired and repaired != arguments:
                 try:
                     logger.warning("Recovered malformed tool arguments by balancing closing brackets")
-                    return json.loads(repaired)
+                    return json.loads(repaired), repaired
                 except (json.JSONDecodeError, TypeError):
                     pass
             raise ValueError(
@@ -902,7 +908,9 @@ class AbilityManager:
 
         # Parse arguments
         try:
-            tool_args = self._parse_tool_arguments(tool_call.arguments)
+            tool_args, repaired_arguments = self._parse_tool_arguments_with_repair(tool_call.arguments)
+            if repaired_arguments is not None:
+                tool_call.arguments = repaired_arguments
         except ValueError as exc:
             logger.error(f"Tool '{tool_name}' got malformed arguments: {exc}")
             raise self._build_execution_error(tool_call, str(exc)) from exc

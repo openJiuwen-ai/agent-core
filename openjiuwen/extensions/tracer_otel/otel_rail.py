@@ -110,7 +110,12 @@ class OtelRail(AgentRail):
         model_name = "LLM"
         agent_config = ctx.agent.config
         if agent_config is not None:
-            model_name = getattr(agent_config, "model_name", None) or model_name
+            config_model_name = ""
+            if hasattr(agent_config, "model_config_obj"):
+                config_model_name = getattr(agent_config.model_config_obj, "model_name", "")
+            if not config_model_name:
+                config_model_name = getattr(agent_config, "model_name", "")
+            model_name = config_model_name or model_name
         instance_info = {"class_name": model_name, "type": InvokeType.LLM.value}
 
         inputs_dict = {}

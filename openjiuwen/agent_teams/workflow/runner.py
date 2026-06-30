@@ -86,6 +86,8 @@ async def run_swarmflow(
     session_id: str | None = None,
     abort_event: asyncio.Event | None = None,
     on_backend_ready: Callable[[Any], None] | None = None,
+    run_id: str | None = None,
+    agent_gate: Any = None,
 ) -> Any:
     """Execute a swarmflow script with real LLM workers.
 
@@ -158,6 +160,7 @@ async def run_swarmflow(
         session_id=session_id,
         on_human_prompt=_on_human_prompt,
         on_human_replied=_on_human_replied,
+        run_id=run_id,
     )
     if on_backend_ready is not None:
         on_backend_ready(backend)
@@ -171,6 +174,7 @@ async def run_swarmflow(
         resume=journal_path,
         journal_path=journal_path,
         abort_event=abort_event,
+        agent_gate=agent_gate,
     )
 
 

@@ -5,11 +5,12 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .admission import AgentAdmission
 from .backends.base import AgentBackend
+from .cap import resolve_agents_per_run_cap
 from .journal import Journal
 from .progress import ProgressSink, noop_progress_sink
 
@@ -49,7 +50,7 @@ class Runtime:
     ``None`` disables the checkpoints (default; full back-compat)."""
 
     # Mutable run state (created/advanced inside the running loop).
-    sem: asyncio.Semaphore | None = field(default=None, repr=False)
+    agent_gate: AgentAdmission | None = field(default=None, repr=False)
     spawn_count: int = 0
     tokens_spent: int = 0
     current_phase: str | None = None
@@ -58,6 +59,4 @@ class Runtime:
 
     def make_cap(self) -> int:
         """Concurrent ``agent()`` calls allowed. Clamped to >= 1."""
-        if self.cap_override is not None:
-            return max(1, self.cap_override)
-        return max(1, min(16, (os.cpu_count() or 4) - 2))
+        return resolve_agents_per_run_cap(None, cap_override=self.cap_override)

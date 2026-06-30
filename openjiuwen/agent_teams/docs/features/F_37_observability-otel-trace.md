@@ -4,7 +4,7 @@
 
 | 项 | 值 |
 |---|---|
-| 日期 | 2026-06-17 |
+| 日期 | 2026-06-27 |
 | 范围 | `openjiuwen/agent_teams/observability/` |
 | Refs | #1013 |
 
@@ -25,10 +25,17 @@ team.{team_name}                                    ROOT
 ├── agent.{member}.task_iteration.{n}               AGENT
 │   ├── llm.call                                    GENERATION
 │   │   └── llm.reasoning                           SPAN（条件创建）
-│   └── tool.{name}                                 TOOL
+│   ├── tool.{name}                                 TOOL
+│   └── agent.{subagent}.invoke                     AGENT（subagent 嵌套）
+│       ├── llm.call
+│       └── tool.{name}
+├── agent.{member}.invoke                           AGENT（单轮 subagent standalone）
+│   └── llm.call
 ├── task.{task_id}                                  SPAN
 │   ├── task.{task_id}.created
 │   ├── task.{task_id}.claimed
+│   ├── task.{task_id}.plan_request                 SPAN（plan 模式，duration≈0）
+│   ├── task.{task_id}.plan_response                SPAN（plan 模式，duration≈0）
 │   └── task.{task_id}.completed
 ├── msg.{from}->{to}                                SPAN (duration≈0)
 ├── member.{name}.spawned                           SPAN (duration≈0)
@@ -49,13 +56,14 @@ team.{team_name}                                    ROOT
 
 | 文件 | 触发时机 | 管理对象 |
 |------|----------|----------|
-| `rail.py` | `before_task_iteration` / `after_task_iteration` | Agent Span + 级联排空 LLM/Tool 子 span + 跨 member ContextVar 清理 |
-| `callback_handler.py` | LLM 输入/输出、Tool 开始/结束、Agent invoke 输入 | LLM Span + Tool Span + `_finalize_llm_span_output` 共享输出组装 |
-| `monitor_handler.py` | TeamEvent 发布 | Task Span + Member/Message Event Span（**不**关 team span） |
-| `span_context.py` | 全局 | ContextVar 存取 + `close_team_agent_spans` + `finalize_trace` + `flush_child_spans` |
+| `rail.py` | `before_task_iteration`/`after_task_iteration`（多轮 member）+ `before_invoke`/`after_invoke`（单轮 subagent 兜底） | `AgentSpanScope`（agent span 完整生命周期：open/close/nesting/parent-restore）；级联排空 LLM/Tool 子 span；跨 member ContextVar 清理 |
+| `callback_handler.py` | LLM 输入/输出、Tool 开始/结束、Agent invoke 输入 | LLM Span + Tool Span，tool span input 保留原始 (args, kwargs) 结构 |
+| `monitor_handler.py` | TeamEvent 发布 | Task Span + Member/Message Event Span（**不**关 team span）；`_event_span_io` 按事件语义拆分 input/output |
+| `span_context.py` | 全局 | ContextVar 存取 + `cascade_close_children`（唯一级联排空来源）+ `close_team_agent_spans` + `finalize_trace` |
 | `setup.py` | Runner 初始化 / shutdown | TracerProvider + ActiveSpanTracker + `finalize_team_trace` |
-| `semconv.py` | 跨模块引用 | `gen_ai.*`、`agentteam.*`、`langfuse.*` 属性键常量（标准 + `t_` 双写） |
+| `semconv.py` | 跨模块引用 | `gen_ai.*`、`agentteam.*`、`langfuse.*` 属性键常量 |
 | `config.py` | — | ObservabilityConfig |
+| `subagent_elements.py` | SubAgentSpec build 时 | 在 team 侧三个 subagent 工厂注入 ObservabilityRail（idempotent，仅 `is_initialized()` 时） |
 
 ## Span 生命周期
 
@@ -71,16 +79,21 @@ team.{team_name}                                    ROOT
 | Span 类型 | 创建 | 正常关闭 | 异常/兜底 |
 |-----------|------|----------|-----------|
 | Team | `Runner._maybe_attach_observability()` | `Runner._maybe_finalize_trace()` (finally) | ActiveSpanTracker (shutdown) |
-| Agent | `rail.py` before_task_iteration | `rail.py` after_task_iteration | ① orphan 检测（`before_task_iteration` 中同 member 残留关闭）② ActiveSpanTracker |
+| Agent（iteration） | `rail.py` before_task_iteration | `rail.py` after_task_iteration | ① orphan 检测 ② ActiveSpanTracker |
+| Agent（invoke，单轮 subagent） | `rail.py` before_invoke（`enable_task_loop=False` 且 team_span 存在时） | `rail.py` after_invoke | 父 iteration 的 `after_task_iteration` cascade 兜底 |
 | LLM | `callback_handler._open_llm_span()` | `callback_handler._close_llm_span()` / `on_llm_output()` | Agent span 关闭时级联排空 `_llm_span_stack` |
 | Tool | `callback_handler.on_tool_call_started()` | `callback_handler.on_tool_call_finished()` / `on_tool_call_error()` | Agent span 关闭时级联排空 `_tool_span_map` |
 | Task | `monitor_handler._open_task_span()` | `monitor_handler._close_task_span()` | `monitor_handler.close_team_spans()` / `close_all_spans()` |
 
 关键设计决策：
-- **monitor_handler 不关闭 team span**（`_record_team_cleaned` 仅记录事件子 span + 关本 member 的 agent span）。Team span 生命周期由 Runner finally 唯一管理，避免 CLEANED 事件与 finally 竞争导致的提前关闭。
-- **Agent span 关闭时级联排空子 span**——遍历 `_tool_span_map` 所有 bucket 和 `_llm_span_stack` 全部条目，`end()` 但不设 `Status(OK)`（保持 UNSET），让仪表盘能一眼识别"被异常兜底关闭的 span"。
-- **无有效 parent 时不创建 LLM/tool span**——`_get_parent_context_for_llm_tool()` 在 agent span 和 team span 都不可用时返回 `None`，调用方跳过 span 创建，杜绝孤立 span。
-- **Team span output 双路径**：`on_agent_invoke_output` 写 agent.invoke() 的**最终**返回值；`after_task_iteration` 写 leader 每次 iteration 的 per-iteration 结果。最终值以 invoke_output 为准，per-iteration 值为中间快照。
+- **monitor_handler 不关闭 team span**（同前）。
+- **AgentSpanScope 管 agent span 完整生命周期**：`before_*` 构造 scope 存入 `ctx.extra`，`close()` 统一设 output+status+cascade+end+恢复父 current。`is_outermost` 控制是否级联排空：iteration 或独立 invoke 做，嵌套 subagent 不做（父 iteration 负责）。
+- **Subagent 覆盖**：`subagent_elements.py` 在 team 侧 subagent 工厂注入 ObservabilityRail。`before_invoke` 通过 `enable_task_loop` 区分多轮 member（跳过）和单轮 subagent（开 invoke span）。nesting 判据为结构性 `current_agent_span.is_recording()`——不依赖枚举或 member_name。
+- **无有效 parent 时不创建 LLM/tool span**（同前）。
+- **Team span output 双路径**（同前）。
+- **事件 span 的 input/output 按语义拆分**（`_event_span_io`）：task 事件 input={task_id}/output=结果；plan_request input=完整 payload/output={plan_id,status}；plan_response input={plan_id}/output={approved,feedback}；member.status_changed input={old_status}/output={new_status}；message 只放路由信息；generic/通知类 payload→input 只放一次不重复。
+- **Tool span input 保留原始 (args, kwargs) 结构**：`_ToolMeta` 传 `inputs=(args, kwargs)` 两元素 tuple，`_serialize_tool_inputs` 原样序列化，仅通过 `_sanitize` 将 Session 对象转为 `"session:<id>"` 字符串。
+- **Plan-mode task span 状态**：`TASK_PLAN_REQUEST`/`TASK_PLAN_RESPONSE` 加入 `_TASK_EVENT_TYPES`，从 payload `status` 推导有效状态（claimed/plan_approved）。
 
 ## ContextVar
 
@@ -176,8 +189,7 @@ _ALL_TEAM_EVENT_TYPES = frozenset(
 )
 ```
 
-特殊处理事件（6 类）：CREATED, CLEANED, TEAM_COMPLETED, TASK_*, MEMBER_*, MESSAGE/BROADCAST
-其余事件通过 `_record_generic_event()` 自动采集。
+特殊处理事件：CREATED, CLEANED, TEAM_COMPLETED, TASK_*（含 TASK_PLAN_REQUEST/RESPONSE）, MEMBER_*, MESSAGE/BROADCAST, PLAN_APPROVAL。所有事件子 span 通过 `_event_span_io` 按语义拆分 input/output：有"请求→响应"或"旧状态→新状态"边界的拆开，纯通知类只放完整 payload 到 input 不重复。其余事件通过 `_record_generic_event()` 自动采集。
 
 ## 关键机制
 

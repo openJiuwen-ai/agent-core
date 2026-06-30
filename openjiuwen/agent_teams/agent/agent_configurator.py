@@ -574,6 +574,7 @@ class AgentConfigurator:
         swarmflow_model_resolver: Optional[Callable[[str], Any]] = None
         swarmflow_worker_base_spec = None
         swarmflow_human_base_spec = None
+        swarmflow_concurrency_governor = None
         if ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
             team_spec_for_models = ctx.team_spec
 
@@ -612,6 +613,17 @@ class AgentConfigurator:
                     },
                 )
 
+            from openjiuwen.agent_teams.workflow.concurrency import (
+                ConcurrencyGovernor,
+                validate_swarmflow_concurrency,
+            )
+
+            l2_cap = validate_swarmflow_concurrency(spec.swarmflow_concurrency)
+            swarmflow_concurrency_governor = ConcurrencyGovernor(
+                spec.swarmflow_concurrency,
+                agents_per_run_cap=l2_cap,
+            )
+
         inject_team_handles(
             member_build_context.extras,
             team_backend=self.team_backend,
@@ -622,6 +634,7 @@ class AgentConfigurator:
             swarmflow_model_resolver=swarmflow_model_resolver,
             swarmflow_worker_base_spec=swarmflow_worker_base_spec,
             swarmflow_human_base_spec=swarmflow_human_base_spec,
+            swarmflow_concurrency_governor=swarmflow_concurrency_governor,
             reliability_components=reliability_components,
             permissions_override=ctx.permissions_override,
             worktree_manager=self.worktree_manager,
