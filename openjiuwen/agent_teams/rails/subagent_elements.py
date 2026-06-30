@@ -84,6 +84,41 @@ def _common_kwargs(inp: SubAgentInput) -> dict[str, Any]:
     }
 
 
+def _attach_observability_rail(spec: Any) -> Any:
+    """Append an ObservabilityRail to a sub-agent spec when observability is on.
+
+    Sub-agents default to ``enable_task_loop=False`` and run via the
+    single-round invoke path, which never fires iteration events. Without
+    this rail their LLM/tool spans fall back to the team span (or are
+    skipped), leaving the trace without an agent layer. ObservabilityRail
+    implements ``before_invoke``/``after_invoke`` precisely to cover this
+    single-round path.
+
+    The "is observability initialized → build one rail" guard is shared
+    with ``_build_observability_rail`` via ``maybe_observability_rail``;
+    only the idempotent-append tail is specific to this sub-agent path.
+    Returns the spec unchanged when observability is off or a rail is
+    already attached. Confined to the team package — the harness sub-agent
+    builders are not modified.
+    """
+    from openjiuwen.agent_teams.observability.rail import (
+        ObservabilityRail,
+        maybe_observability_rail,
+    )
+
+    rail = maybe_observability_rail()
+    if rail is None:
+        return spec
+
+    existing = spec.rails or []
+    # Idempotent: never append a second ObservabilityRail even if a caller
+    # wraps the same spec twice.
+    if any(isinstance(r, ObservabilityRail) for r in existing):
+        return spec
+    spec.rails = list(existing) + [rail]
+    return spec
+
+
 class BrowserSubAgentInput(SubAgentInput):
     """Browser sub-agent inputs: per-teammate browser identity (port + profile).
 
@@ -148,7 +183,7 @@ def build_explore_agent(factory_kwargs: dict[str, Any], context: Any) -> Any:
     inp = SubAgentInput.resolve(factory_kwargs, context)
     spec = build_explore_agent_config(model=_parent_model(context), **_common_kwargs(inp))
     spec.factory_kwargs = {"auto_create_workspace": False}
-    return spec
+    return _attach_observability_rail(spec)
 
 
 @harness_element(
@@ -162,7 +197,7 @@ def build_plan_agent(factory_kwargs: dict[str, Any], context: Any) -> Any:
     inp = SubAgentInput.resolve(factory_kwargs, context)
     spec = build_plan_agent_config(model=_parent_model(context), **_common_kwargs(inp))
     spec.factory_kwargs = {"auto_create_workspace": False}
-    return spec
+    return _attach_observability_rail(spec)
 
 
 @harness_element(
@@ -189,7 +224,7 @@ def build_browser_agent(factory_kwargs: dict[str, Any], context: Any) -> Any:
         # Per-teammate isolation: carry browser identity as serializable
         # factory_kwargs (driver mode set on the instance, not global env).
         spec.factory_kwargs = {"auto_create_workspace": False, "browser_instance": instance_dict}
-    return spec
+    return _attach_observability_rail(spec)
 
 
 __all__ = [

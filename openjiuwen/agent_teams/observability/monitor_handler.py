@@ -54,7 +54,6 @@ from openjiuwen.agent_teams.observability.span_context import (
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.core.common.logging import team_logger
 
-
 _TRACER_NAME = "openjiuwen.agent_teams.observability.monitor"
 
 _TASK_OPEN_TYPES = frozenset({TeamEvent.TASK_CREATED})
@@ -69,6 +68,11 @@ _TASK_EVENT_TYPES = frozenset(
         TeamEvent.TASK_CLAIMED,
         TeamEvent.TASK_UPDATED,
         TeamEvent.TASK_UNBLOCKED,
+        # Plan-mode flow: submit_plan publishes TASK_PLAN_REQUEST (status=claimed),
+        # approve_plan publishes TASK_PLAN_RESPONSE (status=plan_approved/claimed).
+        # plan_mode never publishes TASK_CLAIMED — see task_manager.submit_plan.
+        TeamEvent.TASK_PLAN_REQUEST,
+        TeamEvent.TASK_PLAN_RESPONSE,
     },
 )
 _MEMBER_TYPES = frozenset(
@@ -99,10 +103,10 @@ class OtelTeamMonitorHandler:
     """
 
     def __init__(
-        self,
-        config: ObservabilityConfig,
-        *,
-        tracer: Tracer | None = None,
+            self,
+            config: ObservabilityConfig,
+            *,
+            tracer: Tracer | None = None,
     ) -> None:
         self._config = config
         self._injected_tracer = tracer
@@ -130,7 +134,7 @@ class OtelTeamMonitorHandler:
         for task_id, span in list(self._task_spans.items()):
             if span.is_recording():
                 team_logger.info("otel monitor: closing task span {}, is_recording={}, span_id={}",
-                               task_id, span.is_recording(), span.context.span_id)
+                                 task_id, span.is_recording(), span.context.span_id)
                 if not span.attributes.get(LANGFUSE_OBSERVATION_OUTPUT):
                     status_val = span.attributes.get(AT_TASK_STATUS, "unknown")
                     span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT,
@@ -156,6 +160,85 @@ class OtelTeamMonitorHandler:
     def _force_flush_provider() -> None:
         from openjiuwen.agent_teams.observability.setup import force_flush_provider
         force_flush_provider()
+
+    @staticmethod
+    def _event_span_io(etype: str, payload: dict[str, Any]) -> tuple[str | None, str | None]:
+        """Return (input_val, output_val) for a monitor event span.
+
+        Splits the payload semantically when the event has a clear
+        "request → response" or "before → after" boundary:
+          - input  = the event's context / old state / trigger
+          - output = the event's result / new state / outcome
+
+        For events without such a boundary (pure notifications), the
+        full payload goes to input and output is left empty — no
+        duplication.
+        """
+        import json as _json
+        p = _json.dumps(payload, ensure_ascii=False, default=str)
+
+        # --- Task events — split by event type ---
+        if etype == TeamEvent.TASK_CREATED:
+            return p, None  # notification: full payload → input only
+        if etype == TeamEvent.TASK_CLAIMED:
+            return _json.dumps({"task_id": payload.get("task_id")},
+                               ensure_ascii=False), f"claimed by {payload.get('member_name', '?')}"
+        if etype == TeamEvent.TASK_COMPLETED:
+            return _json.dumps({"task_id": payload.get("task_id")},
+                               ensure_ascii=False), f"completed by {payload.get('member_name', '?')}"
+        if etype == TeamEvent.TASK_CANCELLED:
+            return _json.dumps({"task_id": payload.get("task_id")}, ensure_ascii=False), "cancelled"
+        if etype == TeamEvent.TASK_UNBLOCKED:
+            return _json.dumps({"task_id": payload.get("task_id")}, ensure_ascii=False), "unblocked"
+        if etype == TeamEvent.TASK_UPDATED:
+            return _json.dumps({"task_id": payload.get("task_id")}, ensure_ascii=False), p  # payload carries the update
+        if etype == TeamEvent.TASK_PLAN_REQUEST:
+            return p, _json.dumps({"plan_id": payload.get("plan_id"), "status": payload.get("status", "claimed")},
+                                  ensure_ascii=False)
+        if etype == TeamEvent.TASK_PLAN_RESPONSE:
+            return _json.dumps({"plan_id": payload.get("plan_id")}, ensure_ascii=False), _json.dumps(
+                {"approved": payload.get("approved"), "feedback": payload.get("feedback", "")}, ensure_ascii=False)
+
+        # --- Member events — before → after split ---
+        if etype == TeamEvent.MEMBER_SPAWNED:
+            return None, _json.dumps({"member": payload.get("member_name")}, ensure_ascii=False)
+        if etype == TeamEvent.MEMBER_SHUTDOWN:
+            return _json.dumps({"member": payload.get("member_name")}, ensure_ascii=False), _json.dumps(
+                {"shutdown": True, "force": payload.get("force", False)}, ensure_ascii=False)
+        if etype == TeamEvent.MEMBER_RESTARTED:
+            return _json.dumps({"member": payload.get("member_name"), "reason": payload.get("reason", "")},
+                               ensure_ascii=False), _json.dumps(
+                {"restarted": True, "count": payload.get("restart_count", 1)}, ensure_ascii=False)
+        if etype == TeamEvent.MEMBER_CANCELED:
+            return _json.dumps({"member": payload.get("member_name")}, ensure_ascii=False), None
+        if etype in (TeamEvent.MEMBER_STATUS_CHANGED, TeamEvent.MEMBER_EXECUTION_CHANGED):
+            # Natural before/after: old_status → new_status
+            return _json.dumps({"status": payload.get("old_status", "")}, ensure_ascii=False), _json.dumps(
+                {"status": payload.get("new_status", "")}, ensure_ascii=False)
+
+        # --- Message events --- routing → delivery split ---
+        if etype == TeamEvent.MESSAGE:
+            return _json.dumps({"from": payload.get("from_member_name"), "to": payload.get("to_member_name")},
+                               ensure_ascii=False), None
+        if etype == TeamEvent.BROADCAST:
+            return _json.dumps({"from": payload.get("from_member_name")}, ensure_ascii=False), _json.dumps(
+                {"broadcast": True}, ensure_ascii=False)
+
+        # --- Team-level lifecycle — notification, input only ---
+        if etype in (TeamEvent.CREATED, TeamEvent.CLEANED, TeamEvent.STANDBY, TeamEvent.TEAM_COMPLETED):
+            return p, None
+
+        # --- Plan approval (currently unused but routed) ---
+        if etype == TeamEvent.PLAN_APPROVAL:
+            return _json.dumps({"plan": payload.get("member_name")}, ensure_ascii=False), _json.dumps(
+                {"approved": payload.get("approved")}, ensure_ascii=False)
+
+        # --- Drained / anomaly — notification ---
+        if etype in (TeamEvent.TASK_LIST_DRAINED, TeamEvent.ANOMALY_DETECTED):
+            return p, None
+
+        # --- Generic: workflow/worktree/workspace/all others — full payload, input only ---
+        return p, None
 
     async def __call__(self, event: EventMessage) -> None:
         try:
@@ -246,17 +329,17 @@ class OtelTeamMonitorHandler:
             attrs["agentteam.team.member_count"] = int(member_count)
         if task_count is not None:
             attrs["agentteam.team.task_count"] = int(task_count)
-        out_val = f"completed members={member_count} tasks={task_count}"
-        self._record_team_event(team_name, "team.completed", attrs=attrs, output_val=out_val)
+        in_val, out_val = self._event_span_io(TeamEvent.TEAM_COMPLETED, payload)
+        self._record_team_event(team_name, "team.completed", attrs=attrs, input_val=in_val, output_val=out_val)
 
     def _record_team_event(
-        self,
-        team_name: str,
-        name: str,
-        *,
-        attrs: dict[str, Any],
-        input_val: str | None = None,
-        output_val: str | None = None,
+            self,
+            team_name: str,
+            name: str,
+            *,
+            attrs: dict[str, Any],
+            input_val: str | None = None,
+            output_val: str | None = None,
     ) -> None:
         team_span = get_team_span()
         if team_span is None:
@@ -362,8 +445,18 @@ class OtelTeamMonitorHandler:
         task_id = str(payload.get("task_id") or "")
         span = self._task_spans.pop(task_id, None)
         if span is None:
-            team_logger.warning("monitor: _close_task_span: no span for task={}", task_id)
-            return
+            # Task span may have been cleaned up by a prior trace finalization
+            # (e.g. pause/resume cycle).  Create an on-the-fly span so the
+            # completion/cancellation is still recorded in the current trace.
+            team_logger.debug(
+                "monitor: _close_task_span: no existing span for task={}, "
+                "creating on-the-fly span for event={}",
+                task_id, etype,
+            )
+            span = self._create_on_the_fly_task_span(team_name, payload)
+            if span is None:
+                team_logger.warning("monitor: _close_task_span: cannot create span for task={}", task_id)
+                return
 
         # Check if span is still recording before operating
         if not span.is_recording():
@@ -380,8 +473,8 @@ class OtelTeamMonitorHandler:
         }
         if member:
             close_attrs[AT_TASK_ASSIGNEE] = str(member)
+        cancel_reason = payload.get("reason") or payload.get("cancel_reason") or "cancelled"
         if etype == TeamEvent.TASK_CANCELLED:
-            cancel_reason = payload.get("reason") or payload.get("cancel_reason") or "cancelled"
             close_attrs["agentteam.task.cancel_reason"] = str(cancel_reason)
 
         close_ctx = set_span_in_context(span, otel_context.get_current())
@@ -405,35 +498,101 @@ class OtelTeamMonitorHandler:
             span.set_status(Status(StatusCode.OK))
         span.end()
 
+    def _create_on_the_fly_task_span(
+            self, team_name: str, payload: dict[str, Any]
+    ) -> Span | None:
+        """Create a minimal task span when no pre-existing span is found.
+
+        Used in pause/resume scenarios where a task created in a prior trace
+        completes in the current trace — the original span was finalized with
+        the prior trace, so we create a short-lived span here to hold the
+        completion/cancellation event.
+        """
+        team_span = get_team_span()
+        if team_span is None:
+            return None
+
+        task_id = str(payload.get("task_id") or "")
+        parent_ctx = set_span_in_context(team_span, otel_context.get_current())
+        span = self._tracer().start_span(
+            name=f"task.{task_id}",
+            context=parent_ctx,
+            kind=SpanKind.INTERNAL,
+        )
+        span.set_attribute(AT_TASK_ID, task_id)
+        if team_name:
+            span.set_attribute(AT_TEAM_ID, team_name)
+            span.set_attribute(AT_TEAM_NAME, team_name)
+        span.set_attribute("agentteam.task.tag", f"task:{task_id}")
+        # Mark as recovered so the trace viewer can distinguish tasks that
+        # were created in a prior trace from those created in the current one.
+        span.set_attribute("agentteam.task.recovered", True)
+        sid = self._get_ctx_session_id()
+        if sid:
+            span.set_attribute(LANGFUSE_SESSION_ID, sid)
+        return span
+
     def _record_task_status_span(self, team_name: str, payload: dict[str, Any], etype: str) -> None:
         task_id = str(payload.get("task_id") or "")
         member = payload.get("member_name") or ""
         task_span = self._task_spans.get(task_id)
 
+        if task_span is None:
+            # Task span may have been cleaned up by a prior trace finalization
+            # (e.g. pause/resume cycle).  Create an on-the-fly span and store
+            # it so subsequent events (e.g. claimed→completed) in the same
+            # trace can find it.
+            task_span = self._create_on_the_fly_task_span(team_name, payload)
+            if task_span is not None:
+                self._task_spans[task_id] = task_span
+                team_logger.debug(
+                    "monitor: _record_task_status_span: created on-the-fly span "
+                    "for task={} event={}", task_id, etype,
+                )
+
+        # Effective task status carried by this event. Plan-mode events carry
+        # it in the payload `status` field (claimed / plan_approved); the
+        # legacy events derive it from the event type. This is the value
+        # written to both the task span and the child status span attribute.
+        effective_status = self._effective_task_status(etype, payload)
+
         # Only operate on task_span if it exists and is still recording
         if task_span is not None and task_span.is_recording():
             if member:
                 task_span.set_attribute(AT_TASK_ASSIGNEE, str(member))
-            if etype == TeamEvent.TASK_CLAIMED:
-                task_span.set_attribute(AT_TASK_STATUS, "claimed")
-            elif etype == TeamEvent.TASK_UNBLOCKED:
-                task_span.set_attribute(AT_TASK_STATUS, "unblocked")
-            elif etype == TeamEvent.TASK_UPDATED:
-                status = payload.get("status")
-                if status:
-                    task_span.set_attribute(AT_TASK_STATUS, str(status))
+            if effective_status:
+                task_span.set_attribute(AT_TASK_STATUS, effective_status)
+            if etype == TeamEvent.TASK_PLAN_REQUEST:
+                plan_id = payload.get("plan_id")
+                if plan_id:
+                    task_span.set_attribute("agentteam.task.plan_id", str(plan_id))
+                member_plan_md = payload.get("member_plan_md")
+                if member_plan_md:
+                    task_span.set_attribute("agentteam.task.member_plan_md", str(member_plan_md))
+            elif etype == TeamEvent.TASK_PLAN_RESPONSE:
+                approved = bool(payload.get("approved", False))
+                task_span.set_attribute(AT_PLAN_APPROVED, approved)
 
+        # Child status span name uses the event suffix (task.{id}.plan_request
+        # / plan_response / claimed / ...). The AT_TASK_STATUS attribute on it
+        # carries the effective status, NOT the event-name suffix.
         status_label = etype.replace("task_", "")
         attrs: dict[str, Any] = {
             AT_EVENT_TYPE: etype,
-            AT_TASK_STATUS: status_label,
+            AT_TASK_STATUS: effective_status or status_label,
             AT_TASK_ID: task_id,
         }
         if member:
             attrs[AT_TASK_ASSIGNEE] = str(member)
+        if etype == TeamEvent.TASK_PLAN_REQUEST:
+            plan_id = payload.get("plan_id")
+            if plan_id:
+                attrs["agentteam.task.plan_id"] = str(plan_id)
+        elif etype == TeamEvent.TASK_PLAN_RESPONSE:
+            attrs[AT_PLAN_APPROVED] = bool(payload.get("approved", False))
         span_name = f"task.{task_id}.{status_label}"
-        in_val = f"task:{task_id}"
-        out_val = f"{status_label}" + (f" by {member}" if member else "")
+
+        in_val, out_val = self._event_span_io(etype, payload)
 
         if task_span is not None and task_span.is_recording():
             task_ctx = set_span_in_context(task_span, otel_context.get_current())
@@ -443,13 +602,40 @@ class OtelTeamMonitorHandler:
                 kind=SpanKind.INTERNAL,
             )
             status_span.set_attributes(attrs)
-            status_span.set_attribute(LANGFUSE_OBSERVATION_INPUT, in_val)
-            status_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, out_val)
+            if in_val is not None:
+                status_span.set_attribute(LANGFUSE_OBSERVATION_INPUT, in_val)
+            if out_val is not None:
+                status_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, out_val)
             status_span.set_status(Status(StatusCode.OK))
             status_span.end()
         else:
             self._record_team_event(team_name, span_name, attrs=attrs,
                                     input_val=in_val, output_val=out_val)
+
+    @staticmethod
+    def _effective_task_status(etype: str, payload: dict[str, Any]) -> str:
+        """Return the task status this event advances the task to.
+
+        Plan-mode events carry the effective status in ``payload['status']``
+        (claimed / plan_approved). Legacy events derive it from the type.
+        Falls back to "" when unknown.
+        """
+        if etype in (TeamEvent.TASK_PLAN_REQUEST, TeamEvent.TASK_PLAN_RESPONSE):
+            status = payload.get("status")
+            if status:
+                return str(status)
+            # plan_response without an explicit status: approved -> plan_approved
+            if etype == TeamEvent.TASK_PLAN_RESPONSE:
+                return "plan_approved" if bool(payload.get("approved", False)) else "claimed"
+            return "claimed"
+        if etype == TeamEvent.TASK_CLAIMED:
+            return "claimed"
+        if etype == TeamEvent.TASK_UNBLOCKED:
+            return "unblocked"
+        if etype == TeamEvent.TASK_UPDATED:
+            status = payload.get("status")
+            return str(status) if status else ""
+        return ""
 
     def _record_plan_approval(self, team_name: str, payload: dict[str, Any]) -> None:
         approved = payload.get("approved", False)
@@ -463,8 +649,7 @@ class OtelTeamMonitorHandler:
             attrs[AT_MEMBER_ID] = str(member)
             attrs[AT_MEMBER_NAME] = str(member)
             attrs[AT_PLAN_SUBMITTED_BY] = str(member)
-        in_val = f"plan by {member}" if member else "plan"
-        out_val = "approved" if approved else "rejected"
+        in_val, out_val = self._event_span_io(TeamEvent.PLAN_APPROVAL, payload)
         self._record_team_event(team_name, span_name, attrs=attrs,
                                 input_val=in_val, output_val=out_val)
 
@@ -473,10 +658,10 @@ class OtelTeamMonitorHandler:
     # ------------------------------------------------------------------
 
     def _record_member_event(
-        self,
-        team_name: str,
-        payload: dict[str, Any],
-        etype: str,
+            self,
+            team_name: str,
+            payload: dict[str, Any],
+            etype: str,
     ) -> None:
         member_name = str(payload.get("member_name") or "")
 
@@ -498,33 +683,15 @@ class OtelTeamMonitorHandler:
         span_name = f"member.{etype.replace('member_', '')}"
         if member_name:
             span_name = f"member.{member_name}.{etype.replace('member_', '')}"
-        old_s = payload.get("old_status", "")
-        new_s = payload.get("new_status", "")
-        if etype == TeamEvent.MEMBER_SPAWNED:
-            in_val = f"spawn:{member_name}"
-            out_val = f"{member_name} spawned"
-        elif etype == TeamEvent.MEMBER_SHUTDOWN:
-            force = payload.get("force", False)
-            in_val = f"{member_name}:running"
-            out_val = f"{member_name}:shutdown(force={force})"
-        elif etype == TeamEvent.MEMBER_CANCELED:
-            in_val = f"{member_name}:running"
-            out_val = f"{member_name}:canceled"
-        elif etype == TeamEvent.MEMBER_RESTARTED:
-            reason = payload.get("reason", "")
-            in_val = f"{member_name}:stopped"
-            out_val = f"{member_name}:restarted(reason={reason})"
-        else:
-            in_val = f"{member_name}:{old_s}" if old_s else None
-            out_val = f"{member_name}:{new_s}" if new_s else etype.replace("member_", "")
+        in_val, out_val = self._event_span_io(etype, payload)
         self._record_team_event(team_name, span_name, attrs=attrs,
                                 input_val=in_val, output_val=out_val)
 
     def _record_message_event(
-        self,
-        team_name: str,
-        payload: dict[str, Any],
-        etype: str,
+            self,
+            team_name: str,
+            payload: dict[str, Any],
+            etype: str,
     ) -> None:
         from_name = str(payload.get("from_member_name") or "")
         to_name = str(payload.get("to_member_name") or "")
@@ -541,16 +708,15 @@ class OtelTeamMonitorHandler:
             span_name = f"msg.broadcast.{from_name}"
         else:
             span_name = f"msg.{from_name}->{to_name}"
-        in_val = f"from:{from_name}" + (f" to:{to_name}" if to_name else "")
-        out_val = f"broadcast:{from_name}" if is_broadcast else f"delivered:{from_name}->{to_name}"
+        in_val, out_val = self._event_span_io(etype, payload)
         self._record_team_event(team_name, span_name, attrs=attrs,
                                 input_val=in_val, output_val=out_val)
 
     def _record_generic_event(
-        self,
-        team_name: str,
-        etype: str,
-        payload: dict[str, Any],
+            self,
+            team_name: str,
+            etype: str,
+            payload: dict[str, Any],
     ) -> None:
         """Fallback handler for any TeamEvent not explicitly handled above.
 
@@ -571,9 +737,8 @@ class OtelTeamMonitorHandler:
         if member_name:
             attrs[AT_MEMBER_NAME] = str(member_name)
 
-        # Special handling for common event types
-        input_val: str | None = None
-        output_val: str = etype
+        # Special handling for common event types — structured attributes only.
+        # Input/output are handled via _event_span_io below.
 
         if etype == TeamEvent.WORKFLOW_PROGRESS:
             workflow_name = payload.get("workflow_name")
@@ -588,9 +753,6 @@ class OtelTeamMonitorHandler:
             outcome = payload.get("outcome")
             if outcome:
                 attrs["agentteam.workflow.outcome"] = str(outcome)
-            # Custom display format
-            input_val = f"workflow:{workflow_name or 'unknown'}"
-            output_val = f"phase:{phase or 'unknown'}" if phase else etype
 
         elif etype == TeamEvent.WORKTREE_CREATED:
             wt_name = payload.get("worktree_name") or payload.get("name") or ""
@@ -602,8 +764,6 @@ class OtelTeamMonitorHandler:
             existed = payload.get("existed")
             if existed is not None:
                 attrs["agentteam.worktree.existed"] = bool(existed)
-            input_val = f"worktree:{wt_name}"
-            output_val = "created" if not existed else "recovered"
 
         elif etype == TeamEvent.WORKTREE_REMOVED:
             wt_name = payload.get("worktree_name") or payload.get("name") or ""
@@ -612,8 +772,6 @@ class OtelTeamMonitorHandler:
                 attrs["agentteam.worktree.name"] = str(wt_name)
             if wt_path:
                 attrs["agentteam.worktree.path"] = str(wt_path)
-            input_val = f"worktree:{wt_name}"
-            output_val = "removed"
 
         elif etype == TeamEvent.WORKSPACE_ARTIFACT_UPDATED:
             artifact_path = payload.get("artifact_path") or payload.get("path") or ""
@@ -622,8 +780,6 @@ class OtelTeamMonitorHandler:
                 attrs["agentteam.workspace.artifact_path"] = str(artifact_path)
             if commit_sha:
                 attrs["agentteam.workspace.commit_sha"] = str(commit_sha)
-            input_val = f"artifact:{artifact_path}"
-            output_val = "updated"
 
         elif etype == TeamEvent.WORKSPACE_CONFLICT:
             file_path = payload.get("file_path") or payload.get("path") or ""
@@ -632,8 +788,6 @@ class OtelTeamMonitorHandler:
                 attrs["agentteam.workspace.file_path"] = str(file_path)
             if conflicting:
                 attrs["agentteam.workspace.conflicting_commit"] = str(conflicting)
-            input_val = f"file:{file_path}"
-            output_val = "conflict"
 
         elif etype == TeamEvent.WORKSPACE_LOCK_REQUEST:
             action = payload.get("action") or ""
@@ -648,8 +802,6 @@ class OtelTeamMonitorHandler:
                 attrs["agentteam.workspace.holder_name"] = str(holder)
             if timeout is not None:
                 attrs["agentteam.workspace.timeout_seconds"] = timeout
-            input_val = f"lock:{file_path}" if file_path else None
-            output_val = f"{action}:{holder}" if holder else action
 
         elif etype == TeamEvent.WORKSPACE_LOCK_RESPONSE:
             file_path = payload.get("file_path") or payload.get("path") or ""
@@ -661,16 +813,11 @@ class OtelTeamMonitorHandler:
                 attrs["agentteam.workspace.granted"] = bool(granted)
             if holder:
                 attrs["agentteam.workspace.holder"] = str(holder)
-            input_val = f"lock:{file_path}" if file_path else None
-            output_val = "granted" if granted else "denied"
 
-        else:
-            # For other events, serialize the full payload as input (no truncation)
-            import json as _json
-            try:
-                input_val = _json.dumps(payload, ensure_ascii=False, default=str)
-            except Exception:
-                input_val = str(payload)
+        # Every event span carries the raw payload as both input and output.
+        # No per-event-type narration, no synthesized status labels, no
+        # hardcoded member names.
+        in_val, out_val = self._event_span_io(etype, payload)
 
         self._record_team_event(team_name, span_name, attrs=attrs,
-                                input_val=input_val, output_val=output_val)
+                                input_val=in_val, output_val=out_val)

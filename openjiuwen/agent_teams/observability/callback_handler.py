@@ -725,19 +725,26 @@ class OtelCallbackHandler:
 
     @staticmethod
     def _serialize_tool_inputs(inputs: Any) -> str:
+        """Serialize the tool call's arguments for the tool span input.
+
+        ``ToolCallEvents.TOOL_CALL_STARTED`` carries ``inputs=(args, kwargs)``
+        — a 2-element tuple of positional and keyword arguments from the
+        tool invocation. Preserve the original structure; Session objects
+        are rendered as ``"session:<id>"`` so they remain readable.
+        """
         if inputs is None:
             return ""
 
         def _sanitize(obj: Any) -> Any:
+            if isinstance(obj, dict):
+                return {k: _sanitize(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_sanitize(v) for v in obj]
             if hasattr(obj, "get_session_id"):
                 try:
                     return f"session:{obj.get_session_id()}"
                 except Exception:
                     return "<Session>"
-            if isinstance(obj, dict):
-                return {k: _sanitize(v) for k, v in obj.items()}
-            if isinstance(obj, (list, tuple)):
-                return type(obj)(_sanitize(v) for v in obj)
             return obj
 
         try:
