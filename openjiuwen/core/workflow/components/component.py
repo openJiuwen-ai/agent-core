@@ -19,40 +19,6 @@ Input = TypeVar("Input", contravariant=True)
 Output = TypeVar("Output", contravariant=True)
 
 
-def _apply_callback_framework_to_executable(cls: type) -> None:
-    """Wrap on_invoke/on_stream with callback framework for trigger support (once per class)."""
-    try:
-        from openjiuwen.core.runner.callback.utils import lazy_callback_framework
-        from openjiuwen.core.runner.callback.events import WorkflowEvents
-        _fw = lazy_callback_framework
-
-        if "on_invoke" in cls.__dict__:
-            fn = cls.__dict__["on_invoke"]
-            fn = _fw.emit_before(WorkflowEvents.COMPONENT_BATCH_INPUT)(fn)
-            fn = _fw.transform_io(
-                input_event=WorkflowEvents.COMPONENT_BATCH_INPUT,
-                output_event=WorkflowEvents.COMPONENT_BATCH_OUTPUT,
-            )(fn)
-            fn = _fw.emit_after(WorkflowEvents.COMPONENT_BATCH_OUTPUT)(fn)
-            setattr(cls, "on_invoke", fn)
-
-        if "on_stream" in cls.__dict__:
-            fn = cls.__dict__["on_stream"]
-            fn = _fw.emit_before(WorkflowEvents.COMPONENT_BATCH_INPUT)(fn)
-            fn = _fw.transform_io(
-                input_event=WorkflowEvents.COMPONENT_BATCH_INPUT,
-                output_event=WorkflowEvents.COMPONENT_STREAM_OUTPUT,
-            )(fn)
-            fn = _fw.emit_after(WorkflowEvents.COMPONENT_STREAM_OUTPUT)(fn)
-            setattr(cls, "on_stream", fn)
-    except Exception as e:
-        logger.debug(
-            "Callback framework registration skipped",
-            event_type=LogEventType.WORKFLOW_COMPONENT_ERROR,
-            metadata={"error": str(e)}
-        )
-
-
 @with_session_for_class
 class ComponentExecutable(Executable):
     """
@@ -68,9 +34,41 @@ class ComponentExecutable(Executable):
     based on their capabilities and use cases.
     """
 
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        _apply_callback_framework_to_executable(cls)
+    def __init__(self):
+        super().__init__()
+        self._register_callback_framework()
+
+    def _register_callback_framework(self):
+        """Wrap on_invoke/on_stream/on_collect/on_transform with callback framework for trigger support."""
+        try:
+            from openjiuwen.core.runner.runner import Runner
+            from openjiuwen.core.runner.callback.events import WorkflowEvents
+            _fw = Runner.callback_framework
+            if _fw is None:
+                return
+            fn = self.on_invoke
+            fn = _fw.emit_before(WorkflowEvents.COMPONENT_BATCH_INPUT)(fn)
+            fn = _fw.transform_io(
+                input_event=WorkflowEvents.COMPONENT_BATCH_INPUT,
+                output_event=WorkflowEvents.COMPONENT_BATCH_OUTPUT,
+            )(fn)
+            fn = _fw.emit_after(WorkflowEvents.COMPONENT_BATCH_OUTPUT)(fn)
+            self.on_invoke = fn
+
+            fn = self.on_stream
+            fn = _fw.emit_before(WorkflowEvents.COMPONENT_BATCH_INPUT)(fn)
+            fn = _fw.transform_io(
+                input_event=WorkflowEvents.COMPONENT_BATCH_INPUT,
+                output_event=WorkflowEvents.COMPONENT_STREAM_OUTPUT,
+            )(fn)
+            fn = _fw.emit_after(WorkflowEvents.COMPONENT_STREAM_OUTPUT)(fn)
+            self.on_stream = fn
+        except Exception as e:
+            logger.debug(
+                "Callback framework registration skipped",
+                event_type=LogEventType.WORKFLOW_COMPONENT_ERROR,
+                metadata={"error": str(e)}
+            )
 
     async def on_invoke(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
         if not isinstance(session, NodeSession):
@@ -195,9 +193,6 @@ class ComponentExecutable(Executable):
             f"  → Expected signature: async def {method_name}(self, inputs: Input, session: Session, "
             f"context: ModelContext) -> AsyncIterator[Output]"
         )
-
-
-_apply_callback_framework_to_executable(ComponentExecutable)
 
 
 class ComponentComposable(ABC):
