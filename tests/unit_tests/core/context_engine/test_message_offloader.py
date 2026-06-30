@@ -181,7 +181,7 @@ class TestMessageOffloaderAddTrigger:
         assert isinstance(message, OffloadMixin)
         assert message.offload_type == "filesystem"
         assert "same line" in message.content
-        assert "[[OFFLOAD: type=filesystem, path=" in message.content
+        assert f"\n[[OFFLOAD: handle={message.offload_handle}, type=filesystem, path=" in message.content
         assert message.content.rstrip().endswith("]]")
 
         offload_path = tmp_path / "context" / "default_session_id_context" / "offload"
@@ -200,7 +200,7 @@ class TestMessageOffloaderAddTrigger:
 
         message = context.get_messages()[0]
         assert isinstance(message, OffloadMixin)
-        assert "[[OFFLOAD: type=filesystem, path=" in message.content
+        assert f"\n[[OFFLOAD: handle={message.offload_handle}, type=filesystem, path=" in message.content
         assert message.content.rstrip().endswith("]]")
         assert str(tmp_path) in message.content
 

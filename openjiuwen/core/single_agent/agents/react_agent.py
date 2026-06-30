@@ -486,6 +486,36 @@ class ReActAgent(BaseAgent):
         """Create default configuration"""
         return ReActAgentConfig()
 
+    @staticmethod
+    def _resolve_context_engine_model_name(config: ReActAgentConfig) -> str:
+        candidates = (
+            getattr(config, "model_name", None),
+            getattr(getattr(config, "model_config_obj", None), "model_name", None),
+            getattr(getattr(config, "model_client_config", None), "model_name", None),
+        )
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return ""
+
+    @classmethod
+    def _with_context_engine_model_name(cls, config: ReActAgentConfig) -> ReActAgentConfig:
+        context_config = config.context_engine_config
+        if getattr(context_config, "model_name", None):
+            return config
+
+        model_name = cls._resolve_context_engine_model_name(config)
+        if not model_name:
+            return config
+
+        return config.model_copy(
+            update={
+                "context_engine_config": context_config.model_copy(
+                    update={"model_name": model_name}
+                )
+            }
+        )
+
     def configure(self, config: ReActAgentConfig) -> 'BaseAgent':
         """Set configuration
 
@@ -499,6 +529,7 @@ class ReActAgent(BaseAgent):
             After config update, context_engine and memory_scope
             will be updated accordingly
         """
+        config = self._with_context_engine_model_name(config)
         old_config = self._config
         self._config = config
 

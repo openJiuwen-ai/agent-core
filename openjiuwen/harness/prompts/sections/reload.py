@@ -12,21 +12,29 @@ if TYPE_CHECKING:
 RELOAD_HINT_CN = (
     "# 上下文压缩\n\n"
     "你的上下文在过长时会被自动压缩，"
-    "并标记为[OFFLOAD: handle=<id>, type=<type>]。\n\n"
-    "如果你认为需要读取隐藏的内容，"
-    "可随时调用reload_original_context_messages工具。\n\n"
+    "并标记为：\n"
+    "[[OFFLOAD: handle=<id>, type=<type>]]\n"
+    "[[OFFLOAD: handle=<id>, type=<type>, path=<path>]]\n\n"
+    "当你看到这类标记，并认为读取它有助于回答时，"
+    "可以调用reload_original_context_messages工具，"
+    "并使用 marker 中的精确值作为参数。"
+    "当 marker 包含 path 时，调用时将 path 作为 offload_handle；"
+    "否则将 handle 作为 offload_handle。\n\n"
     "请勿猜测或编造缺失的内容。\n\n"
-    '存储类型："in_memory"（会话缓存）'
+    '存储类型："in_memory"（会话缓存）、"filesystem"（文件系统持久化内容）'
 )
 
 RELOAD_HINT_EN = (
     "# Context Compression\n\n"
     "Your context will be automatically compressed when it becomes too long "
-    "and marked with [OFFLOAD: handle=<id>, type=<type>].\n\n"
-    'Call reload_original_context_messages(offload_handle="<id>", '
-    'offload_type="<type>"), using the exact values from the marker.\n\n'
+    "and marked with:\n"
+    "[[OFFLOAD: handle=<id>, type=<type>]]\n"
+    "[[OFFLOAD: handle=<id>, type=<type>, path=<path>]]\n\n"
+    'If the marker has a path value, call reload_original_context_messages(offload_handle="<path>", '
+    'offload_type="<type>"). Otherwise, call reload_original_context_messages(offload_handle="<id>", '
+    'offload_type="<type>"). Use the exact values from the marker.\n\n'
     "Do not guess or fabricate missing content.\n\n"
-    'Storage types: "in_memory" (session cache)'
+    'Storage types: "in_memory" (session cache), "filesystem" (filesystem-backed persisted content)'
 )
 
 

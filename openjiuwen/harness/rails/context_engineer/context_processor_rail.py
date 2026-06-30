@@ -116,6 +116,7 @@ class ContextProcessorRail(DeepAgentRail):
 
         self._system_prompt_builder = None
         self._all_processors: List[Tuple[str, BaseModel]] = []
+        self._enable_reload = False
 
     @classmethod
     def _resolve_preset_name(cls, preset_name: str | None, session_memory_enabled: bool) -> str:
@@ -306,6 +307,8 @@ class ContextProcessorRail(DeepAgentRail):
 
         model_config = getattr(config, "model_config_obj", None)
         model_client_config = getattr(config, "model_client_config", None)
+        context_engine_config = getattr(config, "context_engine_config", None)
+        self._enable_reload = bool(getattr(context_engine_config, "enable_reload", False))
 
         if self._session_memory_config is not None and self._session_memory_mgr is not None:
             if self._session_memory_config.model is None:
@@ -511,7 +514,7 @@ class ContextProcessorRail(DeepAgentRail):
 
     async def _maybe_inject_offload_section(self) -> None:
         """Inject offload section if processors are configured."""
-        if not self._all_processors:
+        if not self._all_processors or not self._enable_reload:
             if self._system_prompt_builder is not None:
                 self._system_prompt_builder.remove_section("offload")
             return
