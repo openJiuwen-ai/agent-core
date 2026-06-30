@@ -261,10 +261,11 @@ BASH_PARAMS: Dict[str, Dict[str, str]] = {
         ),
     },
     "max_output_chars": {
-        "cn": "最大输出字符数，0 表示不限制（默认）；非零时上限 20000，防止超大输出撑爆上下文",
+        "cn": "最大输出字符数，默认 20000：超出部分会被截断并写入临时文件（结果中会给出文件路径，可按需读取），防止超大输出撑爆上下文；显式传 0 表示不限制（谨慎使用）",
         "en": (
-            "Max output characters; 0 (default) means no limit; "
-            "non-zero values are capped at 20000 to prevent oversized output from flooding context"
+            "Max output characters; defaults to 20000: output beyond this is truncated and the full "
+            "content is written to a temp file (its path is returned in the result for on-demand reading), "
+            "preventing oversized output from flooding context. Pass 0 explicitly to disable the limit (use with care)"
         ),
     },
     "shell_type": {
