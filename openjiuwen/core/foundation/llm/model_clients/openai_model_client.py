@@ -551,7 +551,13 @@ class OpenAIModelClient(BaseModelClient):
     def _extract_reasoning_content(msg_or_delta: Any) -> Optional[str]:
         # Some OpenAI-compatible endpoints (e.g. vLLM) expose the reasoning
         # chain under the field name `reasoning` instead of `reasoning_content`.
-        return getattr(msg_or_delta, 'reasoning_content', None) or getattr(msg_or_delta, 'reasoning', None)
+        for attr in ('reasoning_content', 'reasoning'):
+            value = getattr(msg_or_delta, attr, None)
+            # Guard against mock objects and other non-string truthy values
+            # that would break AssistantMessage's `Optional[str]` validation.
+            if isinstance(value, str):
+                return value
+        return None
 
     async def _parse_response(
             self,
@@ -664,9 +670,9 @@ class OpenAIModelClient(BaseModelClient):
         # Preserve the provider's real finish_reason (e.g. "length", "stop",
         # "tool_calls") so downstream callers can distinguish a token-budget
         # truncation from a natural stop. Fall back to the legacy hard-coded
-        # values only when the provider omits it.
+        # values only when the provider omits it or returns a non-string.
         raw_finish_reason = getattr(choice, 'finish_reason', None)
-        if raw_finish_reason:
+        if isinstance(raw_finish_reason, str) and raw_finish_reason:
             finish_reason = raw_finish_reason
         else:
             finish_reason = "tool_calls" if tool_calls else "stop"
