@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `harness/async_tools.py`、`harness/native_harness.py`、`id_generator.py`、`tools/tool_async.py`、`tools/tool_factory.py`、`tools/tool_permissions.py`、`paths.py`、`rails/team_tool_rail.py`、`workflow/tool_swarmflow.py`、`workflow/observer.py` |
-| 最近一次修订日期 | 2026-06-26 |
-| 关联 feature | `F_35_native-harness-async-tool-framework.md`、`F_41_async-tool-control-and-spill.md`、`F_47_swarmflow-concurrency-governor.md` |
+| 最近一次修订日期 | 2026-07-01 |
+| 关联 feature | `F_35_native-harness-async-tool-framework.md`、`F_41_async-tool-control-and-spill.md`、`F_47_swarmflow-concurrency-governor.md`、`F_48_swarmflow-inline-script-execution.md` |
 
 ## 范围 / 边界
 
@@ -144,9 +144,11 @@ openjiuwen 工具循环与 Anthropic API 一样**强配对**：每个 `tool_call
   `team_name`、`model_resolver`（worker model 解析）、`concurrency_governor`（`F_47`）。
   worker 不是 teammate、不写 team DB，**不**注入 `team_backend`（`F_44`）。model 取
   `parent_agent.model`。
-- `invoke` 前置校验：`script_path` 必填；`ConcurrencyGovernor.admit_workflow()` 满则拒绝（L1，
+- `invoke` 前置校验：`script_path`（磁盘）或 `script`（内联源码）至少一个，`name` / `resume_id` 返回
+  "not supported yet"；`ConcurrencyGovernor.admit_workflow()` 满则拒绝（L1，
   文案 `Swarmflow concurrent limit reached (n/m)`）。`has_running` 仅作 registry 观测，
-  **不作** L1 门禁（见 `S_21`）。
+  **不作** L1 门禁（见 `S_21`）。内联 `script` 由 `run_background` 落盘到
+  `workflows/{META.name}/script.py`（idempotent，resume 重写同路径）后复用 path-based 加载。
 - `run_background` 返回脚本原始结果；终态经 `format_completed` / `format_failed` 闭包注入
   `swarmflow.completed` / `swarmflow.failed`（含 `run_id` + `summarize_run` 摘要）。
   phase 进度仍发 `WORKFLOW_PROGRESS`（中途叙述，`WorkflowHandler` 只渲染 `workflow_started`

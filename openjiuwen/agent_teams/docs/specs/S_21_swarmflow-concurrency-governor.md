@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/concurrency.py`、`workflow/engine/admission.py`、`workflow/engine/cap.py`、`workflow/engine/runtime.py`、`workflow/engine/primitives.py`、`workflow/engine/runner.py`、`workflow/tool_swarmflow.py`、`workflow/runner.py`、`workflow/backends/team_worker_backend.py`、`harness/async_tools.py`、`harness/native_harness.py`、`schema/blueprint.py`、`agent/agent_configurator.py`、`rails/team_context.py`、`rails/team_tool_rail.py`、`tools/tool_factory.py`、`agent/coordination/handlers/workflow.py`、`i18n.py` |
-| 最近一次修订日期 | 2026-06-26 |
-| 关联 feature | `F_47_swarmflow-concurrency-governor.md` |
+| 最近一次修订日期 | 2026-07-01 |
+| 关联 feature | `F_47_swarmflow-concurrency-governor.md`、`F_48_swarmflow-inline-script-execution.md` |
 
 ## 范围 / 边界
 
@@ -97,8 +97,10 @@ per-Leader 单例）。`agents_per_run_cap` 由 `validate_swarmflow_concurrency`
 
 ### `invoke`
 
-0. 校验 script source（`script_path` / `script` / `name` / `resume_id` 四源 one-of，**仅 `script_path` 当下可执行**）；
-   `script_path` 缺失返回 `ToolOutput(success=False)`。
+0. 校验 script source（`script_path` / `script` / `name` / `resume_id` 四源 one-of，**`script_path`（磁盘）
+   与 `script`（内联源码）当下可执行**，`name` / `resume_id` 返回 "not supported yet"）；四源全缺返回
+   `ToolOutput(success=False)`。内联 `script` 在 `run_background` 落盘到 `workflows/{META.name}/script.py`
+   后复用 path-based 加载链路。
 1. `governor is None` → `ToolOutput(success=False, error="Swarmflow concurrency governor is not configured")`。
 2. `admit_workflow()` → `None` → 拒绝，**不生成** `run_id`。
 3. `new_swarmflow_run_id()` → `wf_{12hex}`（`tool_swarmflow.py` 模块级函数，**仅在 invoke 铸造**；

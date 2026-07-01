@@ -17,6 +17,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable
 
+import aiofiles
+import aiofiles.os
+
 from openjiuwen.agent_teams import paths
 from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
 from openjiuwen.agent_teams.workflow.engine import (
@@ -25,7 +28,7 @@ from openjiuwen.agent_teams.workflow.engine import (
     WorkflowProgressEvent,
     run_workflow,
 )
-from openjiuwen.agent_teams.workflow.engine.loader import load_workflow_meta
+from openjiuwen.agent_teams.workflow.engine.loader import extract_workflow_meta, load_workflow_meta
 from openjiuwen.agent_teams.workflow.observer import WorkflowObserver
 from openjiuwen.agent_teams.workflow.schema import WorkflowRun
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -67,6 +70,55 @@ def _resolve_journal_path(script_path: str, team_name: str, session_id: str | No
     journal = paths.workflow_journal_path(team_name, sid, name)
     journal.parent.mkdir(parents=True, exist_ok=True)
     return str(journal)
+
+
+async def materialize_swarmflow_script(
+    source: str,
+    *,
+    team_name: str,
+    session_id: str | None,
+) -> str:
+    """Persist an inline swarmflow ``script`` source to disk, return its path.
+
+    Inline sources reuse the whole path-based execution pipeline (importlib
+    module import + ``META``-derived resume journal) by being written to the
+    same per-workflow directory that holds the journal:
+    ``{team_home}/sessions/{session_id}/workflows/{name}/script.py``.
+
+    Writing under the ``META`` name directory (not a random temp file) keeps
+    the path stable across a pause/resume relaunch and colocates the script
+    with its journal, so a re-run of the same-named inline workflow resolves
+    the same journal (content-addressed cache-hit), matching ``script_path``
+    semantics exactly.
+
+    File I/O is async (``aiofiles``) to avoid stalling the shared event loop,
+    matching the engine journal's write path.
+
+    Args:
+        source: The swarmflow script source text.
+        team_name: Team identifier (script / journal namespacing).
+        session_id: Current session id; falls back to ``"default"`` when empty.
+
+    Returns:
+        Absolute path to the written script as a string.
+
+    Raises:
+        BaseError: If the script ``META`` declares no ``name``.
+    """
+    meta = extract_workflow_meta(source)
+    name = meta.get("name")
+    if not name:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="swarmflow script META requires a 'name' to persist its script and journal",
+        )
+    sid = session_id or "default"
+    run_dir = paths.workflow_run_dir(team_name, sid, name)
+    await aiofiles.os.makedirs(run_dir, exist_ok=True)
+    script_file = run_dir / "script.py"
+    async with aiofiles.open(script_file, "w", encoding="utf-8") as f:
+        await f.write(source)
+    return str(script_file)
 
 
 async def run_swarmflow(
@@ -199,4 +251,4 @@ async def preprocess_swarmflow(
     return obs.run
 
 
-__all__ = ["run_swarmflow", "preprocess_swarmflow"]
+__all__ = ["run_swarmflow", "preprocess_swarmflow", "materialize_swarmflow_script"]
