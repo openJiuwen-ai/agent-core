@@ -199,10 +199,15 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
         finish_reason="stop",
         usage=_FakeUsage(reasoning_tokens=5, cache_tokens=2),
     )
+    # Mirror the real streaming trigger (openai_model_client): response is the
+    # content string, usage is the metadata object, passed separately. Earlier
+    # the handler re-derived usage from `response` via getattr, which returned
+    # None for a string and silently dropped reasoning_tokens from the
+    # reasoning span — a regression this test must guard against.
     await fw.trigger(
         LLMCallEvents.LLM_OUTPUT,
         messages=messages,
-        response=final,
+        response=final.content,
         reasoning_content=final.reasoning_content,
         finish_reason="stop",
         usage=final.usage_metadata,
