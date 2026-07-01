@@ -669,18 +669,16 @@ class OtelCallbackHandler:
             except (json.JSONDecodeError, TypeError):
                 pass
         response_obj: dict[str, Any] = {"choices": [choice_obj]}
-        if response is not None:
-            usage = getattr(response, "usage_metadata", None)
-            if usage:
-                usage_obj: dict[str, int] = {}
-                if hasattr(usage, "total_tokens") and usage.total_tokens:
-                    usage_obj["total_tokens"] = usage.total_tokens
-                if hasattr(usage, "input_tokens") and usage.input_tokens:
-                    usage_obj["prompt_tokens"] = usage.input_tokens
-                if hasattr(usage, "output_tokens") and usage.output_tokens:
-                    usage_obj["completion_tokens"] = usage.output_tokens
-                if usage_obj:
-                    response_obj["usage"] = usage_obj
+        if usage:
+            usage_obj: dict[str, int] = {}
+            if hasattr(usage, "total_tokens") and usage.total_tokens:
+                usage_obj["total_tokens"] = usage.total_tokens
+            if hasattr(usage, "input_tokens") and usage.input_tokens:
+                usage_obj["prompt_tokens"] = usage.input_tokens
+            if hasattr(usage, "output_tokens") and usage.output_tokens:
+                usage_obj["completion_tokens"] = usage.output_tokens
+            if usage_obj:
+                response_obj["usage"] = usage_obj
         output_json = json.dumps(response_obj, ensure_ascii=False, default=str)
         state.span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redact_completion(output_json, self._config))
 
