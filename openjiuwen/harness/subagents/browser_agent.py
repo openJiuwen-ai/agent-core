@@ -7,6 +7,7 @@ from __future__ import annotations
 import dataclasses
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from openjiuwen.core.context_engine import ToolResultWindowProcessorConfig
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard
 from openjiuwen.core.single_agent.rail.base import AgentRail
@@ -14,6 +15,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
+from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     BrowserInstanceConfig,
@@ -43,6 +45,16 @@ if TYPE_CHECKING:
 
 
 BROWSER_AGENT_FACTORY_NAME = "browser_agent"
+
+# Browser probe/snapshot tools emit large results; keep only the most recent
+# few in context and persist older ones via ToolResultWindowProcessor.
+# Snapshot is exposed through the Playwright MCP server, so it carries the
+# ``mcp_playwright-official_`` prefix in its resolved tool name.
+BROWSER_WINDOWED_TOOL_NAMES = [
+    "browser_probe_interactives",
+    "browser_probe_cards",
+    "mcp_playwright-official_browser_snapshot",
+]
 
 DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "You are a browser automation agent responsible for executing web tasks directly. "
@@ -269,7 +281,24 @@ def create_browser_agent(
         instance=resolved_settings.instance,
     )
     injected_tools = build_browser_runtime_tools(browser_backend, language=resolved_language)
-    injected_rails = [BrowserRuntimeRail(browser_backend)]
+    injected_rails: List[AgentRail] = [BrowserRuntimeRail(browser_backend)]
+    # Window the large browser probe/snapshot results unless the caller already
+    # manages context processors via their own ContextProcessorRail.
+    if not any(isinstance(rail, ContextProcessorRail) for rail in (rails or [])):
+        injected_rails.append(
+            ContextProcessorRail(
+                processors=[
+                    (
+                        "ToolResultWindowProcessor",
+                        ToolResultWindowProcessorConfig(
+                            tool_names=BROWSER_WINDOWED_TOOL_NAMES,
+                            keep_last_k=1,
+                        ),
+                    )
+                ],
+                preset=False,
+            )
+        )
     final_tools = list(tools or []) + injected_tools
     final_mcps = list(mcps or [])
     final_rails = list(rails or []) + injected_rails
