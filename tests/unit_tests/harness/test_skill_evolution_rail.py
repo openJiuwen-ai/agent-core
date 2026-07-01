@@ -75,12 +75,11 @@ def _make_signal(skill_name: str | None, *, excerpt: str = "signal excerpt") -> 
 
 
 def _async_returning(value):
-    """Build an async replacement for ``SignalDetector.detect_async``.
+    """Build an async replacement for ``SignalDetector.detect``.
 
-    The real ``detect_async`` may route through the LLM when an optimizer llm
+    The real ``detect`` may route through the LLM when an optimizer llm
     is configured; tests that only exercise dedup/clearing logic patch it out
-    with a coroutine that returns a fixed value, matching the sync ``detect``
-    shim used previously.
+    with a coroutine that returns a fixed value.
     """
 
     async def _detect_async(self, _):
@@ -681,7 +680,7 @@ async def test_detect_signals_deduplicates_with_processed_keys(tmp_path, monkeyp
     rail = _make_rail(tmp_path)
     rail._evolution_store.skill_exists = Mock(return_value=True)
     signal = _make_signal("skill-a", excerpt="same-excerpt")
-    monkeypatch.setattr(SignalDetector, "detect_async", _async_returning([signal]))
+    monkeypatch.setattr(SignalDetector, "detect", _async_returning([signal]))
 
     first = await rail._detect_signals([{"role": "user", "content": "x"}], ["skill-a"])
     second = await rail._detect_signals([{"role": "user", "content": "x"}], ["skill-a"])
@@ -696,7 +695,7 @@ async def test_detect_signals_clears_processed_keys_when_exceed_limit(tmp_path, 
     rail = _make_rail(tmp_path)
     rail._evolution_store.skill_exists = Mock(return_value=True)
     rail._processed_signal_keys = {(f"type-{i}", f"excerpt-{i}") for i in range(_MAX_PROCESSED_SIGNAL_KEYS)}
-    monkeypatch.setattr(SignalDetector, "detect_async", _async_returning([_make_signal("skill-a", excerpt="new-one")]))
+    monkeypatch.setattr(SignalDetector, "detect", _async_returning([_make_signal("skill-a", excerpt="new-one")]))
 
     detected = await rail._detect_signals([{"role": "user", "content": "x"}], ["skill-a"])
 
@@ -714,14 +713,14 @@ async def test_detect_signals_propagates_optimizer_llm_to_detector(tmp_path, mon
 
     def spy_init(self: Any, **kwargs: Any) -> None:
         captured.update(kwargs)
-        # bypass real init to avoid needing a real detector; mark llm so detect_async works
+        # bypass real init to avoid needing a real detector; mark llm so detect works
         self._existing_skills = kwargs.get("existing_skills") or set()
         self._llm = kwargs.get("llm")
         self._model = kwargs.get("model")
         self._language = kwargs.get("language")
 
     monkeypatch.setattr(SignalDetector, "__init__", spy_init)
-    monkeypatch.setattr(SignalDetector, "detect_async", _async_returning([_make_signal("skill-a", excerpt="x")]))
+    monkeypatch.setattr(SignalDetector, "detect", _async_returning([_make_signal("skill-a", excerpt="x")]))
 
     await rail._detect_signals([{"role": "user", "content": "x"}], ["skill-a"])
 

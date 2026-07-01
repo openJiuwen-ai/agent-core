@@ -208,7 +208,7 @@ class ConversationSignalDetector:
         Args:
             existing_skills: Set of skill names for skill_name resolution.
             llm: LLM client instance with an async ``invoke(model, messages)`` method.
-                When provided together with *model*, ``detect_async()`` uses LLM to
+                When provided together with *model*, ``detect()`` uses LLM to
                 judge user corrections instead of (or in addition to) regex patterns.
             model: Model identifier string passed to ``llm.invoke()``.
             language: Prompt language, ``"cn"`` or ``"en"``.
@@ -217,35 +217,20 @@ class ConversationSignalDetector:
         self._llm = llm
         self._model = model
         self._language = language
+        # 最近一次 LLM 调用异常（无异常则为 None）；仅用于最终失败日志排障，
+        # 不在每次重试时输出，避免抖动场景刷屏。
+        self._last_llm_error: Optional[str] = None
 
-    def detect(
-        self, trajectory_or_messages: Union[Trajectory, List[dict]]
-    ) -> List[EvolutionSignal]:
+    async def detect(self, trajectory_or_messages: Union[Trajectory, List[dict]]) -> List[EvolutionSignal]:
         """Detect evolution signals from Trajectory or messages.
 
-        Main entry: accepts Trajectory or List[dict], returns deduplicated EvolutionSignal list.
-
-        Args:
-            trajectory_or_messages: Execution trajectory or message list.
-
-        Returns:
-            List of deduplicated EvolutionSignal.
-        """
-        if isinstance(trajectory_or_messages, Trajectory):
-            messages = self._convert_trajectory_to_messages(trajectory_or_messages)
-        else:
-            messages = trajectory_or_messages
-        return self._detect_from_messages(messages)
-
-    async def detect_async(
-        self, trajectory_or_messages: Union[Trajectory, List[dict]]
-    ) -> List[EvolutionSignal]:
-        """Async entry: uses LLM for user correction detection when available.
+        Main entry: accepts Trajectory or List[dict], returns deduplicated
+        EvolutionSignal list.
 
         When ``llm`` and ``model`` were provided at construction time, all user
         messages are sent to the LLM for correction judgment inside
-        ``_detect_from_messages``.  On LLM failure the method falls back to
-        the synchronous regex path automatically.
+        ``_detect_from_messages``.  When no LLM is configured, or the LLM call
+        fails, the regex path is used as a fallback.
 
         Args:
             trajectory_or_messages: Execution trajectory or message list.
@@ -257,17 +242,7 @@ class ConversationSignalDetector:
             messages = self._convert_trajectory_to_messages(trajectory_or_messages)
         else:
             messages = trajectory_or_messages
-
-        if self._llm is not None and self._model is not None:
-            try:
-                return await self._detect_from_messages_async(messages)
-            except Exception as exc:
-                logger.warning(
-                    "[FromConvSignalDetector] async detection failed (%s), "
-                    "falling back to regex",
-                    exc,
-                )
-        return self._detect_from_messages(messages)
+        return await self._detect_from_messages(messages)
 
     @staticmethod
     def _convert_trajectory_to_messages(trajectory: Trajectory) -> List[dict]:
@@ -326,121 +301,26 @@ class ConversationSignalDetector:
 
         return messages
 
-    def _detect_from_messages(self, messages: List[dict]) -> List[EvolutionSignal]:
+    async def _detect_from_messages(self, messages: List[dict]) -> List[EvolutionSignal]:
         """Scan messages and return deduplicated signals.
 
-        Original SignalDetector.detect() logic, moved here for unified handling.
+        When ``llm`` and ``model`` were provided at construction time, all user
+        messages are batched into a single LLM call for correction judgment
+        before the main loop; the result drives user-correction detection.  When
+        no LLM is configured or the LLM call fails, *llm_corrections* stays
+        ``None`` and the regex pattern is used as a fallback.
         """
-        signals: List[EvolutionSignal] = []
-        skill_read_history: List[Tuple[int, str]] = []
-        pending_scripts: Dict[str, str] = {}
-        tool_call_id_to_name: Dict[str, str] = {}
-
-        for msg_idx, msg in enumerate(messages):
-            role = str(_get_field(msg, "role"))
-            content = str(_get_field(msg, "content"))
-            tool_calls = _get_field(msg, "tool_calls", [])
-
-            if role == "assistant" and tool_calls:
-                detected = self._detect_skill_from_tool_calls(tool_calls)
-                if detected:
-                    skill_read_history.append((msg_idx, detected))
-
-                for tc in tool_calls:
-                    tc_id = str(_get_field(tc, "id"))
-                    tc_name = str(_get_field(tc, "name"))
-                    if tc_id and tc_name:
-                        tool_call_id_to_name[tc_id] = tc_name
-                    if tc_name.lower() in _CODE_EXEC_TOOLS:
-                        code = self._extract_code_from_args(tc)
-                        if code and tc_id:
-                            pending_scripts[tc_id] = code
-
-            if role in ("tool", "function"):
-                tool_name = msg.get("name") or msg.get("tool_name") or ""
-                tool_call_id = msg.get("tool_call_id", "")
-                if not tool_name and tool_call_id:
-                    tool_name = tool_call_id_to_name.get(tool_call_id, "")
-
-                active_skill = self._resolve_active_skill(msg_idx, skill_read_history)
-
-                if tool_call_id and tool_call_id in pending_scripts:
-                    has_failure = bool(_FAILURE_KEYWORDS.search(content)) if content else False
-                    if not has_failure:
-                        logger.info(
-                            "[FromConvSignalDetector] tool_call_id: %s, pending_scripts: %s",
-                            tool_call_id,
-                            pending_scripts[tool_call_id],
-                        )
-                        signals.append(
-                            EvolutionSignal(
-                                signal_type="script_artifact",
-                                evolution_type=self._classify_type(active_skill),
-                                section="Scripts",
-                                excerpt=pending_scripts[tool_call_id][:600],
-                                tool_name=tool_name,
-                                skill_name=active_skill,
-                            )
-                        )
-                    del pending_scripts[tool_call_id]
-
-                if tool_name.lower() in _DATA_FETCH_TOOLS:
-                    continue
-
-                match = _FAILURE_KEYWORDS.search(content)
-                logger.info("[FromConvSignalDetector] _FAILURE_KEYWORDS match: %s", match)
-                if match:
-                    if _TOOL_SCHEMA_PATTERN.search(content):
-                        continue
-                    excerpt = _extract_around_match(content, match)
-                    logger.info("[FromConvSignalDetector] _extract_around_match excerpt: %s", excerpt)
-                    signals.append(
-                        EvolutionSignal(
-                            signal_type="execution_failure",
-                            evolution_type=self._classify_type(active_skill),
-                            section="Troubleshooting",
-                            excerpt=excerpt,
-                            tool_name=tool_name or None,
-                            skill_name=active_skill,
-                        )
-                    )
-            elif role == "user":
-                active_skill = self._resolve_active_skill(msg_idx, skill_read_history)
-                match = _CORRECTION_PATTERN.search(content)
-                logger.info("[FromConvSignalDetector] _CORRECTION_PATTERN match: %s", match)
-                if match:
-                    excerpt = _extract_around_match(content, match)
-                    logger.info("[FromConvSignalDetector] _extract_around_match excerpt: %s", excerpt)
-                    signals.append(
-                        EvolutionSignal(
-                            signal_type="user_correction",
-                            evolution_type=self._classify_type(active_skill),
-                            section="Examples",
-                            excerpt=excerpt,
-                            skill_name=active_skill,
-                        )
-                    )
-
-        return self._deduplicate(signals)
-
-    async def _detect_from_messages_async(self, messages: List[dict]) -> List[EvolutionSignal]:
-        """Async variant: same structure as _detect_from_messages but uses LLM
-        for user correction detection.  All user messages are batched into a
-        single LLM call to avoid redundant API calls."""
-
-        # --- Pre-pass: batch LLM judgment for all user messages ---------------
-        # None = LLM failed (fallback to regex); dict = LLM succeeded
         llm_corrections: Optional[Dict[int, dict]] = None
-        try:
-            llm_corrections = await self._batch_judge_corrections(messages)
-        except Exception as exc:
-            logger.warning(
-                "[FromConvSignalDetector] batch LLM correction judgment failed (%s), "
-                "will fall back to regex",
-                exc,
-            )
+        if self._llm is not None and self._model is not None:
+            try:
+                llm_corrections = await self._batch_judge_corrections(messages)
+            except Exception as exc:
+                logger.warning(
+                    "[FromConvSignalDetector] batch LLM correction judgment failed (%s), "
+                    "will fall back to regex",
+                    exc,
+                )
 
-        # --- Main detection loop (mirrors _detect_from_messages) ---------------
         signals: List[EvolutionSignal] = []
         skill_read_history: List[Tuple[int, str]] = []
         pending_scripts: Dict[str, str] = {}
@@ -523,7 +403,8 @@ class ConversationSignalDetector:
                         excerpt = correction.get("excerpt", content[:400])
                         logger.info(
                             "[FromConvSignalDetector] LLM correction at msg_idx=%d: %s",
-                            msg_idx, correction.get("reason", ""),
+                            msg_idx,
+                            correction.get("reason", ""),
                         )
                         signals.append(
                             EvolutionSignal(
@@ -536,7 +417,7 @@ class ConversationSignalDetector:
                         )
                     # msg_idx 不在 llm_corrections 中 → LLM 判断不是纠正，跳过
                 else:
-                    # LLM 调用失败（None），fallback 到正则
+                    # LLM 未配置或调用失败（None），fallback 到正则
                     match = _CORRECTION_PATTERN.search(content)
                     logger.info("[FromConvSignalDetector] _CORRECTION_PATTERN match: %s", match)
                     if match:
@@ -600,14 +481,33 @@ class ConversationSignalDetector:
             context_snippet=context_snippet or "(无上下文 / no context)",
         )
 
-        raw = await self._invoke_correction_llm(prompt)
-        parsed = self._parse_correction_response(raw)
-        if parsed is None:
-            # Retry once
-            logger.warning("[FromConvSignalDetector] batch correction LLM parse failed, retrying")
+        # 最多重试 3 次（含初次调用）；调用异常或解析失败均触发重试，
+        # 全部失败后返回 None，由 _detect_from_messages 降级到正则兜底。
+        parsed: Optional[List[dict]] = None
+        last_raw: Optional[str] = None
+        for attempt in range(3):
             raw = await self._invoke_correction_llm(prompt)
+            last_raw = raw
             parsed = self._parse_correction_response(raw)
+            if parsed is not None:
+                break
+            if attempt < 2:
+                logger.warning(
+                    "[FromConvSignalDetector] batch correction LLM attempt %d/3 failed, retrying",
+                    attempt + 1,
+                )
         if parsed is None:
+            # 区分根因：调用异常（auth/timeout/network）vs 返回了但解析失败。
+            if self._last_llm_error:
+                reason = f"llm error: {self._last_llm_error}"
+            else:
+                raw_preview = (last_raw or "")[:120].replace("\n", " ")
+                reason = f"unparseable response: {raw_preview!r}"
+            logger.warning(
+                "[FromConvSignalDetector] batch correction LLM failed after 3 attempts "
+                "(%s), falling back to regex",
+                reason,
+            )
             return None
 
         index_to_msg_idx = {last_user["index"]: last_user["msg_idx"]}
@@ -626,21 +526,30 @@ class ConversationSignalDetector:
 
         logger.info(
             "[FromConvSignalDetector] batch LLM judgment: %d user msgs -> %d corrections",
-            len(user_entries), len(result),
+            len(user_entries),
+            len(result),
         )
         return result
 
     async def _invoke_correction_llm(self, prompt: str) -> Optional[str]:
-        """Call LLM and return raw text; returns None on exception."""
+        """Call LLM and return raw text; returns None on exception.
+
+        Exceptions are swallowed (returned as ``None``) without logging here;
+        the caller (:meth:`_batch_judge_corrections`) owns retry policy and
+        logs only on final failure, so a flaky LLM does not spam the log on
+        every retry.  The last exception (if any) is recorded in
+        ``self._last_llm_error`` for the caller to surface on final failure.
+        """
         try:
             response = await self._llm.invoke(
                 model=self._model,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return response.content if hasattr(response, "content") else str(response)
         except Exception as exc:
-            logger.error("[FromConvSignalDetector] correction LLM call failed: %s", exc)
+            self._last_llm_error = f"{type(exc).__name__}: {exc}"
             return None
+        self._last_llm_error = None
+        return response.content if hasattr(response, "content") else str(response)
 
     @staticmethod
     def _parse_correction_response(raw: Optional[str]) -> Optional[List[dict]]:

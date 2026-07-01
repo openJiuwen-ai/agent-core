@@ -5,6 +5,8 @@
 import unittest
 from typing import List
 
+from unittest import IsolatedAsyncioTestCase
+
 from openjiuwen.agent_evolving.signal.base import EvolutionCategory, make_signal_fingerprint
 from openjiuwen.agent_evolving.signal.from_conv import ConversationSignalDetector
 from openjiuwen.agent_evolving.trajectory.types import (
@@ -23,7 +25,7 @@ class _FakeLLMResponse:
 
 
 class _FakeLLM:
-    """Async LLM client mock for ``detect_async`` correction-judgment tests.
+    """Async LLM client mock for ``detect`` correction-judgment tests.
 
     Records every call and returns the preset ``content`` (or raises) so tests
     can assert the detector's LLM path without a real model.
@@ -95,17 +97,17 @@ def _build_trajectory_from_messages(messages: List[dict]) -> Trajectory:
     return Trajectory(execution_id="test-exec", steps=steps)
 
 
-class TestConversationSignalDetector(unittest.TestCase):
+class TestConversationSignalDetector(IsolatedAsyncioTestCase):
     """Tests for ConversationSignalDetector.detect(Trajectory)."""
 
-    def test_empty_trajectory_returns_empty_signals(self) -> None:
+    async def test_empty_trajectory_returns_empty_signals(self) -> None:
         """Empty trajectory should return empty signal list."""
         detector = ConversationSignalDetector()
         trajectory = Trajectory(execution_id="test", steps=[])
-        signals = detector.detect(trajectory)
+        signals = await detector.detect(trajectory)
         self.assertEqual(signals, [])
 
-    def test_execution_failure_signal(self) -> None:
+    async def test_execution_failure_signal(self) -> None:
         """Tool result with failure keywords should produce execution_failure signal."""
         messages = [
             {"role": "user", "content": "Run the code"},
@@ -124,7 +126,7 @@ class TestConversationSignalDetector(unittest.TestCase):
         trajectory = _build_trajectory_from_messages(messages)
 
         detector = ConversationSignalDetector()
-        signals = detector.detect(trajectory)
+        signals = await detector.detect(trajectory)
 
         self.assertEqual(len(signals), 1)
         signal = signals[0]
@@ -132,7 +134,7 @@ class TestConversationSignalDetector(unittest.TestCase):
         self.assertEqual(signal.evolution_type, EvolutionCategory.SKILL_EXPERIENCE)
         self.assertIn("failed", signal.excerpt.lower())
 
-    def test_user_correction_signal(self) -> None:
+    async def test_user_correction_signal(self) -> None:
         """User message with correction keywords should produce user_correction signal."""
         messages = [
             {"role": "user", "content": "Use the read_file tool"},
@@ -147,7 +149,7 @@ class TestConversationSignalDetector(unittest.TestCase):
         trajectory = _build_trajectory_from_messages(messages)
 
         detector = ConversationSignalDetector()
-        signals = detector.detect(trajectory)
+        signals = await detector.detect(trajectory)
 
         # Should have user_correction signal
         correction_signals = [s for s in signals if s.signal_type == "user_correction"]
@@ -156,7 +158,7 @@ class TestConversationSignalDetector(unittest.TestCase):
         self.assertEqual(signal.signal_type, "user_correction")
         self.assertEqual(signal.section, "Examples")
 
-    def test_script_artifact_signal(self) -> None:
+    async def test_script_artifact_signal(self) -> None:
         """Successful code execution should produce script_artifact signal."""
         messages = [
             {"role": "user", "content": "Write a script"},
@@ -182,7 +184,7 @@ class TestConversationSignalDetector(unittest.TestCase):
         trajectory = _build_trajectory_from_messages(messages)
 
         detector = ConversationSignalDetector()
-        signals = detector.detect(trajectory)
+        signals = await detector.detect(trajectory)
 
         script_signals = [s for s in signals if s.signal_type == "script_artifact"]
         self.assertEqual(len(script_signals), 1)
@@ -190,7 +192,7 @@ class TestConversationSignalDetector(unittest.TestCase):
         self.assertEqual(signal.signal_type, "script_artifact")
         self.assertEqual(signal.section, "Scripts")
 
-    def test_fingerprint_consistency_with_signal_detector(self) -> None:
+    async def test_fingerprint_consistency_with_signal_detector(self) -> None:
         """ConversationSignalDetector signals should match SignalDetector fingerprints."""
         messages = [
             {"role": "user", "content": "Run the code"},
@@ -210,9 +212,9 @@ class TestConversationSignalDetector(unittest.TestCase):
         # SignalDetector (alias for ConversationSignalDetector)
         detector = ConversationSignalDetector()
         # Test both input types: List[dict] and Trajectory
-        signals_from_messages = detector.detect(messages)
+        signals_from_messages = await detector.detect(messages)
         trajectory = _build_trajectory_from_messages(messages)
-        signals_from_trajectory = detector.detect(trajectory)
+        signals_from_trajectory = await detector.detect(trajectory)
 
         # Both should produce same fingerprints
         fingerprints_from_messages = [make_signal_fingerprint(s) for s in signals_from_messages]
@@ -223,7 +225,7 @@ class TestConversationSignalDetector(unittest.TestCase):
 
         self.assertEqual(fingerprints_from_messages, fingerprints_from_trajectory)
 
-    def test_signal_deduplication(self) -> None:
+    async def test_signal_deduplication(self) -> None:
         """Multiple similar failures should be deduplicated."""
         messages = [
             {"role": "user", "content": "Run multiple commands"},
@@ -251,13 +253,13 @@ class TestConversationSignalDetector(unittest.TestCase):
         trajectory = _build_trajectory_from_messages(messages)
 
         detector = ConversationSignalDetector()
-        signals = detector.detect(trajectory)
+        signals = await detector.detect(trajectory)
 
         # Should deduplicate to 1 signal (same type, tool_name, excerpt)
         failure_signals = [s for s in signals if s.signal_type == "execution_failure"]
         self.assertEqual(len(failure_signals), 1)
 
-    def test_existing_skills_filter(self) -> None:
+    async def test_existing_skills_filter(self) -> None:
         """Detector with existing_skills should resolve skill_name correctly."""
         messages = [
             {"role": "user", "content": "Read SKILL.md"},
@@ -284,7 +286,7 @@ class TestConversationSignalDetector(unittest.TestCase):
         trajectory = _build_trajectory_from_messages(messages)
 
         detector = ConversationSignalDetector(existing_skills={"my_skill"})
-        signals = detector.detect(trajectory)
+        signals = await detector.detect(trajectory)
 
         # Should have user_correction signal with skill_name="my_skill"
         correction_signals = [s for s in signals if s.signal_type == "user_correction"]
@@ -295,12 +297,12 @@ class TestConversationSignalDetector(unittest.TestCase):
 class TestConversationSignalDetectorAsync(unittest.IsolatedAsyncioTestCase):
     """Tests for the LLM-based user-correction detection added in 15c68a27.
 
-    Covers ``detect_async``, ``_batch_judge_corrections``, ``_invoke_correction_llm``,
+    Covers ``detect``, ``_batch_judge_corrections``, ``_invoke_correction_llm``,
     ``_parse_correction_response`` and ``_build_correction_context``.
     """
 
-    async def test_detect_async_without_llm_falls_back_to_regex(self) -> None:
-        """No llm/model configured -> detect_async mirrors sync regex detection."""
+    async def test_detect_without_llm_falls_back_to_regex(self) -> None:
+        """No llm/model configured -> detect uses the regex path."""
         messages = [
             {"role": "user", "content": "Run the code"},
             {
@@ -312,17 +314,12 @@ class TestConversationSignalDetectorAsync(unittest.IsolatedAsyncioTestCase):
         ]
         detector = ConversationSignalDetector()  # no llm/model
 
-        sync_signals = detector.detect(messages)
-        async_signals = await detector.detect_async(messages)
+        signals = await detector.detect(messages)
 
-        self.assertEqual(
-            [make_signal_fingerprint(s) for s in sync_signals],
-            [make_signal_fingerprint(s) for s in async_signals],
-        )
-        self.assertTrue(async_signals)
-        self.assertEqual(async_signals[0].signal_type, "execution_failure")
+        self.assertTrue(signals)
+        self.assertEqual(signals[0].signal_type, "execution_failure")
 
-    async def test_detect_async_llm_correction_produces_signal(self) -> None:
+    async def test_detect_llm_correction_produces_signal(self) -> None:
         """When LLM judges a user message as correction, a user_correction signal is emitted."""
         # User content has NO correction regex keyword -> regex path would miss it;
         # only the LLM judgment should surface a correction here.
@@ -332,14 +329,14 @@ class TestConversationSignalDetectorAsync(unittest.IsolatedAsyncioTestCase):
             {"role": "user", "content": "换个方法试试"},
         ]
 
-        signals = await detector.detect_async(messages)
+        signals = await detector.detect(messages)
 
         corrections = [s for s in signals if s.signal_type == "user_correction"]
         self.assertEqual(len(corrections), 1)
         self.assertEqual(corrections[0].section, "Examples")
         self.assertEqual(corrections[0].excerpt, "换个方法")
 
-    async def test_detect_async_llm_no_correction_skips_signal(self) -> None:
+    async def test_detect_llm_no_correction_skips_signal(self) -> None:
         """When LLM judges no correction, no user_correction signal is produced."""
         raw = '[{"msg_index": 0, "is_correction": false}]'
         detector = ConversationSignalDetector(llm=_FakeLLM(content=raw), model="dummy-model", language="cn")
@@ -347,12 +344,12 @@ class TestConversationSignalDetectorAsync(unittest.IsolatedAsyncioTestCase):
             {"role": "user", "content": "换个方法试试"},  # would match regex, but LLM overrides
         ]
 
-        signals = await detector.detect_async(messages)
+        signals = await detector.detect(messages)
 
         self.assertEqual([s for s in signals if s.signal_type == "user_correction"], [])
 
-    async def test_detect_async_llm_failure_falls_back_to_regex(self) -> None:
-        """When the LLM call raises, detect_async falls back to the regex path."""
+    async def test_detect_llm_failure_falls_back_to_regex(self) -> None:
+        """When the LLM call raises, detect falls back to the regex path."""
         detector = ConversationSignalDetector(
             llm=_FakeLLM(content="", raise_on_invoke=True), model="dummy-model", language="cn"
         )
@@ -360,13 +357,35 @@ class TestConversationSignalDetectorAsync(unittest.IsolatedAsyncioTestCase):
             {"role": "user", "content": "不对，应该换一种方式"},  # matches _CORRECTION_PATTERN
         ]
 
-        signals = await detector.detect_async(messages)
+        signals = await detector.detect(messages)
 
         corrections = [s for s in signals if s.signal_type == "user_correction"]
         self.assertEqual(len(corrections), 1)
 
-    async def test_detect_async_llm_unparseable_response_falls_back_to_regex(self) -> None:
-        """When LLM returns non-JSON (after retry), detect_async falls back to regex."""
+    async def test_detect_llm_failure_records_root_cause(self) -> None:
+        """The last LLM exception is recorded so logs can distinguish failure causes.
+
+        Simulates an auth-style error: ``_invoke_correction_llm`` swallows the
+        exception but stores its type+message in ``_last_llm_error``, letting
+        the final-failure log tell auth/timeout apart from a parse failure.
+        """
+
+        class _AuthFailLLM:
+            async def invoke(self, model, messages):
+                raise PermissionError("401 invalid api key")
+
+        detector = ConversationSignalDetector(llm=_AuthFailLLM(), model="dummy-model", language="cn")
+        messages = [{"role": "user", "content": "不对，应该换一种方式"}]
+
+        await detector.detect(messages)
+
+        # 异常类型与消息被记录，排障时可从日志区分 auth 失败 vs 解析失败
+        self.assertIsNotNone(detector._last_llm_error)
+        self.assertIn("PermissionError", detector._last_llm_error)
+        self.assertIn("401", detector._last_llm_error)
+
+    async def test_detect_llm_unparseable_response_falls_back_to_regex(self) -> None:
+        """When LLM returns non-JSON (after retry), detect falls back to regex."""
         detector = ConversationSignalDetector(
             llm=_FakeLLM(content="not json at all"), model="dummy-model", language="cn"
         )
@@ -374,12 +393,14 @@ class TestConversationSignalDetectorAsync(unittest.IsolatedAsyncioTestCase):
             {"role": "user", "content": "不对，应该换一种方式"},
         ]
 
-        signals = await detector.detect_async(messages)
+        signals = await detector.detect(messages)
 
         corrections = [s for s in signals if s.signal_type == "user_correction"]
         self.assertEqual(len(corrections), 1)
-        # parse failed twice (initial + one retry) before falling back
-        self.assertEqual(detector._llm.invoke_count, 2)
+        # parse failed 3 times (initial + 2 retries) before falling back to regex
+        self.assertEqual(detector._llm.invoke_count, 3)
+        # 调用未抛异常，所以根因不是 llm error；最终失败日志会走 unparseable 分支
+        self.assertIsNone(detector._last_llm_error)
 
     async def test_batch_judge_corrections_returns_empty_when_no_user_messages(self) -> None:
         """No user messages -> LLM is not called and an empty dict is returned."""
@@ -409,14 +430,14 @@ class TestConversationSignalDetectorAsync(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result[0]["is_correction"])
 
     async def test_batch_judge_corrections_returns_none_on_unparseable(self) -> None:
-        """Unparseable LLM output (after retry) yields None so callers fall back."""
+        """Unparseable LLM output (after 3 attempts) yields None so callers fall back."""
         detector = ConversationSignalDetector(llm=_FakeLLM(content="###"), model="dummy-model")
         messages = [{"role": "user", "content": "whatever"}]
 
         result = await detector._batch_judge_corrections(messages)
 
         self.assertIsNone(result)
-        self.assertEqual(detector._llm.invoke_count, 2)
+        self.assertEqual(detector._llm.invoke_count, 3)
 
     async def test_invoke_correction_llm_returns_none_on_exception(self) -> None:
         """_invoke_correction_llm swallows exceptions and returns None."""

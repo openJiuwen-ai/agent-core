@@ -971,7 +971,7 @@ class SkillEvolutionRail(EvolutionRail):
             model=self._optimizer_model,
             language=self._optimizer_language,
         )
-        detected = await detector.detect_async(parsed_messages)
+        detected = await detector.detect(parsed_messages)
 
         new_signals: List[EvolutionSignal] = []
         for signal in detected:
