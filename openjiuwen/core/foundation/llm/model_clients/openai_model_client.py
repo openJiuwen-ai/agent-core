@@ -549,7 +549,9 @@ class OpenAIModelClient(BaseModelClient):
 
     @staticmethod
     def _extract_reasoning_content(msg_or_delta: Any) -> Optional[str]:
-        return getattr(msg_or_delta, 'reasoning_content', None)
+        # Some OpenAI-compatible endpoints (e.g. vLLM) expose the reasoning
+        # chain under the field name `reasoning` instead of `reasoning_content`.
+        return getattr(msg_or_delta, 'reasoning_content', None) or getattr(msg_or_delta, 'reasoning', None)
 
     async def _parse_response(
             self,
@@ -659,11 +661,21 @@ class OpenAIModelClient(BaseModelClient):
         completion_token_ids = getattr(choice, 'token_ids', None) or None
         logprobs = self._normalize_logprobs(getattr(choice, 'logprobs', None))
 
+        # Preserve the provider's real finish_reason (e.g. "length", "stop",
+        # "tool_calls") so downstream callers can distinguish a token-budget
+        # truncation from a natural stop. Fall back to the legacy hard-coded
+        # values only when the provider omits it.
+        raw_finish_reason = getattr(choice, 'finish_reason', None)
+        if raw_finish_reason:
+            finish_reason = raw_finish_reason
+        else:
+            finish_reason = "tool_calls" if tool_calls else "stop"
+
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
-            finish_reason="tool_calls" if tool_calls else "stop",
+            finish_reason=finish_reason,
             reasoning_content=reasoning_content,
             parser_content=parser_content,
             prompt_token_ids=prompt_token_ids,
