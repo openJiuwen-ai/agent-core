@@ -1,12 +1,12 @@
 Run a swarmflow orchestration script (a multi-agent workflow) that orchestrates a fleet of worker subagents **deterministically**. The script spawns and coordinates those workers — to be **comprehensive** (decompose and cover in parallel), to be **confident** (verify with independent perspectives before concluding), or to take on **scale one context can't hold** (migrations, audits, deep research). The script is where you encode that structure: **what fans out, what verifies, what synthesizes**. This tool **returns immediately** with a run_id (the workflow runs asynchronously in the background); that run_id is the handle for a later `resume_id`, and phase progress plus the final result are fed back into your context automatically.
 
 ## When to call / when not to
-- **Explicit opt-in only**: a workflow can spawn dozens of workers and burn a lot of tokens, so **the user must ask for that scale — you must not infer it**. Any one of: the user asks in their own words ("use a workflow", "fan out agents", "orchestrate with subagents", "thoroughly audit"); the message contains `swarmflow` / `workflow`; or the hosting team has `enable_swarmflow` on AND the task genuinely needs multi-agent collaboration.
-- **Use it**: complex, multi-step, parallel / pipeline, adversarial-verification, large-scale ranking, root-cause, exploration, triage work — high-value tasks where the compute cost is justified.
-- **Don't**: a simple single-agent task does not need a workflow — most ordinary tasks don't need a five-member panel. **Even when a task would clearly benefit from parallelism, do not orchestrate unless the user asked**: use a single `agent()`, or briefly describe in the main loop what a multi-agent workflow could do and roughly how much compute it would cost, then ask the user whether to run it (you may add that they can say "use a workflow" next time to skip this ask). First ask "does this really need more compute?"
+- **Pick the mechanism by collaboration nature**: a multi-agent task whose structure can be thought through up front and written as deterministic control flow (known topology; fan-out / pipeline / verify / synthesize can be coded) **defaults to this tool** — no explicit user naming required. Conversely, when collaboration is **emergent** — members need to autonomously communicate / negotiate with each other, there is no fixed information-flow topology, the task DAG is unclear, there are many dynamic scenarios, or it needs persistent / HITT collaboration — that is `build_team` team territory. The basis is the task's collaboration nature, not the user's wording or task complexity.
+- **Use it**: complex, multi-step, parallel / pipeline, adversarial-verification, large-scale ranking, root-cause, exploration, triage work — tasks that genuinely need multiple agents working together.
+- **Don't**: a simple single-agent task does not need a workflow — not every task needs a fleet of workers. First ask "does this really need multiple agents working together?"; if yes, orchestrate; if no, use a single `agent()` or just do it yourself. The reversed default is about *which mechanism* multi-agent collaboration uses (swarmflow over build_team), **not** about splitting simple tasks into orchestrations.
 - **Hybrid is best**: before orchestrating, scout inline first (list the relevant files, find the data sources, scope the diff) to discover the work-list, then have the script pipeline over it. You don't need to know the shape before the *task* — only before the *orchestration step*.
 
-> Whether to orchestrate is decided by the `enable_swarmflow` capability bit plus the user's request this turn, not a standing session-level flag.
+> This tool's presence means `enable_swarmflow` is on. Choosing swarmflow vs build_team depends on the **task's collaboration nature** (structure can be deterministically orchestrated → swarmflow; emergent autonomous collaboration, topology / DAG not predetermined, highly dynamic, members must talk to each other → build_team), not on whether the user names it this turn. When unsure, default to swarmflow.
 
 ## Common workflow shapes (chainable across turns)
 - **Understand**: parallel readers over relevant subsystems → a structured map.
@@ -24,13 +24,19 @@ Larger work can be **split into several scripts run in sequence** (start the nex
 - **Do not** spawn members, `create_task`, or orchestrate yourself — the script owns all orchestration; and do not rewrite a worker's intermediate results.
 
 ## Script sources (one of) and args
-- `script_path` (**available today**): path to a script file on disk. Highest precedence.
-- `script` (interface in place, execution coming): inline script source.
+- `script` (**available today**): inline script source, no disk write needed. **Prefer it for simple cases** — pass the source straight in to run, skipping the file and iterating fastest.
+- `script_path` (**available today**): path to a script file on disk. Best for scripts already on disk (`swarmskill-creator` output, or ones you iterate / resume repeatedly).
 - `name` (interface in place, execution coming): a saved / named workflow, resolved to a self-contained script.
 - `resume_id` (interface in place, execution coming): a prior run's run_id, to resume.
 - `args`: a **string** argument passed to the script's `run(args)` (e.g. a question, a target path). For structured input, `json.loads(args)` inside the script.
 
-> Only `script_path` is wired to execution today; the other three are rejected with an **explicit error** (never a silent no-op). **To iterate**: edit the script file on disk and re-invoke with the same `script_path` — no need to resend the source. With no existing script, the `swarmskill-creator` skill can author one — get its path, then call this tool; if that skill is unavailable, tell the user honestly rather than forcing the call or hand-writing a script.
+> **Pick a source by complexity**: for a simple task whose orchestration is obvious at a glance, **prefer inline `script`** and run it directly, or hand-write a minimal script file and use `script_path` — no need to involve `swarmskill-creator`. Only for complex work (multi-phase / multi-role / needing executable retry·degrade·budget constraints / meant to become a reusable skill) use the `swarmskill-creator` skill to author a script through its full develop-and-validate flow.
+>
+> **When to install a `swarmskill-creator`-authored script**: if you are **augmenting / modifying a script inside an existing swarmskill**, follow creator's normal flow. If you are **writing a brand-new script from scratch**, after writing the script file **do not** immediately generate and install the skill — first call this tool to run the workflow to completion, and once swarmflow finishes and you have the actual result, **ask the user whether to install it as a skill**; install only after they confirm. Don't freeze an un-run, unverified orchestration into a skill.
+>
+> **To iterate**: edit the script file on disk and re-invoke with the same `script_path` — no need to resend the source. If `swarmskill-creator` is unavailable, tell the user honestly rather than forcing the call or hand-writing one.
+>
+> `name` (saved / named workflow) and `resume_id` (resume) have their interface in place but execution is still coming; a call today is rejected with an **explicit error** (never a silent no-op).
 
 ## Script structure (Python)
 A script is a Python module: a top-level `META` (pure literal) plus `async def run(args)`, importing the primitives from `swarmflow`.
