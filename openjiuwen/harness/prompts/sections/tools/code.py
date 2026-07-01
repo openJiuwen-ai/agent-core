@@ -18,7 +18,11 @@ DESCRIPTION: Dict[str, str] = {
         " - 读取文件：使用 read_file 工具\n"
         " - 写入文件：使用 write_file 工具\n"
         " - 编辑文件：使用 edit_file 工具\n"
-        "专用工具提供更好的安全性、权限控制和用户体验。"
+        "专用工具提供更好的安全性、权限控制和用户体验。\n\n"
+        "多语言内容处理规则：\n"
+        "1. 检测输入内容的语言（中文、英文、日文等）\n"
+        "2. 生成文件时必须使用支持该语言的字体：\n"
+        "3. 禁止对内容进行翻译，来绕过字体限制"
     ),
     "en": (
         "Execute code (Python or JavaScript).\n\n"
@@ -29,7 +33,11 @@ DESCRIPTION: Dict[str, str] = {
         " - Read files: Use read_file tool\n"
         " - Write files: Use write_file tool\n"
         " - Edit files: Use edit_file tool\n"
-        "Dedicated tools provide better safety, permission control, and user experience."
+        "Dedicated tools provide better safety, permission control, and user experience.\n\n"
+        "Multi-language content rules:\n"
+        "1. Detect the language of input content (Chinese, English, Japanese, etc.)\n"
+        "2. When generating files, you MUST use fonts that support the detected language:\n"
+        "3. Do NOT translate content to avoid font limitations"
     ),
 }
 

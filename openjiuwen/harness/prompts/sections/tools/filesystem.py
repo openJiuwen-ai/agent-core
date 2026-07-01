@@ -36,13 +36,22 @@ READ_FILE_DESCRIPTION: Dict[str, str] = {
 WRITE_FILE_DESCRIPTION: Dict[str, str] = {
     "cn": (
         "写入文件内容。如果文件已存在，将完全覆盖。\n\n"
-        "大文件写入：不要一次性写入整份内容。先用本工具创建文件（content 仅含骨架或首段，保持短小），"
-        "再用 edit_file 分多次追加剩余内容。"
+        "大文件写入（分批写入）：\n"
+        "1. 第一次调用：使用 write_file 创建文件，content 仅含骨架或首段（保持短小）\n"
+        "2. 后续调用：使用 edit_file 分多次追加剩余内容\n\n"
+        "⚠️ 对于有先后顺序的分批写入，必须串行执行：等待前一次写入完成后再发起下一次写入。\n"
+        "⚠️ 每个分片必须是语法完整的（尤其是JS或者python等脚本类文件）：确保括号、引号、字符串正确闭合。\n"
+        "⚠️ 如果某次写入失败，不要继续写入后续分片，先检查并修复失败原因。"
     ),
     "en": (
         "Write file contents. Overwrites existing files only after a full read_file call.\n\n"
-        "Large files: do not put the entire content in one call. Create the file with a short "
-        "skeleton or first chunk, then append the rest in multiple edit_file calls."
+        "Large files (batch writing):\n"
+        "1. First call: use write_file to create the file with a short skeleton or first chunk\n"
+        "2. Subsequent calls: use edit_file to append remaining content in multiple calls\n\n"
+        "⚠️ For sequential batch writing, operations must be executed serially: "
+        " wait for the previous write to complete before initiating the next one.\n"
+        "⚠️ Each chunk must be syntactically complete: ensure brackets, quotes, strings are properly closed.\n"
+        "⚠️ If a write fails, do not continue writing subsequent chunks; check and fix the failure first."
     ),
 }
 
@@ -62,6 +71,8 @@ EDIT_FILE_DESCRIPTION: Dict[str, str] = {
         "- 新文件创建：old_string='' 且目标文件不存在时创建新文件\n"
         "- 格式化处理：自动去除 new_string 行尾空白（.md/.mdx 文件除外）；保留文件原有行尾风格（LF/CRLF）\n"
         "- 外部修改检测：写入前通过时间戳 + 文件大小双重校验，若文件被外部修改则拒绝写入\n\n"
+        "分批追加内容：使用 edit_file 追加内容时，将 new_string 设为要追加的内容，"
+        "old_string 设为文件末尾的最后几行内容（确保唯一匹配）。\n\n"
         "拒绝条件：文件超过 1 GiB / old_string 与 new_string 相同 / .ipynb 文件 / "
         "文件不存在且 old_string 非空 / 文件已存在且 old_string 为空"
     ),
@@ -78,6 +89,8 @@ EDIT_FILE_DESCRIPTION: Dict[str, str] = {
         "- Formatting: strips trailing whitespace from new_string lines (except .md/.mdx); "
         "preserves original EOL style (LF/CRLF)\n"
         "- External modification detection: rejects writes when mtime + size have changed since last read\n\n"
+        "Batch appending: To append content using edit_file, set new_string to the content to append, "
+        "and set old_string to the last few lines of the file (ensure unique match).\n\n"
         "Rejected when: file > 1 GiB / old_string == new_string / .ipynb file / "
         "file missing with non-empty old_string / file exists with empty old_string"
     ),
