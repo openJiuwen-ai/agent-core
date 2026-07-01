@@ -127,6 +127,33 @@ team.{team_name}                                    ROOT
 | `gen_ai.completion.0.content` | response | 响应内容 |
 | `gen_ai.usage.input_tokens` | usage | 输入 token |
 | `gen_ai.usage.output_tokens` | usage | 输出 token |
+| `gen_ai.usage.total_tokens` | usage | 总 token |
+| `gen_ai.usage.cache_tokens` | usage（`UsageMetadata.cache_tokens`） | 命中缓存的 token；provider 未返回则不设 |
+| `gen_ai.usage.reasoning_tokens` | usage（`UsageMetadata.reasoning_tokens`） | 推理 token，取业务层提取值，采集层不自行计算 |
+| `gen_ai.response.time_to_first_token_ms` | `first_chunk_ns - start_ns` | 流式首 chunk 到达耗时（仅流式） |
+| `gen_ai.response.finish_reason` | response / trigger | 结束原因 |
+| `gen_ai.response.model` | usage（`model_name`） | 实际响应模型 |
+
+### Reasoning Span (`llm.reasoning`，条件创建)
+
+仅当本次调用产出 reasoning 文本时创建，挂在 `llm.call` 下。reasoning 内容优先取业务层在流式收尾 trigger 传入的 `reasoning_content`（`final_message.reasoning_content`，业务层已拼好完整文本），采集层不自行拼接 chunk；旧 client 兼容 fallback 到 `state.accumulated_reasoning`。
+
+| 属性 | 来源 | 说明 |
+|------|------|------|
+| `gen_ai.completion.0.role` | 固定 `"reasoning"` | Langfuse reasoning 渲染 |
+| `gen_ai.completion.0.is_reasoning` | 固定 `True` | 标识为推理 |
+| `gen_ai.completion.0.content` | reasoning_content | 完整推理文本（脱敏） |
+| `langfuse.observation.input` | 固定 `"llm reasoning"` | UI 输入占位 |
+| `langfuse.observation.output` | reasoning_content | UI 输出 |
+| `gen_ai.usage.reasoning_tokens` | usage | 镜像一份到 reasoning span（llm.call 上也有） |
+| `gen_ai.reasoning.duration_ms` | `reasoning_last_ns - reasoning_first_ns` | 推理 chunk 区间耗时；非流式不设 |
+
+**计时锚点（关键）**：reasoning span 不用 `with start_as_current_span`（with 体瞬间执行，`__exit__` 立即 `end()` → duration 恒 0）。改为手动 `start_span(start_time=reasoning_start_wall_ns)` + `end(end_time=reasoning_start_wall_ns + dur_ns)`，让 span 自身 start/end 落在真实推理区间，Langfuse UI 显示的 span duration 等于 `duration_ms`。
+- `reasoning_first_ns` / `reasoning_last_ns`：单调钟读数（`time.monotonic_ns()`），首个/末个含 `reasoning_content` 的 stream chunk 到达时记于 `on_llm_stream_output`。两者相减得到 reasoning 时长（`dur_ns`）。
+- `reasoning_start_wall_ns`：墙上钟读数（`time.time_ns()`），与 `reasoning_first_ns` 同时记，作为 span 的 `start_time`。单调钟差值只能算时长，不能当时间戳（基准与 trace 内其他 span 不一致），所以 span 的绝对时间用墙上钟，时长用单调钟差值，`end_time = start_time + dur_ns`。
+- finalize 远晚于末个 reasoning chunk，若不显式传 `start_time`，SDK 默认 start 会超过算出的 end_time，duration 被 clamp 成 0，故必须显式传 `start_time`。
+- **固有局限**：reasoning 计时只覆盖"含 reasoning_content 的 chunk 区间"，漏掉首 token 之前 provider 侧的思考时间（流式协议不给 per-token 时间戳，provider 思考发生在 TTFT 期间）。非流式路径无 chunk 级时间，不设 `duration_ms`，duration 留 0。
+
 
 ### Tool Span
 
@@ -199,7 +226,7 @@ _ALL_TEAM_EVENT_TYPES = frozenset(
 - **显式 parent 选择**：LLM/tool span 优先挂 agent span，fallback 到 team span；两阶段都不可用时拒绝创建。
 - **跨 member 安全**：`before_task_iteration` 检测到跨 member 的 stale ContextVar 时清理全部 observability ContextVar（不关别人的 span）。COW（写时复制）保证 leader 与 teammate 的 `_llm_span_stack` / `_tool_span_map` 永不互相修改。
 - **GEN_AI_PROMPT 双写**：`_open_llm_span` 同时写标准键（`gen_ai.prompt.{i}`）和 Langfuse 命名空间键（`langfuse.gen_ai.prompt.{i}`），前者供通用 OTel 后端，后者供 Langfuse UI 渲染。`GEN_AI_COMPLETION` 同理。相关常量已从 `GEN_AI_T_*` 重命名为 `LANGFUSE_GEN_AI_*`，收束到 semconv.py 的 `langfuse.*` 段。
-- **`_finalize_llm_span_output` 共享方法**：`_close_llm_span`（非流式）与 `on_llm_output`（流式）共用同一份 completion/output/ reasoning/close 逻辑，消除 ~130 行重复。
+- **`_finalize_llm_span_output` 共享方法**：`_close_llm_span`（非流式）与 `on_llm_output`（流式）共用同一份 completion/output/ reasoning/close 逻辑，消除 ~130 行重复。reasoning span 在此条件创建，计时锚点见上方「Reasoning Span」节——手动 `start_span`/`end` 显式传 `start_time`（墙上钟）和 `end_time`（start + 单调钟时长），避免 `with` 块瞬间 end 导致 duration=0。
 - **ActiveSpanTracker**：OTel SpanProcessor，使用**强引用 set** 追踪所有活跃 span。`on_start` 时添加 → `on_end` 时移除（正常关闭的不堆积）。在 `finalize_trace` 和 `shutdown_observability` 中兜底关闭残留 span。`force_flush` 为 no-op（避免 `close_team_spans` 时误关其他 trace 的 span）。
 - **级联关闭 cancelled 标记**：`after_task_iteration` 和 `close_team_agent_spans` 的级联排空逻辑中，已为未正常产出 output 的 LLM/tool span 设置 `langfuse.observation.output = "cancelled"`，便于在 Langfuse 中识别被中断的调用。
 - **LLM input delta**：`langfuse.observation.input` 采用基于消息计数的增量展示策略。同一个 agent span 内 LLM 调用是顺序的——将当前消息数 `gen_ai.request.message_count` 写入 agent span 的 attribute，下次 LLM 调用读取上一次的计数，仅展示 `messages[prev_count:]` 的增量消息。首次调用或上下文压缩导致消息数减少时展示去 system 的全量消息，确保 input 始终有值。全量消息通过 `gen_ai.prompt.{i}.*` 保留。

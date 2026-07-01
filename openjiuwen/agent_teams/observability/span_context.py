@@ -193,6 +193,13 @@ class LlmSpanState:
     accumulated_content: str = ""
     accumulated_reasoning: str = ""
     is_streaming: bool = False
+    reasoning_first_ns: int | None = None
+    reasoning_last_ns: int | None = None
+    # Wall-clock epoch (time.time_ns) captured at the first reasoning chunk.
+    # Span start/end must be wall-clock timestamps, but the measured duration
+    # is a monotonic delta (reasoning_last_ns - reasoning_first_ns). end_time
+    # is set to start + that delta so the UI span duration equals reasoning time.
+    reasoning_start_wall_ns: int | None = None
 
     def next_chunk_seq(self) -> int:
         """Increment and return the next chunk sequence number."""

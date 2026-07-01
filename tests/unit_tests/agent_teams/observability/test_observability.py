@@ -13,6 +13,7 @@ trying to verify (the OTel span tree shape).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any, Iterator
@@ -69,6 +70,8 @@ class _FakeUsage:
     input_tokens: int = 12
     output_tokens: int = 7
     total_tokens: int = 19
+    cache_tokens: int = 0
+    reasoning_tokens: int = 0
     model_name: str = "fake-llm-1"
 
 
@@ -88,19 +91,21 @@ class _FakeAssistantMessage:
         reasoning_content: str = "",
         finish_reason: str = "stop",
         tool_calls: list[Any] | None = None,
+        usage: _FakeUsage | None = None,
     ) -> None:
         self.content = content
         self.reasoning_content = reasoning_content
         self.finish_reason = finish_reason
         self.tool_calls = tool_calls
-        self.usage_metadata = _FakeUsage()
+        self.usage_metadata = usage or _FakeUsage()
 
 
 class _FakeChunk:
     """Stand-in for one streaming AssistantMessageChunk."""
 
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str = "", *, reasoning_content: str = "") -> None:
         self.content = content
+        self.reasoning_content = reasoning_content
 
 
 @pytest.fixture
@@ -171,6 +176,16 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
         model="fake-llm-1",
     )
 
+    # Streaming chunks: first two carry reasoning deltas, then content.
+    for rc in ("Six times ", "seven equals forty-two."):
+        await fw.trigger(
+            LLMCallEvents.LLM_STREAM_OUTPUT,
+            messages=messages,
+            result=_FakeChunk(reasoning_content=rc),
+        )
+        # Spread reasoning chunks so first/last monotonic timestamps differ,
+        # otherwise the measured reasoning interval is 0.
+        await asyncio.sleep(0.01)
     for delta in ("4", "2"):
         await fw.trigger(
         LLMCallEvents.LLM_STREAM_OUTPUT,
@@ -182,13 +197,15 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
         content="42",
         reasoning_content="Six times seven equals forty-two.",
         finish_reason="stop",
+        usage=_FakeUsage(reasoning_tokens=5, cache_tokens=2),
     )
     await fw.trigger(
         LLMCallEvents.LLM_OUTPUT,
         messages=messages,
         response=final,
+        reasoning_content=final.reasoning_content,
         finish_reason="stop",
-        usage=_FakeUsage(),
+        usage=final.usage_metadata,
     )
 
     llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
@@ -201,6 +218,8 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
     assert _attr(span, "gen_ai.usage.prompt_tokens") == 12
     assert _attr(span, "gen_ai.usage.completion_tokens") == 7
     assert _attr(span, "gen_ai.usage.total_tokens") == 19
+    assert _attr(span, "gen_ai.usage.cache_tokens") == 2
+    assert _attr(span, "gen_ai.usage.reasoning_tokens") == 5
 
     ttft = _attr(span, "gen_ai.response.time_to_first_token_ms")
     assert ttft is not None and ttft >= 0.0, "TTFT must be recorded on the LLM span"
@@ -212,9 +231,23 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
     reasoning_spans = _spans_by_name(in_memory_exporter, "llm.reasoning")
     assert reasoning_spans, "no llm.reasoning child span emitted"
     rs = reasoning_spans[0]
-    assert "forty-two" in _attr(rs, "gen_ai.completion.0.content", "")
+    # Content comes from the trigger's reasoning_content (the business-layer
+    # assembled text), not from the collector stitching chunk deltas.
+    assert _attr(rs, "gen_ai.completion.0.content") == "Six times seven equals forty-two."
     assert _attr(rs, "langfuse.observation.input") == "llm reasoning"
     assert rs.parent is not None and rs.parent.span_id == span.context.span_id
+    # Reasoning duration is measured from the chunk stream (first..last reasoning
+    # chunk); non-zero because the two reasoning deltas are stamped at different times.
+    rdur = _attr(rs, "gen_ai.reasoning.duration_ms")
+    assert rdur is not None and rdur > 0.0, "reasoning duration_ms must be recorded and > 0"
+    # The span's own start/end must reflect the measured interval — Langfuse UI
+    # shows span duration, not the attribute. Guard against the prior regression
+    # where start==end (duration 0) despite the attribute being set.
+    span_dur_ms = (rs.end_time - rs.start_time) / 1e6
+    assert span_dur_ms > 0, f"reasoning span duration must be > 0, got {span_dur_ms}"
+    assert abs(span_dur_ms - rdur) < 1.0, f"span dur {span_dur_ms} != attr {rdur}"
+    # reasoning_tokens mirrored onto the reasoning span (read from usage, not computed).
+    assert _attr(rs, "gen_ai.usage.reasoning_tokens") == 5
 
 
 # ---------------------------------------------------------------------------

@@ -58,6 +58,9 @@ from openjiuwen.agent_teams.observability.semconv import (
     GEN_AI_USAGE_COMPLETION_TOKENS,
     GEN_AI_USAGE_PROMPT_TOKENS,
     GEN_AI_USAGE_TOTAL_TOKENS,
+    GEN_AI_USAGE_CACHE_TOKENS,
+    GEN_AI_USAGE_REASONING_TOKENS,
+    GEN_AI_REASONING_DURATION_MS,
     LANGFUSE_OBSERVATION_INPUT,
     LANGFUSE_OBSERVATION_OUTPUT,
     LANGFUSE_OBSERVATION_TYPE,
@@ -227,6 +230,13 @@ class OtelCallbackHandler:
             reasoning_chunk = str(getattr(chunk, "reasoning_content", "") or "")
             if reasoning_chunk:
                 state.accumulated_reasoning += reasoning_chunk
+                # Record reasoning timing from chunk callbacks. SDK chunks have
+                # no timestamps, so monotonic_ns here is the best available point.
+                now_ns = time.monotonic_ns()
+                if state.reasoning_first_ns is None:
+                    state.reasoning_first_ns = now_ns
+                    state.reasoning_start_wall_ns = time.time_ns()
+                state.reasoning_last_ns = now_ns
             if state.span.is_recording():
                 state.span.add_event(
                     name="llm.chunk",
@@ -251,11 +261,16 @@ class OtelCallbackHandler:
                 return
 
             completion_text = state.accumulated_content or str(kwargs.get("response") or "")
-            reasoning_text = state.accumulated_reasoning
+            # Prefer the reasoning_content carried by the LLM_OUTPUT trigger
+            # (the business layer already assembled the full text on the
+            # final_message), so the collector does not re-stitch chunks.
+            reasoning_text = str(kwargs.get("reasoning_content") or "")
             if not reasoning_text:
                 resp_obj = kwargs.get("response")
-                if resp_obj is not None:
+                if resp_obj is not None and not isinstance(resp_obj, str):
                     reasoning_text = str(getattr(resp_obj, "reasoning_content", "") or "")
+            if not reasoning_text:
+                reasoning_text = state.accumulated_reasoning
 
             tool_calls = kwargs.get("tool_calls") or getattr(kwargs.get("response"), "tool_calls", None)
             tc_json = _serialize_tool_calls(tool_calls)
@@ -271,6 +286,7 @@ class OtelCallbackHandler:
             self._finalize_llm_span_output(
                 state, completion_text, reasoning_text,
                 tc_json=tc_json, response=kwargs.get("response"),
+                usage=kwargs.get("usage"),
             )
         except Exception as exc:
             team_logger.warning("otel: on_llm_output failed: {}", exc)
@@ -613,6 +629,7 @@ class OtelCallbackHandler:
         self._finalize_llm_span_output(
             state, completion_text, reasoning_text,
             tc_json=tc_json, response=response,
+            usage=getattr(response, "usage_metadata", None),
         )
 
     def _finalize_llm_span_output(
@@ -623,6 +640,7 @@ class OtelCallbackHandler:
         *,
         tc_json: str = "",
         response: Any = None,
+        usage: Any = None,
     ) -> None:
         """Shared: set completion/output attrs, reasoning sub-span, close LLM span.
 
@@ -667,19 +685,50 @@ class OtelCallbackHandler:
         state.span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redact_completion(output_json, self._config))
 
         if reasoning_text:
-            with self._tracer().start_as_current_span(
+            # Manual span lifecycle: start_time = wall-clock at the first
+            # reasoning chunk; end_time = start + measured duration. finalize
+            # runs long after the last chunk, so a default start would exceed
+            # end_time and collapse duration to 0.
+            reasoning_first_ns = state.reasoning_first_ns
+            reasoning_last_ns = state.reasoning_last_ns
+            reasoning_start_wall_ns = state.reasoning_start_wall_ns
+            has_timing = (
+                reasoning_first_ns is not None
+                and reasoning_last_ns is not None
+                and reasoning_start_wall_ns is not None
+            )
+            start_kwarg: dict[str, Any] = (
+                {"start_time": reasoning_start_wall_ns} if has_timing else {}
+            )
+            reasoning_span = self._tracer().start_span(
                 name="llm.reasoning",
                 context=set_span_in_context(state.span),
-            ) as reasoning_span:
-                redacted_reasoning = redact_completion(reasoning_text, self._config)
-                # Standard gen_ai.completion attributes (Langfuse reasoning display)
-                reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.role", "reasoning")
-                reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.is_reasoning", True)
-                reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.content", redacted_reasoning)
-                # Langfuse observation input/output for UI visibility
-                reasoning_span.set_attribute(LANGFUSE_OBSERVATION_INPUT, "llm reasoning")
-                reasoning_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted_reasoning)
-                reasoning_span.set_status(Status(StatusCode.OK))
+                **start_kwarg,
+            )
+            redacted_reasoning = redact_completion(reasoning_text, self._config)
+            # Standard gen_ai.completion attributes (Langfuse reasoning display)
+            reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.role", "reasoning")
+            reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.is_reasoning", True)
+            reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.content", redacted_reasoning)
+            # Langfuse observation input/output for UI visibility
+            reasoning_span.set_attribute(LANGFUSE_OBSERVATION_INPUT, "llm reasoning")
+            reasoning_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted_reasoning)
+            # Mirror reasoning_tokens onto the reasoning span (also on the
+            # parent llm.call span via _record_usage_attrs). Read straight
+            # from the usage object — never compute it.
+            rt = getattr(usage, "reasoning_tokens", 0) or 0
+            if rt:
+                reasoning_span.set_attribute(GEN_AI_USAGE_REASONING_TOKENS, int(rt))
+            reasoning_span.set_status(Status(StatusCode.OK))
+            if has_timing:
+                dur_ns = reasoning_last_ns - reasoning_first_ns  # type: ignore[operator]
+                reasoning_span.set_attribute(
+                    GEN_AI_REASONING_DURATION_MS,
+                    dur_ns / 1_000_000.0,
+                )
+                reasoning_span.end(end_time=reasoning_start_wall_ns + dur_ns)  # type: ignore[operator]
+            else:
+                reasoning_span.end()
 
         state.span.set_status(Status(StatusCode.OK))
         state.span.end()
@@ -693,6 +742,8 @@ class OtelCallbackHandler:
             ("input_tokens", GEN_AI_USAGE_PROMPT_TOKENS),
             ("output_tokens", GEN_AI_USAGE_COMPLETION_TOKENS),
             ("total_tokens", GEN_AI_USAGE_TOTAL_TOKENS),
+            ("cache_tokens", GEN_AI_USAGE_CACHE_TOKENS),
+            ("reasoning_tokens", GEN_AI_USAGE_REASONING_TOKENS),
         ):
             value = getattr(usage, src_attr, 0) or 0
             if value and not (skip_existing and state.span.attributes.get(dst_attr)):

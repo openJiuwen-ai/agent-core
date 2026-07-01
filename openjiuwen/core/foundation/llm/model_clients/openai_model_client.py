@@ -416,6 +416,7 @@ class OpenAIModelClient(BaseModelClient):
                 model_provider=self.model_client_config.client_provider,
                 is_stream=True,
                 response=final_message.content if final_message else None,
+                reasoning_content=final_message.reasoning_content if final_message else None,
                 usage=final_message.usage_metadata if final_message else None,
                 tool_calls=final_message.tool_calls if final_message else None)
 
@@ -613,6 +614,7 @@ class OpenAIModelClient(BaseModelClient):
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
                 cache_tokens=self._extract_cache_tokens(response.usage),
+                reasoning_tokens=self._extract_reasoning_tokens(response.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
                 total_cost=total_cost,
@@ -712,6 +714,7 @@ class OpenAIModelClient(BaseModelClient):
                 output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
                 total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
                 cache_tokens=self._extract_cache_tokens(chunk.usage),
+                reasoning_tokens=self._extract_reasoning_tokens(chunk.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
                 total_cost=total_cost,

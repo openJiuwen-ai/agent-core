@@ -34,9 +34,12 @@ GEN_AI_REQUEST_MESSAGE_COUNT = "gen_ai.request.message_count"
 GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
 GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
 GEN_AI_USAGE_TOTAL_TOKENS = "gen_ai.usage.total_tokens"
+GEN_AI_USAGE_CACHE_TOKENS = "gen_ai.usage.cache_tokens"
+GEN_AI_USAGE_REASONING_TOKENS = "gen_ai.usage.reasoning_tokens"
 GEN_AI_RESPONSE_FINISH_REASON = "gen_ai.response.finish_reason"
 GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
 GEN_AI_RESPONSE_TTFT_MS = "gen_ai.response.time_to_first_token_ms"
+GEN_AI_REASONING_DURATION_MS = "gen_ai.reasoning.duration_ms"
 
 # Standard OpenLLMetry / GenAI keys
 GEN_AI_PROMPT = "gen_ai.prompt"
