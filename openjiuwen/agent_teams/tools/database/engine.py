@@ -244,7 +244,7 @@ def _ensure_message_protocol_column(sync_conn) -> None:
 
 
 def _ensure_dynamic_table_indexes(sync_conn) -> None:
-    """Rebuild per-session dynamic-table indexes to the current scheme (A1/A2).
+    """Rebuild per-session dynamic-table indexes to the current scheme (A1/A2/D4).
 
     ``__table__.create(checkfirst=True)`` never alters an existing table, so a
     persistent team's tables keep whatever indexes they were born with. Bring
@@ -252,10 +252,14 @@ def _ensure_dynamic_table_indexes(sync_conn) -> None:
       - A1: drop the dead ``team_name`` index on every dynamic table — a
         per-session table has ~1 distinct team_name, so the index never helps
         a read and only costs a B-tree write per INSERT.
-      - A2: on message tables, drop the four weak single-column indexes
+      - A2 (message tables): drop the four weak single-column indexes
         (``to_member_name`` / ``timestamp`` / ``broadcast`` / ``is_read``) and
         create the two composites the real queries use (``*_inbox`` /
         ``*_bcast_ts``), kept in sync with ``models._get_message_model``.
+      - D4 (task tables): drop the standalone ``assignee`` index (folded into
+        the composite ``*_assignee_status`` for get_tasks_by_assignee) and the
+        dead ``updated_at`` index (no query filters/orders by it). ``status``
+        keeps its standalone index.
 
     Every statement is idempotent (``IF EXISTS`` / ``IF NOT EXISTS``), so a
     table already on the new scheme is a cheap no-op.
@@ -274,6 +278,24 @@ def _ensure_dynamic_table_indexes(sync_conn) -> None:
         if team_name_index in index_names:
             sync_conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{team_name_index}"')
             team_logger.info("Migrated %s: dropped dead team_name index", table_name)
+
+        if is_task:
+            legacy_task_indexes = [f"ix_{table_name}_assignee", f"ix_{table_name}_updated_at"]
+            assignee_status_index = f"ix_{table_name}_assignee_status"
+            needs_task_migration = (
+                bool(index_names & set(legacy_task_indexes)) or assignee_status_index not in index_names
+            )
+            if needs_task_migration:
+                for legacy in legacy_task_indexes:
+                    sync_conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{legacy}"')
+                sync_conn.exec_driver_sql(
+                    f'CREATE INDEX IF NOT EXISTS "{assignee_status_index}" ON "{table_name}" (assignee, status)'
+                )
+                team_logger.info(
+                    "Migrated task table %s: folded assignee into (assignee, status), dropped dead updated_at index",
+                    table_name,
+                )
+            continue
 
         if not is_message:
             continue

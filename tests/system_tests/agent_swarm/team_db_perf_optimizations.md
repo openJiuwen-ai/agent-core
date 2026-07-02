@@ -1,7 +1,7 @@
 # Team DB 性能优化清单
 
 本清单是基于 `agent_team_tools_db_stress_e2e.py` 压测（20 人团队并发、消息主导画像）
-识别出的 SQLite 数据库层优化点汇总。进度：**A1 / A2 / B1 / B2 / B3 / B4 / C4 / C1 / C2 / C3 / D1 / D2 / D3 / D5 已落地**，其余为待办分析项。
+识别出的 SQLite 数据库层优化点汇总。进度：**A1 / A2 / A3(D4) / B1 / B2 / B3 / B4 / C4 / C1 / C2 / C3 / D1 / D2 / D3 / D5 已落地（清单全清）**，其余为待办分析项。
 消息路径见 A/B/C 三节；**task 相关操作专项见 D 节**（读路径 N+1、写路径重复全表扫描、
 task 表索引）。
 
@@ -69,9 +69,17 @@ task 表索引）。
   - **A/B（默认 20×20，各 2 轮）**：send_message avg 31~47ms ↔ 31~43ms（p50 26ms 前后持平）、broadcast、reads 均**在噪声带内**、
     **读路径零回归**——index B-tree 写在 WAL 内存里，被写锁排队税 + fsync 盖住。**确定收益是结构性写放大 6→3**，在大板 / WAL 增长 / checkpoint / 磁盘占用上显现。同步刷新 `tools/AGENTS.md` 的 Database concurrency 段。
 
-- [ ] **A3 / D4. 复查 task 表索引** — 中收益 / 低优先（未做）
-  - task 表 `team_name` 死索引已随 A1 删除。剩 `status` / `assignee` / `updated_at` 三个单列索引；
-    可按 `get_tasks_by_assignee`（`assignee=? AND status=?`）合成复合 `(assignee, status)`。任务写低频（有界池），优先级低。
+- [x] **A3 / D4. task 表索引：折 `(assignee, status)` 复合 + 删死索引 `updated_at`** — ✅ 已落地（含既有表迁移）
+  - 现象：task 表（A1 删掉 team_name 后）剩 `status` / `assignee` / `updated_at` 三个单列索引。
+    `get_tasks_by_assignee` 查 `assignee=? AND status=?` 想要复合；`updated_at` **从不被任何 WHERE/ORDER BY 查询**
+    （只是返回字段），却在每次状态转移都写——纯死索引。
+  - 落地：`models.py` 中 `assignee` / `updated_at` 去 `index=True`，`_get_task_model` 经 `__table_args__` 注入
+    `ix_<tbl>_assignee_status = (assignee, status)`；`status` 保留独立索引（`get_team_tasks` / 恢复扫描 / cancel_all 按 status 单独过滤）。
+    net：task 表 3 单列 → `status` + `(assignee, status)` = **2 个二级索引**，且每次状态转移少写一棵 `updated_at` 死索引 B-tree。
+  - 迁移：`_ensure_dynamic_table_indexes` 扩 task 分支——DROP `ix_*_assignee` / `ix_*_updated_at` + `CREATE ... IF NOT EXISTS`
+    复合；幂等。新增 `test_task_table_uses_assignee_status_composite_index` + `test_dynamic_index_migration_rewrites_legacy_task_table`；agent_teams level0 **725 条全过**。
+  - **A/B（默认 20×20，各 2 轮）**：task 写 p50 前后持平（claim 36→35 / update 43→44 / create 42→29ms）、读零回归——**在噪声带内**
+    （写锁排队税主导）。确定收益是删死索引 + 复合折叠的结构性写放大下降。
 
 ---
 
@@ -294,7 +302,7 @@ task 表索引）。
    （≈ -50% 写放大）；延迟在噪声带内、读零回归，收益是结构性写放大 + WAL/磁盘占用，大尺度显现。
 6. ~~**C3（WAL checkpoint 挪出写路径）**~~ — ✅ 已落地（opt-in，默认关；封顶最坏写尾延迟，本尺度收益偶发）。
    ~~**B2 + B3**（has_unread EXISTS、member CAS）~~ — ✅ 已落地（如预判在噪声带内；收益是 O(1) 内存/短临界区/CAS 一致性）。
-   **清单基本收尾**——仅剩 **A3/D4**（task 表 `(assignee, status)` 复合索引，低优先）待做。
+   ~~**A3/D4**（task 表 `(assignee, status)` 复合 + 删死索引 updated_at）~~ — ✅ 已落地。**清单全部清空。**
 
 每步都跑 harness 前后对比，用数字验证，不猜。D1 的 A/B 要临时恢复"任务膨胀"画像（每轮建任务、
 不设有界池）才压得出 view_task 的真实收益。

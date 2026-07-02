@@ -3377,3 +3377,57 @@ async def test_dynamic_index_migration_rewrites_legacy_message_table(db):
     assert f"ix_{table}_bcast_ts" in names
     for col in legacy_cols:
         assert f"ix_{table}_{col}" not in names
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_task_table_uses_assignee_status_composite_index(db):
+    """A fresh session task table carries the D4 index scheme."""
+    from sqlalchemy import text
+
+    async with db.read_session_local() as session:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type='index' "
+                    "AND tbl_name LIKE 'team_task_%' AND tbl_name NOT LIKE 'team_task_dependency_%'"
+                )
+            )
+        ).scalars().all()
+    names = set(rows)
+    assert any(n.endswith("_assignee_status") for n in names), names
+    assert any(n.endswith("_status") and not n.endswith("_assignee_status") for n in names), names
+    # Dropped: team_name (A1), standalone assignee (folded), dead updated_at.
+    for suffix in ("_team_name", "_updated_at"):
+        assert not any(n.endswith(suffix) for n in names), f"unexpected index *{suffix}: {names}"
+    assert not any(n.endswith("_assignee") and not n.endswith("_assignee_status") for n in names), names
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_dynamic_index_migration_rewrites_legacy_task_table(db):
+    """The index migration folds task assignee into a composite and drops updated_at."""
+    from openjiuwen.agent_teams.tools.database.engine import _ensure_dynamic_table_indexes
+
+    table = "team_task_legacy00"
+    async with db.engine.begin() as conn:
+        await conn.exec_driver_sql(
+            f"CREATE TABLE {table} (task_id TEXT PRIMARY KEY, team_name TEXT, "
+            f"status TEXT, assignee TEXT, updated_at INTEGER)"
+        )
+        for col in ("team_name", "status", "assignee", "updated_at"):
+            await conn.exec_driver_sql(f"CREATE INDEX ix_{table}_{col} ON {table} ({col})")
+
+        await conn.run_sync(_ensure_dynamic_table_indexes)
+
+        names = set(
+            (
+                await conn.exec_driver_sql(
+                    f"SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='{table}'"
+                )
+            ).scalars().all()
+        )
+    assert f"ix_{table}_assignee_status" in names
+    assert f"ix_{table}_status" in names
+    for col in ("team_name", "assignee", "updated_at"):
+        assert f"ix_{table}_{col}" not in names

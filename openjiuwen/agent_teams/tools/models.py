@@ -111,9 +111,15 @@ class TeamTaskBase(SQLModel):
     team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE")
     title: str = Field(nullable=False)
     content: str = Field(nullable=False)
+    # status keeps a standalone index (get_team_tasks / recovery sweep /
+    # cancel_all filter by status alone). assignee folds into the composite
+    # (assignee, status) injected in _get_task_model (D4) — get_tasks_by_assignee
+    # queries assignee=? AND status=?. updated_at drops its index: no query ever
+    # filters or orders by it (it is a returned field only), so the index was
+    # pure write overhead bumped on every status transition.
     status: str = Field(nullable=False, index=True)
-    assignee: Optional[str] = Field(default=None, nullable=True, index=True)
-    updated_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True, index=True)
+    assignee: Optional[str] = Field(default=None, nullable=True)
+    updated_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True)
 
     def brief(self) -> dict:
         """Return a lightweight summary (id + title + status) for write-op responses."""
@@ -207,8 +213,14 @@ def _get_task_model() -> type[TeamTaskBase]:
         class_name = f"TeamTask_{suffix}"
         table_name = f"team_task_{suffix}"
 
+        # Composite (assignee, status) for get_tasks_by_assignee
+        # (assignee=? AND status=?) — replaces the standalone assignee index
+        # (D4). Kept in sync with the migration in ``database/engine.py``.
         attrs = {
-            "__tablename__": table_name
+            "__tablename__": table_name,
+            "__table_args__": (
+                Index(f"ix_{table_name}_assignee_status", "assignee", "status"),
+            ),
         }
 
         model_cls = SQLModelMetaclass(class_name, (TeamTaskBase,), attrs, table=True)
