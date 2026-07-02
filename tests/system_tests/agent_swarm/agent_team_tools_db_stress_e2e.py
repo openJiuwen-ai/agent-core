@@ -10,7 +10,7 @@ across the WHOLE collaboration surface — not just the team tools, but the
 behind them:
 
   - Tools: create_task / send_message / view_task / list_members / claim_task
-  - Task status: update_task / complete / reset
+  - Task status: update_task / complete / reset / cancel
   - Messaging: send / multicast / broadcast / get_messages /
     get_broadcast_messages / has_unread_messages / mark_messages_read
   - Member state machine: update_member_status (READY<->BUSY) and
@@ -330,7 +330,7 @@ async def _worker(
     Task churn (light, bounded pool):
       - view_task list / claimable, list_members (tool) — small-board reads
       - create_task (tool)                   — rare replenishment
-      - update_task / claim / complete / reset — pool churn + status writes
+      - update_task / claim / complete / reset / cancel — pool churn + status writes
     """
     name = backend.member_name
     db = backend.db
@@ -442,10 +442,15 @@ async def _worker(
         )
         if not (claim and claim.success):
             continue
-        # Mostly reset the won task back to the pool (keeps it non-empty),
-        # sometimes complete it — both terminal status-write paths run.
-        if rng.random() < 0.3:
+        # Drive the won task to one of three outcomes. Reset is the majority so
+        # the pool stays non-empty for other workers to claim; complete and
+        # cancel are the two terminal status-write paths (both trigger the
+        # drain check). Exercising all three keeps the task write mix realistic.
+        roll = rng.random()
+        if roll < 0.25:
             await _timed(metrics, "task_complete", name, lambda tid=task_id: task_mgr.complete(tid))
+        elif roll < 0.45:
+            await _timed(metrics, "task_cancel", name, lambda tid=task_id: task_mgr.cancel(tid))
         else:
             await _timed(metrics, "task_reset", name, lambda tid=task_id: task_mgr.reset(tid))
 
