@@ -504,8 +504,7 @@ class TeamTaskManager:
         deps = await self.get_dependencies(task_id)
         blocked_by = [d.depends_on_task_id for d in deps if not d.resolved]
 
-        downstream = await self.db.task.get_tasks_depending_on(task_id)
-        blocks = [t.task_id for t in downstream]
+        blocks = await self.db.task.get_dependent_task_ids(task_id)
 
         return TaskDetail(
             task_id=task.task_id,

@@ -749,26 +749,23 @@ class TaskDao:
             )
             return len(result.scalars().all())
 
-    async def get_tasks_depending_on(self, depends_on_task_id: str) -> List[TeamTaskBase]:
-        """Get all tasks that depend on a specific task."""
+    async def get_dependent_task_ids(self, depends_on_task_id: str) -> List[str]:
+        """Return the ids of every task that depends on ``depends_on_task_id``.
+
+        The downstream task id IS the ``task_id`` column of each dependency
+        edge, so one ``SELECT task_id`` over the edge table answers this — the
+        previous ``get_tasks_depending_on`` looped a per-edge task SELECT (an
+        N+1 that also loaded whole task rows just to read their id). The sole
+        caller (``get_task_detail``) only needs the ids for its ``blocks`` list.
+        """
         task_dependency_model = _get_task_dependency_model()
-        team_task_model = _get_task_model()
         async with self._sessions.read() as session:
             result = await session.execute(
-                select(task_dependency_model).where(task_dependency_model.depends_on_task_id == depends_on_task_id)
+                select(task_dependency_model.task_id)
+                .where(task_dependency_model.depends_on_task_id == depends_on_task_id)
+                .distinct()
             )
-            deps = result.scalars().all()
-
-            tasks = []
-            for dep in deps:
-                task_result = await session.execute(
-                    select(team_task_model).where(team_task_model.task_id == dep.task_id)
-                )
-                task = task_result.scalar_one_or_none()
-                if task:
-                    tasks.append(task)
-
-            return tasks
+            return [row[0] for row in result.all()]
 
     async def delete_task(self, task_id: str) -> bool:
         """Delete a task."""
