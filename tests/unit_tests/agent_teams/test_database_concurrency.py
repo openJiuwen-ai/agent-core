@@ -127,6 +127,53 @@ async def test_pool_and_cache_knobs_are_honored(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
+async def test_default_config_keeps_in_commit_autocheckpoint(file_db: TeamDatabase) -> None:
+    """Default (wal_checkpoint_interval_s=0): no background task, autocheckpoint=1000."""
+    assert file_db._checkpoint_task is None
+    async with file_db.session_local() as session:
+        writer_ckpt = (await session.execute(text("PRAGMA wal_autocheckpoint"))).scalar()
+    assert writer_ckpt == 1000
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_background_checkpointer_moves_checkpoint_off_write_path(tmp_path) -> None:
+    """wal_checkpoint_interval_s>0 disables the writer's in-commit checkpoint.
+
+    The writer connection reports ``wal_autocheckpoint=0`` (so no commit ever
+    stalls on a checkpoint) while a background task drives PASSIVE checkpoints;
+    the reader keeps the configured threshold. ``close()`` cancels the task.
+    """
+    token = set_session_id("ckpt_session")
+    config = DatabaseConfig(
+        db_type=DatabaseType.SQLITE,
+        connection_string=str(tmp_path / "team.db"),
+        wal_checkpoint_interval_s=0.05,
+    )
+    database = TeamDatabase(config)
+    try:
+        await database.initialize()
+        assert database._checkpoint_task is not None
+        assert not database._checkpoint_task.done()
+
+        async with database.session_local() as session:
+            writer_ckpt = (await session.execute(text("PRAGMA wal_autocheckpoint"))).scalar()
+        async with database.read_session_local() as session:
+            reader_ckpt = (await session.execute(text("PRAGMA wal_autocheckpoint"))).scalar()
+        assert writer_ckpt == 0
+        assert reader_ckpt == 1000
+
+        # The loop ticks at least once without crashing.
+        await asyncio.sleep(0.12)
+        assert not database._checkpoint_task.done()
+    finally:
+        await database.close()
+        reset_session_id(token)
+    assert database._checkpoint_task is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.level0
 async def test_concurrent_claims_do_not_exhaust_pool(file_db: TeamDatabase) -> None:
     """More concurrent writers than pool_size must all succeed, not time out."""

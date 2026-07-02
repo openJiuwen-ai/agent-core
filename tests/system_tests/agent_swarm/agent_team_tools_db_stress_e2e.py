@@ -34,7 +34,7 @@ Design:
     task, unread message ids) — this measures DB throughput, not business
     correctness.
   - Every call is timed with ``perf_counter``; any call slower than the
-    threshold (default 1 s) emits a ``team_logger.warning`` and is counted.
+    threshold (default 0.5 s) emits a ``team_logger.warning`` and is counted.
   - A final report prints the per-operation latency distribution + slow count.
 
 Run directly (no model / network needed):
@@ -49,7 +49,7 @@ Tunables (env vars):
     STRESS_MSG_PAYLOAD_SIZE   bytes per message (large comms)  (default 8192)
     STRESS_PAYLOAD_SIZE       bytes per member/task row        (default 2048)
     STRESS_TASK_POOL_SIZE     seeded, bounded task count       (default 20)
-    STRESS_SLOW_THRESHOLD_S   slow-call warning threshold      (default 1.0)
+    STRESS_SLOW_THRESHOLD_S   slow-call warning threshold      (default 0.5)
 
 Exit code: 0 = no call raised; 1 = at least one call raised an exception.
 Slow calls only warn — they never fail the run.
@@ -110,7 +110,11 @@ MSGS_PER_ITER = int(os.getenv("STRESS_MSGS_PER_ITER", "6"))
 # claim / complete / reset / update this small pool instead of ballooning the
 # board — so ``view_task`` reflects a realistic small board, not O(N) growth.
 TASK_POOL_SIZE = int(os.getenv("STRESS_TASK_POOL_SIZE", "20"))
-SLOW_THRESHOLD_S = float(os.getenv("STRESS_SLOW_THRESHOLD_S", "1.0"))
+SLOW_THRESHOLD_S = float(os.getenv("STRESS_SLOW_THRESHOLD_S", "0.5"))
+# Background WAL checkpoint interval (seconds); 0 keeps in-commit checkpointing
+# (SQLite default). Set > 0 to A/B the C3 optimisation (checkpoint off the
+# write path) — the writer stops stalling its own commits on a checkpoint.
+WAL_CKPT_INTERVAL_S = float(os.getenv("STRESS_WAL_CKPT_INTERVAL", "0.0"))
 
 TEAM_NAME = "stress_team"
 LEADER_NAME = "leader"
@@ -500,10 +504,11 @@ def _group_lines(title: str, labels: list[str], metrics: Metrics, wall_seconds: 
         group_slow += slow_here
     pooled.sort()
     group_tput = len(pooled) / wall_seconds if wall_seconds > 0 else 0.0
+    slow_col = f">{SLOW_THRESHOLD_S:g}s"
     return [
         f"-- {title} ({len(pooled)} calls, {group_tput:.1f}/s) --",
         f"{'op':<20}{'count':>8}{'avg(ms)':>10}{'p50(ms)':>10}"
-        f"{'p95(ms)':>10}{'p99(ms)':>10}{'max(ms)':>10}{'>1s':>8}",
+        f"{'p95(ms)':>10}{'p99(ms)':>10}{'max(ms)':>10}{slow_col:>8}",
         *rows,
         _stat_row("SUBTOTAL", pooled, group_slow),
     ]
@@ -566,7 +571,13 @@ async def run_stress() -> Metrics:
     token = set_session_id(session_id)
     tmpdir = Path(tempfile.mkdtemp(prefix="team_tools_stress_"))
     db_path = tmpdir / "team.db"
-    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=str(db_path)))
+    db = TeamDatabase(
+        DatabaseConfig(
+            db_type=DatabaseType.SQLITE,
+            connection_string=str(db_path),
+            wal_checkpoint_interval_s=WAL_CKPT_INTERVAL_S,
+        )
+    )
     metrics = Metrics()
 
     try:
