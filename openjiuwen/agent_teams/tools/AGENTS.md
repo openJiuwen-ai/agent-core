@@ -80,8 +80,11 @@ would-be parallel writers:
   (`_inbox` = `(to_member_name, is_read, timestamp)` for the direct-inbox read
   + ordering, `_bcast_ts` = `(broadcast, timestamp)` for broadcast reads /
   `has_unread`) instead of five weak single-column ones — 3 B-tree writes per
-  message INSERT (PK + 2) rather than 6. Defined per table in
-  `models._get_message_model`; `engine._ensure_dynamic_table_indexes` migrates
+  message INSERT (PK + 2) rather than 6. The task table keeps a standalone
+  `status` index and folds `assignee` into a composite `(assignee, status)`
+  (for `get_tasks_by_assignee`), dropping the dead `updated_at` index that no
+  query ever reads. Indexes are defined per table in `models._get_message_model`
+  / `_get_task_model`; `engine._ensure_dynamic_table_indexes` migrates
   pre-existing (persistent-team) tables to this scheme on session-table setup.
 
 Applicability: this serialisation targets the in-process (single event
