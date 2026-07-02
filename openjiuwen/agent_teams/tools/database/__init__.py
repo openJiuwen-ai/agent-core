@@ -28,6 +28,7 @@ from openjiuwen.agent_teams.tools.database.engine import (
     drop_session_tables_by_id as _drop_session_tables_by_id,
     get_current_time as _get_current_time,
     initialize_engine as _initialize_engine,
+    run_wal_checkpoint_passive as _run_wal_checkpoint_passive,
 )
 from openjiuwen.agent_teams.tools.database.graph import (
     TASK_DEPENDENCY_REJECT_STATUSES as TASK_DEPENDENCY_REJECT_STATUSES,
@@ -69,6 +70,9 @@ class TeamDatabase:
         self.read_session_local: Optional[async_sessionmaker] = None
         self._initialized = False
         self._init_lock = asyncio.Lock()
+        # Background WAL checkpointer task (file-backed SQLite +
+        # wal_checkpoint_interval_s > 0 only); None otherwise.
+        self._checkpoint_task: Optional[asyncio.Task] = None
         self.team: Optional[TeamDao] = None
         self.member: Optional[MemberDao] = None
         self.task: Optional[TaskDao] = None
@@ -114,8 +118,43 @@ class TeamDatabase:
             self.task = TaskDao(sessions)
             self.message = MessageDao(sessions)
 
+            self._maybe_start_checkpointer()
+
             self._initialized = True
             team_logger.info("Team database initialized")
+
+    def _maybe_start_checkpointer(self) -> None:
+        """Start the background WAL checkpointer when configured.
+
+        Only for file-backed SQLite with WAL and a positive
+        ``wal_checkpoint_interval_s``. A file-backed engine is the one case
+        where ``read_engine`` is a distinct pool from the writer, which also
+        confirms this is not ``:memory:`` / PostgreSQL / MySQL.
+        """
+        interval = self.config.wal_checkpoint_interval_s
+        is_file_sqlite_split = self.read_engine is not None and self.read_engine is not self.engine
+        if interval <= 0 or not is_file_sqlite_split or not self.config.db_enable_wal:
+            return
+        self._checkpoint_task = asyncio.create_task(self._checkpoint_loop(interval))
+        team_logger.info("Started background WAL checkpointer (interval=%.1fs)", interval)
+
+    async def _checkpoint_loop(self, interval_s: float) -> None:
+        """Run a PASSIVE WAL checkpoint every ``interval_s`` seconds.
+
+        Runs on the writer engine but off the app write lock (a separate
+        connection); PASSIVE never blocks the writer. A failed checkpoint is
+        logged and the loop continues — it must never crash the app.
+        """
+        while True:
+            await asyncio.sleep(interval_s)
+            if self.engine is None:
+                return
+            try:
+                await _run_wal_checkpoint_passive(self.engine)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                team_logger.warning("Background WAL checkpoint failed: %s", e)
 
     async def create_cur_session_tables(self) -> None:
         """Create dynamic tables for current session."""
@@ -188,6 +227,13 @@ class TeamDatabase:
 
     async def close(self) -> None:
         """Close the database engine(s) and release all connections."""
+        if self._checkpoint_task is not None:
+            self._checkpoint_task.cancel()
+            try:
+                await self._checkpoint_task
+            except asyncio.CancelledError:
+                pass
+            self._checkpoint_task = None
         if self.engine:
             # Dispose the reader engine first when it is a distinct pool
             # (file-backed SQLite); it aliases the writer otherwise.

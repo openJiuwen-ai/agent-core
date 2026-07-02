@@ -55,6 +55,15 @@ class DatabaseConfig(BaseModel):
     # WAL auto-checkpoint threshold in pages. Larger means fewer (but bigger)
     # commit stalls under write-heavy load; SQLite's default is 1000.
     wal_autocheckpoint: int = 1000
+    # Background WAL checkpoint interval (seconds). ``0.0`` (default) keeps the
+    # in-commit auto-checkpoint (a writer's commit stalls whenever the WAL
+    # crosses ``wal_autocheckpoint`` pages). ``> 0`` moves checkpointing OFF
+    # the write path: the writer connection sets ``wal_autocheckpoint=0`` so no
+    # commit ever triggers a checkpoint, and a background task runs
+    # ``PRAGMA wal_checkpoint(PASSIVE)`` every this-many seconds on a separate
+    # connection (no write lock, PASSIVE never blocks the writer). File-backed
+    # SQLite + WAL only; ignored for ``:memory:`` and PostgreSQL / MySQL.
+    wal_checkpoint_interval_s: float = 0.0
 
     @model_validator(mode="after")
     def _normalize_memory_alias(self) -> "DatabaseConfig":

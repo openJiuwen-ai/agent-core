@@ -1,7 +1,7 @@
 # Team DB 性能优化清单
 
 本清单是基于 `agent_team_tools_db_stress_e2e.py` 压测（20 人团队并发、消息主导画像）
-识别出的 SQLite 数据库层优化点汇总。进度：**B1 / C4 / C1 / C2 / D1 / D5 已落地**，其余为待办分析项。
+识别出的 SQLite 数据库层优化点汇总。进度：**B1 / C4 / C1 / C2 / C3 / D1 / D5 已落地**，其余为待办分析项。
 消息路径见 A/B/C 三节；**task 相关操作专项见 D 节**（读路径 N+1、写路径重复全表扫描、
 task 表索引）。
 
@@ -125,12 +125,27 @@ task 表索引）。
     降 ~40%，且读并行度从 5 提到 8**。共享 OS page cache + `mmap_size=256MB` 仍提供跨连接缓存。
   - 单测 `test_reader_connection_uses_smaller_cache` / `test_pool_and_cache_knobs_are_honored` 守住。
 
-- [ ] **C3. WAL checkpoint 停顿：写尖刺的主因** — 中收益 / 中风险
-  - 现象：写已串行，单笔却偶发秒级尖刺（multicast p99 2.5s、broadcast p99 1s、member max 2.5s），
-    典型是 WAL auto-checkpoint 卡 commit：8KB 大消息每条 ~2-3 页，3700 次插入让 WAL 快速涨过
-    `wal_autocheckpoint` 默认阈值（1000 页）。
-  - 改动：调大 `wal_autocheckpoint` 降频，或把 checkpoint 挪出写路径（后台定时
-    `PRAGMA wal_checkpoint(PASSIVE)`）；写连接调大 `cache_size` 反利 checkpoint（更多脏页在内存）。
+- [x] **C3. WAL checkpoint 挪出写路径：封顶最坏写尾延迟** — ✅ 已落地（opt-in，默认关）
+  - 现象：写已串行，单笔却偶发秒级尖刺，典型是 WAL auto-checkpoint 卡 commit：8KB 大消息每条 ~2-3 页，
+    数千次插入让 WAL 快速涨过 `wal_autocheckpoint` 默认阈值（1000 页），越阈值那笔 commit 同步做 checkpoint。
+  - 落地：新增 `DatabaseConfig.wal_checkpoint_interval_s`（默认 `0.0` = 保持 in-commit checkpoint，零行为变更）。
+    `> 0` 时**写连接** `wal_autocheckpoint=0`（commit 永不触发 checkpoint），`TeamDatabase` 起一个后台 task
+    每 N 秒在**独立连接**（不持写锁）跑 `PRAGMA wal_checkpoint(PASSIVE)`——PASSIVE 不阻塞写者。仅文件型
+    SQLite + WAL 生效；`initialize` 起、`close` 取消。`engine.run_wal_checkpoint_passive` 是 SQL 原语。
+    单测 `test_background_checkpointer_moves_checkpoint_off_write_path`（写连接 autocheckpoint=0、读连接仍 1000、
+    close 取消）+ `test_default_config_keeps_in_commit_autocheckpoint`；130 条 DB 单测全过。
+  - **A/B①（1s 阈值，~12 轮）：尖刺真实但罕见**。只 1 轮 BEFORE 抓到 checkpoint 停顿——send_multicast
+    **6 次 >1s、max 1425ms**；同配置 AFTER 全程 **0 次 >1s、写 max ≤587ms**。其余多数轮两侧均 0 尖刺。
+  - **A/B②（阈值收紧到 0.5s，各 5 轮，更敏感）：C3 并非干净胜利**。`slow(>0.5s)` 分布 BEFORE `0/0/17/4/14`
+    （3/5 轮尖刺）vs AFTER `0/12/0/12/0`（2/5 轮）——AFTER 中位/总数略好（0 vs 4、24 vs 35）但**自己也尖刺**。
+    且 AFTER 尖刺那轮里 `send_multicast` 的 >0.5s 计数是 **0**，说明被拖慢的是**别的写**——后台 PASSIVE checkpoint
+    每 1s 占写连接/做 I/O 时偶尔挡到并发写。**关键**：0.5~0.8s 的写尾尖刺 BEFORE/AFTER **两侧都在**，主体是
+    `send_multicast`（一次写 3 行 8KB、持锁久）的**写锁排队**——20 个 worker 的 multicast burst 撞车，排在后面的等
+    0.5~0.8s。C3 只削掉"越阈值那笔 commit 的 checkpoint 停顿"，治不了排队，还引入后台 checkpointer 自身抖动。
+  - 结论：**本 harness 尺度 C3 跑不赢基线**——写尾主因是「写锁排队税」（尤以 multicast 3× 工作量 + 突发撞车），
+    非 in-commit checkpoint。C3 仍是**防御性 opt-in**：给**持续超高写、WAL 频繁越阈值**的部署封顶最坏 in-commit
+    停顿（A/B① 的 1425ms→587ms），代价是后台 checkpointer 常态开销。默认关正确。要真正压写尾，得动排队本身
+    （减 multicast 扇出的持锁时长 / 减写数量），而非 checkpoint。写连接大 `cache_size`（C2 已配 64MB）本就利 checkpoint。
 
 - [x] **C4. 把连接池 / PRAGMA 旋钮暴露到 `DatabaseConfig`** — ✅ 已落地（纯 additive）
   - 改动：`DatabaseConfig` 增 `read_pool_size` / `write_pool_size` / `read_cache_size_kb` /
@@ -236,8 +251,8 @@ task 表索引）。
 4. ~~**D5（claim_task 折 CAS 缩临界区）**~~ — ✅ 已落地（延迟在噪声带内，收益是正确性/单一职责，印证写锁排队税）。
    **D2 / D3**（task 写路径全表扫描、get_task_detail 次级 N+1）零迁移，待做。
 5. **A1 + A2 + D4**（索引减写放大：消息表 + task 表） — 收益大但要迁移 + spec 文档，同批做，放最后。
-6. **C3 + B2 + B3**（WAL checkpoint 挪出写路径、has_unread EXISTS、member CAS） — 由「关键洞察」，
-   C3 降 fsync 是写侧吞吐的主杠杆，视前几步后的剩余尾延迟按需推进。
+6. ~~**C3（WAL checkpoint 挪出写路径）**~~ — ✅ 已落地（opt-in，默认关；封顶最坏写尾延迟，本尺度收益偶发）。
+   **B2 + B3**（has_unread EXISTS、member CAS）待做，收益预计与 D5 同在噪声带内，按需推进。
 
 每步都跑 harness 前后对比，用数字验证，不猜。D1 的 A/B 要临时恢复"任务膨胀"画像（每轮建任务、
 不设有界池）才压得出 view_task 的真实收益。

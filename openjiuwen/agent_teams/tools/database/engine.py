@@ -308,6 +308,7 @@ def _build_file_sqlite_engine(
     *,
     pool_size: int,
     cache_size_kb: int,
+    wal_autocheckpoint: int,
 ) -> AsyncEngine:
     """Build one file-backed SQLite engine with pool + PRAGMA tuning.
 
@@ -315,6 +316,9 @@ def _build_file_sqlite_engine(
     same file. ``max_overflow=0`` keeps checkout timeouts surfacing real
     session leaks instead of masking them; ``pool_pre_ping`` is dropped because
     a local SQLite file connection does not silently die like a network socket.
+    ``wal_autocheckpoint`` is passed explicitly (not read from config) so the
+    writer engine can disable in-commit checkpointing (0) when a background
+    checkpointer is running while the reader keeps the configured value.
     """
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{conn_str}",
@@ -335,9 +339,23 @@ def _build_file_sqlite_engine(
         enable_wal=config.db_enable_wal,
         cache_size_kb=cache_size_kb,
         mmap_size_bytes=config.mmap_size_mb * 1024 * 1024,
-        wal_autocheckpoint=config.wal_autocheckpoint,
+        wal_autocheckpoint=wal_autocheckpoint,
     )
     return engine
+
+
+async def run_wal_checkpoint_passive(engine: AsyncEngine) -> None:
+    """Run one PASSIVE WAL checkpoint on a dedicated connection.
+
+    ``wal_checkpoint(PASSIVE)`` never waits on readers or the writer — it moves
+    whatever committed WAL frames it can into the main database file and
+    returns — so it is safe to run off the app write lock on a separate
+    connection. The background checkpointer calls this to keep WAL growth (and
+    thus the in-commit checkpoint stalls it would otherwise cause) off the
+    writer's commit path.
+    """
+    async with engine.connect() as conn:
+        await conn.exec_driver_sql("PRAGMA wal_checkpoint(PASSIVE)")
 
 
 async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
@@ -384,11 +402,24 @@ async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
             conn_str = str(db_path)
             if not db_path.parent.exists():
                 db_path.parent.mkdir(parents=True, exist_ok=True)
+            # When a background checkpointer runs (wal_checkpoint_interval_s > 0)
+            # the writer disables in-commit auto-checkpoint (0) so no commit
+            # ever stalls on a checkpoint; the reader never commits, so its
+            # value is moot — keep the configured one.
+            writer_autocheckpoint = 0 if config.wal_checkpoint_interval_s > 0 else config.wal_autocheckpoint
             write_engine = _build_file_sqlite_engine(
-                conn_str, config, pool_size=config.write_pool_size, cache_size_kb=config.write_cache_size_kb
+                conn_str,
+                config,
+                pool_size=config.write_pool_size,
+                cache_size_kb=config.write_cache_size_kb,
+                wal_autocheckpoint=writer_autocheckpoint,
             )
             read_engine = _build_file_sqlite_engine(
-                conn_str, config, pool_size=config.read_pool_size, cache_size_kb=config.read_cache_size_kb
+                conn_str,
+                config,
+                pool_size=config.read_pool_size,
+                cache_size_kb=config.read_cache_size_kb,
+                wal_autocheckpoint=config.wal_autocheckpoint,
             )
 
     elif db_type == DatabaseType.POSTGRESQL:
