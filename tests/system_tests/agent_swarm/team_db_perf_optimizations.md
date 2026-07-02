@@ -1,7 +1,7 @@
 # Team DB 性能优化清单
 
 本清单是基于 `agent_team_tools_db_stress_e2e.py` 压测（20 人团队并发、消息主导画像）
-识别出的 SQLite 数据库层优化点汇总。进度：**B1 / C4 / C1 / C2 / C3 / D1 / D5 已落地**，其余为待办分析项。
+识别出的 SQLite 数据库层优化点汇总。进度：**B1 / B4 / C4 / C1 / C2 / C3 / D1 / D5 已落地**，其余为待办分析项。
 消息路径见 A/B/C 三节；**task 相关操作专项见 D 节**（读路径 N+1、写路径重复全表扫描、
 task 表索引）。
 
@@ -96,6 +96,22 @@ task 表索引）。
   - 现象：校验在 Python 侧，故先读后写，两次往返（各 400 次，PK 读较快）。
   - 改动：仿 `try_transition_member_status`，用单条 `UPDATE ... WHERE status IN (合法前态)` 的 CAS，
     省一次往返。代价：非法转移不再打详细日志（可保留 rowcount=0 的告警）。
+
+- [x] **B4. `send_multicast`：N 条同内容消息合并到单事务批量写** — ✅ 已落地（0.5s 阈值 A/B 逼出的对症优化）
+  - 现象：multicast（一条消息发给 K 个成员）走工具 `_multicast` 时，对每个目标各调一次
+    `send_message → create_message`，即 **K 次写锁获取 + K 次 commit + K 次 fsync**。在 0.5s 阈值下，
+    `send_multicast`（K=3）是最大的写尾尖刺源（BEFORE avg 87~100ms / p99 ~380ms / max 388~751ms）。
+  - 落地：DAO 新增 `create_direct_messages`（一个事务插入 N 条同内容点对点消息，1 次写锁 + 1 次 commit +
+    1 次 fsync，整批原子）；manager 新增 `multicast_message`（生成 N 个 id → 批量写一次 → 写锁外逐条发
+    `MessageEvent`）；工具 `_multicast` 预校验成员存在性（读）后改调一次 `multicast_message`，保留
+    delivered/failed 契约（批量原子：写失败则全部计入 failed 供重发）。新增
+    `test_multicast_message_single_batch`（断言全部收件人到达且**共享同一 timestamp** = 单事务）+ 空列表 no-op；
+    248 条相关单测全过。
+  - **A/B（默认 20×20，0.5s 阈值，各 2 轮）**：**send_multicast 本身干净 2~3 倍**——avg 87~100ms → **42~45ms**、
+    p95 173~243ms → **58~76ms**、p99 ~380ms → **96~163ms**、max 751ms → **107ms**（run1）。写锁持有与 fsync 都从 3× 降到 1×。
+  - 结论/边界：这是 multicast 专项的**真实收益**。但 multicast 仅占 ~400/5300 的写，故 **WRITES SUBTOTAL 与总
+    throughput 仍在噪声带内**（被其余 ~4900 条 per-message 写的排队税盖住）——再次印证「关键洞察」：要动总写尾仍需
+    C3（降 fsync 频次）/ 减写总数。B4 无迁移、无 schema 变更、纯赚，值得独立保留。
 
 ---
 
@@ -249,6 +265,7 @@ task 表索引）。
    总 throughput +35%。零迁移、数量级收益，正是"view_task 开销离谱"的根因。
 3. ~~**C4 → C1 + C2**~~ — ✅ 已落地（连接池旋钮 + 读写分离 + 小读缓存）。
 4. ~~**D5（claim_task 折 CAS 缩临界区）**~~ — ✅ 已落地（延迟在噪声带内，收益是正确性/单一职责，印证写锁排队税）。
+   ~~**B4（multicast 单事务批量写）**~~ — ✅ 已落地（send_multicast 本身 2~3×，总写尾仍受 per-message 排队税限制）。
    **D2 / D3**（task 写路径全表扫描、get_task_detail 次级 N+1）零迁移，待做。
 5. **A1 + A2 + D4**（索引减写放大：消息表 + task 表） — 收益大但要迁移 + spec 文档，同批做，放最后。
 6. ~~**C3（WAL checkpoint 挪出写路径）**~~ — ✅ 已落地（opt-in，默认关；封顶最坏写尾延迟，本尺度收益偶发）。

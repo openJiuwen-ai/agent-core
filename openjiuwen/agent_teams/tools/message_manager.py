@@ -154,6 +154,69 @@ class TeamMessageManager:
         team_logger.debug(f"Broadcast message sent from {sender}: {message_id}")
         return message_id
 
+    async def multicast_message(
+        self,
+        content: str,
+        to_member_names: List[str],
+        from_member_name: str | None = None,
+        protocol: str = "plain",
+    ) -> List[str]:
+        """Send identical content to several members as N point-to-point messages.
+
+        Persists all recipients in a SINGLE DB transaction (one fsync) via
+        ``create_direct_messages`` instead of N separate ``send_message``
+        writes — this is the multicast write-tail optimization. Message events
+        are published per recipient AFTER the commit; the messager bus runs off
+        the DB write lock, so the fan-out never extends the write critical
+        section.
+
+        Args:
+            content: Shared message body.
+            to_member_names: Recipient member ids (caller de-duplicates /
+                validates existence; empty list is a no-op).
+            from_member_name: Override sender id. Defaults to
+                ``self.member_name``.
+            protocol: Message format (``"plain"`` / ``"json"``).
+
+        Returns:
+            The created message ids in recipient order, or an empty list when
+            there were no recipients or the batch write failed.
+        """
+        sender = from_member_name or self.member_name
+        if not to_member_names:
+            return []
+
+        pairs = [(str(uuid.uuid4()), to) for to in to_member_names]
+        created = await self.db.message.create_direct_messages(
+            team_name=self.team_name,
+            from_member_name=sender,
+            content=content,
+            recipients=pairs,
+            protocol=protocol,
+        )
+        if created != len(pairs):
+            team_logger.error("Failed to batch-create multicast messages from %s", sender)
+            return []
+
+        for message_id, to_member_name in pairs:
+            try:
+                await self.messager.publish(
+                    topic_id=TeamTopic.MESSAGE.build(get_session_id(), self.team_name),
+                    message=EventMessage.from_event(
+                        MessageEvent(
+                            message_id=message_id,
+                            team_name=self.team_name,
+                            from_member_name=sender,
+                            to_member_name=to_member_name,
+                        )
+                    ),
+                )
+            except Exception as e:
+                team_logger.error(f"Failed to publish message event for {message_id}: {e}")
+
+        team_logger.debug(f"Multicast sent from {sender} to {len(pairs)} members")
+        return [message_id for message_id, _ in pairs]
+
     async def get_messages(
         self,
         to_member_name: str,
