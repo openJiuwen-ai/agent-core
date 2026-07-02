@@ -243,6 +243,62 @@ def _ensure_message_protocol_column(sync_conn) -> None:
         )
 
 
+def _ensure_dynamic_table_indexes(sync_conn) -> None:
+    """Rebuild per-session dynamic-table indexes to the current scheme (A1/A2).
+
+    ``__table__.create(checkfirst=True)`` never alters an existing table, so a
+    persistent team's tables keep whatever indexes they were born with. Bring
+    them up to the current design:
+      - A1: drop the dead ``team_name`` index on every dynamic table — a
+        per-session table has ~1 distinct team_name, so the index never helps
+        a read and only costs a B-tree write per INSERT.
+      - A2: on message tables, drop the four weak single-column indexes
+        (``to_member_name`` / ``timestamp`` / ``broadcast`` / ``is_read``) and
+        create the two composites the real queries use (``*_inbox`` /
+        ``*_bcast_ts``), kept in sync with ``models._get_message_model``.
+
+    Every statement is idempotent (``IF EXISTS`` / ``IF NOT EXISTS``), so a
+    table already on the new scheme is a cheap no-op.
+    """
+    inspector = inspect(sync_conn)
+    for table_name in inspector.get_table_names():
+        is_message = table_name.startswith("team_message_")
+        is_dependency = table_name.startswith("team_task_dependency_")
+        is_task = table_name.startswith("team_task_") and not is_dependency
+        if not (is_message or is_dependency or is_task):
+            continue
+
+        index_names = {idx["name"] for idx in inspector.get_indexes(table_name)}
+
+        team_name_index = f"ix_{table_name}_team_name"
+        if team_name_index in index_names:
+            sync_conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{team_name_index}"')
+            team_logger.info("Migrated %s: dropped dead team_name index", table_name)
+
+        if not is_message:
+            continue
+
+        legacy_message_indexes = [
+            f"ix_{table_name}_to_member_name",
+            f"ix_{table_name}_timestamp",
+            f"ix_{table_name}_broadcast",
+            f"ix_{table_name}_is_read",
+        ]
+        inbox_index = f"ix_{table_name}_inbox"
+        bcast_index = f"ix_{table_name}_bcast_ts"
+        needs_migration = bool(index_names & set(legacy_message_indexes)) or inbox_index not in index_names
+        if not needs_migration:
+            continue
+
+        for legacy in legacy_message_indexes:
+            sync_conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{legacy}"')
+        sync_conn.exec_driver_sql(
+            f'CREATE INDEX IF NOT EXISTS "{inbox_index}" ON "{table_name}" (to_member_name, is_read, timestamp)'
+        )
+        sync_conn.exec_driver_sql(
+            f'CREATE INDEX IF NOT EXISTS "{bcast_index}" ON "{table_name}" (broadcast, timestamp)'
+        )
+        team_logger.info("Migrated message table %s: rebuilt to composite indexes", table_name)
 
 
 class SqlEngines(NamedTuple):
@@ -513,6 +569,7 @@ async def create_cur_session_tables(engine: AsyncEngine) -> None:
         for model in (task_model, dep_model, message_model, read_status_model):
             await conn.run_sync(model.__table__.create, checkfirst=True)
         await conn.run_sync(_ensure_message_protocol_column)
+        await conn.run_sync(_ensure_dynamic_table_indexes)
 
     team_logger.info("Session tables ready for session %s", session_id)
 

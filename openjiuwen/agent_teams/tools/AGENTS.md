@@ -72,6 +72,17 @@ would-be parallel writers:
   `database is locked`; the sleep runs outside the session block so a retry
   never pins a checked-out connection. Rare once writes are serialised —
   only WAL-checkpoint edges or a foreign process touching the same file.
+- **Index scheme (per-session dynamic tables)** — indexes are query-driven to
+  keep INSERT write-amplification low (each secondary index is a B-tree write
+  per row). No `team_name` index on any dynamic table: they are physically
+  partitioned by session, so `team_name` cardinality is ~1 and an index there
+  only costs writes. The message table carries **two composite indexes**
+  (`_inbox` = `(to_member_name, is_read, timestamp)` for the direct-inbox read
+  + ordering, `_bcast_ts` = `(broadcast, timestamp)` for broadcast reads /
+  `has_unread`) instead of five weak single-column ones — 3 B-tree writes per
+  message INSERT (PK + 2) rather than 6. Defined per table in
+  `models._get_message_model`; `engine._ensure_dynamic_table_indexes` migrates
+  pre-existing (persistent-team) tables to this scheme on session-table setup.
 
 Applicability: this serialisation targets the in-process (single event
 loop) runtime. A genuinely high-concurrency-write deployment should use the
