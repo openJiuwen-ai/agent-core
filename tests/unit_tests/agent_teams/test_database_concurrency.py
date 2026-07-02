@@ -24,7 +24,6 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
 )
 from openjiuwen.agent_teams.tools.database.engine import DbSessions, retry_on_locked
-from openjiuwen.agent_teams.tools.memory_database import InMemoryTeamDatabase
 from openjiuwen.core.single_agent import AgentCard
 
 
@@ -246,22 +245,24 @@ async def test_retry_on_locked_succeeds_first_try() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_in_memory_mark_messages_read_batch() -> None:
-    """The in-memory backend mirrors the SQL batch mark-read API."""
-    db = InMemoryTeamDatabase()
-    await db.initialize()
-    await db.create_member(
+async def test_mark_messages_read_batch(file_db: TeamDatabase) -> None:
+    """The batch mark-read API marks a whole mailbox drain in one call."""
+    db = file_db
+    await db.team.create_team(team_name="t1", display_name="T1", leader_member_name="leader")
+    await db.member.create_member(
         member_name="dev",
         team_name="t1",
         display_name="dev",
         agent_card=AgentCard().model_dump_json(),
         status="ready",
     )
-    await db.create_message(
+    await db.message.create_message(
         message_id="d1", team_name="t1", from_member_name="leader", content="a", to_member_name="dev"
     )
-    await db.create_message(message_id="b1", team_name="t1", from_member_name="leader", content="all", broadcast=True)
+    await db.message.create_message(
+        message_id="b1", team_name="t1", from_member_name="leader", content="all", broadcast=True
+    )
 
-    marked = await db.mark_messages_read(["d1", "b1", "missing"], "dev")
+    marked = await db.message.mark_messages_read(["d1", "b1", "missing"], "dev")
     assert marked == 2
-    assert await db.has_unread_messages("t1") is False
+    assert await db.message.has_unread_messages("t1") is False

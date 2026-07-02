@@ -83,12 +83,10 @@ def _ensure_builtin_infra_registered() -> None:
 
     if not _STORAGE_REGISTRY:
         from openjiuwen.agent_teams.tools.database import DatabaseConfig
-        from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 
         _STORAGE_REGISTRY["sqlite"] = DatabaseConfig
         _STORAGE_REGISTRY["postgresql"] = DatabaseConfig
         _STORAGE_REGISTRY["mysql"] = DatabaseConfig
-        _STORAGE_REGISTRY["memory"] = MemoryDatabaseConfig
 
 
 class TransportSpec(BaseModel):

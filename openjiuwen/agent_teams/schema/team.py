@@ -16,7 +16,6 @@ from openjiuwen.agent_teams.models.pool import ModelPoolEntry
 from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
-from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,7 +295,7 @@ class TeamRuntimeContext(BaseModel):
     persona: str = ""
     team_spec: Optional[TeamSpec] = None
     messager_config: Optional[MessagerTransportConfig] = None
-    db_config: DatabaseConfig | MemoryDatabaseConfig = Field(default_factory=DatabaseConfig)
+    db_config: DatabaseConfig = Field(default_factory=DatabaseConfig)
     member_model: Optional[TeamModelConfig] = None
     """TeamModelConfig assigned to this member by the allocator."""
     worktree_path: Optional[str] = None

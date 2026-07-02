@@ -26,7 +26,6 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.tools.memory_database import InMemoryTeamDatabase
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.core.single_agent import AgentCard
 
@@ -1190,8 +1189,7 @@ async def test_empty_task_list_never_drains(task_manager, message_bus):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_plan_mode_submit_approve_and_complete(message_bus, tmp_path):
-    db = InMemoryTeamDatabase()
+async def test_plan_mode_submit_approve_and_complete(db, message_bus, tmp_path):
     await db.team.create_team(
         team_name="plan_team",
         display_name="Plan Team",

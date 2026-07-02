@@ -28,7 +28,6 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
     TeamMember,
 )
-from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberMode,
@@ -971,7 +970,7 @@ class TestCancelAllTasks:
 
 
 class TestTeamRuntimeContextDbConfig:
-    """Test TeamRuntimeContext accepts both DatabaseConfig and MemoryDatabaseConfig."""
+    """Test TeamRuntimeContext accepts DatabaseConfig."""
 
     @pytest.mark.level0
     def test_runtime_context_with_database_config(self):
@@ -987,18 +986,6 @@ class TestTeamRuntimeContextDbConfig:
             db_config=db_config,
         )
         assert context.db_config.db_type == "sqlite"
-
-    @pytest.mark.level0
-    def test_runtime_context_with_memory_database_config(self):
-        """Test TeamRuntimeContext accepts MemoryDatabaseConfig."""
-        db_config = MemoryDatabaseConfig()
-        context = TeamRuntimeContext(
-            role=TeamRole.LEADER,
-            member_name="leader1",
-            team_spec=TeamSpec(team_name="test_team", display_name="Test Team"),
-            db_config=db_config,
-        )
-        assert context.db_config.db_type == "memory"
 
     @pytest.mark.level0
     def test_runtime_context_default_database_config(self):

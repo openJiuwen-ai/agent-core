@@ -21,7 +21,6 @@ from pydantic import BaseModel, Field, ValidationError
 
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.tools.database.config import DatabaseConfig
-from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 
@@ -58,8 +57,8 @@ class TeamJoinDescriptor(BaseModel):
             inbound message / task-board text consistently with in-process
             members.
         db_config: Team database connection. For cross-process use this must
-            be a file-backed sqlite ``connection_string``; the in-memory
-            backend (``MemoryDatabaseConfig``) is single-process only and is
+            be a file-backed sqlite ``connection_string``; a sqlite
+            ``:memory:`` connection string is single-process only and is
             intended for tests.
         transport_config: Messager transport config used by the external
             client. ``external_publish_url`` is the Gateway relay WebSocket
@@ -72,7 +71,7 @@ class TeamJoinDescriptor(BaseModel):
     role: str = "teammate"
     scope: Literal["operator", "member"] = "operator"
     language: str = "cn"
-    db_config: DatabaseConfig | MemoryDatabaseConfig = Field(default_factory=DatabaseConfig)
+    db_config: DatabaseConfig = Field(default_factory=DatabaseConfig)
     transport_config: MessagerTransportConfig = Field(default_factory=MessagerTransportConfig)
 
     def to_json(self) -> str:

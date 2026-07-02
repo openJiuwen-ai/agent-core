@@ -26,7 +26,6 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
 )
 from openjiuwen.agent_teams.tools.database.engine import _ensure_team_member_options_column
-from openjiuwen.agent_teams.tools.memory_database import InMemoryTeamDatabase
 from openjiuwen.agent_teams.tools.member_options import (
     build_member_options,
     get_member_options,
@@ -3249,18 +3248,17 @@ async def test_mutate_dependency_graph_rejects_terminal_target(db):
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_in_memory_has_unread_messages_honors_include_broadcast() -> None:
-    """In-memory has_unread_messages mirrors the SQL DAO and gates broadcasts."""
-    db = InMemoryTeamDatabase()
-    await db.initialize()
-    await db.create_member(
+async def test_has_unread_messages_honors_include_broadcast(db) -> None:
+    """has_unread_messages gates broadcasts behind the include_broadcast flag."""
+    await db.team.create_team(team_name="t1", display_name="T1", leader_member_name="leader")
+    await db.member.create_member(
         member_name="leader",
         team_name="t1",
         display_name="leader",
         agent_card=AgentCard().model_dump_json(),
         status="ready",
     )
-    await db.create_member(
+    await db.member.create_member(
         member_name="dev",
         team_name="t1",
         display_name="dev",
@@ -3269,25 +3267,25 @@ async def test_in_memory_has_unread_messages_honors_include_broadcast() -> None:
     )
 
     # No messages → nothing unread.
-    assert await db.has_unread_messages("t1") is False
+    assert await db.message.has_unread_messages("t1") is False
 
     # Unread broadcast: counted by default, excluded on request.
-    await db.create_message(
+    await db.message.create_message(
         message_id="b1",
         team_name="t1",
         from_member_name="leader",
         content="hi",
         broadcast=True,
     )
-    assert await db.has_unread_messages("t1") is True
-    assert await db.has_unread_messages("t1", include_broadcast=False) is False
+    assert await db.message.has_unread_messages("t1") is True
+    assert await db.message.has_unread_messages("t1", include_broadcast=False) is False
 
     # Unread direct message: counted under both settings.
-    await db.create_message(
+    await db.message.create_message(
         message_id="d1",
         team_name="t1",
         from_member_name="leader",
         content="ping",
         to_member_name="dev",
     )
-    assert await db.has_unread_messages("t1", include_broadcast=False) is True
+    assert await db.message.has_unread_messages("t1", include_broadcast=False) is True
