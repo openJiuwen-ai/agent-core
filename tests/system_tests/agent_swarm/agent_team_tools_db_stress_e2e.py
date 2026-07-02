@@ -139,7 +139,9 @@ _T = TypeVar("_T")
 # WAL reader pool). Everything else is a write — it serialises through the
 # process-wide write lock, which is why the report splits the two: writes pay
 # the shared-lock queuing tax, reads do not.
-READ_OPS = frozenset({"has_unread", "read_inbox", "read_broadcast", "list_members", "view_task"})
+READ_OPS = frozenset(
+    {"has_unread", "read_inbox", "read_broadcast", "list_members", "view_task", "view_task_get"}
+)
 
 
 def _make_payload(tag: str, size: int = PAYLOAD_SIZE) -> str:
@@ -289,12 +291,20 @@ async def _seed_team(db: TeamDatabase, t: Translator, member_names: list[str]) -
         await db.member.update_member_status(name, TEAM_NAME, MemberStatus.READY.value)
 
     # Seed a small, bounded task pool. Tasks stay few in a real team; workers
-    # churn this pool (claim/complete/reset/update) rather than growing it, so
-    # the board reads stay cheap and messaging stays the dominant DB load.
+    # churn this pool (claim/complete/reset/update/cancel) rather than growing
+    # it, so board reads stay cheap and messaging stays the dominant DB load.
+    # Every 3rd task depends on the one before it, so the pool carries real
+    # BLOCKED tasks: this exercises the dependency-graph write path
+    # (mutate_dependency_graph — cycle detection + status refresh in one
+    # transaction) at seed time, makes view_task's dependency grouping do real
+    # work, and drives the unblock path when a blocker is completed / cancelled.
     leader_task_mgr = leader_backend.task_manager
     task_content = _make_payload("seed-task")
+    prev_id: str | None = None
     for i in range(TASK_POOL_SIZE):
-        await leader_task_mgr.add(title=f"seed task {i}", content=task_content)
+        dependencies = [prev_id] if (prev_id is not None and i % 3 == 0) else None
+        result = await leader_task_mgr.add(title=f"seed task {i}", content=task_content, dependencies=dependencies)
+        prev_id = result.task_id
 
 
 # ---------------------------------------------------------------------------
@@ -327,10 +337,12 @@ async def _worker(
       - update_member_status (DAO)           — READY <-> BUSY
       - update_member_execution_status (DAO) — IDLE -> ... -> IDLE loop
 
-    Task churn (light, bounded pool):
-      - view_task list / claimable, list_members (tool) — small-board reads
+    Task churn (light, bounded pool, seeded with dependency chains):
+      - view_task list / claimable / get, list_members (tool) — small-board reads
+        (get = get_task_detail: upstream blocked_by + downstream blocks)
       - create_task (tool)                   — rare replenishment
       - update_task / claim / complete / reset / cancel — pool churn + status writes
+        (complete / cancel of a blocker unblocks its dependents)
     """
     name = backend.member_name
     db = backend.db
@@ -431,6 +443,16 @@ async def _worker(
         task_id = _pick_claimable(claimable, rng)
         if not task_id:
             continue
+        # Read the full task detail before starting — the common "read
+        # requirements before working" step. This is the get_task_detail read
+        # path (upstream blocked_by + downstream blocks), distinct from the
+        # list view above.
+        await _timed(
+            metrics,
+            "view_task_get",
+            name,
+            lambda tid=task_id: toolset["view_task"].invoke({"action": "get", "task_id": tid}),
+        )
         # Edit while still PENDING (update_task only allows edits on
         # pending / blocked tasks), then race to claim it.
         await _timed(metrics, "task_update", name, lambda tid=task_id: task_mgr.update_task(tid, content=task_payload))
