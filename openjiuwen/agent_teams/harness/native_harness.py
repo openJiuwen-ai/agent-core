@@ -1020,11 +1020,9 @@ class NativeHarness(DeepAgent):
                 # producing a real result — notably, an immediate abort/pause
                 # cancels this wait task and the handler swallows the
                 # CancelledError into {"error": "cancelled"}. Streaming that as
-                # an (empty) answer is noise: an aborted/paused round emits its
-                # own round_aborted marker, and a timed-out round has no answer
-                # to show. Only stream genuine round results (normal answers /
-                # HITL / workflow interrupts) so harness output matches a plain
-                # DeepAgent run.
+                # an (empty) answer is noise: aborted/paused rounds emit their
+                # own round_aborted marker. A timeout is a terminal round error,
+                # so convert it into the standard error-result shape.
                 if isinstance(result, dict) and result.get("error") == "completion_timeout":
                     # The harness gave up waiting, but the TaskScheduler task
                     # may still be running (e.g. a slow API call).  Cancel it
@@ -1041,7 +1039,20 @@ class NativeHarness(DeepAgent):
                                 "completion_timeout, round_id=%s",
                                 active.round_id,
                             )
-                if not (isinstance(result, dict) and result.get("error")):
+                    logger.warning(
+                        "[NativeHarness] round_id=%s task_id=%s completion_timeout after %.3fs",
+                        active.round_id,
+                        active.task_id,
+                        self._timeout,
+                    )
+                    await self._write_round_result_to_stream(
+                        {
+                            "output": f"Agent round timed out after {self._timeout:g}s.",
+                            "result_type": "error",
+                        },
+                        self._session,
+                    )
+                elif not (isinstance(result, dict) and result.get("error")):
                     await self._write_round_result_to_stream(result, self._session)
                 # Expose the round result to AFTER_INVOKE rails (fired in the
                 # lifecycle's finally). Control-error dicts carry no real answer,
