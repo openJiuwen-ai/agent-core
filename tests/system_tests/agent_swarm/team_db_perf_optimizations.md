@@ -1,7 +1,7 @@
 # Team DB 性能优化清单
 
 本清单是基于 `agent_team_tools_db_stress_e2e.py` 压测（20 人团队并发、消息主导画像）
-识别出的 SQLite 数据库层优化点汇总。进度：**B1 / C4 / C1 / C2 / D1 已落地**，其余为待办分析项。
+识别出的 SQLite 数据库层优化点汇总。进度：**B1 / C4 / C1 / C2 / D1 / D5 已落地**，其余为待办分析项。
 消息路径见 A/B/C 三节；**task 相关操作专项见 D 节**（读路径 N+1、写路径重复全表扫描、
 task 表索引）。
 
@@ -209,15 +209,21 @@ task 表索引）。
     assignee 找 claimed 任务）。任务写现为低频（有界池），收益低于消息表，但与 A1/A2 同批做迁移最省事。
   - 义务：schema 变更 → 补 `test_database.py` migration/字段用例 + 同步 `docs/specs`。
 
-- [ ] **D5. task 写：把锁内 SELECT 折成单条 CAS，缩短临界区** — 中收益（惠及所有写者）/ 低风险
-  - 现象：`claim_task`（task_dao:396-423）在**写锁内**先 `SELECT`（查 assignee + 校验状态转移）再 `UPDATE`，
-    把一次读关进了临界区。`task_update` / `complete` / `reset` 同样是"锁内先读后写"。由「关键洞察」，写延迟
-    ~70ms 主体是排队；缩短每个写者的锁持有时长 → 队列排空更快 → **所有写者（不止 task）都受益**。
-  - 改动：仿 `try_transition_member_status`，用单条 CAS：
-    `UPDATE team_task SET status='claimed', assignee=?, updated_at=? WHERE task_id=? AND assignee IS NULL
-    AND status IN (合法前态)`，看 `rowcount`。失败（rowcount=0）时再按需单查一次拿具体原因（在锁外）。
-    去掉锁内 SELECT，临界区从"SELECT+UPDATE+commit"缩到"UPDATE+commit"。
-  - 注意：这不改变写总数，只缩短单次锁持有；配合 C3（降 fsync 频次）才是写侧吞吐的主要杠杆。
+- [x] **D5. task 写（claim_task）：把锁内 SELECT 折成单条 CAS，缩短临界区** — ✅ 已落地（claim_task）
+  - 现象：`claim_task` 在**写锁内**先 `SELECT`（查 assignee + 校验状态转移）再 `UPDATE`，把一次读关进临界区；
+    而两条调用方（`TeamTaskManager.claim` / `.assign`）**已在写锁外**做完全部校验（存在性/成员/冲突/转移），
+    DAO 实际只是竞态仲裁器——锁内那次 SELECT 纯属重复。
+  - 落地：`claim_task` 改为单条 CAS `UPDATE team_task SET status='claimed', assignee=?, updated_at=?
+    WHERE task_id=? AND assignee IS NULL AND status='pending'`（PENDING 是 CLAIMED 的唯一合法前态），看
+    `rowcount==1`。去掉锁内 SELECT，临界区从"SELECT+UPDATE+commit"缩到"UPDATE+commit"。返回值语义逐一等价
+    （成功=pending+unassigned；失败=不存在/已认领/非 pending/输掉竞态）。新增并发回归
+    `test_concurrent_claim_same_task_single_winner`（10 成员抢 1 条 pending → 恰好 1 个 True）；相关 364 条单测全过。
+  - **A/B（默认 20×20，各 2 轮 before/after）：在噪声带内**——`claim_task` avg 30~33ms ↔ 29~41ms、WRITES
+    SUBTOTAL avg 33~42ms ↔ 34~38ms，run-to-run 方差（p99 72~346ms）盖过 D5 效果。**这正好印证「关键洞察」**：
+    claim 的 ~30ms 主体是写锁排队，去掉的那次锁内 SELECT 只占 ~3ms 临界区里的 ~0.5ms，低于噪声底。
+  - 结论：D5 的确定收益是**代码正确性/单一职责**（DAO 变成纯原子仲裁器，消除与 manager 重复的校验）+
+    **并发正确性回归**，而非一个延迟数字。要真正压低写延迟仍需 **C3（降 fsync 频次）/ 减写总数**。
+    `task_update` / `complete` / `reset` 的锁内 SELECT 同理可折，但收益同样在噪声带内，未做。
 
 ---
 
@@ -227,8 +233,8 @@ task 表索引）。
 2. ~~**D1（`list_tasks_with_deps` N+1 → 2 查询）**~~ — ✅ 已落地。view_task avg 70ms→5ms、p99→~12ms，
    总 throughput +35%。零迁移、数量级收益，正是"view_task 开销离谱"的根因。
 3. ~~**C4 → C1 + C2**~~ — ✅ 已落地（连接池旋钮 + 读写分离 + 小读缓存）。
-4. **D2 / D3 / D5**（task 写路径全表扫描、get_task_detail 次级 N+1、claim/update 折 CAS 缩临界区） —
-   零迁移，随 D1 一并做；D5 惠及所有写者。
+4. ~~**D5（claim_task 折 CAS 缩临界区）**~~ — ✅ 已落地（延迟在噪声带内，收益是正确性/单一职责，印证写锁排队税）。
+   **D2 / D3**（task 写路径全表扫描、get_task_detail 次级 N+1）零迁移，待做。
 5. **A1 + A2 + D4**（索引减写放大：消息表 + task 表） — 收益大但要迁移 + spec 文档，同批做，放最后。
 6. **C3 + B2 + B3**（WAL checkpoint 挪出写路径、has_unread EXISTS、member CAS） — 由「关键洞察」，
    C3 降 fsync 是写侧吞吐的主杠杆，视前几步后的剩余尾延迟按需推进。
