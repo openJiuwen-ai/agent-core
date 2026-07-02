@@ -265,20 +265,49 @@ class TeamMessageManager:
             team_logger.error(f"Failed to mark message {message_id} as read by {member_name}")
         return success
 
-    async def mark_messages_read(self, message_ids: list[str], member_name: str) -> int:
-        """Mark several messages read for one member in one transaction.
+    async def mark_messages_read(self, messages: List[TeamMessageBase], member_name: str) -> int:
+        """Mark a batch of delivered messages read for one member.
 
-        Batches the per-message read-state writes into a single commit
-        (one fsync) — the dominant write-throughput lever on SQLite.
+        Takes the raw message objects (not ids) so this layer — which owns
+        read-state semantics — can honour the two read models before handing
+        a safe id list to the DAO:
+
+          - Direct messages each flip their own ``is_read`` row, so every
+            direct id is kept.
+          - Broadcast read state is a per-member watermark: one
+            ``(member, team)`` row keyed by the newest read broadcast
+            timestamp. Marking the newest broadcast advances the watermark
+            past every older one, so only that single id is kept. Passing
+            more than one broadcast id to the DAO in one transaction would
+            re-insert the same ``(member, team)`` primary key and the commit
+            would raise ``UNIQUE constraint failed``, rolling back the whole
+            batch and stalling the mailbox. Collapsing broadcasts here keeps
+            that invariant out of every caller (handler, external client,
+            stress harness).
+
+        The DAO write stays a single transaction (one fsync) — the dominant
+        write-throughput lever on SQLite.
 
         Args:
-            message_ids: Message ids to mark read, in delivery order.
+            messages: Delivered message objects to mark read.
             member_name: Member who read the messages.
 
         Returns:
             Count of messages whose read state was applied.
         """
-        marked = await self.db.message.mark_messages_read(message_ids, member_name)
+        if not messages:
+            return 0
+
+        direct_ids = [m.message_id for m in messages if not m.broadcast]
+        broadcasts = [m for m in messages if m.broadcast]
+        ids = list(direct_ids)
+        if broadcasts:
+            newest_broadcast = max(broadcasts, key=lambda m: m.timestamp)
+            ids.append(newest_broadcast.message_id)
+        if not ids:
+            return 0
+
+        marked = await self.db.message.mark_messages_read(ids, member_name)
         if marked:
             team_logger.debug("Marked %d messages read by %s", marked, member_name)
         return marked
