@@ -684,6 +684,21 @@ class TaskDao:
             rows = result.scalars().all()
             return rows
 
+    async def get_team_dependencies(self, team_name: str) -> List[TeamTaskDependencyBase]:
+        """Get every dependency edge for a team in a single query.
+
+        Batch counterpart to ``get_task_dependencies`` — lets callers that
+        need dependencies for many tasks (e.g. ``list_tasks_with_deps``)
+        fetch the whole edge set once and group in memory, instead of the
+        N+1 pattern of one ``get_task_dependencies`` per task.
+        """
+        task_dependency_model = _get_task_dependency_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(task_dependency_model).where(task_dependency_model.team_name == team_name)
+            )
+            return result.scalars().all()
+
     async def get_unresolved_dependencies_count(self, task_id: str) -> int:
         """Get count of unresolved dependencies for a task."""
         task_dependency_model = _get_task_dependency_model()

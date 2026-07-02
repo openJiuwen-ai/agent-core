@@ -1332,3 +1332,46 @@ async def test_plan_mode_submit_approve_and_complete(db, message_bus, tmp_path):
 
     index = json.loads((tmp_path / "plans" / "index.json").read_text(encoding="utf-8"))
     assert index["tasks"][task.task_id]["status"] == TaskStatus.COMPLETED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_list_tasks_with_deps_avoids_n_plus_1(task_manager, monkeypatch):
+    """list_tasks_with_deps fetches all deps in one batch query, never per-task.
+
+    Regression guard for the N+1 that made view_task O(tasks) queries: it must
+    call get_team_dependencies exactly once and get_task_dependencies zero
+    times, regardless of how many tasks are on the board.
+    """
+    t1 = await task_manager.add(title="T1", content="c1")
+    t2 = await task_manager.add(title="T2", content="c2")
+    t3 = await task_manager.add(title="T3", content="c3", dependencies=[t1.task_id, t2.task_id])
+
+    dao = task_manager.db.task
+    per_task_calls = 0
+    batch_calls = 0
+    orig_per_task = dao.get_task_dependencies
+    orig_batch = dao.get_team_dependencies
+
+    async def spy_per_task(task_id):
+        nonlocal per_task_calls
+        per_task_calls += 1
+        return await orig_per_task(task_id)
+
+    async def spy_batch(team_name):
+        nonlocal batch_calls
+        batch_calls += 1
+        return await orig_batch(team_name)
+
+    monkeypatch.setattr(dao, "get_task_dependencies", spy_per_task)
+    monkeypatch.setattr(dao, "get_team_dependencies", spy_batch)
+
+    result = await task_manager.list_tasks_with_deps()
+
+    assert batch_calls == 1
+    assert per_task_calls == 0
+    # Grouping is correct: t3 blocked by both deps; t1/t2 have none.
+    by_id = {s.task_id: s for s in result.tasks}
+    assert set(by_id[t3.task_id].blocked_by) == {t1.task_id, t2.task_id}
+    assert by_id[t1.task_id].blocked_by == []
+    assert by_id[t2.task_id].blocked_by == []
