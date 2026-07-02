@@ -6,28 +6,69 @@
 from __future__ import annotations
 
 import os
+import shutil
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel
-
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.agent_teams.tools.member_options import get_member_worktree
-from openjiuwen.agent_teams.worktree.naming import build_teammate_worktree_name
+from openjiuwen.agent_teams.tools.member_options import (
+    MemberWorktreeOptions,
+    get_member_worktree,
+)
+from openjiuwen.agent_teams.worktree.member_state import (
+    MemberWorktreeInfo,
+    clear_member_worktree_metadata,
+    info_from_options,
+    matches_scope,
+    resolve_current_session_member_worktree,
+    team_context,
+    teammate_member_names,
+)
+from openjiuwen.agent_teams.worktree.session_scope import (
+    WorktreeOwnerScope,
+    build_worktree_owner_scope,
+    enter_project_worktree_context,
+    manager_for_worktree_scope,
+    restore_project_worktree_context,
+)
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
+_TEAM_RUNTIME_FILES = frozenset(
+    {
+        ".DS_Store",
+        "AGENT.md",
+        "HEARTBEAT.md",
+        "IDENTITY.md",
+        "SOUL.md",
+        "USER.md",
+    }
+)
 
-class MemberWorktreeInfo(BaseModel):
-    """Leader-host metadata for one teammate worktree."""
+_TEAM_RUNTIME_DIRS = frozenset(
+    {
+        ".agent_history",
+        ".team",
+        "agents",
+        "coding_memory",
+        "context",
+        "memory",
+        "messages",
+        "skills",
+        "todo",
+    }
+)
 
-    worktree_path: str
-    worktree_name: str
-    worktree_branch: str | None = None
-    head_commit: str | None = None
-    hook_based: bool = False
+
+class WorktreeContributionState(str, Enum):
+    """Contribution classification for a teammate worktree branch."""
+
+    CONTRIBUTED = "contributed"
+    NOT_CONTRIBUTED = "not_contributed"
+    UNKNOWN = "unknown"
 
 
 class TeammateWorktreeLifecycle:
@@ -61,111 +102,172 @@ class TeammateWorktreeLifecycle:
         self._configurator.worktree_manager = manager
         return manager
 
-    def _resolve_project_dir(self) -> str | None:
-        """Return the project directory that should own teammate worktrees."""
-        spec = getattr(self._configurator, "spec", None)
-        build_context = getattr(spec, "build_context", None)
-        project_dir = getattr(build_context, "project_dir", None)
-        if not project_dir:
-            seed = getattr(spec, "build_context_seed", None) or {}
-            if isinstance(seed, dict):
-                project_dir = seed.get("project_dir")
-        if not isinstance(project_dir, str) or not project_dir.strip():
-            return None
-        resolved = os.path.realpath(project_dir)
-        return resolved if os.path.isdir(resolved) else None
-
-    @staticmethod
-    def _enter_project_cwd(project_dir: str) -> tuple[str, str, str, str | None, str | None]:
-        """Temporarily anchor worktree creation to the project git repo."""
-        from openjiuwen.core.sys_operation.cwd import (
-            get_cwd,
-            get_original_cwd,
-            get_project_root,
-            get_team_workspace,
-            get_workspace,
-            init_cwd,
+    def _owner_scope(self, team_name: str, member_name: str) -> WorktreeOwnerScope:
+        return build_worktree_owner_scope(
+            team_name=team_name,
+            member_name=member_name,
+            spec=self._configurator.spec,
         )
 
-        snapshot = (
-            get_cwd(),
-            get_original_cwd(),
-            get_project_root(),
-            get_workspace(),
-            get_team_workspace(),
-        )
-        init_cwd(project_dir, project_root=project_dir, workspace=project_dir, team_workspace=snapshot[4])
-        return snapshot
+    @staticmethod
+    def _status_path(line: str) -> str:
+        """Extract the path part from one ``git status --porcelain`` line."""
+        path = line[3:].strip() if len(line) > 3 else ""
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[-1].strip()
+        return path.strip('"').rstrip("/")
 
     @staticmethod
-    def _restore_cwd(snapshot: tuple[str, str, str, str | None, str | None]) -> None:
-        """Restore the leader cwd state after worktree creation."""
-        from openjiuwen.core.sys_operation.cwd import init_cwd, set_cwd, set_original_cwd
+    def _is_team_runtime_status(line: str) -> bool:
+        path = TeammateWorktreeLifecycle._status_path(line)
+        if not path:
+            return False
+        if path in _TEAM_RUNTIME_FILES:
+            return True
+        root = path.split("/", 1)[0]
+        return root in _TEAM_RUNTIME_DIRS
 
-        cwd, original_cwd, project_root, workspace, team_workspace = snapshot
-        init_cwd(original_cwd, project_root=project_root, workspace=workspace, team_workspace=team_workspace)
-        set_cwd(cwd)
-        set_original_cwd(original_cwd)
+    @classmethod
+    async def _count_user_changed_files(cls, worktree_path: str) -> int:
+        from openjiuwen.harness.tools.worktree import git as worktree_git
+
+        changes = await worktree_git.status_porcelain(worktree_path)
+        return sum(1 for line in changes if not cls._is_team_runtime_status(line))
+
+    @staticmethod
+    async def _classify_worktree_contribution(
+        worktree_info: MemberWorktreeInfo,
+        repo_root: str,
+    ) -> WorktreeContributionState:
+        from openjiuwen.harness.tools.worktree.git import is_ref_ancestor, merge_base, rev_parse
+
+        if worktree_info.head_commit:
+            base_head = await rev_parse(worktree_info.head_commit, repo_root)
+            if base_head:
+                actual_head = await rev_parse("HEAD", worktree_info.worktree_path)
+                if actual_head:
+                    if actual_head != base_head:
+                        is_actual_descendant = await is_ref_ancestor(
+                            worktree_info.head_commit,
+                            "HEAD",
+                            worktree_info.worktree_path,
+                        )
+                        if is_actual_descendant is True:
+                            return WorktreeContributionState.CONTRIBUTED
+                        if is_actual_descendant is None:
+                            return WorktreeContributionState.UNKNOWN
+                    elif not worktree_info.worktree_branch:
+                        return WorktreeContributionState.NOT_CONTRIBUTED
+
+                if not worktree_info.worktree_branch:
+                    return WorktreeContributionState.UNKNOWN
+
+                branch_head = await rev_parse(worktree_info.worktree_branch, repo_root)
+                if not branch_head:
+                    return WorktreeContributionState.UNKNOWN
+                if branch_head == base_head:
+                    return WorktreeContributionState.NOT_CONTRIBUTED
+                is_descendant = await is_ref_ancestor(
+                    worktree_info.head_commit,
+                    worktree_info.worktree_branch,
+                    repo_root,
+                )
+                if is_descendant is True:
+                    return WorktreeContributionState.CONTRIBUTED
+                if is_descendant is None:
+                    return WorktreeContributionState.UNKNOWN
+
+        if not worktree_info.worktree_branch:
+            return WorktreeContributionState.UNKNOWN
+
+        branch_head = await rev_parse(worktree_info.worktree_branch, repo_root)
+        if not branch_head:
+            return WorktreeContributionState.UNKNOWN
+
+        fallback_base = await merge_base("HEAD", worktree_info.worktree_branch, repo_root)
+        if fallback_base is None:
+            return WorktreeContributionState.UNKNOWN
+        if branch_head == fallback_base:
+            return WorktreeContributionState.NOT_CONTRIBUTED
+        return WorktreeContributionState.CONTRIBUTED
 
     async def ensure_member_worktree(
         self,
         teammate: Any,
         role: TeamRole,
     ) -> str | None:
-        """Create or reuse the leader-owned worktree for a teammate."""
+        """Create or reuse the current-session worktree for a teammate."""
         if not self._member_needs_worktree(teammate, role):
             return None
 
+        team_backend = self._configurator.team_backend
+        if team_backend is None:
+            raise RuntimeError("Team worktree isolation requires a team backend")
+
+        team_name = team_backend.team_name
+        scope = self._owner_scope(team_name, teammate.member_name)
         worktree = get_member_worktree(teammate)
         worktree_path = worktree.path if worktree is not None else None
-        team_backend = self._configurator.team_backend
-        if worktree_path:
-            if os.path.isdir(worktree_path):
-                return worktree_path
-            if team_backend is not None:
-                await team_backend.db.member.update_member_worktree(
-                    teammate.member_name,
-                    team_backend.team_name,
-                    isolation="worktree",
-                    worktree_path=None,
+        if worktree is not None and worktree_path and os.path.isdir(worktree_path):
+            if matches_scope(worktree, scope):
+                info = info_from_options(
+                    worktree,
+                    member_name=teammate.member_name,
+                    scope=scope,
                 )
+                if info is not None:
+                    self._member_worktree_info[teammate.member_name] = info
+                    return worktree_path
+            team_logger.info(
+                "Not reusing foreign or legacy worktree for teammate {}: {}",
+                teammate.member_name,
+                worktree_path,
+            )
+        elif worktree is not None and worktree_path and matches_scope(worktree, scope):
+            await team_backend.db.member.update_member_worktree(
+                teammate.member_name,
+                team_name,
+                MemberWorktreeOptions(isolation="worktree"),
+            )
             self._member_worktree_info.pop(teammate.member_name, None)
             team_logger.info(
-                "Cleared missing worktree metadata before recreating teammate {}: {}",
+                "Cleared missing current-session worktree metadata before recreating teammate {}: {}",
                 teammate.member_name,
                 worktree_path,
             )
 
-        if team_backend is None:
-            return None
+        manager = manager_for_worktree_scope(self._get_worktree_manager(), scope)
+        snapshot = enter_project_worktree_context(scope.project_dir, scope.managed_root)
+        try:
+            result = await manager.create_owner_worktree(
+                scope.worktree_name,
+                source_dir=scope.project_dir,
+            )
+        finally:
+            restore_project_worktree_context(snapshot)
 
-        team_name = team_backend.team_name
-        slug = build_teammate_worktree_name(
-            team_name=team_name,
-            member_name=teammate.member_name,
-        )
-        manager = self._get_worktree_manager()
-        project_dir = self._resolve_project_dir()
-        if project_dir is not None:
-            snapshot = self._enter_project_cwd(project_dir)
-            try:
-                result = await manager.create_owner_worktree(slug)
-            finally:
-                self._restore_cwd(snapshot)
-        else:
-            result = await manager.create_owner_worktree(slug)
         await team_backend.db.member.update_member_worktree(
             teammate.member_name,
             team_name,
-            isolation="worktree",
-            worktree_path=result.worktree_path,
+            MemberWorktreeOptions(
+                isolation="worktree",
+                path=result.worktree_path,
+                session_id=scope.session_id,
+                project_hash=scope.project_hash,
+                managed_root=scope.managed_root,
+                worktree_branch=result.worktree_branch,
+                head_commit=result.head_commit,
+            ),
         )
         self._member_worktree_info[teammate.member_name] = MemberWorktreeInfo(
             worktree_path=result.worktree_path,
-            worktree_name=slug,
+            worktree_name=scope.worktree_name,
             worktree_branch=result.worktree_branch,
             head_commit=result.head_commit,
             hook_based=bool(getattr(result, "hook_based", False)),
+            session_id=scope.session_id,
+            project_hash=scope.project_hash,
+            managed_root=scope.managed_root,
         )
         team_logger.info(
             "Created worktree for teammate {}: {} ({})",
@@ -175,44 +277,25 @@ class TeammateWorktreeLifecycle:
         )
         return result.worktree_path
 
-    async def finalize_member_worktree(self, member_name: str) -> None:
-        """Remove a clean teammate worktree, preserve one with changes."""
-        team_backend = getattr(self._configurator, "team_backend", None)
-        team_name = getattr(self._configurator, "team_name", None) or (
-            team_backend.team_name if team_backend else None
+    async def _finalize_member_worktree(
+        self,
+        member_name: str,
+    ) -> None:
+        """Remove a clean current-session teammate worktree."""
+        resolved = await resolve_current_session_member_worktree(
+            self._configurator,
+            self._member_worktree_info,
+            member_name,
+            self._owner_scope,
+            log_foreign=True,
         )
-        if team_backend is None or team_name is None:
+        if resolved is None:
             return
+        worktree_info = resolved.worktree_info
 
-        teammate = await team_backend.db.member.get_member(member_name, team_name)
-        if teammate is None:
-            return
-        worktree = get_member_worktree(teammate)
-        if worktree is None or worktree.isolation != "worktree":
-            return
-
-        worktree_path = worktree.path
-        if not worktree_path:
-            return
-
-        if not os.path.isdir(worktree_path):
-            await team_backend.db.member.update_member_worktree(
-                member_name,
-                team_name,
-                isolation="worktree",
-                worktree_path=None,
-            )
-            self._member_worktree_info.pop(member_name, None)
-            team_logger.info("Cleared missing worktree metadata for teammate {}", member_name)
-            return
-
-        worktree_info = self._member_worktree_info.get(member_name)
-        if worktree_info is None:
-            team_logger.warning(
-                "Keeping worktree for teammate {} because host worktree metadata is not available: {}",
-                member_name,
-                worktree_path,
-            )
+        if not os.path.isdir(worktree_info.worktree_path):
+            await clear_member_worktree_metadata(member_name, resolved, self._member_worktree_info)
+            team_logger.info("Cleared missing current-session worktree metadata for teammate {}", member_name)
             return
         if worktree_info.hook_based:
             team_logger.info(
@@ -225,7 +308,7 @@ class TeammateWorktreeLifecycle:
         from openjiuwen.harness.tools.worktree.git import find_canonical_git_root
         from openjiuwen.harness.tools.worktree.models import WorktreeSession
 
-        manager = self._get_worktree_manager()
+        manager = manager_for_worktree_scope(self._get_worktree_manager(), resolved.scope)
         repo_root = await find_canonical_git_root(worktree_info.worktree_path)
         session = WorktreeSession(
             original_cwd=repo_root or worktree_info.worktree_path,
@@ -234,7 +317,7 @@ class TeammateWorktreeLifecycle:
             worktree_branch=worktree_info.worktree_branch,
             original_head_commit=worktree_info.head_commit,
             member_name=member_name,
-            team_name=team_name,
+            team_name=resolved.team_name,
         )
         summary = await manager.count_changes(session)
         if summary is None:
@@ -245,12 +328,17 @@ class TeammateWorktreeLifecycle:
             )
             return
 
-        if summary.changed_files > 0 or summary.commits > 0:
+        changed_files = summary.changed_files
+        remove_force = False
+        if changed_files > 0:
+            changed_files = await self._count_user_changed_files(worktree_info.worktree_path)
+            remove_force = changed_files == 0
+
+        if changed_files > 0:
             team_logger.info(
-                "Keeping worktree for teammate {} with {} changed files and {} commits: {} ({})",
+                "Keeping worktree for teammate {} with {} changed files: {} ({})",
                 member_name,
-                summary.changed_files,
-                summary.commits,
+                changed_files,
                 worktree_info.worktree_path,
                 worktree_info.worktree_branch,
             )
@@ -258,23 +346,166 @@ class TeammateWorktreeLifecycle:
 
         if repo_root is None:
             team_logger.warning(
-                "Keeping clean worktree for teammate {} because repo root could not be resolved: {}",
+                "Keeping worktree for teammate {} because repo root could not be resolved: {}",
                 member_name,
                 worktree_info.worktree_path,
             )
             return
 
-        removed = await manager.remove_worktree(worktree_info.worktree_path, repo_root)
-        if removed:
-            await team_backend.db.member.update_member_worktree(
+        contribution_state = await self._classify_worktree_contribution(worktree_info, repo_root)
+        if contribution_state is WorktreeContributionState.UNKNOWN:
+            team_logger.warning(
+                "Keeping worktree for teammate {} because branch commit state could not be verified: {} ({})",
                 member_name,
-                team_name,
-                isolation="worktree",
-                worktree_path=None,
+                worktree_info.worktree_path,
+                worktree_info.worktree_branch,
             )
-            self._member_worktree_info.pop(member_name, None)
+            return
+
+        if contribution_state is WorktreeContributionState.CONTRIBUTED:
             team_logger.info(
-                "Removed clean worktree for teammate {}: {}",
+                "Keeping worktree for teammate {} with branch commits while team lifecycle is still active: {} ({})",
+                member_name,
+                worktree_info.worktree_path,
+                worktree_info.worktree_branch,
+            )
+            return
+
+        removed = await manager.remove_worktree(worktree_info.worktree_path, repo_root, force=remove_force)
+        if removed:
+            await clear_member_worktree_metadata(member_name, resolved, self._member_worktree_info)
+            team_logger.info(
+                "Removed clean current-session worktree for teammate {}: {}",
+                member_name,
+                worktree_info.worktree_path,
+            )
+
+    async def finalize_non_contributing_member_worktrees(self) -> None:
+        """Finalize current-session worktrees whose branches did not contribute commits."""
+        await self._finalize_all_member_worktrees()
+
+    async def finalize_all_member_worktrees_for_team_clean(self) -> None:
+        """Finalize teammate worktrees before the team is permanently cleaned."""
+        await self._remove_all_current_session_member_worktrees()
+
+    async def _finalize_all_member_worktrees(self) -> None:
+        """Finalize every teammate worktree owned by the current session."""
+        context = team_context(self._configurator)
+        if context is None:
+            return
+        team_backend, team_name = context
+        for member_name in await teammate_member_names(team_backend, team_name):
+            await self._finalize_member_worktree(member_name)
+
+    async def _remove_all_current_session_member_worktrees(self) -> None:
+        """Remove every teammate worktree owned by this team."""
+        context = team_context(self._configurator)
+        if context is None:
+            return
+        team_backend, team_name = context
+        for member_name in await teammate_member_names(team_backend, team_name):
+            await self._remove_current_session_member_worktree(member_name)
+        await self._remove_orphaned_team_session_worktrees(team_name)
+
+    async def _remove_orphaned_team_session_worktrees(self, team_name: str) -> None:
+        """Remove team-owned worktrees that no longer have DB member metadata."""
+        from openjiuwen.agent_teams.paths import team_sessions_dir
+        from openjiuwen.harness.tools.worktree.git import find_canonical_git_root
+
+        sessions_root = team_sessions_dir(team_name)
+        if not sessions_root.is_dir():
+            return
+
+        sessions_root_real = os.path.realpath(str(sessions_root))
+        manager = self._get_worktree_manager()
+        for session_dir in sessions_root.iterdir():
+            worktrees_root = session_dir / "worktrees"
+            if not worktrees_root.is_dir():
+                continue
+            for worktree_path in worktrees_root.iterdir():
+                if worktree_path.is_symlink() or not worktree_path.is_dir():
+                    continue
+
+                worktree_path_str = str(worktree_path)
+                worktree_real = os.path.realpath(worktree_path_str)
+                try:
+                    if os.path.commonpath([sessions_root_real, worktree_real]) != sessions_root_real:
+                        team_logger.warning(
+                            "Keeping team worktree path outside session root during team clean: {}",
+                            worktree_path_str,
+                        )
+                        continue
+                except ValueError:
+                    team_logger.warning(
+                        "Keeping team worktree path with incompatible root during team clean: {}",
+                        worktree_path_str,
+                    )
+                    continue
+
+                repo_root = await find_canonical_git_root(worktree_path_str)
+                if repo_root is None:
+                    shutil.rmtree(worktree_path_str, ignore_errors=True)
+                    team_logger.info(
+                        "Removed orphaned team worktree directory during team clean: {}",
+                        worktree_path_str,
+                    )
+                    continue
+
+                removed = await manager.remove_worktree(worktree_path_str, repo_root, force=True)
+                if removed:
+                    team_logger.info(
+                        "Removed orphaned team worktree during team clean: {}",
+                        worktree_path_str,
+                    )
+                else:
+                    team_logger.warning(
+                        "Failed to remove orphaned team worktree during team clean: {}",
+                        worktree_path_str,
+                    )
+
+    async def _remove_current_session_member_worktree(self, member_name: str) -> None:
+        """Remove one current-session teammate worktree without contribution checks."""
+        resolved = await resolve_current_session_member_worktree(
+            self._configurator,
+            self._member_worktree_info,
+            member_name,
+            self._owner_scope,
+        )
+        if resolved is None:
+            return
+        worktree_info = resolved.worktree_info
+
+        if not os.path.isdir(worktree_info.worktree_path):
+            await clear_member_worktree_metadata(member_name, resolved, self._member_worktree_info)
+            return
+        if worktree_info.hook_based:
+            team_logger.info(
+                "Keeping hook-based worktree for teammate {} during team clean: {}",
+                member_name,
+                worktree_info.worktree_path,
+            )
+            return
+
+        from openjiuwen.harness.tools.worktree.git import find_canonical_git_root
+
+        repo_root = await find_canonical_git_root(worktree_info.worktree_path)
+        if repo_root is None:
+            shutil.rmtree(worktree_info.worktree_path, ignore_errors=True)
+            await clear_member_worktree_metadata(member_name, resolved, self._member_worktree_info)
+            team_logger.info(
+                "Removed current-session worktree directory for teammate {} during team clean "
+                "because git metadata could not be resolved: {}",
+                member_name,
+                worktree_info.worktree_path,
+            )
+            return
+
+        manager = manager_for_worktree_scope(self._get_worktree_manager(), resolved.scope)
+        removed = await manager.remove_worktree(worktree_info.worktree_path, repo_root, force=True)
+        if removed:
+            await clear_member_worktree_metadata(member_name, resolved, self._member_worktree_info)
+            team_logger.info(
+                "Removed current-session worktree for teammate {} during team clean: {}",
                 member_name,
                 worktree_info.worktree_path,
             )

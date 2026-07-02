@@ -21,6 +21,7 @@ from typing import (
 
 from pydantic import BaseModel
 
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.schema.status import (
     EXECUTION_TRANSITIONS,
     MEMBER_TRANSITIONS,
@@ -338,10 +339,16 @@ class InMemoryTeamDatabase:
 
     async def force_delete_team_session(self, team_name: str) -> bool:
         """Force delete a team's records and clear in-memory session data."""
+        from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
+
+        session_id = get_session_id()
+        cleanup_success = True
+        if session_id:
+            cleanup_success = await remove_session_worktrees(team_name, session_id)
         deleted = await self.delete_team(team_name)
         await self.drop_cur_session_tables()
         team_logger.info("Force deleted team session data for {}", team_name)
-        return deleted
+        return deleted and cleanup_success
 
     # =====================================================================
     # Member Operations

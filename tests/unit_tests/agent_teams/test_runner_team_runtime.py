@@ -1,7 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-import asyncio
 import uuid
 from types import SimpleNamespace
 from typing import (
@@ -1876,12 +1875,19 @@ class TestRunnerReleaseAutoDispatch:
         fake_db.initialize = AsyncMock()
         fake_db.drop_session_tables_by_id = AsyncMock(return_value=["team_task_xxx"])
 
-        with patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db):
+        with (
+            patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db),
+            patch(
+                "openjiuwen.agent_teams.runtime.manager.remove_session_worktrees",
+                new_callable=AsyncMock,
+            ) as remove_worktrees,
+        ):
             await Runner.release(session_id)
 
         # Should have called drop_session_tables_by_id (team cleanup)
         fake_db.initialize.assert_awaited_once()
         fake_db.drop_session_tables_by_id.assert_awaited_once_with(session_id)
+        remove_worktrees.assert_awaited_once_with("auto_team", session_id)
 
         # Checkpoint should be released
         assert await isolated_checkpointer.session_exists(session_id) is False
@@ -1920,10 +1926,22 @@ class TestRunnerReleaseAutoDispatch:
         fake_db.initialize = AsyncMock()
         fake_db.drop_session_tables_by_id = AsyncMock(return_value=["team_task_xxx"])
 
-        with patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db):
+        with (
+            patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db),
+            patch(
+                "openjiuwen.agent_teams.runtime.manager.remove_session_worktrees",
+                new_callable=AsyncMock,
+            ) as remove_worktrees,
+        ):
             await Runner.release(session_id)
 
         fake_db.drop_session_tables_by_id.assert_awaited_once_with(session_id)
+        remove_worktrees.assert_has_awaits(
+            [
+                call("first_team", session_id),
+                call("second_team", session_id),
+            ]
+        )
         assert await isolated_checkpointer.session_exists(session_id) is False
 
         await Runner.stop()

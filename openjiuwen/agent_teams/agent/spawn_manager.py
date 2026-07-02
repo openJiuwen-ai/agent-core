@@ -236,8 +236,6 @@ class SpawnManager:
                 await handle.force_kill()
         except Exception as e:
             team_logger.error("Error cleaning up teammate {}: {}", member_name, e)
-        finally:
-            await self.worktree_lifecycle.finalize_member_worktree(member_name)
 
     async def restart_teammate(self, member_name: str, max_retries: int = 3) -> bool:
         await self.cleanup_teammate(member_name)
@@ -288,6 +286,19 @@ class SpawnManager:
         team_backend = self._configurator.team_backend
         team_name = self._configurator.team_name
         if team_backend and team_name:
+            member = await team_backend.db.member.get_member(member_name, team_name)
+            if member is not None:
+                try:
+                    status = MemberStatus(member.status)
+                except ValueError:
+                    status = MemberStatus.ERROR
+                if status in {MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN}:
+                    team_logger.info(
+                        "Teammate {} is {}; skip unhealthy restart",
+                        member_name,
+                        status.value,
+                    )
+                    return
             await team_backend.db.member.update_member_status(
                 member_name,
                 team_name,
@@ -327,7 +338,13 @@ class SpawnManager:
         # get a backfilled ``teammate`` default via
         # ``database.engine._ensure_team_member_role_column``.
         role = TeamRole(teammate.role)
-        worktree_path = await self.worktree_lifecycle.ensure_member_worktree(teammate, role)
+        try:
+            member_status = MemberStatus(teammate.status)
+        except ValueError:
+            member_status = MemberStatus.ERROR
+        worktree_path = None
+        if member_status not in {MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN}:
+            worktree_path = await self.worktree_lifecycle.ensure_member_worktree(teammate, role)
         # External-CLI members carry no DeepAgent: the backend registry says
         # which CLI adapter drives them, routing spawn to external_cli_spawn.
         cli_agent = team_backend.get_external_cli_agent(teammate.member_name)

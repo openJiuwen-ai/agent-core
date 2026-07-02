@@ -248,6 +248,7 @@ class AgentConfigurator:
         ctx: TeamRuntimeContext,
         *,
         on_teammate_created=None,
+        on_before_team_cleaned=None,
         on_team_cleaned=None,
         on_team_built=None,
     ) -> None:
@@ -285,6 +286,7 @@ class AgentConfigurator:
             spec,
             ctx,
             self.messager,
+            on_before_team_cleaned=on_before_team_cleaned,
             on_team_cleaned=on_team_cleaned,
             on_team_built=on_team_built,
         )
@@ -496,7 +498,6 @@ class AgentConfigurator:
         )
         from openjiuwen.agent_teams.rails.team_context import inject_team_handles
         from openjiuwen.agent_teams.schema.build_context import BuildContext
-        from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
 
         ensure_harness_elements_registered()
 
@@ -787,6 +788,7 @@ class AgentConfigurator:
         ctx: TeamRuntimeContext,
         messager: Messager,
         *,
+        on_before_team_cleaned=None,
         on_team_cleaned=None,
         on_team_built=None,
     ) -> TeamBackend:
@@ -802,6 +804,9 @@ class AgentConfigurator:
                 on the ``clean_team`` success path. Wired for every role;
                 only the leader can ever fire it (``clean_team`` is a
                 leader-only tool).
+            on_before_team_cleaned: Optional async callback threaded into
+                ``TeamBackend`` before the team DB row is deleted. Cleanup
+                that needs member metadata should be wired here.
             on_team_built: Optional async callback threaded into the
                 ``TeamBackend`` so the hosting ``TeamAgent`` can persist
                 DB lifecycle state after ``build_team`` succeeds.
@@ -827,6 +832,7 @@ class AgentConfigurator:
             enable_hitt=spec.enable_hitt,
             enable_bridge=spec.enable_bridge,
             external_cli_agents=spec.external_cli_agents,
+            on_before_team_cleaned=on_before_team_cleaned,
             on_team_cleaned=on_team_cleaned,
             on_team_built=on_team_built,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,

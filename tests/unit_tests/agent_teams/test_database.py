@@ -15,6 +15,11 @@ from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
 )
+from openjiuwen.agent_teams.paths import (
+    configure_openjiuwen_home,
+    reset_openjiuwen_home,
+    team_session_worktrees_dir,
+)
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
@@ -3062,6 +3067,38 @@ class TestRuntimeCleanup:
         finally:
             await database.close()
             reset_session_id(token)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_force_delete_team_session_removes_current_session_worktrees(self, tmp_path):
+        """Force delete should remove the current session's managed worktree root."""
+        db_path = tmp_path / "force_cleanup_worktree.db"
+        config = DatabaseConfig(
+            db_type=DatabaseType.SQLITE,
+            connection_string=str(db_path),
+        )
+        configure_openjiuwen_home(tmp_path / "openjiuwen-home")
+        database = TeamDatabase(config)
+        token = set_session_id("force_cleanup_worktree")
+        worktree_root = team_session_worktrees_dir("cleanup_team", "force_cleanup_worktree")
+        worktree_path = worktree_root / "agent-cleanup-team-dev-abcdef1234"
+        worktree_path.mkdir(parents=True)
+        (worktree_path / "file.txt").write_text("content", encoding="utf-8")
+        try:
+            await database.initialize()
+            await database.team.create_team(
+                "cleanup_team",
+                "Cleanup Team",
+                "leader1",
+            )
+
+            assert await database.force_delete_team_session("cleanup_team") is True
+
+            assert not worktree_root.exists()
+        finally:
+            await database.close()
+            reset_session_id(token)
+            reset_openjiuwen_home()
 
 
 # ---------------------------------------------------------------------------
