@@ -29,7 +29,7 @@ from openjiuwen.agent_teams.paths import (
 from openjiuwen.agent_teams.prompts import role_policy
 from openjiuwen.agent_teams.runtime.team_plan import is_team_plan_enabled
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
-from openjiuwen.agent_teams.schema.deep_agent_spec import SysOperationSpec, WorkspaceSpec
+from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec, SysOperationSpec, WorkspaceSpec
 from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
@@ -54,6 +54,12 @@ if TYPE_CHECKING:
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
+_TEAM_WORKTREE_BASH_DENY_PATTERNS = [
+    r"\bgit(?:\s+(?:-[A-Za-z](?:\s+\S+)?|--[^\s;&|]+(?:=\S+)?))*\s+worktree\s+"
+    r"(?:add|remove|prune|move|repair|lock|unlock)\b",
+]
+
+
 def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     if spec.team_mode is not None:
         return spec.team_mode
@@ -66,6 +72,49 @@ def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     avatar_roles = {TeamRole.HUMAN_AGENT, TeamRole.BRIDGE_AGENT}
     non_avatar_predefined = [m for m in spec.predefined_members if m.role_type not in avatar_roles]
     return "hybrid" if non_avatar_predefined else "default"
+
+
+def _apply_team_worktree_shell_guard(rails: list[Any], *, enabled: bool) -> list[Any]:
+    """Merge team-managed worktree shell guards into core.sys_operation rails."""
+    if not enabled:
+        return rails
+    from openjiuwen.agent_teams.rails.builtin_elements import SYS_OPERATION
+
+    guarded: list[Any] = []
+    found_sys_operation = False
+    for rail in rails:
+        if getattr(rail, "type", None) != SYS_OPERATION:
+            guarded.append(rail)
+            continue
+        found_sys_operation = True
+        params = dict(getattr(rail, "params", None) or {})
+        deny_patterns = list(params.get("bash_deny_patterns") or [])
+        for pattern in _TEAM_WORKTREE_BASH_DENY_PATTERNS:
+            if pattern not in deny_patterns:
+                deny_patterns.append(pattern)
+        params["bash_deny_patterns"] = deny_patterns
+        guarded.append(rail.model_copy(update={"params": params}))
+    if not found_sys_operation:
+        guarded.append(
+            RailSpec(
+                type=SYS_OPERATION,
+                params={"bash_deny_patterns": list(_TEAM_WORKTREE_BASH_DENY_PATTERNS)},
+            )
+        )
+    return guarded
+
+
+def _has_team_worktree_shell_guard(rails: list[Any]) -> bool:
+    from openjiuwen.agent_teams.rails.builtin_elements import SYS_OPERATION
+
+    for rail in rails:
+        if getattr(rail, "type", None) != SYS_OPERATION:
+            continue
+        params = getattr(rail, "params", None) or {}
+        deny_patterns = set(params.get("bash_deny_patterns") or [])
+        if all(pattern in deny_patterns for pattern in _TEAM_WORKTREE_BASH_DENY_PATTERNS):
+            return True
+    return False
 
 
 class AgentConfigurator:
@@ -643,8 +692,17 @@ class AgentConfigurator:
         # Fold the team rails into the spec rails (after the user rails, to keep
         # the init order consistent with the legacy mount order).
         team_rail_specs.append(observability_rail_spec)
+        base_rails = _apply_team_worktree_shell_guard(
+            list(build_spec.rails or []),
+            enabled=ctx.role in {TeamRole.LEADER, TeamRole.TEAMMATE},
+        )
+        if ctx.role in {TeamRole.LEADER, TeamRole.TEAMMATE} and not _has_team_worktree_shell_guard(base_rails):
+            team_logger.warning(
+                "Team-managed worktree shell guard was not applied for member {} because core.sys_operation is absent",
+                member_name,
+            )
         build_spec = build_spec.model_copy(
-            update={"rails": list(build_spec.rails or []) + team_rail_specs},
+            update={"rails": base_rails + team_rail_specs},
         )
 
         self.harness = TeamHarness.build(
@@ -779,8 +837,6 @@ class AgentConfigurator:
 
         if self.workspace_manager:
             agent_team.register_cleanup_path(self.workspace_manager.workspace_path)
-
-        agent_team.register_cleanup_path(str(team_home(team_name)))
 
         return agent_team
 
