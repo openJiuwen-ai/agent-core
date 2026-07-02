@@ -5,7 +5,7 @@
 
 from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class DatabaseType(StrEnum):
@@ -55,3 +55,19 @@ class DatabaseConfig(BaseModel):
     # WAL auto-checkpoint threshold in pages. Larger means fewer (but bigger)
     # commit stalls under write-heavy load; SQLite's default is 1000.
     wal_autocheckpoint: int = 1000
+
+    @model_validator(mode="after")
+    def _normalize_memory_alias(self) -> "DatabaseConfig":
+        """Normalise the ``"memory"`` shorthand to a ``:memory:`` SQLite db.
+
+        The dedicated in-memory backend (``InMemoryTeamDatabase``) was
+        removed — a ``:memory:`` SQLite database is the single in-memory
+        store now. ``db_type="memory"`` is kept as a convenience alias
+        (used by tests and lightweight callers) and normalised here so every
+        downstream (``initialize_engine`` / ``StorageSpec``) only ever sees a
+        real ``DatabaseType``.
+        """
+        if self.db_type == "memory":
+            self.db_type = DatabaseType.SQLITE
+            self.connection_string = ":memory:"
+        return self
