@@ -1,7 +1,7 @@
 # Team DB 性能优化清单
 
 本清单是基于 `agent_team_tools_db_stress_e2e.py` 压测（20 人团队并发、消息主导画像）
-识别出的 SQLite 数据库层优化点汇总。进度：**B1 已落地**，其余为待办分析项。
+识别出的 SQLite 数据库层优化点汇总。进度：**B1 / C4 / C1 / C2 已落地**，其余为待办分析项。
 
 - 证据来源：`tests/system_tests/agent_swarm/agent_team_tools_db_stress_e2e.py`
 - 涉及代码：`openjiuwen/agent_teams/tools/database/`（`engine.py` / `message_dao.py` /
@@ -89,21 +89,24 @@
 `mmap_size=256MB` / `synchronous=NORMAL` / `temp_store=MEMORY`；首连接 `journal_mode=WAL`。
 设计前提：**写由应用层 `asyncio.Lock` 串行化（单一逻辑写者）**，读不持锁靠 WAL 并发。
 
-- [ ] **C1. 读写分离池：解开"读连接可用性被写者持有时长绑架"** — 高收益 / 结构改动 / 无 schema 迁移
+- [x] **C1. 读写分离池：解开"读连接可用性被写者持有时长绑架"** — ✅ 已落地（结构改动，无 schema 迁移）
   - 现象：写事务**同时占写锁 + 一个池连接**，整个事务不放；multicast avg 306ms/p99 2.5s 期间，
-    20 个读者只剩 4 个连接可用 → 读尾延迟被写延迟通过共享池反向传染。这是单一共享池在
-    "1 写多读"模型下的结构缺陷。
-  - 改动：既然写已串行到单一写者，拆成**写 engine（`StaticPool`/size=1）+ 读 engine（QueuePool，
-    按读并发配）**，同一文件、`sqlite+aiosqlite`；`DbSessions.read()/write()` 分别绑不同 engine，
-    上层零改动。读永不为拿连接等写者。
-  - 验证：看 `read_inbox`/`view_task` 的 p95/p99 是否随写尖刺同步抖动消失。
+    20 个读者只剩 4 个连接可用 → 读尾延迟被写延迟通过共享池反向传染。
+  - 改动：`initialize_engine` 返回 `SqlEngines`——文件型 SQLite 拆成**写 engine（QueuePool，
+    `write_pool_size=2`）+ 读 engine（QueuePool，`read_pool_size=8`）**，同一文件；`:memory:`/PG/MySQL
+    读引擎别名写引擎（不拆）。`DbSessions(write_sf, read_sf)` 分绑；`TeamDatabase.engine`/`session_local`
+    仍是写引擎（DDL 用），`read_engine`/`read_session_local` 是读池。
+  - **A/B（team=40，2 轮 stash 前/后）结论：延迟中性**——本 harness 读操作本就 ~4ms，池排队不成瓶颈，
+    `read_inbox` p99 与 `view_task` p95 双方均在噪声带内（如 view_task p95 602/420→448/417）。
+    读写分离的延迟收益只在"读又多又慢 + 写占连接久"时显现，本负载读太便宜。**确定收益是结构隔离
+    （写尖刺不再传染读连接可用性）+ 为 C2 的差异化缓存/内存优化提供载体**。
 
-- [ ] **C2. `pool_size` 与 `cache_size` 的内存耦合：多连接 + 小每连接缓存** — 中收益 / 低风险
-  - 现象：`cache_size=-65536` 是**每连接 64MB**（SQLite 页缓存非共享），5 连接 = 最多 320MB；
-    靠加 `pool_size` 提读并发会线性膨胀内存（16 连接 ≈ 1GB）。
-  - 改动：读连接改"多而小"，如 `read_pool_size=16, cache_size=-8000(8MB)` → 128MB 总量却 3 倍读并行；
-    共享 OS page cache + `mmap_size=256MB` 已提供跨连接缓存，私有缓存不必开大。
-  - 与 C1 呼应：分离后可**差异化配置**——写连接大缓存利 checkpoint，读连接小缓存省内存。
+- [x] **C2. `pool_size` 与 `cache_size` 的内存耦合：多连接 + 小每连接缓存** — ✅ 已落地
+  - 现象：`cache_size=-65536` 是**每连接 64MB**（SQLite 页缓存非共享），旧单池 5×64MB=320MB。
+  - 改动：写连接大缓存（`write_cache_size_kb=65536`=64MB，利 checkpoint），读连接小缓存
+    （`read_cache_size_kb=8192`=8MB）。**峰值连接缓存：写 2×64 + 读 8×8 = 192MB，较旧 320MB
+    降 ~40%，且读并行度从 5 提到 8**。共享 OS page cache + `mmap_size=256MB` 仍提供跨连接缓存。
+  - 单测 `test_reader_connection_uses_smaller_cache` / `test_pool_and_cache_knobs_are_honored` 守住。
 
 - [ ] **C3. WAL checkpoint 停顿：写尖刺的主因** — 中收益 / 中风险
   - 现象：写已串行，单笔却偶发秒级尖刺（multicast p99 2.5s、broadcast p99 1s、member max 2.5s），
@@ -112,10 +115,11 @@
   - 改动：调大 `wal_autocheckpoint` 降频，或把 checkpoint 挪出写路径（后台定时
     `PRAGMA wal_checkpoint(PASSIVE)`）；写连接调大 `cache_size` 反利 checkpoint（更多脏页在内存）。
 
-- [ ] **C4. 把连接池 / PRAGMA 旋钮暴露到 `DatabaseConfig`** — 前置项 / 纯 additive
-  - 现象：`pool_size` / `cache_size` / `mmap_size` / `wal_autocheckpoint` 全硬编码在 `engine.py`。
-  - 改动：`DatabaseConfig` 增 `pool_size` / `read_pool_size` / `cache_size_kb` / `mmap_size` /
-    `wal_autocheckpoint` 字段，带当前默认值，向后兼容。是 C1~C3 做 A/B 的前提。
+- [x] **C4. 把连接池 / PRAGMA 旋钮暴露到 `DatabaseConfig`** — ✅ 已落地（纯 additive）
+  - 改动：`DatabaseConfig` 增 `read_pool_size` / `write_pool_size` / `read_cache_size_kb` /
+    `write_cache_size_kb` / `mmap_size_mb` / `wal_autocheckpoint` 字段，默认值保持原行为
+    （写缓存 64MB、mmap 256MB、autocheckpoint 1000），向后兼容。`wal_autocheckpoint` 也已接入
+    PRAGMA（C3 的旋钮就绪，C3 的 checkpoint 挪出写路径尚未做）。
 
 ### 保持现状、别乱动
 

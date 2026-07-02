@@ -32,27 +32,38 @@ Tools never reach into `TeamDatabase` directly — they go through `TeamBackend`
 
 ### Database concurrency (SQLite write serialisation)
 
-SQLite allows a single writer at a time (a database-level lock). The
-in-process team runtime shares one engine + connection pool across every
-member, so the DB layer is built around SQLite's model instead of fighting
-it with a pool of would-be parallel writers:
+SQLite allows a single writer at a time (a database-level lock). The DB
+layer is built around SQLite's model instead of fighting it with a pool of
+would-be parallel writers:
 
+- **Read/write engine split (`initialize_engine` → `SqlEngines`)** —
+  file-backed SQLite runs **two** engines over the same file: a small
+  single-writer pool (`write_pool_size`, default 2) and a larger reader pool
+  (`read_pool_size`, default 8). Writes serialise on the app-level lock onto
+  the writer pool; reads run on the reader pool, so a slow write never starves
+  reader-connection availability. `:memory:` (one shared StaticPool
+  connection) and PostgreSQL / MySQL use a single engine for both — the read
+  fields of `SqlEngines` alias the write ones. `TeamDatabase.engine` /
+  `session_local` are the **writer** engine + factory (also used by the DDL
+  helpers); `read_engine` / `read_session_local` are the reader pool.
 - **`DbSessions` (`database/engine.py`)** — one provider shared by all four
-  DAOs, exposing `read()` / `write()` async-context accessors. `write()`
-  holds a process-wide `asyncio.Lock`; `read()` does not. Only one
-  connection is ever on the write path (no busy-timeout back-off pinning a
-  checked-out connection), and the rest of the pool serves concurrent WAL
-  reads. This is what stops `QueuePool limit ... timed out` exhaustion under
-  multi-member load. The write lock is **non-reentrant**: when a public
-  write delegates to another (`add_task_with_bidirectional_dependencies` →
-  `mutate_dependency_graph`, `verify_and_fix_task_consistency` →
-  `_verify_and_fix_blocked_tasks`), only the innermost session opener takes
-  the lock.
-- **PRAGMA (`engine.py` `connect` event)** — file-backed SQLite runs
+  DAOs, exposing `read()` / `write()` async-context accessors bound to the
+  reader / writer factories respectively. `write()` holds a process-wide
+  `asyncio.Lock`; `read()` does not. This is what stops `QueuePool limit ...
+  timed out` exhaustion under multi-member load. The write lock is
+  **non-reentrant**: when a public write delegates to another
+  (`add_task_with_bidirectional_dependencies` → `mutate_dependency_graph`,
+  `verify_and_fix_task_consistency` → `_verify_and_fix_blocked_tasks`), only
+  the innermost session opener takes the lock.
+- **PRAGMA (`engine.py` `_attach_sqlite_pragmas`)** — file-backed SQLite runs
   `journal_mode=WAL` (database-level, set once on first connect) +
-  `synchronous=NORMAL` (connection-level, set on every connect). NORMAL is
-  the safe, high-throughput WAL pairing; FULL's per-commit fsync is the
-  throughput ceiling.
+  `synchronous=NORMAL` + `wal_autocheckpoint` (connection-level, every
+  connect). NORMAL is the safe, high-throughput WAL pairing; FULL's per-commit
+  fsync is the throughput ceiling. Per-connection page cache is asymmetric:
+  the writer keeps a large `cache_size` (`write_cache_size_kb`, default 64 MiB
+  — helps WAL checkpoints) while each reader keeps a small one
+  (`read_cache_size_kb`, default 8 MiB) so raising `read_pool_size` does not
+  multiply memory. All knobs live on `DatabaseConfig`.
 - **Batched writes** — each `COMMIT` is one fsync, the dominant write cost.
   `MessageDao.mark_messages_read` marks a whole mailbox drain in one
   transaction (one fsync) instead of one per message; the coordination

@@ -8,7 +8,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TypeVar
+from typing import NamedTuple, TypeVar
 
 from sqlalchemy import event, inspect
 from sqlalchemy.exc import OperationalError
@@ -54,26 +54,37 @@ _DB_RETRY_BASE_DELAY = 0.5
 class DbSessions:
     """Read/write session provider with process-wide write serialisation.
 
-    SQLite permits a single writer at a time (a database-level lock). In
-    the in-process team runtime every member shares one engine and one
-    connection pool, so a process-wide ``asyncio.Lock`` funnels all writes
-    through one logical writer slot. Writers therefore never contend on the
-    SQLite lock — no busy-timeout back-off pinning a checked-out connection
-    — and the remaining pool connections stay free for concurrent WAL
-    reads. This mirrors SQLite's own concurrency model (serialised writes +
-    concurrent readers) instead of fighting it with a pool of would-be
-    parallel writers.
+    SQLite permits a single writer at a time (a database-level lock), so a
+    process-wide ``asyncio.Lock`` funnels every write through one logical
+    writer slot — writers never contend on the SQLite lock. For file-backed
+    SQLite the reads and writes run on *separate* engines (a dedicated
+    single-writer pool + a larger reader pool), so a slow write never starves
+    reader-connection availability. For ``:memory:`` and PostgreSQL / MySQL the
+    two factories are the same object (no split), and ``read()`` / ``write()``
+    still differ only by whether the write lock is held.
     """
 
-    def __init__(self, session_local: async_sessionmaker) -> None:
-        """Bind the shared session factory and create the write lock."""
-        self._session_local = session_local
+    def __init__(
+        self,
+        write_session_local: async_sessionmaker,
+        read_session_local: async_sessionmaker | None = None,
+    ) -> None:
+        """Bind the write / read session factories and create the write lock.
+
+        Args:
+            write_session_local: Session factory bound to the writer engine.
+            read_session_local: Session factory bound to the reader engine.
+                Defaults to ``write_session_local`` when no split exists
+                (``:memory:`` / PostgreSQL / MySQL).
+        """
+        self._write_session_local = write_session_local
+        self._read_session_local = read_session_local or write_session_local
         self._write_lock = asyncio.Lock()
 
     @asynccontextmanager
     async def read(self) -> AsyncIterator[AsyncSession]:
         """Yield a session for read-only work; the write lock is not held."""
-        async with self._session_local() as session:
+        async with self._read_session_local() as session:
             yield session
 
     @asynccontextmanager
@@ -86,7 +97,7 @@ class DbSessions:
         method when one write helper delegates to another.
         """
         async with self._write_lock:
-            async with self._session_local() as session:
+            async with self._write_session_local() as session:
                 yield session
 
 
@@ -234,98 +245,151 @@ def _ensure_message_protocol_column(sync_conn) -> None:
 
 
 
-async def initialize_engine(
+class SqlEngines(NamedTuple):
+    """Engines + session factories returned by ``initialize_engine``.
+
+    For file-backed SQLite the write and read engines are distinct — a
+    dedicated single-writer pool plus a larger reader pool — so a slow write
+    never starves reader-connection availability. For ``:memory:`` /
+    PostgreSQL / MySQL the read fields alias the write ones (no split).
+    """
+
+    write_engine: AsyncEngine
+    read_engine: AsyncEngine
+    write_session_local: async_sessionmaker
+    read_session_local: async_sessionmaker
+
+
+def _attach_sqlite_pragmas(
+    engine: AsyncEngine,
+    *,
+    in_memory: bool,
+    enable_wal: bool,
+    cache_size_kb: int,
+    mmap_size_bytes: int,
+    wal_autocheckpoint: int,
+) -> None:
+    """Attach the per-connection PRAGMA tuning to a SQLite engine.
+
+    A ``:memory:`` db already lives in RAM, so the page-cache / mmap tuning is
+    skipped there. ``cache_size=-<kb>`` is a KiB page cache (negative form);
+    ``temp_store=MEMORY`` keeps sorts / transient B-trees off disk;
+    ``mmap_size`` maps file bytes for read I/O; ``synchronous=NORMAL`` is the
+    safe high-throughput WAL pairing; ``wal_autocheckpoint`` bounds WAL growth
+    before a commit triggers a checkpoint. ``journal_mode=WAL`` is a persistent
+    database-level setting applied once on first connect.
+    """
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_pragmas(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        if not in_memory:
+            cursor.execute("PRAGMA temp_store=MEMORY")
+            cursor.execute(f"PRAGMA cache_size=-{cache_size_kb}")
+            cursor.execute(f"PRAGMA mmap_size={mmap_size_bytes}")
+            if enable_wal:
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute(f"PRAGMA wal_autocheckpoint={wal_autocheckpoint}")
+        cursor.close()
+
+    if enable_wal and not in_memory:
+
+        @event.listens_for(engine.sync_engine, "first_connect")
+        def _set_wal(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.close()
+
+
+def _build_file_sqlite_engine(
+    conn_str: str,
     config: DatabaseConfig,
-) -> tuple[AsyncEngine, async_sessionmaker]:
-    """Create and configure the async engine and session factory.
+    *,
+    pool_size: int,
+    cache_size_kb: int,
+) -> AsyncEngine:
+    """Build one file-backed SQLite engine with pool + PRAGMA tuning.
+
+    Used to build both the single-writer engine and the reader engine over the
+    same file. ``max_overflow=0`` keeps checkout timeouts surfacing real
+    session leaks instead of masking them; ``pool_pre_ping`` is dropped because
+    a local SQLite file connection does not silently die like a network socket.
+    """
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{conn_str}",
+        echo=False,
+        future=True,
+        poolclass=AsyncAdaptedQueuePool,
+        pool_size=pool_size,
+        max_overflow=0,
+        pool_timeout=10,
+        connect_args={
+            "timeout": config.db_timeout,
+            "check_same_thread": False,
+        },
+    )
+    _attach_sqlite_pragmas(
+        engine,
+        in_memory=False,
+        enable_wal=config.db_enable_wal,
+        cache_size_kb=cache_size_kb,
+        mmap_size_bytes=config.mmap_size_mb * 1024 * 1024,
+        wal_autocheckpoint=config.wal_autocheckpoint,
+    )
+    return engine
+
+
+async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
+    """Create and configure the async engine(s) and session factories.
+
+    File-backed SQLite gets a read/write split: writes are serialised by the
+    app-level lock onto a small single-writer pool, and reads run on a separate,
+    larger reader pool so a slow write never starves reader-connection
+    availability. ``:memory:`` (one shared StaticPool connection) and
+    PostgreSQL / MySQL use a single engine for both.
 
     Args:
         config: Database configuration.
 
     Returns:
-        Tuple of (engine, session_factory).
+        A ``SqlEngines`` bundle. ``read_engine`` / ``read_session_local`` alias
+        the write fields when there is no split.
     """
     db_type = config.db_type
-    engine: AsyncEngine
 
     if db_type == DatabaseType.SQLITE:
         conn_str = config.connection_string
         in_memory = conn_str == ":memory:"
-        if not in_memory:
-            db_path = Path(conn_str).expanduser()
-            conn_str = str(db_path)
-            if not db_path.parent.exists():
-                db_path.parent.mkdir(parents=True, exist_ok=True)
-
         if in_memory:
-            engine = create_async_engine(
+            # A single shared connection *is* the database — no split possible.
+            write_engine = create_async_engine(
                 "sqlite+aiosqlite:///:memory:",
                 echo=False,
                 future=True,
                 poolclass=StaticPool,
                 connect_args={"check_same_thread": False},
             )
-        else:
-            # SQLite allows a single writer at a time. Writes are
-            # serialised in the application layer (see ``DbSessions.write``),
-            # so only one connection is ever on the write path and the
-            # remaining pool connections serve concurrent WAL reads —
-            # matching SQLite's own model instead of fighting it with a pool
-            # of would-be parallel writers. ``max_overflow=0`` keeps checkout
-            # timeouts surfacing real session leaks instead of masking them
-            # with unbounded growth; ``pool_timeout`` is short because, with
-            # writes serialised, a checkout that cannot be satisfied quickly
-            # signals a real problem rather than transient write-lock
-            # contention. ``pool_pre_ping`` is dropped: a local SQLite file
-            # connection does not silently die the way a network socket can,
-            # so pinging every checkout is pure waste.
-            engine = create_async_engine(
-                f"sqlite+aiosqlite:///{conn_str}",
-                echo=False,
-                future=True,
-                poolclass=AsyncAdaptedQueuePool,
-                pool_size=5,
-                max_overflow=0,
-                pool_timeout=10,
-                connect_args={
-                    "timeout": config.db_timeout,
-                    "check_same_thread": False,
-                },
+            _attach_sqlite_pragmas(
+                write_engine,
+                in_memory=True,
+                enable_wal=config.db_enable_wal,
+                cache_size_kb=config.write_cache_size_kb,
+                mmap_size_bytes=config.mmap_size_mb * 1024 * 1024,
+                wal_autocheckpoint=config.wal_autocheckpoint,
             )
-
-        @event.listens_for(engine.sync_engine, "connect")
-        def set_sqlite_pragma(dbapi_connection, connection_record):
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
-            if not in_memory:
-                # Connection-level read / I/O tuning for the file-backed
-                # store (a :memory: db already lives in RAM, so a page cache
-                # and mmap add nothing). temp_store=MEMORY keeps sorts and
-                # transient B-trees off disk; cache_size=-65536 is a 64MB
-                # page cache (negative = KiB); mmap_size maps up to 256MB of
-                # the file for read I/O. All three are upper bounds — a small
-                # team.db only uses what it needs.
-                cursor.execute("PRAGMA temp_store=MEMORY")
-                cursor.execute("PRAGMA cache_size=-65536")
-                cursor.execute("PRAGMA mmap_size=268435456")
-                if config.db_enable_wal:
-                    # synchronous=NORMAL is the safe, high-throughput
-                    # pairing for WAL: a power loss loses at most the last
-                    # un-checkpointed transaction and never corrupts the
-                    # database, while avoiding the per-commit fsync that FULL
-                    # forces. Connection-scoped, set on every connect —
-                    # unlike journal_mode, a persistent database-level
-                    # setting applied once on first connect.
-                    cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.close()
-
-        if config.db_enable_wal and not in_memory:
-
-            @event.listens_for(engine.sync_engine, "first_connect")
-            def set_sqlite_wal(dbapi_connection, connection_record):
-                cursor = dbapi_connection.cursor()
-                cursor.execute("PRAGMA journal_mode=WAL")
-                cursor.close()
+            read_engine = write_engine
+        else:
+            db_path = Path(conn_str).expanduser()
+            conn_str = str(db_path)
+            if not db_path.parent.exists():
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+            write_engine = _build_file_sqlite_engine(
+                conn_str, config, pool_size=config.write_pool_size, cache_size_kb=config.write_cache_size_kb
+            )
+            read_engine = _build_file_sqlite_engine(
+                conn_str, config, pool_size=config.read_pool_size, cache_size_kb=config.read_cache_size_kb
+            )
 
     elif db_type == DatabaseType.POSTGRESQL:
         conn_str = config.connection_string.strip()
@@ -338,7 +402,7 @@ async def initialize_engine(
         if not conn_str.startswith("postgresql+asyncpg://"):
             raise ValueError("PostgreSQL connection_string must use postgresql+asyncpg:// scheme")
 
-        engine = create_async_engine(
+        write_engine = create_async_engine(
             conn_str,
             echo=False,
             future=True,
@@ -347,6 +411,7 @@ async def initialize_engine(
             pool_pre_ping=True,
             pool_recycle=1800,
         )
+        read_engine = write_engine
 
     elif db_type == DatabaseType.MYSQL:
         conn_str = config.connection_string.strip()
@@ -357,7 +422,7 @@ async def initialize_engine(
         elif not conn_str.startswith("mysql+aiomysql://"):
             raise ValueError("MySQL connection_string must use mysql:// or mysql+aiomysql:// scheme")
 
-        engine = create_async_engine(
+        write_engine = create_async_engine(
             conn_str,
             echo=False,
             future=True,
@@ -366,22 +431,33 @@ async def initialize_engine(
             pool_pre_ping=True,
             pool_recycle=1800,
         )
+        read_engine = write_engine
     else:
         raise NotImplementedError(f"Database type {config.db_type} not yet implemented")
 
-    session_local = async_sessionmaker(
-        bind=engine,
+    write_session_local = async_sessionmaker(
+        bind=write_engine,
         class_=AsyncSession,
         expire_on_commit=False,
         autoflush=False,
     )
+    if read_engine is write_engine:
+        read_session_local = write_session_local
+    else:
+        read_session_local = async_sessionmaker(
+            bind=read_engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+            autoflush=False,
+        )
 
-    async with engine.begin() as conn:
+    # DDL + migrations run on the writer engine (they are writes).
+    async with write_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
         await conn.run_sync(_ensure_team_member_role_column)
         await conn.run_sync(_ensure_team_member_options_column)
 
-    return engine, session_local
+    return SqlEngines(write_engine, read_engine, write_session_local, read_session_local)
 
 
 async def create_cur_session_tables(engine: AsyncEngine) -> None:

@@ -65,6 +65,69 @@ async def test_sqlite_pragmas_enable_wal_normal_sync_and_read_tuning(file_db: Te
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_file_db_splits_read_and_write_engines(file_db: TeamDatabase) -> None:
+    """File-backed SQLite runs a separate reader pool from the single writer."""
+    assert file_db.engine is not None
+    assert file_db.read_engine is not None
+    assert file_db.read_engine is not file_db.engine
+    assert file_db.read_session_local is not file_db.session_local
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_reader_connection_uses_smaller_cache(file_db: TeamDatabase) -> None:
+    """Reader connections carry the small per-connection cache (default 8 MiB)."""
+    async with file_db.read_session_local() as session:
+        cache_size = (await session.execute(text("PRAGMA cache_size"))).scalar()
+    # read_cache_size_kb default 8192 -> negative KiB form.
+    assert cache_size == -8192
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_memory_db_shares_single_engine(tmp_path) -> None:
+    """A :memory: db cannot split — read/write share one StaticPool engine."""
+    token = set_session_id("mem_split_session")
+    database = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    try:
+        await database.initialize()
+        assert database.engine is not None
+        assert database.read_engine is database.engine
+        assert database.read_session_local is database.session_local
+    finally:
+        await database.close()
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_pool_and_cache_knobs_are_honored(tmp_path) -> None:
+    """DatabaseConfig pool / cache knobs flow through to the engines."""
+    token = set_session_id("knob_session")
+    config = DatabaseConfig(
+        db_type=DatabaseType.SQLITE,
+        connection_string=str(tmp_path / "team.db"),
+        read_pool_size=3,
+        read_cache_size_kb=4096,
+        write_cache_size_kb=32768,
+    )
+    database = TeamDatabase(config)
+    try:
+        await database.initialize()
+        assert database.read_engine.pool.size() == 3
+        async with database.read_session_local() as session:
+            read_cache = (await session.execute(text("PRAGMA cache_size"))).scalar()
+        async with database.session_local() as session:
+            write_cache = (await session.execute(text("PRAGMA cache_size"))).scalar()
+        assert read_cache == -4096
+        assert write_cache == -32768
+    finally:
+        await database.close()
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_concurrent_claims_do_not_exhaust_pool(file_db: TeamDatabase) -> None:
     """More concurrent writers than pool_size must all succeed, not time out."""
     team = "team1"
