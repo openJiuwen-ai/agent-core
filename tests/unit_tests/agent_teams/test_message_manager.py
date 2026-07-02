@@ -664,3 +664,40 @@ async def test_has_unread_messages_direct_counts_when_broadcast_excluded(team_me
 
     assert await team_messaging.has_unread_messages() is True
     assert await team_messaging.has_unread_messages(include_broadcast=False) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_multicast_message_single_batch(db, team_messaging):
+    """multicast_message delivers to every recipient in one batched transaction.
+
+    All rows share the same timestamp (computed once for the batch), which is
+    the observable proxy for "one write / one fsync" instead of N sends.
+    """
+    agent_card = AgentCard(name="TestAgent").model_dump_json()
+    await db.member.create_member(
+        member_name="member3",
+        team_name="test_team_123",
+        display_name="Member Three",
+        agent_card=agent_card,
+        status="busy",
+    )
+
+    ids = await team_messaging.multicast_message(content="ping all", to_member_names=["member2", "member3"])
+    assert len(ids) == 2
+
+    msgs2 = await team_messaging.get_messages(to_member_name="member2")
+    msgs3 = await team_messaging.get_messages(to_member_name="member3")
+    assert len(msgs2) == 1
+    assert len(msgs3) == 1
+    assert msgs2[0].content == "ping all"
+    assert msgs3[0].content == "ping all"
+    assert msgs2[0].from_member_name == "member1"
+    assert msgs2[0].timestamp == msgs3[0].timestamp
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_multicast_message_empty_is_noop(team_messaging):
+    """An empty recipient list returns no ids and writes nothing."""
+    assert await team_messaging.multicast_message(content="x", to_member_names=[]) == []

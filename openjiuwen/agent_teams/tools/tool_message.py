@@ -168,22 +168,28 @@ class SendMessageTool(TeamTool):
 
         await self._auto_start_members()
 
-        delivered: list[str] = []
+        # Split into existing members (valid) and not-found up front — the
+        # existence check is a read. The valid set is then written in ONE
+        # batched transaction (one fsync) instead of one write per recipient.
         failed: list[dict[str, str]] = []
+        valid: list[str] = []
         for name in deduped:
             if self._team:
                 member = await self._team.get_member(name)
                 if not member:
                     failed.append({"to": name, "reason": f"Member '{name}' not found"})
                     continue
-            msg_id = await self.message_manager.send_message(
-                content=content,
-                to_member_name=name,
-            )
-            if not msg_id:
-                failed.append({"to": name, "reason": f"Failed to send message to '{name}'"})
-                continue
-            delivered.append(name)
+            valid.append(name)
+
+        delivered: list[str] = []
+        if valid:
+            ids = await self.message_manager.multicast_message(content=content, to_member_names=valid)
+            if ids:
+                delivered = valid
+            else:
+                # The batch is atomic — a failed write delivers to nobody, so
+                # every valid target is reported failed for the caller to resend.
+                failed.extend({"to": name, "reason": f"Failed to send message to '{name}'"} for name in valid)
 
         total = len(deduped)
         ok = not failed

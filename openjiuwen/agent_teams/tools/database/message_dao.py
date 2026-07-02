@@ -86,6 +86,76 @@ class MessageDao:
 
         return await retry_on_locked(_op, on_locked_result=False, label=f"create_message {message_id}")
 
+    async def create_direct_messages(
+        self,
+        *,
+        team_name: str,
+        from_member_name: str,
+        content: str,
+        recipients: List[tuple[str, str]],
+        protocol: str = "plain",
+    ) -> int:
+        """Insert N point-to-point messages (same content) in ONE transaction.
+
+        Batch counterpart to ``create_message`` for multicast: one write-lock
+        acquisition + one COMMIT (one fsync) covers every recipient, instead
+        of N separate transactions each paying their own fsync — the dominant
+        multicast write-tail cost under the process-wide write lock. The whole
+        batch is atomic: an ``IntegrityError`` rolls back all rows and returns
+        0. ``is_read`` starts False (multicast never targets consumer-less
+        pseudo-members — the tool layer rejects ``user`` and ``*``).
+
+        Args:
+            team_name: Team the messages belong to.
+            from_member_name: Sender member id.
+            content: Shared message body.
+            recipients: ``(message_id, to_member_name)`` pairs, in delivery
+                order. Message ids are minted by the caller (mirrors
+                ``create_message``).
+            protocol: Message format (``"plain"`` / ``"json"``).
+
+        Returns:
+            Number of rows inserted; 0 when ``recipients`` is empty or the
+            batch failed (nothing committed).
+        """
+        if not recipients:
+            return 0
+        message_model = _get_message_model()
+        now = get_current_time()
+
+        async def _op() -> int:
+            try:
+                async with self._sessions.write() as session:
+                    for message_id, to_member_name in recipients:
+                        session.add(
+                            message_model(
+                                message_id=message_id,
+                                team_name=team_name,
+                                from_member_name=from_member_name,
+                                to_member_name=to_member_name,
+                                content=content,
+                                timestamp=now,
+                                broadcast=False,
+                                protocol=protocol,
+                                is_read=False,
+                            )
+                        )
+                    await session.commit()
+                team_logger.info("Created %d direct messages from %s", len(recipients), from_member_name)
+                return len(recipients)
+            except IntegrityError as e:
+                team_logger.error(
+                    "Failed to batch-create %d messages from %s: %s",
+                    len(recipients),
+                    from_member_name,
+                    e,
+                )
+                return 0
+
+        return await retry_on_locked(
+            _op, on_locked_result=0, label=f"create_direct_messages ({len(recipients)})"
+        )
+
     async def get_messages(
         self,
         team_name: str,
