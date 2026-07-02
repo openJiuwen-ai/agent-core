@@ -160,6 +160,30 @@ async def test_mark_messages_read_batch_direct_and_broadcast(file_db: TeamDataba
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
+async def test_mark_messages_read_batch_multiple_broadcasts(file_db: TeamDatabase) -> None:
+    """Two broadcasts in one DAO batch collapse to a single watermark row.
+
+    Regression: the broadcast branch INSERTs the (member, team) watermark row
+    on first sight. The session runs autoflush=False, so before the fix a
+    second broadcast in the same transaction did not see the pending INSERT,
+    re-inserted the same PK, and the commit raised an ``IntegrityError`` on
+    the UNIQUE (member_name, team_name) constraint. The manager layer now
+    collapses broadcasts before the DAO, but the DAO must stay safe on its
+    own for direct callers — hence this test drives the DAO directly.
+    """
+    team = "team1"
+    await file_db.team.create_team(team, "Team 1", "leader")
+    await file_db.member.create_member("m1", team, "M1", "{}", MemberStatus.UNSTARTED.value)
+    await file_db.message.create_message("b1", team, "leader", "all-1", broadcast=True)
+    await file_db.message.create_message("b2", team, "leader", "all-2", broadcast=True)
+
+    marked = await file_db.message.mark_messages_read(["b1", "b2"], "m1")
+    assert marked == 2
+    assert await file_db.message.get_broadcast_messages(team, "m1", unread_only=True) == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.level1
 async def test_mark_messages_read_skips_missing(file_db: TeamDatabase) -> None:
     """Missing ids are skipped; the count reflects only applied marks."""

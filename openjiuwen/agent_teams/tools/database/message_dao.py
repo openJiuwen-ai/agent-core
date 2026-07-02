@@ -5,7 +5,7 @@
 
 from typing import List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -293,6 +293,13 @@ class MessageDao:
                     read_at=message.timestamp,
                 )
                 session.add(read_status)
+                # Flush the pending INSERT so a second broadcast id in the same
+                # batch transaction sees this watermark row on its SELECT. The
+                # session runs autoflush=False, so without this the next
+                # broadcast re-inserts the same (member_name, team_name) PK and
+                # the commit hits a UNIQUE violation. Flush holds no fsync — the
+                # single commit still batches the whole drain into one.
+                await session.flush()
             elif read_status.read_at is None or message.timestamp > read_status.read_at:
                 read_status.read_at = message.timestamp
         else:
@@ -317,11 +324,14 @@ class MessageDao:
     async def mark_messages_read(self, message_ids: List[str], member_name: str) -> int:
         """Mark several messages read for one member in a single transaction.
 
-        Batches what would otherwise be one transaction (one fsync) per
-        message into a single commit — the dominant write-throughput lever
-        on SQLite. Skips ids that are missing or fail validation; returns
-        the number actually marked. Idempotent and safe to retry on a
-        locked database (see ``_mark_read_in_session``).
+        Batches the whole mailbox drain into one commit (one fsync) — the
+        dominant write-throughput lever on SQLite. Direct messages are marked
+        with a single set-based ``UPDATE ... WHERE message_id IN (...)`` rather
+        than one SELECT+write per id, so draining a busy inbox costs a constant
+        few statements instead of ``O(n)`` round-trips. Broadcasts keep the
+        per-message watermark path (they are few — the manager layer collapses
+        them to the newest before the DAO). Skips ids that are missing or fail
+        validation; returns the number actually marked.
 
         Args:
             message_ids: Message ids to mark read, in delivery order.
@@ -333,14 +343,65 @@ class MessageDao:
         if not message_ids:
             return 0
 
+        message_model = _get_message_model()
+
         async def _op() -> int:
-            marked = 0
             async with self._sessions.write() as session:
-                for message_id in message_ids:
-                    if await self._mark_read_in_session(session, message_id, member_name):
+                # One SELECT for every target row — missing ids simply drop out.
+                result = await session.execute(
+                    select(message_model).where(message_model.message_id.in_(message_ids))
+                )
+                messages = result.scalars().all()
+                if not messages:
+                    return 0
+
+                direct = [m for m in messages if not m.broadcast]
+                broadcasts = [m for m in messages if m.broadcast]
+
+                marked = 0
+                # Direct messages: one set-based UPDATE for the whole batch.
+                direct_ids = await self._eligible_direct_ids(session, direct, member_name)
+                if direct_ids:
+                    await session.execute(
+                        update(message_model).where(message_model.message_id.in_(direct_ids)).values(is_read=True)
+                    )
+                    marked += len(direct_ids)
+
+                # Broadcasts: per-message watermark advance (few in practice).
+                for message in broadcasts:
+                    if await self._mark_read_in_session(session, message.message_id, member_name):
                         marked += 1
+
                 if marked:
                     await session.commit()
-            return marked
+                return marked
 
         return await retry_on_locked(_op, on_locked_result=0, label=f"mark_messages_read ({len(message_ids)})")
+
+    async def _eligible_direct_ids(
+        self,
+        session: AsyncSession,
+        direct_messages: List[TeamMessageBase],
+        member_name: str,
+    ) -> List[str]:
+        """Return the direct-message ids ``member_name`` is allowed to ack.
+
+        Mirrors the per-message validation of ``_mark_read_in_session`` but in
+        one roster query: the ``user`` pseudo-member may ack any direct message
+        without a roster row; every other member must exist in the message's
+        team. Messages whose team lacks the member are dropped (not marked),
+        matching the single-message path's "member not found -> skip".
+        """
+        if not direct_messages:
+            return []
+        if member_name == "user":
+            return [m.message_id for m in direct_messages]
+        teams = {m.team_name for m in direct_messages}
+        result = await session.execute(
+            select(TeamMember.team_name).where(
+                TeamMember.member_name == member_name,
+                TeamMember.team_name.in_(teams),
+            )
+        )
+        valid_teams = set(result.scalars().all())
+        return [m.message_id for m in direct_messages if m.team_name in valid_teams]
