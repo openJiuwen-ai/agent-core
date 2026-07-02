@@ -385,44 +385,54 @@ class TaskDao:
             return result.scalars().all()
 
     async def claim_task(self, task_id: str, member_name: str) -> bool:
-        """Bind a task to ``member_name`` and move it to CLAIMED.
+        """Atomically claim a PENDING, unassigned task via a single CAS UPDATE.
 
-        Single entry point for both teammate self-claim and leader-side
-        assign — the persistence step is identical in both cases.
-        Higher-level semantics (who initiated, what to log) belong in
-        the caller.
+        Shared persistence step for teammate self-claim and leader-side
+        assign. Both callers (``TeamTaskManager.claim`` / ``.assign``)
+        already validate existence, member, conflict, and the state
+        transition with reads taken *outside* the write lock; this method
+        is only the concurrency arbiter. Expressing the claim as one
+        conditional ``UPDATE`` — ``WHERE assignee IS NULL AND status =
+        pending`` (PENDING is the sole valid predecessor of CLAIMED) — keeps
+        the write-lock critical section to a single statement instead of the
+        old SELECT-then-UPDATE, so the process-wide write lock is held for
+        less time under contention (benefiting every writer, not just this
+        one). Only one racing caller can match the row, so exactly one wins.
+
+        Returns:
+            True iff this call claimed the row (``rowcount == 1``); False
+            when the task is missing, already assigned, not pending, or a
+            concurrent claim won first.
         """
         team_task_model = _get_task_model()
+        now = get_current_time()
         async with self._sessions.write() as session:
-            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
-            task = result.scalar_one_or_none()
-            if not task:
-                team_logger.error("Task %s not found", task_id)
-                return False
-
-            if task.assignee:
-                team_logger.warning("Task %s is already claimed by member %s", task_id, task.assignee)
-                return False
-
-            if not is_valid_transition(
-                TaskStatus(task.status),
-                TaskStatus.CLAIMED,
-                TASK_TRANSITIONS,
-            ):
-                team_logger.error(
-                    "Invalid state transition for task %s: %s -> %s",
-                    task_id,
-                    task.status,
-                    TaskStatus.CLAIMED.value,
+            result = await session.execute(
+                update(team_task_model)
+                .where(
+                    team_task_model.task_id == task_id,
+                    team_task_model.assignee.is_(None),
+                    team_task_model.status == TaskStatus.PENDING.value,
                 )
-                return False
-
-            task.status = TaskStatus.CLAIMED.value
-            task.assignee = member_name
-            task.updated_at = get_current_time()
+                .values(
+                    status=TaskStatus.CLAIMED.value,
+                    assignee=member_name,
+                    updated_at=now,
+                )
+            )
             await session.commit()
-            team_logger.info("Task %s claimed by member %s", task_id, member_name)
-            return True
+            claimed = result.rowcount == 1
+            if claimed:
+                team_logger.info("Task %s claimed by member %s", task_id, member_name)
+            else:
+                team_logger.debug(
+                    "CAS claim for task %s by %s did not apply (rowcount=%s): "
+                    "missing / already assigned / not pending / lost the race",
+                    task_id,
+                    member_name,
+                    result.rowcount,
+                )
+            return claimed
 
     async def reset_task(self, task_id: str) -> Optional[TeamTaskBase]:
         """Reset a claimed or plan_approved task back to pending status and clear assignee."""

@@ -144,6 +144,29 @@ async def test_concurrent_claims_do_not_exhaust_pool(file_db: TeamDatabase) -> N
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_concurrent_claim_same_task_single_winner(file_db: TeamDatabase) -> None:
+    """Racing claims on ONE pending task: the CAS lets exactly one win.
+
+    Guards the single-statement claim (WHERE assignee IS NULL AND status =
+    pending): only the first caller matches the row, later callers see it no
+    longer pending and get rowcount 0, so exactly one True comes back.
+    """
+    team = "team1"
+    await file_db.team.create_team(team, "Team 1", "leader")
+    await file_db.task.create_task("t1", team, "T1", "content", TaskStatus.PENDING.value)
+
+    results = await asyncio.gather(
+        *[file_db.task.claim_task("t1", f"m{i}") for i in range(10)]
+    )
+    assert sum(results) == 1
+
+    task = await file_db.task.get_task("t1")
+    assert task.status == TaskStatus.CLAIMED.value
+    assert task.assignee is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_concurrent_create_messages_succeed(file_db: TeamDatabase) -> None:
     """High-frequency concurrent message writes do not exhaust the pool."""
     team = "team1"
