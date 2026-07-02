@@ -97,6 +97,23 @@ def _make_leader(
     return agent
 
 
+async def _prepare_backend_db(agent: TeamAgent) -> None:
+    """Initialize the leader's in-memory db and seed its team row.
+
+    ``_make_leader`` builds the agent without initializing storage. Tests that
+    call ``spawn_member`` directly (instead of driving the coordination
+    start-up path that would init the db) must initialize it and create the
+    ``team_info`` row first, so the member insert satisfies the foreign key.
+    """
+    backend = agent.team_backend
+    await backend.db.initialize()
+    await backend.db.team.create_team(
+        team_name=backend.team_name,
+        display_name=backend.team_name,
+        leader_member_name=backend.member_name,
+    )
+
+
 def _make_human_agent(member_name: str = "human_alice") -> TeamAgent:
     """Build a configured ``role=HUMAN_AGENT`` avatar runtime.
 
@@ -258,6 +275,7 @@ async def test_human_agent_inbound_callback_fires_on_message_event():
     # Register a human-agent member name on the live backend so
     # ``is_human_agent`` recognises the recipient. Persist to DB
     # so async queries find the row.
+    await _prepare_backend_db(agent)
     await agent.team_backend.spawn_member(
         member_name="human_alice",
         display_name="Alice",
@@ -523,6 +541,7 @@ async def test_human_agent_ignores_other_member_task_claim():
     member — no ``list_tasks`` survey, no ``deliver_input``.
     """
     agent = _make_leader(team_name="human-claim-other-team", member_name="human-leader-other")
+    await _prepare_backend_db(agent)
     # Role check consults backend.is_human_agent (not TeamRole); persist
     # a HUMAN_AGENT row so async DB queries find it.
     await agent.team_backend.spawn_member(
@@ -953,6 +972,7 @@ async def test_task_claimed_for_self_uses_human_template_when_human_agent():
     ``view_task`` round-trip.
     """
     agent = _make_leader(team_name="human-claim-self-team", member_name="human-leader-self")
+    await _prepare_backend_db(agent)
     # Register the leader's member_name as a human-agent member. The
     # role check in TaskBoardHandler only consults
     # ``backend.is_human_agent`` — persist a HUMAN_AGENT row so async
@@ -1011,6 +1031,7 @@ async def test_task_claimed_for_human_self_swallows_title_lookup_error():
     avatar still gets notified.
     """
     agent = _make_leader(team_name="human-claim-error-team", member_name="human-leader-error")
+    await _prepare_backend_db(agent)
     await agent.team_backend.spawn_member(
         member_name="human-leader-error",
         display_name="Leader",

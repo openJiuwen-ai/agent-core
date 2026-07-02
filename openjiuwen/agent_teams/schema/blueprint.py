@@ -87,6 +87,9 @@ def _ensure_builtin_infra_registered() -> None:
         _STORAGE_REGISTRY["sqlite"] = DatabaseConfig
         _STORAGE_REGISTRY["postgresql"] = DatabaseConfig
         _STORAGE_REGISTRY["mysql"] = DatabaseConfig
+        # "memory" is an alias for a :memory: SQLite db (DatabaseConfig
+        # normalises db_type="memory" -> sqlite + connection_string=":memory:").
+        _STORAGE_REGISTRY["memory"] = DatabaseConfig
 
 
 class TransportSpec(BaseModel):
