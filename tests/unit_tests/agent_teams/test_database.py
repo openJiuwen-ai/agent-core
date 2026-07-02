@@ -3326,3 +3326,54 @@ async def test_update_member_execution_status_invalid_transition_returns_false(d
     assert await db.member.update_member_execution_status("m1", "team_inv2", "running") is False
     member = await db.member.get_member("m1", "team_inv2")
     assert member.execution_status == "idle"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_message_table_uses_composite_indexes(db):
+    """A fresh session message table carries the A1/A2 composite index scheme."""
+    from sqlalchemy import text
+
+    async with db.read_session_local() as session:
+        rows = (
+            await session.execute(
+                text("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name LIKE 'team_message_%'")
+            )
+        ).scalars().all()
+    names = set(rows)
+    assert any(n.endswith("_inbox") for n in names), names
+    assert any(n.endswith("_bcast_ts") for n in names), names
+    # A1/A2 dropped these single-column indexes.
+    for suffix in ("_team_name", "_to_member_name", "_timestamp", "_broadcast", "_is_read"):
+        assert not any(n.endswith(suffix) for n in names), f"unexpected index *{suffix}: {names}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_dynamic_index_migration_rewrites_legacy_message_table(db):
+    """The index migration drops legacy single-column indexes for the composites."""
+    from openjiuwen.agent_teams.tools.database.engine import _ensure_dynamic_table_indexes
+
+    table = "team_message_legacy00"
+    legacy_cols = ("team_name", "to_member_name", "timestamp", "broadcast", "is_read")
+    async with db.engine.begin() as conn:
+        await conn.exec_driver_sql(
+            f"CREATE TABLE {table} (message_id TEXT PRIMARY KEY, team_name TEXT, "
+            f"to_member_name TEXT, timestamp INTEGER, broadcast INTEGER, is_read INTEGER)"
+        )
+        for col in legacy_cols:
+            await conn.exec_driver_sql(f"CREATE INDEX ix_{table}_{col} ON {table} ({col})")
+
+        await conn.run_sync(_ensure_dynamic_table_indexes)
+
+        names = set(
+            (
+                await conn.exec_driver_sql(
+                    f"SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='{table}'"
+                )
+            ).scalars().all()
+        )
+    assert f"ix_{table}_inbox" in names
+    assert f"ix_{table}_bcast_ts" in names
+    for col in legacy_cols:
+        assert f"ix_{table}_{col}" not in names

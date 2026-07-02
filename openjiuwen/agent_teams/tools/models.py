@@ -12,7 +12,7 @@ import copy
 import hashlib
 from typing import Dict, Optional, cast
 
-from sqlalchemy import BigInteger
+from sqlalchemy import BigInteger, Index
 from sqlmodel import SQLModel, Field
 from sqlmodel.main import SQLModelMetaclass
 
@@ -104,7 +104,11 @@ class TeamTaskBase(SQLModel):
     __abstract__ = True
 
     task_id: str = Field(primary_key=True)
-    team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE", index=True)
+    # No index on team_name: these are per-session physical tables, so
+    # team_name cardinality is ~1 and a secondary index never helps a read
+    # while it costs a B-tree write on every INSERT (A1). The FK stays for
+    # cascade semantics.
+    team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE")
     title: str = Field(nullable=False)
     content: str = Field(nullable=False)
     status: str = Field(nullable=False, index=True)
@@ -120,7 +124,8 @@ class TeamTaskDependencyBase(SQLModel):
     """Base class for task dependency tables (one per session)"""
     __abstract__ = True
 
-    team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE", index=True)
+    # No index on team_name (A1) — see TeamTaskBase.
+    team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE")
     resolved: Optional[bool] = Field(default=False, nullable=True, index=True)
 
 
@@ -129,12 +134,18 @@ class TeamMessageBase(SQLModel):
     __abstract__ = True
 
     message_id: str = Field(primary_key=True)
-    team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE", index=True)
+    # No index on team_name (A1). The four columns below drop their weak
+    # single-column indexes in favour of two composite indexes injected per
+    # dynamic table in ``_get_message_model`` (A2): a 2-value boolean index
+    # (broadcast / is_read) is near-useless standalone, and the real queries
+    # want composites — so INSERT B-tree writes go from 6 (PK + 5 secondary)
+    # down to 3 (PK + 2 composite). See the composite definitions there.
+    team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE")
     from_member_name: str = Field(nullable=False)
-    to_member_name: Optional[str] = Field(default=None, nullable=True, index=True)
+    to_member_name: Optional[str] = Field(default=None, nullable=True)
     content: str = Field(nullable=False)
-    timestamp: int = Field(sa_type=BigInteger, nullable=False, index=True)
-    broadcast: bool = Field(nullable=False, index=True)
+    timestamp: int = Field(sa_type=BigInteger, nullable=False)
+    broadcast: bool = Field(nullable=False)
     protocol: str = Field(
         default="plain",
         nullable=False,
@@ -149,7 +160,7 @@ class TeamMessageBase(SQLModel):
     # in MessageReadStatus (high-water mark by timestamp); a single bool on
     # the message row cannot represent "read by A, unread by B".  Writers
     # must enforce this — see ``create_message``.
-    is_read: Optional[bool] = Field(default=False, nullable=True, index=True)
+    is_read: Optional[bool] = Field(default=False, nullable=True)
 
 
 class MessageReadStatusBase(SQLModel):
@@ -252,8 +263,21 @@ def _get_message_model() -> type[TeamMessageBase]:
         class_name = f"TeamMessage_{suffix}"
         table_name = f"team_message_{suffix}"
 
+        # Two composite indexes (A2), replacing the dropped single-column
+        # to_member_name / timestamp / broadcast / is_read indexes. Names carry
+        # the table suffix so every per-session table gets its own. Kept in
+        # sync with the migration in ``database/engine.py``.
+        #   - inbox: get_messages (to_member_name=? AND is_read=? ORDER BY
+        #     timestamp) — equality + equality + ordered, no filesort.
+        #   - broadcast: get_broadcast_messages / has_unread broadcast branch
+        #     (broadcast=1 ORDER BY timestamp) and the has_unread direct probe
+        #     (broadcast=0 is the leading-column prefix).
         attrs = {
-            "__tablename__": table_name
+            "__tablename__": table_name,
+            "__table_args__": (
+                Index(f"ix_{table_name}_inbox", "to_member_name", "is_read", "timestamp"),
+                Index(f"ix_{table_name}_bcast_ts", "broadcast", "timestamp"),
+            ),
         }
 
         model_cls = SQLModelMetaclass(class_name, (TeamMessageBase,), attrs, table=True)

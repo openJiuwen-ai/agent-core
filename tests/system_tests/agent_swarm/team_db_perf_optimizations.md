@@ -1,7 +1,7 @@
 # Team DB 性能优化清单
 
 本清单是基于 `agent_team_tools_db_stress_e2e.py` 压测（20 人团队并发、消息主导画像）
-识别出的 SQLite 数据库层优化点汇总。进度：**B1 / B2 / B3 / B4 / C4 / C1 / C2 / C3 / D1 / D2 / D3 / D5 已落地**，其余为待办分析项。
+识别出的 SQLite 数据库层优化点汇总。进度：**A1 / A2 / B1 / B2 / B3 / B4 / C4 / C1 / C2 / C3 / D1 / D2 / D3 / D5 已落地**，其余为待办分析项。
 消息路径见 A/B/C 三节；**task 相关操作专项见 D 节**（读路径 N+1、写路径重复全表扫描、
 task 表索引）。
 
@@ -45,31 +45,33 @@ task 表索引）。
 
 ## A. 索引 / 表结构 / 冗余
 
-消息表（per-session 动态表）当前有 5 个二级索引：`team_name` / `to_member_name` /
-`timestamp` / `broadcast` / `is_read`。每次 INSERT 额外写 5 棵 B-tree。
+消息表（per-session 动态表）**曾有** 5 个二级索引：`team_name` / `to_member_name` /
+`timestamp` / `broadcast` / `is_read`，每次 INSERT 额外写 5 棵 B-tree。A1/A2 已把它降到
+**2 个复合索引**（PK + 2，即每条 INSERT 3 棵 B-tree），详见下。
 
-- [ ] **A1. 删除动态表上的 `team_name` 索引（冗余，纯写负担）** — 高收益 / 低风险
+- [x] **A1. 删除动态表上的 `team_name` 索引（冗余，纯写负担）** — ✅ 已落地（含既有表迁移）
   - 现象：message/task/dependency 三张动态表**本身按 session 物理分表**，表内 `team_name`
-    基数≈1（多 team-per-session 也仅 2~5），单列索引永不被优化器选中，却每次 INSERT 都维护。
-  - 改动：`models.py` 中 `TeamTaskBase` / `TeamMessageBase` / `TeamTaskDependencyBase` 的
-    `team_name` 去掉 `index=True`。
-  - 义务：schema 变更 → 补 `test_database.py` migration/字段用例 + 同步 `docs/specs`。
+    基数≈1，单列索引永不被优化器选中，却每次 INSERT 都维护。
+  - 落地：`models.py` 中三个 base class 的 `team_name` 去掉 `index=True`（FK 保留供 cascade）。
+    迁移见 A2 合并的 `_ensure_dynamic_table_indexes`（对三张动态表 DROP `ix_*_team_name`）。
 
-- [ ] **A2. 用复合索引替换弱单列布尔索引** — 高收益 / 中风险
+- [x] **A2. 用复合索引替换弱单列布尔索引（消息表）** — ✅ 已落地（含既有表迁移）
   - 现象：`broadcast` / `is_read` 单列（2 值）选择性≈50%，常被 SQLite 跳过；`get_messages` 的
     `to_member_name=? AND is_read=? ORDER BY timestamp` 想要的是复合。
-  - 改动（消息表）：删 `to_member_name` / `timestamp` / `broadcast` / `is_read` 四个单列索引，
-    加两个复合索引（经 `__table_args__`）：
-    - `(to_member_name, is_read, timestamp)` — 覆盖 `get_messages`（等值+等值+有序，免 filesort）。
-    - `(broadcast, timestamp)` — 覆盖 `get_broadcast_messages` 与 `has_unread` 广播分支。
-  - 净效果：5 个弱单列 → 2 个强复合，每次 INSERT 少写 ~3 棵 B-tree（≈ -40% 写放大），读还更快。
-  - 注意：`to_member_name = ?` 已隐含排除广播（广播行 `to_member_name IS NULL`），
-    `get_messages` 里的 `broadcast.is_(False)` 过滤与之部分重复。
-  - 义务：同 A1（迁移 + spec 文档）。
+  - 落地：删 `to_member_name` / `timestamp` / `broadcast` / `is_read` 四个单列索引，`_get_message_model`
+    经 `__table_args__` 注入两个**每表命名**的复合索引：
+    - `ix_<tbl>_inbox = (to_member_name, is_read, timestamp)` — 覆盖 `get_messages`（等值+等值+有序，免 filesort）。
+    - `ix_<tbl>_bcast_ts = (broadcast, timestamp)` — 覆盖 `get_broadcast_messages` / `has_unread`（含 direct 探测的 broadcast=0 前缀）。
+  - **净效果**：每条消息 INSERT 的 B-tree 写从 **6（PK + 5 单列）降到 3（PK + 2 复合）**，≈ -50% 索引写放大。
+  - 迁移：`engine._ensure_dynamic_table_indexes`（在 `create_cur_session_tables` 里跟 `_ensure_message_protocol_column`
+    一起跑，遍历全部动态表）——DROP 5 个旧单列索引 + `CREATE ... IF NOT EXISTS` 两个复合；幂等，持久化 team 的旧表也升级。
+    新增 `test_message_table_uses_composite_indexes`（新表 schema）+ `test_dynamic_index_migration_rewrites_legacy_message_table`（旧表迁移）；agent_teams level0 **723 条全过**。
+  - **A/B（默认 20×20，各 2 轮）**：send_message avg 31~47ms ↔ 31~43ms（p50 26ms 前后持平）、broadcast、reads 均**在噪声带内**、
+    **读路径零回归**——index B-tree 写在 WAL 内存里，被写锁排队税 + fsync 盖住。**确定收益是结构性写放大 6→3**，在大板 / WAL 增长 / checkpoint / 磁盘占用上显现。同步刷新 `tools/AGENTS.md` 的 Database concurrency 段。
 
-- [ ] **A3. 复查 task 表索引** — 中收益 / 低优先
-  - task 表有 `team_name` / `status` / `assignee` / `updated_at` 四个二级索引；`team_name` 同 A1 属
-    死索引。任务写现在低频（有界池），优先级低于消息表，但顺手可清。
+- [ ] **A3 / D4. 复查 task 表索引** — 中收益 / 低优先（未做）
+  - task 表 `team_name` 死索引已随 A1 删除。剩 `status` / `assignee` / `updated_at` 三个单列索引；
+    可按 `get_tasks_by_assignee`（`assignee=? AND status=?`）合成复合 `(assignee, status)`。任务写低频（有界池），优先级低。
 
 ---
 
@@ -288,10 +290,11 @@ task 表索引）。
    ~~**B4（multicast 单事务批量写）**~~ — ✅ 已落地（send_multicast 本身 2~3×，总写尾仍受 per-message 排队税限制）。
    ~~**D2（drained 全表扫描 → 聚合查询）**~~ — ✅ 已落地（O(N)→O(1) 读，有界尺度平、大板 scalability）。
    ~~**D3（get_task_detail 次级 N+1 → 单查询）**~~ — ✅ 已落地（零迁移，N+1→单查询 + 消除白拉整行，尺度内平）。
-5. **A1 + A2 + D4**（索引减写放大：消息表 + task 表） — 收益大但要迁移 + spec 文档，同批做，放最后。
+5. ~~**A1 + A2（消息表索引减写放大）**~~ — ✅ 已落地（含既有表迁移）。每条消息 INSERT 的 B-tree 写 6→3
+   （≈ -50% 写放大）；延迟在噪声带内、读零回归，收益是结构性写放大 + WAL/磁盘占用，大尺度显现。
 6. ~~**C3（WAL checkpoint 挪出写路径）**~~ — ✅ 已落地（opt-in，默认关；封顶最坏写尾延迟，本尺度收益偶发）。
    ~~**B2 + B3**（has_unread EXISTS、member CAS）~~ — ✅ 已落地（如预判在噪声带内；收益是 O(1) 内存/短临界区/CAS 一致性）。
-   **零迁移项到此收尾**——剩 **A1 / A2 / D4**（索引减写放大）是唯一还能动 per-message 写放大的杠杆，需迁移 + spec + 三段提交。
+   **清单基本收尾**——仅剩 **A3/D4**（task 表 `(assignee, status)` 复合索引，低优先）待做。
 
 每步都跑 harness 前后对比，用数字验证，不猜。D1 的 A/B 要临时恢复"任务膨胀"画像（每轮建任务、
 不设有界池）才压得出 view_task 的真实收益。
