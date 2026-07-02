@@ -186,23 +186,17 @@ class QAArtifactManager:
         return True
 
     def _initial_fold_messages(self, qa: QARef) -> list:
-        """Messages to fold on a first (non-rolling) artifact production.
+        """Messages to fold when producing artifacts for a QA block.
 
-        A history QA is finalized and folds entirely. An in-flight (active) QA
-        must preserve a recent tail: otherwise ``covers_upto`` reaches the last
-        message and ``apply_artifact_to_context`` treats the QA as
-        already-compact and skips it (``zero progress`` -> fallback), so the QA
-        layer never reduces a single growing active QA on its own. Reserving
-        the same ``active_qa_rolling_keep_tail`` used by
-        ``_refresh_active_qa_products`` keeps first compaction and subsequent
-        rolling compaction on one boundary rule, and is applied per-QA so a
-        window mixing history + active QAs stays correct (history folds whole,
-        only the active QA keeps a tail).
+        History QAs fold entirely. Active QAs reserve ``active_qa_keep_tail``
+        recent messages so ``covers_upto`` does not reach the last message
+        (which would make ``apply_artifact_to_context`` skip as already-compact).
+        The same tail rule applies to first compaction and safety-net refresh.
         """
         messages = qa.get_messages()
         if qa.is_history:
             return messages
-        keep_tail = self._config.active_qa_rolling_keep_tail
+        keep_tail = self._config.active_qa_keep_tail
         if keep_tail <= 0:
             return messages
         if len(messages) <= keep_tail:
@@ -251,14 +245,35 @@ class QAArtifactManager:
         store: QAArtifactStore,
         qa_ref: QARef,
     ) -> bool:
+        """§5.2: RAW/STAGED only; COMPACTED and stale active blocks use safety net."""
         if qa_ref.tokens < self._config.qa_min_worth_tokens:
             return False
         state = store.get_or_init(qa_ref.qa_id)
-        if state.state in ("RAW", "STAGED") and not state.products_ready:
-            return True
-        if qa_ref.is_history:
+        if state.products_ready:
             return False
-        if not self._has_products(store, qa_ref.qa_id):
+        if state.state == "COMPACTED":
+            return False
+        if state.state not in ("RAW", "STAGED"):
+            return False
+        if not qa_ref.is_history and self._has_products(store, qa_ref.qa_id):
+            if is_qa_already_compact_in_window(
+                qa_ref.get_messages(),
+                qa_ref.qa_id,
+                covers_upto_message_id=state.covers_upto_message_id,
+            ):
+                return False
+        return True
+
+    def _active_qa_needs_safety_net_compact(
+        self,
+        ctx: Any,
+        store: QAArtifactStore,
+        qa_ref: QARef,
+    ) -> bool:
+        if qa_ref.is_history or qa_ref.tokens < self._config.qa_min_worth_tokens:
+            return False
+        state = store.get_or_init(qa_ref.qa_id)
+        if not (state.products_ready or state.state in ("STAGED", "COMPACTED")):
             return False
         uncov = self._uncovered_tokens(ctx, store, qa_ref)
         if uncov < self._config.qa_min_worth_tokens:
@@ -269,88 +284,103 @@ class QAArtifactManager:
             covers_upto_message_id=state.covers_upto_message_id,
         )
 
-    def _should_force_reapply_active_qa(
+    async def _safety_net_compact_active_once(
         self,
         ctx: Any,
-        store: QAArtifactStore,
-        qa_ref: QARef,
-    ) -> bool:
-        if qa_ref.is_history or not self._has_products(store, qa_ref.qa_id):
-            return False
-        state = store.get_or_init(qa_ref.qa_id)
-        if self._uncovered_tokens(ctx, store, qa_ref) < self._config.qa_min_worth_tokens:
-            return False
-        return is_qa_already_compact_in_window(
-            qa_ref.get_messages(),
-            qa_ref.qa_id,
-            covers_upto_message_id=state.covers_upto_message_id,
-        )
-
-    async def _refresh_active_qa_products(
-        self,
-        ctx: Any,
+        *,
         workspace: Any,
-        qa_ref: QARef,
-    ) -> bool:
-        """Rolling compact for in-flight QA: extend covers_upto when tail keeps growing."""
-        if not self._should_force_reapply_active_qa(ctx, self.build_store(ctx, workspace), qa_ref):
-            return False
+        window_qas: list[QARef],
+        context: Any,
+    ) -> int:
+        """Full-compact 入口对主 active QA 做一次同步 stale refresh。
 
+        仅取 window 中第一个 active：plan 模式通常只有一个 current_qa_id，
+        其余为 history。多 active 场景由 trigger2 异步处理，不在此同步扫全窗。
+        """
         store = self.build_store(ctx, workspace)
-        messages = qa_ref.get_messages()
-        keep_tail = self._config.active_qa_rolling_keep_tail
-        if keep_tail <= 0:
-            fold_messages = list(messages)
-        else:
-            if len(messages) <= keep_tail:
-                return False
-            fold_messages = list(messages[:-keep_tail])
-        if not fold_messages:
-            return False
+        active = next((qa for qa in window_qas if not qa.is_history), None)
+        if active is None or not self._active_qa_needs_safety_net_compact(ctx, store, active):
+            return 0
 
-        if not self._claim(store, qa_ref.qa_id, stale_refresh=True):
-            await self._await_products(store, qa_ref.qa_id)
-            if not self._claim(store, qa_ref.qa_id, stale_refresh=True):
+        token_counter = context.token_counter() if hasattr(context, "token_counter") else None
+        fold_messages = self._initial_fold_messages(active)
+        if not fold_messages:
+            return 0
+
+        if not self._claim(store, active.qa_id, stale_refresh=True):
+            await self._await_products(store, active.qa_id)
+            if not self._claim(store, active.qa_id, stale_refresh=True):
                 logger.info(
-                    "[QAArtifactManager] active qa rolling compact claim failed qa_id=%s",
-                    qa_ref.qa_id,
+                    "[QAArtifactManager] active qa safety net claim failed qa_id=%s",
+                    active.qa_id,
                 )
-                return False
+                return 0
 
         try:
             await self._produce_impl(
                 ctx,
                 workspace,
-                qa_ref,
+                active,
                 mark_ready=False,
                 messages=fold_messages,
             )
             logger.info(
-                "[QAArtifactManager] active qa rolling compact qa_id=%s "
+                "[QAArtifactManager] active qa safety net compact qa_id=%s "
                 "fold_messages=%s uncovered_tokens=%s",
-                qa_ref.qa_id,
+                active.qa_id,
                 len(fold_messages),
-                self._uncovered_tokens(ctx, store, qa_ref),
+                self._uncovered_tokens(ctx, store, active),
             )
             write_context_trace(
-                "qa_artifact.active_qa_rolling_compact",
+                "qa_artifact.active_qa_safety_net_compact",
                 {
-                    "qa_id": qa_ref.qa_id,
+                    "qa_id": active.qa_id,
                     "fold_messages": len(fold_messages),
-                    "keep_tail": keep_tail,
+                    "keep_tail": self._config.active_qa_keep_tail,
                 },
             )
-            return True
         except Exception as exc:
             logger.warning(
-                "[QAArtifactManager] active qa rolling compact failed qa_id=%s error=%s",
-                qa_ref.qa_id,
+                "[QAArtifactManager] active qa safety net compact failed qa_id=%s error=%s",
+                active.qa_id,
                 exc,
             )
-            state = store.get_or_init(qa_ref.qa_id)
+            state = store.get_or_init(active.qa_id)
             state.is_extracting = False
-            store.save(qa_ref.qa_id, state)
-            return False
+            store.save(active.qa_id, state)
+            return 0
+
+        state = store.get_or_init(active.qa_id)
+        try:
+            artifact = await self._read_artifacts(store, state)
+            reduced = apply_artifact_to_context(
+                context,
+                active.qa_id,
+                artifact,
+                token_counter=token_counter,
+                covers_upto_message_id=state.covers_upto_message_id,
+                force_reapply=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[QAArtifactManager] active qa safety net apply failed qa_id=%s error=%s",
+                active.qa_id,
+                exc,
+            )
+            return 0
+        if reduced > 0:
+            state.state = "COMPACTED"
+            state.products_ready = False
+            store.save(active.qa_id, state)
+        elif is_qa_already_compact_in_window(
+            active.get_messages(),
+            active.qa_id,
+            covers_upto_message_id=state.covers_upto_message_id,
+        ):
+            state.state = "COMPACTED"
+            state.products_ready = False
+            store.save(active.qa_id, state)
+        return reduced
 
     async def maybe_compact_history_block(
         self,
@@ -773,6 +803,13 @@ class QAArtifactManager:
                 if self._claim(store, qa_ref.qa_id, stale_refresh=stale):
                     task = asyncio.create_task(self._produce(ctx, workspace, qa_ref, mark_ready=True))
                     self._register_bg_task(ctx, qa_ref.qa_id, task)
+            elif self._has_products(store, qa_ref.qa_id):
+                uncov = self._uncovered_tokens(ctx, store, qa_ref)
+                if uncov < self._config.qa_min_worth_tokens:
+                    continue
+                if self._claim(store, qa_ref.qa_id, stale_refresh=True):
+                    task = asyncio.create_task(self._produce(ctx, workspace, qa_ref, mark_ready=False))
+                    self._register_bg_task(ctx, qa_ref.qa_id, task)
             elif self._claim(store, qa_ref.qa_id):
                 task = asyncio.create_task(self._produce(ctx, workspace, qa_ref, mark_ready=False))
                 self._register_bg_task(ctx, qa_ref.qa_id, task)
@@ -1004,6 +1041,25 @@ class QAArtifactManager:
         token_counter = context.token_counter() if hasattr(context, "token_counter") else None
         trigger_line = trigger_total_tokens or self._config.full_compact_target_tokens
 
+        safety_reduced = await self._safety_net_compact_active_once(
+            ctx,
+            workspace=workspace,
+            window_qas=window_qas,
+            context=context,
+        )
+        if safety_reduced > 0:
+            est = estimate_context_messages_tokens(context.get_messages(), token_counter)
+            if est <= self._config.full_compact_target_tokens:
+                logger.info(
+                    "[QAArtifactManager] compact_to_target reached target after safety net est=%s",
+                    est,
+                )
+                write_context_trace(
+                    "qa_artifact.compact_to_target",
+                    {"result": "target_reached", "estimated_tokens": est, "waves_used": 0},
+                )
+                return True
+
         for _ in range(self._config.full_compact_max_waves):
             if est <= self._config.full_compact_target_tokens:
                 logger.info("[QAArtifactManager] compact_to_target reached target est=%s", est)
@@ -1021,7 +1077,6 @@ class QAArtifactManager:
 
             reduced = 0
             for qa_ref in wave:
-                refreshed = await self._refresh_active_qa_products(ctx, workspace, qa_ref)
                 try:
                     artifact = await self.ensure_compacted(ctx, workspace=workspace, qa=qa_ref)
                 except Exception as exc:
@@ -1034,14 +1089,12 @@ class QAArtifactManager:
                     continue
 
                 state = store.get_or_init(qa_ref.qa_id)
-                force_reapply = refreshed or self._should_force_reapply_active_qa(ctx, store, qa_ref)
                 qa_reduced = apply_artifact_to_context(
                     context,
                     qa_ref.qa_id,
                     artifact,
                     token_counter=token_counter,
                     covers_upto_message_id=state.covers_upto_message_id,
-                    force_reapply=force_reapply,
                 )
                 reduced += qa_reduced
                 if qa_reduced > 0:
@@ -1050,17 +1103,17 @@ class QAArtifactManager:
                     state.products_ready = False
                     store.save(qa_ref.qa_id, state)
             if reduced == 0:
-                est = estimate_context_messages_tokens(context.get_messages(), token_counter)
-                if est <= self._config.full_compact_target_tokens:
+                msg_est = estimate_context_messages_tokens(context.get_messages(), token_counter)
+                if msg_est <= self._config.full_compact_target_tokens:
                     logger.info(
                         "[QAArtifactManager] compact_to_target zero progress but at target est=%s",
-                        est,
+                        msg_est,
                     )
                     return True
-                if est <= trigger_line:
+                if msg_est <= trigger_line:
                     logger.info(
                         "[QAArtifactManager] compact_to_target zero progress but under trigger est=%s",
-                        est,
+                        msg_est,
                     )
                     return True
                 logger.info("[QAArtifactManager] compact_to_target zero progress, fallback")

@@ -200,6 +200,59 @@ async def test_maybe_compact_history_block_claims_one_qa(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_on_session_memory_trigger_stale_refresh_active_qa(tmp_path, monkeypatch):
+    from openjiuwen.core.context_engine.qa_artifact.window import compact_replacement_message
+
+    session = FakeSession("session-trigger2-active")
+    config = QAArtifactConfig(qa_min_worth_tokens=10)
+    mgr = _CompactTestManager(session, tmp_path, config)
+    store = QAArtifactStore(session, str(tmp_path))
+    state = store.get_or_init("qa_002")
+    state.state = "STAGED"
+    state.products_ready = False
+    store.save("qa_002", state)
+    await store.write_atomic(state.overview_path, "overview", state.pending_path)
+    await store.write_atomic(
+        state.catalog_path,
+        json.dumps({"qa_id": "qa_002", "entries": [{"preview": "p", "handle": "h1"}]}),
+        f"{state.pending_path}.catalog",
+    )
+
+    compact = compact_replacement_message("qa_002", "compact block")
+    tail = AssistantMessage(content="growing tail " * 80, metadata={"qa_id": "qa_002"})
+    context = SessionModelContext(
+        "default_context_id",
+        "session-trigger2-active",
+        ContextEngineConfig(),
+        history_messages=[compact, tail],
+    )
+    stored = context.get_messages()
+    state.covers_upto_message_id = (getattr(stored[0], "metadata", None) or {}).get("context_message_id")
+    store.save("qa_002", state)
+
+    qa_ref = QARef(
+        qa_id="qa_002",
+        tokens=500,
+        is_history=False,
+        get_messages=lambda: context.get_messages(),
+    )
+    ctx = FakeCtx(session, FakeWorkspace(str(tmp_path)))
+    ctx.context = context
+
+    scheduled = []
+
+    async def _fake_produce(_ctx, _workspace, qa, *, mark_ready):
+        scheduled.append((qa.qa_id, mark_ready))
+
+    monkeypatch.setattr(mgr, "_produce", _fake_produce)
+
+    await mgr.on_session_memory_trigger(ctx, workspace=ctx.workspace, window_qas=[qa_ref])
+    await asyncio.sleep(0)
+
+    assert scheduled == [("qa_002", False)]
+
+
+@pytest.mark.asyncio
 async def test_hydrate_injects_compact_when_products_ready(tmp_path):
     session = FakeSession("session-a")
     history = HistoryQABuffer(max_blocks=3)
@@ -238,7 +291,7 @@ async def test_hydrate_injects_compact_when_products_ready(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_apply_artifact_force_reapply_replaces_rolling_active_qa(tmp_path):
+async def test_apply_artifact_force_reapply_replaces_stale_active_qa(tmp_path):
     from openjiuwen.core.context_engine.qa_artifact.window import (
         apply_artifact_to_context,
         compact_replacement_message,
@@ -281,7 +334,7 @@ async def test_apply_artifact_force_reapply_replaces_rolling_active_qa(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_compact_to_target_includes_active_qa_with_growing_tail(tmp_path, monkeypatch):
+async def test_compact_to_target_safety_net_active_qa_with_growing_tail(tmp_path, monkeypatch):
     from openjiuwen.core.context_engine.qa_artifact.window import compact_replacement_message
 
     session = FakeSession("session-active")
@@ -317,6 +370,7 @@ async def test_compact_to_target_includes_active_qa_with_growing_tail(tmp_path, 
     stored = context.get_messages()
     state.covers_upto_message_id = (getattr(stored[0], "metadata", None) or {}).get("context_message_id")
     store.save("qa_001", state)
+    await store.write_atomic(state.overview_path, "refreshed overview", state.pending_path)
 
     qa_ref = QARef(
         qa_id="qa_001",
@@ -327,14 +381,11 @@ async def test_compact_to_target_includes_active_qa_with_growing_tail(tmp_path, 
     ctx = FakeCtx(session, FakeWorkspace(str(tmp_path)))
     ctx.context = context
 
-    refreshed = False
-
-    async def _fake_refresh(_ctx, _workspace, _qa_ref):
-        nonlocal refreshed
-        refreshed = True
-        return True
+    produced = False
 
     async def _fake_produce(_ctx, _workspace, qa, *, mark_ready, messages=None):
+        nonlocal produced
+        produced = True
         store_local = QAArtifactStore(session, str(tmp_path))
         st = store_local.get_or_init(qa.qa_id)
         st.state = "STAGED"
@@ -343,7 +394,6 @@ async def test_compact_to_target_includes_active_qa_with_growing_tail(tmp_path, 
         st.covers_upto_message_id = tail_id
         store_local.save(qa.qa_id, st)
 
-    monkeypatch.setattr(mgr, "_refresh_active_qa_products", _fake_refresh)
     monkeypatch.setattr(mgr, "_produce_impl", _fake_produce)
     monkeypatch.setattr(mgr, "_claim", lambda *args, **kwargs: True)
 
@@ -356,19 +406,19 @@ async def test_compact_to_target_includes_active_qa_with_growing_tail(tmp_path, 
         fallback=AsyncMock(return_value=False),
     )
 
-    assert refreshed is True
+    assert produced is True
     assert len(context.get_messages()) <= 2
 
 
 @pytest.mark.asyncio
-async def test_compact_to_target_refreshes_active_qa_when_covered_id_left_live_context(tmp_path, monkeypatch):
+async def test_compact_to_target_safety_net_refreshes_stale_active_cover(tmp_path, monkeypatch):
     from openjiuwen.core.context_engine.qa_artifact.window import compact_replacement_message
 
     session = FakeSession("session-active-stale-cover")
     config = QAArtifactConfig(
         qa_min_worth_tokens=10,
         full_compact_target_tokens=600,
-        active_qa_rolling_keep_tail=1,
+        active_qa_keep_tail=1,
     )
     mgr = QAArtifactManager(config, None, CatalogBuilder(config))
     store = QAArtifactStore(session, str(tmp_path))
@@ -449,6 +499,116 @@ async def test_compact_to_target_refreshes_active_qa_when_covered_id_left_live_c
     assert len(messages) == 2
     assert "refreshed overview" in messages[0].content
     assert messages[-1].content == "latest user"
+
+
+@pytest.mark.asyncio
+async def test_safety_net_apply_failure_returns_zero_and_clears_extracting(tmp_path, monkeypatch):
+    from openjiuwen.core.context_engine.qa_artifact.window import compact_replacement_message
+
+    session = FakeSession("session-safety-net-apply-fail")
+    config = QAArtifactConfig(qa_min_worth_tokens=10, full_compact_target_tokens=600)
+    mgr = QAArtifactManager(config, None, CatalogBuilder(config))
+    store = QAArtifactStore(session, str(tmp_path))
+    state = store.get_or_init("qa_001")
+    state.state = "STAGED"
+    state.products_ready = False
+    store.save("qa_001", state)
+    await store.write_atomic(state.overview_path, "overview", state.pending_path)
+    await store.write_atomic(
+        state.catalog_path,
+        json.dumps({"qa_id": "qa_001", "entries": []}),
+        f"{state.pending_path}.catalog",
+    )
+
+    compact = compact_replacement_message("qa_001", "compact block")
+    tail = AssistantMessage(content="growing tail " * 80, metadata={"qa_id": "qa_001"})
+    context = SessionModelContext(
+        "default_context_id",
+        "session-safety-net-apply-fail",
+        ContextEngineConfig(),
+        history_messages=[compact, tail],
+    )
+    stored = context.get_messages()
+    state.covers_upto_message_id = (getattr(stored[0], "metadata", None) or {}).get("context_message_id")
+    store.save("qa_001", state)
+
+    qa_ref = QARef(
+        qa_id="qa_001",
+        tokens=500,
+        is_history=False,
+        get_messages=lambda: context.get_messages(),
+    )
+    ctx = FakeCtx(session, FakeWorkspace(str(tmp_path)))
+    ctx.context = context
+
+    async def _fake_produce_impl(_ctx, _workspace, qa, *, mark_ready, messages=None):
+        store_local = QAArtifactStore(session, str(tmp_path))
+        st = store_local.get_or_init(qa.qa_id)
+        st.state = "STAGED"
+        st.products_ready = False
+        st.is_extracting = False
+        store_local.save(qa.qa_id, st)
+
+    async def _fail_read_artifacts(_store, _state):
+        raise OSError("read failed")
+
+    monkeypatch.setattr(mgr, "_produce_impl", _fake_produce_impl)
+    monkeypatch.setattr(mgr, "_claim", lambda *args, **kwargs: True)
+    monkeypatch.setattr(mgr, "_read_artifacts", _fail_read_artifacts)
+
+    reduced = await mgr._safety_net_compact_active_once(
+        ctx,
+        workspace=ctx.workspace,
+        window_qas=[qa_ref],
+        context=context,
+    )
+
+    assert reduced == 0
+    final_state = store.get_or_init("qa_001")
+    assert final_state.is_extracting is False
+
+
+@pytest.mark.asyncio
+async def test_compact_to_target_candidate_excludes_stale_active_compact_block(tmp_path):
+    from openjiuwen.core.context_engine.qa_artifact.window import compact_replacement_message
+
+    session = FakeSession("session-candidate")
+    store = QAArtifactStore(session, str(tmp_path))
+    state = store.get_or_init("qa_001")
+    state.state = "COMPACTED"
+    state.products_ready = False
+    store.save("qa_001", state)
+    await store.write_atomic(state.overview_path, "overview", state.pending_path)
+    await store.write_atomic(
+        state.catalog_path,
+        json.dumps({"qa_id": "qa_001", "entries": [{"preview": "p", "handle": "h1"}]}),
+        f"{state.pending_path}.catalog",
+    )
+
+    compact = compact_replacement_message("qa_001", "compact block")
+    tail = AssistantMessage(content="growing tail " * 80, metadata={"qa_id": "qa_001"})
+    context = SessionModelContext(
+        "default_context_id",
+        "session-candidate",
+        ContextEngineConfig(),
+        history_messages=[compact, tail],
+    )
+    stored = context.get_messages()
+    state.covers_upto_message_id = (getattr(stored[0], "metadata", None) or {}).get("context_message_id")
+    store.save("qa_001", state)
+
+    qa_ref = QARef(
+        qa_id="qa_001",
+        tokens=500,
+        is_history=False,
+        get_messages=lambda: context.get_messages(),
+    )
+    ctx = FakeCtx(session, FakeWorkspace(str(tmp_path)))
+    ctx.context = context
+    mgr = QAArtifactManager(QAArtifactConfig(qa_min_worth_tokens=10), None, CatalogBuilder(QAArtifactConfig()))
+
+    assert mgr._is_compact_to_target_candidate(ctx, store, qa_ref) is False
+    assert mgr._active_qa_needs_safety_net_compact(ctx, store, qa_ref) is True
 
 
 def test_needs_history_artifact_work_false_when_history_already_compact(tmp_path):
@@ -533,7 +693,6 @@ async def test_compact_to_target_zero_progress_reestimates_before_fallback(tmp_p
     ctx.context = context
 
     monkeypatch.setattr(mgr, "_is_compact_to_target_candidate", lambda *args, **kwargs: True)
-    monkeypatch.setattr(mgr, "_refresh_active_qa_products", AsyncMock(return_value=False))
     monkeypatch.setattr(
         mgr,
         "ensure_compacted",
