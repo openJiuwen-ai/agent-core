@@ -1,7 +1,9 @@
 # Team DB 性能优化清单
 
 本清单是基于 `agent_team_tools_db_stress_e2e.py` 压测（20 人团队并发、消息主导画像）
-识别出的 SQLite 数据库层优化点汇总。进度：**B1 / C4 / C1 / C2 已落地**，其余为待办分析项。
+识别出的 SQLite 数据库层优化点汇总。进度：**B1 / C4 / C1 / C2 / D1 已落地**，其余为待办分析项。
+消息路径见 A/B/C 三节；**task 相关操作专项见 D 节**（读路径 N+1、写路径重复全表扫描、
+task 表索引）。
 
 - 证据来源：`tests/system_tests/agent_swarm/agent_team_tools_db_stress_e2e.py`
 - 涉及代码：`openjiuwen/agent_teams/tools/database/`（`engine.py` / `message_dao.py` /
@@ -23,6 +25,21 @@
 | `view_task` | bounded 后 avg 116ms | 任务池有界后已非瓶颈 |
 
 三条正交优化主线：**索引减写放大** · **算法减往返/复杂度** · **连接池减读排队**。
+
+### 关键洞察：写延迟 ≈ 写锁排队税（非各操作自身开销）
+
+最新一版数据（20×20，有界任务池，errors=0）里，最简单的单行写 `member_status`（PK SELECT +
+改一列，实际工作 <1ms）avg **69ms**，与 `send_message`（73ms）/ `task_update`（75ms）/
+`claim_task`（69ms）几乎相同——一个只改一列的写不可能干了 69ms。**这 ~70ms 绝大部分是排队，不是干活**：
+20 个 worker 的所有写都挤过同一把进程级 `asyncio.Lock`，任一时刻约 19 个在等，每个写都交这笔均匀的税。
+
+- 判据：纯读（不持写锁）全在 3.5~9.8ms；所有写（消息/成员/任务）全在 45~210ms、聚在 ~70ms。
+- 推论 1：**单独微优化某个写操作的代码收益极小**——省掉一次 5ms 冗余 read，对 70ms 排队几乎无感。
+- 推论 2：写侧吞吐天花板 = 写总数 × 每次 commit 一次 fsync，全部串行。本轮 ~5343 次写 × ~3ms ≈ 16s，
+  占 25.8s wall 的 ~62%。只有三条能动：**减写数量** / **缩短临界区（队列排空更快，惠及所有写者）** /
+  **降每次 commit 的 fsync（WAL checkpoint = C3）**。
+- 推论 3：task 写慢 ≠ task 代码差，是"排在 3700 次消息写后面"。task 写在**等消息写**。因此 task 写的唯一
+  task-侧实招是**缩短临界区**（见 D5），其余靠全局 B/C 项。
 
 ---
 
@@ -130,11 +147,91 @@
 
 ---
 
+## D. Task 相关操作专项
+
+消息是当前主负载，但**任务操作藏着最离谱的单点开销**：原始压测画像（每轮建任务、任务板无界膨胀）
+下 `view_task` avg **2.6s** / max **14.5s** / 557 次 >1s——远超任何消息操作。改写用例把任务池收成有界
+后 view_task 降到 avg 116ms，**但那是把负载画像改小掩盖了问题，根因没动**。根因不是行扫描，是查询次数
+爆炸（N+1）。本节独立于负载画像，任务多时必须做。
+
+**最新一版数据（有界池，~30 条任务）实锤**：`view_task` 仍 avg **96ms** / p95 350ms，是其他纯读
+（`read_inbox` 4.6ms / `has_unread` 3.5ms）的 **~20 倍**。有界池只有 ~30 条任务，但每次 view_task 仍
+~31 次查询（1 list + 30 次 `get_dependencies`），96ms/31 ≈ 3ms/查 = 一次读连接 checkout。**N+1 的 N 是
+"每次调用的任务数"，与历史膨胀无关——这就是 D1。** 至于 task 的**写**（claim/create/complete/reset/update
+均 ~70ms），那不是 task 特有的慢，是"写锁排队税"（见上文关键洞察）：它们和 `member_status`(69ms) 一样慢，
+在等 3700 次消息写。task 侧唯一能缩短临界区的实招见 D5。
+
+- [x] **D1. `list_tasks_with_deps` 的 N+1 → 固定 2 次查询** — ✅ 已落地（无 schema 变更）
+  - 现象：`view_task`（list / claimable）走 `task_manager.list_tasks_with_deps`：
+    ```python
+    tasks = await self.list_tasks(status=status)          # 1 次查询，返回 N 条
+    for task in tasks:
+        deps = await self.get_dependencies(task.task_id)  # 每条任务再查 1 次
+    ```
+    `get_dependencies → task_dao.get_task_dependencies` 每次独立 `read()` 一个池连接 →
+    **N+1 次查询 / N+1 次连接 checkout**。板子 400 条时单次 view_task = 401 次查询；20 个 worker
+    并发、每轮 list+claimable 两次 → 峰值上万次查询抢读池连接。**这才是 2.6s/14.5s 的真凶。**
+  - 改动（纯读路径，依赖表已带 `team_name` 列+索引）：
+    - `task_dao` 新增 `get_team_dependencies(team_name)`：一次 `SELECT ... WHERE team_name=?` 捞全团队依赖边。
+    - `list_tasks_with_deps` 改为 **2 次查询 + 内存分组**：查全部任务（查询 1）+ 查全部依赖（查询 2），
+      用 `dict[task_id -> list[unresolved_dep]]`（`defaultdict`）一次遍历分组，再拼 `TaskSummary`。
+  - 净效果：401 次查询 → **2 次**，连接 checkout 401 → 2；并发下 view_task 尾延迟从秒级掉到毫秒级。
+    即便任务板有界到 ~20 条（N+1=21 次）仍是 ~10 倍收益，**与负载画像无关**。
+  - 落地：`task_dao` 新增 `get_team_dependencies(team_name)`（一次查全团队依赖边）；`list_tasks_with_deps`
+    改为"查全部任务 + 查全部依赖 + `defaultdict` 内存分组"。回归 `test_list_tasks_with_deps_avoids_n_plus_1`
+    spy 断言 `get_team_dependencies` 调 1 次、`get_task_dependencies` 调 0 次，且分组正确；`test_task_manager.py`
+    61 条全过。
+  - **A/B（默认有界池，20×20，各 2 轮 before/after）**：`view_task` avg 70~72ms → **4.7~5.2ms（~14×）**；
+    p95 209~253ms → **9.7~10ms（~24×）**；p99 318~657ms → **12~13ms（~30~50×）**；max 653~731ms → 17~131ms。
+    view_task 已降到与其他纯读（`read_inbox` 4.6ms / `has_unread` 3.5ms）同一档。**顺带总 throughput
+    431~456 → 578~629 calls/s（~+35%）、wall 16s → 11~12s**——N+1 的读连接 checkout 洪流消失，全局都受益。
+
+- [ ] **D2. 写路径 `_maybe_publish_task_list_drained` 每次终态写都全表扫描** — 中收益 / 低风险
+  - 现象：`complete` / `reset` / `cancel` 三处（task_manager:759 / 1041 / 1078）在每次终态转移后都调
+    `_maybe_publish_task_list_drained()`，其内部 `await self.list_tasks()` **全表读一遍**判断是否全部终态。
+    任务churn 下 = 每次写后跟一次 O(N) 读；压测里 claim/complete/reset 合计每轮都触发。
+  - 改动：把"是否全部终态"下推为一条聚合查询——`SELECT 1 WHERE EXISTS(status NOT IN terminal) LIMIT 1`
+    的反面，或 `COUNT(*) FILTER (status NOT IN terminal)`，避免把全部行拉进内存。或由 DAO 的终态写直接
+    回传"剩余非终态计数"，省掉独立那次扫描。
+
+- [ ] **D3. `get_task_detail` / `get_tasks_depending_on` 的次级 N+1** — 低收益 / 低优先
+  - 现象：`view_task`（get，单任务、低频）→ `get_task_detail` → `get_tasks_depending_on`，后者
+    （task_dao:699-715）先查依赖边、再**对每条边循环单查任务**，又是 N+1。
+  - 改动：同 D1 思路，`WHERE task_id IN (:ids)` 一次批量取 + 内存拼装。因是单任务低频路径，优先级低。
+
+- [ ] **D4. task 表索引：删 `team_name` 死索引 + 按查询形状加复合索引** — 中收益 / 中风险
+  - 现象（细化 A3）：task 表（per-session 动态表）有 `team_name` / `status` / `assignee` / `updated_at`
+    四个二级索引。`team_name` 同 A1 属死索引（表内基数≈1）。真实查询形状：
+    - claimable：`status = 'pending' ORDER BY ...` → `status` 单列够用（低基数但 pending 子集通常小）。
+    - `get_tasks_by_assignee`：`assignee = ? AND status = ?` → 想要复合 `(assignee, status)`。
+    - list：`status = ?` 或全表。
+  - 改动：删 `team_name` 索引；`assignee` 单列 → 复合 `(assignee, status)`（覆盖 cancel/reassign 时按
+    assignee 找 claimed 任务）。任务写现为低频（有界池），收益低于消息表，但与 A1/A2 同批做迁移最省事。
+  - 义务：schema 变更 → 补 `test_database.py` migration/字段用例 + 同步 `docs/specs`。
+
+- [ ] **D5. task 写：把锁内 SELECT 折成单条 CAS，缩短临界区** — 中收益（惠及所有写者）/ 低风险
+  - 现象：`claim_task`（task_dao:396-423）在**写锁内**先 `SELECT`（查 assignee + 校验状态转移）再 `UPDATE`，
+    把一次读关进了临界区。`task_update` / `complete` / `reset` 同样是"锁内先读后写"。由「关键洞察」，写延迟
+    ~70ms 主体是排队；缩短每个写者的锁持有时长 → 队列排空更快 → **所有写者（不止 task）都受益**。
+  - 改动：仿 `try_transition_member_status`，用单条 CAS：
+    `UPDATE team_task SET status='claimed', assignee=?, updated_at=? WHERE task_id=? AND assignee IS NULL
+    AND status IN (合法前态)`，看 `rowcount`。失败（rowcount=0）时再按需单查一次拿具体原因（在锁外）。
+    去掉锁内 SELECT，临界区从"SELECT+UPDATE+commit"缩到"UPDATE+commit"。
+  - 注意：这不改变写总数，只缩短单次锁持有；配合 C3（降 fsync 频次）才是写侧吞吐的主要杠杆。
+
+---
+
 ## 落地建议顺序
 
-1. **B1（mark_read 批量 UPDATE）** — 零迁移风险，立刻能量化收益。
-2. **C4 → C1 + C2**（连接池旋钮暴露 + 读写分离 + 小读缓存） — 结构收益最大、无 schema 迁移。
-3. **A1 + A2**（索引减写放大） — 收益大但要迁移 + spec 文档，放最后。
-4. C3 / B2 / B3 视前三步后的剩余尾延迟按需推进。
+1. ~~**B1（mark_read 批量 UPDATE）**~~ — ✅ 已落地。
+2. ~~**D1（`list_tasks_with_deps` N+1 → 2 查询）**~~ — ✅ 已落地。view_task avg 70ms→5ms、p99→~12ms，
+   总 throughput +35%。零迁移、数量级收益，正是"view_task 开销离谱"的根因。
+3. ~~**C4 → C1 + C2**~~ — ✅ 已落地（连接池旋钮 + 读写分离 + 小读缓存）。
+4. **D2 / D3 / D5**（task 写路径全表扫描、get_task_detail 次级 N+1、claim/update 折 CAS 缩临界区） —
+   零迁移，随 D1 一并做；D5 惠及所有写者。
+5. **A1 + A2 + D4**（索引减写放大：消息表 + task 表） — 收益大但要迁移 + spec 文档，同批做，放最后。
+6. **C3 + B2 + B3**（WAL checkpoint 挪出写路径、has_unread EXISTS、member CAS） — 由「关键洞察」，
+   C3 降 fsync 是写侧吞吐的主杠杆，视前几步后的剩余尾延迟按需推进。
 
-每步都跑 harness 前后对比，用数字验证，不猜。
+每步都跑 harness 前后对比，用数字验证，不猜。D1 的 A/B 要临时恢复"任务膨胀"画像（每轮建任务、
+不设有界池）才压得出 view_task 的真实收益。

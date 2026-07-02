@@ -8,6 +8,7 @@ This module provides task management functionality for agent teams.
 
 import json
 import shutil
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -462,21 +463,27 @@ class TeamTaskManager:
         Returns:
             TaskListResult containing task summaries with dependency info.
         """
+        # Two queries, independent of task count: all tasks + all dependency
+        # edges for the team, grouped in memory. Replaces the previous N+1
+        # (one get_dependencies per task) that turned a large board into
+        # hundreds of per-task queries / connection checkouts.
         tasks = await self.list_tasks(status=status)
-        summaries = []
-        for task in tasks:
-            deps = await self.get_dependencies(task.task_id)
-            unresolved = [d.depends_on_task_id for d in deps if not d.resolved]
-            summaries.append(
-                TaskSummary(
-                    task_id=task.task_id,
-                    title=task.title,
-                    status=task.status,
-                    assignee=task.assignee,
-                    blocked_by=unresolved,
-                    updated_at=task.updated_at,
-                )
+        all_deps = await self.db.task.get_team_dependencies(self.team_name)
+        unresolved_by_task: dict[str, list[str]] = defaultdict(list)
+        for dep in all_deps:
+            if not dep.resolved:
+                unresolved_by_task[dep.task_id].append(dep.depends_on_task_id)
+        summaries = [
+            TaskSummary(
+                task_id=task.task_id,
+                title=task.title,
+                status=task.status,
+                assignee=task.assignee,
+                blocked_by=unresolved_by_task.get(task.task_id, []),
+                updated_at=task.updated_at,
             )
+            for task in tasks
+        ]
         return TaskListResult(tasks=summaries, count=len(summaries))
 
     async def get_task_detail(self, task_id: str) -> Optional[TaskDetail]:

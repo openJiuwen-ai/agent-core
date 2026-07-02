@@ -131,6 +131,12 @@ EXEC_STATUS_CYCLE = (
 
 _T = TypeVar("_T")
 
+# Operation labels that only read (no write lock; served concurrently by the
+# WAL reader pool). Everything else is a write — it serialises through the
+# process-wide write lock, which is why the report splits the two: writes pay
+# the shared-lock queuing tax, reads do not.
+READ_OPS = frozenset({"has_unread", "read_inbox", "read_broadcast", "list_members", "view_task"})
+
 
 def _make_payload(tag: str, size: int = PAYLOAD_SIZE) -> str:
     """Build a ``size``-char string with a readable prefix.
@@ -463,37 +469,73 @@ def _percentile(sorted_values: list[float], pct: float) -> float:
     return sorted_values[rank]
 
 
+def _stat_row(label: str, samples: list[float], slow_count: int) -> str:
+    """Format one latency row (samples must be pre-sorted ascending, seconds)."""
+    count = len(samples)
+    avg = sum(samples) / count if count else 0.0
+    return (
+        f"{label:<20}{count:>8}{avg * 1000:>10.2f}"
+        f"{_percentile(samples, 50) * 1000:>10.2f}{_percentile(samples, 95) * 1000:>10.2f}"
+        f"{_percentile(samples, 99) * 1000:>10.2f}{samples[-1] * 1000:>10.2f}{slow_count:>8}"
+    )
+
+
+def _group_lines(title: str, labels: list[str], metrics: Metrics, wall_seconds: float) -> list[str]:
+    """Render one op group (reads or writes) with per-op rows + a subtotal.
+
+    The subtotal aggregates every sample across the group's ops, so its
+    avg / percentiles describe the group as a whole and its throughput is the
+    group's calls-per-second.
+    """
+    if not labels:
+        return []
+    pooled: list[float] = []
+    group_slow = 0
+    rows: list[str] = []
+    for label in labels:
+        samples = sorted(metrics.latencies[label])
+        slow_here = sum(1 for tn, _, _ in metrics.slow if tn == label)
+        rows.append(_stat_row(label, samples, slow_here))
+        pooled.extend(samples)
+        group_slow += slow_here
+    pooled.sort()
+    group_tput = len(pooled) / wall_seconds if wall_seconds > 0 else 0.0
+    return [
+        f"-- {title} ({len(pooled)} calls, {group_tput:.1f}/s) --",
+        f"{'op':<20}{'count':>8}{'avg(ms)':>10}{'p50(ms)':>10}"
+        f"{'p95(ms)':>10}{'p99(ms)':>10}{'max(ms)':>10}{'>1s':>8}",
+        *rows,
+        _stat_row("SUBTOTAL", pooled, group_slow),
+    ]
+
+
 def _report(metrics: Metrics, wall_seconds: float) -> None:
-    """Print the aggregate latency distribution and slow/error tallies.
+    """Print the latency distribution, split into writes vs reads, + tallies.
 
     The benchmark report is the script's primary deliverable and is written
     to stdout so it stays visible regardless of the log config's level gate.
+    The report is split into two groups because they live on different
+    concurrency paths: writes serialise through the one process-wide write
+    lock (and pay its queuing tax), reads run concurrently on the WAL reader
+    pool. Seeing them apart makes the write-lock bottleneck obvious.
     The required per-call slow-path alerts still go through
     ``team_logger.warning`` (see ``Metrics.record``); this is only the
-    end-of-run summary table.
+    end-of-run summary.
     """
     total = metrics.total_calls
     throughput = total / wall_seconds if wall_seconds > 0 else 0.0
+    write_labels = sorted(lbl for lbl in metrics.latencies if lbl not in READ_OPS)
+    read_labels = sorted(lbl for lbl in metrics.latencies if lbl in READ_OPS)
     lines = [
-        "=" * 84,
+        "=" * 86,
         f"Team-tool DB stress: team_size={TEAM_SIZE} iterations={ITERATIONS} "
         f"payload={PAYLOAD_SIZE}B slow_threshold={SLOW_THRESHOLD_S:.1f}s",
         f"Total calls={total} wall={wall_seconds:.3f}s throughput={throughput:.1f} calls/s "
         f"slow(>{SLOW_THRESHOLD_S:.1f}s)={len(metrics.slow)} errors={len(metrics.errors)}",
-        f"{'tool':<14}{'count':>8}{'avg(ms)':>10}{'p50(ms)':>10}"
-        f"{'p95(ms)':>10}{'p99(ms)':>10}{'max(ms)':>10}{'>1s':>8}",
+        *_group_lines("WRITES (serialized through the write lock)", write_labels, metrics, wall_seconds),
+        *_group_lines("READS (WAL-concurrent, no write lock)", read_labels, metrics, wall_seconds),
+        "=" * 86,
     ]
-    for tool_name in sorted(metrics.latencies):
-        samples = sorted(metrics.latencies[tool_name])
-        count = len(samples)
-        avg = sum(samples) / count if count else 0.0
-        slow_here = sum(1 for tn, _, _ in metrics.slow if tn == tool_name)
-        lines.append(
-            f"{tool_name:<14}{count:>8}{avg * 1000:>10.2f}"
-            f"{_percentile(samples, 50) * 1000:>10.2f}{_percentile(samples, 95) * 1000:>10.2f}"
-            f"{_percentile(samples, 99) * 1000:>10.2f}{samples[-1] * 1000:>10.2f}{slow_here:>8}"
-        )
-    lines.append("=" * 84)
     print("\n".join(lines))
 
     if metrics.errors:
