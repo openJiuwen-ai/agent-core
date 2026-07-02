@@ -1395,3 +1395,35 @@ async def test_count_tasks_terminality(task_manager):
     await task_manager.complete(t1.task_id)
     # One completed (terminal) + one pending -> total 2, non_terminal 1.
     assert await dao.count_tasks_terminality(team) == (2, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_get_dependent_task_ids_single_query(task_manager):
+    """get_dependent_task_ids returns every downstream task id from the edge table."""
+    a = await task_manager.add(title="A", content="ca")
+    b = await task_manager.add(title="B", content="cb", dependencies=[a.task_id])
+    c = await task_manager.add(title="C", content="cc", dependencies=[a.task_id])
+
+    downstream = await task_manager.db.task.get_dependent_task_ids(a.task_id)
+    assert set(downstream) == {b.task_id, c.task_id}
+    # A leaf task nobody depends on has no downstream ids.
+    assert await task_manager.db.task.get_dependent_task_ids(b.task_id) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_get_task_detail_reports_blocks_and_blocked_by(task_manager):
+    """get_task_detail: blocks = downstream tasks, blocked_by = unresolved deps."""
+    a = await task_manager.add(title="A", content="ca")
+    b = await task_manager.add(title="B", content="cb", dependencies=[a.task_id])
+
+    detail_a = await task_manager.get_task_detail(a.task_id)
+    assert detail_a is not None
+    assert detail_a.blocks == [b.task_id]
+    assert detail_a.blocked_by == []
+
+    detail_b = await task_manager.get_task_detail(b.task_id)
+    assert detail_b is not None
+    assert detail_b.blocked_by == [a.task_id]
+    assert detail_b.blocks == []

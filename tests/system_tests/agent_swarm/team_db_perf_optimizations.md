@@ -1,7 +1,7 @@
 # Team DB 性能优化清单
 
 本清单是基于 `agent_team_tools_db_stress_e2e.py` 压测（20 人团队并发、消息主导画像）
-识别出的 SQLite 数据库层优化点汇总。进度：**B1 / B4 / C4 / C1 / C2 / C3 / D1 / D2 / D5 已落地**，其余为待办分析项。
+识别出的 SQLite 数据库层优化点汇总。进度：**B1 / B4 / C4 / C1 / C2 / C3 / D1 / D2 / D3 / D5 已落地**，其余为待办分析项。
 消息路径见 A/B/C 三节；**task 相关操作专项见 D 节**（读路径 N+1、写路径重复全表扫描、
 task 表索引）。
 
@@ -231,10 +231,18 @@ task 表索引）。
     A/B 在有界任务板（~30 条）尺度**平**——drain 扫描本就单数字 ms；收益是**大任务板下的 scalability**
     （O(N)→O(1)），把每次终态写附带的全表读消掉，属正确性/可扩展性改进而非当前尺度的延迟数字。
 
-- [ ] **D3. `get_task_detail` / `get_tasks_depending_on` 的次级 N+1** — 低收益 / 低优先
-  - 现象：`view_task`（get，单任务、低频）→ `get_task_detail` → `get_tasks_depending_on`，后者
-    （task_dao:699-715）先查依赖边、再**对每条边循环单查任务**，又是 N+1。
-  - 改动：同 D1 思路，`WHERE task_id IN (:ids)` 一次批量取 + 内存拼装。因是单任务低频路径，优先级低。
+- [x] **D3. `get_task_detail` 的次级 N+1：`get_tasks_depending_on` → 单查询 `get_dependent_task_ids`** — ✅ 已落地（零迁移）
+  - 现象：`view_task`（get，单任务）→ `get_task_detail` → `get_tasks_depending_on`，后者先查依赖边、
+    再**对每条边循环单查任务**（1+M 次），且只为读 `t.task_id` 却拉了整行（含 content）。
+  - 落地：唯一调用方 `get_task_detail` 只需下游任务 id，而**边行的 `task_id` 列本就是下游任务 id**。
+    故把 `get_tasks_depending_on(task_id)->List[TeamTaskBase]`（1+M 次、返回整行）替换为
+    `get_dependent_task_ids(task_id)->list[str]`（**单条 `SELECT task_id ... WHERE depends_on_task_id=? DISTINCT`**，
+    不再拉任务行），`get_task_detail` 直接用其结果做 `blocks`。无其它调用方、无测试引用旧方法，零迁移。
+    新增 `test_get_dependent_task_ids_single_query` + `test_get_task_detail_reports_blocks_and_blocked_by`；174 条相关单测全过。
+  - **A/B（默认 20×20，各 2 轮，harness 每 3 个任务串一条依赖）**：`view_task_get` avg 8~11ms → 7.8~10.8ms、
+    p99 25~106ms → 20~66ms——**在噪声带内**（依赖链浅、M≈1，N+1 的 N 太小；读又走无锁 reader pool）。
+  - 结论：与 D2 同理——本尺度是正确性/可扩展性改进（N+1→单查询、消除白拉整行），fan-out hub（一个基础任务被
+    几十个任务依赖）或大板场景才有数量级收益。
 
 - [ ] **D4. task 表索引：删 `team_name` 死索引 + 按查询形状加复合索引** — 中收益 / 中风险
   - 现象（细化 A3）：task 表（per-session 动态表）有 `team_name` / `status` / `assignee` / `updated_at`
@@ -273,7 +281,7 @@ task 表索引）。
 4. ~~**D5（claim_task 折 CAS 缩临界区）**~~ — ✅ 已落地（延迟在噪声带内，收益是正确性/单一职责，印证写锁排队税）。
    ~~**B4（multicast 单事务批量写）**~~ — ✅ 已落地（send_multicast 本身 2~3×，总写尾仍受 per-message 排队税限制）。
    ~~**D2（drained 全表扫描 → 聚合查询）**~~ — ✅ 已落地（O(N)→O(1) 读，有界尺度平、大板 scalability）。
-   **D3**（get_task_detail 次级 N+1）零迁移，待做。
+   ~~**D3（get_task_detail 次级 N+1 → 单查询）**~~ — ✅ 已落地（零迁移，N+1→单查询 + 消除白拉整行，尺度内平）。
 5. **A1 + A2 + D4**（索引减写放大：消息表 + task 表） — 收益大但要迁移 + spec 文档，同批做，放最后。
 6. ~~**C3（WAL checkpoint 挪出写路径）**~~ — ✅ 已落地（opt-in，默认关；封顶最坏写尾延迟，本尺度收益偶发）。
    **B2 + B3**（has_unread EXISTS、member CAS）待做，收益预计与 D5 同在噪声带内，按需推进。
