@@ -50,7 +50,6 @@ from openjiuwen.agent_teams.schema.task import (
 )
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database import (
-    TASK_TERMINAL_STATUSES,
     TeamDatabase,
     TeamTaskBase,
     TeamTaskDependencyBase,
@@ -1108,20 +1107,20 @@ class TeamTaskManager:
         team_logger.info(f"Unblocked {len(unblocked_tasks)} tasks")
 
     async def _maybe_publish_task_list_drained(self) -> None:
-        """Publish TASK_LIST_DRAINED if every task in the list is now terminal.
+        """Publish TASK_LIST_DRAINED if every task on the board is now terminal.
 
-        Re-reads the full task list; no-op when the list is empty (an empty
-        board is not "drained"). Idempotency across repeated terminal
-        transitions is the consumer's concern — the manager just reports the
-        fact each time it observes it.
+        Uses one aggregate COUNT query (total + non-terminal) instead of
+        loading the whole task list and iterating — this fires on every
+        terminal transition, so a full scan here is pure waste. No-op when the
+        board is empty (an empty board is not "drained"). Idempotency across
+        repeated terminal transitions is the consumer's concern — the manager
+        just reports the fact each time it observes it.
         """
-        tasks = await self.list_tasks()
-        if not tasks:
-            return
-        if any(tk.status not in TASK_TERMINAL_STATUSES for tk in tasks):
+        total, non_terminal = await self.db.task.count_tasks_terminality(self.team_name)
+        if total == 0 or non_terminal > 0:
             return
         await self._publish_task_event(
-            TaskListDrainedEvent(team_name=self.team_name, task_count=len(tasks)),
+            TaskListDrainedEvent(team_name=self.team_name, task_count=total),
             error_label=f"Task list drained event for team {self.team_name}",
         )
 

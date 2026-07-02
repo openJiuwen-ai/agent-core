@@ -1,7 +1,7 @@
 # Team DB 性能优化清单
 
 本清单是基于 `agent_team_tools_db_stress_e2e.py` 压测（20 人团队并发、消息主导画像）
-识别出的 SQLite 数据库层优化点汇总。进度：**B1 / B4 / C4 / C1 / C2 / C3 / D1 / D5 已落地**，其余为待办分析项。
+识别出的 SQLite 数据库层优化点汇总。进度：**B1 / B4 / C4 / C1 / C2 / C3 / D1 / D2 / D5 已落地**，其余为待办分析项。
 消息路径见 A/B/C 三节；**task 相关操作专项见 D 节**（读路径 N+1、写路径重复全表扫描、
 task 表索引）。
 
@@ -217,13 +217,19 @@ task 表索引）。
     view_task 已降到与其他纯读（`read_inbox` 4.6ms / `has_unread` 3.5ms）同一档。**顺带总 throughput
     431~456 → 578~629 calls/s（~+35%）、wall 16s → 11~12s**——N+1 的读连接 checkout 洪流消失，全局都受益。
 
-- [ ] **D2. 写路径 `_maybe_publish_task_list_drained` 每次终态写都全表扫描** — 中收益 / 低风险
-  - 现象：`complete` / `reset` / `cancel` 三处（task_manager:759 / 1041 / 1078）在每次终态转移后都调
-    `_maybe_publish_task_list_drained()`，其内部 `await self.list_tasks()` **全表读一遍**判断是否全部终态。
-    任务churn 下 = 每次写后跟一次 O(N) 读；压测里 claim/complete/reset 合计每轮都触发。
-  - 改动：把"是否全部终态"下推为一条聚合查询——`SELECT 1 WHERE EXISTS(status NOT IN terminal) LIMIT 1`
-    的反面，或 `COUNT(*) FILTER (status NOT IN terminal)`，避免把全部行拉进内存。或由 DAO 的终态写直接
-    回传"剩余非终态计数"，省掉独立那次扫描。
+- [x] **D2. 写路径 `_maybe_publish_task_list_drained` 全表扫描 → 单条聚合查询** — ✅ 已落地（O(N)→O(1) 读，无迁移）
+  - 现象：`complete` / `reset` / `cancel` 在每次终态转移后都调 `_maybe_publish_task_list_drained()`，
+    其内部 `await self.list_tasks()` **全表读一遍**、把所有行拉进内存判断是否全部终态。任务 churn 下 =
+    每次终态写后跟一次 O(N) 读（在读池、不占写锁，但纯浪费）。
+  - 落地：DAO 新增 `count_tasks_terminality(team_name) -> (total, non_terminal)`——一条
+    `SELECT COUNT(*), COALESCE(SUM(CASE WHEN status IN terminal THEN 0 ELSE 1 END), 0)`（用 `case`+`sum`
+    而非 `FILTER`，跨 SQLite/PG/MySQL 可移植）；`_maybe_publish_task_list_drained` 改为
+    `total==0 or non_terminal>0 → return`，否则用 `task_count=total` 发事件。清掉 task_manager 里
+    因此变孤儿的 `TASK_TERMINAL_STATUSES` 导入。新增 `test_count_tasks_terminality`（0/0 → 2/2 → 2/1）+
+    现有 3 条 drain 行为测试（complete-last / complete-non-last / cancel-last）作回归护栏；172 条全过。
+  - **验证**：单次压测 errors=0、slow(>0.5s)=0、throughput 695/s，`task_complete`/`task_reset` ~30-34ms 稳定。
+    A/B 在有界任务板（~30 条）尺度**平**——drain 扫描本就单数字 ms；收益是**大任务板下的 scalability**
+    （O(N)→O(1)），把每次终态写附带的全表读消掉，属正确性/可扩展性改进而非当前尺度的延迟数字。
 
 - [ ] **D3. `get_task_detail` / `get_tasks_depending_on` 的次级 N+1** — 低收益 / 低优先
   - 现象：`view_task`（get，单任务、低频）→ `get_task_detail` → `get_tasks_depending_on`，后者
@@ -266,7 +272,8 @@ task 表索引）。
 3. ~~**C4 → C1 + C2**~~ — ✅ 已落地（连接池旋钮 + 读写分离 + 小读缓存）。
 4. ~~**D5（claim_task 折 CAS 缩临界区）**~~ — ✅ 已落地（延迟在噪声带内，收益是正确性/单一职责，印证写锁排队税）。
    ~~**B4（multicast 单事务批量写）**~~ — ✅ 已落地（send_multicast 本身 2~3×，总写尾仍受 per-message 排队税限制）。
-   **D2 / D3**（task 写路径全表扫描、get_task_detail 次级 N+1）零迁移，待做。
+   ~~**D2（drained 全表扫描 → 聚合查询）**~~ — ✅ 已落地（O(N)→O(1) 读，有界尺度平、大板 scalability）。
+   **D3**（get_task_detail 次级 N+1）零迁移，待做。
 5. **A1 + A2 + D4**（索引减写放大：消息表 + task 表） — 收益大但要迁移 + spec 文档，同批做，放最后。
 6. ~~**C3（WAL checkpoint 挪出写路径）**~~ — ✅ 已落地（opt-in，默认关；封顶最坏写尾延迟，本尺度收益偶发）。
    **B2 + B3**（has_unread EXISTS、member CAS）待做，收益预计与 D5 同在噪声带内，按需推进。
