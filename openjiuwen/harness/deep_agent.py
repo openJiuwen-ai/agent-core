@@ -736,6 +736,8 @@ class DeepAgent(BaseAgent):
         if cfg.context_engine_config is not None:
             react_config.context_engine_config = cfg.context_engine_config
         react_config.workspace = cfg.workspace
+        if cfg.sys_operation is not None:
+            react_config.sys_operation_id = cfg.sys_operation.id
 
         react_config.parallel_tool_calls = cfg.parallel_tool_calls
 

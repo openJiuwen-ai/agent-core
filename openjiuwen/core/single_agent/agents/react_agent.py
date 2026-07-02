@@ -540,8 +540,13 @@ class ReActAgent(BaseAgent):
             from openjiuwen.core.runner import Runner
             sys_operation = Runner.resource_mgr.get_sys_operation(config.sys_operation_id)
 
-        # Update context_engine if context window limit changed
-        if old_config.context_engine_config != config.context_engine_config:
+        # Update context_engine if context settings or runtime dependencies changed.
+        context_engine_runtime_changed = (
+                old_config.context_engine_config != config.context_engine_config
+                or old_config.workspace != config.workspace
+                or old_config.sys_operation_id != config.sys_operation_id
+        )
+        if context_engine_runtime_changed:
             self.context_engine = ContextEngine(
                 config.context_engine_config,
                 workspace=config.workspace,
