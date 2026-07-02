@@ -275,13 +275,13 @@ class OtelCallbackHandler:
             tool_calls = kwargs.get("tool_calls") or getattr(kwargs.get("response"), "tool_calls", None)
             tc_json = _serialize_tool_calls(tool_calls)
 
-            # Usage / finish_reason from streaming trigger kwargs
+            # Usage from streaming trigger kwargs. finish_reason is recorded
+            # per-chunk in on_llm_stream_output via _maybe_record_response_attrs;
+            # the LLM_OUTPUT trigger carries content as `response`, not a
+            # finish_reason, so never fall back to it.
             usage_from_trigger = kwargs.get("usage")
             if usage_from_trigger is not None:
                 self._record_usage_attrs(state, usage_from_trigger, skip_existing=True)
-            finish_from_trigger = kwargs.get("finish_reason") or kwargs.get("response")
-            if finish_from_trigger is not None and not state.span.attributes.get(GEN_AI_RESPONSE_FINISH_REASON):
-                self._maybe_record_finish_from_trigger(state, finish_from_trigger)
 
             self._finalize_llm_span_output(
                 state, completion_text, reasoning_text,
@@ -759,17 +759,6 @@ class OtelCallbackHandler:
             OtelCallbackHandler._record_usage_attrs(state, usage, skip_existing=False)
         finish_reason = getattr(response, "finish_reason", None)
         if finish_reason and finish_reason != "null":
-            state.span.set_attribute(GEN_AI_RESPONSE_FINISH_REASON, str(finish_reason))
-
-    @staticmethod
-    def _maybe_record_finish_from_trigger(state: LlmSpanState, response: Any) -> None:
-        if not state.span.is_recording():
-            return
-        if isinstance(response, str):
-            finish_reason = response
-        else:
-            finish_reason = getattr(response, "finish_reason", None)
-        if finish_reason and finish_reason != "null" and not state.span.attributes.get(GEN_AI_RESPONSE_FINISH_REASON):
             state.span.set_attribute(GEN_AI_RESPONSE_FINISH_REASON, str(finish_reason))
 
     @staticmethod

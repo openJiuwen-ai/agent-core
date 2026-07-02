@@ -103,9 +103,10 @@ class _FakeAssistantMessage:
 class _FakeChunk:
     """Stand-in for one streaming AssistantMessageChunk."""
 
-    def __init__(self, content: str = "", *, reasoning_content: str = "") -> None:
+    def __init__(self, content: str = "", *, reasoning_content: str = "", finish_reason: str | None = None) -> None:
         self.content = content
         self.reasoning_content = reasoning_content
+        self.finish_reason = finish_reason
 
 
 @pytest.fixture
@@ -186,12 +187,15 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
         # Spread reasoning chunks so first/last monotonic timestamps differ,
         # otherwise the measured reasoning interval is 0.
         await asyncio.sleep(0.01)
-    for delta in ("4", "2"):
+    # Content chunks; the last one carries finish_reason, matching real
+    # OpenAI streaming where only the final chunk includes it. finish_reason
+    # is recorded from the chunk stream, not from the LLM_OUTPUT trigger.
+    for i, delta in enumerate(("4", "2")):
         await fw.trigger(
-        LLMCallEvents.LLM_STREAM_OUTPUT,
-        messages=messages,
-        result=_FakeChunk(content=delta),
-    )
+            LLMCallEvents.LLM_STREAM_OUTPUT,
+            messages=messages,
+            result=_FakeChunk(content=delta, finish_reason="stop" if i == 1 else None),
+        )
 
     final = _FakeAssistantMessage(
         content="42",
@@ -200,16 +204,16 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
         usage=_FakeUsage(reasoning_tokens=5, cache_tokens=2),
     )
     # Mirror the real streaming trigger (openai_model_client): response is the
-    # content string, usage is the metadata object, passed separately. Earlier
-    # the handler re-derived usage from `response` via getattr, which returned
-    # None for a string and silently dropped reasoning_tokens from the
-    # reasoning span — a regression this test must guard against.
+    # content string, usage is the metadata object, passed separately. The
+    # trigger does NOT carry finish_reason; content must never be mistaken for
+    # one. Earlier the handler re-derived usage from `response` via getattr,
+    # which returned None for a string and silently dropped reasoning_tokens
+    # from the reasoning span — a regression this test must guard against.
     await fw.trigger(
         LLMCallEvents.LLM_OUTPUT,
         messages=messages,
         response=final.content,
         reasoning_content=final.reasoning_content,
-        finish_reason="stop",
         usage=final.usage_metadata,
     )
 
@@ -253,6 +257,45 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
     assert abs(span_dur_ms - rdur) < 1.0, f"span dur {span_dur_ms} != attr {rdur}"
     # reasoning_tokens mirrored onto the reasoning span (read from usage, not computed).
     assert _attr(rs, "gen_ai.usage.reasoning_tokens") == 5
+
+
+@pytest.mark.asyncio
+async def test_streaming_content_not_mistaken_for_finish_reason(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Streaming content string must never be recorded as finish_reason.
+
+    The LLM_OUTPUT trigger carries the final content as `response` and does
+    not pass `finish_reason`. If no chunk in the stream carried one either,
+    finish_reason must stay unset rather than being filled from the content.
+    """
+    fw = Runner.callback_framework
+    _create_team_span("test_team")
+
+    messages = [{"role": "user", "content": "hi"}]
+    await fw.trigger(
+        LLMCallEvents.LLM_STREAM_INPUT,
+        messages=messages,
+        model="fake-llm-1",
+    )
+    # Chunks without finish_reason — simulates a provider whose final chunk
+    # omits it. Content is a short string that must not leak into finish_reason.
+    await fw.trigger(
+        LLMCallEvents.LLM_STREAM_OUTPUT,
+        messages=messages,
+        result=_FakeChunk(content="hello"),
+    )
+    await fw.trigger(
+        LLMCallEvents.LLM_OUTPUT,
+        messages=messages,
+        response="hello",
+        usage=_FakeUsage(),
+    )
+
+    span = _spans_by_name(in_memory_exporter, "llm.call")[0]
+    finish_reason = _attr(span, "gen_ai.response.finish_reason")
+    assert finish_reason != "hello", "content string leaked into finish_reason"
+    assert finish_reason is None, f"finish_reason should be unset, got {finish_reason!r}"
 
 
 # ---------------------------------------------------------------------------
