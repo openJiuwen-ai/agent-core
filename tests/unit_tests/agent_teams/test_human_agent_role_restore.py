@@ -349,7 +349,7 @@ async def test_legacy_team_member_table_gets_role_column(tmp_path: Path):
         conn.close()
 
     config = DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=str(db_path))
-    engine, _ = await initialize_engine(config)
+    engines = await initialize_engine(config)
     try:
         # Probe the migrated schema directly through the raw driver
         # rather than spinning up TeamDatabase — keeps the assertion
@@ -366,4 +366,6 @@ async def test_legacy_team_member_table_gets_role_column(tmp_path: Path):
         finally:
             conn.close()
     finally:
-        await engine.dispose()
+        await engines.write_engine.dispose()
+        if engines.read_engine is not engines.write_engine:
+            await engines.read_engine.dispose()

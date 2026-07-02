@@ -59,8 +59,14 @@ class TeamDatabase:
     def __init__(self, config: DatabaseConfig):
         """Initialize database manager."""
         self.config = config
+        # ``engine`` / ``session_local`` are the WRITER engine + factory (also
+        # used by the DDL helpers). ``read_engine`` / ``read_session_local``
+        # are the separate reader pool for file-backed SQLite; they alias the
+        # writer fields when there is no split (:memory: / PostgreSQL / MySQL).
         self.engine: Optional[AsyncEngine] = None
         self.session_local: Optional[async_sessionmaker] = None
+        self.read_engine: Optional[AsyncEngine] = None
+        self.read_session_local: Optional[async_sessionmaker] = None
         self._initialized = False
         self._init_lock = asyncio.Lock()
         self.team: Optional[TeamDao] = None
@@ -90,14 +96,19 @@ class TeamDatabase:
         async with self._init_lock:
             if self._initialized:
                 return
-            self.engine, self.session_local = await _initialize_engine(self.config)
+            engines = await _initialize_engine(self.config)
+            self.engine = engines.write_engine
+            self.read_engine = engines.read_engine
+            self.session_local = engines.write_session_local
+            self.read_session_local = engines.read_session_local
             if get_session_id():
                 await _create_cur_session_tables(self.engine)
 
             # One DbSessions (one write lock) shared by every DAO: SQLite's
             # write lock is database-wide, so all four tables must serialise
-            # writes through the same lock — see DbSessions.
-            sessions = DbSessions(self.session_local)
+            # writes through the same lock. Reads go to the reader factory
+            # (a separate pool for file-backed SQLite) — see DbSessions.
+            sessions = DbSessions(self.session_local, self.read_session_local)
             self.team = TeamDao(sessions)
             self.member = MemberDao(sessions)
             self.task = TaskDao(sessions)
@@ -176,11 +187,17 @@ class TeamDatabase:
         return cleanup_success
 
     async def close(self) -> None:
-        """Close the database engine and release all connections."""
+        """Close the database engine(s) and release all connections."""
         if self.engine:
+            # Dispose the reader engine first when it is a distinct pool
+            # (file-backed SQLite); it aliases the writer otherwise.
+            if self.read_engine is not None and self.read_engine is not self.engine:
+                await self.read_engine.dispose()
             await self.engine.dispose()
             self.engine = None
+            self.read_engine = None
             self.session_local = None
+            self.read_session_local = None
             self._initialized = False
             self.team = None
             self.member = None
