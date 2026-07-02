@@ -3289,3 +3289,40 @@ async def test_has_unread_messages_honors_include_broadcast(db) -> None:
         to_member_name="dev",
     )
     assert await db.message.has_unread_messages("t1", include_broadcast=False) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_member_status_invalid_transition_returns_false(db):
+    """The guarded CAS update rejects an illegal member-status transition."""
+    await db.team.create_team(team_name="team_inv", display_name="T", leader_member_name="l")
+    await db.member.create_member(
+        member_name="m1",
+        team_name="team_inv",
+        display_name="M1",
+        agent_card=AgentCard(name="A").model_dump_json(),
+        status="ready",
+    )
+    # ready -> unstarted is not a legal MemberStatus transition.
+    assert await db.member.update_member_status("m1", "team_inv", "unstarted") is False
+    member = await db.member.get_member("m1", "team_inv")
+    assert member.status == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_member_execution_status_invalid_transition_returns_false(db):
+    """The guarded CAS update rejects an illegal execution-status transition."""
+    await db.team.create_team(team_name="team_inv2", display_name="T", leader_member_name="l")
+    await db.member.create_member(
+        member_name="m1",
+        team_name="team_inv2",
+        display_name="M1",
+        agent_card=AgentCard(name="A").model_dump_json(),
+        status="ready",
+        execution_status="idle",
+    )
+    # idle -> running skips the mandatory starting step; not a legal transition.
+    assert await db.member.update_member_execution_status("m1", "team_inv2", "running") is False
+    member = await db.member.get_member("m1", "team_inv2")
+    assert member.execution_status == "idle"

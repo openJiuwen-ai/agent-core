@@ -275,35 +275,35 @@ class MessageDao:
             if not include_broadcast:
                 return False
 
-            # Broadcast messages: per-member watermark comparison.
-            broadcast_result = await session.execute(
-                select(message_model).where(
+            # Broadcast messages: a broadcast B is unread by member M when M
+            # is not its sender and M has no read watermark covering B's
+            # timestamp. Push the whole "does any such (member, broadcast)
+            # pair exist?" check into one correlated EXISTS query instead of
+            # loading every broadcast + member + watermark row and doing an
+            # O(members x broadcasts) scan in Python. A NULL / absent
+            # watermark never satisfies ``read_at >= B.timestamp`` (SQL
+            # three-valued logic), so it correctly counts as uncovered.
+            covered_by_watermark = (
+                select(read_status_model.member_name)
+                .where(
+                    read_status_model.member_name == TeamMember.member_name,
+                    read_status_model.team_name == team_name,
+                    read_status_model.read_at >= message_model.timestamp,
+                )
+                .exists()
+            )
+            unread_broadcast = await session.execute(
+                select(message_model.message_id)
+                .join(TeamMember, TeamMember.team_name == message_model.team_name)
+                .where(
                     message_model.team_name == team_name,
                     message_model.broadcast.is_(True),
+                    TeamMember.member_name != message_model.from_member_name,
+                    ~covered_by_watermark,
                 )
+                .limit(1)
             )
-            broadcasts = broadcast_result.scalars().all()
-            if not broadcasts:
-                return False
-
-            member_result = await session.execute(
-                select(TeamMember.member_name).where(TeamMember.team_name == team_name)
-            )
-            members = member_result.scalars().all()
-
-            read_result = await session.execute(
-                select(read_status_model).where(read_status_model.team_name == team_name)
-            )
-            read_at_by_member = {row.member_name: row.read_at for row in read_result.scalars().all()}
-
-            for member_name in members:
-                watermark = read_at_by_member.get(member_name)
-                for msg in broadcasts:
-                    if msg.from_member_name == member_name:
-                        continue
-                    if watermark is None or msg.timestamp > watermark:
-                        return True
-            return False
+            return unread_broadcast.first() is not None
 
     async def _mark_read_in_session(
         self,

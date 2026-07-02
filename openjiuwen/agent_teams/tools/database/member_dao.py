@@ -14,7 +14,6 @@ from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberMode,
     MemberStatus,
-    is_valid_transition,
 )
 from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
 from openjiuwen.agent_teams.tools.member_options import (
@@ -23,6 +22,16 @@ from openjiuwen.agent_teams.tools.member_options import (
 )
 from openjiuwen.agent_teams.tools.models import TeamMember
 from openjiuwen.core.common.logging import team_logger
+
+
+def _valid_predecessor_values(target, transitions) -> list[str]:
+    """Return the status string values that may legally transition to ``target``.
+
+    Inverts a ``{from: [to, ...]}`` transition table into "which from-states
+    reach ``target``", so an update can be expressed as one CAS UPDATE with a
+    ``status IN (...)`` guard instead of a SELECT + Python validation.
+    """
+    return [state.value for state, targets in transitions.items() if target in targets]
 
 
 class MemberDao:
@@ -167,36 +176,63 @@ class MemberDao:
         team_name: str,
         status: str,
     ) -> bool:
-        """Update member status."""
+        """Update member status via a single guarded CAS UPDATE.
+
+        The transition validation lives in the ``WHERE status IN (valid
+        predecessors)`` clause, so the happy path is one UPDATE — no SELECT
+        held inside the write lock. Only the rare rowcount=0 (failure) path
+        reads back the row to log whether the member was missing or the
+        transition was illegal.
+        """
+        valid_from = _valid_predecessor_values(MemberStatus(status), MEMBER_TRANSITIONS)
         async with self._sessions.write() as session:
             result = await session.execute(
-                select(TeamMember).where(
+                update(TeamMember)
+                .where(
                     TeamMember.member_name == member_name,
                     TeamMember.team_name == team_name,
+                    TeamMember.status.in_(valid_from),
                 )
+                .values(status=status)
             )
-            member = result.scalar_one_or_none()
-            if not member:
-                team_logger.error("Member %s not found in team %s", member_name, team_name)
-                return False
+            if result.rowcount == 1:
+                await session.commit()
+                team_logger.debug("Member %s status updated to %s", member_name, status)
+                return True
 
-            if not is_valid_transition(
-                MemberStatus(member.status),
-                MemberStatus(status),
-                MEMBER_TRANSITIONS,
-            ):
-                team_logger.error(
-                    "Invalid state transition for member %s: %s -> %s",
-                    member_name,
-                    member.status,
-                    status,
-                )
-                return False
+            await self._log_member_update_rejection(session, member_name, team_name, TeamMember.status, status)
+            return False
 
-            member.status = status
-            await session.commit()
-            team_logger.debug("Member %s status updated to %s", member_name, status)
-            return True
+    async def _log_member_update_rejection(
+        self,
+        session,
+        member_name: str,
+        team_name: str,
+        column,
+        target: str,
+    ) -> None:
+        """Log the reason a guarded member update matched no row (failure path).
+
+        Reads the PK (to distinguish a missing member from a legal-but-rejected
+        transition) plus the current value of ``column`` (which may itself be
+        NULL, e.g. ``execution_status``) for the invalid-transition message.
+        """
+        existing = await session.execute(
+            select(TeamMember.member_name, column).where(
+                TeamMember.member_name == member_name,
+                TeamMember.team_name == team_name,
+            )
+        )
+        row = existing.first()
+        if row is None:
+            team_logger.error("Member %s not found in team %s", member_name, team_name)
+        else:
+            team_logger.error(
+                "Invalid state transition for member %s: %s -> %s",
+                member_name,
+                row[1],
+                target,
+            )
 
     async def try_transition_member_status(
         self,
@@ -249,40 +285,33 @@ class MemberDao:
         team_name: str,
         execution_status: str,
     ) -> bool:
-        """Update member execution status."""
+        """Update member execution status via a single guarded CAS UPDATE.
+
+        Mirror of ``update_member_status``: the transition validation is the
+        ``WHERE execution_status IN (valid predecessors)`` guard, so the happy
+        path is one UPDATE with no in-lock SELECT; only rowcount=0 reads back
+        to log the precise rejection reason.
+        """
+        valid_from = _valid_predecessor_values(ExecutionStatus(execution_status), EXECUTION_TRANSITIONS)
         async with self._sessions.write() as session:
             result = await session.execute(
-                select(TeamMember).where(
+                update(TeamMember)
+                .where(
                     TeamMember.member_name == member_name,
                     TeamMember.team_name == team_name,
+                    TeamMember.execution_status.in_(valid_from),
                 )
+                .values(execution_status=execution_status)
             )
-            member = result.scalar_one_or_none()
-            if not member:
-                team_logger.error("Member %s not found in team %s", member_name, team_name)
-                return False
+            if result.rowcount == 1:
+                await session.commit()
+                team_logger.debug("Member %s execution status updated to %s", member_name, execution_status)
+                return True
 
-            if not is_valid_transition(
-                ExecutionStatus(member.execution_status),
-                ExecutionStatus(execution_status),
-                EXECUTION_TRANSITIONS,
-            ):
-                team_logger.error(
-                    "Invalid state transition for member %s: %s -> %s",
-                    member_name,
-                    member.execution_status,
-                    execution_status,
-                )
-                return False
-
-            member.execution_status = execution_status
-            await session.commit()
-            team_logger.debug(
-                "Member %s execution status updated to %s",
-                member_name,
-                execution_status,
+            await self._log_member_update_rejection(
+                session, member_name, team_name, TeamMember.execution_status, execution_status
             )
-            return True
+            return False
 
     async def update_member_worktree(
         self,
