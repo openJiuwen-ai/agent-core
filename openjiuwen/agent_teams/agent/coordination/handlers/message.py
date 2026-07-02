@@ -137,27 +137,16 @@ class MessageHandler(BaseCoordinationHandler):
                 break
 
             team_logger.info("[{}] processing {} unread messages (steer={})", member_name, len(new_messages), use_steer)
-            # Collect delivered ids and batch their read-state write into a
-            # single transaction after the loop — one commit (one fsync)
+            # Collect delivered messages and batch their read-state write into
+            # a single transaction after the loop — one commit (one fsync)
             # instead of one per message. The finally guarantees already
             # delivered messages are marked even if delivery raises or an
             # interrupt cuts the drain short; undelivered ones stay unread
-            # for the next poll.
-            #
-            # Broadcast read state is a per-member watermark (one row per
-            # ``(member, team)`` keyed by the newest read broadcast timestamp),
-            # so marking the newest broadcast in the batch advances the
-            # watermark past every older broadcast too. Collecting more than
-            # one broadcast id would make ``mark_messages_read`` insert
-            # duplicate ``(member, team)`` rows in the same transaction and
-            # the commit would raise ``UNIQUE constraint failed``, rolling
-            # back the whole batch and stalling the watermark — the mailbox
-            # reprocessing loop. ``_read_all_unread`` returns newest-first,
-            # so the first broadcast delivered is the watermark anchor; older
-            # broadcasts are still delivered to the agent but skipped on the
-            # read-state write.
-            delivered_ids: list[str] = []
-            broadcast_marked = False
+            # for the next poll. The read-state details (direct is_read rows
+            # vs the single broadcast watermark) live in
+            # ``TeamMessageManager.mark_messages_read`` — the handler just
+            # hands over the raw delivered objects.
+            delivered: list[Any] = []
             interrupted = False
             try:
                 for msg in new_messages:
@@ -189,19 +178,10 @@ class MessageHandler(BaseCoordinationHandler):
                     team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
                     await self._round.deliver_input(text, use_steer=use_steer)
-                    # Direct messages flip their own ``is_read`` row, so every
-                    # delivered direct id goes to the batch. Broadcasts share
-                    # one watermark row — collect only the newest (first seen,
-                    # since the unread list is newest-first) and let the
-                    # watermark cover the rest.
-                    if msg.broadcast:
-                        if broadcast_marked:
-                            continue
-                        broadcast_marked = True
-                    delivered_ids.append(msg.message_id)
+                    delivered.append(msg)
             finally:
-                if delivered_ids:
-                    await self._infra.message_manager.mark_messages_read(delivered_ids, member_name)
+                if delivered:
+                    await self._infra.message_manager.mark_messages_read(delivered, member_name)
             if interrupted:
                 return
 

@@ -622,23 +622,21 @@ async def test_mailbox_messages_deferred_while_interrupt_pending():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_process_unread_collects_only_newest_broadcast_for_watermark():
-    """A batch of broadcasts marks only the newest id; directs all pass through.
+async def test_process_unread_delegates_raw_delivered_messages_to_manager():
+    """The handler hands every delivered message object to the manager.
 
-    Broadcast read state is a per-member watermark (one row per ``(member,
-    team)``). Collecting more than one broadcast id in one batch would make
-    ``mark_messages_read`` insert duplicate primary keys in the same
-    transaction and the commit would raise ``UNIQUE constraint failed``,
-    rolling back the whole batch and stalling the watermark — the mailbox
-    reprocessing loop. The handler delivers every broadcast to the agent but
-    only collects the newest (the unread list is newest-first) for the
-    read-state write; the watermark then covers the older broadcasts too.
+    Read-state semantics (direct ``is_read`` rows vs the single broadcast
+    watermark) belong to ``TeamMessageManager.mark_messages_read``, not the
+    handler. The handler therefore delivers every message to the agent and
+    passes the raw delivered objects — all directs AND all broadcasts — to
+    the manager in one batch; collapsing broadcasts to their watermark anchor
+    is the manager's job (see ``test_message_manager`` for that guard).
     """
     agent = _make_leader()
     agent._configurator.message_manager = MagicMock()
     mark_messages_read = AsyncMock(return_value=3)
     agent._configurator.message_manager.mark_messages_read = mark_messages_read
-    # deliver_input is a no-op so delivered_ids collection is exercised
+    # deliver_input is a no-op so the delivered-object collection is exercised
     # without a live harness.
     agent.deliver_input = AsyncMock()
     agent._start_agent = AsyncMock()
@@ -662,8 +660,8 @@ async def test_process_unread_collects_only_newest_broadcast_for_watermark():
         msg.content = f"direct {msg_id}"
         return msg
 
-    # Newest-first ordering (as _read_all_unread returns). Two directs both
-    # pass through; three broadcasts collapse to the newest one.
+    # Newest-first ordering (as _read_all_unread returns). Two directs and
+    # three broadcasts — the handler forwards all five untouched.
     agent._coordination.dispatcher.message._read_all_unread = AsyncMock(
         side_effect=[
             [_bc("b3", 3000), _dm("dm-2", 2500), _bc("b2", 2000), _dm("dm-1", 1500), _bc("b1", 1000)],
@@ -673,16 +671,12 @@ async def test_process_unread_collects_only_newest_broadcast_for_watermark():
 
     await agent._coordination.dispatcher.message._process_unread_messages("leader-1")
 
-    # mark_messages_read called once. Both directs are collected (each flips
-    # its own is_read row); only the newest broadcast is collected (the
-    # watermark then covers the older broadcasts).
+    # Called once with the raw delivered message objects — every id present,
+    # no dedup at the handler layer.
     mark_messages_read.assert_called_once()
-    marked_ids = mark_messages_read.call_args.args[0]
-    assert "dm-1" in marked_ids
-    assert "dm-2" in marked_ids
-    assert "b3" in marked_ids
-    assert "b1" not in marked_ids
-    assert "b2" not in marked_ids
+    delivered = mark_messages_read.call_args.args[0]
+    delivered_ids = {m.message_id for m in delivered}
+    assert delivered_ids == {"b3", "b2", "b1", "dm-2", "dm-1"}
 
 
 @pytest.mark.asyncio

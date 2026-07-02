@@ -412,6 +412,56 @@ class TestMarkMessageRead:
         assert broadcasts[0].broadcast is True
 
 
+# ==================== Test. mark_messages_read (batch) ====================
+
+
+class TestMarkMessagesReadBatch:
+    """Test the batch mark_messages_read that takes raw message objects."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_batch_collapses_multiple_broadcasts_to_watermark(self, team_messaging, db, message_bus):
+        """Several broadcasts in one batch collapse to the newest watermark.
+
+        Broadcast read state is a per-member watermark (one ``(member, team)``
+        row keyed by the newest read broadcast timestamp). The manager takes
+        raw message objects so it can keep every direct id but reduce the
+        broadcasts to just the newest before hitting the DAO. Passing more
+        than one broadcast id to the DAO in a single transaction re-inserts
+        the same primary key and the commit raises ``UNIQUE constraint
+        failed``; collapsing here keeps that invariant out of every caller.
+        """
+        await team_messaging.broadcast_message("all-1")
+        await team_messaging.broadcast_message("all-2")
+        await team_messaging.send_message("direct hi", "member2")
+
+        reader = TeamMessageManager(
+            team_name="test_team_123",
+            db=db,
+            messager=message_bus,
+            member_name="member2",
+        )
+        directs = await reader.get_messages(to_member_name="member2", unread_only=True)
+        broadcasts = await reader.get_broadcast_messages(member_name="member2", unread_only=True)
+        assert len(directs) == 1
+        assert len(broadcasts) == 2
+
+        # Both broadcasts + the direct in one call must not raise UNIQUE: the
+        # manager forwards one direct id + the single newest broadcast id.
+        marked = await reader.mark_messages_read([*directs, *broadcasts], "member2")
+        assert marked == 2
+
+        # The watermark now covers every broadcast, and the direct is read.
+        assert await reader.get_messages(to_member_name="member2", unread_only=True) == []
+        assert await reader.get_broadcast_messages(member_name="member2", unread_only=True) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_batch_empty_is_noop(self, team_messaging):
+        """An empty batch returns zero without touching the DAO."""
+        assert await team_messaging.mark_messages_read([], "member2") == 0
+
+
 # ==================== Test Integration Scenarios ====================
 
 class TestIntegrationScenarios:
