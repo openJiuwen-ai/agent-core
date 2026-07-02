@@ -701,3 +701,28 @@ async def test_multicast_message_single_batch(db, team_messaging):
 async def test_multicast_message_empty_is_noop(team_messaging):
     """An empty recipient list returns no ids and writes nothing."""
     assert await team_messaging.multicast_message(content="x", to_member_names=[]) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_broadcast_partial_read(db, team_messaging):
+    """A broadcast read by one non-sender but not another is still unread.
+
+    Guards the correlated-EXISTS path: with member3 having no watermark, the
+    query must still find an uncovered (member, broadcast) pair.
+    """
+    agent_card = AgentCard(name="TestAgent").model_dump_json()
+    await db.member.create_member(
+        member_name="member3",
+        team_name="test_team_123",
+        display_name="Member Three",
+        agent_card=agent_card,
+        status="busy",
+    )
+    message_id = await team_messaging.broadcast_message(content="all hands")
+    await team_messaging.mark_message_read(message_id, "member2")
+
+    assert await team_messaging.has_unread_messages() is True
+
+    await team_messaging.mark_message_read(message_id, "member3")
+    assert await team_messaging.has_unread_messages() is False

@@ -1,7 +1,7 @@
 # Team DB 性能优化清单
 
 本清单是基于 `agent_team_tools_db_stress_e2e.py` 压测（20 人团队并发、消息主导画像）
-识别出的 SQLite 数据库层优化点汇总。进度：**B1 / B4 / C4 / C1 / C2 / C3 / D1 / D2 / D3 / D5 已落地**，其余为待办分析项。
+识别出的 SQLite 数据库层优化点汇总。进度：**B1 / B2 / B3 / B4 / C4 / C1 / C2 / C3 / D1 / D2 / D3 / D5 已落地**，其余为待办分析项。
 消息路径见 A/B/C 三节；**task 相关操作专项见 D 节**（读路径 N+1、写路径重复全表扫描、
 task 表索引）。
 
@@ -86,16 +86,22 @@ task 表索引）。
     p99 234~356ms → 85~161ms（**~-55%**）；max 362~535ms → 193~215ms（**~-55% 尾延迟**）；
     总 throughput +10~15%。尾延迟收益最大——排空大收件箱的 N 次往返最坏情况被消除。
 
-- [ ] **B2. `has_unread_messages` 广播分支下推为 SQL EXISTS** — 中收益 / 中风险
-  - 现象：当前把全部广播 + 全部成员 + 全部水位线拉进内存做 O(members × broadcasts) 双重循环。
-    压测因广播少而 avg 3.8ms，但广播积累后会退化。
-  - 改动：改成一条 `EXISTS`（存在某成员的水位线未覆盖某条非自己发送的广播），或先按成员维度
-    聚合。保持 `is_read` 语义（consumer-less 成员写时即已读）。
+- [x] **B2. `has_unread_messages` 广播分支下推为 SQL EXISTS** — ✅ 已落地（零迁移）
+  - 现象：旧实现把全部广播行 + 全部成员 + 全部水位线拉进内存做 O(members × broadcasts) Python 双循环。
+  - 落地：改成一条**相关 `EXISTS`**——`SELECT message_id FROM message JOIN team_member ON team ... WHERE
+    broadcast=1 AND member != from_member AND NOT EXISTS(read_status WHERE member 匹配 AND read_at >= B.timestamp)
+    LIMIT 1`。语义逐一等价（无 read_status 行 / read_at 为 NULL / 水位线 < timestamp 皆算未读，靠 SQL 三值逻辑）。
+    既有 4 条广播 has_unread 行为测试守语义，新增 `test_has_unread_messages_broadcast_partial_read`（3 成员部分已读仍未读）。
+  - **A/B（默认 20×20，各 2 轮）**：`has_unread` avg 1.8~2.7ms ↔ 2.3~3.0ms——**在噪声带内**（harness 广播少，
+    O(M×B) 本就微秒级）。真实收益是 O(1) 内存 + DB 侧短路（LIMIT 1）+ 不再把全部行拉进 Python，广播/成员规模大时才显数量级。
 
-- [ ] **B3. `update_member_status` / `update_member_execution_status`：SELECT+UPDATE → 单条 CAS** — 低收益 / 低优先
-  - 现象：校验在 Python 侧，故先读后写，两次往返（各 400 次，PK 读较快）。
-  - 改动：仿 `try_transition_member_status`，用单条 `UPDATE ... WHERE status IN (合法前态)` 的 CAS，
-    省一次往返。代价：非法转移不再打详细日志（可保留 rowcount=0 的告警）。
+- [x] **B3. `update_member_status` / `update_member_execution_status`：SELECT+UPDATE → 单条 CAS** — ✅ 已落地（零迁移）
+  - 现象：校验在 Python 侧，故写锁内先读后写、两次往返（各 400 次）。
+  - 落地：仿 `try_transition_member_status`，用单条 `UPDATE ... WHERE status IN (合法前态)` 的 CAS（合法前态由
+    `_valid_predecessor_values` 反转转移表得到），happy path 只剩 1 条 UPDATE；仅 rowcount=0 失败路径回读一次以
+    区分"成员不存在 vs 非法转移"保留精确日志。新增两条非法转移回归（ready→unstarted、idle→running 均 False 且原值不变）。
+  - **A/B（默认 20×20，各 2 轮）**：member_status 31~36ms ↔ 39~43ms、member_exec 36~40ms ↔ 39~50ms——**在噪声带内**
+    （与 D5 同：去掉的锁内 SELECT 仅 ~0.5ms，写锁排队税主导）。收益是缩短临界区 + 与 CAS 模式统一、消除锁内冗余读。
 
 - [x] **B4. `send_multicast`：N 条同内容消息合并到单事务批量写** — ✅ 已落地（0.5s 阈值 A/B 逼出的对症优化）
   - 现象：multicast（一条消息发给 K 个成员）走工具 `_multicast` 时，对每个目标各调一次
@@ -284,7 +290,8 @@ task 表索引）。
    ~~**D3（get_task_detail 次级 N+1 → 单查询）**~~ — ✅ 已落地（零迁移，N+1→单查询 + 消除白拉整行，尺度内平）。
 5. **A1 + A2 + D4**（索引减写放大：消息表 + task 表） — 收益大但要迁移 + spec 文档，同批做，放最后。
 6. ~~**C3（WAL checkpoint 挪出写路径）**~~ — ✅ 已落地（opt-in，默认关；封顶最坏写尾延迟，本尺度收益偶发）。
-   **B2 + B3**（has_unread EXISTS、member CAS）待做，收益预计与 D5 同在噪声带内，按需推进。
+   ~~**B2 + B3**（has_unread EXISTS、member CAS）~~ — ✅ 已落地（如预判在噪声带内；收益是 O(1) 内存/短临界区/CAS 一致性）。
+   **零迁移项到此收尾**——剩 **A1 / A2 / D4**（索引减写放大）是唯一还能动 per-message 写放大的杠杆，需迁移 + spec + 三段提交。
 
 每步都跑 harness 前后对比，用数字验证，不猜。D1 的 A/B 要临时恢复"任务膨胀"画像（每轮建任务、
 不设有界池）才压得出 view_task 的真实收益。
