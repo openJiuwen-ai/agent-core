@@ -8,18 +8,22 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from openjiuwen.core.context_engine.base import ContextWindow
-from openjiuwen.core.context_engine.processor.compressor.forked.current import (
-    ForkedCurrentRoundCompressor,
-    ForkedCurrentRoundCompressorConfig,
+from openjiuwen.core.context_engine.processor.compressor.current_round_compressor import (
+    CurrentRoundCompressor,
+    CurrentRoundCompressorConfig,
 )
-from openjiuwen.core.context_engine.processor.compressor.forked.dialogue import (
-    ForkedDialogueCompressor,
-    ForkedDialogueCompressorConfig,
+from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
+    DialogueCompressor,
+    DialogueCompressorConfig,
 )
-from openjiuwen.core.context_engine.processor.compressor.forked.executor import ForkedCompressionResult
-from openjiuwen.core.context_engine.processor.compressor.forked.round import (
-    ForkedRoundLevelCompressor,
-    ForkedRoundLevelCompressorConfig,
+from openjiuwen.core.context_engine.processor.compressor.compression_executor import (
+    CompressionError,
+    CompressionErrorKind,
+    CompressionResult,
+)
+from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
+    RoundLevelCompressor,
+    RoundLevelCompressorConfig,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
 
@@ -46,9 +50,17 @@ def _context_window(messages):
 
 def _attach_executor(compressor, summary: str = "compact summary"):
     executor = MagicMock()
-    executor.invoke = AsyncMock(return_value=ForkedCompressionResult(AssistantMessage(content=summary)))
-    compressor._forked_executor = executor
+    executor.invoke = AsyncMock(return_value=CompressionResult(AssistantMessage(content=summary)))
+    compressor._compression_executor = executor
     return executor
+
+
+def _compression_error(kind: CompressionErrorKind) -> CompressionError:
+    return CompressionError(
+        kind=kind,
+        message=kind.value,
+        original_error=RuntimeError(kind.value),
+    )
 
 
 def _write_todo_file(workspace_root, session_id: str = "session-1"):
@@ -70,8 +82,8 @@ def _write_plan_file(workspace_root, slug: str = "active"):
 
 
 @pytest.mark.asyncio
-async def test_forked_compression_stores_only_state_snapshot_block():
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig())
+async def test_compression_stores_only_state_snapshot_block():
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     _attach_executor(
         compressor,
         "\n".join(
@@ -106,8 +118,8 @@ async def test_forked_compression_stores_only_state_snapshot_block():
 
 
 @pytest.mark.asyncio
-async def test_forked_compression_falls_back_to_raw_response_without_state_snapshot():
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig())
+async def test_compression_falls_back_to_raw_response_without_state_snapshot():
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     _attach_executor(compressor, "raw compact state")
     context = _context({})
     window = _context_window(
@@ -125,8 +137,8 @@ async def test_forked_compression_falls_back_to_raw_response_without_state_snaps
 
 
 @pytest.mark.asyncio
-async def test_forked_current_reinjects_current_execution_state_after_compression(tmp_path):
-    compressor = ForkedCurrentRoundCompressor(ForkedCurrentRoundCompressorConfig(keep_recent_messages=1))
+async def test_current_reinjects_current_execution_state_after_compression(tmp_path):
+    compressor = CurrentRoundCompressor(CurrentRoundCompressorConfig(keep_recent_messages=1))
     _attach_executor(compressor)
     _write_todo_file(tmp_path)
     _write_plan_file(tmp_path)
@@ -150,20 +162,20 @@ async def test_forked_current_reinjects_current_execution_state_after_compressio
     assert event is not None
     reinjected = updated_window.context_messages[2]
     assert isinstance(reinjected, UserMessage)
-    assert reinjected.content.startswith("[STATE_REINJECTION]\n[REINJECTED_STATE]")
-    assert "[PLAN_MODE]" in reinjected.content
-    assert "[PLAN]" in reinjected.content
+    assert reinjected.content.startswith("<recovered_context>\n<instruction>")
+    assert '<section name="plan_mode">' in reinjected.content
+    assert '<section name="plan">' in reinjected.content
     assert "Active Plan" in reinjected.content
-    assert "[TASK_STATUS]" in reinjected.content
-    assert "[TODO]" in reinjected.content
+    assert '<section name="task_status">' in reinjected.content
+    assert '<section name="todo">' in reinjected.content
     assert "Run tests" in reinjected.content
-    assert "[TOOL_RESULT_HINT]" not in reinjected.content
+    assert "tool_result_hint" not in reinjected.content
     assert updated_window.context_messages[-1].content == "protected tail"
 
 
 @pytest.mark.asyncio
-async def test_forked_dialogue_reinjects_only_external_materials_after_compression():
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig())
+async def test_dialogue_reinjects_only_external_materials_after_compression():
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     _attach_executor(compressor)
     context = _context(
         {
@@ -199,26 +211,27 @@ async def test_forked_dialogue_reinjects_only_external_materials_after_compressi
     assert event is not None
     reinjected = updated_window.context_messages[1]
     assert isinstance(reinjected, UserMessage)
-    # Dialogue reinjects external materials — read_file snapshots must survive.
-    assert "[READ_FILE]" in reinjected.content
+    # Dialogue reinjects supporting context from earlier dialogue when relevant.
+    assert '<section name="read_file">' in reinjected.content
     assert "Recently read file: /repo/src/app.py" in reinjected.content
-    # ForkedDialogueCompressor.reinject_builder_names is
-    # ["skills", "read_file", "plan_mode", "plan"], so [PLAN_MODE] IS emitted
-    # here. [PLAN] is not, because this test does not stage a plan file
+    assert "Partial read: false" not in reinjected.content
+    # DialogueCompressor.reinject_builder_names is
+    # ["skills", "read_file", "plan_mode", "plan"], so plan_mode is emitted
+    # here. plan is not, because this test does not stage a plan file
     # (workspace_root is empty) and build_plan_reinjected_content returns "".
     # Dialogue does not carry task/todo state, and never emits the tool-result
     # hint section.
-    assert "[PLAN_MODE]" in reinjected.content
-    assert "[PLAN]" not in reinjected.content
-    assert "[TASK_STATUS]" not in reinjected.content
-    assert "[TODO]" not in reinjected.content
-    assert "[TOOL_RESULT_HINT]" not in reinjected.content
+    assert '<section name="plan_mode">' in reinjected.content
+    assert '<section name="plan">' not in reinjected.content
+    assert '<section name="task_status">' not in reinjected.content
+    assert '<section name="todo">' not in reinjected.content
+    assert "tool_result_hint" not in reinjected.content
     assert updated_window.context_messages[-1].content == "Current task"
 
 
 @pytest.mark.asyncio
-async def test_forked_dialogue_uses_real_user_message_boundary():
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig())
+async def test_dialogue_uses_real_user_message_boundary():
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     _attach_executor(compressor, "historical compact state")
     context = _context({})
     window = _context_window(
@@ -227,7 +240,7 @@ async def test_forked_dialogue_uses_real_user_message_boundary():
             AssistantMessage(content="historical padding " * 600),
             UserMessage(content='你收到一条消息： {"type": "user input", "content": "Current task"}'),
             UserMessage(content="<memory_block_current>\ncurrent task snapshot\n</memory_block_current>"),
-            UserMessage(content="[STATE_REINJECTION]\n[REINJECTED_STATE]\n[PLAN_MODE] active"),
+            UserMessage(content='<recovered_context>\n<section name="plan_mode">active</section>\n</recovered_context>'),
             UserMessage(content="<system-reminder>runtime state</system-reminder>"),
         ]
     )
@@ -239,13 +252,13 @@ async def test_forked_dialogue_uses_real_user_message_boundary():
     assert "historical compact state" in contents[0]
     assert contents[1].startswith('你收到一条消息： {"type": "user input"')
     assert contents[2].startswith("<memory_block_current>")
-    assert contents[3].startswith("[STATE_REINJECTION]")
+    assert contents[3].startswith("<recovered_context>")
     assert contents[4].startswith("<system-reminder>")
 
 
 @pytest.mark.asyncio
-async def test_forked_dialogue_skips_when_target_is_below_min_context_ratio():
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig())
+async def test_dialogue_skips_when_target_is_below_min_context_ratio():
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     _attach_executor(compressor, "historical compact state")
     context = _context({})
     window = _context_window(
@@ -262,16 +275,16 @@ async def test_forked_dialogue_skips_when_target_is_below_min_context_ratio():
 
 
 @pytest.mark.skip(
-    reason="ForkedDialogueCompressorConfig does not declare `tokens_threshold`/"
+    reason="DialogueCompressorConfig does not declare `tokens_threshold`/"
     "`trigger_total_tokens`, so _resolve_trigger_tokens_threshold always falls back to "
     "context_max * trigger_context_ratio. The absolute-threshold path this test exercised "
-    "is therefore unreachable on the forked compressors. Re-enable once those fields are "
-    "declared on the forked Configs."
+    "is therefore unreachable on the compressors. Re-enable once those fields are "
+    "declared on the compression configs."
 )
 @pytest.mark.asyncio
-async def test_forked_dialogue_uses_absolute_tokens_threshold_before_ratio_threshold():
-    compressor = ForkedDialogueCompressor(
-        ForkedDialogueCompressorConfig(tokens_threshold=100, min_target_context_ratio=0.0)
+async def test_dialogue_uses_absolute_tokens_threshold_before_ratio_threshold():
+    compressor = DialogueCompressor(
+        DialogueCompressorConfig(tokens_threshold=100, min_target_context_ratio=0.0)
     )
     _attach_executor(compressor, "historical compact state")
     context = _context({})
@@ -289,8 +302,8 @@ async def test_forked_dialogue_uses_absolute_tokens_threshold_before_ratio_thres
 
 
 @pytest.mark.asyncio
-async def test_forked_current_compresses_internal_user_messages_after_real_user_boundary():
-    compressor = ForkedCurrentRoundCompressor(ForkedCurrentRoundCompressorConfig(keep_recent_messages=0))
+async def test_current_compresses_internal_user_messages_after_real_user_boundary():
+    compressor = CurrentRoundCompressor(CurrentRoundCompressorConfig(keep_recent_messages=0))
     _attach_executor(compressor, "current compact state")
     context = _context({})
     window = _context_window(
@@ -299,7 +312,7 @@ async def test_forked_current_compresses_internal_user_messages_after_real_user_
             AssistantMessage(content="Historical answer"),
             UserMessage(content='你收到一条消息： {"type": "user input", "content": "Current task"}'),
             UserMessage(content="<memory_block_current>\n" + ("old current snapshot " * 600) + "\n</memory_block_current>"),
-            UserMessage(content="[STATE_REINJECTION]\n[REINJECTED_STATE]\n" + ("runtime state " * 200)),
+            UserMessage(content="<recovered_context>\n" + ("runtime state " * 200) + "\n</recovered_context>"),
             UserMessage(content="<system-reminder>" + ("runtime state " * 200) + "</system-reminder>"),
         ]
     )
@@ -311,12 +324,12 @@ async def test_forked_current_compresses_internal_user_messages_after_real_user_
     assert contents[2].startswith('你收到一条消息： {"type": "user input"')
     assert "current compact state" in contents[3]
     assert not any("old current snapshot" in content for content in contents)
-    assert not any("[STATE_REINJECTION]" in content for content in contents)
+    assert not any("<recovered_context>" in content for content in contents)
     assert not any("<system-reminder>" in content for content in contents)
 
 
-def test_forked_current_default_targets_tool_results_before_trailing_internal_user():
-    compressor = ForkedCurrentRoundCompressor(ForkedCurrentRoundCompressorConfig(tokens_threshold=100000))
+def test_current_default_targets_tool_results_before_trailing_internal_user():
+    compressor = CurrentRoundCompressor(CurrentRoundCompressorConfig(tokens_threshold=100000))
     window_messages = [
         UserMessage(content='你收到一条消息： {"type": "user input", "content": "Read files"}'),
         AssistantMessage(
@@ -340,8 +353,8 @@ def test_forked_current_default_targets_tool_results_before_trailing_internal_us
 
 
 @pytest.mark.asyncio
-async def test_forked_round_reinjects_all_state_except_tool_result_hint_after_compression(tmp_path):
-    compressor = ForkedRoundLevelCompressor(ForkedRoundLevelCompressorConfig(keep_recent_messages=1))
+async def test_round_reinjects_all_state_except_tool_result_hint_after_compression(tmp_path):
+    compressor = RoundLevelCompressor(RoundLevelCompressorConfig(keep_recent_messages=1))
     _attach_executor(compressor)
     _write_todo_file(tmp_path)
     _write_plan_file(tmp_path)
@@ -371,13 +384,128 @@ async def test_forked_round_reinjects_all_state_except_tool_result_hint_after_co
     assert event is not None
     reinjected = updated_window.context_messages[1]
     assert isinstance(reinjected, UserMessage)
-    assert "[PLAN_MODE]" in reinjected.content
-    assert "[PLAN]" in reinjected.content
+    assert '<section name="plan_mode">' in reinjected.content
+    assert '<section name="plan">' in reinjected.content
     assert "Active Plan" in reinjected.content
-    assert "[TASK_STATUS]" in reinjected.content
+    assert '<section name="task_status">' in reinjected.content
+    assert "Team collaboration state:" in reinjected.content
+    assert "- Team: verification-team" in reinjected.content
+    assert "Current members:" in reinjected.content
+    assert "Open tasks:" in reinjected.content
+    assert "Team signals:" in reinjected.content
+    assert "- Unread team messages exist." in reinjected.content
     assert "verification-team" in reinjected.content
     assert "Inspect traces" in reinjected.content
-    assert "[TODO]" in reinjected.content
+    assert "use team messaging tools" not in reinjected.content
+    assert '<section name="todo">' in reinjected.content
     assert "Run tests" in reinjected.content
-    assert "[TOOL_RESULT_HINT]" not in reinjected.content
+    assert "tool_result_hint" not in reinjected.content
     assert updated_window.context_messages[-1].content == "protected tail"
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_retry_increases_exclude_recent_messages():
+    compressor = DialogueCompressor(DialogueCompressorConfig())
+    executor = MagicMock()
+    executor.invoke = AsyncMock(
+        side_effect=[
+            _compression_error(CompressionErrorKind.CONTEXT_OVERFLOW),
+            CompressionResult(AssistantMessage(content="retried compact state")),
+        ]
+    )
+    compressor._compression_executor = executor
+    context = _context({})
+    window = _context_window(
+        [
+            UserMessage(content="Historical request"),
+            AssistantMessage(content="a" * 1200),
+            AssistantMessage(content="b" * 1200),
+            AssistantMessage(content="c" * 1200),
+            UserMessage(content="Current task"),
+        ]
+    )
+
+    event, updated_window = await compressor.on_get_context_window(context, window)
+
+    assert event is not None
+    assert "retried compact state" in updated_window.context_messages[0].content
+    assert executor.invoke.await_count == 2
+    first_request = executor.invoke.await_args_list[0].args[0]
+    second_request = executor.invoke.await_args_list[1].args[0]
+    assert second_request.exclude_recent_messages > first_request.exclude_recent_messages
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_retry_stops_after_budget_retries_without_mutating_context():
+    compressor = DialogueCompressor(DialogueCompressorConfig())
+    executor = MagicMock()
+    executor.invoke = AsyncMock(side_effect=_compression_error(CompressionErrorKind.CONTEXT_OVERFLOW))
+    compressor._compression_executor = executor
+    context = _context({})
+    original_messages = [
+        UserMessage(content="Historical request"),
+        AssistantMessage(content="a" * 120),
+        AssistantMessage(content="b" * 120),
+        AssistantMessage(content="c" * 120),
+        UserMessage(content="Current task"),
+    ]
+    window = _context_window(original_messages)
+
+    event, updated_window = await compressor.on_get_context_window(context, window)
+
+    assert event is None
+    assert updated_window.context_messages == original_messages
+    assert executor.invoke.await_count == 4
+    assert context.set_messages.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_transient_compression_error_retries_without_changing_request():
+    compressor = DialogueCompressor(DialogueCompressorConfig())
+    executor = MagicMock()
+    executor.invoke = AsyncMock(
+        side_effect=[
+            _compression_error(CompressionErrorKind.TIMEOUT),
+            CompressionResult(AssistantMessage(content="retried compact state")),
+        ]
+    )
+    compressor._compression_executor = executor
+    context = _context({})
+    window = _context_window(
+        [
+            UserMessage(content="Historical request"),
+            AssistantMessage(content="historical padding " * 600),
+            UserMessage(content="Current task"),
+        ]
+    )
+
+    event, _ = await compressor.on_get_context_window(context, window)
+
+    assert event is not None
+    assert executor.invoke.await_count == 2
+    first_request = executor.invoke.await_args_list[0].args[0]
+    second_request = executor.invoke.await_args_list[1].args[0]
+    assert second_request.exclude_recent_messages == first_request.exclude_recent_messages
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_compression_error_does_not_retry():
+    compressor = DialogueCompressor(DialogueCompressorConfig())
+    executor = MagicMock()
+    executor.invoke = AsyncMock(side_effect=_compression_error(CompressionErrorKind.AUTHENTICATION))
+    compressor._compression_executor = executor
+    context = _context({})
+    window = _context_window(
+        [
+            UserMessage(content="Historical request"),
+            AssistantMessage(content="historical padding " * 600),
+            UserMessage(content="Current task"),
+        ]
+    )
+
+    event, updated_window = await compressor.on_get_context_window(context, window)
+
+    assert event is None
+    assert updated_window is window
+    assert executor.invoke.await_count == 1
+    assert context.set_messages.call_count == 0

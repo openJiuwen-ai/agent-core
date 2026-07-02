@@ -1,12 +1,12 @@
 # coding: utf-8
-"""DeepAgent example for forked context compression processors.
+"""DeepAgent example for context compression processors.
 
 This script builds a real DeepAgent configured with:
 
 1. MessageOffloader
-2. ForkedDialogueCompressor
-3. ForkedCurrentRoundCompressor
-4. ForkedRoundLevelCompressor
+2. DialogueCompressor
+3. CurrentRoundCompressor
+4. RoundLevelCompressor
 
 It also registers common working tools:
 
@@ -18,8 +18,8 @@ model. Pass ``--run`` to execute one real DeepAgent call.
 
 Run from repository root::
 
-    uv run python examples/context_engine/forked_compression_deepagent_demo.py
-    uv run python examples/context_engine/forked_compression_deepagent_demo.py --run
+    uv run python examples/context_engine/compression_deepagent_demo.py
+    uv run python examples/context_engine/compression_deepagent_demo.py --run
 
 Model environment variables:
 
@@ -58,18 +58,18 @@ SCENARIOS = _FIXTURES.SCENARIOS
 
 from openjiuwen.core.context_engine import ContextEngine  # noqa: E402
 from openjiuwen.core.context_engine.base import ContextWindow  # noqa: E402
-from openjiuwen.core.context_engine.processor.compressor.forked.current import (  # noqa: E402
-    ForkedCurrentRoundCompressorConfig,
+from openjiuwen.core.context_engine.processor.compressor.current_round_compressor import (  # noqa: E402
+    CurrentRoundCompressorConfig,
 )
-from openjiuwen.core.context_engine.processor.compressor.forked.dialogue import (  # noqa: E402
-    ForkedDialogueCompressorConfig,
+from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (  # noqa: E402
+    DialogueCompressorConfig,
 )
-from openjiuwen.core.context_engine.processor.compressor.forked.executor import (  # noqa: E402
-    ForkedCompressionExecutor,
-    ForkedCompressionResult,
+from openjiuwen.core.context_engine.processor.compressor.compression_executor import (  # noqa: E402
+    CompressionExecutor,
+    CompressionResult,
 )
-from openjiuwen.core.context_engine.processor.compressor.forked.round import (  # noqa: E402
-    ForkedRoundLevelCompressorConfig,
+from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (  # noqa: E402
+    RoundLevelCompressorConfig,
 )
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import (  # noqa: E402
     MessageOffloaderConfig,
@@ -96,14 +96,14 @@ from openjiuwen.harness.tools import WebFetchWebpageTool  # noqa: E402
 
 
 DEFAULT_CONTEXT_WINDOW_TOKENS = 8000
-DEFAULT_CONTEXT_LOG_DIR = _REPO_ROOT / ".forked_compression_demo_logs"
-DEMO_AGENT_ID = "forked-compression-demo"
-FORKED_PROBE_USER_GOAL = "验证 forked compression query 触发流程"
-FORKED_PROBE_DURABLE_FACT = "ALPHA-42"
+DEFAULT_CONTEXT_LOG_DIR = _REPO_ROOT / ".compression_demo_logs"
+DEMO_AGENT_ID = "compression-demo"
+PROBE_USER_GOAL = "验证 compression query 触发流程"
+PROBE_DURABLE_FACT = "ALPHA-42"
 _REAL_PROBE_PROCESSOR_NAMES = [
-    "ForkedDialogueCompressor",
-    "ForkedCurrentRoundCompressor",
-    "ForkedRoundLevelCompressor",
+    "DialogueCompressor",
+    "CurrentRoundCompressor",
+    "RoundLevelCompressor",
 ]
 _REAL_PROBE_CACHE_WARMUP_SECONDS = 3.0
 OFFLOAD_FILESYSTEM_MARKER_PATTERN = re.compile(
@@ -153,16 +153,16 @@ def build_context_processors(model: Model) -> list[tuple[str, Any]]:
             ),
         ),
         (
-            "ForkedDialogueCompressor",
-            ForkedDialogueCompressorConfig(
+            "DialogueCompressor",
+            DialogueCompressorConfig(
                 trigger_context_ratio=0.10,
                 model=model_config,
                 model_client=model_client,
             ),
         ),
         (
-            "ForkedCurrentRoundCompressor",
-            ForkedCurrentRoundCompressorConfig(
+            "CurrentRoundCompressor",
+            CurrentRoundCompressorConfig(
                 trigger_context_ratio=0.10,
                 keep_recent_messages=2,
                 model=model_config,
@@ -170,8 +170,8 @@ def build_context_processors(model: Model) -> list[tuple[str, Any]]:
             ),
         ),
         (
-            "ForkedRoundLevelCompressor",
-            ForkedRoundLevelCompressorConfig(
+            "RoundLevelCompressor",
+            RoundLevelCompressorConfig(
                 trigger_context_ratio=0.10,
                 keep_recent_messages=4,
                 model=model_config,
@@ -192,7 +192,7 @@ def build_agent(
         card=AgentCard(
             id=DEMO_AGENT_ID,
             name=DEMO_AGENT_ID,
-            description="DeepAgent demo for MessageOffloader and forked compressors.",
+            description="DeepAgent demo for MessageOffloader and compressors.",
         ),
         system_prompt=(
             "你是 context compression demo agent。请正常回答用户问题；"
@@ -272,24 +272,24 @@ def _read_offload_files(content: Any) -> list[dict[str, Any]]:
     return files
 
 
-class _ProbeForkedExecutor:
+class _ProbeCompressionExecutor:
     def __init__(self, processor_name: str) -> None:
         self.processor_name = processor_name
         self.calls = 0
 
-    async def invoke(self, request: Any) -> ForkedCompressionResult:
+    async def invoke(self, request: Any) -> CompressionResult:
         self.calls += 1
         summary = "\n".join(
             [
                 "<state_snapshot>",
                 f"processor: {self.processor_name}",
-                f"user_goal: {FORKED_PROBE_USER_GOAL}",
-                f"durable_fact: {FORKED_PROBE_DURABLE_FACT}",
+                f"user_goal: {PROBE_USER_GOAL}",
+                f"durable_fact: {PROBE_DURABLE_FACT}",
                 "quality_note: Preserve the user goal, durable fact, active task, and latest raw tail.",
                 "</state_snapshot>",
             ]
         )
-        return ForkedCompressionResult(AssistantMessage(content=summary))
+        return CompressionResult(AssistantMessage(content=summary))
 
 
 class _ProbeKVCacheModel:
@@ -301,37 +301,25 @@ class _ProbeKVCacheModel:
         return True
 
 
-def _forked_probe_processors(model: Model, processor_name: str) -> list[tuple[str, Any]]:
+def _probe_processors(model: Model, processor_name: str) -> list[tuple[str, Any]]:
     model_config = model.model_config
     model_client = model.model_client_config
-    if processor_name == "ForkedDialogueCompressor":
+    if processor_name == "DialogueCompressor":
         return [
             (
                 processor_name,
-                ForkedDialogueCompressorConfig(
+                DialogueCompressorConfig(
                     trigger_context_ratio=0.05,
                     model=model_config,
                     model_client=model_client,
                 ),
             )
         ]
-    if processor_name == "ForkedCurrentRoundCompressor":
+    if processor_name == "CurrentRoundCompressor":
         return [
             (
                 processor_name,
-                ForkedCurrentRoundCompressorConfig(
-                    trigger_context_ratio=0.05,
-                    keep_recent_messages=1,
-                    model=model_config,
-                    model_client=model_client,
-                ),
-            )
-        ]
-    if processor_name == "ForkedRoundLevelCompressor":
-        return [
-            (
-                processor_name,
-                ForkedRoundLevelCompressorConfig(
+                CurrentRoundCompressorConfig(
                     trigger_context_ratio=0.05,
                     keep_recent_messages=1,
                     model=model_config,
@@ -339,13 +327,25 @@ def _forked_probe_processors(model: Model, processor_name: str) -> list[tuple[st
                 ),
             )
         ]
-    raise ValueError(f"Unsupported forked probe processor: {processor_name}")
+    if processor_name == "RoundLevelCompressor":
+        return [
+            (
+                processor_name,
+                RoundLevelCompressorConfig(
+                    trigger_context_ratio=0.05,
+                    keep_recent_messages=1,
+                    model=model_config,
+                    model_client=model_client,
+                ),
+            )
+        ]
+    raise ValueError(f"Unsupported probe processor: {processor_name}")
 
 
-def _build_forked_probe_messages(processor_name: str) -> list[Any]:
+def _build_probe_messages(processor_name: str) -> list[Any]:
     durable_header = (
-        f"用户目标: {FORKED_PROBE_USER_GOAL}\n"
-        f"必须保留的持久事实: {FORKED_PROBE_DURABLE_FACT}\n"
+        f"用户目标: {PROBE_USER_GOAL}\n"
+        f"必须保留的持久事实: {PROBE_DURABLE_FACT}\n"
     )
     large_history = (
         durable_header
@@ -353,31 +353,31 @@ def _build_forked_probe_messages(processor_name: str) -> list[Any]:
         + "重复填充用于制造上下文压力。"
     ) * 80
 
-    if processor_name == "ForkedDialogueCompressor":
+    if processor_name == "DialogueCompressor":
         return [
             UserMessage(content=f"请记住: {durable_header}"),
             AssistantMessage(content=large_history),
-            UserMessage(content="当前 query: 请继续验证 dialogue forked 压缩是否触发。"),
+            UserMessage(content="当前 query: 请继续验证 dialogue 压缩是否触发。"),
         ]
 
-    if processor_name == "ForkedCurrentRoundCompressor":
+    if processor_name == "CurrentRoundCompressor":
         return [
             UserMessage(content=f"请记住: {durable_header}"),
             AssistantMessage(content="已进入当前任务验证。"),
-            UserMessage(content="当前 query: 请继续验证 current-round forked 压缩是否触发。"),
+            UserMessage(content="当前 query: 请继续验证 current-round 压缩是否触发。"),
             AssistantMessage(content=large_history),
             AssistantMessage(content="最新尾部原文: current-round tail should remain raw."),
         ]
 
-    if processor_name == "ForkedRoundLevelCompressor":
+    if processor_name == "RoundLevelCompressor":
         return [
             UserMessage(content=f"请记住: {durable_header}"),
             AssistantMessage(content=large_history),
-            UserMessage(content="当前 query: 请继续验证 round-level forked 压缩是否触发。"),
+            UserMessage(content="当前 query: 请继续验证 round-level 压缩是否触发。"),
             AssistantMessage(content="最新尾部原文: round-level tail should remain raw."),
         ]
 
-    raise ValueError(f"Unsupported forked probe processor: {processor_name}")
+    raise ValueError(f"Unsupported probe processor: {processor_name}")
 
 
 def _window_token_count(context: Any, window: Any) -> int:
@@ -385,7 +385,7 @@ def _window_token_count(context: Any, window: Any) -> int:
     return processor._count_context_window_tokens(window, context)
 
 
-async def _run_one_forked_compression_probe(
+async def _run_one_compression_probe(
     *,
     processor_name: str,
     log_dir: Path,
@@ -403,17 +403,17 @@ async def _run_one_forked_compression_probe(
         workspace=Workspace(root_path=str(workspace_dir)),
     )
     context = await engine.create_context(
-        f"forked_probe_{processor_name}",
-        history_messages=_build_forked_probe_messages(processor_name),
-        processors=_forked_probe_processors(model_for_config, processor_name),
+        f"compression_probe_{processor_name}",
+        history_messages=_build_probe_messages(processor_name),
+        processors=_probe_processors(model_for_config, processor_name),
     )
     processor = context._processors[0]
     executor = None
     if use_probe_executor:
-        executor = _ProbeForkedExecutor(processor_name)
-        processor._forked_executor = executor
+        executor = _ProbeCompressionExecutor(processor_name)
+        processor._compression_executor = executor
     elif compression_model is not None:
-        processor._forked_executor = ForkedCompressionExecutor(compression_model)
+        processor._compression_executor = CompressionExecutor(compression_model)
     model = _ProbeKVCacheModel()
     baseline_window = ContextWindow(
         system_messages=[],
@@ -445,7 +445,7 @@ async def _run_one_forked_compression_probe(
         "processor": processor_name,
         "constructed_query": next(
             str(getattr(message, "content", ""))
-            for message in reversed(_build_forked_probe_messages(processor_name))
+            for message in reversed(_build_probe_messages(processor_name))
             if isinstance(message, UserMessage)
         ),
         "triggered": (executor.calls > 0 if executor is not None else bool(completed_states))
@@ -456,8 +456,8 @@ async def _run_one_forked_compression_probe(
         "after_tokens": after_tokens,
         "saved_tokens": before_tokens - after_tokens,
         "quality": {
-            "contains_user_goal": FORKED_PROBE_USER_GOAL in joined_content,
-            "contains_durable_fact": FORKED_PROBE_DURABLE_FACT in joined_content,
+            "contains_user_goal": PROBE_USER_GOAL in joined_content,
+            "contains_durable_fact": PROBE_DURABLE_FACT in joined_content,
             "contains_state_snapshot_tags": "<state_snapshot>" in joined_content,
         },
         "compression_usage": compression_usage,
@@ -474,7 +474,7 @@ async def _run_one_forked_compression_probe(
         "processor_states": states,
     }
     log_dir.mkdir(parents=True, exist_ok=True)
-    probe_path = log_dir / f"forked_probe_{processor_name}.json"
+    probe_path = log_dir / f"compression_probe_{processor_name}.json"
     probe_path.write_text(
         json.dumps(result, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
@@ -483,14 +483,14 @@ async def _run_one_forked_compression_probe(
     return result
 
 
-async def _warm_real_forked_compression_cache(
+async def _warm_real_compression_cache(
     *,
     processor_name: str,
     log_dir: Path,
     workspace_dir: Path,
     compression_model: Any,
 ) -> dict[str, Any]:
-    return await _run_one_forked_compression_probe(
+    return await _run_one_compression_probe(
         processor_name=processor_name,
         log_dir=log_dir,
         workspace_dir=workspace_dir,
@@ -499,18 +499,18 @@ async def _warm_real_forked_compression_cache(
     )
 
 
-async def run_forked_compression_probe(
+async def run_compression_probe(
     *,
     log_dir: Path,
     workspace_dir: Path,
 ) -> dict[str, Any]:
     processor_names = [
-        "ForkedDialogueCompressor",
-        "ForkedCurrentRoundCompressor",
-        "ForkedRoundLevelCompressor",
+        "DialogueCompressor",
+        "CurrentRoundCompressor",
+        "RoundLevelCompressor",
     ]
     results = [
-        await _run_one_forked_compression_probe(
+        await _run_one_compression_probe(
             processor_name=processor_name,
             log_dir=log_dir,
             workspace_dir=workspace_dir,
@@ -518,7 +518,7 @@ async def run_forked_compression_probe(
         for processor_name in processor_names
     ]
     summary = {
-        "session_id": f"{DEMO_AGENT_ID}-forked-probe-{uuid.uuid4().hex[:8]}",
+        "session_id": f"{DEMO_AGENT_ID}-compression-probe-{uuid.uuid4().hex[:8]}",
         "processor_count": len(results),
         "processors": results,
     }
@@ -532,7 +532,7 @@ async def run_forked_compression_probe(
     return summary
 
 
-async def run_real_forked_compression_probe(
+async def run_real_compression_probe(
     *,
     log_dir: Path,
     workspace_dir: Path,
@@ -542,7 +542,7 @@ async def run_real_forked_compression_probe(
     warmups: list[dict[str, Any]] = []
     for processor_name in _REAL_PROBE_PROCESSOR_NAMES:
         warmups.append(
-            await _warm_real_forked_compression_cache(
+            await _warm_real_compression_cache(
                 processor_name=processor_name,
                 log_dir=log_dir,
                 workspace_dir=workspace_dir,
@@ -552,7 +552,7 @@ async def run_real_forked_compression_probe(
         if _REAL_PROBE_CACHE_WARMUP_SECONDS > 0:
             await asyncio.sleep(_REAL_PROBE_CACHE_WARMUP_SECONDS)
         results.append(
-            await _run_one_forked_compression_probe(
+            await _run_one_compression_probe(
                 processor_name=processor_name,
                 log_dir=log_dir,
                 workspace_dir=workspace_dir,
@@ -562,7 +562,7 @@ async def run_real_forked_compression_probe(
         )
 
     summary = {
-        "session_id": f"{DEMO_AGENT_ID}-real-forked-probe-{uuid.uuid4().hex[:8]}",
+        "session_id": f"{DEMO_AGENT_ID}-real-compression-probe-{uuid.uuid4().hex[:8]}",
         "processor_count": len(results),
         "cache_warmup_count": len(warmups),
         "processors": results,
@@ -754,15 +754,15 @@ def parse_args() -> argparse.Namespace:
         help="Run deterministic oversized tool-result probes for every rule compressor without calling a model.",
     )
     parser.add_argument(
-        "--probe-forked-compression",
+        "--probe-compression",
         action="store_true",
-        help="Run deterministic probes for each forked compressor and KV-cache release without calling a model.",
+        help="Run deterministic probes for each compressor and KV-cache release without calling a model.",
     )
     parser.add_argument(
-        "--probe-forked-compression-real",
+        "--probe-compression-real",
         action="store_true",
         help=(
-            "Run each forked compressor with real model calls, warm the provider prompt cache, "
+            "Run each compressor with real model calls, warm the provider prompt cache, "
             "and report compression quality plus compression-request cache hits."
         ),
     )
@@ -776,14 +776,14 @@ async def main() -> None:
         summary = await run_rule_compression_probe(log_dir=log_dir, workspace_dir=_REPO_ROOT)
         print("Rule compression probe summary:", json.dumps(summary, ensure_ascii=False, indent=2, default=str))
         return
-    if args.probe_forked_compression:
-        summary = await run_forked_compression_probe(log_dir=log_dir, workspace_dir=_REPO_ROOT)
-        print("Forked compression probe summary:", json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+    if args.probe_compression:
+        summary = await run_compression_probe(log_dir=log_dir, workspace_dir=_REPO_ROOT)
+        print("Compression probe summary:", json.dumps(summary, ensure_ascii=False, indent=2, default=str))
         return
-    if args.probe_forked_compression_real:
-        summary = await run_real_forked_compression_probe(log_dir=log_dir, workspace_dir=_REPO_ROOT)
+    if args.probe_compression_real:
+        summary = await run_real_compression_probe(log_dir=log_dir, workspace_dir=_REPO_ROOT)
         print(
-            "Real forked compression probe summary:",
+            "Real compression probe summary:",
             json.dumps(summary, ensure_ascii=False, indent=2, default=str),
         )
         return

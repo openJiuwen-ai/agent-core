@@ -8,7 +8,7 @@ from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
 
 
-class ForkedCompressionErrorKind(str, Enum):
+class CompressionErrorKind(str, Enum):
     CONTEXT_OVERFLOW = "context_overflow"
     RATE_LIMIT = "rate_limit"
     AUTHENTICATION = "authentication"
@@ -18,13 +18,13 @@ class ForkedCompressionErrorKind(str, Enum):
     UNKNOWN = "unknown"
 
 
-class ForkedCompressionError(Exception):
-    """Structured error raised when a forked compression model call fails."""
+class CompressionError(Exception):
+    """Structured error raised when a compression model call fails."""
 
     def __init__(
         self,
         *,
-        kind: ForkedCompressionErrorKind,
+        kind: CompressionErrorKind,
         message: str,
         original_error: BaseException,
     ) -> None:
@@ -35,7 +35,7 @@ class ForkedCompressionError(Exception):
 
     @property
     def is_context_overflow(self) -> bool:
-        return self.kind == ForkedCompressionErrorKind.CONTEXT_OVERFLOW
+        return self.kind == CompressionErrorKind.CONTEXT_OVERFLOW
 
 
 _CONTEXT_OVERFLOW_MARKERS = (
@@ -70,7 +70,7 @@ _API_REQUEST_MARKERS = ("bad request", "invalid request", "400")
 
 
 @dataclass(frozen=True)
-class ForkedCompressionRequest:
+class CompressionRequest:
     prompt: str
     context_messages: list[BaseMessage] = field(default_factory=list)
     system_messages: list[BaseMessage] = field(default_factory=list)
@@ -86,7 +86,7 @@ class ForkedCompressionRequest:
         context_window: ContextWindow,
         exclude_recent_messages: int = 0,
         output_parser: Any = None,
-    ) -> "ForkedCompressionRequest":
+    ) -> "CompressionRequest":
         return cls(
             prompt=prompt,
             system_messages=list(context_window.system_messages or []),
@@ -98,7 +98,7 @@ class ForkedCompressionRequest:
 
 
 @dataclass(frozen=True)
-class ForkedCompressionResult:
+class CompressionResult:
     """Normalized compaction response while preserving raw model response access."""
 
     response: Any
@@ -113,7 +113,7 @@ class ForkedCompressionResult:
         return getattr(self.response, item)
 
 
-class ForkedCompressionExecutor:
+class CompressionExecutor:
     """Shared model invocation wrapper for compaction calls using main-agent prefix context."""
 
     def __init__(self, model: Any) -> None:
@@ -124,7 +124,7 @@ class ForkedCompressionExecutor:
     def last_response(self) -> Any:
         return self._last_response
 
-    async def invoke(self, request: ForkedCompressionRequest) -> ForkedCompressionResult:
+    async def invoke(self, request: CompressionRequest) -> CompressionResult:
         messages = self.build_messages(request)
         kwargs: dict[str, Any] = {"messages": messages, "tools": request.tools}
         if request.output_parser is not None:
@@ -132,15 +132,15 @@ class ForkedCompressionExecutor:
         try:
             response = await self._model.invoke(**kwargs)
         except Exception as exc:
-            raise classify_forked_compression_error(exc) from exc
+            raise classify_compression_error(exc) from exc
         self._last_response = response
-        return ForkedCompressionResult(
+        return CompressionResult(
             response=response,
             usage=getattr(response, "usage_metadata", None) or getattr(response, "usage", None),
         )
 
     @staticmethod
-    def build_messages(request: ForkedCompressionRequest) -> list[BaseMessage]:
+    def build_messages(request: CompressionRequest) -> list[BaseMessage]:
         context_messages = list(request.context_messages)
         if request.exclude_recent_messages > 0:
             keep_count = max(len(context_messages) - request.exclude_recent_messages, 0)
@@ -152,33 +152,33 @@ class ForkedCompressionExecutor:
         ]
 
 
-def classify_forked_compression_error(error: BaseException) -> ForkedCompressionError:
+def classify_compression_error(error: BaseException) -> CompressionError:
     message = _error_text(error)
-    return ForkedCompressionError(
-        kind=_classify_error_kind(error, message),
+    return CompressionError(
+        kind=_classify_compression_error_kind(error, message),
         message=message or error.__class__.__name__,
         original_error=error,
     )
 
 
-def _classify_error_kind(error: BaseException, message: str) -> ForkedCompressionErrorKind:
+def _classify_compression_error_kind(error: BaseException, message: str) -> CompressionErrorKind:
     normalized = message.lower()
     status_code = _extract_status_code(error)
     if _contains_any(normalized, _CONTEXT_OVERFLOW_MARKERS):
-        return ForkedCompressionErrorKind.CONTEXT_OVERFLOW
+        return CompressionErrorKind.CONTEXT_OVERFLOW
     if status_code == 413:
-        return ForkedCompressionErrorKind.CONTEXT_OVERFLOW
+        return CompressionErrorKind.CONTEXT_OVERFLOW
     if _contains_any(normalized, _RATE_LIMIT_MARKERS) or status_code == 429:
-        return ForkedCompressionErrorKind.RATE_LIMIT
+        return CompressionErrorKind.RATE_LIMIT
     if _contains_any(normalized, _AUTHENTICATION_MARKERS) or status_code in {401, 403}:
-        return ForkedCompressionErrorKind.AUTHENTICATION
+        return CompressionErrorKind.AUTHENTICATION
     if isinstance(error, TimeoutError) or _contains_any(normalized, _TIMEOUT_MARKERS):
-        return ForkedCompressionErrorKind.TIMEOUT
+        return CompressionErrorKind.TIMEOUT
     if _contains_any(normalized, _SERVER_UNSTABLE_MARKERS) or status_code in {500, 502, 503, 504}:
-        return ForkedCompressionErrorKind.SERVER_UNSTABLE
+        return CompressionErrorKind.SERVER_UNSTABLE
     if _contains_any(normalized, _API_REQUEST_MARKERS) or status_code == 400:
-        return ForkedCompressionErrorKind.API_REQUEST_ERROR
-    return ForkedCompressionErrorKind.UNKNOWN
+        return CompressionErrorKind.API_REQUEST_ERROR
+    return CompressionErrorKind.UNKNOWN
 
 
 def _contains_any(text: str, markers: tuple[str, ...]) -> bool:

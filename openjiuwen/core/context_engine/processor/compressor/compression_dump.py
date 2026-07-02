@@ -8,24 +8,24 @@ from typing import Any
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
-from openjiuwen.core.context_engine.processor.compressor.forked.base import (
-    ForkedPrefixCompactProcessor,
+from openjiuwen.core.context_engine.processor.compressor.prefix_compact_processor import (
+    PrefixCompactProcessor,
     PrefixCompactSpan,
 )
-from openjiuwen.core.context_engine.processor.compressor.forked.executor import (
-    ForkedCompressionExecutor,
-    ForkedCompressionRequest,
+from openjiuwen.core.context_engine.processor.compressor.compression_executor import (
+    CompressionExecutor,
+    CompressionRequest,
 )
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.llm.request_trace import _to_jsonable
 
 
-FORKED_COMPRESSION_DUMP_DIR_ENV = "OPENJIUWEN_FORKED_COMPRESSION_DUMP_DIR"
+COMPRESSION_DUMP_DIR_ENV = "OPENJIUWEN_COMPRESSION_DUMP_DIR"
 
 
 def dump_compression_artifact(
     *,
-    processor: ForkedPrefixCompactProcessor,
+    processor: PrefixCompactProcessor,
     context: ModelContext,
     context_window: ContextWindow,
     config: Any,
@@ -33,18 +33,18 @@ def dump_compression_artifact(
     original_messages: list[BaseMessage],
     span: PrefixCompactSpan,
     prompt: str,
-    request: ForkedCompressionRequest,
+    request: CompressionRequest,
     response_content: str,
     summary: str,
     new_messages: list[BaseMessage],
     usage: dict[str, Any] | None,
 ) -> str | None:
-    """Persist one forked compression invocation for offline effect analysis.
+    """Persist one compression invocation for offline effect analysis.
 
     Resolution order for the dump directory:
       1. ``config.compression_dump_dir`` (explicit override)
-      2. ``OPENJIUWEN_FORKED_COMPRESSION_DUMP_DIR`` env var
-      3. ``{workspace_dir}/context/{session_id}_context/forked_compression_logs/``
+      2. ``OPENJIUWEN_COMPRESSION_DUMP_DIR`` env var
+      3. ``{workspace_dir}/context/{session_id}_context/compression_logs/``
 
     Returns the written file path, or ``None`` when dumping is disabled or
     fails. All filesystem errors are swallowed so tracing never breaks the
@@ -61,7 +61,7 @@ def dump_compression_artifact(
     context_max = processor._resolve_context_max(context, {})
     tokens_before = processor._count_messages_tokens(original_messages, context)
     tokens_after = processor._count_messages_tokens(new_messages, context)
-    messages_sent_to_model = ForkedCompressionExecutor.build_messages(request)
+    messages_sent_to_model = CompressionExecutor.build_messages(request)
 
     payload = {
         "processor_type": processor_type,
@@ -115,14 +115,14 @@ def _resolve_dump_dir(context: ModelContext, config: Any) -> str:
     configured = getattr(config, "compression_dump_dir", None)
     if configured:
         return str(configured)
-    env_dir = os.getenv(FORKED_COMPRESSION_DUMP_DIR_ENV)
+    env_dir = os.getenv(COMPRESSION_DUMP_DIR_ENV)
     if env_dir:
         return env_dir
     workspace_dir = _workspace_dir(context)
     if not workspace_dir:
         return ""
     session_id = _safe_context_value(context, "session_id", "unknown_session")
-    return os.path.join(workspace_dir, "context", f"{session_id}_context", "forked_compression_logs")
+    return os.path.join(workspace_dir, "context", f"{session_id}_context", "compression_logs")
 
 
 def _workspace_dir(context: ModelContext) -> str:

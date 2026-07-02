@@ -20,8 +20,7 @@ from openjiuwen.core.context_engine import (
     ContextEngineConfig,
 )
 from openjiuwen.core.context_engine.context.context import SessionModelContext
-from openjiuwen.core.context_engine.processor.base import ContextProcessor
-from openjiuwen.core.context_engine.processor.compressor.micro_compact_processor import MicroCompactProcessorConfig
+from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloaderConfig
 from openjiuwen.core.context_engine.schema.messages import OffloadUserMessage
 from openjiuwen.core.foundation.llm import (
@@ -55,6 +54,28 @@ class BlockingCompressor(ContextProcessor):
         if _blocking_release is not None:
             await _blocking_release.wait()
         return None, messages_to_add
+
+    def load_state(self, state):
+        return
+
+    def save_state(self):
+        return {}
+
+
+class ActiveCompactingCompressorConfig(BaseModel):
+    replacement: str = "[COMPRESSED]"
+
+
+@ContextEngine.register_processor()
+class ActiveCompactingCompressor(ContextProcessor):
+    async def on_add_messages(self, context, messages_to_add, **kwargs):
+        messages = context.get_messages()
+        if not messages:
+            return None, messages_to_add
+        updated = list(messages)
+        updated[0] = UserMessage(content=self.config.replacement)
+        context.set_messages(updated)
+        return ContextEvent(event_type=self.processor_type(), messages_to_modify=[0]), messages_to_add
 
     def load_state(self, state):
         return
@@ -295,34 +316,16 @@ class TestContextEngine:
             context_id="ctx",
             session=session,
             processors=[(
-                "MicroCompactProcessor",
-                MicroCompactProcessorConfig(
-                    trigger_threshold=999,
-                    compactable_tool_names=["grep"],
-                    keep_recent_per_tool=1,
-                    cleared_marker="[CLEARED]",
-                ),
+                "ActiveCompactingCompressor",
+                ActiveCompactingCompressorConfig(replacement="[COMPRESSED]"),
             )],
         )
-        messages = [
-            UserMessage(content="search one"),
-            AssistantMessage(content="", tool_calls=[ToolCall(id="call-1", name="grep", type="function", arguments="{}")]),
-            ToolMessage(content="first grep result", tool_call_id="call-1", name="grep"),
-            AssistantMessage(content="done one"),
-            UserMessage(content="search two"),
-            AssistantMessage(content="", tool_calls=[ToolCall(id="call-2", name="grep", type="function", arguments="{}")]),
-            ToolMessage(content="second grep result", tool_call_id="call-2", name="grep"),
-            AssistantMessage(content="done two"),
-        ]
-        await context.add_messages(messages)
+        await context.add_messages([UserMessage(content="large historical context")])
 
         result = await engine.compress_context(context_id="ctx", session=session)
 
         assert result == "compressed"
-        processed_messages = context.get_messages()
-        assert isinstance(processed_messages[2], ToolMessage)
-        assert processed_messages[2].content == "[CLEARED]"
-        assert processed_messages[6].content == "second grep result"
+        assert context.get_messages()[0].content == "[COMPRESSED]"
 
     @pytest.mark.asyncio
     async def test_compress_context_returns_busy_message_when_passive_compression_running(self, engine, session):
@@ -380,13 +383,8 @@ class TestContextEngine:
             context_id="ctx",
             session=session,
             processors=[(
-                "MicroCompactProcessor",
-                MicroCompactProcessorConfig(
-                    trigger_threshold=999,
-                    compactable_tool_names=["grep"],
-                    keep_recent_per_tool=1,
-                    cleared_marker="[CLEARED]",
-                ),
+                "ActiveCompactingCompressor",
+                ActiveCompactingCompressorConfig(),
             )],
         )
 

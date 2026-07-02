@@ -45,10 +45,12 @@ def test_auto_harness_context_rail_init_keeps_context_processors():
     rail.init(agent)
 
     processors = dict(agent.react_agent._config.context_processors)
-    assert "DialogueCompressor" in processors
-    assert "MessageSummaryOffloader" in processors
-    assert "CurrentRoundCompressor" in processors
-    assert "RoundLevelCompressor" in processors
+    assert list(processors) == [
+        "MessageOffloader",
+        "DialogueCompressor",
+        "CurrentRoundCompressor",
+        "RoundLevelCompressor",
+    ]
 
 
 @pytest.mark.asyncio
