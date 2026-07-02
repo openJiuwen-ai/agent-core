@@ -123,7 +123,11 @@ async def test_init_processors_merge(tmp_path: Path):
         (False, None, []),
         (False, [("custom", DialogueCompressorConfig(messages_threshold=25))], ["custom"]),
         (False, [("d", DialogueCompressorConfig(messages_to_keep=5))], ["d"]),
-        (True, None, ["MessageSummaryOffloader", "DialogueCompressor", "CurrentRoundCompressor", "RoundLevelCompressor"]),
+        (
+            True,
+            None,
+            ["MessageSummaryOffloader", "DialogueCompressor", "CurrentRoundCompressor", "RoundLevelCompressor"],
+        ),
         (True, [("d", DialogueCompressorConfig(messages_threshold=99))],
          ["MessageSummaryOffloader", "DialogueCompressor", "CurrentRoundCompressor", "RoundLevelCompressor", "d"]),
         (True, [("c", DialogueCompressorConfig(messages_to_keep=5))],
@@ -185,7 +189,7 @@ async def test_init_preset_defaults(tmp_path: Path):
     # RoundLevelCompressor tests
     round_lvl = procs.get("RoundLevelCompressor")
     assert round_lvl is not None
-    assert round_lvl.trigger_total_tokens == 230000
+    assert round_lvl.trigger_context_ratio == 0.9
     assert round_lvl.target_total_tokens == 160000
     assert round_lvl.keep_recent_messages == 6
 
