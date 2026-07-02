@@ -461,7 +461,7 @@ tool / rail / sys_operation 与 `DeepAgentSpec.build()` 同模式。
 | `persona` | `str` | `""` |
 | `team_spec` | `Optional[TeamSpec]` | `None` |
 | `messager_config` | `Optional[MessagerTransportConfig]` | `None` |
-| `db_config` | `DatabaseConfig \| MemoryDatabaseConfig` | `DatabaseConfig()` |
+| `db_config` | `DatabaseConfig` | `DatabaseConfig()` |
 | `member_model` | `Optional[TeamModelConfig]` | `None` |
 | `worktree_path` | `Optional[str]` | `None` |
 | `permissions_override` | `Optional[dict[str, str]]` | `None` | Per-member permission narrowing from `spawn_teammate.permissions`；flat `{tool_name: level_string}` dict，由 `narrow_permissions` 收紧基础配置 |

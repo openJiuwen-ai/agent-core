@@ -65,7 +65,6 @@ from openjiuwen.agent_teams.tiny_agent import (
     generate_summary,
     generate_title,
 )
-from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 
 __all__ = [
     "DEFAULT_LEADER_MEMBER_NAME",
@@ -106,7 +105,6 @@ __all__ = [
     "PyZmqMessager",
     "create_messager",
     "InProcessSpawnHandle",
-    "MemoryDatabaseConfig",
     "ReliabilityConfig",
     "TinyAgent",
     "TinyAgentSpec",

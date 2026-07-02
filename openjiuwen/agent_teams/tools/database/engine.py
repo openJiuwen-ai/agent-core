@@ -163,9 +163,8 @@ def _ensure_team_member_role_column(sync_conn) -> None:
         return
 
     # Hard-coded "teammate" to keep this module free of the
-    # ``schema.team`` import (which would close a circular dependency
-    # back through ``tools.memory_database``). Keep in sync with
-    # ``TeamRole.TEAMMATE`` if that enum value ever changes.
+    # ``schema.team`` import (which would close a circular dependency).
+    # Keep in sync with ``TeamRole.TEAMMATE`` if that enum value ever changes.
     default_role = "teammate"
     sync_conn.exec_driver_sql(f"ALTER TABLE team_member ADD COLUMN role TEXT NOT NULL DEFAULT '{default_role}'")
     team_logger.info(

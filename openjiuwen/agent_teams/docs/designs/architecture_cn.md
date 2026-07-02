@@ -197,7 +197,6 @@ openjiuwen/agent_teams/
 │   ├── task_manager.py             # TeamTaskManager
 │   ├── message_manager.py          # TeamMessageManager
 │   ├── models.py                   # SQLModel 静态表 + 动态会话表工厂
-│   ├── memory_database.py          # InMemoryTeamDatabase + MemoryDatabaseConfig
 │   ├── database/                   # 分 DAO 的 SQL 层
 │   │   ├── config.py               # DatabaseConfig / DatabaseType（sqlite/postgres/mysql）
 │   │   ├── engine.py               # 引擎生命周期 + 动态表 CRUD
@@ -694,9 +693,9 @@ erDiagram
 
 | 后端 | 配置类 | 特征 |
 |------|--------|------|
-| SQLite | `DatabaseConfig(db_type="sqlite")` | WAL 模式，AsyncAdaptedQueuePool，默认 |
+| SQLite（文件） | `DatabaseConfig(db_type="sqlite")` | WAL 模式，AsyncAdaptedQueuePool，默认 |
+| SQLite（内存） | `DatabaseConfig(db_type="sqlite", connection_string=":memory:")` | StaticPool 单连接，单进程，测试友好 |
 | PostgreSQL / MySQL | `DatabaseConfig(db_type="postgresql"/"mysql")` | 共用同一 `DatabaseConfig` |
-| 内存 | `MemoryDatabaseConfig` | asyncio.Lock 序列化，单进程，测试友好 |
 
 ### 8.2 Session checkpoint 状态结构
 
@@ -987,7 +986,7 @@ Worktree 工具（`enter_worktree` / `exit_worktree`）已下沉到 `openjiuwen.
 
 ```python
 get_shared_runtime() -> TeamRuntime
-get_shared_db(config) -> TeamDatabase | InMemoryTeamDatabase
+get_shared_db(config) -> TeamDatabase
 cleanup_shared_resources() -> None
 ```
 
@@ -1530,7 +1529,6 @@ create_messager()
 
 # 生成机制
 InProcessSpawnHandle
-MemoryDatabaseConfig
 
 # 可观测性
 TeamMonitor / create_monitor()

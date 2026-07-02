@@ -40,7 +40,6 @@ from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.database import TeamDatabase
-    from openjiuwen.agent_teams.tools.memory_database import InMemoryTeamDatabase
     from openjiuwen.agent_teams.tools.team import TeamBackend
     from openjiuwen.core.foundation.tool.base import Tool
 
@@ -84,7 +83,7 @@ class ExternalTeamClient:
         self._backend: "TeamBackend | None" = None
         self._tasks: TeamTaskManager | None = None
         self._messages: TeamMessageManager | None = None
-        self._db: "TeamDatabase | InMemoryTeamDatabase | None" = None
+        self._db: "TeamDatabase | None" = None
         self._session_token: Token[str] | None = None
         # Member-scope real team tools, keyed by card.name. Built at connect()
         # for the ``member`` scope so an external CLI member calls the exact
@@ -418,7 +417,7 @@ class ExternalTeamClient:
             self._raise_not_connected()
         return self._messager
 
-    def _require_db(self) -> "TeamDatabase | InMemoryTeamDatabase":
+    def _require_db(self) -> "TeamDatabase":
         if self._db is None:
             self._raise_not_connected()
         return self._db

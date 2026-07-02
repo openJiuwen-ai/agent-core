@@ -16,7 +16,7 @@ from openjiuwen.agent_teams.external.cli_agent.spawn import (
 from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
-from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
+from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
 
 # A streaming stand-in CLI: read a line from stdin, echo it, then emit the
 # generic adapter's turn-completion marker. Exercises the real subprocess +
@@ -67,7 +67,7 @@ def _ctx(
             language="en",
             external_messager_config=external_messager_config,
         ),
-        db_config=MemoryDatabaseConfig(),
+        db_config=DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"),
         messager_config=messager_config
         or MessagerTransportConfig(
             backend="inprocess",
