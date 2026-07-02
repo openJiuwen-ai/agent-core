@@ -16,7 +16,7 @@ The module is organised in two layers:
 
 from typing import Dict, Iterable, List, Optional
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -368,6 +368,34 @@ class TaskDao:
                 query = query.where(team_task_model.status == status)
             result = await session.execute(query)
             return result.scalars().all()
+
+    async def count_tasks_terminality(self, team_name: str) -> tuple[int, int]:
+        """Return ``(total_tasks, non_terminal_tasks)`` for a team in one query.
+
+        Lets a caller decide "is the whole board drained?" (``total > 0 and
+        non_terminal == 0``) with a single aggregate SELECT instead of loading
+        every row and iterating in Python — the ``_maybe_publish_task_list_drained``
+        check runs on every terminal task transition, so an O(N) full scan there
+        is pure waste. ``func.sum`` over a 0/1 ``case`` is used (not the FILTER
+        clause) to stay portable across the SQLite / PostgreSQL / MySQL backends.
+
+        Returns:
+            ``(total, non_terminal)`` — both 0 when the board is empty.
+        """
+        team_task_model = _get_task_model()
+        non_terminal_flag = case(
+            (team_task_model.status.in_(list(TASK_TERMINAL_STATUSES)), 0),
+            else_=1,
+        )
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(
+                    func.count(),
+                    func.coalesce(func.sum(non_terminal_flag), 0),
+                ).where(team_task_model.team_name == team_name)
+            )
+            total, non_terminal = result.one()
+            return int(total), int(non_terminal)
 
     async def get_tasks_by_assignee(
         self, team_name: str, assignee_id: str, status: Optional[str] = None

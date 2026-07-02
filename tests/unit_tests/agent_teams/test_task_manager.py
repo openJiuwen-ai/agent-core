@@ -1375,3 +1375,23 @@ async def test_list_tasks_with_deps_avoids_n_plus_1(task_manager, monkeypatch):
     assert set(by_id[t3.task_id].blocked_by) == {t1.task_id, t2.task_id}
     assert by_id[t1.task_id].blocked_by == []
     assert by_id[t2.task_id].blocked_by == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_count_tasks_terminality(task_manager):
+    """count_tasks_terminality returns (total, non_terminal) in one aggregate query."""
+    dao = task_manager.db.task
+    team = "test_team"
+
+    assert await dao.count_tasks_terminality(team) == (0, 0)
+
+    t1 = await task_manager.add(title="T1", content="c")
+    await task_manager.add(title="T2", content="c")
+    # Two pending tasks -> both non-terminal.
+    assert await dao.count_tasks_terminality(team) == (2, 2)
+
+    assert await task_manager.claim(t1.task_id)
+    await task_manager.complete(t1.task_id)
+    # One completed (terminal) + one pending -> total 2, non_terminal 1.
+    assert await dao.count_tasks_terminality(team) == (2, 1)
