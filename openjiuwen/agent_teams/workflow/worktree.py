@@ -16,8 +16,6 @@ from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.harness.tools.worktree.models import WorktreeSession
 
-_SWARMFLOW_MODE_NAMESPACE = "swarmflow"
-
 
 class SwarmflowWorkerWorktrees:
     """Create and finalize owner-scoped worktrees for swarmflow workers."""
@@ -87,7 +85,6 @@ class SwarmflowWorkerWorktrees:
             team_name=self._team_name,
             member_name=member_name,
             session_id=self._resolved_session_id(),
-            mode_namespace=_SWARMFLOW_MODE_NAMESPACE,
             project_hash=project_hash,
         )
         result = await manager.create_owner_worktree(slug, source_dir=project_dir)
@@ -98,7 +95,6 @@ class SwarmflowWorkerWorktrees:
             head_commit=result.head_commit,
             hook_based=bool(getattr(result, "hook_based", False)),
             session_id=self._resolved_session_id(),
-            mode_namespace=_SWARMFLOW_MODE_NAMESPACE,
             project_hash=project_hash,
             managed_root=self._managed_root(),
         )

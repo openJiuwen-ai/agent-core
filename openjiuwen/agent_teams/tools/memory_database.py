@@ -41,6 +41,7 @@ from openjiuwen.agent_teams.tools.database import (
     detect_cycle_in_adjacency,
 )
 from openjiuwen.agent_teams.tools.member_options import (
+    MemberWorktreeOptions,
     set_member_worktree_options,
 )
 from openjiuwen.agent_teams.tools.models import (
@@ -297,9 +298,6 @@ class InMemoryTeamDatabase:
             team_logger.info("Team %s created", team_name)
             return True
 
-    async def team_exists(self, team_name: str) -> bool:
-        return team_name in self._teams
-
     async def get_team(self, team_name: str) -> Optional[Team]:
         return self._teams.get(team_name)
 
@@ -391,6 +389,7 @@ class InMemoryTeamDatabase:
         self,
         member_name: str,
         team_name: str,
+        worktree: MemberWorktreeOptions | None = None,
         *,
         isolation: Optional[str] = None,
         worktree_path: Optional[str] = None,
@@ -402,6 +401,7 @@ class InMemoryTeamDatabase:
                 return False
             member.options = set_member_worktree_options(
                 member.options,
+                worktree,
                 isolation=isolation,
                 worktree_path=worktree_path,
             )

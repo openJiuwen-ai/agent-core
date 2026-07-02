@@ -26,13 +26,12 @@ def build_teammate_worktree_name(
     team_name: str,
     member_name: str,
     session_id: str,
-    mode_namespace: str,
     project_hash: str,
 ) -> str:
     """Build a deterministic worktree slug for a session-scoped team owner."""
     team = _slug_part(team_name, "team", max_length=_TEAM_PART_LENGTH)
     member = _slug_part(member_name, "member", max_length=_MEMBER_PART_LENGTH)
-    seed = f"{team_name}:{member_name}:{session_id}:{mode_namespace}:{project_hash}"
+    seed = f"{team_name}:{member_name}:{session_id}:{project_hash}"
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:10]
     slug = f"agent-{team}-{member}-{digest}"
     validate_slug(slug)
