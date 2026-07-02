@@ -23,6 +23,12 @@ from openjiuwen.agent_evolving.experience import (
 )
 from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
+from openjiuwen.agent_evolving.prompts.sections import (
+    EVOLUTION_FUZZY_REVIEW_PROMPT_CN,
+    EVOLUTION_FUZZY_REVIEW_PROMPT_EN,
+    EVOLUTION_FUZZY_REVIEW_RULES_CN,
+    EVOLUTION_FUZZY_REVIEW_RULES_EN,
+)
 from openjiuwen.agent_evolving.signal import (
     EvolutionSignal,
     SignalDetector,
@@ -49,6 +55,8 @@ from openjiuwen.harness.rails.evolution.contracts import (
 from openjiuwen.harness.rails.evolution.review.materials import build_review_scoped_materials
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import (
+    _FUZZY_REVIEW_PROMPT_CN,
+    _FUZZY_REVIEW_PROMPT_EN,
     _MAX_PROCESSED_SIGNAL_KEYS,
     SkillEvolutionRail,
 )
@@ -640,6 +648,7 @@ def test_skill_rail_invalid_review_agent_max_iterations_rejected(tmp_path):
             review_agent_max_iterations=0,
         )
 
+
 @pytest.mark.asyncio
 async def test_build_user_evolution_request_requires_registered_evolve_review_task_after_init(tmp_path):
     rail = _make_rail(tmp_path)
@@ -663,8 +672,8 @@ async def test_build_user_evolution_request_requires_registered_evolve_review_ta
 
 @pytest.mark.asyncio
 async def test_evolve_review_task_uses_fixed_evolution_reviewer_subagent(monkeypatch):
-    from openjiuwen.harness.rails.evolution.review.subagent import EVOLUTION_REVIEW_AGENT_NAME
     from openjiuwen.agent_evolving.tools.skill import EvolveReviewTaskTool
+    from openjiuwen.harness.rails.evolution.review.subagent import EVOLUTION_REVIEW_AGENT_NAME
 
     captured = {}
 
@@ -1121,6 +1130,16 @@ async def test_fuzzy_review_without_task_loop_controller_drops_followup(tmp_path
 def test_fuzzy_review_interval_must_be_positive(tmp_path):
     with pytest.raises(ValueError, match="fuzzy_review_interval"):
         _make_rail(tmp_path, fuzzy_review_interval=0)
+
+
+def test_cn_fuzzy_review_prompts_share_rule_text():
+    assert EVOLUTION_FUZZY_REVIEW_RULES_CN in EVOLUTION_FUZZY_REVIEW_PROMPT_CN
+    assert EVOLUTION_FUZZY_REVIEW_RULES_CN in _FUZZY_REVIEW_PROMPT_CN
+
+
+def test_en_fuzzy_review_prompts_share_rule_text():
+    assert EVOLUTION_FUZZY_REVIEW_RULES_EN in EVOLUTION_FUZZY_REVIEW_PROMPT_EN
+    assert EVOLUTION_FUZZY_REVIEW_RULES_EN in _FUZZY_REVIEW_PROMPT_EN
 
 
 @pytest.mark.asyncio
@@ -3147,7 +3166,6 @@ def test_skill_rewriter_exports_removed():
 
     assert not hasattr(skill_call, "SkillRewriter")
     assert not hasattr(skill_call, "SkillRewriteResult")
-
 
 
 # =============================================================================
