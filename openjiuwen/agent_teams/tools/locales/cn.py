@@ -215,12 +215,12 @@ STRINGS: dict[str, str] = {
     "swarmflow.script_path": (
         "磁盘上的 swarmflow 脚本文件路径——一个 Python 模块，含顶层 META（纯字面量）与 "
         "async def run(args)，脚本体用 from swarmflow import 引入 agent()/parallel()/pipeline() "
-        "等原语。四个脚本来源（script_path / script / name / resume_id）中优先级最高，也是当前唯一接通执行的来源。"
+        "等原语。与内联 script 同为当前已接通执行的来源，适合已落盘 / 需反复迭代或 resume 的脚本。"
     ),
     "swarmflow.script": (
         "自包含的内联 swarmflow 脚本源码（免去先写盘）。必须以顶层 META（纯字面量，无变量 / 函数调用 / "
         "f-string）开头，后跟 async def run(args)，脚本体用 agent()/parallel()/pipeline()/phase() 等原语。"
-        "接口已就位、执行推进中——当前请改用 script_path。"
+        "已接通执行——简单场景优先用它，框架会自动把源码落到该工作流的 journal 目录再运行。"
     ),
     "swarmflow.name": (
         "已保存 / 具名 swarmflow 工作流的名称，解析为一个自包含脚本来运行。"

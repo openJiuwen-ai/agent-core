@@ -702,13 +702,10 @@ class TestModelContext:
 
     # ---------- enable_reload ----------
     @pytest.mark.asyncio
-    async def test_enable_reload_adds_reloader_prompt(self):
-        from openjiuwen.core.context_engine.context.context import _RELOADER_SYSTEM_PROMPT
-
+    async def test_enable_reload_does_not_add_reloader_prompt_in_context_window(self):
         context = await self.create_context(enable_reload=True)
         window = await context.get_context_window()
-        assert len(window.system_messages) == 1
-        assert window.system_messages[0].content == _RELOADER_SYSTEM_PROMPT
+        assert window.system_messages == []
 
     @pytest.mark.asyncio
     async def test_enable_reload_false_no_reloader_prompt(self):
@@ -718,14 +715,11 @@ class TestModelContext:
 
     @pytest.mark.asyncio
     async def test_enable_reload_with_custom_system_messages(self):
-        from openjiuwen.core.context_engine.context.context import _RELOADER_SYSTEM_PROMPT
-
         context = await self.create_context(enable_reload=True)
         sys_msgs = [SystemMessage(content="custom sys")]
         window = await context.get_context_window(system_messages=sys_msgs)
-        assert len(window.system_messages) == 2
+        assert len(window.system_messages) == 1
         assert window.system_messages[0].content == "custom sys"
-        assert window.system_messages[1].content == _RELOADER_SYSTEM_PROMPT
 
     # ---------- enable_kv_cache_release ----------
     @pytest.mark.asyncio

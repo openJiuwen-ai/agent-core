@@ -86,6 +86,7 @@ class ContextProcessorRail(DeepAgentRail):
 
         self._system_prompt_builder = None
         self._all_processors: List[Tuple[str, BaseModel]] = []
+        self._reload_enabled = False
 
     @staticmethod
     def _merge_config_with_overrides(
@@ -250,6 +251,8 @@ class ContextProcessorRail(DeepAgentRail):
         config.context_processors = all_processors
 
         self._all_processors = all_processors
+        context_engine_config = getattr(config, "context_engine_config", None)
+        self._reload_enabled = bool(getattr(context_engine_config, "enable_reload", False))
         self._system_prompt_builder = getattr(agent, "system_prompt_builder", None)
 
     def uninit(self, agent) -> None:
@@ -265,6 +268,7 @@ class ContextProcessorRail(DeepAgentRail):
         if self._system_prompt_builder is not None:
             self._system_prompt_builder.remove_section("offload")
         self._all_processors = []
+        self._reload_enabled = False
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         await self.fix_incomplete_tool_context(ctx)
@@ -429,12 +433,11 @@ class ContextProcessorRail(DeepAgentRail):
 
     async def _maybe_inject_offload_section(self) -> None:
         """Inject offload section if processors are configured."""
-        if not self._all_processors:
-            if self._system_prompt_builder is not None:
-                self._system_prompt_builder.remove_section("offload")
+        if self._system_prompt_builder is None:
             return
 
-        if self._system_prompt_builder is None:
+        if not self._all_processors:
+            self._system_prompt_builder.remove_section("offload")
             return
 
         lang = self._system_prompt_builder.language or "cn"

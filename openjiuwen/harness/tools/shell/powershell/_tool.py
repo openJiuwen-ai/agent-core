@@ -92,8 +92,13 @@ class PowerShellTool(Tool):
         return max(1, min(timeout, max_timeout))
 
     @staticmethod
-    def _resolve_max_output_chars(raw_value: Any, default: int = 0) -> int:
-        """Parse and validate a max_output_chars value. 0 means no limit."""
+    def _resolve_max_output_chars(raw_value: Any, default: int = 20000) -> int:
+        """Parse and validate a max_output_chars value.
+
+        Absent/invalid falls back to ``default`` (20000) so large command output
+        is truncated and persisted to a file by default; an explicit ``0`` means
+        no limit (caller opted out).
+        """
         try:
             value = int(raw_value)
         except (TypeError, ValueError):
@@ -115,7 +120,7 @@ class PowerShellTool(Tool):
             timeout=PowerShellTool._resolve_timeout(inputs.get("timeout", 300)),
             workdir=inputs.get("workdir", ""),
             background=bool(inputs.get("background", False)),
-            max_output_chars=PowerShellTool._resolve_max_output_chars(inputs.get("max_output_chars", 0)),
+            max_output_chars=PowerShellTool._resolve_max_output_chars(inputs.get("max_output_chars", 20000)),
             description=inputs.get("description", ""),
         )
 

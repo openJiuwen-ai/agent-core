@@ -17,7 +17,7 @@ from openjiuwen.core.context_engine.context.processor_state_recorder import (
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
-from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage, AssistantMessage
+from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage
 from openjiuwen.core.foundation.tool import ToolInfo, Tool, ToolCard, tool
 from openjiuwen.core.context_engine.base import ModelContext, ContextWindow, ContextStats
 from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
@@ -26,16 +26,6 @@ from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import ContextEvents
 
 
-_RELOADER_SYSTEM_PROMPT = """
-You may see offloaded content markers in your context: [[OFFLOAD: handle=<id>, type=<type>]].
-
-When you see an offloaded-content marker and believe retrieving it will help your answer, 
-feel free to call reload_original_context_messages:
-- Call reload_original_context_messages(offload_handle="<id>", offload_type="<type>") with the exact values from the marker
-- Do not guess or make up the missing content
-
-Storage types: "in_memory" (session cache).
-"""
 _ACTIVE_COMPRESSION_RESULT_BUSY = "busy"
 _ACTIVE_COMPRESSION_RESULT_COMPRESSED = "compressed"
 _ACTIVE_COMPRESSION_RESULT_NOOP = "noop"
@@ -65,7 +55,6 @@ class SessionModelContext(ModelContext):
         self._session_id = session_id
         self._message_buffer = ContextMessageBuffer(history_messages or [], config.max_context_message_num)
         self._default_window_size = config.default_window_message_num
-        self._enable_reload = config.enable_reload
         self._context_window_tokens = config.context_window_tokens
         self._model_name = config.model_name
         self._model_context_window_tokens = ContextUtils.build_model_context_window_tokens(
@@ -303,6 +292,11 @@ class SessionModelContext(ModelContext):
     async def clear_messages(self, with_history: bool = True):
         self.pop_messages(len(self), with_history=with_history)
         self._offload_message_buffer = OffloadMessageBuffer()
+        self._offload_message_buffer.set_sys_operation(self._sys_operation)
+        self._offload_message_buffer.set_workspace_info(
+            self._workspace.root_path if self._workspace else "",
+            self._session_id
+        )
         return
 
     @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="window")
@@ -328,8 +322,6 @@ class SessionModelContext(ModelContext):
 
         async with self._processor_lock:
             system_messages = (system_messages or [])[:]
-            if self._enable_reload:
-                system_messages.append(SystemMessage(content=_RELOADER_SYSTEM_PROMPT))
 
             # with specific context size
             system_messages, context_messages = self._get_window_messages(
@@ -804,3 +796,8 @@ class SessionModelContext(ModelContext):
             for _, msg_list in offload_messages.items():
                 ContextUtils.validate_messages(msg_list)
             self._offload_message_buffer = OffloadMessageBuffer(offload_messages)
+        self._offload_message_buffer.set_sys_operation(self._sys_operation)
+        self._offload_message_buffer.set_workspace_info(
+            self._workspace.root_path if self._workspace else "",
+            self._session_id
+        )
