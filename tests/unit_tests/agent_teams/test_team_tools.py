@@ -691,6 +691,19 @@ class TestListMembersTool:
         assert "member1" in member_ids
         assert "member2" in member_ids
 
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_projects_roster_columns_only(self, agent_team, t, sample_agent_card):
+        """Roster entries carry only name/display_name/status, no heavy columns."""
+        await agent_team.spawn_member(member_name="member1", display_name="Member One", agent_card=sample_agent_card)
+
+        tool = ListMembersTool(agent_team, t)
+        result = await tool.invoke({})
+
+        assert result.success is True
+        member = result.data["members"][0]
+        assert set(member) == {"member_name", "display_name", "status"}
+
 
 # ========== Task Management Tools (V2) ==========
 
