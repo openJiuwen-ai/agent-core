@@ -49,6 +49,7 @@ from openjiuwen.agent_teams.schema.team import (
     BridgeMemberSpec,
     ExternalCliAgentSpec,
     MemberOpResult,
+    MemberRosterEntry,
     TeamCompletionSnapshot,
     TeamMemberSpec,
     TeamRole,
@@ -886,6 +887,25 @@ class TeamBackend:
         """
         members = await self.db.member.get_team_members(self.team_name)
         return [member for member in members if member.member_name != self.member_name]
+
+    async def list_member_roster(self) -> List[MemberRosterEntry]:
+        """List the roster (name / display name / status) excluding self.
+
+        Backs the ``list_members`` tool. Uses a narrow column projection
+        (``member.get_member_roster``) instead of loading full
+        ``TeamMember`` rows, since the roster view only needs these three
+        fields — avoids pulling every member's ``agent_card`` / ``prompt`` /
+        ``options`` out of the DB on each call.
+
+        Returns:
+            One ``MemberRosterEntry`` per member, the calling member removed.
+        """
+        rows = await self.db.member.get_member_roster(self.team_name)
+        return [
+            MemberRosterEntry(member_name=name, display_name=display_name, status=status)
+            for name, display_name, status in rows
+            if name != self.member_name
+        ]
 
     async def get_team_info(self) -> Optional[Team]:
         """Get team information

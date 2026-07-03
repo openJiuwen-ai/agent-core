@@ -56,6 +56,21 @@ class TeamCompletionSnapshot:
     task_count: int
 
 
+class MemberRosterEntry(BaseModel):
+    """Lightweight roster projection returned by ``list_members``.
+
+    Carries only the three fields the roster view renders (member_name /
+    display_name / status). It deliberately omits the heavy ``TeamMember``
+    columns (``agent_card`` / ``prompt`` / ``options``) so listing the
+    roster is a narrow column projection instead of pulling every member's
+    serialized card and private prompt out of the DB.
+    """
+
+    member_name: str
+    display_name: str
+    status: str
+
+
 class TeamLifecycle(str, Enum):
     """Team lifecycle mode."""
 

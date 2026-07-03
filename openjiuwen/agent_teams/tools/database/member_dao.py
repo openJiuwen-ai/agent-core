@@ -153,6 +153,28 @@ class MemberDao:
                 stmt = stmt.where(TeamMember.status == status)
             return (await session.execute(stmt)).scalars().all()
 
+    async def get_member_roster(self, team_name: str) -> List[tuple[str, str, str]]:
+        """Get a projected roster of ``(member_name, display_name, status)``.
+
+        A column projection instead of ``select(TeamMember)`` so the roster
+        view never loads the heavy columns (``agent_card`` / ``prompt`` /
+        ``options``) it does not render.
+
+        Args:
+            team_name: Team identifier.
+
+        Returns:
+            One ``(member_name, display_name, status)`` tuple per member.
+        """
+        async with self._sessions.read() as session:
+            stmt = select(
+                TeamMember.member_name,
+                TeamMember.display_name,
+                TeamMember.status,
+            ).where(TeamMember.team_name == team_name)
+            rows = (await session.execute(stmt)).all()
+            return [(row.member_name, row.display_name, row.status) for row in rows]
+
     async def get_members_max_updated_at(self, team_name: str) -> int:
         """Probe MAX(``team_member.updated_at``) for the team.
 

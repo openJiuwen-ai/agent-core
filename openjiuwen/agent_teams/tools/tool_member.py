@@ -581,7 +581,7 @@ class ListMembersTool(TeamTool):
         self.card.input_params = {"type": "object", "properties": {}, "required": []}
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
-        members = await self.team.list_members()
+        members = await self.team.list_member_roster()
         return ToolOutput(
             success=True, data={"members": [member.model_dump() for member in members], "count": len(members)}
         )
