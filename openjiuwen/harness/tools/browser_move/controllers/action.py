@@ -1359,7 +1359,21 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
                 "request_id": request_id,
             }
 
-        safe_steps = steps[:25]
+        original_step_count = len(steps)
+        max_steps = 25
+        safe_steps = steps[:max_steps]
+        truncated = original_step_count > len(safe_steps)
+        dropped_step_count = original_step_count - len(safe_steps)
+        if truncated:
+            browser_agent_log_warning(
+                "[BROWSER_BATCH] truncated session_id=%s request_id=%s "
+                "original_steps=%s executed_steps=%s dropped_steps=%s",
+                session_id or "-",
+                request_id or "-",
+                original_step_count,
+                len(safe_steps),
+                dropped_step_count,
+            )
         try:
             per_step_timeout = int(timeout_ms or 5000)
         except (TypeError, ValueError):
@@ -1394,6 +1408,10 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
             "timeout_ms": per_step_timeout,
             "wait_after_each_ms": after_each,
             "continue_on_error": continue_on_error,
+            "original_step_count": original_step_count,
+            "executed_step_limit": max_steps,
+            "truncated": truncated,
+            "dropped_step_count": dropped_step_count,
         }
         js_code = _build_batch_interact_script(payload)
         code_executor = ctl.code_executor
@@ -1420,6 +1438,11 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
                 "error": "browser_code_executor_not_ready",
                 "session_id": session_id,
                 "request_id": request_id,
+                "steps_requested": len(safe_steps),
+                "original_step_count": original_step_count,
+                "executed_step_limit": max_steps,
+                "truncated": truncated,
+                "dropped_step_count": dropped_step_count,
             }
 
         try:
@@ -1441,6 +1464,10 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
                 "session_id": session_id,
                 "request_id": request_id,
                 "steps_requested": len(safe_steps),
+                "original_step_count": original_step_count,
+                "executed_step_limit": max_steps,
+                "truncated": truncated,
+                "dropped_step_count": dropped_step_count,
             }
         except Exception as exc:
             error = f"browser_run_code failed: {exc}"
@@ -1455,6 +1482,11 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
                 "error": error,
                 "session_id": session_id,
                 "request_id": request_id,
+                "steps_requested": len(safe_steps),
+                "original_step_count": original_step_count,
+                "executed_step_limit": max_steps,
+                "truncated": truncated,
+                "dropped_step_count": dropped_step_count,
             }
 
         unwrapped = _unwrap_browser_code_result(raw)
@@ -1476,11 +1508,20 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
                 "raw_preview": raw_text[:400],
                 "session_id": session_id,
                 "request_id": request_id,
+                "steps_requested": len(safe_steps),
+                "original_step_count": original_step_count,
+                "executed_step_limit": max_steps,
+                "truncated": truncated,
+                "dropped_step_count": dropped_step_count,
             }
 
         parsed.setdefault("session_id", session_id)
         parsed.setdefault("request_id", request_id)
         parsed.setdefault("action", "browser_batch_interact")
+        parsed.setdefault("original_step_count", original_step_count)
+        parsed.setdefault("executed_step_limit", max_steps)
+        parsed.setdefault("truncated", truncated)
+        parsed.setdefault("dropped_step_count", dropped_step_count)
         completed = parsed.get("steps") or parsed.get("completed_steps") or []
 
         browser_agent_log_info(

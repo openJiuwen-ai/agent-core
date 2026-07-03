@@ -316,6 +316,8 @@ def test_react_agent_redacts_browser_tool_arguments() -> None:
     source = react_agent_path.read_text(encoding="utf-8")
 
     assert "_summarize_tool_args_for_log" in source
+    assert "_is_browser_tool_name" in source
+    assert "mcp_playwright" in source
     assert "Executing tool: %s with args: %s" in source
     assert "browser_batch_interact" in source
 

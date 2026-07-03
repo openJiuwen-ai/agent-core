@@ -1067,6 +1067,15 @@ class ReActAgent(BaseAgent):
 
 
     @staticmethod
+    def _is_browser_tool_name(tool_name: str) -> bool:
+        lowered_name = str(tool_name or "").lower()
+        return (
+            lowered_name.startswith("browser_")
+            or "browser_" in lowered_name
+            or lowered_name.startswith("mcp_playwright")
+        )
+
+    @staticmethod
     def _summarize_tool_args_for_log(tool_name: str, tool_args: Any) -> Any:
         """Redact high-risk tool arguments while keeping generic logs useful."""
         name = str(tool_name or "")
@@ -1101,14 +1110,17 @@ class ReActAgent(BaseAgent):
             if "subagent_type" in parsed:
                 summary["subagent_type"] = str(parsed.get("subagent_type") or "")[:120]
             if task_text:
+                task_hash = hashlib.sha256(
+                    task_text.encode("utf-8", errors="ignore")
+                ).hexdigest()[:12]
                 summary["task_description"] = {
                     "redacted": True,
                     "length": len(task_text),
-                    "sha256_12": hashlib.sha256(task_text.encode("utf-8", errors="ignore")).hexdigest()[:12],
+                    "sha256_12": task_hash,
                 }
             return summary
 
-        is_browser_tool = lowered_name.startswith("browser_") or "browser_" in lowered_name
+        is_browser_tool = ReActAgent._is_browser_tool_name(lowered_name)
         if not is_browser_tool:
             return tool_args
 
@@ -1204,7 +1216,7 @@ class ReActAgent(BaseAgent):
         for tool_call in tool_calls:
             log_args = self._summarize_tool_args_for_log(tool_call.name, tool_call.arguments)
             tool_name = str(tool_call.name or "")
-            is_browser_tool = tool_name.startswith("browser_") or tool_name.startswith("mcp_playwright")
+            is_browser_tool = self._is_browser_tool_name(tool_name)
             if is_browser_tool and browser_agent_log_info is not None:
                 browser_agent_log_info("Executing tool: %s with args: %s", tool_name, log_args)
             else:

@@ -147,6 +147,45 @@ def test_batch_interact_action_calls_code_executor_and_parses_result() -> None:
     assert "Nationality" in observed["js_code"]
 
 
+def test_batch_interact_action_reports_truncated_steps() -> None:
+    observed: dict[str, Any] = {}
+
+    async def fake_code_executor(js_code: str) -> dict[str, Any]:
+        observed["js_code"] = js_code
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps({"ok": True, "steps": [], "elapsed_ms": 1}),
+                }
+            ]
+        }
+
+    controller.register_example_actions()
+    controller.bind_code_executor(fake_code_executor)
+
+    steps = [
+        {"op": "click", "selector": f"#button-{index}"}
+        for index in range(30)
+    ]
+    result = _run(
+        controller.run_action(
+            "browser_batch_interact",
+            session_id="sess-test",
+            request_id="req-test",
+            steps=steps,
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["original_step_count"] == 30
+    assert result["executed_step_limit"] == 25
+    assert result["truncated"] is True
+    assert result["dropped_step_count"] == 5
+    assert "#button-24" in observed["js_code"]
+    assert "#button-25" not in observed["js_code"]
+
+
 def test_batch_interact_action_rejects_empty_or_non_list_steps_before_running_code() -> None:
     called = False
 
