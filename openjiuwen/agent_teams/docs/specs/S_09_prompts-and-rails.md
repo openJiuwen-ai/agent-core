@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-06-17 |
+| 最近一次修订日期 | 2026-07-03 |
 | 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md` |
 
 ## 范围 / 边界
@@ -44,7 +44,7 @@
 ### 双语 / i18n
 
 9. **`cn/` `en/` 双语模板必须成对存在**：每个文件名两边都要有；`load_template` 按 `(name, language)` 分别 `@cache`。
-10. **`prompts/` 与 `agent_teams/i18n.py` 严格分离**：长文本（角色策略 / 工作流 / 生命周期 / HITT）一律走 `prompts/`，运行时硬编码字符串（dispatcher 通知、default persona 等）走 `i18n.py`。新增字符串前必须先决定归属，不得混用。
+10. **`prompts/` 与 `agent_teams/i18n.py` 严格分离**：长文本（角色策略 / 工作流 / 生命周期 / HITT）一律走 `prompts/`，运行时硬编码字符串（dispatcher 通知、default desc 等）走 `i18n.py`。新增字符串前必须先决定归属，不得混用。
 11. **`load_template` 默认语言 `"cn"`**：缺省 `language` 参数等价于 `"cn"`，与 `core.single_agent.prompts.builder.DEFAULT_LANGUAGE` 一致。
 
 ### 缓存
@@ -56,7 +56,7 @@
 ### Rail 注入契约
 
 15. **Rail 通过 DeepAgent 的 rail registry 注入，不直接修改 `SystemPromptBuilder`**：`TeamPolicyRail` 在 `init(agent)` 里捕获 `agent.system_prompt_builder` 引用，于 `before_model_call` 写入 section；在 `uninit(agent)` 里按名移除。**禁止**绕过 rail 把 section 直接 `add_section` 到 *DeepAgent 的共享 builder* 上。**例外（外部 CLI 成员）**：非 DeepAgent 的外部 CLI 成员没有共享 builder，由 `sections.build_team_member_system_prompt(...)` 把同一批静态 section 装进一个**一次性 `SystemPromptBuilder`** 渲染成独立字符串(见不变量 18a / [[F_25_external-cli-hardening-and-gemini]])——这不违反本条，因为它不触碰任何 DeepAgent 的共享 builder，且**只装 team section、排除其它 rail**。
-    - 18a. **静态 section 的单一真相源是 `sections.build_team_static_sections(...)`**：`TeamPolicyRail._build_static_sections` 与 `build_team_member_system_prompt` 都委托它构建 role/hitt/bridge/workflow/lifecycle/persona/extra,保证进程内成员与外部 CLI 成员的团队 section 完全一致。dynamic 的 info/members section 不在其中(依赖 live DB,外部 CLI 成员经 MCP 工具自取)。
+    - 18a. **静态 section 的单一真相源是 `sections.build_team_static_sections(...)`**：`TeamPolicyRail._build_static_sections` 与 `build_team_member_system_prompt` 都委托它构建 role/hitt/bridge/workflow/lifecycle/private-prompt/extra,保证进程内成员与外部 CLI 成员的团队 section 完全一致。成员**公开 `desc` 不进自己的 prompt**(只进他人花名册 team_members section);成员**私有 `prompt` 只进自己的 prompt**(team_private_prompt static section)。dynamic 的 info/members section 不在其中(依赖 live DB,外部 CLI 成员经 MCP 工具自取)。
 16. **Mount order load-bearing**：`TeamHarness.build` 必须先挂 `TeamToolRail` 并 eager `init`，再挂 `TeamPolicyRail`。原因：policy 输出引用 ability 快照，能力必须先就位。Rail 顺序的修改必须同步检视 mount path。
 17. **`uninit` 必须把自己写入的 section 全部清掉**：`TeamPolicyRail.uninit` 删除 `_static_sections` 里的每个 section + 两个 dynamic section 名；rail 卸载后 builder 不得残留团队 section。
 18. **dynamic section 在 `team_backend is None` 时整体跳过**：单测可只关心 static 内容；`_info_cache` / `_members_cache` 在缺 backend 时不构造，rail 行为退化成纯静态。
@@ -107,7 +107,6 @@ def role_policy(role: TeamRole, language: str = "cn") -> str:
 def build_system_prompt(
     *,
     role: TeamRole,
-    persona: str,
     base_prompt: str | None = None,
     team_info: dict[str, Any] | None = None,
     team_members: list[dict[str, str]] | None = None,
@@ -134,8 +133,8 @@ class TeamSectionName:
     HITT = "team_hitt"        # P:12
     WORKFLOW = "team_workflow"   # P:13
     LIFECYCLE = "team_lifecycle" # P:14
-    PERSONA = "team_persona"  # P:15
-    EXTRA = "team_extra"      # P:16
+    PRIVATE_PROMPT = "team_private_prompt"  # P:16 — member-private prompt
+    EXTRA = "team_extra"      # P:17
     INFO = "team_info"        # P:65
     MEMBERS = "team_members"  # P:66
 
@@ -161,11 +160,11 @@ def build_team_lifecycle_section(
     language: str = "cn",
 ) -> PromptSection | None: ...    # None when role != LEADER
 
-def build_team_persona_section(
+def build_team_private_prompt_section(
     *,
-    persona: str | None,
+    member_prompt: str | None,
     language: str = "cn",
-) -> PromptSection | None: ...    # None when persona is empty
+) -> PromptSection | None: ...    # None when member_prompt is empty; injects ONLY into the member's own prompt
 
 def build_team_extra_section(
     *,
@@ -174,13 +173,15 @@ def build_team_extra_section(
 ) -> PromptSection | None: ...    # None when base_prompt is empty/whitespace
 
 # Single source of truth for the static section set (role/hitt/bridge/workflow/
-# lifecycle/persona/extra). TeamPolicyRail._build_static_sections delegates here;
-# build_team_member_system_prompt (external CLI members) renders these into a
-# standalone string via a throwaway SystemPromptBuilder, excluding other rails.
+# lifecycle/private-prompt/extra). TeamPolicyRail._build_static_sections delegates
+# here; build_team_member_system_prompt (external CLI members) renders these into
+# a standalone string via a throwaway SystemPromptBuilder, excluding other rails.
+# Note: the member's public `desc` is NOT rendered here — it belongs only in
+# peers' roster (team_members section), never in the member's own prompt.
 def build_team_static_sections(
     *,
     role: TeamRole,
-    persona: str,
+    member_prompt: str = "",
     member_name: str | None,
     lifecycle: str = "temporary",
     teammate_mode: str = "build_mode",
@@ -195,7 +196,7 @@ def build_team_static_sections(
 def build_team_member_system_prompt(  # same kwargs as build_team_static_sections
     *,
     role: TeamRole,
-    persona: str,
+    member_prompt: str = "",
     member_name: str | None,
     # ... lifecycle / teammate_mode / team_mode / base_prompt / language /
     # human_agent_names / expose_human_agents_to_teammates / bridge_agent_names
@@ -261,7 +262,7 @@ class TeamPolicyRail(DeepAgentRail):
         self,
         *,
         role: TeamRole,
-        persona: str,
+        member_prompt: str = "",
         member_name: str | None = None,
         lifecycle: str = "temporary",
         teammate_mode: str = "build_mode",

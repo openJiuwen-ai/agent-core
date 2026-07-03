@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_02 / team-agent-architecture |
 | 关联模块 | `openjiuwen/agent_teams/agent/` |
-| 最近一次修订日期 | 2026-06-17 |
+| 最近一次修订日期 | 2026-07-03 |
 | 关联 feature | F_11_leader-member-status-tracking.md、F_10_temporary-leader-clean-team-stream-end.md、F_38_team-teammate-worktree-isolation-agenttool.md |
 
 ## 范围 / 边界
@@ -284,7 +284,7 @@ class SpawnPayloadBuilder:
         "leader_member_name": str | None,
         "member_name": str,
         "role": str,                # TeamRole.value
-        "persona": str | None,
+        "desc": str | None,
         "transport": dict | None,   # MessagerTransportConfig.model_dump
     },
     "query": str,

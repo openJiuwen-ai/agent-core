@@ -14,7 +14,7 @@ does not.
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-06-17 |
+| 最近一次修订日期 | 2026-07-03 |
 | 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）。其余条目见 `docs/features/` |
 
 ## 范围 / 边界
@@ -259,8 +259,13 @@ session checkpoint 全局状态根上有一个 `teams` namespace：
 |---|---|---|---|
 | `member_name` | `str` | `"team_leader"` | leader 在 team 中的成员名 |
 | `display_name` | `str` | `"Team Leader"` | UI 展示名 |
-| `persona` | `str` | `t("blueprint.default_persona")` | 默认人设文本 |
+| `desc` | `str` | `t("blueprint.default_desc")` | 公开描述（仅进他人花名册 / `list_members`） |
+| `prompt` | `str` | `""` | 私有系统提示词（仅进自己 prompt；leader build 时定死） |
 | `model_name` | `Optional[str]` | `None` | 池模式下指定从哪一组 / 哪一条路由取 endpoint；`round_robin` 忽略 |
+
+`LeaderSpec` / `TeamMemberSpec` / `BridgeMemberSpec` 共享基类 `MemberSpecBase`
+（`member_name` / `display_name` / `desc` / `prompt` / `model_name`），公开 `desc` 与私有
+`prompt` 的二分定义一次。
 
 #### `TeamAgentSpec`
 
@@ -445,8 +450,8 @@ tool / rail / sys_operation 与 `DeepAgentSpec.build()` 同模式。
 | `member_name` | `str` | required |
 | `display_name` | `str` | required |
 | `role_type` | `TeamRole` | `TEAMMATE` |
-| `persona` | `str` | required |
-| `prompt_hint` | `Optional[str]` | `None` |
+| `desc` | `str` | `""` |
+| `prompt` | `str` | `""` |
 | `model_name` | `Optional[str]` | `None` |
 
 仅用于 `TeamAgentSpec.predefined_members`；不是运行时载体，spawn / restart 路径
@@ -458,7 +463,8 @@ tool / rail / sys_operation 与 `DeepAgentSpec.build()` 同模式。
 |---|---|---|
 | `role` | `TeamRole` | `LEADER` |
 | `member_name` | `Optional[str]` | `None` |
-| `persona` | `str` | `""` |
+| `desc` | `str` | `""` |
+| `prompt` | `str` | `""` |
 | `team_spec` | `Optional[TeamSpec]` | `None` |
 | `messager_config` | `Optional[MessagerTransportConfig]` | `None` |
 | `db_config` | `DatabaseConfig` | `DatabaseConfig()` |
