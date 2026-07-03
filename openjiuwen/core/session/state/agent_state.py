@@ -31,10 +31,10 @@ class StateCollection(State):
             return self._global_state.get_state()
         return self._global_state.get(key)
 
-    def get_state(self) -> dict:
+    def get_state(self, **kwargs) -> dict:
         return {
-            GLOBAL_STATE_KEY: self._global_state.get_state(),
-            AGENT_STATE_KEY: self._agent_state.get_state()
+            GLOBAL_STATE_KEY: self._global_state.get_state(**kwargs),
+            AGENT_STATE_KEY: self._agent_state.get_state(**kwargs)
         }
 
     def set_state(self, state: dict) -> None:

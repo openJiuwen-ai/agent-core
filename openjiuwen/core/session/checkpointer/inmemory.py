@@ -434,7 +434,7 @@ class AgentStorage(BaseSingleStateStorage):
         return session.agent_id()
 
     def _get_state_to_save(self, session: BaseSession):
-        return session.state().get_state()
+        return session.state().get_state(copied=False)
 
     def _restore_state(self, session: BaseSession, state) -> None:
         session.state().set_state(state)
@@ -455,7 +455,7 @@ class WorkflowStorage(Storage):
 
     async def save(self, session: BaseSession):
         workflow_id = session.workflow_id()
-        state = session.state().get_state()
+        state = session.state().get_state(copied=False)
         state_blob = self.serde.dumps_typed(state)
         if state_blob:
             self.state_blobs[workflow_id] = state_blob

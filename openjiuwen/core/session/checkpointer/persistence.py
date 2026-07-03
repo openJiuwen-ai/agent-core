@@ -297,7 +297,7 @@ class AgentStorage(BaseSingleStateStorage):
         return session.agent_id()
 
     def _get_state_to_save(self, session: BaseSession) -> Any:
-        return session.state().get_state()
+        return session.state().get_state(copied=False)
 
     def _restore_state(self, session: BaseSession, state: Any) -> None:
         session.state().set_state(state)
@@ -351,7 +351,7 @@ class WorkflowStorage(BaseStorage):
 
     async def save(self, session: BaseSession):
         """Save workflow state to KV store."""
-        state = session.state().get_state()
+        state = session.state().get_state(copied=False)
         workflow_id = session.workflow_id()
         session_id = session.session_id()
 

@@ -6,7 +6,6 @@ from typing import Any, Union, Optional, Callable
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import session_logger, LogEventType
 from openjiuwen.core.session.utils import update_dict, get_by_schema
 
 
@@ -26,7 +25,7 @@ Transformer = Callable[[ReadableStateLike], Any]
 class RecoverableStateLike(ABC):
 
     @abstractmethod
-    def get_state(self) -> dict:
+    def get_state(self, **kwargs) -> dict:
         pass
 
     @abstractmethod
@@ -121,7 +120,9 @@ class InMemoryStateLike(StateLike):
     def update(self, data: dict) -> None:
         update_dict(deepcopy(data), self._state)
 
-    def get_state(self) -> dict:
+    def get_state(self, **kwargs) -> dict:
+        if kwargs.get("copied", True) is False:
+            return self._state
         return deepcopy(self._state)
 
     def set_state(self, state: dict) -> None:
@@ -177,8 +178,8 @@ class InMemoryCommitState(CommitStateLike):
         if updates:
             self._updates = updates
 
-    def get_state(self) -> dict:
-        return self._state.get_state()
+    def get_state(self, **kwargs) -> dict:
+        return self._state.get_state(**kwargs)
 
     def set_state(self, state: dict) -> None:
         self._state.set_state(state)
