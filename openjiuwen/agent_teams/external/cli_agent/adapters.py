@@ -63,11 +63,11 @@ MCP_INJECT_GEMINI_ADD = "gemini_add"
 MCP_INJECT_HERMES_ADD = "hermes_add"
 
 # ---- system-prompt injection strategies ----
-# How to give the member a per-member system prompt (its persona / role).
+# How to give the member a per-member system prompt (its role / prompt).
 SYSTEM_PROMPT_NONE = "none"
-# Claude Code: pass the persona via ``--append-system-prompt <text>`` so it
+# Claude Code: pass the prompt via ``--append-system-prompt <text>`` so it
 # survives the whole long-lived process. CLIs without a system-prompt flag use
-# ``SYSTEM_PROMPT_NONE``; the spawn path then prepends the persona to the
+# ``SYSTEM_PROMPT_NONE``; the spawn path then prepends the prompt to the
 # member's first user message instead (proven, CLI-agnostic).
 SYSTEM_PROMPT_CLAUDE_APPEND = "claude_append"
 # Codex: inject the prompt as the developer-message layer via

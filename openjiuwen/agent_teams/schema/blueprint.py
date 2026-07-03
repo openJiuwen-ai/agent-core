@@ -38,6 +38,7 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
     BridgeMemberSpec,
     ExternalCliAgentSpec,
+    MemberSpecBase,
     TeamLifecycle,
     TeamMemberSpec,
     TeamRole,
@@ -151,26 +152,22 @@ PredefinedMemberSpec = Annotated[
 # ---------------------------------------------------------------------------
 
 
-class LeaderSpec(BaseModel):
-    """Leader identity specification."""
+class LeaderSpec(MemberSpecBase):
+    """Leader identity specification.
 
-    model_config = {"protected_namespaces": ()}
+    Shares the ``desc`` (public) / ``prompt`` (private) split with every other
+    member via :class:`MemberSpecBase`. The leader's ``prompt`` — its private
+    system prompt — is fixed at build time and, unlike a teammate, is never
+    regenerated after ``build_team``, keeping the leader's system-prompt prefix
+    KV-cache stable.
+
+    Overrides ``model_name``'s docstring only to note the ``build()``-time
+    (rather than ``build_team``-time) allocation; the field itself is inherited.
+    """
 
     member_name: str = "team_leader"
     display_name: str = "Team Leader"
-    persona: str = Field(default_factory=lambda: t("blueprint.default_persona"))
-    model_name: Optional[str] = None
-    """Optional pool model_name to allocate from when ``TeamSpec.model_pool``
-    is configured with ``by_model_name`` or ``router`` strategy.
-
-    Forwarded to ``ModelAllocator.allocate`` at ``build()`` time so the
-    leader draws an endpoint from the named group (``by_model_name``) or
-    the named router entry (``router``). Ignored by the ``round_robin``
-    strategy (which always allocates regardless of name). ``None``
-    (default) means the leader uses its per-agent model — except under
-    ``router``, where it falls back to the router's first declared
-    model_name.
-    """
+    desc: str = Field(default_factory=lambda: t("blueprint.default_desc"))
 
 
 class TinyAgentSpec(BaseModel):
@@ -596,7 +593,8 @@ class TeamAgentSpec(BaseModel):
         context = TeamRuntimeContext(
             role=TeamRole.LEADER,
             member_name=self.leader.member_name,
-            persona=self.leader.persona,
+            desc=self.leader.desc,
+            prompt=self.leader.prompt,
             team_spec=team_spec,
             messager_config=messager_config,
             db_config=db_config,

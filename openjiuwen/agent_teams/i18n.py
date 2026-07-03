@@ -4,7 +4,7 @@
 """Process-global i18n for agent team runtime strings.
 
 Houses hard-coded user-facing strings that live inside runtime code paths
-(dispatcher nudges, backend message content, default persona) so they can
+(dispatcher nudges, backend message content, default desc) so they can
 be switched between Chinese and English without source edits.
 
 Modules that already carry their own bilingual dictionaries
@@ -41,7 +41,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "time.days_ago": "{value} 天前",
         "time.unknown": "时间未知",
         # schema/blueprint.py
-        "blueprint.default_persona": "天才项目管理专家",
+        "blueprint.default_desc": "天才项目管理专家",
         # tools/team.py
         "team.shutdown_request_content": "当前任务已全部完成，请结束流程",
         "team.cancel_request_content": "当前任务有变动，请停止执行当前任务，重新尝试认领合适任务",
@@ -120,7 +120,7 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # HITT — reserved human_agent member
         "hitt.human_agent_display_name": "人类成员",
-        "hitt.human_agent_default_persona": (
+        "hitt.human_agent_default_desc": (
             "外部用户在团队里的代理（avatar）。所有动作都由对应的真人通过 Inbox 驱动；"
             "可使用文件、任务、工作空间等工具替用户完成事务，但不主动发声、不自主认领任务。"
         ),
@@ -198,7 +198,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "time.days_ago": "{value}d ago",
         "time.unknown": "unknown time",
         # schema/blueprint.py
-        "blueprint.default_persona": "Genius project management expert",
+        "blueprint.default_desc": "Genius project management expert",
         # tools/team.py
         "team.shutdown_request_content": "All tasks are complete. Please wrap up and exit.",
         "team.cancel_request_content": (
@@ -294,7 +294,7 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # HITT — reserved human_agent member
         "hitt.human_agent_display_name": "Human Member",
-        "hitt.human_agent_default_persona": (
+        "hitt.human_agent_default_desc": (
             "An external user's avatar on the team. Every action is "
             "driven by the corresponding human via the Inbox; uses file, "
             "task, and workspace tools to act on the user's behalf, but "

@@ -20,7 +20,7 @@ STRINGS: dict[str, str] = {
     ),
     "build_team.leader_display_name": "Human-readable display label for the leader member",
     "build_team.leader_desc": (
-        "Leader persona (professional background, domain expertise); "
+        "Leader description (professional background, domain expertise); "
         "influences how members trust and communicate with you"
     ),
     "build_team.enable_hitt": (
@@ -95,7 +95,7 @@ STRINGS: dict[str, str] = {
     ),
     "spawn_human_agent.desc": (
         "[PUBLIC] Role profile and responsibilities of the human member, used "
-        "for display and persona persistence and injected into other members' "
+        "for display and description persistence and injected into other members' "
         "system prompts / returned by list_members. The real user drives this "
         "member via HumanAgentInbox; the model and startup prompt are managed "
         "by the framework template, so do not provide them here"
@@ -117,17 +117,22 @@ STRINGS: dict[str, str] = {
         "list_members — do not put private content here"
     ),
     "spawn_bridge_agent.desc": (
-        "[PUBLIC] Role profile of the bridge member. **Required**: it doubles "
-        "as the local teammate persona AND the connect briefing the remote "
-        "agent adopts (sent via adapter.connect). Injected into other members' "
-        "system prompts and returned by list_members — do not put private "
-        "content here"
+        "[PUBLIC] Public roster description of the bridge member — how peers "
+        "recognise it in list_members / the team roster. Optional. Injected "
+        "into other members' system prompts and returned by list_members — do "
+        "not put private content here"
+    ),
+    "spawn_bridge_agent.prompt": (
+        "[PRIVATE] The system prompt the remote agent adopts to act as this "
+        "member (this member's own private working setup). **Required**: sent "
+        "to the remote via adapter.connect. Visible only to this member, never "
+        "shown in peers' roster"
     ),
     "spawn_bridge_agent.mailbox_inject_mode": (
         "Controls how team-side mailbox messages are wrapped before being "
         "relayed to the remote agent. 'passthrough' (default) prefixes only "
         "the sender label; 'rephrase' wraps full sender context (role, "
-        "persona, optional task hint)"
+        "desc, optional task hint)"
     ),
     "spawn_bridge_agent.protocol": (
         "Protocol identifier (e.g. 'a2a' / 'acp' / 'claudecode'). Reserved for "
@@ -162,9 +167,15 @@ STRINGS: dict[str, str] = {
         "returned by list_members — do not put private content here"
     ),
     "spawn_external_cli.desc": (
-        "[PUBLIC] Persona / role profile of this CLI member. **Required**. "
-        "Injected into other members' system prompts and returned by "
+        "[PUBLIC] Public roster description of this CLI member — how peers "
+        "recognise it in list_members / the team roster. Optional. Injected "
+        "into other members' system prompts and returned by "
         "list_members — do not put private content here"
+    ),
+    "spawn_external_cli.prompt": (
+        "[PRIVATE] The private system prompt this CLI member adopts to act as "
+        "this member. **Required**. Visible only to this member, never shown "
+        "in peers' roster"
     ),
     "spawn_external_cli.cli_agent": (
         "Identifier of the third-party CLI agent kind to launch, e.g. 'claude' "

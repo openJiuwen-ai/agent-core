@@ -103,7 +103,7 @@ class BridgeMailboxInjectMode(str, Enum):
     PASSTHROUGH — body forwarded verbatim with a minimal sender header.
         Suitable when the remote was briefed once via ``connect`` and
         does not need per-message context refresh.
-    REPHRASE — full sender context (role + persona + optional task
+    REPHRASE — full sender context (role + desc + optional task
         hint) wrapped around the body. Suitable for stateless wrapping
         CLIs where every relayed turn needs full context.
     """
@@ -112,7 +112,41 @@ class BridgeMailboxInjectMode(str, Enum):
     REPHRASE = "rephrase"
 
 
-class TeamMemberSpec(BaseModel):
+class MemberSpecBase(BaseModel):
+    """Shared identity surface for every team member (leader / teammate / bridge).
+
+    Two orthogonal description fields, each with a single destination:
+
+    - ``desc`` (public): the member's outward blurb. The ONLY field shown in
+      other members' roster (the ``team_members`` prompt section) and returned
+      by ``list_members``. Never injected into the member's own prompt.
+    - ``prompt`` (private): the member's private working agreement. Injected
+      ONLY into this member's own system prompt (as a static section), never
+      visible to any peer.
+
+    Leader / teammate / bridge specs all share this base so the public/private
+    split is defined once. Role-specific fields belong on a subclass.
+    """
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    member_name: str
+    display_name: str
+    desc: str = ""
+    prompt: str = ""
+    model_name: Optional[str] = None
+    """Optional pool model_name to allocate from when ``TeamSpec.model_pool``
+    is configured with ``by_model_name`` or ``router`` strategy.
+
+    Forwarded to ``ModelAllocator.allocate`` at ``build_team`` time so
+    this member draws an endpoint from the named group (``by_model_name``)
+    or the named router entry (``router``). Ignored by the ``round_robin``
+    strategy. ``None`` (default) means the member uses its per-agent model
+    (or, under ``router``, the router's first declared model_name).
+    """
+
+
+class TeamMemberSpec(MemberSpecBase):
     """Declarative input for pre-defining a team member.
 
     Used only for ``predefined_members`` at team creation time.
@@ -124,27 +158,11 @@ class TeamMemberSpec(BaseModel):
     subclass, not on this base.
     """
 
-    model_config = ConfigDict(protected_namespaces=())
-
-    member_name: str
-    display_name: str
     role_type: Literal[
         TeamRole.LEADER,
         TeamRole.TEAMMATE,
         TeamRole.HUMAN_AGENT,
     ] = TeamRole.TEAMMATE
-    persona: str
-    prompt_hint: Optional[str] = None
-    model_name: Optional[str] = None
-    """Optional pool model_name to allocate from when ``TeamSpec.model_pool``
-    is configured with ``by_model_name`` or ``router`` strategy.
-
-    Forwarded to ``ModelAllocator.allocate`` at ``build_team`` time so
-    this member draws an endpoint from the named group (``by_model_name``)
-    or the named router entry (``router``). Ignored by the ``round_robin``
-    strategy. ``None`` (default) means the member uses its per-agent model
-    (or, under ``router``, the router's first declared model_name).
-    """
 
 
 class BridgeMemberSpec(TeamMemberSpec):
@@ -292,7 +310,17 @@ class TeamRuntimeContext(BaseModel):
 
     role: TeamRole = TeamRole.LEADER
     member_name: Optional[str] = None
-    persona: str = ""
+    desc: str = ""
+    """Public member description (DB ``team_member.desc``). Shared into other
+    members' roster (``team_members`` section) and ``list_members`` only; it is
+    NOT injected into this member's own system prompt."""
+    prompt: str = ""
+    """Private, member-only system-prompt addendum (DB ``team_member.prompt``).
+
+    Injected ONLY into this member's own system prompt, as a static section,
+    and never surfaces in ``list_members`` or peers' prompts. Empty for the
+    leader, whose system prompt is fixed at build time to keep the KV-cache
+    prefix stable."""
     team_spec: Optional[TeamSpec] = None
     messager_config: Optional[MessagerTransportConfig] = None
     db_config: DatabaseConfig = Field(default_factory=DatabaseConfig)
@@ -324,6 +352,7 @@ __all__ = [
     "BridgeMemberSpec",
     "ExternalCliAgentSpec",
     "MemberOpResult",
+    "MemberSpecBase",
     "TeamCompletionSnapshot",
     "TeamLifecycle",
     "TeamMemberSpec",

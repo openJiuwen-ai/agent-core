@@ -4,7 +4,7 @@
 """TeamPolicyRail injects team policy as ordered PromptSections.
 
 Decomposes the team's system prompt into one PromptSection per content
-category (role, workflow, lifecycle, persona, ...) and registers them
+category (role, workflow, lifecycle, private-prompt, ...) and registers them
 on the agent's shared ``SystemPromptBuilder`` before every model call,
 so team-specific slices line up with the harness sections (safety,
 tools, memory, workspace, ...) by priority.
@@ -17,10 +17,10 @@ builders):
                            from DB when member roster mtime changes)
   P:13  team_workflow    - leader workflow (LEADER only)
   P:14  team_lifecycle   - team lifecycle policy (LEADER only)
-  P:15  team_persona     - current persona (when persona is set)
-  P:16  team_extra       - user-supplied base prompt (when set)
-  P:65  team_info        - team metadata (after capabilities)
-  P:66  team_members     - relationships with peers
+  P:16  team_private_prompt  - member-private working agreement (when set)
+  P:17  team_extra           - user-supplied base prompt (when set)
+  P:65  team_info            - team metadata (after capabilities)
+  P:66  team_members         - relationships with peers
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ class TeamPolicyRail(DeepAgentRail):
 
     Sections fall into two buckets:
 
-      * **Static** -- role, workflow, lifecycle, persona, extra. Built
+      * **Static** -- role, workflow, lifecycle, private-prompt, extra. Built
         once at ``__init__`` from constructor arguments and re-added to
         the builder on every ``before_model_call`` (cheap dict insert).
       * **Dynamic** -- ``team_hitt``, ``team_info`` and
@@ -84,7 +84,7 @@ class TeamPolicyRail(DeepAgentRail):
         self,
         *,
         role: TeamRole,
-        persona: str,
+        member_prompt: str = "",
         member_name: str | None = None,
         lifecycle: str = "temporary",
         teammate_mode: str = "build_mode",
@@ -116,7 +116,7 @@ class TeamPolicyRail(DeepAgentRail):
         bridge_names: list[str] = sorted(team_backend.bridge_agent_names()) if team_backend else []
         self._static_sections: list[PromptSection] = self._build_static_sections(
             role=role,
-            persona=persona,
+            member_prompt=member_prompt,
             member_name=member_name,
             lifecycle=lifecycle,
             teammate_mode=teammate_mode,
@@ -236,7 +236,7 @@ class TeamPolicyRail(DeepAgentRail):
         self,
         *,
         role: TeamRole,
-        persona: str,
+        member_prompt: str,
         member_name: str | None,
         lifecycle: str,
         teammate_mode: str,
@@ -247,7 +247,7 @@ class TeamPolicyRail(DeepAgentRail):
         """Construct the never-changing sections once at rail init time."""
         sections = build_team_static_sections(
             role=role,
-            persona=persona,
+            member_prompt=member_prompt,
             member_name=member_name,
             lifecycle=lifecycle,
             teammate_mode=teammate_mode,

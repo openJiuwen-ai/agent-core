@@ -354,7 +354,8 @@ class SpawnManager:
         return TeamRuntimeContext(
             role=role,
             member_name=teammate.member_name,
-            persona=teammate.desc or "",
+            desc=teammate.desc or "",
+            prompt=teammate.prompt or "",
             team_spec=ctx.team_spec if ctx else None,
             messager_config=self._configurator.build_member_messager_config(teammate.member_name),
             db_config=ctx.db_config if ctx else None,

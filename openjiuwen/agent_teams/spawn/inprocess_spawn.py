@@ -55,7 +55,7 @@ async def inprocess_spawn(
     card = agent_spec.card or AgentCard(
         id=card_id,
         name=ctx.member_name or "unknown",
-        description=f"Teammate: {ctx.persona}" if ctx.persona else "Teammate",
+        description=f"Teammate: {ctx.desc}" if ctx.desc else "Teammate",
     )
 
     teammate = _TeamAgent(card)

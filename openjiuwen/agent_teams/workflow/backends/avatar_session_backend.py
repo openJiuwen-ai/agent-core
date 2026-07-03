@@ -44,13 +44,13 @@ from openjiuwen.core.common.logging import team_logger
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
-# Multi-turn persona — the session counterpart of the worker's single-shot prompt.
+# Multi-turn role prompt — the session counterpart of the worker's single-shot prompt.
 _SESSION_SYS_PROMPT_AGENT = (
     "You are a stateful swarmflow session agent in a multi-turn conversation. "
     "You remember every prior turn; answer each new message directly and "
     "concisely, using the accumulated context. Do not restate the whole history."
 )
-# Persona for a human session's avatar: it does NOT invent answers — it renders a
+# Role prompt for a human session's avatar: it does NOT invent answers — it renders a
 # real person's reply faithfully into the form the turn asked for.
 _SESSION_SYS_PROMPT_HUMAN = (
     "You are the avatar of a human team member in a multi-turn conversation. Each "
@@ -457,7 +457,7 @@ class AvatarSessionManager:
             "Render their reply faithfully into the answer for this turn; do not "
             "add anything they did not express."
         )
-        # The avatar (human persona) formats the raw reply; reuse the agent turn
+        # The avatar (human stand-in) formats the raw reply; reuse the agent turn
         # path so schema capture / round settling work identically.
         return await self._agent_turn(state, format_prompt, schema_json)
 
@@ -512,7 +512,7 @@ class AvatarSessionManager:
 
     @staticmethod
     def _session_system_prompt(state: _SessionState) -> str:
-        """Compose the avatar's system prompt: role persona + caller instructions."""
+        """Compose the avatar's system prompt: role prompt + caller instructions."""
         base = _SESSION_SYS_PROMPT_HUMAN if state.kind == "human" else _SESSION_SYS_PROMPT_AGENT
         if state.instructions:
             return f"{base}\n\n{state.instructions}"

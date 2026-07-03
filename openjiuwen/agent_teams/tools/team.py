@@ -111,6 +111,7 @@ class TeamBackend:
         plan_storage_dir: str | None = None,
         plan_id: str | None = None,
         leader_member_name: str | None = None,
+        leader_prompt: str = "",
     ):
         """Initialize agent team manager.
 
@@ -165,6 +166,12 @@ class TeamBackend:
                 is deleted, before best-effort cleanup and event publishing.
             on_team_built: Optional async callback fired exactly once after
                 ``build_team`` creates the team row and initial members.
+            leader_prompt: The leader's private prompt (``LeaderSpec.prompt``
+                via ``ctx.prompt``). Persisted on the leader's DB row at
+                ``build_team`` so cold-recovery — which rebuilds the leader
+                context from the DB — restores the same private prompt. The
+                public ``leader_desc`` is supplied separately by the
+                ``build_team`` caller (LLM-filled tool arg).
         """
         self.team_name = team_name
         self.member_name = member_name
@@ -176,6 +183,10 @@ class TeamBackend:
         self.predefined_members = predefined_members or []
         self._allocate_model_config = model_config_allocator
         self.leader_allocation = leader_allocation
+        # Leader's private prompt (LeaderSpec.prompt via ctx.prompt). Persisted
+        # on the leader's DB row at build_team so cold-recovery, which rebuilds
+        # the leader context from the DB, restores the same private prompt.
+        self._leader_prompt = leader_prompt
         # HITT capability ceiling (immutable, from spec) and the runtime
         # effective flag that ``build_team`` may downgrade. All human-agent
         # creation paths gate on ``_enable_hitt``; the spec ceiling is
@@ -321,7 +332,7 @@ class TeamBackend:
             member_name: Unique member identifier (semantic slug, e.g. "backend-dev-1").
             display_name: Human-readable display label for the member.
             agent_card: Agent card defining the agent.
-            desc: Member persona description.
+            desc: Public member description.
             prompt: Startup instruction for the member.
             status: Initial member status.
             execution_status: Initial execution status.
@@ -1047,7 +1058,9 @@ class TeamBackend:
             display_name: Human-readable team label.
             desc: Team goal, scope, and directives.
             leader_display_name: Human-readable display label for the leader member.
-            leader_desc: Persona description of the leader member.
+            leader_desc: Public description of the leader member (shown in
+                peers' roster; the private prompt is passed via the
+                ``leader_prompt`` constructor arg, not here).
             overrides: Optional runtime capability overrides. Use
                 ``CapabilityOverrides(enable_hitt=True/False)`` to override
                 the HITT or bridge capability ceiling for this run. None
@@ -1113,6 +1126,7 @@ class TeamBackend:
             display_name=leader_display_name,
             agent_card=leader_card,
             desc=leader_desc,
+            prompt=self._leader_prompt,
             status=MemberStatus.BUSY,
             execution_status=ExecutionStatus.RUNNING,
             mode=MemberMode.BUILD_MODE,
@@ -1139,15 +1153,15 @@ class TeamBackend:
             member_card = AgentCard(
                 id=member_card_id,
                 name=member_spec.display_name,
-                description=member_spec.persona,
+                description=member_spec.desc,
             )
             allocation = self._allocate_model_config(member_spec.model_name) if self._allocate_model_config else None
             await self.spawn_member(
                 member_name=member_spec.member_name,
                 display_name=member_spec.display_name,
                 agent_card=member_card,
-                desc=member_spec.persona,
-                prompt=member_spec.prompt_hint,
+                desc=member_spec.desc,
+                prompt=member_spec.prompt,
                 status=MemberStatus.UNSTARTED,
                 execution_status=ExecutionStatus.IDLE,
                 mode=self.teammate_mode,
@@ -1173,8 +1187,8 @@ class TeamBackend:
                 await self.spawn_human_agent(
                     member_name=human_spec.member_name,
                     display_name=human_spec.display_name,
-                    desc=human_spec.persona,
-                    prompt=human_spec.prompt_hint,
+                    desc=human_spec.desc,
+                    prompt=human_spec.prompt,
                 )
         elif human_specs:
             team_logger.warning(
@@ -1239,7 +1253,7 @@ class TeamBackend:
             member_name: Unique member identifier for the human.
             display_name: Optional display label; falls back to the
                 framework-managed default when omitted.
-            desc: Optional persona description; falls back to the
+            desc: Optional member description; falls back to the
                 framework default.
             prompt: Optional startup hint forwarded to the avatar.
 
@@ -1255,7 +1269,7 @@ class TeamBackend:
             )
 
         resolved_display_name = display_name or t("hitt.human_agent_display_name")
-        resolved_desc = desc or t("hitt.human_agent_default_persona")
+        resolved_desc = desc or t("hitt.human_agent_default_desc")
         member_card = AgentCard(
             id=f"{self.team_name}_{member_name}",
             name=resolved_display_name,
@@ -1411,8 +1425,8 @@ class TeamBackend:
         *,
         member_name: str,
         display_name: str,
-        persona: str,
-        desc: Optional[str] = None,
+        desc: str = "",
+        prompt: str,
         model_name: Optional[str] = None,
         mailbox_inject_mode: BridgeMailboxInjectMode = BridgeMailboxInjectMode.PASSTHROUGH,
         protocol: str = "",
@@ -1433,11 +1447,11 @@ class TeamBackend:
         Args:
             member_name: Unique member identifier.
             display_name: Human-readable label.
-            persona: Persona text — same field the local teammate
-                LLM uses as identity AND the briefing string the
-                remote agent receives at ``adapter.connect``. Required.
-            desc: Optional persona override stored on the DB row;
-                defaults to ``persona`` when omitted.
+            desc: Public description — the field peers see in the roster
+                and ``list_members``. Optional; defaults to empty.
+            prompt: Private briefing the remote agent adopts as its own
+                system prompt via ``adapter.connect``. Required — it is
+                what makes the remote act as this member.
             model_name: Optional model pool hint forwarded to the
                 allocator (``None`` falls back to per-agent default).
             mailbox_inject_mode: Outbound wrap format for inbound
@@ -1457,25 +1471,24 @@ class TeamBackend:
                 "(enable_bridge=False on TeamAgentSpec or build_team)"
             )
 
-        if not persona:
+        if not prompt:
             return MemberOpResult.fail(
-                "spawn_bridge_agent requires non-empty 'persona' — it is the "
+                "spawn_bridge_agent requires non-empty 'prompt' — it is the "
                 "briefing the remote agent adopts via adapter.connect"
             )
 
-        resolved_desc = desc or persona
         member_card = AgentCard(
             id=f"{self.team_name}_{member_name}",
             name=display_name,
-            description=resolved_desc,
+            description=desc,
         )
         allocation = self._allocate_model_config(model_name) if self._allocate_model_config else None
         result = await self.spawn_member(
             member_name=member_name,
             display_name=display_name,
             agent_card=member_card,
-            desc=resolved_desc,
-            prompt=None,
+            desc=desc,
+            prompt=prompt,
             status=MemberStatus.UNSTARTED,
             execution_status=ExecutionStatus.IDLE,
             mode=self.teammate_mode,
@@ -1494,7 +1507,8 @@ class TeamBackend:
         self._bridge_member_specs[member_name] = BridgeMemberSpec(
             member_name=member_name,
             display_name=display_name,
-            persona=persona,
+            desc=desc,
+            prompt=prompt,
             model_name=model_name,
             mailbox_inject_mode=mailbox_inject_mode,
             protocol=protocol,
@@ -1532,8 +1546,8 @@ class TeamBackend:
         member_name: str,
         display_name: str,
         cli_agent: str,
-        persona: str,
-        desc: Optional[str] = None,
+        desc: str = "",
+        prompt: str,
         model_name: Optional[str] = None,
     ) -> MemberOpResult:
         """Register an external-CLI teammate dynamically.
@@ -1550,8 +1564,10 @@ class TeamBackend:
             display_name: Human-readable label.
             cli_agent: Adapter name (``"claude"`` / ``"codex"`` / ...); see
                 ``agent_teams/external/cli_agent/adapters.py``.
-            persona: Persona text stored on the member row.
-            desc: Optional persona override (defaults to ``persona``).
+            desc: Public description stored on the member row (roster view).
+                Optional; defaults to empty.
+            prompt: Private system prompt the CLI adopts to act as this
+                member. Required.
             model_name: Ignored for external-CLI members (the model lives in
                 the external CLI); accepted for signature symmetry.
 
@@ -1561,8 +1577,8 @@ class TeamBackend:
         """
         from openjiuwen.agent_teams.external.cli_agent.adapters import available_adapters
 
-        if not persona:
-            return MemberOpResult.fail("spawn_external_cli_agent requires non-empty 'persona'")
+        if not prompt:
+            return MemberOpResult.fail("spawn_external_cli_agent requires non-empty 'prompt'")
         # Capability ceiling: the CLI kind must be pre-declared in
         # ``TeamAgentSpec.external_cli_agents`` (all launch knowledge is
         # static there; the spawn call only names the kind).
@@ -1575,11 +1591,10 @@ class TeamBackend:
         if cli_agent not in available_adapters():
             return MemberOpResult.fail(f"Unknown cli_agent '{cli_agent}'; known: {', '.join(available_adapters())}")
 
-        resolved_desc = desc or persona
         member_card = AgentCard(
             id=f"{self.team_name}_{member_name}",
             name=display_name,
-            description=resolved_desc,
+            description=desc,
         )
         # Record the mapping before spawn_member so the later startup ->
         # build_context_from_db pass routes this member to the CLI path.
@@ -1588,8 +1603,8 @@ class TeamBackend:
             member_name=member_name,
             display_name=display_name,
             agent_card=member_card,
-            desc=resolved_desc,
-            prompt=None,
+            desc=desc,
+            prompt=prompt,
             status=MemberStatus.UNSTARTED,
             execution_status=ExecutionStatus.IDLE,
             mode=self.teammate_mode,
