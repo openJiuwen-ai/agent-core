@@ -531,7 +531,7 @@ class AgentConfigurator:
             RailSpec(
                 type=TEAM_POLICY,
                 params={
-                    "persona": ctx.persona or "",
+                    "prompt": ctx.prompt or "",
                     "lifecycle": spec.lifecycle,
                     "teammate_mode": teammate_mode,
                     "team_mode": _resolve_team_mode(spec),
@@ -666,7 +666,7 @@ class AgentConfigurator:
             swarmflow_worker_base_spec = base_specs.get("teammate") or base_specs.get("leader")
             # Human-session avatars derive from the human_agent spec; fall back to
             # the worker base spec so human_session still works when no dedicated
-            # human_agent spec is configured (it just lacks human-tuned persona).
+            # human_agent spec is configured (it just lacks human-tuned desc).
             swarmflow_human_base_spec = base_specs.get("human_agent") or swarmflow_worker_base_spec
 
             # Workers also need the observability rail for agent spans.
@@ -844,6 +844,7 @@ class AgentConfigurator:
             predefined_members=spec.predefined_members or None,
             model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
             leader_allocation=self.leader_allocation if is_leader else None,
+            leader_prompt=ctx.prompt if is_leader else "",
             enable_hitt=spec.enable_hitt,
             enable_bridge=spec.enable_bridge,
             external_cli_agents=spec.external_cli_agents,

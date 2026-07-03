@@ -948,7 +948,7 @@ class TeamAgent(BaseAgent):
         card = agent_spec.card or AgentCard(
             id=card_id,
             name=context.member_name or "unknown",
-            description=f"Teammate: {context.persona}" if context.persona else "Teammate",
+            description=f"Teammate: {context.desc}" if context.desc else "Teammate",
         )
         agent = cls(card)
         agent.configure(spec, context)
@@ -959,10 +959,13 @@ class TeamAgent(BaseAgent):
         ctx = await self._spawn_manager.build_context_from_db(teammate_id)
         if ctx is None:
             return
-        teammate = await self._configurator.team_backend.get_member(teammate_id)
+        # No first-start message: a member's DB ``prompt`` is its private
+        # system-prompt addendum (carried on ``ctx.member_prompt``), not a
+        # startup instruction. Members come up subscribed-only and receive
+        # real work from the leader via send_message / task assignment.
         await self.spawn_teammate(
             ctx,
-            initial_message=teammate.prompt if teammate else None,
+            initial_message=None,
             session=self.session_id,
             spawn_config=SpawnConfig(health_check_timeout=30, health_check_interval=50),
         )

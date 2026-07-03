@@ -24,7 +24,6 @@ from openjiuwen.agent_teams.schema.team import TeamRole
 
 _I18N_LABELS: dict[str, dict[str, str]] = {
     "cn": {
-        "persona": "当前人设",
         "member_name_label": "你的成员名（member_name）",
         "team_info_heading": "团队信息",
         "team_name_label": "团队名（team_name）",
@@ -33,7 +32,6 @@ _I18N_LABELS: dict[str, dict[str, str]] = {
         "relationships_heading": "成员关系",
     },
     "en": {
-        "persona": "Current Persona",
         "member_name_label": "Your member_name",
         "team_info_heading": "Team Info",
         "team_name_label": "team_name",
@@ -100,7 +98,6 @@ def _format_team_members(
 def _build_team_policy(
     *,
     role: TeamRole,
-    persona: str,
     base_prompt: str | None = None,
     team_info: dict[str, Any] | None = None,
     team_members: list[dict[str, str]] | None = None,
@@ -109,7 +106,7 @@ def _build_team_policy(
     language: str = "cn",
     team_mode: str = "default",
 ) -> str:
-    """Build the team-specific policy section (role, persona, team context)."""
+    """Build the team-specific policy section (role, team context)."""
     labels = _I18N_LABELS.get(language, _I18N_LABELS["cn"])
 
     policy_name = "leader_policy" if role == TeamRole.LEADER else "teammate_policy"
@@ -143,8 +140,6 @@ def _build_team_policy(
         "role_policy": role_policy_text,
         "workflow_section": workflow_section,
         "lifecycle_section": lifecycle_section,
-        "persona_label": labels["persona"],
-        "persona": persona,
         "team_info_section": team_info_section,
         "team_members_section": team_members_section,
         "base_prompt_section": base_prompt_section,
@@ -154,7 +149,6 @@ def _build_team_policy(
 def build_system_prompt(
     *,
     role: TeamRole,
-    persona: str,
     base_prompt: str | None = None,
     team_info: dict[str, Any] | None = None,
     team_members: list[dict[str, str]] | None = None,
@@ -172,7 +166,7 @@ def build_system_prompt(
 
     Final prompt structure at runtime::
 
-        [IDENTITY]  team policy + persona + team context  ← this function
+        [IDENTITY]  team policy + team context             ← this function
         [TOOLS]     tool descriptions                     ← SysOperationRail etc.
         [SAFETY]    security rules                        ← SecurityRail
         [RUNTIME]   execution constraints                 ← auto
@@ -180,7 +174,6 @@ def build_system_prompt(
 
     Args:
         role: LEADER or TEAMMATE.
-        persona: Character persona description.
         base_prompt: Optional extra instructions appended at the end.
         team_info: Optional team metadata dict.
         team_members: Optional list of member dicts.
@@ -192,7 +185,6 @@ def build_system_prompt(
     """
     return _build_team_policy(
         role=role,
-        persona=persona,
         base_prompt=base_prompt,
         team_info=team_info,
         team_members=team_members,

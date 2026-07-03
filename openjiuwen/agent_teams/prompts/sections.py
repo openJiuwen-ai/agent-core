@@ -5,7 +5,7 @@
 """PromptSection builders for the team policy rail.
 
 Each function produces a single ``PromptSection`` covering one slice of
-team-specific content (role, workflow, lifecycle, persona, ...). The
+team-specific content (role, workflow, lifecycle, private prompt, ...). The
 rail composes these sections into the shared ``SystemPromptBuilder``
 alongside the harness sections (safety, tools, memory, ...).
 
@@ -24,8 +24,8 @@ Section layout (aligned with ``prompt_design.md``):
                           section.
   P:13  team_workflow    — leader workflow (LEADER only)
   P:14  team_lifecycle   — team lifecycle policy (LEADER only)
-  P:15  team_persona     — current persona (when persona is set)
-  P:16  team_extra       — user-supplied base prompt (when set)
+  P:16  team_private_prompt — member-private working agreement (when set)
+  P:17  team_extra       — user-supplied base prompt (when set)
   P:65  team_info        — team metadata (after capabilities)
   P:66  team_members     — relationships with peers
 """
@@ -51,7 +51,7 @@ class TeamSectionName:
     BRIDGE = "team_bridge"
     WORKFLOW = "team_workflow"
     LIFECYCLE = "team_lifecycle"
-    PERSONA = "team_persona"
+    PRIVATE_PROMPT = "team_private_prompt"
     EXTRA = "team_extra"
     ATTACHMENT_NOTICE = "team_attachment_notice"
     INBOUND_TAGS = "team_inbound_tags"
@@ -69,7 +69,7 @@ _LABELS: dict[str, dict[str, str]] = {
         "role_heading": "# 团队角色",
         "workflow_heading": "# 工作流程",
         "lifecycle_heading": "# 团队生命周期",
-        "persona_heading": "# 当前人设",
+        "private_prompt_heading": "# 私有工作约定",
         "info_heading": "# 团队信息",
         "team_name_label": "team_name（团队唯一标识）",
         "display_name_label": "display_name（团队展示名）",
@@ -98,7 +98,7 @@ _LABELS: dict[str, dict[str, str]] = {
         "role_heading": "# Team Role",
         "workflow_heading": "# Workflow",
         "lifecycle_heading": "# Team Lifecycle",
-        "persona_heading": "# Current Persona",
+        "private_prompt_heading": "# Private Working Agreement",
         "info_heading": "# Team Info",
         "team_name_label": "team_name (unique identifier)",
         "display_name_label": "display_name (human-readable label)",
@@ -252,25 +252,32 @@ def build_team_lifecycle_section(
     )
 
 
-def build_team_persona_section(
+def build_team_private_prompt_section(
     *,
-    persona: str | None,
+    member_prompt: str | None,
     language: str = "cn",
 ) -> Optional[PromptSection]:
-    """Build the persona section.
+    """Build the member-private working-agreement section.
+
+    The member-private counterpart to the public ``desc``: injected solely into
+    this member's own system prompt and never shared into any peer's roster
+    or ``list_members`` output. Built once as a static section (fixed at
+    spawn time) so the system-prompt prefix stays KV-cache stable. Empty text
+    (e.g. the leader, or a member spawned without a private prompt) drops the
+    section entirely.
 
     Returns:
-        PromptSection with the persona description, or ``None`` when
-        no persona is set.
+        PromptSection with the private prompt body, or ``None`` when no
+        private prompt is set.
     """
-    if not persona:
+    if not member_prompt or not member_prompt.strip():
         return None
     labels = _labels_for(language)
-    body = f"{labels['persona_heading']}\n\n{persona}\n"
+    body = f"{labels['private_prompt_heading']}\n\n{member_prompt.strip()}\n"
     return PromptSection(
-        name=TeamSectionName.PERSONA,
+        name=TeamSectionName.PRIVATE_PROMPT,
         content={language: body},
-        priority=15,
+        priority=16,
     )
 
 
@@ -292,7 +299,7 @@ def build_team_extra_section(
     return PromptSection(
         name=TeamSectionName.EXTRA,
         content={language: f"{base_prompt.strip()}\n"},
-        priority=16,
+        priority=17,
     )
 
 
@@ -1053,8 +1060,8 @@ def build_team_members_section(
 def build_team_static_sections(
     *,
     role: TeamRole,
-    persona: str,
     member_name: str | None,
+    member_prompt: str = "",
     lifecycle: str = "temporary",
     teammate_mode: str = "build_mode",
     team_mode: str = "default",
@@ -1068,15 +1075,18 @@ def build_team_static_sections(
 
     Single source of truth for one-shot static team sections. In-process
     DeepAgent members call this through :class:`TeamPolicyRail` for role /
-    bridge / workflow / lifecycle / persona / extra; HITT is refreshed by
-    the rail dynamically instead of being passed here. External CLI members
+    bridge / workflow / lifecycle / private-prompt / extra; HITT is refreshed
+    by the rail dynamically instead of being passed here. External CLI members
     use this function to build a standalone prompt snapshot, so callers may
     still pass ``human_agent_names`` to include a static HITT section.
 
     Args:
         role: LEADER or TEAMMATE (other roles get the role-appropriate slices).
-        persona: The member's persona text (empty drops the persona section).
         member_name: Semantic member identifier.
+        member_prompt: The member's private working agreement (DB ``prompt``),
+            injected only into this member's own prompt (empty drops the
+            section). The public ``desc`` is intentionally NOT rendered here —
+            it belongs only in peers' roster section.
         lifecycle: Team lifecycle ("temporary" / "persistent").
         teammate_mode: Teammate execution mode ("build_mode" / "plan_mode").
         team_mode: Team mode ("default" / "predefined" / "hybrid").
@@ -1121,8 +1131,8 @@ def build_team_static_sections(
             lifecycle=lifecycle,
             language=language,
         ),
-        build_team_persona_section(
-            persona=persona,
+        build_team_private_prompt_section(
+            member_prompt=member_prompt,
             language=language,
         ),
         build_team_extra_section(
@@ -1136,8 +1146,8 @@ def build_team_static_sections(
 def build_team_member_system_prompt(
     *,
     role: TeamRole,
-    persona: str,
     member_name: str | None,
+    member_prompt: str = "",
     lifecycle: str = "temporary",
     teammate_mode: str = "build_mode",
     team_mode: str = "default",
@@ -1162,8 +1172,8 @@ def build_team_member_system_prompt(
     """
     sections = build_team_static_sections(
         role=role,
-        persona=persona,
         member_name=member_name,
+        member_prompt=member_prompt,
         lifecycle=lifecycle,
         teammate_mode=teammate_mode,
         team_mode=team_mode,
@@ -1190,7 +1200,6 @@ __all__ = [
     "build_team_lifecycle_section",
     "build_team_member_system_prompt",
     "build_team_members_section",
-    "build_team_persona_section",
     "build_team_role_section",
     "build_team_static_sections",
     "build_team_workflow_section",

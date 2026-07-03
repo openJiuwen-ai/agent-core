@@ -131,7 +131,7 @@ class TeamPolicyInput(ConstructionInput):
     role: str = context_field(attr="role", default="leader", description="Team role value.")
     member_name: str = context_field(attr="member_name", default="", description="Member name.")
     language: str = context_field(attr="language", default="cn", description="Resolved language code.")
-    persona: str = param_field(default="", description="Member persona.")
+    prompt: str = param_field(default="", description="Member-private working agreement (own prompt only).")
     lifecycle: str = param_field(default="temporary", description="Team lifecycle.")
     teammate_mode: str = param_field(default="build_mode", description="Member execution mode.")
     team_mode: str = param_field(default="default", description="Team operating mode.")
@@ -158,7 +158,7 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
     inp = TeamPolicyInput.resolve(params, context)
     return TeamPolicyRail(
         role=TeamRole(inp.role),
-        persona=inp.persona,
+        member_prompt=inp.prompt,
         member_name=inp.member_name or None,
         lifecycle=inp.lifecycle,
         teammate_mode=inp.teammate_mode,

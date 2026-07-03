@@ -227,7 +227,7 @@ class MessageHandler(BaseCoordinationHandler):
             sender=msg.from_member_name,
             sender_display_name=await self._lookup_display_name(msg.from_member_name),
             sender_role=await self._lookup_role(msg.from_member_name),
-            sender_persona=await self._lookup_persona(msg.from_member_name),
+            sender_desc=await self._lookup_desc(msg.from_member_name),
             body=msg.content,
             broadcast=bool(getattr(msg, "broadcast", False)),
             task_hint=None,
@@ -266,7 +266,7 @@ class MessageHandler(BaseCoordinationHandler):
             return None
         return row.display_name if row is not None else None
 
-    async def _lookup_persona(self, member_name: str) -> Any:
+    async def _lookup_desc(self, member_name: str) -> Any:
         backend = self._infra.team_backend
         if backend is None or backend.db is None:
             return None

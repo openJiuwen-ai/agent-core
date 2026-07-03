@@ -37,14 +37,14 @@ async def _build_member_system_prompt(
     """Build the external CLI member's system prompt from team-rail sections.
 
     Gives the member the same team sections an in-process DeepAgent member gets
-    (role / workflow / lifecycle / persona / ...), built the same way, but
+    (role / workflow / lifecycle / private prompt / ...), built the same way, but
     excluding the other DeepAgent rails (safety, workspace, memory, ...) that
     do not apply to a CLI whose brain is not a local DeepAgent.
 
     Args:
         team_agent: The leader TeamAgent (source of the team backend roster).
         spec: The team spec carrying lifecycle / teammate_mode / team_mode.
-        ctx: The external CLI member's runtime context (role / persona / language).
+        ctx: The external CLI member's runtime context (role / desc / language).
         member_name: The member's semantic identifier.
 
     Returns:
@@ -58,7 +58,7 @@ async def _build_member_system_prompt(
     bridge_names = sorted(backend.bridge_agent_names()) if backend is not None else []
     prompt = build_team_member_system_prompt(
         role=ctx.role,
-        persona=ctx.persona,
+        member_prompt=ctx.prompt,
         member_name=member_name,
         lifecycle=spec.lifecycle,
         teammate_mode=spec.teammate_mode,
@@ -101,7 +101,7 @@ async def external_cli_spawn(
     card = AgentCard(
         id=card_id,
         name=member_name or "unknown",
-        description=f"External CLI member: {ctx.persona}" if ctx.persona else "External CLI member",
+        description=f"External CLI member: {ctx.desc}" if ctx.desc else "External CLI member",
     )
 
     # Build the member's system prompt from the team-rail sections (the same

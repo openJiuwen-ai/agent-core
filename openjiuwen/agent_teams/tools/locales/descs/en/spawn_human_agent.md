@@ -6,7 +6,7 @@ Add a real person as a team member (Human in the Team). The human member is driv
 | **display_name** | public | Human-readable label for the human member (e.g. "Product Owner"); presentational only |
 | **desc** | public | Role profile and responsibilities of the human member; injected into other members' system prompts and returned by list_members — never put private content here |
 
-Human members **reject** `model_name` and `prompt` — the model and startup prompt are managed by the framework template, and this tool does not expose those parameters. `desc` / `display_name` are honoured for presentation and persisted persona.
+Human members **reject** `model_name` and `prompt` — the model and startup prompt are managed by the framework template, and this tool does not expose those parameters. `desc` / `display_name` are honoured for presentation and persisted desc.
 
 **Capability requirement**: requires `TeamAgentSpec.enable_hitt=True` and the current build_team instance to leave HITT engaged. When the capability is off, this tool is not even listed in the available tools (and on a runtime downgrade it returns a rejection suggesting spawn_teammate instead).
 

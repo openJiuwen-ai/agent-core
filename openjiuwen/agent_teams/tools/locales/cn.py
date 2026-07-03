@@ -16,7 +16,7 @@ STRINGS: dict[str, str] = {
     "build_team.display_name": "团队的显示名（如「后端平台小队」），仅用于展示，不是标识符",
     "build_team.team_desc": "团队目标、交付范围和全局协作指令。所有成员可见此描述，写清协作目标和约束",
     "build_team.leader_display_name": "Leader 的显示名（纯展示，不作为标识符）",
-    "build_team.leader_desc": "Leader 的人设描述（专业背景、领域专长），影响成员的信任和沟通方式",
+    "build_team.leader_desc": "Leader 的角色描述（专业背景、领域专长），影响成员的信任和沟通方式",
     "build_team.enable_hitt": (
         "本次实例是否启用 HITT（Human in the Team）模式。可选 true / false / 不传。"
         "不传：继承 TeamAgentSpec.enable_hitt（spec 层能力天花板）。"
@@ -73,7 +73,7 @@ STRINGS: dict[str, str] = {
         "会注入所有其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
     ),
     "spawn_human_agent.desc": (
-        "[公开] 人类成员的角色画像与职责范围，用于展示与持久化人设，"
+        "[公开] 人类成员的角色画像与职责范围，用于展示与持久化描述，"
         "并注入其他成员的 system prompt、由 list_members 返回。"
         "真人通过 HumanAgentInbox 驱动该成员；模型与启动提示由框架内置模板托管，无需在此提供"
     ),
@@ -90,14 +90,17 @@ STRINGS: dict[str, str] = {
         "会注入所有其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
     ),
     "spawn_bridge_agent.desc": (
-        "[公开] 桥接成员的角色画像。**必填**：同时作为本地团队 persona 与远程 agent 的连接 briefing"
-        "（通过 adapter.connect 下发，远程据此扮演角色）。"
-        "会注入其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
+        "[公开] 桥接成员的对外花名册描述，仅供其他成员在 list_members / 团队 roster 中识别该成员。"
+        "可选；会注入其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
+    ),
+    "spawn_bridge_agent.prompt": (
+        "[私有] 远程 agent 据此扮演角色的系统提示词（该成员自己的私有工作设定），"
+        "**必填**：通过 adapter.connect 下发给远程，远程据此充当本成员。仅本成员自己可见，不进他人花名册"
     ),
     "spawn_bridge_agent.mailbox_inject_mode": (
         "控制团队消息被自动转发给远程 agent 时的形态："
         "'passthrough'（默认）= 仅加最简发送者前缀直传；"
-        "'rephrase' = 包装完整发送者上下文（角色、人设、相关任务）"
+        "'rephrase' = 包装完整发送者上下文（角色、描述、相关任务）"
     ),
     "spawn_bridge_agent.protocol": (
         "协议标识（如 'a2a' / 'acp' / 'claudecode'）。"
@@ -124,8 +127,12 @@ STRINGS: dict[str, str] = {
         "会注入所有其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
     ),
     "spawn_external_cli.desc": (
-        "[公开] 该 CLI 成员的 persona / 角色画像。**必填**。"
-        "会注入其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
+        "[公开] 该 CLI 成员的对外花名册描述，仅供其他成员在 list_members / 团队 roster 中识别。"
+        "可选；会注入其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
+    ),
+    "spawn_external_cli.prompt": (
+        "[私有] 该 CLI 成员的私有系统提示词，CLI 据此扮演本成员角色。**必填**。"
+        "仅本成员自己可见，不进他人花名册"
     ),
     "spawn_external_cli.cli_agent": (
         "要拉起的第三方 CLI agent 类型标识，如 'claude'（claudecode）或 'codex'。"
