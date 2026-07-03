@@ -29,8 +29,8 @@
 ### 装配路径
 
 1. **唯一装配路径 `sections.build_team_*_section`**：每片内容独立产出 `PromptSection`，读 `prompts/<lang>/*.md`。由 `TeamPolicyRail` 合并进 `SystemPromptBuilder`（进程内成员），或经 `build_team_member_system_prompt` 渲染成独立字符串（外部 CLI 成员）。模板正文修改即时生效。
-2. **`policy.role_policy` 只加载 role policy 文本**：按角色返回 `leader_policy` / `teammate_policy` markdown，供 role section 消费；不再做整壳装配。
-3. **生产路径就是 rail 注入**：`TeamHarness.build` 走 `TeamPolicyRail`。早期的 `policy.build_system_prompt` + `system_prompt.md` 壳模板老路径仅测试在用，已随 desc/prompt 归一移除（测试迁移到 `role_policy` / `build_team_member_system_prompt`）。
+2. **role policy 由 `build_team_role_section` 直接读**：`sections.build_team_role_section` 按角色 `load_template` 出 `leader_policy` / `teammate_policy` markdown 塞进 role section。没有独立的 policy 装配层（`policy.py` 已删）。
+3. **生产路径就是 rail 注入**：`TeamHarness.build` 走 `TeamPolicyRail`。早期的 `policy.build_system_prompt` + `system_prompt.md` 壳模板老路径与 `role_policy` 中间层都仅测试在用，已随 desc/prompt 归一移除（测试迁移到 `load_template` / `build_team_member_system_prompt`）。
 
 ### Section / 文件落位
 
@@ -97,18 +97,10 @@ def load_shared_template(name: str) -> PromptTemplate:
 - 返回 `core.foundation.prompt.PromptTemplate`，`.content` 为原始 markdown，`.format(...)` 渲染 `{{placeholder}}`。
 - 文件不存在直接抛 `FileNotFoundError`（`Path.read_text` 默认行为），不做兜底。
 
-### `prompts/policy.py`
-
-```python
-def role_policy(role: TeamRole, language: str = "cn") -> str:
-    """Return the leader_policy or teammate_policy markdown text."""
-    ...
-```
-
-- LEADER 加载 `leader_policy`，其它角色加载 `teammate_policy`；返回的 markdown 供 `sections.py` 的 role section 消费。
-- `team_mode`（`{"default","predefined","hybrid"}` → `leader_workflow*.md`）与 `lifecycle`（`{"temporary","persistent"}` → `lifecycle_*.md`）的映射现由 `sections.build_team_workflow_section` / `build_team_lifecycle_section` 承担（`sections.py` 自己的 `_WORKFLOW_TEMPLATES`），非法值走 `"default"` / `lifecycle_temporary`。
-
 ### `prompts/sections.py`
+
+`build_team_role_section` 按角色 `load_template` 出 `leader_policy`（LEADER）/ `teammate_policy`（其它角色）塞进 role section。`team_mode`（`{"default","predefined","hybrid"}` → `leader_workflow*.md`）与 `lifecycle`（`{"temporary","persistent"}` → `lifecycle_*.md`）的映射由 `build_team_workflow_section` / `build_team_lifecycle_section` 承担（`sections.py` 自己的 `_WORKFLOW_TEMPLATES`），非法值走 `"default"` / `lifecycle_temporary`。
+
 
 每个 builder 返回 `PromptSection | None`，`None` 表示该角色下不应出现该 section。
 

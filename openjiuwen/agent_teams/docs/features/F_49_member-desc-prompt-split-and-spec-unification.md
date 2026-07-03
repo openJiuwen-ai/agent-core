@@ -92,7 +92,10 @@
 
 ## 已知遗留
 
-- （已清理）`prompts/policy.py` 的 `build_system_prompt` + `_build_team_policy` legacy 装配路径
-  确认仅测试在用，已随本次一并删除（连同 `system_prompt.md` 壳模板与 `_format_team_*` helper）；
-  `policy.py` 精简为纯 `role_policy` 加载器，测试迁移到 `role_policy` 与主力路径
-  `build_team_member_system_prompt`。唯一装配路径现在只有 `sections.py` + `TeamPolicyRail`。
+- （已清理）`prompts/policy.py` 整个文件已删除。先删 `build_system_prompt` + `_build_team_policy`
+  + `system_prompt.md` 壳模板 + `_format_team_*` helper（仅测试在用）；再删 `role_policy` 中间层——
+  它算出 role 文本存进 `TeamAgentBlueprint.role_policy` 字段却**无人消费**（role policy 实际由
+  `sections.build_team_role_section` 直接 `load_template` 进 prompt）。连带移除
+  `TeamAgentBlueprint.role_policy` 字段、configurator 的 `role_policy` property，以及至此无消费者的
+  `loader.load_shared_template`。测试迁移到 `load_template` / `build_team_member_system_prompt`。
+  唯一装配路径现在只有 `sections.py` + `TeamPolicyRail`。

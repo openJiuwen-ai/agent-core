@@ -202,7 +202,6 @@ class TeamAgentBlueprint:
     card: AgentCard
     spec: TeamAgentSpec
     ctx: TeamRuntimeContext
-    role_policy: str
     language: str
 
     @property
@@ -302,7 +301,6 @@ class SpawnPayloadBuilder:
 | Blueprint | `card` | `AgentCard` | `TeamAgent.__init__` 传入 → `setup_infra` 锁定 | 一次性 |
 | Blueprint | `spec` | `TeamAgentSpec` | `setup_infra` | 一次性（frozen） |
 | Blueprint | `ctx` | `TeamRuntimeContext` | `setup_infra` | 一次性（frozen） |
-| Blueprint | `role_policy` | `str` | `setup_infra` 调用 `prompts.role_policy(role, language)` | 一次性 |
 | Blueprint | `language` | `str` | `setup_infra` 调用 `_resolve_language(agent_spec.language)` | 一次性 |
 | State | `team_session` | `AgentTeamSession | None` | `SessionManager` start / resume | SessionManager |
 | State | `team_member` | `TeamMember | None` | `setup_agent`（所有角色同步创建） | TeamAgent |
@@ -330,7 +328,7 @@ TeamAgentSpec  +  TeamRuntimeContext
 AgentConfigurator(card).configure(spec, ctx)
         │
         ├─ setup_infra(spec, ctx)
-        │     • blueprint = TeamAgentBlueprint(card, spec, ctx, role_policy, language)
+        │     • blueprint = TeamAgentBlueprint(card, spec, ctx, language)
         │     • spawn_payload_builder = SpawnPayloadBuilder(spec, ctx)
         │     • infra.messager = create_messager(...)
         │     • infra.workspace_manager = create_workspace_manager(...)         (optional)

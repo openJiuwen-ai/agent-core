@@ -1,15 +1,14 @@
 # Agent Team Prompts
 
-Markdown 模板是团队 Agent 的行为契约。Python 侧只做装配（`sections.py` 按 section 构造 `PromptSection`，`policy.py` 只加载 role policy 文本），所有文案都在此目录下的 `.md` 文件里 —— 改提示词不需要动 Python。
+Markdown 模板是团队 Agent 的行为契约。Python 侧只做装配（`sections.py` 按 section 构造 `PromptSection`，各 builder 直接 `load_template` 读 `cn/`/`en/` 下的 `.md`），所有文案都在此目录下的 `.md` 文件里 —— 改提示词不需要动 Python。
 
 ## Directory Layout
 
 | 路径 | 作用 |
 |---|---|
 | `__init__.py` | 公开导出：loader、policy、sections、section_cache |
-| `loader.py` | `load_template(name, lang)` / `load_shared_template(name)` 加载器，`@cache` 缓存，默认语言 `"cn"` |
-| `policy.py` | `role_policy`：按角色加载 `leader_policy` / `teammate_policy` markdown（sections 的 role slice 消费它） |
-| `sections.py` | `TeamSectionName` + `build_team_*_section` 构造 `PromptSection`（唯一装配路径，由 `TeamPolicyRail` / `build_team_member_system_prompt` 消费） |
+| `loader.py` | `load_template(name, lang)` 加载器，`@cache` 缓存，默认语言 `"cn"` |
+| `sections.py` | `TeamSectionName` + `build_team_*_section` 构造 `PromptSection`（唯一装配路径，由 `TeamPolicyRail` / `build_team_member_system_prompt` 消费）；`build_team_role_section` 直接 `load_template` 读 `leader_policy` / `teammate_policy` |
 | `section_cache.py` | `MtimeSectionCache`：dynamic section 的 mtime 缓存原语 |
 | `cn/` · `en/` | 语言相关的角色 / 工作流 / 生命周期模板，由 `load_template` 加载 |
 
@@ -19,8 +18,8 @@ Markdown 模板是团队 Agent 的行为契约。Python 侧只做装配（`secti
 
 | 模板文件 | 触发条件 | 装配位置 | 主要内容 |
 |---|---|---|---|
-| `leader_policy.md` | `role == LEADER` | `role_policy` | Leader 的核心理念、协作机制选择（按任务协同性质：结构可确定性编排 → swarmflow；涌现式自主协同 → build_team）、职责、决策原则、响应节奏、任务状态流转 |
-| `teammate_policy.md` | `role == TEAMMATE` | `role_policy` | Teammate 的自主规划/领取/协作规范、通信协议、代码/文件协作约定 |
+| `leader_policy.md` | `role == LEADER` | `build_team_role_section` | Leader 的核心理念、协作机制选择（按任务协同性质：结构可确定性编排 → swarmflow；涌现式自主协同 → build_team）、职责、决策原则、响应节奏、任务状态流转 |
+| `teammate_policy.md` | `role == TEAMMATE` | `build_team_role_section` | Teammate 的自主规划/领取/协作规范、通信协议、代码/文件协作约定 |
 | `leader_workflow.md` | Leader 且 `team_mode="default"` | `build_team_workflow_section` | 常规 Leader 工作流：建队 → 建任务 → spawn 成员 → 广播启动 → 等通知 |
 | `leader_workflow_predefined.md` | Leader 且 `team_mode="predefined"` | `build_team_workflow_section` | 预定义团队工作流：禁止 `spawn_teammate` 等 spawn 工具，成员已预先注册 |
 | `leader_workflow_hybrid.md` | Leader 且 `team_mode="hybrid"` | `build_team_workflow_section` | 混合团队工作流：预注册基础成员 + 允许动态 `spawn_teammate` 扩员 |
@@ -40,6 +39,6 @@ Teammate 不消费 workflow / lifecycle 模板；`sections.py` 在 `role != LEAD
 
 ## Runtime Assembly 路径
 
-唯一装配入口是 `sections.build_team_*_section`：每个模板独立产出一个 `PromptSection`，由 `agent_teams/rails/team_policy_rail.py` 的 `TeamPolicyRail` 按优先级合并进 `SystemPromptBuilder`（外部 CLI 成员则经 `build_team_member_system_prompt` 渲染成独立字符串）。`policy.role_policy` 只负责加载 `leader_policy` / `teammate_policy` markdown，供 role section 消费。
+唯一装配入口是 `sections.build_team_*_section`：每个模板独立产出一个 `PromptSection`，由 `agent_teams/rails/team_policy_rail.py` 的 `TeamPolicyRail` 按优先级合并进 `SystemPromptBuilder`（外部 CLI 成员则经 `build_team_member_system_prompt` 渲染成独立字符串）。各 builder 直接 `load_template` 读对应 `.md`（如 `build_team_role_section` 读 `leader_policy` / `teammate_policy`）。
 
 （早期还有一条 `policy.build_system_prompt` + `system_prompt.md` 壳模板的老装配路径，仅测试在用，已随 desc/prompt 归一一并移除。）
