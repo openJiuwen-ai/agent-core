@@ -146,7 +146,7 @@ class CoordinationKernel:
         if host.role == TeamRole.LEADER and infra.team_backend:
             existing = await infra.team_backend.db.team.get_team(infra.team_backend.team_name)
             if existing is not None:
-                non_leader_members = await infra.team_backend.list_members()
+                non_leader_members = await infra.team_backend.list_member_roster()
                 if non_leader_members and all(m.status == MemberStatus.SHUTDOWN.value for m in non_leader_members):
                     team_logger.warning(
                         "[{}] team {} found with all teammates in SHUTDOWN — finalizing prior incomplete cleanup",
@@ -267,7 +267,7 @@ class CoordinationKernel:
         if not spawned:
             return
         leader = host.member_name
-        members = await team_backend.list_members()
+        members = await team_backend.list_member_roster()
         for member in members:
             if member.member_name == leader:
                 continue
