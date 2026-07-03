@@ -87,7 +87,7 @@ customizer 后处理）。
 
 | 文件 | 职责 |
 |---|---|
-| `team_policy_rail.py` | `TeamPolicyRail`：静态 `PromptSection` 注入 `SystemPromptBuilder`；3 个 dynamic section（hitt/info/members）经 `MtimeSectionCache` 刷新后改挂 `prompt_attachment_manager`（移出 system prompt → 前缀 KV cache 稳定），不再进 builder；另含 attachment / 入站标签两个静态说明 section。见 F_46 |
+| `team_policy_rail.py` | `TeamPolicyRail`：静态 `PromptSection` + HITT **静态协作契约** 注入 `SystemPromptBuilder`（前缀 KV cache 稳定）；churn 的 `team_members` / `team_info` / `team_hitt_roster`（人类成员名册）经 members/info 探针缓存刷新后挂 `prompt_attachment_manager`（移出 system prompt → 尾部即弃）；另含 attachment / 入站标签两个静态说明 section。见 F_46 / F_50 |
 | `confirm_payload.py` | `TeamConfirmPayload` + `TeamPermissionConfirmResponse`：team-specific confirmation payload/response models（extend harness base classes with `decided_by` tracking） |
 | `team_permission_rail.py` | `TeamPermissionRail` + `TeamApprovalOrchestrator`：team-mode permission guardrail；继承 `PermissionInterruptRail`，leader-mediated ASK resolution + session-scoped auto-confirm（`_persist_allow_always=False`）。`enable_permissions=True` 时替代 `TeamToolApprovalRail` |
 | `tool_approval_rail.py` | `TeamToolApprovalRail`：teammate 调工具时通过消息向 leader 申请审批的中断 rail（`enable_permissions=False` 时使用） |

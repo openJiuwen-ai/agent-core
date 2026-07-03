@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
 | 最近一次修订日期 | 2026-07-03 |
-| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md` |
+| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md` |
 
 ## 范围 / 边界
 
@@ -36,10 +36,11 @@
 
 4. **`TeamPolicyRail` 是团队 section 名的唯一发行方**：所有团队相关 section 名集中在 `TeamSectionName` 类常量里，priority 取值集中在该 rail 的注释表里。其他模块不得 hardcode `"team_*"` section 名。
 5. **section name 全局唯一**：`SystemPromptBuilder._sections` 是 `dict[str, PromptSection]`，同名 add 直接覆盖。团队 section 与 harness 内置 section（safety / capabilities / runtime / ...）必须不冲突。
-6. **section priority 单调约定**：团队静态 section 占 11–16，团队动态 section 占 65–66；harness 内置 section 排在 0–10、20–60、70–99。priority 升序拼接，相同 priority 顺序由 `dict` 插入序决定。
-7. **role-specific section 在不应出现的角色下返回 `None`**：`build_team_workflow_section` / `build_team_lifecycle_section` 在 `role != LEADER` 时返回 `None`；`build_team_hitt_section` 在没有 human_agent 注册时返回 `None`。**禁止用空字符串占位**——返回 `None` 等价于不挂 section。
-   - **TEAMMATE 默认走 anonymous 变体**：`build_team_hitt_section` 对 `role == TEAMMATE` 默认渲染一段**无名单、无 "real humans" 标签**的 role-neutral section（只承载"跨成员一律 `send_message`、容忍延迟、不要推断 peer 身份"等通用协作守则），peer role 不会泄漏到其它成员的 system prompt。开关 `TeamAgentSpec.expose_human_agents_to_teammates=True` 切换回旧版 roster-exposing section（列出所有 human_agent `member_name` + "real humans" 标签）。LEADER / HUMAN_AGENT 分支不受开关影响，始终拿完整 roster section。
-8. **`cn/` `en/` 下的模板均为纯文本**：不使用占位符，`load_template` 原样返回内容。（`{{double_brace}}` 占位符壳模板 `system_prompt.md` 随 legacy `build_system_prompt` 一并移除。）
+6. **section priority 单调约定**：进 builder 的团队 section 占 11–18（含 HITT 契约 P:12、attachment/inbound 两个说明 section P:17/18）；harness 内置 section 排在 0–10、20–60、70–99，priority 升序拼接。进 attachment 的团队 section（`team_members` P:66 / `team_info` P:65 / `team_hitt_roster` P:12）按同一 priority 值在 attachment 内部排序，与 builder 序正交。相同 priority 顺序由插入序决定。
+7. **role-specific section 在不应出现的角色下返回 `None`**：`build_team_workflow_section` / `build_team_lifecycle_section` 在 `role != LEADER` 时返回 `None`；`build_team_hitt_contract_section` / `build_team_hitt_roster_section` / `build_team_hitt_section` 在没有 human_agent 注册时返回 `None`。**禁止用空字符串占位**——返回 `None` 等价于不挂 section。
+   - **HITT 按信息生命周期拆分（[[F_50]]）**：静态协作契约（roster-agnostic 规则）由 `build_team_hitt_contract_section` 出，进 system prompt builder（P:12，KV 稳定）；动态人类成员名册由 `build_team_hitt_roster_section` 出 `team_hitt_roster`，进 attachment。组合入口 `build_team_hitt_section`（契约+名册拼一段）仅供外部 CLI 成员 / 测试（无 attachment 通道）。
+   - **TEAMMATE 默认走 anonymous 变体**：`_hitt_template_name` 对 `role == TEAMMATE` 默认选 `hitt_teammate_anonymous`——**无名单、无 "real humans" 标签**的 role-neutral 契约（只承载"跨成员一律 `send_message`、容忍延迟、不要推断 peer 身份"等通用守则），且**无 roster 段**（`build_team_hitt_roster_section` 返回 `None`）。开关 `TeamAgentSpec.expose_human_agents_to_teammates=True` 切回 `hitt_teammate` 并输出 roster 段。LEADER / HUMAN_AGENT 始终拿契约 + roster。
+8. **多数 `cn/` `en/` 模板为纯文本**：policy / workflow / lifecycle / attachment_notice / inbound_tags / HITT anonymous 不含占位符，`load_template` 原样返回。**例外**：Bridge 模板用 `{{roster}}`+`{{peers}}`、HITT 契约模板用 `{{peers}}`，由 builder `load_template(...).format({...})` 渲染（`{{ }}` 定界符）。（早期 `system_prompt.md` 壳模板随 legacy `build_system_prompt` 一并移除。）
 
 ### 双语 / i18n
 
@@ -50,15 +51,15 @@
 ### 缓存
 
 12. **`@cache` 永不失效**：`loader._load(name, language)` 用 `functools.cache` 终身缓存解析后的 `PromptTemplate`。运行进程不会感知文件改动；调试热更需重启进程或清 `_load.cache_clear()`。
-13. **`MtimeSectionCache` 仅用于动态 section**：当前仅 `team_info` / `team_members` 两片走该缓存。新增 dynamic section 必须提供单调递增的 `probe`（数据库 `updated_at` 列或聚合 `MAX(updated_at)`）；缺少 probe 的内容不应走 dynamic 路径。
+13. **动态 section 走 mtime 探针缓存**：`team_info` 走 `MtimeSectionCache`（team `updated_at` 探针）；HITT 契约 / HITT 名册 / `team_members` 三片共用 rail 内手写的 members 探针缓存（`get_members_max_updated_at` + `_members_cache_initialized`），一次探针刷新三片。新增 dynamic section 必须提供单调递增的 `probe`（数据库 `updated_at` 列或聚合 `MAX(updated_at)`）；缺少 probe 的内容不应走 dynamic 路径。
 14. **首次调用必 miss**：`MtimeSectionCache._initialized = False` 保证第一次 `refresh()` 一定执行 `fetch_and_build`，无视 probe 是否变化。
 
 ### Rail 注入契约
 
 15. **Rail 通过 DeepAgent 的 rail registry 注入，不直接修改 `SystemPromptBuilder`**：`TeamPolicyRail` 在 `init(agent)` 里捕获 `agent.system_prompt_builder` 引用，于 `before_model_call` 写入 section；在 `uninit(agent)` 里按名移除。**禁止**绕过 rail 把 section 直接 `add_section` 到 *DeepAgent 的共享 builder* 上。**例外（外部 CLI 成员）**：非 DeepAgent 的外部 CLI 成员没有共享 builder，由 `sections.build_team_member_system_prompt(...)` 把同一批静态 section 装进一个**一次性 `SystemPromptBuilder`** 渲染成独立字符串(见不变量 18a / [[F_25_external-cli-hardening-and-gemini]])——这不违反本条，因为它不触碰任何 DeepAgent 的共享 builder，且**只装 team section、排除其它 rail**。
-    - 18a. **静态 section 的单一真相源是 `sections.build_team_static_sections(...)`**：`TeamPolicyRail._build_static_sections` 与 `build_team_member_system_prompt` 都委托它构建 role/hitt/bridge/workflow/lifecycle/private-prompt/extra,保证进程内成员与外部 CLI 成员的团队 section 完全一致。成员**公开 `desc` 不进自己的 prompt**(只进他人花名册 team_members section);成员**私有 `prompt` 只进自己的 prompt**(team_private_prompt static section)。dynamic 的 info/members section 不在其中(依赖 live DB,外部 CLI 成员经 MCP 工具自取)。
+    - 18a. **静态 section 的单一真相源是 `sections.build_team_static_sections(...)`**：`TeamPolicyRail._build_static_sections` 与 `build_team_member_system_prompt` 都委托它构建 role/hitt(契约+名册)/bridge/workflow/lifecycle/private-prompt/extra。**HITT 例外**:rail 的 `_build_static_sections` **不传** `human_agent_names`,故 HITT 契约/名册在该路径返回 `None`、改由 rail 每轮动态刷新(契约→builder、名册→attachment);`build_team_member_system_prompt`(外部 CLI,无 attachment 通道)传入 spawn 期 `human_agent_names` 快照,把契约+名册内联进一次性 prompt。成员**公开 `desc` 不进自己的 prompt**(只进他人花名册 team_members section);成员**私有 `prompt` 只进自己的 prompt**(team_private_prompt static section)。dynamic 的 info/members section 不在其中(依赖 live DB,外部 CLI 成员经 MCP 工具自取)。
 16. **Mount order load-bearing**：`TeamHarness.build` 必须先挂 `TeamToolRail` 并 eager `init`，再挂 `TeamPolicyRail`。原因：policy 输出引用 ability 快照，能力必须先就位。Rail 顺序的修改必须同步检视 mount path。
-17. **`uninit` 必须把自己写入的 section 全部清掉**：`TeamPolicyRail.uninit` 删除 `_static_sections` 里的每个 section + 两个 dynamic section 名；rail 卸载后 builder 不得残留团队 section。
+17. **`uninit` 必须把自己写入 builder 的 section 全部清掉**：`TeamPolicyRail.uninit` 删除 `_static_sections` 里的每个 section + builder-bound 的 HITT 契约（`TeamSectionName.HITT`）；attachment-bound 的 roster/info/members 随 attachment_manager 销毁、无需 uninit 清理。rail 卸载后 builder 不得残留团队 section。
 18. **dynamic section 在 `team_backend is None` 时整体跳过**：单测可只关心 static 内容；`_info_cache` / `_members_cache` 在缺 backend 时不构造，rail 行为退化成纯静态。
 
 ### `FirstIterationGate`
@@ -107,7 +108,8 @@ def load_shared_template(name: str) -> PromptTemplate:
 ```python
 class TeamSectionName:
     ROLE = "team_role"        # P:11
-    HITT = "team_hitt"        # P:12
+    HITT = "team_hitt"        # P:12 — static collaboration contract (builder)
+    HITT_ROSTER = "team_hitt_roster"  # P:12 — human roster (attachment)
     WORKFLOW = "team_workflow"   # P:13
     LIFECYCLE = "team_lifecycle" # P:14
     PRIVATE_PROMPT = "team_private_prompt"  # P:16 — member-private prompt
@@ -194,12 +196,34 @@ def build_team_members_section(
     language: str = "cn",
 ) -> PromptSection | None: ...    # None when list empty after self exclusion
 
-def build_team_hitt_section(
+# HITT splits by information lifetime (F_50): the static contract rides the
+# system-prompt builder; the human-member roster rides the team_hitt_roster
+# attachment. build_team_hitt_section is the combined convenience entry
+# (contract + roster) for external CLI members / tests only.
+def build_team_hitt_contract_section(
     *,
     role: TeamRole,
     human_agent_names: Iterable[str] | None = None,
     language: str = "cn",
     self_member_name: str | None = None,
+    expose_human_agents_to_teammates: bool = False,
+) -> PromptSection | None: ...    # None when no humans / role has no HITT
+
+def build_team_hitt_roster_section(
+    *,
+    role: TeamRole,
+    human_agent_names: Iterable[str] | None = None,
+    language: str = "cn",
+    expose_human_agents_to_teammates: bool = False,
+) -> PromptSection | None: ...    # None when no humans / anonymous teammate
+
+def build_team_hitt_section(  # combined: contract + roster in one section
+    *,
+    role: TeamRole,
+    human_agent_names: Iterable[str] | None = None,
+    language: str = "cn",
+    self_member_name: str | None = None,
+    expose_human_agents_to_teammates: bool = False,
 ) -> PromptSection | None: ...    # None when no human members
 ```
 
@@ -256,9 +280,9 @@ class TeamPolicyRail(DeepAgentRail):
     async def before_model_call(self, ctx: AgentCallbackContext) -> None: ...
 ```
 
-- `__init__` 中一次性 build static section；HITT 段消费 `team_backend.human_agent_names()` 的快照。运行时新增 human-agent 不重建静态段，需要等 rail 重新构造（`build_team` 路径触发）。
-- `before_model_call` 是该 rail 的唯一写入点：先把所有 static section 写回 builder，再依次 `await` 两个 dynamic cache 的 `refresh`。dynamic cache 缺席（`team_backend is None`）时跳过。
-- `uninit` 必须把 `_DYNAMIC_SECTION_NAMES = (TeamSectionName.INFO, TeamSectionName.MEMBERS)` 也一起删——dynamic section 不在 `_static_sections` 里。
+- `__init__` 中一次性 build 真静态 section（role/bridge/workflow/lifecycle/private/extra + attachment/inbound 说明）。HITT 契约与 roster **不**在 `__init__` 冻结——它们随 members 探针每轮从 DB 刷新，运行时新增 human-agent 会在下一轮生效。
+- `before_model_call` 是该 rail 的唯一写入点：先把所有 static section 写回 builder，再 `_sync_dynamic_sections` 把 HITT 契约 upsert 进 builder（None 则 `remove_section`）、把 `team_hitt_roster` / `team_members` / `team_info` upsert 进 attachment（`team_backend` / attachment_manager 缺席时相应跳过）。
+- `uninit` 必须删 `_static_sections` 里每个 section + builder-bound 的 `TeamSectionName.HITT`（HITT 契约，不在 `_static_sections` 里）；attachment-bound 的 roster/info/members 随 manager 销毁。
 
 ### `rails/first_iteration_gate.py`
 
@@ -381,8 +405,9 @@ class TeamPermissionRail(PermissionInterruptRail):
 | `_member_name` | `str \| None` | 用作 dynamic members section 的自身排除 |
 | `_team_backend` | `TeamBackend \| None` | dynamic cache probe / fetch 的来源；`None` 退化为纯静态 |
 | `_team_workspace_mount` / `_team_workspace_path` | `str \| None` | info section 的可选附加 |
-| `_static_sections` | `list[PromptSection]` | 构造期产出的不变内容（已剔除 `None`） |
-| `_info_cache` / `_members_cache` | `MtimeSectionCache \| None` | 仅在 `team_backend` 存在时构造 |
+| `_static_sections` | `list[PromptSection]` | 构造期产出的不变内容（已剔除 `None`），含两个说明 section |
+| `_info_cache` | `MtimeSectionCache \| None` | 仅在 `team_backend` 存在时构造；team_info 探针缓存 |
+| `_cached_hitt_contract` / `_cached_hitt_roster` / `_cached_members_section` | `PromptSection \| None` | members 探针共享缓存的三片产物：contract → builder，roster / members → attachment |
 | `system_prompt_builder` | `SystemPromptBuilder \| None` | `init` 时绑定，`uninit` 时解绑 |
 
 ### `FirstIterationGate` 状态字段
