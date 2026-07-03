@@ -28,9 +28,9 @@
 
 ### 装配路径
 
-1. **两条装配路径并存且都消费同一批 `.md`**：`policy.build_system_prompt`（老路径，把所有内容塞进 `system_prompt.md` 一次成壳）与 `sections.build_team_*_section`（主力路径，每片内容独立产出 `PromptSection`）读的是同一个 `prompts/<lang>/*.md` 目录。模板正文修改自动同时生效。
-2. **结构性变更必须明确归属一条路径**：占位符增减只影响 `policy.py`（`system_prompt.md` 是它的私产）；section 名 / priority 调整只影响 `sections.py` + `TeamPolicyRail`。两条路径的结构演化彼此独立。
-3. **生产路径是 `sections.py` + `TeamPolicyRail`**：`TeamHarness.build` 走的是 rail 注入。`policy.build_system_prompt` 仅供未走 rail 的旧调用者保留兼容。
+1. **唯一装配路径 `sections.build_team_*_section`**：每片内容独立产出 `PromptSection`，读 `prompts/<lang>/*.md`。由 `TeamPolicyRail` 合并进 `SystemPromptBuilder`（进程内成员），或经 `build_team_member_system_prompt` 渲染成独立字符串（外部 CLI 成员）。模板正文修改即时生效。
+2. **`policy.role_policy` 只加载 role policy 文本**：按角色返回 `leader_policy` / `teammate_policy` markdown，供 role section 消费；不再做整壳装配。
+3. **生产路径就是 rail 注入**：`TeamHarness.build` 走 `TeamPolicyRail`。早期的 `policy.build_system_prompt` + `system_prompt.md` 壳模板老路径仅测试在用，已随 desc/prompt 归一移除（测试迁移到 `role_policy` / `build_team_member_system_prompt`）。
 
 ### Section / 文件落位
 
@@ -39,7 +39,7 @@
 6. **section priority 单调约定**：团队静态 section 占 11–16，团队动态 section 占 65–66；harness 内置 section 排在 0–10、20–60、70–99。priority 升序拼接，相同 priority 顺序由 `dict` 插入序决定。
 7. **role-specific section 在不应出现的角色下返回 `None`**：`build_team_workflow_section` / `build_team_lifecycle_section` 在 `role != LEADER` 时返回 `None`；`build_team_hitt_section` 在没有 human_agent 注册时返回 `None`。**禁止用空字符串占位**——返回 `None` 等价于不挂 section。
    - **TEAMMATE 默认走 anonymous 变体**：`build_team_hitt_section` 对 `role == TEAMMATE` 默认渲染一段**无名单、无 "real humans" 标签**的 role-neutral section（只承载"跨成员一律 `send_message`、容忍延迟、不要推断 peer 身份"等通用协作守则），peer role 不会泄漏到其它成员的 system prompt。开关 `TeamAgentSpec.expose_human_agents_to_teammates=True` 切换回旧版 roster-exposing section（列出所有 human_agent `member_name` + "real humans" 标签）。LEADER / HUMAN_AGENT 分支不受开关影响，始终拿完整 roster section。
-8. **`.md` 模板里只能用 `{{double_brace}}` 占位符**：单花括号会被 `PromptTemplate.format` 当字面量。当前只有 `system_prompt.md` 使用占位符；`cn/` `en/` 下的模板均为纯文本。
+8. **`cn/` `en/` 下的模板均为纯文本**：不使用占位符，`load_template` 原样返回内容。（`{{double_brace}}` 占位符壳模板 `system_prompt.md` 随 legacy `build_system_prompt` 一并移除。）
 
 ### 双语 / i18n
 
@@ -103,25 +103,10 @@ def load_shared_template(name: str) -> PromptTemplate:
 def role_policy(role: TeamRole, language: str = "cn") -> str:
     """Return the leader_policy or teammate_policy markdown text."""
     ...
-
-def build_system_prompt(
-    *,
-    role: TeamRole,
-    base_prompt: str | None = None,
-    team_info: dict[str, Any] | None = None,
-    team_members: list[dict[str, str]] | None = None,
-    member_name: str | None = None,
-    lifecycle: str = "temporary",
-    language: str = "cn",
-    team_mode: str = "default",
-) -> str:
-    """Compose the full system prompt by stuffing system_prompt.md placeholders."""
-    ...
 ```
 
-- `team_mode` 取值 `{"default", "predefined", "hybrid"}`，由 `_WORKFLOW_TEMPLATES` 映射到 `leader_workflow*.md`；非法值走 `"default"`。
-- `lifecycle` 取值 `{"persistent", "temporary"}`，非 `"persistent"` 走 `lifecycle_temporary`。
-- 输出字符串供 `DeepAgentSpec.system_prompt` 消费，进入 `SystemPromptBuilder` 的 IDENTITY 槽位。
+- LEADER 加载 `leader_policy`，其它角色加载 `teammate_policy`；返回的 markdown 供 `sections.py` 的 role section 消费。
+- `team_mode`（`{"default","predefined","hybrid"}` → `leader_workflow*.md`）与 `lifecycle`（`{"temporary","persistent"}` → `lifecycle_*.md`）的映射现由 `sections.build_team_workflow_section` / `build_team_lifecycle_section` 承担（`sections.py` 自己的 `_WORKFLOW_TEMPLATES`），非法值走 `"default"` / `lifecycle_temporary`。
 
 ### `prompts/sections.py`
 

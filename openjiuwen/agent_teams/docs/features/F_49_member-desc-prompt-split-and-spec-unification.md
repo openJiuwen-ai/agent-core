@@ -92,6 +92,7 @@
 
 ## 已知遗留
 
-- `prompts/policy.py`（`build_system_prompt` legacy 装配路径）当前无活跃调用者
-  （`role_policy` 被用但不传 persona），已随本次一并去掉其 persona 注入以保持一致。若后续
-  确认整条 legacy 路径可删，另开清理。
+- （已清理）`prompts/policy.py` 的 `build_system_prompt` + `_build_team_policy` legacy 装配路径
+  确认仅测试在用，已随本次一并删除（连同 `system_prompt.md` 壳模板与 `_format_team_*` helper）；
+  `policy.py` 精简为纯 `role_policy` 加载器，测试迁移到 `role_policy` 与主力路径
+  `build_team_member_system_prompt`。唯一装配路径现在只有 `sections.py` + `TeamPolicyRail`。
