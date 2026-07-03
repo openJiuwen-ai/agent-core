@@ -25,13 +25,17 @@ Markdown 模板是团队 Agent 的行为契约。Python 侧只做装配（`secti
 | `leader_workflow_hybrid.md` | Leader 且 `team_mode="hybrid"` | `build_team_workflow_section` | 混合团队工作流：预注册基础成员 + 允许动态 `spawn_teammate` 扩员 |
 | `lifecycle_persistent.md` | Leader 且 `lifecycle="persistent"` | `build_team_lifecycle_section` | 长期团队收尾语义（完成任务后待命，不解散） |
 | `lifecycle_temporary.md` | Leader 且 `lifecycle="temporary"`（默认） | `build_team_lifecycle_section` | 临时团队收尾语义（shutdown → clean_team） |
+| `attachment_notice.md` | 常驻（每个成员） | `build_team_attachment_notice_section` | 团队动态状态说明：名册 / 团队信息 / HITT 以 `<prompt-attachment>` 挂在消息尾部，逐轮刷新 |
+| `inbound_tags.md` | 常驻（每个成员） | `build_team_inbound_tags_section` | 入站消息 XML 标签体系（`<team-inbound>` / `<team-note>` / `<team-event>`、`for="controller"`） |
+| `hitt_leader.md` / `hitt_teammate.md` / `hitt_teammate_anonymous.md` / `hitt_human_agent.md` | 存在 human_agent 成员，且角色命中 | `build_team_hitt_section` | HITT 协作规则，按角色分四版；`{{roster}}` 注入人类成员名册，`{{peers}}` 注入自身名字 |
+| `bridge_leader.md` / `bridge_teammate.md` / `bridge_agent.md` | 存在 bridge_agent 成员，且角色命中 | `build_team_bridge_section` | Bridge 协作规则，按角色分三版；`{{roster}}` 注入桥接成员名册，`{{peers}}` 注入自身名字 |
 
-Teammate 不消费 workflow / lifecycle 模板；`sections.py` 在 `role != LEADER` 时对这两个 section 直接返回 None。
+Teammate 不消费 workflow / lifecycle 模板；`sections.py` 在 `role != LEADER` 时对这两个 section 直接返回 None。HITT / Bridge 模板仅在存在对应成员时按角色挑选（见 `_hitt_template_name` / `_bridge_template_name`）。
 
 ## 编辑规则（Hard Constraints）
 
 1. **cn / en 双语对齐** — 任何语义变更必须同步修改两种语言文件。结构、小节顺序、字段名保持一致，只翻译文本。
-2. **`.md` 模板是纯文本** — `cn/` `en/` 下的模板不含占位符，`load_template` 原样返回内容。（占位符壳模板 `system_prompt.md` 已随 legacy `build_system_prompt` 一并移除。）
+2. **动态值走 `{{name}}` 占位符** — 需要注入运行期数据的模板（HITT / Bridge 的成员名册 `{{roster}}`、自身名字 `{{peers}}`）用 `PromptTemplate` 默认的 `{{ }}` 定界符，由 builder 调 `load_template(...).format({...})` 渲染；名册 / 自身名字这类动态行仍由 Python 侧的 `_format_*_roster` / `_self_member_line` 生成后注入。纯静态模板（policy / workflow / lifecycle / attachment_notice / inbound_tags 等）不含占位符，`load_template` 原样返回。
 3. **`@cache` 基于 `(name, language)`** — 运行中的进程不会感知文件改动。开发时如需热更新，重启进程或清 `_load.cache_clear()`。
 4. **空分节省略而不是空字符串** — 新增可选章节时，参考 `build_team_workflow_section` / `build_team_lifecycle_section` 的 None 处理方式（`sections.py` 在 `role != LEADER` 时直接返回 None）。**不要在 `.md` 里写占位文字**。
 5. **策略分层不要重复写** — `leader_policy.md` 谈"角色身份/决策原则"，`leader_workflow.md` 谈"操作步骤"，`tools/locales/descs/*.md` 谈"工具使用语义"。三层内容互不重叠（参见 `agent_teams/tools/AGENTS.md` 的 Prompt Layering 章节）。
