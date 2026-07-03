@@ -879,6 +879,21 @@ class TeamBackend:
         """
         return await self.db.member.get_member(member_name, self.team_name)
 
+    async def member_exists(self, member_name: str) -> bool:
+        """Check whether a member exists without loading its full row.
+
+        For callers that only need presence (recipient validation, roster
+        membership tests). Avoids ``get_member`` pulling ``agent_card`` /
+        ``prompt`` / ``options`` just to test for ``None``.
+
+        Args:
+            member_name: Member identifier.
+
+        Returns:
+            True when the member exists in this team.
+        """
+        return await self.db.member.member_exists(member_name, self.team_name)
+
     async def list_members(self) -> List[TeamMember]:
         """List all team members
 

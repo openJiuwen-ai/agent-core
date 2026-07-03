@@ -470,6 +470,28 @@ class TestMemberOperations:
 
     @pytest.mark.asyncio
     @pytest.mark.level0
+    async def test_member_exists(self, db):
+        """member_exists returns True only for a present member row."""
+        await db.team.create_team(
+            team_name="team_exists",
+            display_name="Team Exists",
+            leader_member_name="leader_e",
+        )
+        agent_card = AgentCard(name="ExistAgent").model_dump_json()
+        await db.member.create_member(
+            member_name="present",
+            team_name="team_exists",
+            display_name="Present",
+            agent_card=agent_card,
+            status="ready",
+        )
+
+        assert await db.member.member_exists("present", "team_exists") is True
+        assert await db.member.member_exists("absent", "team_exists") is False
+        assert await db.member.member_exists("present", "other_team") is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_update_member_status(self, db):
         """Test updating member status"""
         await db.team.create_team(
