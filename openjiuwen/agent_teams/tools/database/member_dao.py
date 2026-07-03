@@ -5,7 +5,7 @@
 
 from typing import List, Optional
 
-from sqlalchemy import func, select, update
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from openjiuwen.agent_teams.schema.status import (
@@ -128,6 +128,29 @@ class MemberDao:
                 TeamMember.role == TeamRole.HUMAN_AGENT.value,
             )
             return list((await session.execute(stmt)).scalars().all())
+
+    async def member_exists(self, member_name: str, team_name: str) -> bool:
+        """Check whether a member row exists, without loading it.
+
+        An ``EXISTS`` probe for callers that only need presence (e.g.
+        recipient validation) instead of ``get_member``, which loads the
+        full row (``agent_card`` / ``prompt`` / ``options``).
+
+        Args:
+            member_name: Member identifier.
+            team_name: Team identifier.
+
+        Returns:
+            True when a matching member row exists.
+        """
+        async with self._sessions.read() as session:
+            stmt = select(
+                exists().where(
+                    TeamMember.member_name == member_name,
+                    TeamMember.team_name == team_name,
+                )
+            )
+            return bool((await session.execute(stmt)).scalar())
 
     async def get_member(self, member_name: str, team_name: str) -> Optional[TeamMember]:
         """Get member information by ID."""

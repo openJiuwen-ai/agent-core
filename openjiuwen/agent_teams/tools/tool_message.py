@@ -101,8 +101,7 @@ class SendMessageTool(TeamTool):
         # "user" is the pseudo-member representing the human caller; skip
         # roster validation so teammates can reply through the same tool.
         if self._team and to != "user":
-            member = await self._team.get_member(to)
-            if not member:
+            if not await self._team.member_exists(to):
                 return ToolOutput(success=False, error=f"Member '{to}' not found")
         await self._auto_start_members()
         msg_id = await self.message_manager.send_message(content=content, to_member_name=to)
@@ -175,8 +174,7 @@ class SendMessageTool(TeamTool):
         valid: list[str] = []
         for name in deduped:
             if self._team:
-                member = await self._team.get_member(name)
-                if not member:
+                if not await self._team.member_exists(name):
                     failed.append({"to": name, "reason": f"Member '{name}' not found"})
                     continue
             valid.append(name)
