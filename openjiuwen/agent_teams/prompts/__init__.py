@@ -9,10 +9,10 @@ instead of reaching into individual files.
 
 Layout:
 - ``loader``: ``load_template`` / ``load_shared_template`` for markdown.
-- ``policy``: legacy monolithic ``build_system_prompt`` + ``role_policy``.
+- ``policy``: role-policy markdown loader (``role_policy``).
 - ``sections``: per-section ``PromptSection`` builders consumed by the rail.
 - ``section_cache``: mtime-keyed cache primitive for dynamic sections.
-- ``system_prompt.md`` / ``cn/`` / ``en/``: markdown templates.
+- ``cn/`` / ``en/``: markdown templates.
 """
 
 from __future__ import annotations
@@ -21,10 +21,7 @@ from openjiuwen.agent_teams.prompts.loader import (
     load_shared_template,
     load_template,
 )
-from openjiuwen.agent_teams.prompts.policy import (
-    build_system_prompt,
-    role_policy,
-)
+from openjiuwen.agent_teams.prompts.policy import role_policy
 from openjiuwen.agent_teams.prompts.section_cache import MtimeSectionCache
 from openjiuwen.agent_teams.prompts.sections import (
     TeamSectionName,
@@ -69,7 +66,6 @@ __all__ = [
     "TEAM_PLAN_MODE_PROMPT_EN",
     "TeamSectionName",
     "apply_team_plan_agent_prompt",
-    "build_system_prompt",
     "build_team_attachment_notice_section",
     "build_team_bridge_section",
     "build_team_plan_agent_card",
