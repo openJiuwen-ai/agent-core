@@ -121,7 +121,7 @@ async def hitt_team_backend(db, messager):
                 member_name=HUMAN_AGENT_MEMBER_NAME,
                 display_name="Human",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="Default human collaborator",
+                desc="Default human collaborator",
             ),
         ],
         enable_hitt=True,
@@ -191,7 +191,7 @@ def test_enable_hitt_with_declared_human_agent_passes_validation():
         member_name=HUMAN_AGENT_MEMBER_NAME,
         display_name="Custom Human",
         role_type=TeamRole.HUMAN_AGENT,
-        persona="Custom persona",
+        desc="Custom persona",
     )
     spec = _minimal_spec(enable_hitt=True, predefined_members=[pre])
     spec._validate_hitt_consistency()  # must not raise
@@ -211,7 +211,7 @@ def test_enable_hitt_false_with_human_agent_predefined_raises():
         member_name=HUMAN_AGENT_MEMBER_NAME,
         display_name="Custom Human",
         role_type=TeamRole.HUMAN_AGENT,
-        persona="Custom persona",
+        desc="Custom persona",
     )
     spec = _minimal_spec(enable_hitt=False, predefined_members=[pre])
     from openjiuwen.core.common.exception.errors import BaseError
@@ -239,7 +239,7 @@ def test_predefined_member_cannot_use_reserved_name():
     pre = TeamMemberSpec(
         member_name=USER_PSEUDO_MEMBER_NAME,
         display_name="x",
-        persona="x",
+        desc="x",
     )
     spec = _minimal_spec(predefined_members=[pre])
     with pytest.raises(ValueError, match="reserved name"):
@@ -624,13 +624,13 @@ def _multi_human_spec() -> TeamAgentSpec:
                 member_name="human_designer",
                 display_name="Designer",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="Visual designer",
+                desc="Visual designer",
             ),
             TeamMemberSpec(
                 member_name="human_pm",
                 display_name="Product Manager",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="PM",
+                desc="PM",
             ),
         ],
     )
@@ -669,13 +669,13 @@ async def multi_human_backend(db, messager):
                 member_name="human_designer",
                 display_name="Designer",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="Visual designer",
+                desc="Visual designer",
             ),
             TeamMemberSpec(
                 member_name="human_pm",
                 display_name="PM",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="Product",
+                desc="Product",
             ),
         ],
         enable_hitt=True,
@@ -1105,7 +1105,7 @@ def test_resolve_team_mode_ignores_human_agent_in_predefined():
         member_name=HUMAN_AGENT_MEMBER_NAME,
         display_name="H",
         role_type=TeamRole.HUMAN_AGENT,
-        persona="x",
+        desc="x",
     )
     spec = _minimal_spec(enable_hitt=True, predefined_members=[pre])
     assert _resolve_team_mode(spec) == "default"
@@ -1120,7 +1120,7 @@ def test_resolve_team_mode_hybrid_when_non_human_member():
         member_name="dev_1",
         display_name="Dev",
         role_type=TeamRole.TEAMMATE,
-        persona="x",
+        desc="x",
     )
     spec = _minimal_spec(predefined_members=[pre])
     assert _resolve_team_mode(spec) == "hybrid"
@@ -1138,13 +1138,13 @@ def test_resolve_team_mode_hybrid_with_mixed_roster():
                 member_name=HUMAN_AGENT_MEMBER_NAME,
                 display_name="H",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="x",
+                desc="x",
             ),
             TeamMemberSpec(
                 member_name="dev_1",
                 display_name="Dev",
                 role_type=TeamRole.TEAMMATE,
-                persona="x",
+                desc="x",
             ),
         ],
     )
@@ -1160,7 +1160,7 @@ def test_resolve_team_mode_explicit_predefined_overrides_derivation():
         member_name="dev_1",
         display_name="Dev",
         role_type=TeamRole.TEAMMATE,
-        persona="x",
+        desc="x",
     )
     spec = _minimal_spec(predefined_members=[pre], team_mode="predefined")
     assert _resolve_team_mode(spec) == "predefined"

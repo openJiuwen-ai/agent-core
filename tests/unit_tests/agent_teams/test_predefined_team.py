@@ -62,13 +62,13 @@ def predefined_members():
         TeamMemberSpec(
             member_name="backend-dev",
             display_name="Backend Developer",
-            persona="Senior backend engineer",
-            prompt_hint="Check tasks and start working",
+            desc="Senior backend engineer",
+            prompt="Check tasks and start working",
         ),
         TeamMemberSpec(
             member_name="frontend-dev",
             display_name="Frontend Developer",
-            persona="Senior frontend engineer",
+            desc="Senior frontend engineer",
         ),
     ]
 
@@ -147,7 +147,9 @@ class TestBuildTeamWithPredefinedMembers:
         assert backend_dev.desc == "Senior backend engineer"
         assert backend_dev.prompt == "Check tasks and start working"
         assert frontend_dev.desc == "Senior frontend engineer"
-        assert frontend_dev.prompt is None
+        # A predefined member with no ``prompt`` stores the schema default (empty
+        # string), not NULL — ``MemberSpecBase.prompt`` defaults to "".
+        assert frontend_dev.prompt == ""
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -335,7 +337,6 @@ class TestPredefinedTeamPrompt:
 
         prompt = build_system_prompt(
             role=TeamRole.LEADER,
-            persona="PM",
             team_mode="predefined",
         )
         logger.info("Predefined prompt length: {}", len(prompt))
@@ -349,7 +350,6 @@ class TestPredefinedTeamPrompt:
 
         prompt = build_system_prompt(
             role=TeamRole.LEADER,
-            persona="PM",
             team_mode="default",
         )
 
@@ -361,7 +361,6 @@ class TestPredefinedTeamPrompt:
 
         prompt = build_system_prompt(
             role=TeamRole.LEADER,
-            persona="PM",
             team_mode="hybrid",
         )
 
@@ -374,7 +373,6 @@ class TestPredefinedTeamPrompt:
 
         prompt = build_system_prompt(
             role=TeamRole.TEAMMATE,
-            persona="Dev",
             team_mode="predefined",
         )
 

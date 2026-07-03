@@ -76,13 +76,13 @@ def _make_leader(
         leader=LeaderSpec(
             member_name=member_name,
             display_name="Leader",
-            persona="PM",
+            desc="PM",
         ),
     )
     context = TeamRuntimeContext(
         role=TeamRole.LEADER,
         member_name=member_name,
-        persona="PM",
+        desc="PM",
         team_spec=team_spec,
         db_config=DatabaseConfig(db_type="memory"),
     )
@@ -136,14 +136,14 @@ def _make_human_agent(member_name: str = "human_alice") -> TeamAgent:
                 member_name=member_name,
                 display_name="Alice",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="user avatar",
+                desc="user avatar",
             ),
         ],
     )
     context = TeamRuntimeContext(
         role=TeamRole.HUMAN_AGENT,
         member_name=member_name,
-        persona="user avatar",
+        desc="user avatar",
         team_spec=team_spec,
         db_config=DatabaseConfig(db_type="memory"),
     )
@@ -255,7 +255,7 @@ def _make_teammate() -> TeamAgent:
     ctx = TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
         member_name="dev-1",
-        persona="dev",
+        desc="dev",
         team_spec=team_spec,
         db_config=DatabaseConfig(db_type="memory"),
     )
@@ -334,7 +334,7 @@ async def test_tool_approval_event_resumes_interrupt():
     ctx = TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
         member_name="dev-1",
-        persona="dev",
+        desc="dev",
         team_spec=team_spec,
     )
     agent = TeamAgent(AgentCard(id="dev-1", name="dev", description="test"))
@@ -590,7 +590,7 @@ async def test_teammate_does_not_self_shutdown_on_member_shutdown():
     ctx = TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
         member_name="dev-1",
-        persona="dev",
+        desc="dev",
         team_spec=team_spec,
         db_config=DatabaseConfig(db_type="memory"),
     )

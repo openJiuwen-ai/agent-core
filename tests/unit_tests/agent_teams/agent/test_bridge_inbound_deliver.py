@@ -89,7 +89,7 @@ async def _make_backend_with_bridge(db, messager) -> TeamBackend:
     await backend.spawn_bridge_agent(
         member_name="codex",
         display_name="Codex",
-        persona="senior python reviewer",
+        prompt="senior python reviewer",
         mailbox_inject_mode=BridgeMailboxInjectMode.PASSTHROUGH,
     )
     return backend
@@ -147,11 +147,11 @@ class _FakeAdapter:
         *,
         member_name: str,
         adapter_config: dict[str, object],
-        bridge_persona: str,
+        prompt: str,
         team_overview: str,
     ) -> None:
         """No-op."""
-        del member_name, adapter_config, bridge_persona, team_overview
+        del member_name, adapter_config, prompt, team_overview
 
     async def relay(self, *, member_name: str, text: str) -> str:
         """Capture + canned reply."""
@@ -211,11 +211,11 @@ class _RaisingAdapter:
         *,
         member_name: str,
         adapter_config: dict[str, object],
-        bridge_persona: str,
+        prompt: str,
         team_overview: str,
     ) -> None:
         """No-op."""
-        del member_name, adapter_config, bridge_persona, team_overview
+        del member_name, adapter_config, prompt, team_overview
 
     async def relay(self, *, member_name: str, text: str) -> str:
         """Always fails."""
@@ -241,7 +241,7 @@ async def test_bridge_deliverable_swallows_adapter_exception(db, messager):
 
 
 # ---------------------------------------------------------------------------
-# REPHRASE injection mode includes sender role / persona
+# REPHRASE injection mode includes sender role / desc
 # ---------------------------------------------------------------------------
 
 
@@ -265,7 +265,7 @@ async def test_bridge_deliverable_rephrase_mode_includes_sender_context(db, mess
     await backend.spawn_bridge_agent(
         member_name="codex",
         display_name="Codex",
-        persona="reviewer",
+        prompt="reviewer",
         mailbox_inject_mode=BridgeMailboxInjectMode.REPHRASE,
     )
     adapter = _FakeAdapter()
@@ -275,7 +275,7 @@ async def test_bridge_deliverable_rephrase_mode_includes_sender_context(db, mess
 
     await handler._bridge_deliverable_for("codex", msg)
 
-    # The REPHRASE outbound includes the sender's role + persona so the
+    # The REPHRASE outbound includes the sender's role + desc so the
     # remote sees who it's talking to.
     assert "leader" in adapter.last_text.lower()
     assert "human_agent" not in adapter.last_text

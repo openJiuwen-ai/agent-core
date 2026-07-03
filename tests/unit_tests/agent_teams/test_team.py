@@ -1457,3 +1457,35 @@ async def test_try_transition_member_status_atomic_cas(db):
         "dev-1", team_id, MemberStatus.UNSTARTED, MemberStatus.STARTING,
     )
     assert ok2 is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_team_persists_leader_prompt(db, message_bus):
+    """build_team writes the leader's private prompt onto the leader DB row.
+
+    The leader's private prompt (LeaderSpec.prompt, supplied via ctx.prompt to
+    the TeamBackend ``leader_prompt`` arg) must land on the leader member row —
+    cold-recovery rebuilds the leader context from the DB, so a prompt that only
+    lived in the runtime rail would be lost on recovery. The public leader_desc
+    goes to desc; the private prompt goes to prompt.
+    """
+    backend = TeamBackend(
+        team_name="lp_team",
+        member_name="lead",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        leader_prompt="private working agreement",
+    )
+    await backend.build_team(
+        display_name="LP Team",
+        desc="team goal",
+        leader_display_name="Lead",
+        leader_desc="public role blurb",
+    )
+
+    row = await db.member.get_member("lead", "lp_team")
+    assert row is not None
+    assert row.prompt == "private working agreement"
+    assert row.desc == "public role blurb"

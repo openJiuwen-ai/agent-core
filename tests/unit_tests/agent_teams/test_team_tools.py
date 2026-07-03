@@ -379,7 +379,7 @@ class TestSpawnTools:
         """A cli_agent absent from external_cli_agents is rejected (capability ceiling)."""
         tool = SpawnExternalCliTool(agent_team, t)
         result = await tool.invoke(
-            {"member_name": "cli-2", "display_name": "CLI Two", "desc": "worker", "cli_agent": "claude"}
+            {"member_name": "cli-2", "display_name": "CLI Two", "prompt": "worker", "cli_agent": "claude"}
         )
         assert result.success is False
         assert "not declared" in (result.error or "")
@@ -399,7 +399,7 @@ class TestSpawnTools:
         )
         tool = SpawnExternalCliTool(team, t)
         result = await tool.invoke(
-            {"member_name": "claude-1", "display_name": "Claude One", "desc": "reviewer", "cli_agent": "claude"}
+            {"member_name": "claude-1", "display_name": "Claude One", "prompt": "reviewer", "cli_agent": "claude"}
         )
         assert result.success is True, result.error
         assert result.data["role_type"] == "external_cli"

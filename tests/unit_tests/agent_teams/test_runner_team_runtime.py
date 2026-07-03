@@ -122,7 +122,7 @@ class FakeTeamAgent:
                 "context": {
                     "role": "leader",
                     "member_name": "leader",
-                    "persona": "leader",
+                    "desc": "leader",
                     "team_spec": {
                         "team_name": self.team_name,
                         "display_name": self.team_name,
@@ -1015,7 +1015,7 @@ def test_team_agent_recover_from_session_restores_session_id():
             "context": {
                 "role": "leader",
                 "member_name": "leader",
-                "persona": "leader",
+                "desc": "leader",
                 "team_spec": {
                     "team_name": "persistent_team",
                     "display_name": "persistent_team",
@@ -1057,7 +1057,7 @@ def test_team_agent_recover_from_session_builds_leader_member_handle():
             "context": {
                 "role": "leader",
                 "member_name": "leader",
-                "persona": "leader",
+                "desc": "leader",
                 "team_spec": {
                     "team_name": "persistent_team",
                     "display_name": "persistent_team",
