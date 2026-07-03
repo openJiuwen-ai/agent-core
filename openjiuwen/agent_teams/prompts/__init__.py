@@ -8,8 +8,7 @@ TeamAgent. Consumers (rails, configurators, tests) import from here
 instead of reaching into individual files.
 
 Layout:
-- ``loader``: ``load_template`` / ``load_shared_template`` for markdown.
-- ``policy``: role-policy markdown loader (``role_policy``).
+- ``loader``: ``load_template`` for markdown.
 - ``sections``: per-section ``PromptSection`` builders consumed by the rail.
 - ``section_cache``: mtime-keyed cache primitive for dynamic sections.
 - ``cn/`` / ``en/``: markdown templates.
@@ -17,11 +16,7 @@ Layout:
 
 from __future__ import annotations
 
-from openjiuwen.agent_teams.prompts.loader import (
-    load_shared_template,
-    load_template,
-)
-from openjiuwen.agent_teams.prompts.policy import role_policy
+from openjiuwen.agent_teams.prompts.loader import load_template
 from openjiuwen.agent_teams.prompts.section_cache import MtimeSectionCache
 from openjiuwen.agent_teams.prompts.sections import (
     TeamSectionName,
@@ -84,7 +79,5 @@ __all__ = [
     "build_team_static_sections",
     "build_team_workflow_section",
     "get_team_plan_mode_prompt",
-    "load_shared_template",
     "load_template",
-    "role_policy",
 ]
