@@ -1,13 +1,10 @@
 # coding: utf-8
-"""Tests for role policy and system prompt construction."""
+"""Tests for role policy text (the leader/teammate policy markdown slice)."""
 from __future__ import annotations
 
 import pytest
 
-from openjiuwen.agent_teams.prompts import (
-    build_system_prompt,
-    role_policy,
-)
+from openjiuwen.agent_teams.prompts import role_policy
 from openjiuwen.agent_teams.agent.agent_configurator import (
     _TEAM_WORKTREE_BASH_DENY_PATTERNS,
     _apply_team_worktree_shell_guard,
@@ -67,51 +64,34 @@ def test_team_worktree_shell_guard_merges_existing_sys_operation():
 
 
 @pytest.mark.level1
-def test_build_system_prompt_includes_all_parts():
-    prompt = build_system_prompt(
-        role=TeamRole.LEADER,
-    )
-    assert "create_task" in prompt
-
-
-@pytest.mark.level1
-def test_leader_prompt_carries_collaboration_mechanism_boundary_cn():
-    prompt = build_system_prompt(
-        role=TeamRole.LEADER,
-        language="cn",
-    )
+def test_leader_policy_carries_collaboration_mechanism_boundary_cn():
+    policy = role_policy(TeamRole.LEADER, language="cn")
 
     # Leader must see the swarmflow vs build_team routing boundary.
-    assert "协作机制选择" in prompt
-    assert "涌现式" in prompt
-    assert "swarmflow" in prompt
+    assert "协作机制选择" in policy
+    assert "涌现式" in policy
+    assert "swarmflow" in policy
     # Concrete anti-pattern anchor: fixed-count sequential tasks stay on swarmflow.
-    assert "顺序接力" in prompt
-    assert "固定结束条件" in prompt
+    assert "顺序接力" in policy
+    assert "固定结束条件" in policy
 
 
 @pytest.mark.level1
-def test_leader_prompt_carries_collaboration_mechanism_boundary_en():
-    prompt = build_system_prompt(
-        role=TeamRole.LEADER,
-        language="en",
-    )
+def test_leader_policy_carries_collaboration_mechanism_boundary_en():
+    policy = role_policy(TeamRole.LEADER, language="en")
 
-    assert "Collaboration Mechanism" in prompt
-    assert "emergent" in prompt
-    assert "swarmflow" in prompt
-    assert "sequential relay" in prompt
-    assert "fixed end condition" in prompt
+    assert "Collaboration Mechanism" in policy
+    assert "emergent" in policy
+    assert "swarmflow" in policy
+    assert "sequential relay" in policy
+    assert "fixed end condition" in policy
 
 
 @pytest.mark.level1
-def test_teammate_prompt_omits_leader_collaboration_boundary():
-    prompt = build_system_prompt(
-        role=TeamRole.TEAMMATE,
-        language="cn",
-    )
+def test_teammate_policy_omits_leader_collaboration_boundary():
+    policy = role_policy(TeamRole.TEAMMATE, language="cn")
 
     # The routing boundary is a leader-only concern; it must not leak to teammates.
-    assert "协作机制选择" not in prompt
-    assert "涌现式" not in prompt
-    assert "顺序接力" not in prompt
+    assert "协作机制选择" not in policy
+    assert "涌现式" not in policy
+    assert "顺序接力" not in policy

@@ -333,10 +333,11 @@ class TestPredefinedTeamPrompt:
 
     @pytest.mark.level1
     def test_predefined_prompt_includes_override(self):
-        from openjiuwen.agent_teams.prompts import build_system_prompt
+        from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 
-        prompt = build_system_prompt(
+        prompt = build_team_member_system_prompt(
             role=TeamRole.LEADER,
+            member_name="leader",
             team_mode="predefined",
         )
         logger.info("Predefined prompt length: {}", len(prompt))
@@ -346,10 +347,11 @@ class TestPredefinedTeamPrompt:
 
     @pytest.mark.level1
     def test_auto_team_prompt_no_override(self):
-        from openjiuwen.agent_teams.prompts import build_system_prompt
+        from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 
-        prompt = build_system_prompt(
+        prompt = build_team_member_system_prompt(
             role=TeamRole.LEADER,
+            member_name="leader",
             team_mode="default",
         )
 
@@ -357,10 +359,11 @@ class TestPredefinedTeamPrompt:
 
     @pytest.mark.level1
     def test_hybrid_prompt_includes_hybrid_mode(self):
-        from openjiuwen.agent_teams.prompts import build_system_prompt
+        from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 
-        prompt = build_system_prompt(
+        prompt = build_team_member_system_prompt(
             role=TeamRole.LEADER,
+            member_name="leader",
             team_mode="hybrid",
         )
 
@@ -369,10 +372,11 @@ class TestPredefinedTeamPrompt:
 
     @pytest.mark.level1
     def test_predefined_workflow_not_applied_to_teammate(self):
-        from openjiuwen.agent_teams.prompts import build_system_prompt
+        from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 
-        prompt = build_system_prompt(
+        prompt = build_team_member_system_prompt(
             role=TeamRole.TEAMMATE,
+            member_name="worker",
             team_mode="predefined",
         )
 
