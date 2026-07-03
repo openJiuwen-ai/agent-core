@@ -303,72 +303,13 @@ def build_team_extra_section(
     )
 
 
-_ATTACHMENT_NOTICE: dict[str, str] = {
-    "cn": (
-        "# 团队动态状态（Attachment）\n\n"
-        "团队的成员名册、团队信息、人类成员名单**不在系统提示词里**，而是以 "
-        "`<prompt-attachment>` 的形式在每轮对话的消息末尾动态提供，type 分别为 "
-        "`team_members`（成员关系）、`team_info`（团队信息）、`team_hitt`"
-        "（人类成员协作规则）。它们反映**当前最新**的团队状态，可能逐轮变化或消失——"
-        "请始终以最新一份为准，不要把它们当作历史对话，也不要向用户暴露这些标签或其内部 id。\n"
-    ),
-    "en": (
-        "# Team Dynamic State (Attachment)\n\n"
-        "The team roster, team info, and human-member list are **not in the system "
-        "prompt**. They are provided dynamically as `<prompt-attachment>` blocks at the "
-        "end of the message sequence each round, with type `team_members` (member "
-        "relationships), `team_info` (team info), and `team_hitt` (human-member "
-        "collaboration rules). They reflect the **current latest** team state and may "
-        "change or disappear from round to round — always rely on the most recent copy, "
-        "do not treat them as conversation history, and do not expose these tags or "
-        "their internal ids to the user.\n"
-    ),
-}
-
-
-_INBOUND_TAGS: dict[str, str] = {
-    "cn": (
-        "# 入站消息标签\n\n"
-        "团队投递给你的消息与事件用 XML 标签分段，便于你区分「谁说的」与「框架补充的」：\n\n"
-        "- `<team-inbound>`：其他成员或用户发给你的**原始消息**，属性含 from（发送者）、"
-        "message_id、type（direct/broadcast）、time（时间）；标签内是对方的原话，未经改写。\n"
-        "- `<team-note>`：框架附加的操作提示（如是否需要回复、静默约束等），由 kind 属性"
-        "标明用途——这不是对方说的话。\n"
-        "- `<team-event>`：框架投递的团队事件通知（任务指派、计划审批、催促、完成通知、"
-        "任务看板、工作流进度等），由 kind 属性标明事件类型。\n"
-        "- 标签上出现 `for=\"controller\"` 表示该内容是转发给你的人类控制者看的通知，"
-        "按 HITT 规则保持静默，不要自行回应。\n\n"
-        "这些标签是框架与你之间的约定，不要把标签本身回显给团队或用户。\n"
-    ),
-    "en": (
-        "# Inbound Message Tags\n\n"
-        "Messages and events the team delivers to you are segmented with XML tags so "
-        'you can tell "who said it" from "what the framework added":\n\n'
-        "- `<team-inbound>`: the **original message** another member or the user sent "
-        "you; attributes include from (sender), message_id, type (direct/broadcast), "
-        "and time. The tag body is the sender's words, unaltered.\n"
-        "- `<team-note>`: an operational hint added by the framework (e.g. whether to "
-        "reply, silence constraints), with its purpose marked by the kind attribute — "
-        "it is not something the sender said.\n"
-        "- `<team-event>`: a team event notification delivered by the framework (task "
-        "assignment, plan approval, nudges, completion notices, the task board, "
-        "workflow progress, ...), "
-        "with the event type marked by the kind attribute.\n"
-        '- A `for="controller"` attribute means the content is a notification surfaced '
-        "to your human controller; follow the HITT rules and stay silent — do not "
-        "respond on your own.\n\n"
-        "These tags are a contract between the framework and you; do not echo the tags "
-        "themselves back to the team or the user.\n"
-    ),
-}
-
-
 def build_team_attachment_notice_section(*, language: str = "cn") -> PromptSection:
     """Build the static notice explaining team-state prompt attachments (§5.1).
 
     Tells the LLM that roster / team-info / HITT state is delivered as
     ``<prompt-attachment>`` blocks at the message tail (rather than in the
-    system prompt) and reflects the current round's latest state.
+    system prompt) and reflects the current round's latest state. The bilingual
+    body lives in ``<lang>/attachment_notice.md``.
 
     Args:
         language: Prompt language ('cn' or 'en').
@@ -377,9 +318,13 @@ def build_team_attachment_notice_section(*, language: str = "cn") -> PromptSecti
         PromptSection with the bilingual attachment-notice body.
     """
     del language  # content carries both languages; selection happens at render
+    content = {
+        "cn": load_template("attachment_notice", "cn").content,
+        "en": load_template("attachment_notice", "en").content,
+    }
     return PromptSection(
         name=TeamSectionName.ATTACHMENT_NOTICE,
-        content=_ATTACHMENT_NOTICE,
+        content=content,
         priority=17,
     )
 
@@ -389,7 +334,8 @@ def build_team_inbound_tags_section(*, language: str = "cn") -> PromptSection:
 
     Explains the ``<team-inbound>`` / ``<team-note>`` / ``<team-event>`` tag
     system and the ``for="controller"`` marker, so the LLM reads inbound
-    messages and framework events with clear boundaries.
+    messages and framework events with clear boundaries. The bilingual body
+    lives in ``<lang>/inbound_tags.md``.
 
     Args:
         language: Prompt language ('cn' or 'en').
@@ -398,9 +344,13 @@ def build_team_inbound_tags_section(*, language: str = "cn") -> PromptSection:
         PromptSection with the bilingual inbound-tags body.
     """
     del language  # content carries both languages; selection happens at render
+    content = {
+        "cn": load_template("inbound_tags", "cn").content,
+        "en": load_template("inbound_tags", "en").content,
+    }
     return PromptSection(
         name=TeamSectionName.INBOUND_TAGS,
-        content=_INBOUND_TAGS,
+        content=content,
         priority=18,
     )
 
