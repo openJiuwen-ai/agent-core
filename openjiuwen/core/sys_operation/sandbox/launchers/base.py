@@ -62,7 +62,7 @@ class SandboxLauncher:
         """Resume a previously paused sandbox."""
         return None
 
-    async def delete(self, sandbox_id: str) -> None:
+    async def delete(self, sandbox_id: str, **kwargs) -> None:
         """Permanently destroy the sandbox and release its resources."""
         return None
 

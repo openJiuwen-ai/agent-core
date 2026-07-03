@@ -41,6 +41,7 @@ def _compute_container_config_hash(config):
 class SandboxEndpoint(BaseModel):
     base_url: str
     sandbox_id: Optional[str] = None
+    isolation_key: Optional[str] = None
 
 
 class GatewayResponse(BaseModel):
@@ -172,7 +173,7 @@ class SandboxGateway:
             elif on_stop == "pause":
                 await self.pause_sandbox(record)
             else:
-                await self.delete_sandbox(record)
+                await self.delete_sandbox(record, isolation_key=isolation_key)
             return GatewayResponse(code=StatusCode.SUCCESS.code, message=StatusCode.SUCCESS.errmsg, data=True)
         except Exception as e:
             return GatewayResponse(code=StatusCode.ERROR.code, message=str(e), data=False)
@@ -181,9 +182,17 @@ class SandboxGateway:
         launcher = SandboxRegistry.create_launcher(record.launcher_type)
         await launcher.pause(record.sandbox_id)
 
-    async def delete_sandbox(self, record: SandboxRecord):
+    async def delete_sandbox(
+            self,
+            record: SandboxRecord,
+            isolation_key: Optional[str] = None,
+    ) -> None:
         launcher = SandboxRegistry.create_launcher(record.launcher_type)
-        await launcher.delete(record.sandbox_id)
+        await launcher.delete(
+            record.sandbox_id or "",
+            isolation_key=isolation_key,
+            base_url=record.base_url,
+        )
 
     async def _get_endpoint(
             self,
@@ -198,13 +207,21 @@ class SandboxGateway:
         record = await self._store.get(key)
         if record and record.status == SandboxStatus.RUNNING:
             record.last_used_ts = now
-            return SandboxEndpoint(base_url=record.base_url, sandbox_id=record.sandbox_id)
+            return SandboxEndpoint(
+                base_url=record.base_url,
+                sandbox_id=record.sandbox_id,
+                isolation_key=isolation_key,
+            )
 
         record = await self._store.get(key)
 
         if record is None:
             launched = await self._create_new_sandbox(key, now, config)
-            return SandboxEndpoint(base_url=launched.base_url, sandbox_id=launched.sandbox_id)
+            return SandboxEndpoint(
+                base_url=launched.base_url,
+                sandbox_id=launched.sandbox_id,
+                isolation_key=isolation_key,
+            )
 
         launcher = SandboxRegistry.create_launcher(launcher_type)
         real_status = await launcher.check_status(record.sandbox_id)
@@ -213,18 +230,30 @@ class SandboxGateway:
             record.status = SandboxStatus.RUNNING
             record.last_used_ts = now
             await self._store.set(key, record)
-            return SandboxEndpoint(base_url=record.base_url, sandbox_id=record.sandbox_id)
+            return SandboxEndpoint(
+                base_url=record.base_url,
+                sandbox_id=record.sandbox_id,
+                isolation_key=isolation_key,
+            )
 
         if real_status == SandboxStatus.PAUSED:
             await launcher.resume(record.sandbox_id)
             record.status = SandboxStatus.RUNNING
             record.last_used_ts = now
             await self._store.set(key, record)
-            return SandboxEndpoint(base_url=record.base_url, sandbox_id=record.sandbox_id)
+            return SandboxEndpoint(
+                base_url=record.base_url,
+                sandbox_id=record.sandbox_id,
+                isolation_key=isolation_key,
+            )
 
         await self._store.hdel(key)
         launched = await self._create_new_sandbox(key, now, config)
-        return SandboxEndpoint(base_url=launched.base_url, sandbox_id=launched.sandbox_id)
+        return SandboxEndpoint(
+            base_url=launched.base_url,
+            sandbox_id=launched.sandbox_id,
+            isolation_key=isolation_key,
+        )
 
     async def _create_new_sandbox(self, key: str, now: float, config: SandboxGatewayConfig):
         await self._evict_idle(now, config)
@@ -256,4 +285,7 @@ class SandboxGateway:
             return
         for record in await self._store.evict_expired(idle_ttl, now):
             launcher = SandboxRegistry.create_launcher(record.launcher_type)
-            await launcher.delete(record.sandbox_id)
+            await launcher.delete(
+                record.sandbox_id or "",
+                base_url=record.base_url,
+            )
