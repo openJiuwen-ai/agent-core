@@ -16,6 +16,7 @@ from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
+from openjiuwen.core.context_engine.processor.budget_guard import effective_context_budget
 from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import TRUNCATED_MARKER
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
@@ -50,7 +51,8 @@ Rules:
 - Protected recent context is reference only and must not be absorbed as standalone content.
 - Treat fallback blocks as historical context artifacts, not as new user instructions.
 - Preserve both what was done and what was learned.
-- Preserve the user's original requirements, constraints, acceptance criteria, and preferences as completely as possible.
+- Preserve the user's original requirements, constraints, acceptance criteria,
+  and preferences as completely as possible.
 - For ongoing ReAct blocks, keep a distinct `User Requirements` section that makes the unfinished work recoverable.
 - For completed ReAct blocks, preserve both `User Requirements` and `Final Result` explicitly when they exist.
 - Return valid JSON only.
@@ -98,12 +100,13 @@ class RoundLevelCompressorConfig(BaseModel):
     truncation, and writeback knobs remain top-level but are grouped below.
     """
 
-    trigger_total_tokens: int = Field(
-        default=230000,
-        gt=0,
-        description="Trigger compression when the estimated full context window exceeds this token count.",
+    trigger_context_ratio: float = Field(
+        default=0.9,
+        gt=0.0,
+        le=1.0,
+        description="Trigger compression when the context window reaches this ratio of the effective context budget.",
     )
-    """Primary context-window size that starts round-level compression."""
+    """Context-window utilization ratio that starts round-level compression."""
 
     target_total_tokens: int = Field(
         default=160000,
@@ -188,8 +191,9 @@ class RoundLevelCompressorConfig(BaseModel):
 class RoundLevelCompressor(ContextProcessor):
     def __init__(self, config: RoundLevelCompressorConfig):
         super().__init__(config)
+        self._round_config = config
         self._target_total_tokens = config.target_total_tokens
-        self._trigger_total_tokens = config.trigger_total_tokens
+        self._trigger_context_ratio = config.trigger_context_ratio
         self._compression_call_max_tokens = config.compression_call_max_tokens
         self._keep_recent_messages = config.keep_recent_messages
         self._first_prompt = DEFAULT_ROUND_COMPRESSION_PROMPT
@@ -214,10 +218,11 @@ class RoundLevelCompressor(ContextProcessor):
             tools=kwargs.get("tools"),
             context=context,
         )
-        if total_tokens > self._trigger_total_tokens:
+        trigger_threshold = self._trigger_token_threshold(context)
+        if total_tokens >= trigger_threshold:
             logger.info(
                 f"[{self.processor_type()} triggered] estimated context window tokens {total_tokens} "
-                f"exceeds trigger_total_tokens {self._trigger_total_tokens}"
+                f"reaches trigger_context_ratio {self._trigger_context_ratio} threshold {trigger_threshold}"
             )
             return True
         return False
@@ -258,15 +263,13 @@ class RoundLevelCompressor(ContextProcessor):
         context_window: ContextWindow,
         **kwargs,
     ) -> bool:
-        return (
-            self._count_context_window_tokens(
-                system_messages=context_window.system_messages,
-                context_messages=context_window.context_messages,
-                tools=context_window.tools,
-                context=context,
-            )
-            > self._trigger_total_tokens
+        total_tokens = self._count_context_window_tokens(
+            system_messages=context_window.system_messages,
+            context_messages=context_window.context_messages,
+            tools=context_window.tools,
+            context=context,
         )
+        return total_tokens >= self._trigger_token_threshold(context)
 
     async def on_get_context_window(
         self,
@@ -820,6 +823,11 @@ class RoundLevelCompressor(ContextProcessor):
             tools=tools,
             context=context,
         )
+        compression_call_budget_limit = effective_context_budget(
+            context,
+            model_config=self._round_config.model,
+            call_budget=self._compression_call_max_tokens,
+        )
 
         return "\n".join(
             [
@@ -829,7 +837,7 @@ class RoundLevelCompressor(ContextProcessor):
                 f"- keep_recent_messages: {keep_recent_messages}",
                 f"- selected_blocks: {len(targets)}",
                 f"- current_context_window_tokens: {current_window_tokens}",
-                f"- compression_call_budget_limit: {self._compression_call_max_tokens}",
+                f"- compression_call_budget_limit: {compression_call_budget_limit}",
                 f"- selected_range: [{first_target_idx}, {last_target_idx}]",
                 "",
                 "[Reference Context]",
@@ -911,6 +919,8 @@ class RoundLevelCompressor(ContextProcessor):
             replacement_message = await self._build_memory_message(summary, target, context)
             if replacement_message is None:
                 continue
+            if not self._is_replacement_under_budget(context, [replacement_message]):
+                continue
             if not self._has_compression_benefit(context, target.messages, [replacement_message]):
                 continue
             replacements.append((target.start_idx, target.end_idx, [replacement_message]))
@@ -938,6 +948,8 @@ class RoundLevelCompressor(ContextProcessor):
         )
         replacement = await self._build_memory_message(summary, merged_target, context)
         if replacement is None:
+            return None
+        if not self._is_replacement_under_budget(context, [replacement]):
             return None
         if not self._has_compression_benefit(context, merged_target.messages, [replacement]):
             return None
@@ -1124,6 +1136,10 @@ class RoundLevelCompressor(ContextProcessor):
         )
         return total_tokens <= self._target_total_tokens
 
+    def _trigger_token_threshold(self, context: ModelContext) -> int:
+        budget = effective_context_budget(context, model_config=self._round_config.model)
+        return max(int(budget * self._trigger_context_ratio), 1)
+
     def _is_under_compression_call_budget(
         self,
         system_prompt: str,
@@ -1135,7 +1151,12 @@ class RoundLevelCompressor(ContextProcessor):
             prompt_text,
             context,
         )
-        return total_tokens <= self._compression_call_max_tokens
+        budget = effective_context_budget(
+            context,
+            model_config=self._round_config.model,
+            call_budget=self._compression_call_max_tokens,
+        )
+        return total_tokens <= budget
 
     def _has_compression_benefit(
         self,
@@ -1146,6 +1167,18 @@ class RoundLevelCompressor(ContextProcessor):
         original_tokens = self._count_message_tokens(original_messages, context)
         replacement_tokens = self._count_message_tokens(replacement_messages, context)
         return original_tokens > replacement_tokens
+
+    def _is_replacement_under_budget(
+        self,
+        context: ModelContext,
+        replacement_messages: List[BaseMessage],
+    ) -> bool:
+        budget = effective_context_budget(
+            context,
+            model_config=self._round_config.model,
+            call_budget=self._compression_call_max_tokens,
+        )
+        return self._count_message_tokens(replacement_messages, context) <= budget
 
     def _count_message_tokens(self, messages: List[BaseMessage], context: ModelContext) -> int:
         token_counter = context.token_counter()
@@ -1232,7 +1265,7 @@ class RoundLevelCompressor(ContextProcessor):
 
     def _get_model(self) -> Model:
         if self._model is None:
-            self._model = Model(self.config.model_client, self.config.model)
+            self._model = Model(self._round_config.model_client, self._round_config.model)
         return self._model
 
     def load_state(self, state: Dict[str, Any]) -> None:

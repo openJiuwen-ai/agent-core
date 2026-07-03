@@ -37,11 +37,17 @@ from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimi
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
     GENERATE_RECORDS_LLM_POLICY,
 )
+from openjiuwen.agent_evolving.prompts.sections import (
+    EVOLUTION_FUZZY_REVIEW_RULES_CN,
+    EVOLUTION_FUZZY_REVIEW_RULES_EN,
+    build_evolution_protocol_section,
+)
 from openjiuwen.agent_evolving.signal import (
     EvolutionSignal,
     SignalDetector,
     make_signal_fingerprint,
 )
+from openjiuwen.agent_evolving.tools import create_main_evolution_tools
 from openjiuwen.agent_evolving.trajectory import Trajectory, TrajectoryStore
 from openjiuwen.agent_evolving.updater import SingleDimUpdater
 from openjiuwen.agent_evolving.utils import infer_skill_from_texts, parse_top_level_frontmatter
@@ -51,7 +57,6 @@ from openjiuwen.core.operator.skill_call import SkillExperienceOperator
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind, ToolCallInputs
 from openjiuwen.core.sys_operation import SysOperation
-from openjiuwen.agent_evolving.prompts.sections import build_evolution_protocol_section
 from openjiuwen.harness.rails.evolution.approval_events import (
     attach_evolution_meta,
     build_evolution_progress_event,
@@ -77,49 +82,18 @@ from openjiuwen.harness.rails.evolution.review.subagent import (
 )
 from openjiuwen.harness.rails.evolution.skill_evolution_sharing import SkillEvolutionSharingMixin
 from openjiuwen.harness.rails.subagent import SubagentRail
-from openjiuwen.agent_evolving.tools import create_main_evolution_tools
 
 _MAX_PROCESSED_SIGNAL_KEYS = 500
 _DEFAULT_EVOLUTION_TOTAL_TIMEOUT_SECS = 600.0
 _NON_REGULAR_SKILL_KINDS = {"team-skill", "swarm-skill"}
 _FUZZY_REVIEW_PROMPT_CN = (
     "请检查近期上下文是否有可复用 Skill 经验线索；这不是处理本次错误的请求。\n"
-    "当用户纠正上一轮 agent 的执行步骤、顺序、确认条件或交付流程时，"
-    "先判定为高优先级可复用流程线索；该反馈可作为演进候选，但不表示必然演进。\n"
-    "只有问题可归入已使用或可从近期任务上下文推断的相关 Skill、可归因到 Skill "
-    "指令缺口、改法可复用且非重复时，才算可演进机会。\n"
-    "执行失败本身不作为本次处理对象；\n"
-    "它可作为判断 Skill 是否缺少 precheck、fallback、verification 或排错指引的线索。\n"
-    "当用户用“你应该/应该先/先...再.../确认后再.../不要直接...”等规则化表达，"
-    "且内容是可复用工作流或可复用执行规则，先确认该建议是否要沉淀为相关 "
-    "Skill 经验。\n"
-    "一次性偏好、不可复用、已有经验覆盖或无法归入相关 Skill 场景时，不要询问演进。\n"
-    "没有可演进机会时，不要打扰用户；如果你需要回复本次自检，"
-    "只能说：本次技能演进自检未发现需要更新的 Skill。\n"
-    "有可演进机会时，用一句话询问：这条反馈可以沉淀为以后处理同类任务时的"
-    "流程经验，是否需要我发起 Skill 演进？\n"
-    "用户确认后，才使用 prepare_skill_evolution、evolve_review_task、evolve_skill_experiences。\n"
-    "不要直接编辑 Skill 文件；未确认时不要提交演进变更。"
+    f"{EVOLUTION_FUZZY_REVIEW_RULES_CN}"
 )
-_FUZZY_REVIEW_PROMPT_EN = """Check recent context for reusable Skill lessons; this is not a request to handle the
-current error.
-When the user corrects prior-agent execution steps, order, confirmation gates, or delivery flow,
-it is a high-priority reusable workflow clue (not a mandatory evolution signal).
-Treat something as an evolution opportunity only when it is linked to a used or inferable Skill context from recent
-task context, attribution to a Skill-guidance gap, reusable guidance, and no duplicate coverage.
-Use concrete execution failures only as evidence when deciding whether the Skill lacks precheck, fallback,
-verification, or troubleshooting guidance.
-If the user gives reusable rule-style guidance (for example “you should”, “should first”, “do X then Y”,
-“confirm before doing”, or “do not do this directly”) and it is about a reusable workflow or execution
-rule, first confirm whether to distill it as a Skill experience (related Skill).
-Do not ask to evolve for one-off preferences, non-reusable feedback, duplicate coverage, or feedback that cannot
-fit any related Skill context.
-If there is no evolution opportunity, do not bother the user; if you need to respond to this self-check, only say:
-This skill evolution self-check did not find any Skill that needs updating.
-If there is an evolution opportunity, ask this sentence in one line: This feedback can be distilled into a workflow
-lesson for similar future tasks. Should I start Skill evolution?
-Only after user confirmation, use prepare_skill_evolution, evolve_review_task, and evolve_skill_experiences.
-Do not edit Skill files directly, and do not submit evolution changes before confirmation."""
+_FUZZY_REVIEW_PROMPT_EN = (
+    "Check recent context for reusable Skill lessons; this is not a request to handle the current error.\n"
+    f"{EVOLUTION_FUZZY_REVIEW_RULES_EN}"
+)
 
 
 class EvolutionReviewScopeBuilder:

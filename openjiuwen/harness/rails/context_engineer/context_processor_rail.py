@@ -207,7 +207,7 @@ class ContextProcessorRail(DeepAgentRail):
                 (
                     "RoundLevelCompressor",
                     RoundLevelCompressorConfig(
-                        trigger_total_tokens=230000,
+                        trigger_context_ratio=0.9,
                         target_total_tokens=160000,
                         keep_recent_messages=6,
                         model=model_cfg,

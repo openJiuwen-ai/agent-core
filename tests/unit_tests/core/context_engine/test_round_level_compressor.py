@@ -14,7 +14,7 @@ from openjiuwen.core.context_engine.processor.compressor.round_level_compressor 
     RoundLevelCompressorConfig,
     _CompressTarget,
 )
-from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, ModelRequestConfig, UserMessage
 from openjiuwen.core.session.agent import Session
 from tests.unit_tests.core.context_engine._stream_state_helpers import (
     assert_context_state_pair,
@@ -39,24 +39,46 @@ class _TestableRoundLevelCompressor(RoundLevelCompressor):
 
 class TestRoundLevelCompressor:
     @pytest.mark.asyncio
-    async def test_trigger_get_context_window_uses_trigger_total_tokens(self):
+    async def test_trigger_get_context_window_uses_context_ratio_threshold(self):
         compressor = _TestableRoundLevelCompressor(
             RoundLevelCompressorConfig(
-                trigger_total_tokens=100,
+                trigger_context_ratio=0.9,
                 target_total_tokens=50,
             )
         )
         context = MagicMock()
+        context._context_window_tokens = 100
+        context._model_context_window_tokens = {}
         context_window = ContextWindow(
             system_messages=[],
             context_messages=[UserMessage(content="u")],
             tools=[],
         )
-        compressor._count_context_window_tokens = MagicMock(return_value=75)
+        compressor._count_context_window_tokens = MagicMock(return_value=89)
         assert await compressor.trigger_get_context_window(context, context_window) is False
 
-        compressor._count_context_window_tokens = MagicMock(return_value=101)
+        compressor._count_context_window_tokens = MagicMock(return_value=90)
         assert await compressor.trigger_get_context_window(context, context_window) is True
+
+    @pytest.mark.asyncio
+    async def test_trigger_add_messages_uses_model_context_ratio_when_model_window_is_smaller(self):
+        compressor = _TestableRoundLevelCompressor(
+            RoundLevelCompressorConfig(
+                trigger_context_ratio=0.9,
+                target_total_tokens=50,
+                model=ModelRequestConfig(model="small-model"),
+            )
+        )
+        context = MagicMock()
+        context.get_messages.return_value = [UserMessage(content="old")]
+        context._context_window_tokens = 1000
+        context._model_context_window_tokens = {"small-model": 100}
+
+        compressor._count_context_window_tokens = MagicMock(return_value=89)
+        assert await compressor.trigger_add_messages(context, [UserMessage(content="new")]) is False
+
+        compressor._count_context_window_tokens = MagicMock(return_value=90)
+        assert await compressor.trigger_add_messages(context, [UserMessage(content="new")]) is True
 
     @pytest.mark.asyncio
     async def test_streams_state_when_round_level_compressor_triggers_on_get(self):
@@ -73,7 +95,7 @@ class TestRoundLevelCompressor:
                 (
                     "RoundLevelCompressor",
                     RoundLevelCompressorConfig(
-                        trigger_total_tokens=1,
+                        trigger_context_ratio=0.9,
                         target_total_tokens=1,
                     ),
                 )
@@ -108,7 +130,7 @@ class TestRoundLevelCompressor:
     async def test_build_memory_message_returns_plain_user_message(self):
         compressor = _TestableRoundLevelCompressor(
             RoundLevelCompressorConfig(
-                trigger_total_tokens=100,
+                trigger_context_ratio=0.9,
                 target_total_tokens=50,
             )
         )
@@ -135,7 +157,7 @@ class TestRoundLevelCompressor:
     async def test_on_get_context_window_reports_original_message_range(self):
         compressor = _TestableRoundLevelCompressor(
             RoundLevelCompressorConfig(
-                trigger_total_tokens=100,
+                trigger_context_ratio=0.9,
                 target_total_tokens=50,
             )
         )
@@ -175,7 +197,7 @@ class TestRoundLevelCompressor:
     def test_build_compression_user_prompt_includes_ongoing_and_completed_requirements():
         compressor = _TestableRoundLevelCompressor(
             RoundLevelCompressorConfig(
-                trigger_total_tokens=100,
+                trigger_context_ratio=0.9,
                 target_total_tokens=50,
             )
         )
@@ -222,3 +244,77 @@ class TestRoundLevelCompressor:
         assert "User Requirements" in prompt_text
         assert "Final Result" in prompt_text
         assert "Do not weaken or over-compress the user's original request" in prompt_text
+
+    @staticmethod
+    def test_compression_call_budget_uses_configured_context_window_when_smaller_than_call_limit():
+        compressor = _TestableRoundLevelCompressor(
+            RoundLevelCompressorConfig(
+                trigger_context_ratio=0.9,
+                target_total_tokens=500,
+                compression_call_max_tokens=1000,
+                model=ModelRequestConfig(model="test-model"),
+            )
+        )
+        token_counter = MagicMock()
+        token_counter.count_messages.return_value = 50
+        context = MagicMock()
+        context.token_counter.return_value = token_counter
+        context._context_window_tokens = 40
+        context._model_context_window_tokens = {"test-model": 200}
+
+        assert compressor._is_under_compression_call_budget("system", "prompt", context) is False
+
+        token_counter.count_messages.return_value = 39
+        assert compressor._is_under_compression_call_budget("system", "prompt", context) is True
+
+    @staticmethod
+    def test_compression_call_budget_uses_model_context_window_when_smaller_than_call_limit():
+        compressor = _TestableRoundLevelCompressor(
+            RoundLevelCompressorConfig(
+                trigger_context_ratio=0.9,
+                target_total_tokens=500,
+                compression_call_max_tokens=1000,
+                model=ModelRequestConfig(model="test-model"),
+            )
+        )
+        token_counter = MagicMock()
+        token_counter.count_messages.return_value = 75
+        context = MagicMock()
+        context.token_counter.return_value = token_counter
+        context._context_window_tokens = 300
+        context._model_context_window_tokens = {"test-model": 70}
+
+        assert compressor._is_under_compression_call_budget("system", "prompt", context) is False
+
+        token_counter.count_messages.return_value = 70
+        assert compressor._is_under_compression_call_budget("system", "prompt", context) is True
+
+    @pytest.mark.asyncio
+    async def test_build_json_replacements_skips_replacement_that_exceeds_effective_budget(self):
+        compressor = _TestableRoundLevelCompressor(
+            RoundLevelCompressorConfig(
+                trigger_context_ratio=0.9,
+                target_total_tokens=500,
+                compression_call_max_tokens=1000,
+                model=ModelRequestConfig(model="test-model"),
+            )
+        )
+        context = MagicMock()
+        context._context_window_tokens = 50
+        context._model_context_window_tokens = {"test-model": 500}
+        context.token_counter.return_value = None
+        target = _CompressTarget(
+            block_id="block_1",
+            scope="completed_react",
+            start_idx=0,
+            end_idx=0,
+            messages=[AssistantMessage(content="original" * 100)],
+        )
+
+        replacements = await compressor._build_json_replacements(
+            context,
+            [target],
+            {"blocks": [{"block_id": "block_1", "summary": "summary" * 200}]},
+        )
+
+        assert replacements == []

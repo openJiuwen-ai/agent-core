@@ -77,6 +77,15 @@ class TestSkillCreateRailThresholdCheck:
         rail._builder = None
         assert rail._should_propose_new_skill() is False
 
+    @pytest.mark.parametrize("tool_name", ["skill_tool", "team.skill_tool"])
+    def test_should_not_propose_when_skill_was_used(self, tmp_path, tool_name):
+        rail = _make_rail(tmp_path, auto_trigger=True)
+        _set_builder_tool_calls(
+            rail,
+            [tool_name, "bash", "read_file", "write_file", "edit_file", "grep", "ls", "diff", "sed", "python"],
+        )
+        assert rail._should_propose_new_skill() is False
+
     def test_no_tool_calls(self, tmp_path):
         rail = _make_rail(tmp_path, auto_trigger=True)
         _set_builder_tool_calls(rail, [])
@@ -108,6 +117,26 @@ class TestSkillCreateRailOnAfterTaskIteration:
     async def test_no_follow_up_when_below_threshold(self, tmp_path):
         rail = _make_rail(tmp_path)
         _set_builder_tool_calls(rail, ["bash"] * 3)
+
+        controller = MagicMock()
+        controller.enqueue_follow_up = MagicMock()
+        agent = MagicMock()
+        agent._loop_controller = controller
+        ctx = MagicMock()
+        ctx.agent = agent
+
+        await rail._on_after_task_iteration(ctx)
+
+        controller.enqueue_follow_up.assert_not_called()
+
+    @pytest.mark.parametrize("tool_name", ["skill_tool", "team.skill_tool"])
+    @pytest.mark.asyncio
+    async def test_no_follow_up_when_skill_was_used(self, tmp_path, tool_name):
+        rail = _make_rail(tmp_path)
+        _set_builder_tool_calls(
+            rail,
+            [tool_name, "bash", "read_file", "write_file", "edit_file", "grep", "ls", "diff", "sed", "python"],
+        )
 
         controller = MagicMock()
         controller.enqueue_follow_up = MagicMock()
