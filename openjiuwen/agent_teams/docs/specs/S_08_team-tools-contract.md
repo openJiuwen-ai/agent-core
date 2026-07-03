@@ -19,7 +19,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-06-17 |
+| 最近一次修订日期 | 2026-07-03 |
 | 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md |
 
 ## 范围 / 边界
@@ -42,7 +42,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
   `exclude_tools` 改写这条边界。
 - 系统提示词（`prompts/`）。提示词写"角色身份与决策原则"，工具描述写
   "操作过程"，两边内容禁止重复——这是分层契约。
-- 运行时硬编码字符串（dispatcher 通知 / 默认 persona）走 `agent_teams/i18n.py`，
+- 运行时硬编码字符串（dispatcher 通知 / 默认 desc）走 `agent_teams/i18n.py`，
   本规约只管工具描述文本。
 
 ## 不变量
@@ -348,7 +348,7 @@ all_tools = {
   契约：必须用关键字参数透传 `role` / `teammate_mode` / `lang`，
   不允许 rail 自行重写工具集合。
 - **`agent_teams/i18n.py`**：运行时硬编码字符串（dispatcher 通知、
-  默认 persona 等）走 `t(key)` 这一组；本规约的描述文本是另一条路径。
+  默认 desc 等）走 `t(key)` 这一组；本规约的描述文本是另一条路径。
   两者读不同的源，不要把工具描述塞进 `i18n.py` 的 `STRINGS`。
 - **`schema/task.py` / `schema/team.py`**：工具返回的结构化 `data` 必须
   来自 schema 层的 Pydantic 模型（`TaskSummary` / `TaskDetail` /

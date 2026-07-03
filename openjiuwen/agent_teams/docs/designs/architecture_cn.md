@@ -273,7 +273,7 @@ class TeamRole(str, Enum):
 
 | 象限 | 文件 | 含义 |
 |------|------|------|
-| **静态数据** | `agent/blueprint.py` (`TeamAgentBlueprint`, frozen) | 构造时确定、生命周期不变（spec / role / member_name / persona） |
+| **静态数据** | `agent/blueprint.py` (`TeamAgentBlueprint`, frozen) | 构造时确定、生命周期不变（spec / role / member_name / desc / prompt） |
 | **运行时可变状态** | `agent/state.py` (`TeamAgentState`) | 只放**跨 operator** 的字段；operator 内部状态留在 operator 自己 |
 | **每实例资源** | `agent/resources.py` (`PrivateAgentResources`) | 这个 TeamAgent 独占（DeepAgent / WorktreeManager / MemoryManager） |
 | **每进程基础设施** | `agent/infra.py` (`TeamInfra`) | **per-process** 共享（messager / db / team_backend）。leader 和 teammate 跨进程时各持一份 |
@@ -589,12 +589,12 @@ CoordinationEvent = Union[InnerEventMessage, EventMessage]
 | P:12 | `team_hitt` | HITT 协作规则（当存在 human 成员时） | All |
 | P:13 | `team_workflow` | Leader 工作流（按 team_mode 选择模板） | Leader |
 | P:14 | `team_lifecycle` | 生命周期策略 | Leader |
-| P:15 | `team_persona` | 人设描述 | All |
+| P:16 | `team_private_prompt` | 私有 prompt（仅本成员） | All |
 | P:16 | `team_extra` | 用户自定义 base_prompt | All |
 | P:65 | `team_info` | 团队元数据 | All |
 | P:66 | `team_members` | 成员关系 | All |
 
-- **静态分段**（role / hitt / workflow / lifecycle / persona / extra）在 `__init__` 一次性构建，每次 `before_model_call` 重新 `add_section`
+- **静态分段**（role / hitt / workflow / lifecycle / private-prompt / extra）在 `__init__` 一次性构建，每次 `before_model_call` 重新 `add_section`
 - **动态分段**（`team_info` / `team_members`）由 `MtimeSectionCache` 包装，先 probe `updated_at`，未变则复用缓存
 
 ### 7.2 模板组织
@@ -738,8 +738,8 @@ classDiagram
         +build() TeamAgent
         +resolve_db_config()
     }
-    class LeaderSpec { +member_name +display_name +persona +model_name }
-    class TeamMemberSpec { +member_name +display_name +role_type +persona +prompt_hint +model_name }
+    class LeaderSpec { +member_name +display_name +desc +prompt +model_name }
+    class TeamMemberSpec { +member_name +display_name +role_type +desc +prompt +model_name }
     class TransportSpec { +type +params +build() }
     class StorageSpec { +type +params +build() }
     class DeepAgentSpec { +card +model +system_prompt +tools +mcps +subagents +rails +skills +workspace +sys_operation +approval_required_tools +max_iterations +completion_timeout +language +build() }

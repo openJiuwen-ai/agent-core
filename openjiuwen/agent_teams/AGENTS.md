@@ -252,7 +252,7 @@ openclaw 无已知注册方式则 `mcp_inject=none` + 大声告警。MCP server 
 `OPENJIUWEN_TEAM_JOIN` env，自动绑定成员身份。`ssh_transport` 配置后 CLI 进程在远程 SSH 端点
 启动，`command` / `cwd` / `mcp_server_command` 均按远程主机解释；DB / messager 可达性由部署保证。
 外部 CLI 成员的**系统提示词**复用 team-rail 的
-`build_team_static_sections`（role/workflow/lifecycle/persona，排除其它 DeepAgent rail），经
+`build_team_static_sections`（role/workflow/lifecycle/private-prompt，排除其它 DeepAgent rail），经
 claude `--append-system-prompt` / codex `-c developer_instructions` / 其余 prepend 下发；其
 stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内成员同路 fan-out。
 详见 [[F_22]] 与 [[F_25_external-cli-hardening-and-gemini]]。
@@ -284,7 +284,7 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
    `CoordinatorLoop` 只管 wake-up，所有业务行为由内部 DeepAgent + team tools 驱动。不要把业务逻辑塞到 loop 里。
 
 4. **i18n 的两条路径**  
-   - 运行时 hard-coded 字符串（dispatcher 通知、default persona 等）走 `agent_teams/i18n.py` 的 `t(key)`；
+   - 运行时 hard-coded 字符串（dispatcher 通知、default desc 等）走 `agent_teams/i18n.py` 的 `t(key)`；
    - Prompt / 工具描述的长文本走各自模块的 `locales/` 或 `prompts/`（按 `lang` 参数入参传递）。  
    **新增字符串前先判断归属**：运行时提示进 `i18n.py`，模板正文进 `prompts/` 或 `tools/locales/descs/`。
 

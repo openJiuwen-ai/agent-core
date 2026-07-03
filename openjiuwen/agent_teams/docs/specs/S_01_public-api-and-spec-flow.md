@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/__init__.py`、`openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/runtime/manager.py`、`openjiuwen/core/runner/team_runner.py`、`openjiuwen/core/runner/runner.py` |
-| 最近一次修订日期 | 2026-05-14 |
+| 最近一次修订日期 | 2026-07-03 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -77,7 +77,7 @@ leader = spec.build()
 ```
 
 - `agents["leader"]` 必填，缺失时 `build()` 抛 `ValueError("agents dict must contain a 'leader' key")`。
-- `agents["teammate"]` 可选，缺失时 teammate 派生自 leader 的模型与默认 persona。
+- `agents["teammate"]` 可选，缺失时 teammate 派生自 leader 的模型与默认 desc。
 - `spawn_mode="inprocess"` 时 `transport=None` 会被 spec 验证器自动填为 `TransportSpec(type="inprocess")`；`"process"` 不做隐式默认（强制用户显式选 `pyzmq` 等跨进程后端）。
 - 新增装配维度直接在 `TeamAgentSpec` 上加字段——package 不暴露任何"参数列表型"工厂函数承接配置。
 

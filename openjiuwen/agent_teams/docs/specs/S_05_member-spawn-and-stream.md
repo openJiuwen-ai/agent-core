@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/spawn/`、`openjiuwen/agent_teams/agent/spawn_manager.py`、`openjiuwen/agent_teams/agent/stream_controller.py`、`openjiuwen/agent_teams/agent/payload.py`、`openjiuwen/agent_teams/agent/agent_configurator.py`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-06-17 |
+| 最近一次修订日期 | 2026-07-03 |
 | 关联 feature | F_38_team-teammate-worktree-isolation-agenttool.md |
 
 ## 范围 / 边界
@@ -54,7 +54,7 @@ DeepAgent round 的 stream 队列、cooperative cancel、observer fan-out 行为
 3. **Wire 契约对称**：`SpawnPayloadBuilder.build_spawn_payload` 输出的
    每个键都是 `TeamAgent.from_spawn_payload` 的读取键。改一边必须同改另一边，
    否则跨进程拉起立即崩。当前键集：
-   `coordination.{team_name, display_name, leader_member_name, member_name, role, persona, transport}`、`query`。
+   `coordination.{team_name, display_name, leader_member_name, member_name, role, desc, transport}`、`query`。
 4. **`spawn_mode='inprocess'` 隐含 in-process transport**：`TeamAgentSpec`
    的 `_default_transport_for_spawn_mode` validator 在 `transport=None` 时
    自动注入 `TransportSpec(type='inprocess')`。`spawn_mode='process'`
