@@ -888,7 +888,6 @@ async def test_team_agent_resume_for_new_session_rebinds_only_live_teammates():
         card=leader_card,
         spec=TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="persistent_team"),
         ctx=ctx,
-        role_policy="",
         language="en",
     )
 
@@ -949,7 +948,6 @@ async def test_team_agent_recover_for_existing_session_rebinds_live_teammates():
         card=leader_card,
         spec=TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="persistent_team"),
         ctx=ctx,
-        role_policy="",
         language="en",
     )
 
