@@ -347,11 +347,13 @@ class _FakeTeamBackend:
         members: list[_StubMember] | None = None,
         team_mtime: int = 1,
         members_mtime: int = 1,
+        human_agents: list[str] | None = None,
     ) -> None:
         self._team = team
         self._members: list[_StubMember] = list(members or [])
         self._team_mtime = team_mtime
         self._members_mtime = members_mtime
+        self._human_agents: list[str] = list(human_agents or [])
 
         self.team_mtime_calls = 0
         self.members_mtime_calls = 0
@@ -379,8 +381,8 @@ class _FakeTeamBackend:
         return False
 
     async def human_agent_names(self) -> frozenset[str]:
-        """TeamPolicyRail queries DB for the roster; fake teams are empty."""
-        return frozenset()
+        """TeamPolicyRail queries DB for the roster (empty unless injected)."""
+        return frozenset(self._human_agents)
 
     def bridge_agent_names(self) -> frozenset[str]:
         """TeamPolicyRail snapshots the bridge roster too; empty for fakes."""
@@ -726,3 +728,120 @@ class TestTeamPolicyRailDynamicSections:
             TeamSectionName.PRIVATE_PROMPT,
         ):
             assert not builder.has_section(name)
+
+
+class TestTeamPolicyRailHittSplit:
+    """HITT contract rides the builder prefix; the roster rides the attachment.
+
+    F_50 splits the old single ``team_hitt`` section into a static
+    collaboration contract (system-prompt builder) and a dynamic human-member
+    roster (``team_hitt_roster`` attachment). ``_FakeTeamBackend`` injects a
+    human roster so these paths actually fire.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_leader_contract_in_builder_roster_in_attachment(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test"),
+            members=[_StubMember("leader1", "Leader")],
+            human_agents=["alice", "bob"],
+        )
+        builder = SystemPromptBuilder(language="cn")
+        manager = PromptAttachmentManager()
+        agent = _StubAgent(builder, manager)
+        rail = TeamPolicyRail(
+            role=TeamRole.LEADER,
+            member_prompt="PM",
+            member_name="leader1",
+            lifecycle="temporary",
+            language="cn",
+            team_backend=backend,
+        )
+        rail.init(agent)
+        await rail.before_model_call(_StubContext())
+
+        # Contract (rules) rides the cache-stable builder prefix, names absent.
+        assert builder.has_section(TeamSectionName.HITT)
+        contract = builder.get_section(TeamSectionName.HITT).render("cn")
+        assert "禁止" in contract
+        assert "alice" not in contract and "bob" not in contract
+
+        # Roster (names) rides the attachment tail, never the builder.
+        assert not builder.has_section(TeamSectionName.HITT_ROSTER)
+        roster = await _attachment_content(manager, TeamSectionName.HITT_ROSTER)
+        assert roster is not None
+        assert "alice" in roster and "bob" in roster
+        logger.info("HITT split: contract in builder, roster in attachment")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_anonymous_teammate_has_contract_but_no_roster(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test"),
+            members=[_StubMember("dev1", "Dev")],
+            human_agents=["alice"],
+        )
+        builder = SystemPromptBuilder(language="cn")
+        manager = PromptAttachmentManager()
+        agent = _StubAgent(builder, manager)
+        rail = TeamPolicyRail(
+            role=TeamRole.TEAMMATE,
+            member_prompt="Coder",
+            member_name="dev1",
+            lifecycle="temporary",
+            language="cn",
+            team_backend=backend,
+        )
+        rail.init(agent)
+        await rail.before_model_call(_StubContext())
+
+        # Anonymous teammate keeps the contract but never lists names anywhere.
+        assert builder.has_section(TeamSectionName.HITT)
+        assert "alice" not in builder.get_section(TeamSectionName.HITT).render("cn")
+        assert await _attachment_content(manager, TeamSectionName.HITT_ROSTER) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_no_human_agents_no_hitt_anywhere(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test"),
+            members=[_StubMember("dev1", "Dev")],
+            human_agents=[],
+        )
+        builder = SystemPromptBuilder(language="cn")
+        manager = PromptAttachmentManager()
+        agent = _StubAgent(builder, manager)
+        rail = TeamPolicyRail(
+            role=TeamRole.LEADER,
+            member_name="leader1",
+            language="cn",
+            team_backend=backend,
+        )
+        rail.init(agent)
+        await rail.before_model_call(_StubContext())
+        assert not builder.has_section(TeamSectionName.HITT)
+        assert await _attachment_content(manager, TeamSectionName.HITT_ROSTER) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_uninit_strips_hitt_contract_from_builder(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test"),
+            members=[_StubMember("leader1", "Leader")],
+            human_agents=["alice"],
+        )
+        builder = SystemPromptBuilder(language="cn")
+        manager = PromptAttachmentManager()
+        agent = _StubAgent(builder, manager)
+        rail = TeamPolicyRail(
+            role=TeamRole.LEADER,
+            member_name="leader1",
+            language="cn",
+            team_backend=backend,
+        )
+        rail.init(agent)
+        await rail.before_model_call(_StubContext())
+        assert builder.has_section(TeamSectionName.HITT)
+        rail.uninit(agent)
+        assert not builder.has_section(TeamSectionName.HITT)
