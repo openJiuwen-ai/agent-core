@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from openjiuwen.core.context_engine.processor.offloader.rules.types import RuleContext
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.types import RuleContext
 
 
 ERROR_RE = re.compile(

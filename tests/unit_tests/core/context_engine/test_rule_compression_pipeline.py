@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from openjiuwen.core.context_engine.processor.offloader.rules.pipeline import (
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.pipeline import (
     RuleCompressionPipeline,
 )
 from openjiuwen.core.foundation.llm import ToolMessage

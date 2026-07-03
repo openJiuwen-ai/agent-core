@@ -9,9 +9,9 @@ from typing import Callable
 from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-from openjiuwen.core.context_engine.processor.offloader.rules.query_terms import extract_query_terms
-from openjiuwen.core.context_engine.processor.offloader.rules.router import RuleContentRouter
-from openjiuwen.core.context_engine.processor.offloader.rules.types import RuleContext
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.query_terms import extract_query_terms
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.router import RuleContentRouter
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.types import RuleContext
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, UserMessage
 
 

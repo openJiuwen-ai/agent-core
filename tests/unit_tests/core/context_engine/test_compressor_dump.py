@@ -8,14 +8,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from openjiuwen.core.context_engine.base import ContextWindow
-from openjiuwen.core.context_engine.processor.compressor.compression_dump import (
+from openjiuwen.core.context_engine.processor.compressor.support.compression_dump import (
     COMPRESSION_DUMP_DIR_ENV,
 )
 from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
     DialogueCompressor,
     DialogueCompressorConfig,
 )
-from openjiuwen.core.context_engine.processor.compressor.compression_executor import CompressionResult
+from openjiuwen.core.context_engine.processor.compressor.support.compression_executor import CompressionResult
 from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
 
 

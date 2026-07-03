@@ -161,7 +161,7 @@ class ContextProcessorRail(DeepAgentRail):
             (
                 "MessageOffloader",
                 MessageOffloaderConfig(
-                    protected_tool_names=["read_file:*SKILL.md", "reload_original_context_messages"],
+                    protected_tool_names=["read_file"],
                 ),
             ),
             (

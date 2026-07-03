@@ -6,22 +6,22 @@ from typing import Protocol
 
 from json_repair import loads as repair_json_loads
 
-from openjiuwen.core.context_engine.processor.offloader.rules.diff_compressor import DiffCompressor
-from openjiuwen.core.context_engine.processor.offloader.rules.html_compressor import HtmlCompressor
-from openjiuwen.core.context_engine.processor.offloader.rules.json_array_compressor import (
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.diff_compressor import DiffCompressor
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.html_compressor import HtmlCompressor
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.json_array_compressor import (
     JsonArrayCompressor,
 )
-from openjiuwen.core.context_engine.processor.offloader.rules.log_compressor import LogCompressor
-from openjiuwen.core.context_engine.processor.offloader.rules.plain_text_compressor import (
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.log_compressor import LogCompressor
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.plain_text_compressor import (
     PlainTextCompressor,
 )
-from openjiuwen.core.context_engine.processor.offloader.rules.search_results_compressor import (
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.search_results_compressor import (
     SearchResultsCompressor,
 )
-from openjiuwen.core.context_engine.processor.offloader.rules.source_code_compressor import (
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.source_code_compressor import (
     SourceCodeCompressor,
 )
-from openjiuwen.core.context_engine.processor.offloader.rules.types import (
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.types import (
     ContentType,
     RuleCompressionResult,
     RuleContext,

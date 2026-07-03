@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from openjiuwen.core.context_engine.processor.offloader.rules.source_code_compressor import (
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.source_code_compressor import (
     SourceCodeCompressor,
 )
-from openjiuwen.core.context_engine.processor.offloader.rules.types import (
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.types import (
     ContentType,
     RuleContext,
 )

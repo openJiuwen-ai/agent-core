@@ -255,8 +255,8 @@ class TestMessageOffloaderAddTrigger:
         context = await create_context(context_window_tokens=100)
         await context.add_messages(
             [
-                _tool_call("tc-reload", "reload_original_context_messages"),
-                ToolMessage(content="x" * 100, tool_call_id="tc-reload"),
+                _tool_call("tc-read", "read_file"),
+                ToolMessage(content="x" * 100, tool_call_id="tc-read"),
             ]
         )
 
@@ -534,8 +534,8 @@ class TestMessageOffloaderTtl:
         content = "x" * 100
         await context.add_messages(
             [
-                _tool_call("tc-reload", "reload_original_context_messages"),
-                ToolMessage(content=content, tool_call_id="tc-reload"),
+                _tool_call("tc-read", "read_file"),
+                ToolMessage(content=content, tool_call_id="tc-read"),
             ]
         )
         await context.get_context_window()

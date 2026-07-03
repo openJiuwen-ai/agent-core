@@ -8,11 +8,11 @@ from typing import Any
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
-from openjiuwen.core.context_engine.processor.compressor.prefix_compact_processor import (
+from openjiuwen.core.context_engine.processor.compressor.base import (
     PrefixCompactProcessor,
     PrefixCompactSpan,
 )
-from openjiuwen.core.context_engine.processor.compressor.compression_executor import (
+from openjiuwen.core.context_engine.processor.compressor.support.compression_executor import (
     CompressionExecutor,
     CompressionRequest,
 )

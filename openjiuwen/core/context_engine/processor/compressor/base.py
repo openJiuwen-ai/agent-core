@@ -12,8 +12,8 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
-from openjiuwen.core.context_engine.processor.compressor.util import build_compressor_reinjected_state_message
-from openjiuwen.core.context_engine.processor.compressor.compression_executor import (
+from openjiuwen.core.context_engine.processor.compressor.support.util import build_compressor_reinjected_state_message
+from openjiuwen.core.context_engine.processor.compressor.support.compression_executor import (
     CompressionError,
     CompressionErrorKind,
     CompressionExecutor,
@@ -405,7 +405,7 @@ class PrefixCompactProcessor(ContextProcessor):
             return
         # Lazy import avoids a circular dependency: compression_dump imports
         # from this module (PrefixCompactProcessor, PrefixCompactSpan).
-        from openjiuwen.core.context_engine.processor.compressor.compression_dump import (
+        from openjiuwen.core.context_engine.processor.compressor.support.compression_dump import (
             dump_compression_artifact,
         )
 

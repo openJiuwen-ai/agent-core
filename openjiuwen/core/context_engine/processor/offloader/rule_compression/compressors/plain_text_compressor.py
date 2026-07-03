@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from openjiuwen.core.context_engine.processor.offloader.rules.types import (
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.types import (
     ContentType,
     RuleCompressionResult,
     RuleContext,
 )
-from openjiuwen.core.context_engine.processor.offloader.rules.common import meets_savings_ratio
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.common import meets_savings_ratio
 
 
 class PlainTextCompressor:

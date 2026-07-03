@@ -8,8 +8,8 @@ from typing import Any
 
 from json_repair import loads as repair_json_loads
 
-from openjiuwen.core.context_engine.processor.offloader.rules.common import ERROR_RE, fits_budget_and_saves
-from openjiuwen.core.context_engine.processor.offloader.rules.types import (
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.common import ERROR_RE, fits_budget_and_saves
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.types import (
     ContentType,
     RuleCompressionResult,
     RuleContext,

@@ -16,7 +16,7 @@ from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor imp
     DialogueCompressor,
     DialogueCompressorConfig,
 )
-from openjiuwen.core.context_engine.processor.compressor.compression_executor import (
+from openjiuwen.core.context_engine.processor.compressor.support.compression_executor import (
     CompressionError,
     CompressionErrorKind,
     CompressionResult,

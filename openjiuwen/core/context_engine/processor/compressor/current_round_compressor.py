@@ -3,7 +3,7 @@ from __future__ import annotations
 from pydantic import Field
 
 from openjiuwen.core.context_engine.context_engine import ContextEngine
-from openjiuwen.core.context_engine.processor.compressor.prefix_compact_processor import (
+from openjiuwen.core.context_engine.processor.compressor.base import (
     PrefixCompactProcessorConfig,
     PrefixCompactProcessor,
     PrefixCompactSpan,

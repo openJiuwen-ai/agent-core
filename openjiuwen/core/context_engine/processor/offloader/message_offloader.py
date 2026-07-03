@@ -13,7 +13,7 @@ from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
-from openjiuwen.core.context_engine.processor.offloader.rules import RuleCompressionPipeline
+from openjiuwen.core.context_engine.processor.offloader.rule_compression import RuleCompressionPipeline
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
 
@@ -51,7 +51,7 @@ class MessageOffloaderConfig(BaseModel):
     """Context-capacity ratio above which one TTL tool message is processed."""
 
     protected_tool_names: list[str] = Field(
-        default_factory=lambda: ["reload_original_context_messages"]
+        default_factory=lambda: ["read_file"]
     )
     """Tool names, or ``tool:argument-pattern`` entries, that must remain inline."""
 
