@@ -157,8 +157,7 @@ openjiuwen/agent_teams/
 │   └── tool_approval_rail.py       # Teammate 工具审批中断
 │
 ├── prompts/                        # 系统提示词模板 + 装配
-│   ├── loader.py                   # load_template / load_shared_template（@cache）
-│   ├── policy.py                   # role_policy（加载 leader/teammate_policy markdown）
+│   ├── loader.py                   # load_template（@cache）
 │   ├── sections.py                 # TeamSectionName + build_team_*_section（唯一装配路径）
 │   ├── section_cache.py            # MtimeSectionCache — dynamic section 缓存
 │   ├── cn/                         # 中文模板
@@ -608,7 +607,7 @@ prompts/
 └── en/                           # 英文（同结构）
 ```
 
-`sections.py`（唯一装配路径，独立 PromptSection，由 `TeamPolicyRail` / `build_team_member_system_prompt` 消费）读这批模板；`policy.role_policy` 只加载 role policy 文本供 role section 消费。改正文即时生效。
+`sections.py`（唯一装配路径，独立 PromptSection，由 `TeamPolicyRail` / `build_team_member_system_prompt` 消费）读这批模板——各 builder 直接 `load_template`（如 `build_team_role_section` 读 `leader_policy` / `teammate_policy`）。改正文即时生效。
 
 ---
 

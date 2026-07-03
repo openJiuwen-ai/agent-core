@@ -70,13 +70,12 @@ agent_teams/
 
 | 文件 | 职责 |
 |---|---|
-| `loader.py` | `load_template` / `load_shared_template`，按语言加载 `.md` |
-| `policy.py` | `role_policy`：按角色加载 `leader_policy` / `teammate_policy` markdown |
-| `sections.py` | `TeamSectionName` + `build_team_*_section` 构造 `PromptSection`（唯一装配路径） |
+| `loader.py` | `load_template`，按语言加载 `.md` |
+| `sections.py` | `TeamSectionName` + `build_team_*_section` 构造 `PromptSection`（唯一装配路径）；`build_team_role_section` 直接读 `leader_policy` / `teammate_policy` |
 | `section_cache.py` | `MtimeSectionCache`：dynamic section 的 mtime 缓存 |
 | `cn/` · `en/` | 角色 / 工作流 / 生命周期模板 |
 
-**唯一装配路径是 `sections.build_team_*_section`**（由 `TeamPolicyRail` / `build_team_member_system_prompt` 消费）；`policy.role_policy` 只加载 role policy 文本。改正文即时生效。详见 `prompts/AGENTS.md`。
+**唯一装配路径是 `sections.build_team_*_section`**（由 `TeamPolicyRail` / `build_team_member_system_prompt` 消费，各 builder 直接 `load_template` 读对应 `.md`）。改正文即时生效。详见 `prompts/AGENTS.md`。
 
 ### rails/ — 团队 Rail 注入 + manifest 声明
 
