@@ -158,10 +158,9 @@ openjiuwen/agent_teams/
 │
 ├── prompts/                        # 系统提示词模板 + 装配
 │   ├── loader.py                   # load_template / load_shared_template（@cache）
-│   ├── policy.py                   # role_policy / build_system_prompt（老装配路径）
-│   ├── sections.py                 # TeamSectionName + build_team_*_section（Rail 主力路径）
+│   ├── policy.py                   # role_policy（加载 leader/teammate_policy markdown）
+│   ├── sections.py                 # TeamSectionName + build_team_*_section（唯一装配路径）
 │   ├── section_cache.py            # MtimeSectionCache — dynamic section 缓存
-│   ├── system_prompt.md            # 语言无关占位符模板
 │   ├── cn/                         # 中文模板
 │   │   ├── leader_policy.md
 │   │   ├── teammate_policy.md
@@ -601,7 +600,6 @@ CoordinationEvent = Union[InnerEventMessage, EventMessage]
 
 ```
 prompts/
-├── system_prompt.md              # 占位符模板（policy.py 装配路径）
 ├── cn/                           # 中文
 │   ├── leader_policy.md
 │   ├── teammate_policy.md
@@ -610,7 +608,7 @@ prompts/
 └── en/                           # 英文（同结构）
 ```
 
-`policy.py`（老路径，`system_prompt.md` 壳模板）和 `sections.py`（Rail 主力路径，独立 PromptSection）读同一批模板。仅占位符或 section 拆分这类结构性变更需要决定落到哪条路径。
+`sections.py`（唯一装配路径，独立 PromptSection，由 `TeamPolicyRail` / `build_team_member_system_prompt` 消费）读这批模板；`policy.role_policy` 只加载 role policy 文本供 role section 消费。改正文即时生效。
 
 ---
 
