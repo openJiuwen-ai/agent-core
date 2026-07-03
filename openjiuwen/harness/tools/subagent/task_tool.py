@@ -4,8 +4,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
-from typing import TYPE_CHECKING, AsyncIterator, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, List, Optional
 
 
 if TYPE_CHECKING:
@@ -18,6 +19,27 @@ from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.prompts.tools import build_tool_card
+try:
+    from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
+        browser_agent_log_info,
+    )
+except Exception:  # pragma: no cover - browser runtime is optional here
+    browser_agent_log_info = None
+
+
+def _summarize_task_description(task_description: Any) -> dict[str, Any]:
+    task_text = str(task_description or "")
+    task_hash = ""
+    if task_text:
+        task_hash = hashlib.sha256(
+            task_text.encode("utf-8", errors="ignore")
+        ).hexdigest()[:12]
+
+    return {
+        "redacted": True,
+        "length": len(task_text),
+        "sha256_12": task_hash,
+    }
 
 
 class TaskTool(Tool):
@@ -106,7 +128,15 @@ class TaskTool(Tool):
                 reason=f"Subagent {subagent_type} creation failed: {exc}",
             ) from exc
 
-        logger.info(f"[TaskTool] Invoking subagent with isolated session: {sub_session_id}, query: {task_description}")
+        query_summary = _summarize_task_description(task_description)
+        invoke_log = (
+            "[TaskTool] Invoking subagent with isolated session: %s, "
+            "subagent_type=%s, query_summary=%s"
+        )
+        if str(subagent_type) == "browser_agent" and browser_agent_log_info is not None:
+            browser_agent_log_info(invoke_log, sub_session_id, subagent_type, query_summary)
+        else:
+            logger.info(invoke_log, sub_session_id, subagent_type, query_summary)
 
         try:
             # Invoke subagent with isolated session_id
