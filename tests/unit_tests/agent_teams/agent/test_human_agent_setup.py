@@ -86,7 +86,7 @@ async def team_backend(db, messager):
                 member_name="human_alice",
                 display_name="Alice",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="user avatar",
+                desc="user avatar",
             ),
         ],
         enable_hitt=True,
@@ -107,7 +107,7 @@ def _human_agent_team_spec() -> TeamAgentSpec:
                 member_name=HUMAN_AGENT_MEMBER_NAME,
                 display_name="Human",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="Default human collaborator",
+                desc="Default human collaborator",
             ),
         ],
     )
@@ -232,7 +232,7 @@ def _build_human_agent_runtime() -> TeamAgent:
     card = AgentCard(
         id=f"hitt_team_{member.member_name}",
         name=member.member_name,
-        description=member.persona,
+        description=member.desc,
     )
     avatar = TeamAgent(card)
     avatar.configure(spec, ctx)
@@ -264,7 +264,7 @@ def test_human_agent_never_attaches_tool_approval_rail() -> None:
                 member_name=HUMAN_AGENT_MEMBER_NAME,
                 display_name="Human",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="Default human collaborator",
+                desc="Default human collaborator",
             ),
         ],
     )
@@ -277,7 +277,7 @@ def test_human_agent_never_attaches_tool_approval_rail() -> None:
     card = AgentCard(
         id=f"hitt_team_{member.member_name}",
         name=member.member_name,
-        description=member.persona,
+        description=member.desc,
     )
     avatar = TeamAgent(card)
     avatar.configure(spec, ctx)

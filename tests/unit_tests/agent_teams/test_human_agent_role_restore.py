@@ -218,7 +218,7 @@ async def test_predefined_human_agent_survives_backend_restart(db, messager):
                 member_name="alice",
                 display_name="Alice",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="Visual designer",
+                desc="Visual designer",
             ),
         ],
         enable_hitt=True,

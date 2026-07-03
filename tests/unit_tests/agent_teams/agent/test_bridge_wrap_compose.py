@@ -8,7 +8,7 @@ Covers:
   task_hint / broadcast handling.
 - ``compose_bridge_inbound`` — original body + remote reply assembly
   with explicit scheduling instructions baked in.
-- ``build_bridge_persona`` / ``build_team_overview`` — adapter.connect
+- ``build_bridge_brief`` / ``build_team_overview`` — adapter.connect
   briefing strings for cn/en.
 """
 
@@ -20,7 +20,7 @@ from openjiuwen.agent_teams.agent.bridge_inbound_compose import compose_bridge_i
 from openjiuwen.agent_teams.agent.bridge_outbound_wrap import wrap_outbound_to_remote
 from openjiuwen.agent_teams.prompts.bridge_remote_brief import (
     MemberSummary,
-    build_bridge_persona,
+    build_bridge_brief,
     build_team_overview,
 )
 from openjiuwen.agent_teams.schema.team import (
@@ -39,7 +39,7 @@ def test_passthrough_minimal_header_cn():
         sender="alice",
         sender_display_name="Alice",
         sender_role=TeamRole.TEAMMATE,
-        sender_persona="dev",
+        sender_desc="dev",
         body="please review pr 123",
         broadcast=False,
         task_hint=None,
@@ -55,7 +55,7 @@ def test_passthrough_minimal_header_en():
         sender="alice",
         sender_display_name="Alice",
         sender_role=TeamRole.TEAMMATE,
-        sender_persona="dev",
+        sender_desc="dev",
         body="please review pr 123",
         broadcast=False,
         task_hint=None,
@@ -71,7 +71,7 @@ def test_passthrough_broadcast_marker():
         sender="leader",
         sender_display_name=None,  # falls back to sender
         sender_role=None,
-        sender_persona=None,
+        sender_desc=None,
         body="standup in 5",
         broadcast=True,
         task_hint=None,
@@ -82,12 +82,12 @@ def test_passthrough_broadcast_marker():
 
 
 @pytest.mark.level0
-def test_rephrase_includes_role_and_persona_cn():
+def test_rephrase_includes_role_and_desc_cn():
     text = wrap_outbound_to_remote(
         sender="alice",
         sender_display_name="Alice",
         sender_role=TeamRole.TEAMMATE,
-        sender_persona="senior dev",
+        sender_desc="senior dev",
         body="please refactor metrics module",
         broadcast=False,
         task_hint="任务 #42 重构监控",
@@ -107,7 +107,7 @@ def test_rephrase_without_task_hint():
         sender="alice",
         sender_display_name="Alice",
         sender_role=TeamRole.TEAMMATE,
-        sender_persona="dev",
+        sender_desc="dev",
         body="hi",
         broadcast=False,
         task_hint=None,
@@ -123,7 +123,7 @@ def test_rephrase_broadcast_kind_label():
         sender="leader",
         sender_display_name="Leader",
         sender_role=TeamRole.LEADER,
-        sender_persona="planner",
+        sender_desc="planner",
         body="standup",
         broadcast=True,
         task_hint=None,
@@ -222,13 +222,13 @@ def test_compose_includes_time_info_when_provided():
 
 
 # ---------------------------------------------------------------------------
-# build_bridge_persona / build_team_overview
+# build_bridge_brief / build_team_overview
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.level0
-def test_build_bridge_persona_cn_contains_identity_and_contract():
-    text = build_bridge_persona(member_name="codex", persona="senior python reviewer")
+def test_build_bridge_brief_cn_contains_identity_and_contract():
+    text = build_bridge_brief(member_name="codex", prompt="senior python reviewer")
     assert "codex" in text
     assert "senior python reviewer" in text
     assert "实际执行者" in text
@@ -238,10 +238,10 @@ def test_build_bridge_persona_cn_contains_identity_and_contract():
 
 
 @pytest.mark.level0
-def test_build_bridge_persona_en_passthrough_contract():
-    text = build_bridge_persona(
+def test_build_bridge_brief_en_passthrough_contract():
+    text = build_bridge_brief(
         member_name="claudecode",
-        persona="pair-programmer",
+        prompt="pair-programmer",
         language="en",
     )
     assert "claudecode" in text
@@ -254,9 +254,9 @@ def test_build_team_overview_lists_members_cn():
     text = build_team_overview(
         team_name="demo",
         members=[
-            MemberSummary(member_name="leader", role=TeamRole.LEADER, persona="planner"),
-            MemberSummary(member_name="alice", role=TeamRole.TEAMMATE, persona="dev"),
-            MemberSummary(member_name="codex", role=TeamRole.BRIDGE_AGENT, persona="reviewer"),
+            MemberSummary(member_name="leader", role=TeamRole.LEADER, desc="planner"),
+            MemberSummary(member_name="alice", role=TeamRole.TEAMMATE, desc="dev"),
+            MemberSummary(member_name="codex", role=TeamRole.BRIDGE_AGENT, desc="reviewer"),
         ],
     )
     assert "团队 demo" in text
@@ -275,10 +275,10 @@ def test_build_team_overview_empty_members():
 
 
 @pytest.mark.level0
-def test_build_team_overview_handles_no_persona():
+def test_build_team_overview_handles_no_desc():
     text = build_team_overview(
         team_name="demo",
         members=[MemberSummary(member_name="x", role=TeamRole.TEAMMATE)],
         language="en",
     )
-    assert "x (teammate): (no persona)" in text
+    assert "x (teammate): (no desc)" in text

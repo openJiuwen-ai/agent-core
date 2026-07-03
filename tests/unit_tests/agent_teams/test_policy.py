@@ -70,9 +70,7 @@ def test_team_worktree_shell_guard_merges_existing_sys_operation():
 def test_build_system_prompt_includes_all_parts():
     prompt = build_system_prompt(
         role=TeamRole.LEADER,
-        persona="PM Expert",
     )
-    assert "PM Expert" in prompt
     assert "create_task" in prompt
 
 
@@ -80,7 +78,6 @@ def test_build_system_prompt_includes_all_parts():
 def test_leader_prompt_carries_collaboration_mechanism_boundary_cn():
     prompt = build_system_prompt(
         role=TeamRole.LEADER,
-        persona="PM Expert",
         language="cn",
     )
 
@@ -97,7 +94,6 @@ def test_leader_prompt_carries_collaboration_mechanism_boundary_cn():
 def test_leader_prompt_carries_collaboration_mechanism_boundary_en():
     prompt = build_system_prompt(
         role=TeamRole.LEADER,
-        persona="PM Expert",
         language="en",
     )
 
@@ -112,7 +108,6 @@ def test_leader_prompt_carries_collaboration_mechanism_boundary_en():
 def test_teammate_prompt_omits_leader_collaboration_boundary():
     prompt = build_system_prompt(
         role=TeamRole.TEAMMATE,
-        persona="Dev",
         language="cn",
     )
 

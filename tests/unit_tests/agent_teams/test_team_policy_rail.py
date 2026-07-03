@@ -12,7 +12,7 @@ from openjiuwen.agent_teams.prompts import (
     build_team_info_section,
     build_team_lifecycle_section,
     build_team_members_section,
-    build_team_persona_section,
+    build_team_private_prompt_section,
     build_team_role_section,
     build_team_workflow_section,
 )
@@ -167,20 +167,20 @@ class TestTeamLifecycleSection:
         assert section is None
 
 
-class TestTeamPersonaSection:
+class TestTeamPrivatePromptSection:
     @pytest.mark.level0
-    def test_with_persona(self):
-        section = build_team_persona_section(persona="PM Expert", language="cn")
+    def test_with_private_prompt(self):
+        section = build_team_private_prompt_section(member_prompt="Ship small PRs", language="cn")
         assert section is not None
-        assert section.priority == 15
+        assert section.priority == 16
         content = section.render("cn")
-        assert "# 当前人设" in content
-        assert "PM Expert" in content
+        assert "# 私有工作约定" in content
+        assert "Ship small PRs" in content
 
     @pytest.mark.level1
-    def test_empty_persona_returns_none(self):
-        assert build_team_persona_section(persona="", language="cn") is None
-        assert build_team_persona_section(persona=None, language="cn") is None
+    def test_empty_private_prompt_returns_none(self):
+        assert build_team_private_prompt_section(member_prompt="", language="cn") is None
+        assert build_team_private_prompt_section(member_prompt=None, language="cn") is None
 
 
 class TestTeamExtraSection:
@@ -188,7 +188,7 @@ class TestTeamExtraSection:
     def test_with_base_prompt(self):
         section = build_team_extra_section(base_prompt="Be careful", language="cn")
         assert section is not None
-        assert section.priority == 16
+        assert section.priority == 17
         content = section.render("cn")
         assert "Be careful" in content
 
@@ -399,7 +399,7 @@ class _FakeTeamBackend:
 
 class TestTeamPolicyRailStaticSections:
     """Static-only behaviour (team_backend is None) -- the rail still
-    registers role/workflow/lifecycle/persona/extra without touching DB."""
+    registers role/workflow/lifecycle/private-prompt/extra without touching DB."""
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -409,7 +409,7 @@ class TestTeamPolicyRailStaticSections:
 
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
-            persona="PM Expert",
+            member_prompt="PM Expert",
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
@@ -424,7 +424,7 @@ class TestTeamPolicyRailStaticSections:
             TeamSectionName.ROLE,
             TeamSectionName.WORKFLOW,
             TeamSectionName.LIFECYCLE,
-            TeamSectionName.PERSONA,
+            TeamSectionName.PRIVATE_PROMPT,
             TeamSectionName.EXTRA,
         ):
             assert name in sections
@@ -440,7 +440,7 @@ class TestTeamPolicyRailStaticSections:
 
         rail = TeamPolicyRail(
             role=TeamRole.TEAMMATE,
-            persona="Coder",
+            member_prompt="Coder",
             member_name="dev1",
             lifecycle="temporary",
             language="cn",
@@ -455,7 +455,7 @@ class TestTeamPolicyRailStaticSections:
         assert TeamSectionName.LIFECYCLE not in sections
         assert TeamSectionName.EXTRA not in sections
         assert TeamSectionName.ROLE in sections
-        assert TeamSectionName.PERSONA in sections
+        assert TeamSectionName.PRIVATE_PROMPT in sections
 
 
 async def _attachment_content(
@@ -497,7 +497,7 @@ class TestTeamPolicyRailDynamicSections:
         agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_prompt="PM",
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
@@ -533,7 +533,7 @@ class TestTeamPolicyRailDynamicSections:
         agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_prompt="PM",
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
@@ -564,7 +564,7 @@ class TestTeamPolicyRailDynamicSections:
         agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_prompt="PM",
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
@@ -601,7 +601,7 @@ class TestTeamPolicyRailDynamicSections:
         agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_prompt="PM",
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
@@ -625,7 +625,7 @@ class TestTeamPolicyRailDynamicSections:
         agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_prompt="PM",
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
@@ -666,7 +666,7 @@ class TestTeamPolicyRailDynamicSections:
         agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_prompt="PM",
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
@@ -681,8 +681,8 @@ class TestTeamPolicyRailDynamicSections:
         idx_role = prompt.index("# 团队角色")
         idx_workflow = prompt.index("# 工作流程")
         idx_lifecycle = prompt.index("# 团队生命周期")
-        idx_persona = prompt.index("# 当前人设")
-        assert idx_role < idx_workflow < idx_lifecycle < idx_persona
+        idx_private_prompt = prompt.index("# 私有工作约定")
+        assert idx_role < idx_workflow < idx_lifecycle < idx_private_prompt
         # Dynamic sections do not leak into the system prompt anymore.
         assert "# 团队信息" not in prompt
         assert "# 成员关系" not in prompt
@@ -703,7 +703,7 @@ class TestTeamPolicyRailDynamicSections:
         agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_prompt="PM",
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
@@ -723,6 +723,6 @@ class TestTeamPolicyRailDynamicSections:
             TeamSectionName.ROLE,
             TeamSectionName.WORKFLOW,
             TeamSectionName.LIFECYCLE,
-            TeamSectionName.PERSONA,
+            TeamSectionName.PRIVATE_PROMPT,
         ):
             assert not builder.has_section(name)

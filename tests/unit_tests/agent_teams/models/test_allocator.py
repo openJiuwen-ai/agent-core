@@ -685,7 +685,7 @@ def test_team_member_spec_carries_model_name_for_pool_allocation():
     member = TeamMemberSpec(
         member_name="dev1",
         display_name="Dev 1",
-        persona="backend",
+        desc="backend",
         model_name="claude",
     )
     assert member.model_name == "claude"
