@@ -10,11 +10,11 @@ import os
 import re
 import time
 from collections import Counter
+from typing import Any, Callable, Mapping, Optional
+from urllib.parse import urlsplit, urlunsplit
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
     browser_agent_log_info,
 )
-from typing import Any, Callable, Mapping, Optional
-from urllib.parse import urlsplit, urlunsplit
 
 _STATUS_KEY = "_browser_subagent_status_logging"
 _TRUE_VALUES = {"1", "true", "yes", "on"}
