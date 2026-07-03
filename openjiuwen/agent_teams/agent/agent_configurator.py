@@ -26,7 +26,6 @@ from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.paths import (
     team_memory_dir as default_team_memory_dir,
 )
-from openjiuwen.agent_teams.prompts import role_policy
 from openjiuwen.agent_teams.runtime.team_plan import is_team_plan_enabled
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec, SysOperationSpec, WorkspaceSpec
@@ -259,7 +258,6 @@ class AgentConfigurator:
             card=self._card,
             spec=spec,
             ctx=ctx,
-            role_policy=role_policy(ctx.role, language=resolved_language),
             language=resolved_language,
         )
         self._spawn_payload_builder = SpawnPayloadBuilder(spec, ctx)
@@ -913,10 +911,6 @@ class AgentConfigurator:
     @property
     def ctx(self) -> Optional[TeamRuntimeContext]:
         return self._blueprint.ctx if self._blueprint else None
-
-    @property
-    def role_policy(self) -> str:
-        return self._blueprint.role_policy if self._blueprint else ""
 
     @property
     def team_spec(self) -> Optional[TeamSpec]:
