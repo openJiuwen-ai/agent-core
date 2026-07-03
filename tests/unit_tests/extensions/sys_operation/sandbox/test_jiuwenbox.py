@@ -161,16 +161,18 @@ def _build_card(
     *,
     card_id: str,
     base_url: str,
+    custom_id: str | None = None,
     extra_params: dict[str, Any] | None = None,
 ) -> SysOperationCard:
     """Build a SysOperationCard pinned to ``base_url`` with optional extra_params."""
+    isolation_id = custom_id if custom_id is not None else card_id
     return SysOperationCard(
         id=card_id,
         mode=OperationMode.SANDBOX,
         gateway_config=SandboxGatewayConfig(
             isolation=SandboxIsolationConfig(
                 container_scope=ContainerScope.CUSTOM,
-                custom_id=card_id,
+                custom_id=isolation_id,
             ),
             launcher_config=PreDeployLauncherConfig(
                 base_url=base_url,
@@ -181,6 +183,13 @@ def _build_card(
             timeout_seconds=30,
         ),
     )
+
+
+def _shared_cache_key_for_sandbox_id(cache: dict[str, str], sandbox_id: str) -> str:
+    """Return the single cache key that maps to ``sandbox_id``."""
+    matching = [key for key, value in cache.items() if value == sandbox_id]
+    assert len(matching) == 1, f"expected one cache key for {sandbox_id}, got {matching}"
+    return matching[0]
 
 
 # ===========================================================================
@@ -232,6 +241,168 @@ async def test_fs_code_shell_share_auto_created_sandbox(sys_op: SysOperation):
     assert shell_code_read.code == StatusCode.SUCCESS.code
     assert shell_code_read.data.exit_code == 0
     assert shell_code_read.data.stdout == "code-visible-to-shell"
+
+
+@pytest.mark.asyncio
+@requires_jiuwenbox
+async def test_multi_agent_custom_id_sandbox_isolation(server_endpoint: str, monkeypatch):
+    """Two agents with different custom_id on the same base_url get separate sandboxes."""
+    base_url = _normalize_endpoint(server_endpoint)
+    monkeypatch.delenv("JIUWENBOX_SANDBOX_ID", raising=False)
+    clear_jiuwenbox_shared_sandbox(base_url)
+
+    marker = uuid.uuid4().hex[:8]
+    agent_a = f"agent_a_{marker}"
+    agent_b = f"agent_b_{marker}"
+    card_a_id = f"jiuwenbox_iso_a_{marker}"
+    card_b_id = f"jiuwenbox_iso_b_{marker}"
+    path_a = f"/tmp/isolation_a_{marker}.txt"
+    path_b = f"/tmp/isolation_b_{marker}.txt"
+    content_a = f"marker-a-{marker}"
+    content_b = f"marker-b-{marker}"
+
+    card_a_added = False
+    card_b_added = False
+
+    with build_jiuwenbox_http_client(base_url) as client:
+        before_ids = _list_sandbox_ids(client)
+
+        await Runner.start()
+        try:
+            card_a = _build_card(card_id=card_a_id, base_url=base_url, custom_id=agent_a)
+            card_b = _build_card(card_id=card_b_id, base_url=base_url, custom_id=agent_b)
+
+            assert Runner.resource_mgr.add_sys_operation(card_a).is_ok()
+            card_a_added = True
+            assert Runner.resource_mgr.add_sys_operation(card_b).is_ok()
+            card_b_added = True
+
+            sys_op_a = Runner.resource_mgr.get_sys_operation(card_a_id)
+            sys_op_b = Runner.resource_mgr.get_sys_operation(card_b_id)
+
+            write_a = await sys_op_a.fs().write_file(path_a, content_a, prepend_newline=False)
+            assert write_a.code == StatusCode.SUCCESS.code
+            write_b = await sys_op_b.fs().write_file(path_b, content_b, prepend_newline=False)
+            assert write_b.code == StatusCode.SUCCESS.code
+
+            sandbox_id_a = sys_op_a._run_config.config.launcher_config.extra_params.get("sandbox_id")
+            sandbox_id_b = sys_op_b._run_config.config.launcher_config.extra_params.get("sandbox_id")
+            assert isinstance(sandbox_id_a, str) and sandbox_id_a
+            assert isinstance(sandbox_id_b, str) and sandbox_id_b
+            assert sandbox_id_a != sandbox_id_b
+
+            cache = jb._JiuwenBoxProviderMixin._shared_sandbox_ids
+            key_a = _shared_cache_key_for_sandbox_id(cache, sandbox_id_a)
+            key_b = _shared_cache_key_for_sandbox_id(cache, sandbox_id_b)
+            assert key_a != key_b
+            assert agent_a in key_a
+            assert agent_b in key_b
+
+            read_a_own = await sys_op_a.shell().execute_cmd(f"cat {path_a}")
+            assert read_a_own.code == StatusCode.SUCCESS.code
+            assert read_a_own.data.exit_code == 0
+            assert read_a_own.data.stdout == content_a
+
+            read_b_own = await sys_op_b.shell().execute_cmd(f"cat {path_b}")
+            assert read_b_own.code == StatusCode.SUCCESS.code
+            assert read_b_own.data.exit_code == 0
+            assert read_b_own.data.stdout == content_b
+
+            read_a_other = await sys_op_a.shell().execute_cmd(f"test -f {path_b}")
+            assert read_a_other.code == StatusCode.SUCCESS.code
+            assert read_a_other.data.exit_code != 0
+
+            read_b_other = await sys_op_b.shell().execute_cmd(f"test -f {path_a}")
+            assert read_b_other.code == StatusCode.SUCCESS.code
+            assert read_b_other.data.exit_code != 0
+        finally:
+            if card_a_added:
+                await _remove_sys_operation_with_sandbox_release(card_a_id)
+            if card_b_added:
+                await _remove_sys_operation_with_sandbox_release(card_b_id)
+            await Runner.stop()
+            clear_jiuwenbox_shared_sandbox(base_url)
+
+            after_ids = _list_sandbox_ids(client)
+            for sandbox_id in after_ids - before_ids:
+                client.delete(f"/api/v1/sandboxes/{sandbox_id}")
+
+
+@pytest.mark.asyncio
+@requires_jiuwenbox
+async def test_release_one_agent_does_not_delete_other_agent_sandbox(
+    server_endpoint: str,
+    monkeypatch,
+):
+    """Releasing agent A must not remote-delete agent B's sandbox or cache entry."""
+    base_url = _normalize_endpoint(server_endpoint)
+    monkeypatch.delenv("JIUWENBOX_SANDBOX_ID", raising=False)
+    clear_jiuwenbox_shared_sandbox(base_url)
+
+    marker = uuid.uuid4().hex[:8]
+    card_a_id = f"jiuwenbox_release_a_{marker}"
+    card_b_id = f"jiuwenbox_release_b_{marker}"
+
+    card_a_added = False
+    card_b_added = False
+
+    with build_jiuwenbox_http_client(base_url) as client:
+        before_ids = _list_sandbox_ids(client)
+
+        await Runner.start()
+        try:
+            assert Runner.resource_mgr.add_sys_operation(
+                _build_card(card_id=card_a_id, base_url=base_url, custom_id=f"agent_a_{marker}")
+            ).is_ok()
+            card_a_added = True
+            assert Runner.resource_mgr.add_sys_operation(
+                _build_card(card_id=card_b_id, base_url=base_url, custom_id=f"agent_b_{marker}")
+            ).is_ok()
+            card_b_added = True
+
+            sys_op_a = Runner.resource_mgr.get_sys_operation(card_a_id)
+            sys_op_b = Runner.resource_mgr.get_sys_operation(card_b_id)
+
+            assert (await sys_op_a.fs().write_file(
+                f"/tmp/release_a_{marker}.txt", "a", prepend_newline=False,
+            )).code == StatusCode.SUCCESS.code
+            assert (await sys_op_b.fs().write_file(
+                f"/tmp/release_b_{marker}.txt", "b", prepend_newline=False,
+            )).code == StatusCode.SUCCESS.code
+
+            sandbox_id_a = sys_op_a._run_config.config.launcher_config.extra_params.get("sandbox_id")
+            sandbox_id_b = sys_op_b._run_config.config.launcher_config.extra_params.get("sandbox_id")
+            assert isinstance(sandbox_id_a, str) and sandbox_id_a
+            assert isinstance(sandbox_id_b, str) and sandbox_id_b
+            assert sandbox_id_a != sandbox_id_b
+
+            isolation_key_a = sys_op_a.isolation_key_template
+            assert isolation_key_a
+            await SandboxGatewayClient.release(isolation_key_a, on_stop="delete")
+            Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_a_id)
+            card_a_added = False
+
+            assert sandbox_id_a not in _list_sandbox_ids(client)
+            assert sandbox_id_b in _list_sandbox_ids(client)
+
+            cache = jb._JiuwenBoxProviderMixin._shared_sandbox_ids
+            assert sandbox_id_a not in cache.values()
+            assert sandbox_id_b in cache.values()
+
+            read_b = await sys_op_b.fs().read_file(f"/tmp/release_b_{marker}.txt")
+            assert read_b.code == StatusCode.SUCCESS.code
+            assert read_b.data.content == "b"
+        finally:
+            if card_a_added:
+                await _remove_sys_operation_with_sandbox_release(card_a_id)
+            if card_b_added:
+                await _remove_sys_operation_with_sandbox_release(card_b_id)
+            await Runner.stop()
+            clear_jiuwenbox_shared_sandbox(base_url)
+
+            after_ids = _list_sandbox_ids(client)
+            for sandbox_id in after_ids - before_ids:
+                client.delete(f"/api/v1/sandboxes/{sandbox_id}")
 
 
 @pytest.mark.asyncio
@@ -402,14 +573,16 @@ async def test_force_recreate_creates_new_sandbox_on_remote_and_replaces_stale_c
     assert write_res.code == StatusCode.SUCCESS.code
 
     cache = jb._JiuwenBoxProviderMixin._shared_sandbox_ids
-    original_id = cache.get(base_url.rstrip("/"))
+    launcher_config = sys_op._run_config.config.launcher_config
+    original_id = launcher_config.extra_params.get("sandbox_id")
     assert isinstance(original_id, str) and original_id
+    shared_key = _shared_cache_key_for_sandbox_id(cache, original_id)
 
     with build_jiuwenbox_http_client(base_url) as client:
         ids_before_recreate = _list_sandbox_ids(client)
         assert original_id in ids_before_recreate
 
-        new_id = await jb.force_recreate_jiuwenbox_sandbox(base_url)
+        new_id = await jb.force_recreate_jiuwenbox_sandbox(base_url, shared_key=shared_key)
 
         # New id is fresh and different from the original.
         assert isinstance(new_id, str) and new_id
@@ -419,9 +592,8 @@ async def test_force_recreate_creates_new_sandbox_on_remote_and_replaces_stale_c
         ids_after_recreate = _list_sandbox_ids(client)
         assert new_id in ids_after_recreate
 
-        # Shared cache now points at the new id (no leftover ``base_url``
-        # entry pointing at the original).
-        assert cache.get(base_url.rstrip("/")) == new_id
+        # Shared cache now points at the new id for this isolation scope.
+        assert cache.get(shared_key) == new_id
 
 
 @pytest.mark.asyncio
@@ -687,10 +859,11 @@ async def test_preserve_file_not_re_uploaded_when_sandbox_id_already_cached(
     monkeypatch,
     tmp_path: Path,
 ):
-    """Once a sandbox_id is in the shared cache for ``base_url``, sibling
-    providers must reuse it *without* re-uploading the preserve file. We
-    verify by mutating the host file after the cache is seeded; if the
-    second provider re-uploaded, the sandbox would receive the new bytes.
+    """Once a sandbox_id is cached for an isolation key, a sibling provider
+    (shell after fs) must reuse it *without* re-uploading the preserve file.
+    We verify by mutating the host file after the cache is seeded; if shell
+    re-uploaded on its ``_get_sandbox_id`` path, the sandbox would receive
+    the new bytes.
     """
     base_url = _normalize_endpoint(server_endpoint)
     monkeypatch.delenv("JIUWENBOX_SANDBOX_ID", raising=False)
@@ -717,51 +890,37 @@ async def test_preserve_file_not_re_uploaded_when_sandbox_id_already_cached(
         before_ids = _list_sandbox_ids(client)
 
         await Runner.start()
-        first_card_id = f"jiuwenbox_preserve_cached_first_{marker}"
-        second_card_id = f"jiuwenbox_preserve_cached_second_{marker}"
-        first_added = False
-        second_added = False
+        card_id = f"jiuwenbox_preserve_cached_{marker}"
+        card_added = False
 
         try:
             assert Runner.resource_mgr.add_sys_operation(
-                _build_card(card_id=first_card_id, base_url=base_url, extra_params=extra_params)
+                _build_card(card_id=card_id, base_url=base_url, extra_params=extra_params)
             ).is_ok()
-            first_added = True
+            card_added = True
 
-            first_op = Runner.resource_mgr.get_sys_operation(first_card_id)
+            sys_op = Runner.resource_mgr.get_sys_operation(card_id)
 
-            # Trigger sandbox creation + preserve upload via the first card.
-            # The upload is scheduled as a background task, so poll until the
-            # file is visible inside the sandbox.
-            res = await _await_sandbox_file(first_op, sandbox_target)
+            # fs triggers sandbox creation + preserve upload (background task).
+            res = await _await_sandbox_file(sys_op, sandbox_target)
             assert res.code == StatusCode.SUCCESS.code
             assert res.data.content == initial_payload
 
-            launcher = first_op._run_config.config.launcher_config
+            launcher = sys_op._run_config.config.launcher_config
             cached_sandbox_id = launcher.extra_params.get("sandbox_id")
             assert isinstance(cached_sandbox_id, str) and cached_sandbox_id
 
-            # Mutate host file. If the second provider re-uploads on its
-            # ``_get_sandbox_id`` path, the sandbox copy would change too.
+            # Mutate host file. If shell re-uploads on cache hit, sandbox content changes.
             host_file.write_text("mutated-bytes-should-not-appear-in-sandbox")
 
-            # Add a second card — same base_url + no policy options ⇒ same
-            # shared scope key ⇒ reuses the existing sandbox_id from cache.
-            assert Runner.resource_mgr.add_sys_operation(
-                _build_card(card_id=second_card_id, base_url=base_url, extra_params=extra_params)
-            ).is_ok()
-            second_added = True
-
-            second_op = Runner.resource_mgr.get_sys_operation(second_card_id)
-            res2 = await second_op.fs().read_file(sandbox_target)
-            assert res2.code == StatusCode.SUCCESS.code
+            cat_res = await sys_op.shell().execute_cmd(f"cat {sandbox_target}")
+            assert cat_res.code == StatusCode.SUCCESS.code
+            assert cat_res.data.exit_code == 0
             # Sandbox content unchanged ⇒ preserve was NOT re-uploaded.
-            assert res2.data.content == initial_payload
+            assert cat_res.data.stdout == initial_payload
         finally:
-            if first_added:
-                await _remove_sys_operation_with_sandbox_release(first_card_id)
-            if second_added:
-                await _remove_sys_operation_with_sandbox_release(second_card_id)
+            if card_added:
+                await _remove_sys_operation_with_sandbox_release(card_id)
             await Runner.stop()
             clear_jiuwenbox_shared_sandbox(base_url)
 
@@ -874,12 +1033,14 @@ async def test_lifecycle_hook_fires_recreate_events_on_force_recreate(
     assert write_res.code == StatusCode.SUCCESS.code
 
     cache = jb._JiuwenBoxProviderMixin._shared_sandbox_ids
-    original_id = cache.get(base_url.rstrip("/"))
+    launcher_config = sys_op._run_config.config.launcher_config
+    original_id = launcher_config.extra_params.get("sandbox_id")
     assert isinstance(original_id, str) and original_id
+    shared_key = _shared_cache_key_for_sandbox_id(cache, original_id)
 
     recorder = _HookRecorder()
     new_id = await jb.force_recreate_jiuwenbox_sandbox(
-        base_url, lifecycle_hook=recorder, reason="policy_changed",
+        base_url, shared_key=shared_key, lifecycle_hook=recorder, reason="policy_changed",
     )
     assert isinstance(new_id, str) and new_id and new_id != original_id
 

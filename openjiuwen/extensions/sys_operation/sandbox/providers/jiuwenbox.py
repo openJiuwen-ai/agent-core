@@ -530,7 +530,7 @@ _T = TypeVar("_T")
 class _JiuwenBoxProviderMixin:
     _shared_lock = threading.Lock()
     _shared_sandbox_ids: Dict[str, str] = {}
-    # Cache base_url -> lifecycle_hook captured at create time, so teardown
+    # Cache shared_scope_key -> lifecycle_hook captured at create time, so teardown
     # (delete_jiuwenbox_sandbox) can fire delete hooks without being passed them.
     _lifecycle_hooks: ClassVar[Dict[str, Callable[[str, dict], None]]] = {}
     # Lazy class-level asyncio.Lock serializes sandbox recreate under concurrent ops.
@@ -599,15 +599,14 @@ class _JiuwenBoxProviderMixin:
         base_url = _endpoint_value(self.endpoint, self.config, "base_url")
         if not base_url:
             raise ValueError("jiuwenbox provider requires endpoint.base_url")
-        # Use base_url as the cross-process sharing key. In practice, different
-        # operation providers (fs/shell/code) may get rebuilt with different
-        # isolation metadata, but they still need to target the same remote sandbox.
-        key = str(base_url).rstrip("/")
-        create_options = self._sandbox_create_options_from_launcher_extra_params()
-        if not create_options:
-            return key
-        options_key = json.dumps(create_options, sort_keys=True, separators=(",", ":"))
-        return f"{key}|{options_key}"
+        # Share sandbox across fs/shell/code for the same isolation, not across
+        # different agents that share the same base_url. isolation_key is the
+        # resolved key from SysOperation (via gateway SandboxEndpoint).
+        parts = [str(base_url).rstrip("/")]
+        isolation_key = getattr(self.endpoint, "isolation_key", None)
+        if isinstance(isolation_key, str) and isolation_key:
+            parts.append(isolation_key)
+        return "|".join(parts)
 
     def _sandbox_id_from_launcher_extra_params(self) -> Optional[str]:
         extra_params = self._launcher_extra_params()
@@ -683,19 +682,26 @@ class _JiuwenBoxProviderMixin:
 
     @classmethod
     def register_lifecycle_hook(
-        cls, base_url: str, hook: Optional[Callable[[str, dict], None]]
+        cls, shared_key: str, hook: Optional[Callable[[str, dict], None]]
     ) -> None:
-        """Cache the lifecycle hook for base_url so teardown can reuse it."""
+        """Cache the lifecycle hook for shared_scope_key so teardown can reuse it."""
         if hook is None:
             return
         with cls._shared_lock:
-            cls._lifecycle_hooks[base_url.rstrip("/")] = hook
+            cls._lifecycle_hooks[shared_key] = hook
 
     @classmethod
-    def pop_lifecycle_hook(cls, base_url: str) -> Optional[Callable[[str, dict], None]]:
-        """Pop the cached lifecycle hook for base_url (None if absent)."""
+    def pop_lifecycle_hook(cls, shared_key: str) -> Optional[Callable[[str, dict], None]]:
+        """Pop the cached lifecycle hook for shared_scope_key (None if absent)."""
         with cls._shared_lock:
-            return cls._lifecycle_hooks.pop(base_url.rstrip("/"), None)
+            return cls._lifecycle_hooks.pop(shared_key, None)
+
+    @classmethod
+    def clear_shared_sandbox_for_key(cls, shared_key: str) -> Optional[str]:
+        """Remove one cached sandbox_id entry; return the removed id if any."""
+        with cls._shared_lock:
+            value = cls._shared_sandbox_ids.pop(shared_key, None)
+        return value if isinstance(value, str) and value else None
 
     @classmethod
     def cached_base_urls(cls) -> list[str]:
@@ -719,6 +725,47 @@ class _JiuwenBoxProviderMixin:
                     removed.append(value)
         return removed
 
+    @classmethod
+    def pop_cached_sandbox_for_shared_key(
+        cls,
+        shared_key: str,
+    ) -> Optional[tuple[str, Optional[Callable[[str, dict], None]]]]:
+        """Remove and return (sandbox_id, lifecycle_hook) for one shared_scope_key."""
+        with cls._shared_lock:
+            sandbox_id = cls._shared_sandbox_ids.pop(shared_key, None)
+            hook = cls._lifecycle_hooks.pop(shared_key, None)
+        if isinstance(sandbox_id, str) and sandbox_id:
+            return sandbox_id, hook
+        return None
+
+    @classmethod
+    def pop_cached_sandbox_by_sandbox_id(
+        cls,
+        sandbox_id: str,
+    ) -> Optional[tuple[str, str, Optional[Callable[[str, dict], None]]]]:
+        """Remove and return (shared_key, sandbox_id, lifecycle_hook) by sandbox_id."""
+        with cls._shared_lock:
+            for shared_key, cached_id in list(cls._shared_sandbox_ids.items()):
+                if cached_id == sandbox_id:
+                    cls._shared_sandbox_ids.pop(shared_key, None)
+                    hook = cls._lifecycle_hooks.pop(shared_key, None)
+                    return shared_key, sandbox_id, hook
+        return None
+
+    @classmethod
+    def drain_all_cached_sandboxes(
+        cls,
+    ) -> list[tuple[str, str, Optional[Callable[[str, dict], None]]]]:
+        """Atomically pop every cached sandbox entry and its lifecycle hook."""
+        with cls._shared_lock:
+            entries = [
+                (shared_key, sandbox_id, cls._lifecycle_hooks.pop(shared_key, None))
+                for shared_key, sandbox_id in list(cls._shared_sandbox_ids.items())
+                if isinstance(sandbox_id, str) and sandbox_id
+            ]
+            cls._shared_sandbox_ids.clear()
+        return entries
+
     def _get_sandbox_id(self) -> str:
         env_sandbox_id = os.environ.get("JIUWENBOX_SANDBOX_ID")
         if env_sandbox_id and self._sandbox_id != env_sandbox_id:
@@ -734,9 +781,7 @@ class _JiuwenBoxProviderMixin:
         if self._sandbox_id is None:
             lifecycle_hook = self._lifecycle_hook()
             shared_key = self._shared_scope_key()
-            self.register_lifecycle_hook(
-                _endpoint_value(self.endpoint, self.config, "base_url"), lifecycle_hook
-            )
+            self.register_lifecycle_hook(shared_key, lifecycle_hook)
             with self._shared_lock:
                 self._sandbox_id = self._shared_sandbox_ids.get(shared_key)
                 newly_created = False
@@ -846,6 +891,7 @@ class _JiuwenBoxProviderMixin:
 
             new_id = await force_recreate_jiuwenbox_sandbox(
                 base_url,
+                shared_key=shared_key,
                 **create_options,
                 timeout_seconds=float(self._timeout_seconds),
                 preserve_files_upload=preserve_files_upload,
@@ -945,6 +991,11 @@ def clear_jiuwenbox_shared_sandbox(base_url: str) -> list[str]:
         Removed sandbox_id list (deduplicated).
     """
     return _JiuwenBoxProviderMixin.clear_shared_sandbox(base_url)
+
+
+def build_jiuwenbox_shared_scope_key(base_url: str, isolation_key: str) -> str:
+    """Build the provider shared-cache key for a base_url + isolation_key pair."""
+    return f"{base_url.rstrip('/')}|{isolation_key}"
 
 
 def _iter_host_files_for_upload(
@@ -1097,6 +1148,7 @@ def _try_upload_preserve_files(
 async def force_recreate_jiuwenbox_sandbox(
     base_url: str,
     *,
+    shared_key: str | None = None,
     policy: dict | None = None,
     policy_mode: str | None = None,
     timeout_seconds: float = 30.0,
@@ -1111,6 +1163,8 @@ async def force_recreate_jiuwenbox_sandbox(
 
     Args:
         base_url: jiuwenbox service base URL.
+        shared_key: Scoped cache key (base_url|isolation). When set, only that
+            entry is cleared; other agents' sandboxes are untouched.
         policy / policy_mode: Security policy for the new sandbox.
         timeout_seconds: HTTP client timeout.
         preserve_files_upload: Files/dirs to re-upload in copy mode.
@@ -1121,25 +1175,26 @@ async def force_recreate_jiuwenbox_sandbox(
     Returns:
         New sandbox_id to write back to launcher_config.extra_params["sandbox_id"].
     """
-    # Pop stale IDs from shared cache before create; server-side cleanup follows.
-    stale_sandbox_ids = clear_jiuwenbox_shared_sandbox(base_url)
+    create_options: dict[str, Any] = {}
+    if policy is not None:
+        create_options["policy"] = policy
+    if policy_mode is not None:
+        create_options["policy_mode"] = policy_mode
+
+    if shared_key is None:
+        # Legacy single-tenant path: clear every cached sandbox under base_url.
+        stale_sandbox_ids = clear_jiuwenbox_shared_sandbox(base_url)
+        shared_key = base_url.rstrip("/")
+    else:
+        stale_id = _JiuwenBoxProviderMixin.clear_shared_sandbox_for_key(shared_key)
+        stale_sandbox_ids = [stale_id] if stale_id else []
+
     if extra_stale_sandbox_ids:
         seen = set(stale_sandbox_ids)
         for extra in extra_stale_sandbox_ids:
             if isinstance(extra, str) and extra and extra not in seen:
                 stale_sandbox_ids.append(extra)
                 seen.add(extra)
-
-    # Register new id in shared cache before deleting stale sandboxes.
-    shared_key = base_url.rstrip("/")
-    create_options: dict[str, Any] = {}
-    if policy is not None:
-        create_options["policy"] = policy
-    if policy_mode is not None:
-        create_options["policy_mode"] = policy_mode
-    if create_options:
-        options_key = json.dumps(create_options, sort_keys=True, separators=(",", ":"))
-        shared_key = f"{shared_key}|{options_key}"
 
     for old_id in stale_sandbox_ids:
         _invoke_lifecycle_hook(
@@ -1156,7 +1211,7 @@ async def force_recreate_jiuwenbox_sandbox(
             await _upload_preserve_files(client, sandbox_id, preserve_files_upload)
 
         _JiuwenBoxProviderMixin.register_shared_sandbox_id(shared_key, sandbox_id)
-        _JiuwenBoxProviderMixin.register_lifecycle_hook(base_url, lifecycle_hook)
+        _JiuwenBoxProviderMixin.register_lifecycle_hook(shared_key, lifecycle_hook)
         for old_id in stale_sandbox_ids:
             _invoke_lifecycle_hook(
                 lifecycle_hook,
@@ -1191,34 +1246,53 @@ async def force_recreate_jiuwenbox_sandbox(
 
 async def delete_jiuwenbox_sandbox(
     *,
+    sandbox_id: Optional[str] = None,
+    shared_key: Optional[str] = None,
+    delete_all: bool = False,
     reason: str = "teardown",
     timeout_seconds: float = 30.0,
 ) -> list[str]:
-    """Delete all cached remote jiuwenbox sandboxes on sysoperation teardown.
+    """Delete cached remote jiuwenbox sandbox(es) on sysoperation teardown.
 
-    base_url and lifecycle_hook are taken from the process-wide cache populated
-    when sandboxes were created (``register_lifecycle_hook`` /
-    ``register_shared_sandbox_id``), so callers only pass the teardown reason.
-    Each cached base_url's sandboxes are deleted remotely and fire ``before_delete``
-    then ``after_delete`` (strict hooks; ctx ``{"reason", "sandbox_id"}``).
+    By default only the sandbox matching ``shared_key`` or ``sandbox_id`` is
+    removed. Pass ``delete_all=True`` to drain the entire process-wide cache
+    (intended for explicit bulk cleanup, not per-agent gateway release).
 
     Args:
+        sandbox_id: Remote sandbox id to delete when ``shared_key`` cache miss.
+        shared_key: Scoped cache key (``base_url|isolation_key``).
+        delete_all: When True, delete every cached sandbox in this process.
         reason: Passed to delete hook context; default "teardown".
         timeout_seconds: HTTP client timeout.
 
     Returns:
         sandbox_ids successfully deleted, in order.
     """
+    entries: list[tuple[str, str, Optional[Callable[[str, dict], None]]]] = []
+    if delete_all:
+        entries = _JiuwenBoxProviderMixin.drain_all_cached_sandboxes()
+    elif shared_key:
+        popped = _JiuwenBoxProviderMixin.pop_cached_sandbox_for_shared_key(shared_key)
+        if popped is not None:
+            resolved_id, hook = popped
+            entries = [(shared_key, resolved_id, hook)]
+        elif isinstance(sandbox_id, str) and sandbox_id:
+            hook = _JiuwenBoxProviderMixin.pop_lifecycle_hook(shared_key)
+            entries = [(shared_key, sandbox_id, hook)]
+    elif isinstance(sandbox_id, str) and sandbox_id:
+        popped = _JiuwenBoxProviderMixin.pop_cached_sandbox_by_sandbox_id(sandbox_id)
+        if popped is not None:
+            entries = [popped]
+
     deleted: list[str] = []
-    for base_url in _JiuwenBoxProviderMixin.cached_base_urls():
-        lifecycle_hook = _JiuwenBoxProviderMixin.pop_lifecycle_hook(base_url)
-        sandbox_ids = clear_jiuwenbox_shared_sandbox(base_url)
-        if not sandbox_ids:
-            continue
+    by_base_url: Dict[str, list[tuple[str, Optional[Callable[[str, dict], None]]]]] = {}
+    for entry_shared_key, entry_sandbox_id, lifecycle_hook in entries:
+        base_url = entry_shared_key.split("|", 1)[0]
+        by_base_url.setdefault(base_url, []).append((entry_sandbox_id, lifecycle_hook))
+
+    for base_url, items in by_base_url.items():
         with _JiuwenBoxClient(base_url=base_url, timeout_seconds=timeout_seconds) as client:
-            for sandbox_id in sandbox_ids:
-                if not sandbox_id:
-                    continue
+            for sandbox_id, lifecycle_hook in items:
                 _invoke_lifecycle_hook(
                     lifecycle_hook,
                     "before_delete",
