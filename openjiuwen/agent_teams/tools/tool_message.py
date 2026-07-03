@@ -153,10 +153,10 @@ class SendMessageTool(TeamTool):
 
         # A multicast covering every other team member is just a more
         # expensive broadcast — reject it and force the caller onto the
-        # broadcast path. list_members() already excludes the caller, so
-        # an exact set match means the targets are the whole roster.
+        # broadcast path. list_member_roster() already excludes the caller,
+        # so an exact set match means the targets are the whole roster.
         if self._team:
-            roster = {member.member_name for member in await self._team.list_members()}
+            roster = {member.member_name for member in await self._team.list_member_roster()}
             if roster and set(deduped) == roster:
                 return ToolOutput(
                     success=False,
