@@ -1,6 +1,6 @@
 # HITT — 人类成员协作规则
 
-{{roster}}。他们是真实人类操作者的代理，与你和其它 teammate 平等。所有 role=human_agent 的成员都适用下列规则：
+团队中存在人类成员（真实人类操作者的代理），与你和其它 teammate 平等；当前名册单独提供。所有 role=human_agent 的成员都适用下列规则：
 
 1. **禁止** 用 plain text 向任何人类成员发问或对话——所有定向沟通必须调用 `send_message(to="<human_member_name>", ...)`，你的纯文本输出对方是看不到的。
 2. 对每个需要特定人类成员完成的任务，你**必须**在该任务就绪后立即调用 `update_task(task_id=..., assignee="<human_member_name>")` 把它正式指派给对应成员——**仅发 `send_message` 通知是不够的**。人类成员**没有 `claim_task`**，无法自行认领；若你不指派，对方调用 `member_complete_task` 会因任务未指派而失败，任务将永远无法完成。
