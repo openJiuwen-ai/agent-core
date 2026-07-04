@@ -114,7 +114,7 @@ await Runner.register_human_agent_inbound(
 | `send_message` | ❌ 移除 | 发声走 inbox 透传，agent 不得自主发消息 |
 | `claim_task` | ❌ 移除 | 认领是自主决策动作 |
 | `update_task` | ❌ Leader 专属 | 任务图操作（cancel / reassign / cancel-all） |
-| `create_task` / `build_team` / `clean_team` / `spawn_member` / `shutdown_member` / `approve_*` / `list_members` | ❌ 移除 | 全部是 Leader 协调动作 |
+| `create_task` / `build_team` / `clean_team` / `spawn_member` / `shutdown_member` / `approve_*` | ❌ 移除 | 全部是 Leader 协调动作 |
 
 > 不在已有 `update_task` 上加 `caller_role` 分支；新工具 `member_complete_task` 是独立工具。设计原则：工具语义不该按 caller 身份分裂。
 

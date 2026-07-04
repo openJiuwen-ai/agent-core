@@ -82,7 +82,6 @@ PostgreSQL / MySQL backend (`engine.py`), not SQLite.
 | `shutdown_member` | ✓ | | `force=True` skips the normal shutdown sequence |
 | `approve_plan` | ✓ (plan_mode only) | | wired only when `teammate_mode == "plan_mode"` |
 | `approve_tool` | ✓ (plan_mode only) | | same gating as `approve_plan` |
-| `list_members` | ✓ | | excludes the caller from the result |
 | `create_task` | ✓ | | auto-routes `depended_by`-bearing specs to `add_with_priority`; single-spec returns `brief()`, batch returns `tasks`+`failures` |
 | `update_task` | ✓ | | one tool handles title/content edit, cancel, assign (with reassignment reset), and `add_blocked_by` |
 | `view_task` | ✓ | ✓ | `action ∈ {list, get, claimable}`; default `list` |
@@ -229,7 +228,7 @@ The ability layer renders tool results with `str(result)` — `MappedToolOutput.
 | Pattern | Tools | Strategy |
 |---|---|---|
 | **Pure text** | `build_team`, `clean_team`, the four `spawn_*` tools, `shutdown_member`, `approve_*` | Confirmation sentence — minimal tokens |
-| **Structured text lines** | `list_members`, `view_task` (list), `create_task` (batch) | One entity per line, dense format |
+| **Structured text lines** | `view_task` (list), `create_task` (batch) | One entity per line, dense format |
 | **Detail text** | `view_task` (get) | Full fields with labeled lines |
 | **Time context** | `view_task` (list + get) | Both tiers render `updated_at` via `timefmt.format_time_context` as `<absolute local time> (<relative diff>)`. `map_result` can't take args, so it calls `get_current_time()` internally and guards on `updated_at is not None` |
 | **Text + behavior guidance** | `claim_task` (completed) | Append `Call view_task now…` after task completion to sustain the autonomous task loop |
@@ -271,7 +270,7 @@ Long `_desc` entries can live in Markdown files under `locales/descs/<lang>/<too
 - Supports `{{placeholder}}` interpolation — pass keyword arguments through `t("tool", param="value")`.
 - When migrating a `_desc` from `STRINGS` to a `.md` file, delete the dict entry and leave a comment.
 
-Current `descs/` population: `approve_plan`, `approve_tool`, `build_team`, `claim_task`, `clean_team`, `create_task`, `enter_worktree`, `exit_worktree`, `list_members`, `send_message`, `shutdown_member`, `spawn_bridge_agent`, `spawn_external_cli`, `spawn_human_agent`, `spawn_teammate`, `update_task`, `view_task`, `workspace_meta`, `async_tasks_list`, `async_task_output`, `async_task_cancel`.
+Current `descs/` population: `approve_plan`, `approve_tool`, `build_team`, `claim_task`, `clean_team`, `create_task`, `enter_worktree`, `exit_worktree`, `send_message`, `shutdown_member`, `spawn_bridge_agent`, `spawn_external_cli`, `spawn_human_agent`, `spawn_teammate`, `update_task`, `view_task`, `workspace_meta`, `async_tasks_list`, `async_task_output`, `async_task_cancel`.
 
 ## Prompt Layering: Tool Description vs System Prompt
 

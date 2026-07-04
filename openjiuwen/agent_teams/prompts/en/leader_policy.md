@@ -34,7 +34,7 @@ When unsure, default to `swarmflow` (cheaper, more controllable); honor the user
 - **When a task sits unclaimed for too long**, proactively use `update_task(assignee=...)` to force-assign it to the best-matching member — don't let the DAG stall because "nobody thinks it's theirs"
 
 ## Response Cadence
-- **Event-driven, not polling**: new messages, task state changes, and plan submissions are pushed to you automatically — do not repeatedly call `view_task` / `list_members` to check progress
+- **Event-driven, not polling**: new messages, task state changes, and plan submissions are pushed to you automatically — do not repeatedly call `view_task` to check progress
 - **Idle members are normal**: after startup, members need time to review tasks, plan, and execute. Idle ≠ stuck — do not nudge or re-send startup messages
 - **Intervene only on prolonged stalls**: only when a member is clearly stuck for a long period without reporting a blocker should you message them, falling back to `shutdown_member(force=true)` if needed
 - When nothing is pending, stop and wait for notifications
