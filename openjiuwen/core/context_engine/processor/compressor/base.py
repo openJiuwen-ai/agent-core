@@ -150,7 +150,7 @@ class PrefixCompactProcessor(ContextProcessor):
 
         total_tokens = self._count_context_window_tokens(context_window, context)
         context_max = self._resolve_context_max(context, kwargs)
-        absolute_threshold = self._resolve_trigger_tokens_threshold(context_max)
+        absolute_threshold = self._resolve_trigger_token_limit(context_max)
         if total_tokens < absolute_threshold:
             return False
 
@@ -469,13 +469,7 @@ class PrefixCompactProcessor(ContextProcessor):
                     pass
         return trace_context
 
-    def _resolve_trigger_tokens_threshold(self, context_max: int) -> int:
-        tokens_threshold = getattr(self.config, "tokens_threshold", None)
-        if tokens_threshold is not None:
-            return int(tokens_threshold)
-        trigger_total_tokens = getattr(self.config, "trigger_total_tokens", None)
-        if trigger_total_tokens is not None:
-            return int(trigger_total_tokens)
+    def _resolve_trigger_token_limit(self, context_max: int) -> int:
         return int(context_max * self.config.trigger_context_ratio)
 
     def _build_prompt(self, span: PrefixCompactSpan) -> str:

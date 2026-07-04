@@ -99,7 +99,6 @@ class TestMessageOffloaderConfig:
             "offload_strategy",
             "offload_preview_head_tail_chars",
             "messages_threshold",
-            "tokens_threshold",
             "large_message_threshold",
             "trim_size",
             "messages_to_keep",

@@ -96,8 +96,19 @@ class ContextProcessorRail(DeepAgentRail):
         if not overrides:
             return base_config
         base_dict = base_config.model_dump(exclude_none=True)
-        merged = {**base_dict, **overrides}
+        normalized_overrides = ContextProcessorRail._normalize_config_overrides(base_config, overrides)
+        merged = {**base_dict, **normalized_overrides}
         return type(base_config)(**merged)
+
+    @staticmethod
+    def _normalize_config_overrides(base_config: BaseModel, overrides: Dict) -> Dict:
+        supported_fields = set(type(base_config).model_fields)
+        normalized = dict(overrides)
+        if "keep_recent_messages" in supported_fields:
+            messages_to_keep = normalized.get("messages_to_keep")
+            if "keep_recent_messages" not in normalized and messages_to_keep is not None:
+                normalized["keep_recent_messages"] = messages_to_keep
+        return {key: value for key, value in normalized.items() if key in supported_fields and value is not None}
 
     @staticmethod
     def _merge_processors(

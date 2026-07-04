@@ -274,33 +274,6 @@ async def test_dialogue_skips_when_target_is_below_min_context_ratio():
     assert should_run is False
 
 
-@pytest.mark.skip(
-    reason="DialogueCompressorConfig does not declare `tokens_threshold`/"
-    "`trigger_total_tokens`, so _resolve_trigger_tokens_threshold always falls back to "
-    "context_max * trigger_context_ratio. The absolute-threshold path this test exercised "
-    "is therefore unreachable on the compressors. Re-enable once those fields are "
-    "declared on the compression configs."
-)
-@pytest.mark.asyncio
-async def test_dialogue_uses_absolute_tokens_threshold_before_ratio_threshold():
-    compressor = DialogueCompressor(
-        DialogueCompressorConfig(tokens_threshold=100, min_target_context_ratio=0.0)
-    )
-    _attach_executor(compressor, "historical compact state")
-    context = _context({})
-    window = _context_window(
-        [
-            UserMessage(content="Historical request"),
-            AssistantMessage(content="historical padding " * 60),
-            UserMessage(content='你收到一条消息： {"type": "user input", "content": "Current task"}'),
-        ]
-    )
-
-    should_run = await compressor.trigger_get_context_window(context, window)
-
-    assert should_run is True
-
-
 @pytest.mark.asyncio
 async def test_current_compresses_internal_user_messages_after_real_user_boundary():
     compressor = CurrentRoundCompressor(CurrentRoundCompressorConfig(keep_recent_messages=0))
@@ -329,7 +302,7 @@ async def test_current_compresses_internal_user_messages_after_real_user_boundar
 
 
 def test_current_default_targets_tool_results_before_trailing_internal_user():
-    compressor = CurrentRoundCompressor(CurrentRoundCompressorConfig(tokens_threshold=100000))
+    compressor = CurrentRoundCompressor(CurrentRoundCompressorConfig())
     window_messages = [
         UserMessage(content='你收到一条消息： {"type": "user input", "content": "Read files"}'),
         AssistantMessage(

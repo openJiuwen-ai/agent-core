@@ -28,7 +28,7 @@ class _FakeSession:
 
 
 class _CompressConfig(BaseModel):
-    trigger_total_tokens: int = 100
+    trigger_context_ratio: float = 0.8
     model: str = "test-compressor-model"
 
 

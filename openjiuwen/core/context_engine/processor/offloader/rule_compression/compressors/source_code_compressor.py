@@ -331,11 +331,15 @@ def _candidate_syntax_valid(language: str, root: Any, candidate: str) -> bool:
 
 
 def _named_children(node: Any) -> list[Any]:
-    return [node.named_child(index) for index in range(node.named_child_count())]
+    named_child_count = getattr(node, "named_child_count")
+    count = named_child_count() if callable(named_child_count) else named_child_count
+    named_child = getattr(node, "named_child")
+    return [named_child(index) for index in range(count)]
 
 
 def _kind(node: Any) -> str:
-    return str(node.kind())
+    kind = getattr(node, "kind")
+    return str(kind() if callable(kind) else kind)
 
 
 def _start(node: Any) -> int:

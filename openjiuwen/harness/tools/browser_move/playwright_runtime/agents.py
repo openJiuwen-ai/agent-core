@@ -35,7 +35,6 @@ def _build_dialogue_compressor_config(
         logger.warning("DialogueCompressor disabled: model_name is empty.")
         return None
     return DialogueCompressorConfig(
-        tokens_threshold=50000,
         messages_to_keep=10,
         keep_last_round=True,
         model_client=ModelClientConfig(
@@ -359,4 +358,3 @@ def build_browser_worker_agent(
     agent.ability_manager.add(mcp_cfg)
     ensure_execute_signature_compat(agent, tool_result_observer=tool_result_observer)
     return agent
-
