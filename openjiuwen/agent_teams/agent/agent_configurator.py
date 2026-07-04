@@ -427,6 +427,9 @@ class AgentConfigurator:
         ws_spec = agent_spec.workspace or spec.agents.get("leader", agent_spec).workspace
         workspace_is_worktree = bool(ctx.worktree_path)
         if ctx.worktree_path:
+            # Team-managed isolation creates the teammate worktree before this
+            # point. Build the DeepAgent with that worktree as its visible
+            # workspace so shell/file tools start inside the isolated checkout.
             base_ws_spec = ws_spec or WorkspaceSpec()
             ws_spec = base_ws_spec.model_copy(
                 update={
@@ -602,12 +605,23 @@ class AgentConfigurator:
         # extras. With a platform-supplied build_context, derive a per-member
         # view and decouple its extras (so members never share handles /
         # caches); otherwise synthesize a minimal context.
+        # Workspace root controls where the agent runs; project_dir controls
+        # project-scoped providers such as LSP and prompt workspace context.
+        # Keep both on the same worktree to avoid a teammate running in the
+        # isolated checkout while project-aware capabilities still point at the
+        # original repository.
+        member_project_dir = ctx.worktree_path if ctx.worktree_path else None
         if spec.build_context is not None:
+            context_overrides: dict[str, Any] = {
+                "member_name": member_name,
+                "role": ctx.role.value,
+                "language": resolved_language,
+                "member_card_id": self._card.id,
+            }
+            if member_project_dir:
+                context_overrides["project_dir"] = member_project_dir
             member_build_context = spec.build_context.derive(
-                member_name=member_name,
-                role=ctx.role.value,
-                language=resolved_language,
-                member_card_id=self._card.id,
+                **context_overrides,
             )
             member_build_context.extras = dict(member_build_context.extras)
         else:
@@ -616,6 +630,7 @@ class AgentConfigurator:
                 member_name=member_name,
                 role=ctx.role.value,
                 member_card_id=self._card.id,
+                project_dir=member_project_dir,
             )
         # Swarmflow worker-model resolver (leader + enable_swarmflow only). A
         # positional pool lookup by ``agent(model=...)`` name hint; None when the
