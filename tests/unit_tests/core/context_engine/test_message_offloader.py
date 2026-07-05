@@ -262,6 +262,8 @@ class TestMessageOffloaderAddTrigger:
         message = context.get_messages()[1]
         assert message.content == "x" * 100
         assert not isinstance(message, OffloadMixin)
+        states = context._processor_state_recorder.history()  # type: ignore[attr-defined]
+        assert [state["status"] for state in states] == ["started", "noop"]
 
     @pytest.mark.asyncio
     async def test_add_threshold_ratio_is_configurable(self):

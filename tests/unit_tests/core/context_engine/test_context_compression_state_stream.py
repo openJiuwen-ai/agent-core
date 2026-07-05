@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import asyncio
 from typing import Any, Dict, List, Tuple
 from unittest.mock import AsyncMock, patch
 import re
@@ -92,6 +93,33 @@ class _NoopCompressor(ContextProcessor):
             **kwargs: Any,
     ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         return None, messages_to_add
+
+    def load_state(self, state: Dict[str, Any]) -> None:
+        return None
+
+    def save_state(self) -> Dict[str, Any]:
+        return {}
+
+
+class _CancellingCompressor(_NoopCompressor):
+    async def on_add_messages(
+            self,
+            context,
+            messages_to_add: List[BaseMessage],
+            **kwargs: Any,
+    ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
+        raise asyncio.CancelledError
+
+
+class _CancellingGetWindowProcessor(ContextProcessor):
+    def __init__(self):
+        super().__init__(_CompressConfig())
+
+    async def trigger_get_context_window(self, context, context_window, **kwargs: Any) -> bool:
+        return True
+
+    async def on_get_context_window(self, context, context_window, **kwargs: Any):
+        raise asyncio.CancelledError
 
     def load_state(self, state: Dict[str, Any]) -> None:
         return None
@@ -241,6 +269,50 @@ async def test_active_compression_returns_noop_when_processor_does_not_change_co
     states = _compression_states(session)
     assert [state.status for state in states] == ["started", "noop"]
     assert states[0].before.context_percent == 0
+
+
+@pytest.mark.asyncio
+async def test_active_compression_streams_failed_state_when_cancelled():
+    session = _FakeSession()
+    context = SessionModelContext(
+        "context-1",
+        session.get_session_id(),
+        ContextEngineConfig(),
+        history_messages=[UserMessage(content="will cancel")],
+        processors=[_CancellingCompressor()],
+        token_counter=None,
+    )
+    setattr(context, "_session_ref", session)
+
+    with pytest.raises(asyncio.CancelledError):
+        await context.compress_context()
+
+    states = _compression_states(session)
+    assert [state.status for state in states] == ["started", "failed"]
+    assert states[1].error == "cancelled"
+    assert states[1].phase == "active_compress"
+
+
+@pytest.mark.asyncio
+async def test_get_context_window_streams_failed_state_when_cancelled():
+    session = _FakeSession()
+    context = SessionModelContext(
+        "context-1",
+        session.get_session_id(),
+        ContextEngineConfig(),
+        history_messages=[UserMessage(content="will cancel")],
+        processors=[_CancellingGetWindowProcessor()],
+        token_counter=None,
+    )
+    setattr(context, "_session_ref", session)
+
+    with pytest.raises(asyncio.CancelledError):
+        await context.get_context_window()
+
+    states = _compression_states(session)
+    assert [state.status for state in states] == ["started", "failed"]
+    assert states[1].error == "cancelled"
+    assert states[1].phase == "get_context_window"
 
 
 @pytest.mark.asyncio

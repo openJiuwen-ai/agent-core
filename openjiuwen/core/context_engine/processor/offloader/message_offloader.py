@@ -4,7 +4,7 @@ import fnmatch
 import json
 import os
 import uuid
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -97,7 +97,7 @@ class MessageOffloader(ContextProcessor):
         context: ModelContext,
         messages_to_add: list[BaseMessage],
         **kwargs: Any,
-    ) -> tuple[ContextEvent, list[BaseMessage]]:
+    ) -> tuple[Optional[ContextEvent], list[BaseMessage]]:
         all_messages = context.get_messages() + messages_to_add
         threshold = self._add_message_threshold(context)
         processed = list(messages_to_add)
@@ -117,7 +117,9 @@ class MessageOffloader(ContextProcessor):
             processed[index] = replacement
             event.messages_to_modify.append(context_size + index)
 
-        return event, processed
+        if event.messages_to_modify:
+            return event, processed
+        return None, processed
 
     async def _process_added_message(
         self,
@@ -219,11 +221,13 @@ class MessageOffloader(ContextProcessor):
         context_window: ContextWindow,
         **kwargs: Any,
     ) -> bool:
-        _ = context_window, kwargs
+        _ = context_window
         now = self._rule_pipeline.current_time()
         previous_access = context.last_context_window_access_at()
         context.set_last_context_window_access_at(now)
-        if self.config.ttl_seconds <= 0 or previous_access is None:
+        if self.config.ttl_seconds <= 0:
+            return False
+        if previous_access is None:
             return False
         if now - previous_access < self.config.ttl_seconds:
             return False
@@ -234,7 +238,7 @@ class MessageOffloader(ContextProcessor):
         context: ModelContext,
         context_window: ContextWindow,
         **kwargs: Any,
-    ) -> tuple[ContextEvent, ContextWindow]:
+    ) -> tuple[Optional[ContextEvent], ContextWindow]:
         messages = context.get_messages()
         processed = list(messages)
         event = ContextEvent(event_type=self.processor_type())
@@ -259,7 +263,8 @@ class MessageOffloader(ContextProcessor):
         if event.messages_to_modify:
             context.set_messages(processed)
             self._replace_window_messages(context_window, processed)
-        return event, context_window
+            return event, context_window
+        return None, context_window
 
     async def _process_ttl_message(
         self,

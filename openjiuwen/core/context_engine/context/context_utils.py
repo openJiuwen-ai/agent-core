@@ -286,6 +286,15 @@ class ContextUtils:
         )
 
     @staticmethod
+    def is_offload_processor(processor: Any) -> bool:
+        processor_type = processor.processor_type().lower()
+        module_name = processor.__class__.__module__.lower()
+        return (
+            "offload" in processor_type
+            or ".processor.offloader." in module_name
+        )
+
+    @staticmethod
     def find_last_ai_message_without_tool_call(
         messages: List[BaseMessage],
     ) -> Optional[int]:
