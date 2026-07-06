@@ -172,8 +172,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "workflow.human_prompt": "正在等待人工回复 [{label}]：{prompt}（correlation_id={corr}）",
         "workflow.human_replied": "人工已回复 [{label}]，编排继续。",
         "swarmflow.launched": (
-            "[Swarmflow 已启动] run_id={run_id}，task_id={task_id}。"
+            "[Swarmflow 已启动] run_id={run_id}，task_id={task_id}，script_path={script_path}。"
             "并行工作流计数请只认 run_id，不要用 task_id 当作新的一局。"
+            "重跑 / 迭代请用上面的 script_path（内联 script 已落盘到此绝对路径），无需重发整段源码。"
         ),
         "swarmflow.completed": "[Swarmflow 完成] run_id={run_id}\n{result}",
         "swarmflow.failed": "[Swarmflow 失败] run_id={run_id}，错误={error}",
@@ -362,8 +363,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "workflow.human_prompt": "Awaiting a human reply [{label}]: {prompt} (correlation_id={corr})",
         "workflow.human_replied": "The human replied [{label}]; orchestration continues.",
         "swarmflow.launched": (
-            "[Swarmflow launched] run_id={run_id}, task_id={task_id}. "
-            "Count parallel workflows by run_id only — do not treat task_id as a new run."
+            "[Swarmflow launched] run_id={run_id}, task_id={task_id}, script_path={script_path}. "
+            "Count parallel workflows by run_id only — do not treat task_id as a new run. "
+            "To re-run / iterate, pass the script_path above (an inline script has been written to this "
+            "absolute path) — no need to resend the source."
         ),
         "swarmflow.completed": "[Swarmflow completed] run_id={run_id}\n{result}",
         "swarmflow.failed": "[Swarmflow failed] run_id={run_id}, error={error}",
