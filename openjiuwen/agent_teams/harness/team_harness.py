@@ -137,8 +137,17 @@ class TeamHarness:
         """
         if self._native is not None and self._native.state is not HarnessState.TERMINATED:
             await self._native.stop()
-        self._native_session_id = None
-        self._active_agent_session = None
+        try:
+            if self._active_agent_session is not None:
+                await self._active_agent_session.commit()
+        except Exception:
+            logger.debug(
+                "[TeamHarness] commit raised during teardown, ignoring",
+                exc_info=True,
+            )
+        finally:
+            self._native_session_id = None
+            self._active_agent_session = None
 
     async def run_once(self, content: Any, *, team_session: Optional[Any] = None) -> dict[str, Any]:
         """Run one non-streaming execution; returns the ``Runner.run_agent`` dict.
