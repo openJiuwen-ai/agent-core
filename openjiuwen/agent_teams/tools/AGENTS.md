@@ -318,7 +318,10 @@ Locale 文件在 `locales/` —— 每种语言一个扁平 `STRINGS` dict（`cn
 - 支持 `{{placeholder}}` 插值 —— 通过 `t("tool", param="value")` 传关键字参数。
 - 把某个 `_desc` 从 `STRINGS` 迁到 `.md` 文件时，删掉 dict 条目并留一条注释。
 
-当前 `descs/` 已覆盖：`approve_plan`、`approve_tool`、`build_team`、`claim_task`、`clean_team`、`create_task`、`enter_worktree`、`exit_worktree`、`list_members`、`send_message`、`shutdown_member`、`spawn_bridge_agent`、`spawn_external_cli`、`spawn_human_agent`、`spawn_teammate`、`update_task`、`view_task`、`workspace_meta`、`async_tasks_list`、`async_task_output`、`async_task_cancel`。
+当前 `descs/` 已覆盖：`approve_plan`、`approve_tool`、`build_team`、`claim_task`、`clean_team`、`create_task`、`list_members`、
+`member_complete_task`、`send_message`、`shutdown_member`、`spawn_bridge_agent`、`spawn_external_cli`、`spawn_human_agent`、
+`spawn_teammate`、`structured_output`、`swarmflow`、`update_task`、`view_task`、`workspace_meta`、`async_tasks_list`、
+`async_task_output`、`async_task_cancel`。
 
 ## Prompt 分层：工具描述 vs 系统提示词
 
