@@ -125,6 +125,11 @@ class ExternalTeamClient:
         return self._descriptor.role == "leader"
 
     @property
+    def is_human_agent(self) -> bool:
+        """Whether this member is a human-agent avatar (drives the inbound note)."""
+        return self._descriptor.role == "human_agent"
+
+    @property
     def scope(self) -> str:
         """The external-access scenario: ``"member"`` or ``"operator"``."""
         return self._descriptor.scope
@@ -356,7 +361,7 @@ class ExternalTeamClient:
         now_ms = get_current_time()
         parts: list[str] = []
         if view.messages:
-            parts.append(render_messages(view.messages, now_ms=now_ms))
+            parts.append(render_messages(view.messages, is_human_agent=self.is_human_agent, now_ms=now_ms))
         board = render_task_board(view.tasks, is_leader=self.is_leader, now_ms=now_ms)
         if board:
             parts.append(board)

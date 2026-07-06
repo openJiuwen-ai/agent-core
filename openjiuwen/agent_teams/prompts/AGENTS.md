@@ -25,8 +25,8 @@ Markdown 模板是团队 Agent 的行为契约。Python 侧只做装配（`secti
 | `leader_workflow_hybrid.md` | Leader 且 `team_mode="hybrid"` | `build_team_workflow_section` | 混合团队工作流：预注册基础成员 + 允许动态 `spawn_teammate` 扩员 |
 | `lifecycle_persistent.md` | Leader 且 `lifecycle="persistent"` | `build_team_lifecycle_section` | 长期团队收尾语义（完成任务后待命，不解散） |
 | `lifecycle_temporary.md` | Leader 且 `lifecycle="temporary"`（默认） | `build_team_lifecycle_section` | 临时团队收尾语义（shutdown → clean_team） |
-| `attachment_notice.md` | 常驻（每个成员） | `build_team_attachment_notice_section` | 团队动态状态说明：成员名册 / 团队信息 / 人类成员名单以 `<prompt-attachment>`（type=`team_members`/`team_info`/`team_hitt_roster`）挂在消息尾部逐轮刷新；HITT 协作规则在系统提示词里、稳定不变 |
-| `inbound_tags.md` | 常驻（每个成员） | `build_team_inbound_tags_section` | 入站消息 XML 标签体系（`<team-inbound>` / `<team-note>` / `<team-event>`、`for="controller"`） |
+| `attachment_notice.md` | 进程内成员（有 attachment 通道） | `build_team_attachment_notice_section` | 团队动态状态说明：成员名册 / 团队信息 / 人类成员名单以 `<prompt-attachment>`（type=`team_members`/`team_info`/`team_hitt_roster`）挂在消息尾部逐轮刷新；HITT 协作规则在系统提示词里、稳定不变 |
+| `inbound_tags.md` | 常驻（每个成员，含外部 CLI） | `build_team_inbound_tags_section` | 入站消息 XML 标签体系（`<team-inbound>` / `<team-note>` / `<team-event>`、`for="controller"`）。进程内成员与外部 CLI（`read_inbox`）都渲染这套 XML |
 | `hitt_leader.md` / `hitt_teammate.md` / `hitt_teammate_anonymous.md` / `hitt_human_agent.md` | 存在 human_agent 成员，且角色命中 | `build_team_hitt_contract_section`（→ system prompt builder）；名册另由 `build_team_hitt_roster_section` 出 `team_hitt_roster`（→ attachment） | HITT **静态协作契约**，按角色分四版（`_hitt_template_name` 挑版），roster-agnostic 不列名字；只 `{{peers}}` 注入自身名字。人类成员名册由 `_format_human_agent_roster` 生成单独的 `team_hitt_roster` 段。组合入口 `build_team_hitt_section`（契约+名册拼一段）仅供外部 CLI 成员 / 测试。见 [[F_50]] |
 | `bridge_leader.md` / `bridge_teammate.md` / `bridge_agent.md` | 存在 bridge_agent 成员，且角色命中 | `build_team_bridge_section` | Bridge 协作规则，按角色分三版；`{{roster}}` 注入桥接成员名册，`{{peers}}` 注入自身名字 |
 
