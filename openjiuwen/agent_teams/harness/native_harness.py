@@ -99,6 +99,7 @@ if TYPE_CHECKING:
 _EVENT_STATE = "harness.state"
 _EVENT_ROUND = "harness.round"
 _EVENT_NAMESPACE = "native_harness"
+_SLOW_ROUND_REPEAT_LOG_INTERVAL_SECONDS = 600.0
 
 
 class NativeHarness(DeepAgent):
@@ -152,7 +153,7 @@ class NativeHarness(DeepAgent):
         self._extra_rails: list[AgentRail] = list(extra_rails) if extra_rails else []
         self._session: Session | None = None
         self._owns_session: bool = False
-        self._timeout: float = parts.config.completion_timeout
+        self._slow_round_log_after_seconds: float = parts.config.completion_timeout
         self._st = HarnessInternalState()
         self._control: asyncio.Queue = asyncio.Queue()
         # Harness-private event bus; consumers subscribe via
@@ -992,6 +993,10 @@ class NativeHarness(DeepAgent):
         """
         error: BaseException | None = None
         result: dict | None = None
+        slow_log_task = asyncio.create_task(
+            self._log_slow_round_until_done(active),
+            name=f"native_harness_slow_round_log[{active.round_id}]",
+        )
         # Per-round BEFORE/AFTER_INVOKE lifecycle. The supervisor drives outer
         # rounds directly (bypassing DeepAgent.invoke), so the invoke-level
         # callbacks have no other firing site here — each outer round is one
@@ -1013,46 +1018,16 @@ class NativeHarness(DeepAgent):
                     is_follow_up=is_follow_up,
                     task_id=active.task_id,
                 )
-                result = await self.loop_controller.wait_round_completion(self._timeout)
+                result = await self.loop_controller.wait_round_completion()
                 # wait_completion returns a control-error dict ({"error":
-                # "cancelled" / "completion_timeout" / "no active round"}) when
-                # the wait itself was cancelled/timed out rather than the round
+                # "cancelled" / "no active round"}) when the wait itself was
+                # cancelled rather than the round
                 # producing a real result — notably, an immediate abort/pause
                 # cancels this wait task and the handler swallows the
                 # CancelledError into {"error": "cancelled"}. Streaming that as
                 # an (empty) answer is noise: aborted/paused rounds emit their
-                # own round_aborted marker. A timeout is a terminal round error,
-                # so convert it into the standard error-result shape.
-                if isinstance(result, dict) and result.get("error") == "completion_timeout":
-                    # The harness gave up waiting, but the TaskScheduler task
-                    # may still be running (e.g. a slow API call).  Cancel it
-                    # now so it doesn't linger as a zombie that concurrently
-                    # writes to the context buffer when the next round starts,
-                    # causing interleaved messages and 400 errors.
-                    controller = self.loop_controller
-                    if controller is not None and controller.task_scheduler is not None:
-                        try:
-                            await controller.task_scheduler.cancel_task(active.task_id)
-                        except Exception:
-                            logger.exception(
-                                "[NativeHarness] cancel_task failed after "
-                                "completion_timeout, round_id=%s",
-                                active.round_id,
-                            )
-                    logger.warning(
-                        "[NativeHarness] round_id=%s task_id=%s completion_timeout after %.3fs",
-                        active.round_id,
-                        active.task_id,
-                        self._timeout,
-                    )
-                    await self._write_round_result_to_stream(
-                        {
-                            "output": f"Agent round timed out after {self._timeout:g}s.",
-                            "result_type": "error",
-                        },
-                        self._session,
-                    )
-                elif not (isinstance(result, dict) and result.get("error")):
+                # own round_aborted marker.
+                if not (isinstance(result, dict) and result.get("error")):
                     await self._write_round_result_to_stream(result, self._session)
                 # Expose the round result to AFTER_INVOKE rails (fired in the
                 # lifecycle's finally). Control-error dicts carry no real answer,
@@ -1065,6 +1040,7 @@ class NativeHarness(DeepAgent):
             logger.exception("[NativeHarness] round_id=%s crashed", active.round_id)
             error = exc
         finally:
+            await self._cancel_slow_log_task(slow_log_task)
             await self._control.put(
                 _CmdRoundFinished(
                     round_id=active.round_id,
@@ -1072,6 +1048,34 @@ class NativeHarness(DeepAgent):
                     result=result,
                 ),
             )
+
+    async def _log_slow_round_until_done(self, active: ActiveRound) -> None:
+        """Log non-terminal slow-round warnings until the round task finishes."""
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        await asyncio.sleep(self._slow_round_log_after_seconds)
+        while True:
+            elapsed = loop.time() - started_at
+            logger.warning(
+                "[NativeHarness] slow round: round_id=%s task_id=%s session_id=%s elapsed=%.3fs state=%s query=%r",
+                active.round_id,
+                active.task_id,
+                self.session_id,
+                elapsed,
+                self.state.value,
+                str(active.original_query)[:120],
+            )
+            await asyncio.sleep(_SLOW_ROUND_REPEAT_LOG_INTERVAL_SECONDS)
+
+    async def _cancel_slow_log_task(self, task: asyncio.Task) -> None:
+        """Cancel a slow-round logger task and swallow its cancellation."""
+        if task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     async def _hard_cancel_round(self, active: ActiveRound) -> None:
         """Hard-cancel a round: stop the scheduler task, then the wait task.
