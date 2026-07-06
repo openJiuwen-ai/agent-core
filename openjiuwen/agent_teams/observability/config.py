@@ -24,6 +24,14 @@ class ObservabilityConfig(BaseModel):
         redact_prompts: When True, hash/truncate prompt contents.
         redact_completions: When True, hash/truncate completion contents.
         attribute_value_max_length: Hard cap on string attribute length.
+            Default 40960 (langfuse recommendation).
+        max_attributes: Maximum number of attributes per span. Default 4096.
+            Passed to OTel SDK SpanLimits to prevent BoundedAttributes FIFO
+            eviction that causes prompt/completion attribute loss.
+        backend: Backend type for attribute deduplication. Default "langfuse".
+            When "langfuse", standard gen_ai.prompt/completion attributes are
+            not written (only langfuse.* versions), avoiding duplicate attributes.
+            When other value, both standard and langfuse versions are written.
         export_timeout_ms: Span exporter shutdown timeout.
         traces_dir: Root directory for the ``file`` exporter. One
             append-only ``traces-<YYYY-MM-DD>.jsonl`` file per calendar
@@ -43,7 +51,9 @@ class ObservabilityConfig(BaseModel):
     sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
     redact_prompts: bool = False
     redact_completions: bool = False
-    attribute_value_max_length: int = 8192
+    attribute_value_max_length: int = 40960
+    max_attributes: int = 4096
+    backend: Literal["langfuse", "otlp"] = "langfuse"
     export_timeout_ms: int = 5000
     # Langfuse authentication (for OTLP export via Langfuse OTLP endpoint)
     langfuse_public_key: str = ""

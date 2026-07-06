@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
 from typing import Any
 
 from opentelemetry import context as otel_context
@@ -32,6 +31,7 @@ from openjiuwen.agent_teams.observability.redaction import (
     redact_prompt,
 )
 from openjiuwen.agent_teams.observability.semconv import (
+    AT_MEMBER_NAME,
     AT_SESSION_ID,
 
     GEN_AI_COMPLETION,
@@ -354,6 +354,7 @@ class OtelCallbackHandler:
             span.set_attribute(GEN_AI_TOOL_INPUT, redacted_input)
             span.set_attribute(LANGFUSE_OBSERVATION_INPUT, redacted_input)
             self._propagate_team_context(span)
+            self._stamp_parent_member_name(span)
             push_tool_span(tool_name, span)
         except Exception as exc:
             team_logger.warning("otel: on_tool_call_started failed: {}", exc)
@@ -528,13 +529,15 @@ class OtelCallbackHandler:
         msg_count = len(messages)
         span.set_attribute(GEN_AI_REQUEST_MESSAGE_COUNT, msg_count)
 
+        emit_standard_prompt = self._config.backend != "langfuse"
         for i, m in enumerate(messages):
             role = _message_role(m)
             raw_content = _coerce_message_content(_message_content(m))
             # Per-message prompt attributes (standard + Langfuse)
             redacted = redact_prompt(raw_content, self._config)
-            span.set_attribute(f"{GEN_AI_PROMPT}.{i}.role", role)
-            span.set_attribute(f"{GEN_AI_PROMPT}.{i}.content", redacted)
+            if emit_standard_prompt:
+                span.set_attribute(f"{GEN_AI_PROMPT}.{i}.role", role)
+                span.set_attribute(f"{GEN_AI_PROMPT}.{i}.content", redacted)
             span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.role", role)
             span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.content", redacted)
 
@@ -592,6 +595,7 @@ class OtelCallbackHandler:
                 span.set_attribute(GEN_AI_TOOL_DEFINITIONS, str(tools))
 
         self._propagate_team_context(span)
+        self._stamp_parent_member_name(span)
 
         push_llm_span_state(
             LlmSpanState(span=span, start_ns=time.monotonic_ns(), is_streaming=is_streaming),
@@ -649,9 +653,11 @@ class OtelCallbackHandler:
         duplicated output assembly.
         """
         redacted_compl = redact_completion(completion_text, self._config)
+        emit_standard_completion = self._config.backend != "langfuse"
         # Standard gen_ai.completion keys
-        state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.role", "assistant")
-        state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.content", redacted_compl)
+        if emit_standard_completion:
+            state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.role", "assistant")
+            state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.content", redacted_compl)
         # Langfuse-compatible t_ prefix keys
         state.span.set_attribute(f"{LANGFUSE_GEN_AI_COMPLETION}.0.role", "assistant")
         state.span.set_attribute(f"{LANGFUSE_GEN_AI_COMPLETION}.0.content", redacted_compl)
@@ -713,6 +719,7 @@ class OtelCallbackHandler:
             rt = getattr(usage, "reasoning_tokens", 0) or 0
             if rt:
                 reasoning_span.set_attribute(GEN_AI_USAGE_REASONING_TOKENS, int(rt))
+            self._stamp_parent_member_name(reasoning_span, fallback=state.span)
             reasoning_span.set_status(Status(StatusCode.OK))
             if has_timing:
                 dur_ns = reasoning_last_ns - reasoning_first_ns  # type: ignore[operator]
@@ -823,3 +830,35 @@ class OtelCallbackHandler:
                 span.set_attribute(AT_SESSION_ID, sid)
         except Exception as exc:
             team_logger.warning("callback_handler: failed to propagate team context: {}", exc)
+
+    @staticmethod
+    def _stamp_parent_member_name(span: Span, *, fallback: Span | None = None) -> None:
+        """Stamp ``agentteam.member.name`` from the parent agent span.
+
+        The outer agent iteration span already carries ``AT_MEMBER_NAME``
+        (stamped by ``ObservabilityRail._stamp_agent_attributes``).  Child
+        llm.call / reasoning / tool spans do not, so when the agent span is
+        closed abnormally these orphans can no longer be traced back to the
+        teammate that produced them.  This copies the member name down so
+        every child span stays attributable.
+
+        Reads ``get_current_agent_span()`` first; if that is gone (agent span
+        already ended) falls back to ``fallback.attributes`` (e.g. the parent
+        llm.call span for a reasoning sub-span, which was stamped at open
+        time).  Silent no-op when neither carries the attribute.
+        """
+        try:
+            member_name: str = ""
+            agent_span = get_current_agent_span()
+            if agent_span is not None:
+                raw = agent_span.attributes.get(AT_MEMBER_NAME)
+                if raw is not None:
+                    member_name = str(raw)
+            if not member_name and fallback is not None:
+                raw = fallback.attributes.get(AT_MEMBER_NAME)
+                if raw is not None:
+                    member_name = str(raw)
+            if member_name:
+                span.set_attribute(AT_MEMBER_NAME, member_name)
+        except Exception as exc:
+            team_logger.warning("callback_handler: failed to stamp member name: {}", exc)

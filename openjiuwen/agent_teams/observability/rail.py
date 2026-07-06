@@ -590,7 +590,6 @@ class ObservabilityRail(DeepAgentRail):
         span.set_attribute(AT_AGENT_ROLE, member_name or "")
         if team_name:
             span.set_attribute(AT_TEAM_ID, team_name)
-            span.set_attribute(AT_TEAM_NAME, team_name)
         if session_id:
             span.set_attribute(AT_SESSION_ID, session_id)
             span.set_attribute(LANGFUSE_SESSION_ID, session_id)
