@@ -7,10 +7,14 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
 from typing import Any, Dict, Optional
 
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging.browser_context import (
+    reset_browser_agent_log_context,
+    set_browser_agent_log_context,
+)
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
@@ -22,18 +26,23 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 
 from ..controllers import ActionController, BaseController
 from ..utils.parsing import extract_json_object
+from .browser_logging import (
+    browser_agent_log_info,
+    browser_agent_log_warning,
+)
 from .browser_tools import ensure_browser_runtime_client_patch
 from .config import BrowserInstanceConfig, BrowserRunGuardrails
 from .probes import build_card_probe_js, build_interactive_probe_js
 from .service import MAX_ITERATION_MESSAGE, BrowserService, BrowserTaskProgressState
 from .site_profiles import builtin_site_profiles, get_selector_cache
+from .status_logging import BrowserSubagentStatusLogger, is_browser_subagent_status_log_enabled
 
-logger = logging.getLogger(__name__)
 
 _BROWSER_PROGRESS_STATE_KEY = "__browser_subagent_progress_state__"
 _BROWSER_PROGRESS_TASK_KEY = "__browser_subagent_last_task__"
 _BROWSER_PROGRESS_SECTION_NAME = "browser_progress_continuation"
 _BROWSER_PROGRESS_FORMAT_SECTION_NAME = "browser_progress_format"
+_BROWSER_LOG_CONTEXT_TOKEN_KEY = "__browser_agent_log_context_token__"
 _BROWSER_PROGRESS_TAG_RE = re.compile(
     r"<browser_progress>\s*(\{.*?\})\s*</browser_progress>",
     re.DOTALL | re.IGNORECASE,
@@ -86,6 +95,7 @@ class BrowserAgentRuntime:
         self._code_executor = None
         self._browser_probe_interactives_tool = None
         self._browser_probe_cards_tool = None
+        self._browser_batch_interact_tool = None
 
     @property
     def service(self) -> BrowserService:
@@ -106,6 +116,10 @@ class BrowserAgentRuntime:
     @property
     def browser_probe_cards_tool(self) -> Any:
         return self._browser_probe_cards_tool
+
+    @property
+    def browser_batch_interact_tool(self) -> Any:
+        return self._browser_batch_interact_tool
 
     @property
     def controller(self) -> BaseController:
@@ -342,24 +356,18 @@ class BrowserAgentRuntime:
         if self._browser_custom_action_tool is not None:
             return
         from .runtime_tools import (
+            BrowserBatchInteractTool,
             BrowserCustomActionTool,
             BrowserListActionsTool,
             BrowserProbeCardsTool,
             BrowserProbeInteractivesTool,
         )
 
-        self._browser_custom_action_tool = BrowserCustomActionTool(self, language="en")
-        self._browser_list_actions_tool = BrowserListActionsTool(self, language="en")
         self._browser_probe_interactives_tool = BrowserProbeInteractivesTool(self, language="en")
         self._browser_probe_cards_tool = BrowserProbeCardsTool(self, language="en")
-        self._register_runtime_tool(
-            self._browser_custom_action_tool,
-            tool_name="browser_custom_action",
-        )
-        self._register_runtime_tool(
-            self._browser_list_actions_tool,
-            tool_name="browser_list_custom_actions",
-        )
+        self._browser_batch_interact_tool = BrowserBatchInteractTool(self, language="en")
+        self._browser_custom_action_tool = BrowserCustomActionTool(self, language="en")
+        self._browser_list_actions_tool = BrowserListActionsTool(self, language="en")
         self._register_runtime_tool(
             self._browser_probe_interactives_tool,
             tool_name="browser_probe_interactives",
@@ -368,14 +376,29 @@ class BrowserAgentRuntime:
             self._browser_probe_cards_tool,
             tool_name="browser_probe_cards",
         )
+        self._register_runtime_tool(
+            self._browser_batch_interact_tool,
+            tool_name="browser_batch_interact",
+        )
+        self._register_runtime_tool(
+            self._browser_custom_action_tool,
+            tool_name="browser_custom_action",
+        )
+        self._register_runtime_tool(
+            self._browser_list_actions_tool,
+            tool_name="browser_list_custom_actions",
+        )
 
         # Legacy browser_run_task compatibility: let the worker agent call
         # deterministic controller helpers without introducing another planner.
         if self._service.browser_agent is not None:
-            self._service.browser_agent.ability_manager.add(self._browser_custom_action_tool.card)
-            self._service.browser_agent.ability_manager.add(self._browser_list_actions_tool.card)
+            # Add compact standalone helpers first so the browser worker sees the
+            # same first-class affordances as the probe tools before MCP primitives.
             self._service.browser_agent.ability_manager.add(self._browser_probe_interactives_tool.card)
             self._service.browser_agent.ability_manager.add(self._browser_probe_cards_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_batch_interact_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_custom_action_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_list_actions_tool.card)
 
     async def run_browser_task(
         self,
@@ -391,6 +414,33 @@ class BrowserAgentRuntime:
             request_id=request_id,
             timeout_s=timeout_s,
         )
+
+    async def batch_interact(
+        self,
+        *,
+        steps: Any,
+        timeout_ms: Any = None,
+        wait_after_each_ms: Any = None,
+        continue_on_error: bool = False,
+        global_timeout_ms: Any = None,
+        session_id: str = "",
+        request_id: str = "",
+    ) -> Dict[str, Any]:
+        await self.ensure_runtime_ready()
+        self._controller.bind_runtime(self)
+        if self._code_executor is not None:
+            self._controller.bind_code_executor(self._code_executor)
+        return await self._controller.run_action(
+            action="browser_batch_interact",
+            session_id=session_id,
+            request_id=request_id,
+            steps=steps,
+            timeout_ms=timeout_ms,
+            wait_after_each_ms=wait_after_each_ms,
+            continue_on_error=continue_on_error,
+            global_timeout_ms=global_timeout_ms,
+        )
+
 
     async def run_custom_action(
         self,
@@ -559,8 +609,40 @@ class BrowserRuntimeRail(AgentRail):
     def __init__(self, runtime: BrowserAgentRuntime) -> None:
         super().__init__()
         self._runtime = runtime
+        self._status_logger = (
+            BrowserSubagentStatusLogger()
+            if is_browser_subagent_status_log_enabled()
+            else None
+        )
+        browser_agent_log_info(
+            "[BROWSER_SUBAGENT_BOOT] enabled=%s logger=%s",
+            self._status_logger is not None,
+            type(self._status_logger).__name__ if self._status_logger is not None else None,
+        )
+
+    def _emit_status(self, method_name: str, ctx: AgentCallbackContext) -> None:
+        if self._status_logger is None:
+            return
+        method = getattr(self._status_logger, method_name, None)
+        if not callable(method):
+            browser_agent_log_warning(
+                "[BROWSER_SUBAGENT_ERROR] missing_status_method=%s",
+                method_name,
+            )
+            return
+        try:
+            method(ctx)
+        except Exception:
+            browser_agent_log_warning(
+                "[BROWSER_SUBAGENT_ERROR] method=%s",
+                method_name,
+                exc_info=True,
+            )
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        if isinstance(getattr(ctx, "extra", None), dict):
+            ctx.extra[_BROWSER_LOG_CONTEXT_TOKEN_KEY] = set_browser_agent_log_context(True)
+        self._emit_status("before_invoke", ctx)
         await self._runtime.ensure_runtime_ready()
         self._ensure_browser_mcp_ability(ctx)
         session = getattr(ctx, "session", None)
@@ -573,6 +655,7 @@ class BrowserRuntimeRail(AgentRail):
             session.update_state({_BROWSER_PROGRESS_TASK_KEY: task_text})
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        self._emit_status("before_model_call", ctx)
         session = getattr(ctx, "session", None)
         builder = getattr(ctx.agent, "system_prompt_builder", None)
         if session is None or builder is None:
@@ -651,7 +734,20 @@ class BrowserRuntimeRail(AgentRail):
         except ValueError:
             return
 
+    async def after_model_call(self, ctx: AgentCallbackContext) -> None:
+        self._emit_status("after_model_call", ctx)
+
+    async def on_model_exception(self, ctx: AgentCallbackContext) -> None:
+        self._emit_status("on_model_exception", ctx)
+
+    async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        self._emit_status("before_tool_call", ctx)
+
+    async def on_tool_exception(self, ctx: AgentCallbackContext) -> None:
+        self._emit_status("on_tool_exception", ctx)
+
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        self._emit_status("after_tool_call", ctx)
         session = getattr(ctx, "session", None)
         if session is None:
             return
@@ -669,76 +765,85 @@ class BrowserRuntimeRail(AgentRail):
         self._persist_service_progress_to_session(session)
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
-        session = getattr(ctx, "session", None)
-        result = getattr(getattr(ctx, "inputs", None), "result", None)
-        if session is None or not isinstance(result, dict):
-            return
+        try:
+            self._emit_status("after_invoke", ctx)
+            session = getattr(ctx, "session", None)
+            result = getattr(getattr(ctx, "inputs", None), "result", None)
+            if session is None or not isinstance(result, dict):
+                return
 
-        session_id = session.get_session_id()
-        self._hydrate_service_progress_from_session(session)
-        output_text = str(result.get("output") or "")
-        clean_output, progress_payload = self._extract_progress_payload(output_text)
-        if clean_output != output_text:
-            result["output"] = clean_output
+            session_id = session.get_session_id()
+            self._hydrate_service_progress_from_session(session)
+            output_text = str(result.get("output") or "")
+            clean_output, progress_payload = self._extract_progress_payload(output_text)
+            if clean_output != output_text:
+                result["output"] = clean_output
 
-        if progress_payload is not None:
-            parsed_progress = self._build_progress_result(progress_payload, clean_output)
-            self._runtime.service.record_worker_progress(
-                session_id=session_id,
-                request_id="",
-                parsed=parsed_progress,
-            )
-            progress_state = self._runtime.service.get_progress_state(session_id)
-            exported = self._runtime.service.export_progress_state(session_id)
-            if self._runtime.service.should_treat_as_completed(parsed_progress):
-                result["result_type"] = "answer"
+            if progress_payload is not None:
+                parsed_progress = self._build_progress_result(progress_payload, clean_output)
+                self._runtime.service.record_worker_progress(
+                    session_id=session_id,
+                    request_id="",
+                    parsed=parsed_progress,
+                )
+                progress_state = self._runtime.service.get_progress_state(session_id)
+                exported = self._runtime.service.export_progress_state(session_id)
+                if self._runtime.service.should_treat_as_completed(parsed_progress):
+                    result["result_type"] = "answer"
+                    result["progress_state"] = exported
+                    self._clear_progress_state(session)
+                    return
+
+                failure_summary = self._runtime.service.build_failure_summary(
+                    task=self._load_task_text(session),
+                    error=str(parsed_progress.get("error") or "browser_task_incomplete"),
+                    page_url=progress_state.last_page_url if progress_state is not None else "",
+                    page_title=progress_state.last_page_title if progress_state is not None else "",
+                    final=clean_output,
+                    screenshot=progress_state.last_screenshot if progress_state is not None else None,
+                    attempt=1,
+                    progress_state=progress_state,
+                )
+                result["result_type"] = "error"
+                result["failure_summary"] = failure_summary
                 result["progress_state"] = exported
+                result["output"] = failure_summary if not clean_output else f"{clean_output}\n\n{failure_summary}"
+                self._persist_service_progress_to_session(session)
+                return
+
+            if self._is_max_iteration_result(result):
+                progress_state = self._runtime.service.get_progress_state(session_id)
+                failure_summary = self._runtime.service.build_failure_summary(
+                    task=self._load_task_text(session),
+                    error="max_iterations_reached",
+                    page_url=progress_state.last_page_url if progress_state is not None else "",
+                    page_title=progress_state.last_page_title if progress_state is not None else "",
+                    final=clean_output or output_text,
+                    screenshot=progress_state.last_screenshot if progress_state is not None else None,
+                    attempt=1,
+                    progress_state=progress_state,
+                )
+                result["failure_summary"] = failure_summary
+                result["progress_state"] = self._runtime.service.export_progress_state(session_id)
+                result["output"] = failure_summary
+                self._persist_service_progress_to_session(session)
+                return
+
+            if str(result.get("result_type", "")).lower() == "answer":
                 self._clear_progress_state(session)
                 return
 
-            failure_summary = self._runtime.service.build_failure_summary(
-                task=self._load_task_text(session),
-                error=str(parsed_progress.get("error") or "browser_task_incomplete"),
-                page_url=progress_state.last_page_url if progress_state is not None else "",
-                page_title=progress_state.last_page_title if progress_state is not None else "",
-                final=clean_output,
-                screenshot=progress_state.last_screenshot if progress_state is not None else None,
-                attempt=1,
-                progress_state=progress_state,
-            )
-            result["result_type"] = "error"
-            result["failure_summary"] = failure_summary
-            result["progress_state"] = exported
-            result["output"] = failure_summary if not clean_output else f"{clean_output}\n\n{failure_summary}"
-            self._persist_service_progress_to_session(session)
-            return
+            exported = self._runtime.service.export_progress_state(session_id)
+            if exported is not None:
+                result["progress_state"] = exported
+                self._persist_service_progress_to_session(session)
 
-        if self._is_max_iteration_result(result):
-            progress_state = self._runtime.service.get_progress_state(session_id)
-            failure_summary = self._runtime.service.build_failure_summary(
-                task=self._load_task_text(session),
-                error="max_iterations_reached",
-                page_url=progress_state.last_page_url if progress_state is not None else "",
-                page_title=progress_state.last_page_title if progress_state is not None else "",
-                final=clean_output or output_text,
-                screenshot=progress_state.last_screenshot if progress_state is not None else None,
-                attempt=1,
-                progress_state=progress_state,
-            )
-            result["failure_summary"] = failure_summary
-            result["progress_state"] = self._runtime.service.export_progress_state(session_id)
-            result["output"] = failure_summary
-            self._persist_service_progress_to_session(session)
-            return
-
-        if str(result.get("result_type", "")).lower() == "answer":
-            self._clear_progress_state(session)
-            return
-
-        exported = self._runtime.service.export_progress_state(session_id)
-        if exported is not None:
-            result["progress_state"] = exported
-            self._persist_service_progress_to_session(session)
+        finally:
+            extra = getattr(ctx, "extra", None)
+            if isinstance(extra, dict):
+                token = extra.pop(_BROWSER_LOG_CONTEXT_TOKEN_KEY, None)
+                if token is not None:
+                    reset_browser_agent_log_context(token)
 
     @staticmethod
     def _normalize_tool_result(tool_result: Any) -> Any:

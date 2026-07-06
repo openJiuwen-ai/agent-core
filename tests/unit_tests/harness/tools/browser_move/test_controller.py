@@ -137,6 +137,12 @@ def test_describe_actions_includes_registered_specs() -> None:
     assert isinstance(spec.get("params"), dict)
     assert spec["params"]
 
+    assert "browser_batch_interact" in details
+    batch_spec = details["browser_batch_interact"]
+    assert "multi-field forms" in batch_spec.get("when_to_use", "")
+    assert "single uncertain click" in batch_spec.get("when_to_use", "")
+    assert "steps" in batch_spec.get("params", {})
+
 
 def test_browser_get_element_coordinates_parses_fenced_json_output() -> None:
     async def fake_runner(

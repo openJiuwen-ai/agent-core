@@ -153,6 +153,223 @@ _PROBE_CARDS_PARAMS: Dict[str, Any] = {
     "required": [],
 }
 
+_BATCH_INTERACT_DESC = (
+    "Execute multiple deterministic browser interactions in one standalone runtime tool call. "
+    "Use after browser_probe_interactives/browser_probe_cards when a page-level flow has multiple "
+    "known targets, such as three or more form fields, click+type+choose autocomplete, dropdown or "
+    "date-picker selection, filter panels, search submit plus result wait, or compact extraction. "
+    "This is a first-class helper like the probe tools; do not route this through browser_custom_action. "
+    "Do not use it for a single uncertain click; keep using browser_fill_form for ordinary visible "
+    "text fields when that official tool is enough."
+)
+_BATCH_INTERACT_PARAMS: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "steps": {
+            "type": "array",
+            "description": (
+                "Ordered browser steps to execute in one batch. Supported ops: click, fill, type, "
+                "autocomplete, select_visible_text, press, select_option, set_checked, "
+                "wait_for_selector, wait_for_text, wait_for_load_state, sleep, extract_text, "
+                "extract_value, screenshot."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "op": {
+                        "type": "string",
+                        "description": "Step operation name.",
+                    },
+                    "selector": {
+                        "type": "string",
+                        "description": "CSS selector, preferably selector_hint from probes.",
+                    },
+                    "role": {
+                        "type": "string",
+                        "description": "ARIA role to locate, e.g. button/textbox/link.",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Accessible name for role-based locating.",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Label text for labeled form controls.",
+                    },
+                    "placeholder": {
+                        "type": "string",
+                        "description": "Placeholder text for form controls.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Visible text for locate/click/wait_for_text.",
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "Value to fill/type/select, or autocomplete query.",
+                    },
+                    "option_text": {
+                        "type": "string",
+                        "description": (
+                            "Visible option text for autocomplete/select_visible_text/native select "
+                            "label."
+                        ),
+                    },
+                    "choose_text": {
+                        "type": "string",
+                        "description": "Alias for option_text in autocomplete flows.",
+                    },
+                    "option_selector": {
+                        "type": "string",
+                        "description": "CSS selector for an autocomplete/dropdown option to choose.",
+                    },
+                    "choose_selector": {
+                        "type": "string",
+                        "description": "Alias for option_selector.",
+                    },
+                    "option_role": {
+                        "type": "string",
+                        "description": (
+                            "ARIA role for an autocomplete/dropdown option, e.g. option/menuitem."
+                        ),
+                    },
+                    "choose_role": {
+                        "type": "string",
+                        "description": "Alias for option_role.",
+                    },
+                    "option_name": {
+                        "type": "string",
+                        "description": "Accessible name for option_role.",
+                    },
+                    "choose_name": {
+                        "type": "string",
+                        "description": "Alias for option_name.",
+                    },
+                    "option_value": {
+                        "type": "string",
+                        "description": "Native select option value. Alias for value when op=select_option.",
+                    },
+                    "values": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "MCP/Playwright-style native select values list. Also accepted for "
+                            "single-select fields."
+                        ),
+                    },
+                    "option_label": {
+                        "type": "string",
+                        "description": (
+                            "Native select visible label. Alias for option_text when "
+                            "op=select_option."
+                        ),
+                    },
+                    "label_value": {
+                        "type": "string",
+                        "description": "Native select visible label alias.",
+                    },
+                    "index": {
+                        "type": "integer",
+                        "description": "Native select option index.",
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "Keyboard key for press, e.g. Enter or Escape.",
+                    },
+                    "checked": {
+                        "type": "boolean",
+                        "description": "Desired checked state for set_checked.",
+                    },
+                    "state": {
+                        "type": "string",
+                        "description": (
+                            "Wait state for wait_for_selector/load_state, e.g. "
+                            "visible/attached/domcontentloaded."
+                        ),
+                    },
+                    "exact": {
+                        "type": "boolean",
+                        "description": "Use exact matching for role/label/text locators.",
+                    },
+                    "optional": {
+                        "type": "boolean",
+                        "description": "When true, failure records the step but continues.",
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "description": "Optional per-step timeout override.",
+                    },
+                    "delay_ms": {
+                        "type": "integer",
+                        "description": "Optional typing delay in milliseconds.",
+                    },
+                    "wait_after_type_ms": {
+                        "type": "integer",
+                        "description": (
+                            "Optional wait after autocomplete typing before choosing an option."
+                        ),
+                    },
+                    "wait_after_ms": {
+                        "type": "integer",
+                        "description": "Optional wait after this step succeeds.",
+                    },
+                    "ms": {
+                        "type": "integer",
+                        "description": "Sleep duration for op=sleep.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum characters for extract_text.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Screenshot path for op=screenshot.",
+                    },
+                    "full_page": {
+                        "type": "boolean",
+                        "description": "When true, screenshot the full page.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Human-readable purpose for logs/debugging.",
+                    },
+                },
+                "required": ["op"],
+            },
+        },
+        "timeout_ms": {
+            "type": "integer",
+            "description": (
+                "Default per-step timeout in milliseconds. Default 5000, clamped to 250..30000."
+            ),
+        },
+        "wait_after_each_ms": {
+            "type": "integer",
+            "description": "Optional short wait after each successful step, clamped to 0..5000.",
+        },
+        "continue_on_error": {
+            "type": "boolean",
+            "description": "When true, continue after failed steps and return per-step errors.",
+        },
+        "global_timeout_ms": {
+            "type": "integer",
+            "description": (
+                "Hard timeout for the whole batch. Default is computed from step count, capped at "
+                "90000."
+            ),
+        },
+        "session_id": {
+            "type": "string",
+            "description": "Optional browser task session id.",
+        },
+        "request_id": {
+            "type": "string",
+            "description": "Optional browser task request id.",
+        },
+    },
+    "required": ["steps"],
+}
+
 
 class BrowserCancelTool(Tool):
     """Cancel an in-progress browser task."""
@@ -406,6 +623,49 @@ class BrowserProbeCardsTool(Tool):
             yield None
 
 
+class BrowserBatchInteractTool(Tool):
+    def __init__(self, runtime: "BrowserAgentRuntime", language: str = "cn") -> None:
+        del language
+        super().__init__(
+            ToolCard(
+                name="browser_batch_interact",
+                description=_BATCH_INTERACT_DESC,
+                input_params=_BATCH_INTERACT_PARAMS,
+            )
+        )
+        self._runtime = runtime
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
+        del kwargs
+
+        steps = inputs.get("steps")
+        session_id = (inputs.get("session_id") or "").strip() or _ctx_parent_session_id.get()
+        request_id = (inputs.get("request_id") or "").strip() or _ctx_parent_request_id.get()
+
+        try:
+            result = await self._runtime.batch_interact(
+                steps=steps,
+                timeout_ms=inputs.get("timeout_ms"),
+                wait_after_each_ms=inputs.get("wait_after_each_ms"),
+                continue_on_error=bool(inputs.get("continue_on_error", False)),
+                global_timeout_ms=inputs.get("global_timeout_ms"),
+                session_id=session_id,
+                request_id=request_id,
+            )
+            return ToolOutput(
+                success=bool(result.get("ok", True)),
+                data=result,
+                error=result.get("error"),
+            )
+        except Exception as exc:
+            return ToolOutput(success=False, error=str(exc))
+
+    async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
+        del inputs, kwargs
+        if False:
+            yield None
+
+
 class BrowserRuntimeHealthTool(Tool):
     """Return runtime readiness and heartbeat metadata."""
 
@@ -448,9 +708,10 @@ def build_browser_runtime_tools(
     return [
         BrowserCancelTool(runtime, language),
         BrowserClearCancelTool(runtime, language),
-        BrowserCustomActionTool(runtime, language),
-        BrowserListActionsTool(runtime, language),
         BrowserProbeInteractivesTool(runtime, language),
         BrowserProbeCardsTool(runtime, language),
+        BrowserBatchInteractTool(runtime, language),
+        BrowserCustomActionTool(runtime, language),
+        BrowserListActionsTool(runtime, language),
         BrowserRuntimeHealthTool(runtime, language),
     ]
