@@ -11,9 +11,11 @@ from openjiuwen.agent_teams.prompts import (
     build_team_extra_section,
     build_team_info_section,
     build_team_lifecycle_section,
+    build_team_member_system_prompt,
     build_team_members_section,
     build_team_private_prompt_section,
     build_team_role_section,
+    build_team_static_sections,
     build_team_workflow_section,
 )
 from openjiuwen.agent_teams.rails import TeamPolicyRail
@@ -845,3 +847,54 @@ class TestTeamPolicyRailHittSplit:
         assert builder.has_section(TeamSectionName.HITT)
         rail.uninit(agent)
         assert not builder.has_section(TeamSectionName.HITT)
+
+
+class TestTagNoticeInclusion:
+    """inbound_tags is universal; attachment_notice is in-process only (F_51).
+
+    Every team member reads inbound messages / events as <team-inbound> /
+    <team-event> XML, so the inbound-tag notice is always built. Only the
+    in-process DeepAgent (with a PromptAttachmentManager) sees prompt
+    attachments, so the attachment notice is gated behind
+    include_attachment_notice.
+    """
+
+    @pytest.mark.level1
+    def test_static_sections_default_omit_attachment_notice(self):
+        secs = build_team_static_sections(role=TeamRole.LEADER, member_name="l", language="cn")
+        names = {s.name for s in secs}
+        assert TeamSectionName.INBOUND_TAGS in names
+        assert TeamSectionName.ATTACHMENT_NOTICE not in names
+
+    @pytest.mark.level1
+    def test_static_sections_include_attachment_notice_when_flagged(self):
+        secs = build_team_static_sections(
+            role=TeamRole.LEADER,
+            member_name="l",
+            language="cn",
+            include_attachment_notice=True,
+        )
+        names = {s.name for s in secs}
+        assert TeamSectionName.INBOUND_TAGS in names
+        assert TeamSectionName.ATTACHMENT_NOTICE in names
+
+    @pytest.mark.level1
+    def test_external_cli_prompt_has_inbound_tags_no_attachment_notice(self):
+        # build_team_member_system_prompt is the external CLI path: it must carry
+        # the inbound-tag notice (external CLI now renders <team-inbound> XML) but
+        # not the attachment notice (external CLI has no attachment channel).
+        prompt = build_team_member_system_prompt(role=TeamRole.LEADER, member_name="l", language="cn")
+        assert "team-inbound" in prompt
+        assert "prompt-attachment" not in prompt
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_rail_static_sections_include_both_notices(self):
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = TeamPolicyRail(role=TeamRole.LEADER, member_name="l", language="cn")
+        rail.init(agent)
+        await rail.before_model_call(None)
+        names = builder.get_all_sections().keys()
+        assert TeamSectionName.INBOUND_TAGS in names
+        assert TeamSectionName.ATTACHMENT_NOTICE in names

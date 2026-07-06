@@ -225,10 +225,11 @@ messager，不经本地 avatar 代理。与 F_07 bridge（本地完整 DeepAgent
   （send/broadcast/list/get/claimable/claim/complete/update/list_members + `create_task`）+
   `fetch_inbox`/`watch`，全团队控制面；MCP instructions = 控制工作流。
 
-公共件：`client.tools`（member 真实工具字典）、`client.read_inbox()`（文本）、
+公共件：`client.tools`（member 真实工具字典）、`client.read_inbox()`（`<team-inbound>`/`<team-event>` XML）、
 `client.bind_session_context()`（每调用重绑 session/language contextvar）。
-- `external/format.py`：纯函数把消息 / 任务板渲染成与进程内 dispatcher 一致的文本
-  （复用 `i18n.t` 文案）；`read_inbox` 用之。
+- `external/format.py`：纯函数把消息 / 任务板渲染成与进程内 dispatcher 一致的
+  `<team-inbound>`/`<team-event>` XML（复用 `inbound_render` 结构 + `i18n.t` note 文案）；
+  `read_inbox` 用之。见 F_51。
 - `skill/cli.py`：非交互脚本式 CLI（`team-member` 入口），两段解析后按 scope 分化子命令
   （member 驱动真实工具 / operator 控制面）。两份 skill 文档：`skill/SKILL_member.md` /
   `skill/SKILL_operator.md`。与 `cli/` 的交互式 TUI 不同——后者给人用，本 CLI 给外部 agent

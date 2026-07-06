@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-07-03 |
-| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md` |
+| 最近一次修订日期 | 2026-07-06 |
+| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md` |
 
 ## 范围 / 边界
 
@@ -57,7 +57,7 @@
 ### Rail 注入契约
 
 15. **Rail 通过 DeepAgent 的 rail registry 注入，不直接修改 `SystemPromptBuilder`**：`TeamPolicyRail` 在 `init(agent)` 里捕获 `agent.system_prompt_builder` 引用，于 `before_model_call` 写入 section；在 `uninit(agent)` 里按名移除。**禁止**绕过 rail 把 section 直接 `add_section` 到 *DeepAgent 的共享 builder* 上。**例外（外部 CLI 成员）**：非 DeepAgent 的外部 CLI 成员没有共享 builder，由 `sections.build_team_member_system_prompt(...)` 把同一批静态 section 装进一个**一次性 `SystemPromptBuilder`** 渲染成独立字符串(见不变量 18a / [[F_25_external-cli-hardening-and-gemini]])——这不违反本条，因为它不触碰任何 DeepAgent 的共享 builder，且**只装 team section、排除其它 rail**。
-    - 18a. **静态 section 的单一真相源是 `sections.build_team_static_sections(...)`**：`TeamPolicyRail._build_static_sections` 与 `build_team_member_system_prompt` 都委托它构建 role/hitt(契约+名册)/bridge/workflow/lifecycle/private-prompt/extra。**HITT 例外**:rail 的 `_build_static_sections` **不传** `human_agent_names`,故 HITT 契约/名册在该路径返回 `None`、改由 rail 每轮动态刷新(契约→builder、名册→attachment);`build_team_member_system_prompt`(外部 CLI,无 attachment 通道)传入 spawn 期 `human_agent_names` 快照,把契约+名册内联进一次性 prompt。成员**公开 `desc` 不进自己的 prompt**(只进他人花名册 team_members section);成员**私有 `prompt` 只进自己的 prompt**(team_private_prompt static section)。dynamic 的 info/members section 不在其中(依赖 live DB,外部 CLI 成员经 MCP 工具自取)。
+    - 18a. **静态 section 的单一真相源是 `sections.build_team_static_sections(...)`**：`TeamPolicyRail._build_static_sections` 与 `build_team_member_system_prompt` 都委托它构建 role/hitt(契约+名册)/bridge/workflow/lifecycle/private-prompt/extra。**HITT 例外**:rail 的 `_build_static_sections` **不传** `human_agent_names`,故 HITT 契约/名册在该路径返回 `None`、改由 rail 每轮动态刷新(契约→builder、名册→attachment);`build_team_member_system_prompt`(外部 CLI,无 attachment 通道)传入 spawn 期 `human_agent_names` 快照,把契约+名册内联进一次性 prompt。成员**公开 `desc` 不进自己的 prompt**(只进他人花名册 team_members section);成员**私有 `prompt` 只进自己的 prompt**(team_private_prompt static section)。dynamic 的 info/members section 不在其中(依赖 live DB,外部 CLI 成员经 MCP 工具自取)。inbound_tags 说明 section 由 `build_team_static_sections` **无条件**构造(进程内 + 外部 CLI 都渲染 `<team-inbound>`/`<team-event>` XML,见 [[F_51]]);attachment_notice 由 `include_attachment_notice` 门控(rail 传 True,外部 CLI 走默认 False——它无 PromptAttachmentManager、靠 MCP 工具取状态,给了会误导),两者都不再由 rail 额外 `append`。
 16. **Mount order load-bearing**：`TeamHarness.build` 必须先挂 `TeamToolRail` 并 eager `init`，再挂 `TeamPolicyRail`。原因：policy 输出引用 ability 快照，能力必须先就位。Rail 顺序的修改必须同步检视 mount path。
 17. **`uninit` 必须把自己写入 builder 的 section 全部清掉**：`TeamPolicyRail.uninit` 删除 `_static_sections` 里的每个 section + builder-bound 的 HITT 契约（`TeamSectionName.HITT`）；attachment-bound 的 roster/info/members 随 attachment_manager 销毁、无需 uninit 清理。rail 卸载后 builder 不得残留团队 section。
 18. **dynamic section 在 `team_backend is None` 时整体跳过**：单测可只关心 static 内容；`_info_cache` / `_members_cache` 在缺 backend 时不构造，rail 行为退化成纯静态。
@@ -152,11 +152,15 @@ def build_team_extra_section(
 ) -> PromptSection | None: ...    # None when base_prompt is empty/whitespace
 
 # Single source of truth for the static section set (role/hitt/bridge/workflow/
-# lifecycle/private-prompt/extra). TeamPolicyRail._build_static_sections delegates
-# here; build_team_member_system_prompt (external CLI members) renders these into
-# a standalone string via a throwaway SystemPromptBuilder, excluding other rails.
-# Note: the member's public `desc` is NOT rendered here — it belongs only in
-# peers' roster (team_members section), never in the member's own prompt.
+# lifecycle/private-prompt/extra + the inbound-tag notice always, + the attachment
+# notice when include_attachment_notice). TeamPolicyRail._build_static_sections
+# delegates here with include_attachment_notice=True; build_team_member_system_prompt
+# (external CLI members) renders these into a standalone string via a throwaway
+# SystemPromptBuilder, excluding other rails, and leaves include_attachment_notice=False
+# (external CLI has no PromptAttachmentManager — it pulls team state via MCP tools — so
+# the attachment notice would mislead; it still renders inbound <team-inbound> XML, so it
+# keeps the inbound-tag notice). Note: the member's public `desc` is NOT rendered here —
+# it belongs only in peers' roster (team_members section).
 def build_team_static_sections(
     *,
     role: TeamRole,
@@ -170,6 +174,7 @@ def build_team_static_sections(
     human_agent_names: list[str] | None = None,
     expose_human_agents_to_teammates: bool = False,
     bridge_agent_names: list[str] | None = None,
+    include_attachment_notice: bool = False,
 ) -> list[PromptSection]: ...      # non-None sections, unsorted
 
 def build_team_member_system_prompt(  # same kwargs as build_team_static_sections

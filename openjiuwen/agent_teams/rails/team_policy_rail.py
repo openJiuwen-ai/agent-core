@@ -32,10 +32,8 @@ from typing import TYPE_CHECKING, Any, Optional
 from openjiuwen.agent_teams.prompts import (
     MtimeSectionCache,
     TeamSectionName,
-    build_team_attachment_notice_section,
     build_team_hitt_contract_section,
     build_team_hitt_roster_section,
-    build_team_inbound_tags_section,
     build_team_info_section,
     build_team_members_section,
     build_team_static_sections,
@@ -270,14 +268,8 @@ class TeamPolicyRail(DeepAgentRail):
             base_prompt=base_prompt,
             language=self._language,
             bridge_agent_names=bridge_agent_names,
+            include_attachment_notice=True,
         )
-        # In-process DeepAgent members read team state via prompt attachments
-        # and receive inbound messages as XML; append the two static notices
-        # that explain those tag systems. External CLI members call
-        # build_team_static_sections directly and use neither mechanism, so
-        # the notices live here on the rail rather than in that shared builder.
-        sections.append(build_team_attachment_notice_section(language=self._language))
-        sections.append(build_team_inbound_tags_section(language=self._language))
         team_logger.info(
             "[{}] TeamPolicyRail static sections: section_names={}",
             member_name or "?",

@@ -712,6 +712,7 @@ def build_team_static_sections(
     human_agent_names: list[str] | None = None,
     expose_human_agents_to_teammates: bool = False,
     bridge_agent_names: list[str] | None = None,
+    include_attachment_notice: bool = False,
 ) -> list[PromptSection]:
     """Build the never-changing team sections for one member.
 
@@ -739,6 +740,12 @@ def build_team_static_sections(
         expose_human_agents_to_teammates: Whether teammates see human agents
             in that one-shot HITT snapshot.
         bridge_agent_names: Registered bridge-agent member names (bridge section).
+        include_attachment_notice: When True, append the prompt-attachment
+            notice (team state delivered as ``<prompt-attachment>`` at the
+            message tail). In-process DeepAgent members pass True; external CLI
+            members have no attachment channel and leave it False. The inbound
+            tag notice is always appended — every member reads inbound messages
+            and events as ``<team-inbound>`` / ``<team-event>`` XML.
 
     Returns:
         The non-None sections, unsorted (the caller orders by priority).
@@ -788,7 +795,16 @@ def build_team_static_sections(
             language=language,
         ),
     ]
-    return [section for section in builders if section is not None]
+    sections = [section for section in builders if section is not None]
+    # Every team member — in-process or external CLI — receives inbound messages
+    # and framework events as <team-inbound> / <team-event> XML, so the inbound
+    # tag notice is always included. The attachment notice is in-process only:
+    # external CLI members have no PromptAttachmentManager (they pull team state
+    # via MCP tools), so it is gated behind include_attachment_notice.
+    if include_attachment_notice:
+        sections.append(build_team_attachment_notice_section(language=language))
+    sections.append(build_team_inbound_tags_section(language=language))
+    return sections
 
 
 def build_team_member_system_prompt(
