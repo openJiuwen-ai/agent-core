@@ -48,7 +48,6 @@ class TeamSectionName:
 
     ROLE = "team_role"
     HITT = "team_hitt"
-    HITT_ROSTER = "team_hitt_roster"
     BRIDGE = "team_bridge"
     WORKFLOW = "team_workflow"
     LIFECYCLE = "team_lifecycle"
@@ -411,14 +410,6 @@ def build_team_info_section(
     )
 
 
-def _format_human_agent_roster(names: list[str], language: str) -> str:
-    """Render the list of human-agent member names for inline prompts."""
-    quoted = ", ".join(f"`{n}`" for n in names)
-    if language == "cn":
-        return f"注册的人类成员：{quoted}"
-    return f"Registered human members: {quoted}"
-
-
 def _self_member_line(self_name: str | None, language: str) -> str:
     """Render the 'your member_name is X' line, or empty when unset."""
     if not self_name:
@@ -432,8 +423,8 @@ def _hitt_template_name(role: TeamRole, expose_human_agents_to_teammates: bool) 
     """Pick the HITT contract template for a role.
 
     TEAMMATE defaults to the role-neutral anonymous template; the
-    ``expose_human_agents_to_teammates`` flag switches it to the legacy
-    roster-exposing variant. Returns ``None`` for roles without a HITT section.
+    ``expose_human_agents_to_teammates`` flag switches it to the roster-aware
+    variant. Returns ``None`` for roles without a HITT section.
     """
     if role == TeamRole.LEADER:
         return "hitt_leader"
@@ -444,72 +435,63 @@ def _hitt_template_name(role: TeamRole, expose_human_agents_to_teammates: bool) 
     return None
 
 
-def _hitt_roster_visible(role: TeamRole, expose_human_agents_to_teammates: bool) -> bool:
-    """Whether this role lists human-member names.
-
-    The anonymous teammate variant never names anyone, so it carries no roster
-    block; every other HITT role does.
-    """
-    if role == TeamRole.TEAMMATE:
-        return expose_human_agents_to_teammates
-    return role in (TeamRole.LEADER, TeamRole.HUMAN_AGENT)
-
-
 def _hitt_contract_body(
     role: TeamRole,
     self_member_name: str | None,
     expose_human_agents_to_teammates: bool,
     language: str,
 ) -> str | None:
-    """Render the static HITT collaboration-contract markdown (rules only)."""
+    """Render the HITT collaboration-contract markdown (rules only).
+
+    The human roster is NOT inlined here — human members appear in the unified
+    ``team_members`` roster tagged ``[human]`` (gated by
+    ``expose_human_agents_to_teammates``). Only the human-agent contract carries
+    a ``{{self_line}}`` placeholder (the avatar's own member_name); the leader /
+    teammate templates are plain text and skip the format step.
+    """
     template_name = _hitt_template_name(role, expose_human_agents_to_teammates)
     if template_name is None:
         return None
-    peers = _self_member_line(self_member_name, language)
-    return load_template(template_name, language).format({"peers": peers}).content
+    template = load_template(template_name, language)
+    if role == TeamRole.HUMAN_AGENT:
+        self_line = _self_member_line(self_member_name, language)
+        return template.format({"self_line": self_line}).content
+    return template.content
 
 
-def _hitt_roster_body(
-    role: TeamRole,
-    human_agent_names: "list[str] | frozenset[str] | set[str]",
-    expose_human_agents_to_teammates: bool,
-    language: str,
-) -> str | None:
-    """Render the dynamic human-member roster markdown (names only)."""
-    if not _hitt_roster_visible(role, expose_human_agents_to_teammates):
-        return None
-    return _format_human_agent_roster(sorted(human_agent_names), language)
-
-
-def build_team_hitt_contract_section(
+def build_team_hitt_section(
     *,
     role: TeamRole,
-    human_agent_names: "list[str] | frozenset[str] | set[str] | None" = None,
+    hitt_enabled: bool = False,
     language: str = "cn",
     self_member_name: str | None = None,
     expose_human_agents_to_teammates: bool = False,
 ) -> Optional[PromptSection]:
-    """Build the static HITT collaboration-contract section (rules only).
+    """Build the HITT collaboration-contract section (rules only).
 
-    The human-member roster is delivered separately (see
-    :func:`build_team_hitt_roster_section`) so this contract stays byte-stable
-    in the system-prompt prefix. Returns ``None`` when no human agent is
-    registered or the role has no HITT section.
+    Present only when HITT is enabled for the team (``hitt_enabled``). The rules
+    reference the ``[human]``-tagged entries in the unified ``team_members``
+    roster rather than an inline human roster, so the section is static
+    (byte-stable in the system-prompt prefix) — gated on the HITT capability
+    flag rather than the live roster, so the rules are ready even before any
+    human agent is spawned. Text is role-specific: LEADER gets assignment
+    rules, TEAMMATE gets role-neutral collaboration habits (anonymous by
+    default; ``expose_human_agents_to_teammates`` switches to the roster-aware
+    variant), HUMAN_AGENT gets the avatar self-contract.
 
     Args:
         role: The role whose prompt this section targets.
-        human_agent_names: Registered human-agent member names. Empty/None
-            means no human members → no section.
+        hitt_enabled: Whether HITT is enabled for the team. False → no section.
         language: "cn" or "en".
         self_member_name: The current member's own name, injected into the
             human-agent contract so the avatar knows which entry is itself.
         expose_human_agents_to_teammates: TEAMMATE-only switch between the
-            anonymous (default) and roster-exposing contract templates.
+            anonymous (default) and roster-aware contract templates.
 
     Returns:
         The contract PromptSection, or ``None``.
     """
-    if not human_agent_names:
+    if not hitt_enabled:
         return None
     body = _hitt_contract_body(role, self_member_name, expose_human_agents_to_teammates, language)
     if body is None:
@@ -521,135 +503,33 @@ def build_team_hitt_contract_section(
     )
 
 
-def build_team_hitt_roster_section(
-    *,
-    role: TeamRole,
-    human_agent_names: "list[str] | frozenset[str] | set[str] | None" = None,
-    language: str = "cn",
-    expose_human_agents_to_teammates: bool = False,
-) -> Optional[PromptSection]:
-    """Build the dynamic human-member roster section (names only).
-
-    Delivered as a per-round attachment so roster churn never invalidates the
-    system-prompt prefix. Returns ``None`` when no human agent is registered,
-    or for the anonymous teammate variant (which never lists names).
-
-    Args:
-        role: The role whose prompt this section targets.
-        human_agent_names: Registered human-agent member names. Empty/None
-            means no human members → no section.
-        language: "cn" or "en".
-        expose_human_agents_to_teammates: TEAMMATE-only switch; False keeps the
-            teammate roster hidden (returns ``None``).
-
-    Returns:
-        The roster PromptSection, or ``None``.
-    """
-    if not human_agent_names:
-        return None
-    body = _hitt_roster_body(role, human_agent_names, expose_human_agents_to_teammates, language)
-    if body is None:
-        return None
-    return PromptSection(
-        name=TeamSectionName.HITT_ROSTER,
-        content={language: body},
-        priority=12,
-    )
-
-
-def build_team_hitt_section(
-    *,
-    role: TeamRole,
-    human_agent_names: "list[str] | frozenset[str] | set[str] | None" = None,
-    language: str = "cn",
-    self_member_name: str | None = None,
-    expose_human_agents_to_teammates: bool = False,
-) -> Optional[PromptSection]:
-    """Build the combined HITT section (contract + roster in one block).
-
-    Convenience entry for one-shot snapshots (external CLI members) and tests,
-    where there is no attachment channel: concatenates the static contract and
-    the human-member roster into a single section. In-process members instead
-    split these across the system prompt (contract) and a per-round attachment
-    (roster) via :func:`build_team_hitt_contract_section` /
-    :func:`build_team_hitt_roster_section`.
-
-    Args:
-        role: The role whose prompt this section targets.
-        human_agent_names: Member names of every registered human agent.
-            Empty/None means no human members → no section.
-        language: "cn" or "en".
-        self_member_name: The current member's own name, used to tell a
-            human-agent reader which entry in the roster is itself.
-        expose_human_agents_to_teammates: Only affects the TEAMMATE branch.
-            False (default) → anonymous variant. True → legacy roster-exposing
-            variant.
-    """
-    if not human_agent_names:
-        return None
-    contract_body = _hitt_contract_body(role, self_member_name, expose_human_agents_to_teammates, language)
-    if contract_body is None:
-        return None
-    roster_body = _hitt_roster_body(role, human_agent_names, expose_human_agents_to_teammates, language)
-    body = contract_body if roster_body is None else f"{contract_body.rstrip()}\n\n{roster_body}"
-    return PromptSection(
-        name=TeamSectionName.HITT,
-        content={language: body},
-        priority=12,
-    )
-
-
-def _format_bridge_agent_roster(names: list[str], language: str) -> str:
-    """Render the list of bridge-agent member names for inline prompts."""
-    quoted = ", ".join(f"`{n}`" for n in names)
-    if language == "cn":
-        return f"注册的桥接成员：{quoted}"
-    return f"Registered bridge members: {quoted}"
-
-
-def _bridge_template_name(role: TeamRole) -> str | None:
-    """Pick the Bridge template for a role, or ``None`` when not applicable."""
-    if role == TeamRole.LEADER:
-        return "bridge_leader"
-    if role == TeamRole.TEAMMATE:
-        return "bridge_teammate"
-    if role == TeamRole.BRIDGE_AGENT:
-        return "bridge_agent"
-    return None
-
-
 def build_team_bridge_section(
     *,
     role: TeamRole,
-    bridge_agent_names: "list[str] | frozenset[str] | set[str] | None" = None,
     language: str = "cn",
     self_member_name: str | None = None,
 ) -> Optional[PromptSection]:
-    """Build the Bridge Agent collaboration-rules section.
+    """Build the Bridge Agent self-contract section (BRIDGE_AGENT only).
 
-    Returns a non-None section only when at least one bridge-agent member is
-    registered. Text is role-specific (``bridge_leader`` / ``bridge_teammate``
-    / ``bridge_agent``) with the roster of bridge member names injected inline,
-    so the leader / other teammates see whom to address through
-    ``send_message``, and the bridge avatar itself sees the scheduling
-    contract.
+    Bridge members are ordinary teammates from every other member's point of
+    view — they appear untagged in the unified ``team_members`` roster and get
+    no peer-facing section. Only the bridge avatar itself receives this
+    scheduling self-contract (how to relay the remote executor's output). The
+    ``{{self_line}}`` placeholder carries the avatar's own member_name.
 
     Args:
-        role: The role whose prompt this section targets.
-        bridge_agent_names: Member names of every registered bridge agent.
-            Empty/None means no bridges → no section.
+        role: The role whose prompt this section targets. Non-BRIDGE_AGENT
+            roles get no section.
         language: ``"cn"`` or ``"en"``.
-        self_member_name: The current member's own name, used to tell a
-            bridge-agent reader which entry in the roster is itself.
+        self_member_name: The bridge avatar's own name.
+
+    Returns:
+        The bridge self-contract PromptSection, or ``None``.
     """
-    if not bridge_agent_names:
+    if role != TeamRole.BRIDGE_AGENT:
         return None
-    template_name = _bridge_template_name(role)
-    if template_name is None:
-        return None
-    roster = _format_bridge_agent_roster(sorted(bridge_agent_names), language)
-    peers = _self_member_line(self_member_name, language)
-    body = load_template(template_name, language).format({"roster": roster, "peers": peers}).content
+    self_line = _self_member_line(self_member_name, language)
+    body = load_template("bridge_agent", language).format({"self_line": self_line}).content
     return PromptSection(
         name=TeamSectionName.BRIDGE,
         content={language: body},
@@ -661,14 +541,24 @@ def build_team_members_section(
     *,
     team_members: list[dict[str, str]] | None,
     self_member_name: str | None,
+    mark_humans: bool = False,
     language: str = "cn",
 ) -> Optional[PromptSection]:
-    """Build the team relationships section.
+    """Build the unified team relationships section.
+
+    Lists every peer member (teammates, bridge / external-CLI avatars and human
+    agents alike) as ordinary members. Human agents are tagged ``[human]`` only
+    when ``mark_humans`` is True — the caller gates this on the viewer role +
+    ``expose_human_agents_to_teammates`` so a teammate's peers stay
+    role-anonymous by default. Bridge / external-CLI members are never tagged;
+    their remote backing is not something peers need to perceive.
 
     Args:
         team_members: List of member dicts with ``member_name``,
-            ``display_name`` and optional ``desc``.
+            ``display_name``, optional ``desc`` and ``role``.
         self_member_name: Excluded from the listing if present.
+        mark_humans: When True, append ``[human]`` to members whose ``role`` is
+            ``human_agent``.
         language: Prompt language.
 
     Returns:
@@ -686,6 +576,8 @@ def build_team_members_section(
         display_name = member.get("display_name", "unknown")
         desc = member.get("desc", "")
         line = f"- member_name={member_name} display_name={display_name}"
+        if mark_humans and member.get("role") == TeamRole.HUMAN_AGENT.value:
+            line += " [human]"
         if desc:
             line += f" :: {desc}"
         rows.append(line)
@@ -709,19 +601,19 @@ def build_team_static_sections(
     team_mode: str = "default",
     base_prompt: str | None = None,
     language: str = "cn",
-    human_agent_names: list[str] | None = None,
+    hitt_enabled: bool = False,
     expose_human_agents_to_teammates: bool = False,
-    bridge_agent_names: list[str] | None = None,
     include_attachment_notice: bool = False,
 ) -> list[PromptSection]:
     """Build the never-changing team sections for one member.
 
-    Single source of truth for one-shot static team sections. In-process
-    DeepAgent members call this through :class:`TeamPolicyRail` for role /
-    bridge / workflow / lifecycle / private-prompt / extra; HITT is refreshed
-    by the rail dynamically instead of being passed here. External CLI members
-    use this function to build a standalone prompt snapshot, so callers may
-    still pass ``human_agent_names`` to include a static HITT section.
+    Single source of truth for the static team sections. In-process DeepAgent
+    members call this through :class:`TeamPolicyRail`; external CLI members call
+    it directly to build a standalone prompt snapshot. Every section here is
+    static — HITT is gated on ``hitt_enabled``, bridge on ``role ==
+    BRIDGE_AGENT``. The dynamic roster (``team_members``, tagged ``[human]``)
+    and ``team_info`` are NOT built here; they are prompt attachments
+    (in-process) or pulled via MCP tools (external CLI).
 
     Args:
         role: LEADER or TEAMMATE (other roles get the role-appropriate slices).
@@ -735,11 +627,10 @@ def build_team_static_sections(
         team_mode: Team mode ("default" / "predefined" / "hybrid").
         base_prompt: Optional user-supplied prompt appended as the extra section.
         language: Prompt language ("cn" / "en").
-        human_agent_names: Optional registered human-agent member names used
-            for one-shot HITT prompt snapshots, mainly external CLI members.
-        expose_human_agents_to_teammates: Whether teammates see human agents
-            in that one-shot HITT snapshot.
-        bridge_agent_names: Registered bridge-agent member names (bridge section).
+        hitt_enabled: Whether HITT is enabled for the team; gates the static
+            HITT collaboration contract.
+        expose_human_agents_to_teammates: Whether teammates get the roster-aware
+            HITT variant (and, via the caller, the ``[human]`` roster tag).
         include_attachment_notice: When True, append the prompt-attachment
             notice (team state delivered as ``<prompt-attachment>`` at the
             message tail). In-process DeepAgent members pass True; external CLI
@@ -757,22 +648,15 @@ def build_team_static_sections(
             teammate_mode=teammate_mode,
             language=language,
         ),
-        build_team_hitt_contract_section(
+        build_team_hitt_section(
             role=role,
-            human_agent_names=human_agent_names,
+            hitt_enabled=hitt_enabled,
             language=language,
             self_member_name=member_name,
             expose_human_agents_to_teammates=expose_human_agents_to_teammates,
         ),
-        build_team_hitt_roster_section(
-            role=role,
-            human_agent_names=human_agent_names,
-            language=language,
-            expose_human_agents_to_teammates=expose_human_agents_to_teammates,
-        ),
         build_team_bridge_section(
             role=role,
-            bridge_agent_names=bridge_agent_names,
             language=language,
             self_member_name=member_name,
         ),
@@ -817,9 +701,8 @@ def build_team_member_system_prompt(
     team_mode: str = "default",
     base_prompt: str | None = None,
     language: str = "cn",
-    human_agent_names: list[str] | None = None,
+    hitt_enabled: bool = False,
     expose_human_agents_to_teammates: bool = False,
-    bridge_agent_names: list[str] | None = None,
 ) -> str:
     """Render a member's team sections into a single standalone system prompt.
 
@@ -843,9 +726,8 @@ def build_team_member_system_prompt(
         team_mode=team_mode,
         base_prompt=base_prompt,
         language=language,
-        human_agent_names=human_agent_names,
+        hitt_enabled=hitt_enabled,
         expose_human_agents_to_teammates=expose_human_agents_to_teammates,
-        bridge_agent_names=bridge_agent_names,
     )
     builder = SystemPromptBuilder(language=language)
     for section in sections:
@@ -858,8 +740,6 @@ __all__ = [
     "build_team_attachment_notice_section",
     "build_team_bridge_section",
     "build_team_extra_section",
-    "build_team_hitt_contract_section",
-    "build_team_hitt_roster_section",
     "build_team_hitt_section",
     "build_team_inbound_tags_section",
     "build_team_info_section",

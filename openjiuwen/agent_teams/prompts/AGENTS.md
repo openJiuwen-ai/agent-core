@@ -25,17 +25,17 @@ Markdown 模板是团队 Agent 的行为契约。Python 侧只做装配（`secti
 | `leader_workflow_hybrid.md` | Leader 且 `team_mode="hybrid"` | `build_team_workflow_section` | 混合团队工作流：预注册基础成员 + 允许动态 `spawn_teammate` 扩员 |
 | `lifecycle_persistent.md` | Leader 且 `lifecycle="persistent"` | `build_team_lifecycle_section` | 长期团队收尾语义（完成任务后待命，不解散） |
 | `lifecycle_temporary.md` | Leader 且 `lifecycle="temporary"`（默认） | `build_team_lifecycle_section` | 临时团队收尾语义（shutdown → clean_team） |
-| `attachment_notice.md` | 进程内成员（有 attachment 通道） | `build_team_attachment_notice_section` | 团队动态状态说明：成员名册 / 团队信息 / 人类成员名单以 `<prompt-attachment>`（type=`team_members`/`team_info`/`team_hitt_roster`）挂在消息尾部逐轮刷新；HITT 协作规则在系统提示词里、稳定不变 |
+| `attachment_notice.md` | 进程内成员（有 attachment 通道） | `build_team_attachment_notice_section` | 团队动态状态说明：成员名册 / 团队信息以 `<prompt-attachment>`（type=`team_members`/`team_info`）挂在消息尾部逐轮刷新，`team_members` 里人类成员标 `[human]`；HITT 协作规则在系统提示词里、稳定不变 |
 | `inbound_tags.md` | 常驻（每个成员，含外部 CLI） | `build_team_inbound_tags_section` | 入站消息 XML 标签体系（`<team-inbound>` / `<team-note>` / `<team-event>`、`for="controller"`）。进程内成员与外部 CLI（`read_inbox`）都渲染这套 XML |
-| `hitt_leader.md` / `hitt_teammate.md` / `hitt_teammate_anonymous.md` / `hitt_human_agent.md` | 存在 human_agent 成员，且角色命中 | `build_team_hitt_contract_section`（→ system prompt builder）；名册另由 `build_team_hitt_roster_section` 出 `team_hitt_roster`（→ attachment） | HITT **静态协作契约**，按角色分四版（`_hitt_template_name` 挑版），roster-agnostic 不列名字；只 `{{peers}}` 注入自身名字。人类成员名册由 `_format_human_agent_roster` 生成单独的 `team_hitt_roster` 段。组合入口 `build_team_hitt_section`（契约+名册拼一段）仅供外部 CLI 成员 / 测试。见 [[F_50]] |
-| `bridge_leader.md` / `bridge_teammate.md` / `bridge_agent.md` | 存在 bridge_agent 成员，且角色命中 | `build_team_bridge_section` | Bridge 协作规则，按角色分三版；`{{roster}}` 注入桥接成员名册，`{{peers}}` 注入自身名字 |
+| `hitt_leader.md` / `hitt_teammate.md` / `hitt_teammate_anonymous.md` / `hitt_human_agent.md` | `hitt_enabled` 且角色命中 | `build_team_hitt_section`（→ system prompt builder，静态） | HITT **静态协作契约**（规则），按角色分四版（`_hitt_template_name` 挑版），roster-agnostic 不列名字——人类成员在 `team_members` 名册里标 `[human]`；仅 `hitt_human_agent` 用 `{{self_line}}` 注入自身名字行。gate 用 `hitt_enabled`（capability flag），HITT 一开启即 present、无需先 spawn 人类。见 [[F_52]] |
+| `bridge_agent.md` | `role == BRIDGE_AGENT`（bridge avatar 本人） | `build_team_bridge_section` | Bridge avatar **自契约**（调度语义）。bridge 成员在别人眼里就是普通 teammate（`team_members` 里不加标记，无 peer 向说明段），只有 avatar 本人拿这段；`{{self_line}}` 注入自身名字行。见 [[F_52]] |
 
-Teammate 不消费 workflow / lifecycle 模板；`sections.py` 在 `role != LEADER` 时对这两个 section 直接返回 None。HITT / Bridge 模板仅在存在对应成员时按角色挑选（见 `_hitt_template_name` / `_bridge_template_name`）。
+Teammate 不消费 workflow / lifecycle 模板；`sections.py` 在 `role != LEADER` 时对这两个 section 直接返回 None。HITT 模板在 `hitt_enabled` 时按角色挑版（见 `_hitt_template_name`）；Bridge 只有 `bridge_agent`（avatar 自契约），仅 `role == BRIDGE_AGENT` 时出现。
 
 ## 编辑规则（Hard Constraints）
 
 1. **cn / en 双语对齐** — 任何语义变更必须同步修改两种语言文件。结构、小节顺序、字段名保持一致，只翻译文本。
-2. **动态值走 `{{name}}` 占位符** — Bridge 模板用 `{{roster}}`（桥接成员名册）+ `{{peers}}`（自身名字）；HITT 契约模板只用 `{{peers}}`（人类成员名册已拆成独立的 `team_hitt_roster` 段，不再内联进契约）。占位符用 `PromptTemplate` 默认的 `{{ }}` 定界符，由 builder 调 `load_template(...).format({...})` 渲染；名册 / 自身名字这类动态行由 Python 侧的 `_format_*_roster` / `_self_member_line` 生成后注入。纯静态模板（policy / workflow / lifecycle / attachment_notice / inbound_tags / HITT anonymous 等）不含占位符，`load_template` 原样返回。
+2. **动态值走 `{{name}}` 占位符** — 只有两个模板含占位符：`bridge_agent` 与 `hitt_human_agent`，都只用 `{{self_line}}`（"你的 member_name 是 X"这一自身名字行）。占位符用 `PromptTemplate` 默认的 `{{ }}` 定界符，由 builder 调 `load_template(...).format({"self_line": ...})` 渲染；`self_line` 由 `_self_member_line` 生成，builder **仅在 HUMAN_AGENT / BRIDGE_AGENT 时才算**。其余模板（policy / workflow / lifecycle / attachment_notice / inbound_tags / `hitt_leader`・`hitt_teammate`・`hitt_teammate_anonymous`）纯静态，`load_template` 原样返回。
 3. **`@cache` 基于 `(name, language)`** — 运行中的进程不会感知文件改动。开发时如需热更新，重启进程或清 `_load.cache_clear()`。
 4. **空分节省略而不是空字符串** — 新增可选章节时，参考 `build_team_workflow_section` / `build_team_lifecycle_section` 的 None 处理方式（`sections.py` 在 `role != LEADER` 时直接返回 None）。**不要在 `.md` 里写占位文字**。
 5. **策略分层不要重复写** — `leader_policy.md` 谈"角色身份/决策原则"，`leader_workflow.md` 谈"操作步骤"，`tools/locales/descs/*.md` 谈"工具使用语义"。三层内容互不重叠（参见 `agent_teams/tools/AGENTS.md` 的 Prompt Layering 章节）。

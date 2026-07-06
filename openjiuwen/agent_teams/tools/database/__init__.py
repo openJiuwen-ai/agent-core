@@ -18,21 +18,41 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database.config import (
     DatabaseConfig as DatabaseConfig,
+)
+from openjiuwen.agent_teams.tools.database.config import (
     DatabaseType as DatabaseType,
 )
 from openjiuwen.agent_teams.tools.database.engine import (
     DbSessions,
+)
+from openjiuwen.agent_teams.tools.database.engine import (
     cleanup_all_runtime_state as _cleanup_all_runtime_state,
+)
+from openjiuwen.agent_teams.tools.database.engine import (
     create_cur_session_tables as _create_cur_session_tables,
+)
+from openjiuwen.agent_teams.tools.database.engine import (
     drop_cur_session_tables as _drop_cur_session_tables,
+)
+from openjiuwen.agent_teams.tools.database.engine import (
     drop_session_tables_by_id as _drop_session_tables_by_id,
+)
+from openjiuwen.agent_teams.tools.database.engine import (
     get_current_time as _get_current_time,
+)
+from openjiuwen.agent_teams.tools.database.engine import (
     initialize_engine as _initialize_engine,
+)
+from openjiuwen.agent_teams.tools.database.engine import (
     run_wal_checkpoint_passive as _run_wal_checkpoint_passive,
 )
 from openjiuwen.agent_teams.tools.database.graph import (
     TASK_DEPENDENCY_REJECT_STATUSES as TASK_DEPENDENCY_REJECT_STATUSES,
+)
+from openjiuwen.agent_teams.tools.database.graph import (
     TASK_TERMINAL_STATUSES as TASK_TERMINAL_STATUSES,
+)
+from openjiuwen.agent_teams.tools.database.graph import (
     detect_cycle_in_adjacency as detect_cycle_in_adjacency,
 )
 from openjiuwen.agent_teams.tools.database.member_dao import MemberDao as MemberDao
@@ -41,9 +61,17 @@ from openjiuwen.agent_teams.tools.database.task_dao import TaskDao as TaskDao
 from openjiuwen.agent_teams.tools.database.team_dao import TeamDao as TeamDao
 from openjiuwen.agent_teams.tools.models import (
     Team as Team,
+)
+from openjiuwen.agent_teams.tools.models import (
     TeamMember as TeamMember,
+)
+from openjiuwen.agent_teams.tools.models import (
     TeamMessageBase as TeamMessageBase,
+)
+from openjiuwen.agent_teams.tools.models import (
     TeamTaskBase as TeamTaskBase,
+)
+from openjiuwen.agent_teams.tools.models import (
     TeamTaskDependencyBase as TeamTaskDependencyBase,
 )
 from openjiuwen.core.common.logging import team_logger
@@ -152,6 +180,11 @@ class TeamDatabase:
             try:
                 await _run_wal_checkpoint_passive(self.engine)
             except asyncio.CancelledError:
+                # Let cancellation propagate so the loop exits on shutdown.
+                # Redundant today (CancelledError is a BaseException, not caught
+                # by the broad `except Exception` below), but kept as an explicit
+                # guard in case that handler is ever widened to BaseException.
+                team_logger.debug("WAL checkpoint loop cancelled; exiting")
                 raise
             except Exception as e:
                 team_logger.warning("Background WAL checkpoint failed: %s", e)
