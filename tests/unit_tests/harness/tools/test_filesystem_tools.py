@@ -719,6 +719,35 @@ async def test_read_file_tool_text(sys_op, temp_dir):
     assert relative_found.success is True
 
 
+@pytest.mark.asyncio
+async def test_read_file_tool_rejects_large_text_without_explicit_limit(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "large.txt")
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("A" * (ReadFileTool.MAX_SIZE_BYTES + 1))
+
+    result = await read_tool.invoke({"file_path": file_path})
+
+    assert result.success is False
+    assert "exceeds maximum allowed size" in result.error
+    assert "offset and limit" in result.error
+
+
+@pytest.mark.asyncio
+async def test_read_file_tool_allows_large_text_with_explicit_limit(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "large_lines.txt")
+    with open(file_path, "w", encoding="utf-8") as fh:
+        for idx in range(30000):
+            fh.write(f"line-{idx}\n")
+
+    result = await read_tool.invoke({"file_path": file_path, "offset": 0, "limit": 2})
+
+    assert result.success is True
+    assert "line-0" in result.data["content"]
+    assert "line-1" in result.data["content"]
+
+
 def test_read_file_tool_capability_flags_keep_backward_compatibility():
     assert ReadFileTool.is_read_only() is True
     assert ReadFileTool.is_concurrency_safe() is True
