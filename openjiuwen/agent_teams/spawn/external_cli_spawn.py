@@ -54,8 +54,7 @@ async def _build_member_system_prompt(
 
     language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
     backend = team_agent.team_backend
-    human_names = sorted(await backend.human_agent_names()) if backend is not None else []
-    bridge_names = sorted(backend.bridge_agent_names()) if backend is not None else []
+    hitt_enabled = backend.hitt_enabled() if backend is not None else False
     prompt = build_team_member_system_prompt(
         role=ctx.role,
         member_prompt=ctx.prompt,
@@ -64,9 +63,8 @@ async def _build_member_system_prompt(
         teammate_mode=spec.teammate_mode,
         team_mode=_resolve_team_mode(spec),
         language=language,
-        human_agent_names=human_names,
+        hitt_enabled=hitt_enabled,
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
-        bridge_agent_names=bridge_names,
     )
     return prompt or None
 
