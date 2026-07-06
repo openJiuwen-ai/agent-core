@@ -1,9 +1,12 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import asyncio
+import time
 from typing import Union, List, Optional, AsyncIterator, Type, Dict
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import llm_logger, LogEventType
 from openjiuwen.core.foundation.llm.model_clients import create_model_client
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
@@ -17,6 +20,7 @@ from openjiuwen.core.foundation.llm.schema.generation_response import (
 )
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client import InferenceAffinityModelClient
+from openjiuwen.core.runner.callback import trigger
 
 
 class Model:
@@ -81,6 +85,10 @@ class Model:
         fn = _fw.emit_after(LLMCallEvents.LLM_STREAM_OUTPUT, item_key="result",
                             extra_kwargs=_extra)(fn)
         self._client.stream = fn
+
+    def _resolve_stream_timeout(self, name: str) -> Optional[float]:
+        """Resolve a stream timeout option from the client config."""
+        return getattr(self.model_client_config, name, None) if self.model_client_config is not None else None
 
     async def invoke(
             self,
@@ -157,18 +165,81 @@ class Model:
         Yields:
             AssistantMessageChunk
         """
-        async for chunk in self._client.stream(
-                messages=messages,
-                stop=stop,
-                model=model,
-                tools=tools,
-                temperature=temperature,
-                top_p=top_p,
-                max_tokens=max_tokens,
-                output_parser=output_parser,
-                timeout=timeout,
-                **kwargs
-        ):
+        first_chunk_timeout = self._resolve_stream_timeout("stream_first_chunk_timeout")
+        idle_timeout = self._resolve_stream_timeout("stream_idle_timeout")
+
+        stream_iterable = self._client.stream(
+            messages=messages,
+            stop=stop,
+            model=model,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+            output_parser=output_parser,
+            timeout=timeout,
+            **kwargs
+        )
+        stream_iterator = stream_iterable.__aiter__()
+        started_at = time.monotonic()
+        last_chunk_at = started_at
+        chunk_count = 0
+        effective_model_name = model or getattr(self.model_config, "model_name", None)
+
+        while True:
+            stage = "first_chunk" if chunk_count == 0 else "idle_chunk"
+            next_timeout = first_chunk_timeout if chunk_count == 0 else idle_timeout
+
+            try:
+                if next_timeout is None:
+                    chunk = await stream_iterator.__anext__()
+                else:
+                    chunk = await asyncio.wait_for(stream_iterator.__anext__(), timeout=next_timeout)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError as exc:
+                close = getattr(stream_iterator, "aclose", None) or getattr(stream_iterable, "aclose", None)
+                if callable(close):
+                    await close()
+
+                now = time.monotonic()
+                total_elapsed_seconds = now - started_at
+                wait_elapsed_seconds = now - (started_at if chunk_count == 0 else last_chunk_at)
+                timeout_seconds = next_timeout if next_timeout is not None else 0
+                model_provider = getattr(self.model_client_config, "client_provider", None)
+                elapsed_label = "first_chunk_elapsed" if chunk_count == 0 else "idle_elapsed"
+                error_detail = (
+                    f"stream frame timeout: stage={stage}, timeout={timeout_seconds}s, "
+                    f"chunk_count={chunk_count}, {elapsed_label}={wait_elapsed_seconds:.2f}s, "
+                    f"total_elapsed={total_elapsed_seconds:.2f}s, "
+                    f"model={effective_model_name or ''}"
+                )
+                from openjiuwen.core.runner.callback.events import LLMCallEvents
+                await trigger(
+                    LLMCallEvents.LLM_CALL_ERROR,
+                    model_name=effective_model_name,
+                    model_provider=model_provider,
+                    is_stream=True,
+                    error=exc)
+                llm_logger.error(
+                    "LLM stream timeout.",
+                    event_type=LogEventType.LLM_CALL_ERROR,
+                    model_name=effective_model_name,
+                    model_provider=model_provider,
+                    tools=tools,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
+                    is_stream=True,
+                    exception=error_detail
+                )
+                raise build_error(
+                    StatusCode.MODEL_CALL_FAILED,
+                    error_msg=f"LLM stream timeout: {error_detail}"
+                ) from exc
+
+            chunk_count += 1
+            last_chunk_at = time.monotonic()
             yield chunk
 
     async def release(
