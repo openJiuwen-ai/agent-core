@@ -173,6 +173,29 @@ class TestToolResultWindowProcessor:
         assert not isinstance(grep_results[2], OffloadToolMessage)
 
     @pytest.mark.asyncio
+    async def test_second_round_skips_already_offloaded(self, tmp_path):
+        # An already-offloaded result stays in the window count but must not be
+        # re-offloaded on the next round (only the newly-outside one is).
+        config = ToolResultWindowProcessorConfig(tool_names=["grep"], keep_last_k=2)
+        context, mock_fs = await build_context(str(tmp_path), config)
+
+        await context.add_messages([UserMessage(content="start")])
+        for i in range(3):
+            await context.add_messages(tool_round(f"tc-{i}", "grep", f"r{i}-" + "x" * 100))
+        # Round 1 offloaded r0.
+        offloaded_r0 = context.get_messages()[2]
+        assert isinstance(offloaded_r0, OffloadToolMessage)
+        r0_content = offloaded_r0.content
+        assert mock_fs.write_file.call_count == 1
+
+        # Round 2: r3 arrives -> r1 offloaded, r0 skipped (not re-processed).
+        await context.add_messages(tool_round("tc-3", "grep", "r3-" + "x" * 100))
+        grep_results = [m for m in context.get_messages() if isinstance(m, ToolMessage)]
+        assert [isinstance(m, OffloadToolMessage) for m in grep_results] == [True, True, False, False]
+        assert grep_results[0].content == r0_content  # r0 untouched
+        assert mock_fs.write_file.call_count == 2  # only r1 written this round
+
+    @pytest.mark.asyncio
     async def test_empty_tool_names_is_noop(self, tmp_path):
         config = ToolResultWindowProcessorConfig(tool_names=[], keep_last_k=1)
         context, mock_fs = await build_context(str(tmp_path), config)
