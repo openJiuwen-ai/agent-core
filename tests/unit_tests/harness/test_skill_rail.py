@@ -22,7 +22,6 @@ from openjiuwen.core.sys_operation import (
 from openjiuwen.harness import Workspace
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts.builder import PromptSection, SystemPromptBuilder
-from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
 from openjiuwen.harness.tools import ListSkillTool
 from openjiuwen.harness.tools.skills.skill_tool import SKILL_TOOL_MARKDOWN_IMAGES_HINT
@@ -53,16 +52,6 @@ class _TrackingSkillUseRail(SkillUseRail):
     async def _load_skill(self, skill_dir, update_at):
         self.load_calls.append(skill_dir.name)
         return await super()._load_skill(skill_dir, update_at)
-
-
-class _Session:
-    """Minimal session object for prompt attachment tests."""
-
-    def __init__(self, session_id: str):
-        self._session_id = session_id
-
-    def get_session_id(self) -> str:
-        return self._session_id
 
 
 def _write_skill(
@@ -178,12 +167,11 @@ async def test_skill_rail_all_mode_injects_skill_prompt(tmp_path: Path):
         content={"cn": "Base system prompt.", "en": "Base system prompt."},
     ))
     skill_rail.system_prompt_builder = builder
-    skill_rail.attachment_manager = PromptAttachmentManager()
 
     ctx = AgentCallbackContext(
         agent=None,
         inputs=ModelCallInputs(tools=[]),
-        session=_Session("skill-session"),
+        session=None,
     )
 
     await skill_rail.before_invoke(ctx)
@@ -193,16 +181,11 @@ async def test_skill_rail_all_mode_injects_skill_prompt(tmp_path: Path):
     content = builder.build()
 
     assert "Base system prompt." in content
-    assert "invoice-parser" not in content
-    assert "xlsx-writer" not in content
+    assert "invoice-parser" in content
+    assert "xlsx-writer" in content
+    assert "Parse invoice pdf files" in content
+    assert "Write xlsx reports" in content
     assert "list_skill" not in content
-
-    attachments = await skill_rail.attachment_manager.collect_for_session("skill-session")
-    attachment_content = "\n".join(item.content or "" for item in attachments)
-    assert "invoice-parser" in attachment_content
-    assert "xlsx-writer" in attachment_content
-    assert "Parse invoice pdf files" in attachment_content
-    assert "Write xlsx reports" in attachment_content
 
 
 @pytest.mark.asyncio
@@ -227,21 +210,18 @@ async def test_skill_rail_before_model_call_refreshes_when_before_invoke_is_skip
         content={"cn": "Base system prompt.", "en": "Base system prompt."},
     ))
     skill_rail.system_prompt_builder = builder
-    skill_rail.attachment_manager = PromptAttachmentManager()
 
     ctx = AgentCallbackContext(
         agent=None,
         inputs=ModelCallInputs(tools=[]),
-        session=_Session("skill-session"),
+        session=None,
     )
 
     await skill_rail.before_model_call(ctx)
 
     assert skill_rail.load_calls == ["invoice-parser"]
     assert _sorted_skill_names(skill_rail.skills) == ["invoice-parser"]
-    assert "invoice-parser" not in builder.build()
-    attachments = await skill_rail.attachment_manager.collect_for_session("skill-session")
-    assert "invoice-parser" in "\n".join(item.content or "" for item in attachments)
+    assert "invoice-parser" in builder.build()
 
 
 @pytest.mark.asyncio
