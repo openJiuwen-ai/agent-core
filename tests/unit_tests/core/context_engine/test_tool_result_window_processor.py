@@ -121,6 +121,23 @@ class TestToolResultWindowProcessor:
         assert not isinstance(by_name["grep"][1], OffloadToolMessage)
 
     @pytest.mark.asyncio
+    async def test_matches_tool_name_by_suffix(self, tmp_path):
+        # A bare suffix matches a registry-prefixed tool name.
+        config = ToolResultWindowProcessorConfig(tool_names=["browser_snapshot"], keep_last_k=1)
+        context, _ = await build_context(str(tmp_path), config)
+
+        mcp_name = "mcp_playwright-official_browser_snapshot"
+        msgs: List = [UserMessage(content="browse")]
+        msgs += tool_round("s0", mcp_name, "snap-old-" + "x" * 100)
+        msgs += tool_round("s1", mcp_name, "snap-new-" + "x" * 100)
+        await context.add_messages(msgs)
+
+        result = [m for m in context.get_messages() if isinstance(m, ToolMessage)]
+        assert isinstance(result[0], OffloadToolMessage)  # oldest offloaded via suffix match
+        assert not isinstance(result[1], OffloadToolMessage)
+        assert result[1].content.startswith("snap-new-")
+
+    @pytest.mark.asyncio
     async def test_no_offload_when_within_window(self, tmp_path):
         config = ToolResultWindowProcessorConfig(tool_names=["grep"], keep_last_k=3)
         context, mock_fs = await build_context(str(tmp_path), config)

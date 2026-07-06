@@ -65,7 +65,7 @@ class ToolResultWindowProcessorConfig(BaseModel):
 
 @ContextEngine.register_processor()
 class ToolResultWindowProcessor(ToolResultBudgetProcessor):
-    """Offload older results of selected tools, keeping only the newest ``keep_last_k`` in context."""
+    """Offload older results of selected tools, keeping at most the newest ``keep_last_k`` in context."""
 
     @property
     def config(self) -> ToolResultWindowProcessorConfig:
@@ -141,7 +141,7 @@ class ToolResultWindowProcessor(ToolResultBudgetProcessor):
         if not isinstance(getattr(message, "content", None), str):
             return False
         tool_name = self._resolve_target_tool_name(message, context_messages)
-        return bool(tool_name and tool_name in allowlist)
+        return bool(tool_name and any(tool_name.endswith(suffix) for suffix in allowlist))
 
     @staticmethod
     def _resolve_target_tool_name(

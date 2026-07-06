@@ -157,7 +157,7 @@ def test_default_wiring_windows_browser_probe_and_snapshot_results() -> None:
     assert config.tool_names == [
         "browser_probe_interactives",
         "browser_probe_cards",
-        "mcp_playwright-official_browser_snapshot",
+        "browser_snapshot",
     ]
     assert config.keep_last_k == 1
 

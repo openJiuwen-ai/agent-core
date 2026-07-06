@@ -46,16 +46,6 @@ if TYPE_CHECKING:
 
 BROWSER_AGENT_FACTORY_NAME = "browser_agent"
 
-# Browser probe/snapshot tools emit large results; keep only the most recent
-# few in context and persist older ones via ToolResultWindowProcessor.
-# Snapshot is exposed through the Playwright MCP server, so it carries the
-# ``mcp_playwright-official_`` prefix in its resolved tool name.
-BROWSER_WINDOWED_TOOL_NAMES = [
-    "browser_probe_interactives",
-    "browser_probe_cards",
-    "mcp_playwright-official_browser_snapshot",
-]
-
 DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "You are a browser automation agent responsible for executing web tasks directly. "
     "Plan and decide at this agent level, then use Playwright browser tools and approved runtime "
@@ -282,8 +272,16 @@ def create_browser_agent(
     )
     injected_tools = build_browser_runtime_tools(browser_backend, language=resolved_language)
     injected_rails: List[AgentRail] = [BrowserRuntimeRail(browser_backend)]
+
     # Window the large browser probe/snapshot results unless the caller already
     # manages context processors via their own ContextProcessorRail.
+    # Browser probe/snapshot tools emit large results; keep only the most recent
+    # few in context and persist older ones via ToolResultWindowProcessor.
+    browser_windowed_tool_names = [
+        "browser_probe_interactives",
+        "browser_probe_cards",
+        "browser_snapshot"
+    ]
     if not any(isinstance(rail, ContextProcessorRail) for rail in (rails or [])):
         injected_rails.append(
             ContextProcessorRail(
@@ -291,7 +289,7 @@ def create_browser_agent(
                     (
                         "ToolResultWindowProcessor",
                         ToolResultWindowProcessorConfig(
-                            tool_names=BROWSER_WINDOWED_TOOL_NAMES,
+                            tool_names=browser_windowed_tool_names,
                             keep_last_k=1,
                         ),
                     )
