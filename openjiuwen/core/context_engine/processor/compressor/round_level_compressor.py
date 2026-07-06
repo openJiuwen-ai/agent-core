@@ -17,6 +17,7 @@ from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
 from openjiuwen.core.context_engine.processor.budget_guard import effective_context_budget
+from openjiuwen.core.context_engine.processor.compressor.util import build_team_collaboration_reinjected_messages
 from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import TRUNCATED_MARKER
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
@@ -919,11 +920,14 @@ class RoundLevelCompressor(ContextProcessor):
             replacement_message = await self._build_memory_message(summary, target, context)
             if replacement_message is None:
                 continue
-            if not self._is_replacement_under_budget(context, [replacement_message]):
+            base_replacement_messages = [replacement_message]
+            if not self._is_replacement_under_budget(context, base_replacement_messages):
                 continue
-            if not self._has_compression_benefit(context, target.messages, [replacement_message]):
+            if not self._has_compression_benefit(context, target.messages, base_replacement_messages):
                 continue
-            replacements.append((target.start_idx, target.end_idx, [replacement_message]))
+            replacement_messages = list(base_replacement_messages)
+            replacement_messages.extend(build_team_collaboration_reinjected_messages(target.messages))
+            replacements.append((target.start_idx, target.end_idx, replacement_messages))
         return replacements
 
     async def _build_raw_fallback_replacement(
@@ -949,11 +953,14 @@ class RoundLevelCompressor(ContextProcessor):
         replacement = await self._build_memory_message(summary, merged_target, context)
         if replacement is None:
             return None
-        if not self._is_replacement_under_budget(context, [replacement]):
+        base_replacement_messages = [replacement]
+        if not self._is_replacement_under_budget(context, base_replacement_messages):
             return None
-        if not self._has_compression_benefit(context, merged_target.messages, [replacement]):
+        if not self._has_compression_benefit(context, merged_target.messages, base_replacement_messages):
             return None
-        return start_idx, end_idx, [replacement]
+        replacement_messages = list(base_replacement_messages)
+        replacement_messages.extend(build_team_collaboration_reinjected_messages(merged_target.messages))
+        return start_idx, end_idx, replacement_messages
 
     async def _build_memory_message(
         self,
@@ -1018,7 +1025,10 @@ class RoundLevelCompressor(ContextProcessor):
             # Physical limit: the fixed window portion (system / tools) has already exhausted
             # the budget, so no context payload can make the full window fit. In that case we
             # still return the smallest possible fallback marker instead of clearing context.
-            return [self._build_compact_truncated_message()]
+            return self._with_team_collaboration_reinjection(
+                [self._build_compact_truncated_message()],
+                context_messages,
+            )
 
         serialized = "\n".join(
             self._serialize_message(index, message)
@@ -1049,7 +1059,7 @@ class RoundLevelCompressor(ContextProcessor):
                 high = middle - 1
 
         if best_messages:
-            return best_messages
+            return self._with_team_collaboration_reinjection(best_messages, context_messages)
         minimal_message = self._build_minimal_truncated_message()
         minimal_tokens = self._count_context_window_tokens(
             system_messages,
@@ -1058,12 +1068,22 @@ class RoundLevelCompressor(ContextProcessor):
             context,
         )
         if minimal_tokens <= self._target_total_tokens:
-            return [minimal_message]
+            return self._with_team_collaboration_reinjection([minimal_message], context_messages)
         # If even the minimal structured fallback block does not fit, fall back to the
         # tightest marker-only truncated block. This keeps the "never clear context just
         # because truncation is hard" contract while acknowledging the remaining budget
         # is nearly exhausted by fixed window content.
-        return [self._build_compact_truncated_message()]
+        return self._with_team_collaboration_reinjection(
+            [self._build_compact_truncated_message()],
+            context_messages,
+        )
+
+    @staticmethod
+    def _with_team_collaboration_reinjection(
+        replacement_messages: List[BaseMessage],
+        source_messages: List[BaseMessage],
+    ) -> List[BaseMessage]:
+        return list(replacement_messages) + build_team_collaboration_reinjected_messages(source_messages)
 
     def _build_head_tail_truncated_text(self, text: str, kept_chars: int) -> str:
         if kept_chars <= 0:

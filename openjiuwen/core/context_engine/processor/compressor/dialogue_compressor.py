@@ -16,7 +16,10 @@ from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
-from openjiuwen.core.context_engine.processor.compressor.util import message_to_text
+from openjiuwen.core.context_engine.processor.compressor.util import (
+    build_team_collaboration_reinjected_messages,
+    message_to_text,
+)
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     BaseMessage,
@@ -485,9 +488,10 @@ class DialogueCompressor(ContextProcessor):
             replacement_message = await self._build_memory_message(context, target.messages, summary)
             if replacement_message is None:
                 continue
-            replacement_messages = [replacement_message]
-            if not self._has_compression_benefit(context, target.messages, replacement_messages):
+            if not self._has_compression_benefit(context, target.messages, [replacement_message]):
                 continue
+            replacement_messages = [replacement_message]
+            replacement_messages.extend(build_team_collaboration_reinjected_messages(target.messages))
             replacements.append((target.start_idx, target.end_idx, replacement_messages))
             modified_indices.extend(range(target.start_idx, target.end_idx + 1))
         return replacements, modified_indices
@@ -522,9 +526,10 @@ class DialogueCompressor(ContextProcessor):
         replacement_message = await self._build_memory_message(context, original_messages, summary)
         if replacement_message is None:
             return None
-        replacement_messages = [replacement_message]
-        if not self._has_compression_benefit(context, original_messages, replacement_messages):
+        if not self._has_compression_benefit(context, original_messages, [replacement_message]):
             return None
+        replacement_messages = [replacement_message]
+        replacement_messages.extend(build_team_collaboration_reinjected_messages(original_messages))
         return start_idx, end_idx, replacement_messages
 
     async def _build_memory_message(

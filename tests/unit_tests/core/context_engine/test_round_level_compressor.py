@@ -14,7 +14,7 @@ from openjiuwen.core.context_engine.processor.compressor.round_level_compressor 
     RoundLevelCompressorConfig,
     _CompressTarget,
 )
-from openjiuwen.core.foundation.llm import AssistantMessage, ModelRequestConfig, UserMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, ModelRequestConfig, ToolCall, ToolMessage, UserMessage
 from openjiuwen.core.session.agent import Session
 from tests.unit_tests.core.context_engine._stream_state_helpers import (
     assert_context_state_pair,
@@ -35,6 +35,10 @@ class _TestableRoundLevelCompressor(RoundLevelCompressor):
 
     async def _compress_until_target(self, *args, **kwargs):
         return self.compress_until_target_result
+
+
+def create_tool_call(tool_call_id: str, name: str, arguments: str = "") -> ToolCall:
+    return ToolCall(id=tool_call_id, name=name, type="function", arguments=arguments)
 
 
 class TestRoundLevelCompressor:
@@ -318,3 +322,77 @@ class TestRoundLevelCompressor:
         )
 
         assert replacements == []
+
+    @pytest.mark.asyncio
+    async def test_build_json_replacements_reinjects_team_collaboration_per_target(self):
+        compressor = _TestableRoundLevelCompressor(
+            RoundLevelCompressorConfig(
+                trigger_context_ratio=0.9,
+                target_total_tokens=500,
+                compression_call_max_tokens=1000,
+            )
+        )
+        context = MagicMock()
+        context.token_counter.return_value = None
+        compressor._has_compression_benefit = MagicMock(return_value=True)
+        target_one = _CompressTarget(
+            block_id="block_1",
+            scope="completed_react",
+            start_idx=0,
+            end_idx=1,
+            messages=[
+                AssistantMessage(
+                    content="",
+                    tool_calls=[
+                        create_tool_call(
+                            "tc-claim",
+                            "claim_task",
+                            '{"task_id": "42", "status": "claimed"}',
+                        )
+                    ],
+                ),
+                ToolMessage(content="Task #42 pending -> claimed", tool_call_id="tc-claim"),
+            ],
+        )
+        target_two = _CompressTarget(
+            block_id="block_2",
+            scope="completed_react",
+            start_idx=2,
+            end_idx=3,
+            messages=[
+                AssistantMessage(
+                    content="",
+                    tool_calls=[
+                        create_tool_call(
+                            "tc-complete",
+                            "member_complete_task",
+                            '{"task_id": "99", "note": "done and verified"}',
+                        )
+                    ],
+                ),
+                ToolMessage(content="Task #99 completed", tool_call_id="tc-complete"),
+            ],
+        )
+
+        replacements = await compressor._build_json_replacements(
+            context,
+            [target_one, target_two],
+            {
+                "blocks": [
+                    {"block_id": "block_1", "summary": "summary one"},
+                    {"block_id": "block_2", "summary": "summary two"},
+                ]
+            },
+        )
+
+        assert len(replacements) == 2
+        first_messages = replacements[0][2]
+        second_messages = replacements[1][2]
+        assert len(first_messages) == 2
+        assert len(second_messages) == 2
+        assert "认领任务 #42 [claim_task]" in first_messages[1].content
+        assert "Task #42 pending -> claimed" in first_messages[1].content
+        assert "99" not in first_messages[1].content
+        assert "完成自己负责的任务 #99，备注：done and verified [member_complete_task]" in second_messages[1].content
+        assert "Task #99 completed" in second_messages[1].content
+        assert "42" not in second_messages[1].content
