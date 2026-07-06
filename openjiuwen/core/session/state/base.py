@@ -35,7 +35,7 @@ class RecoverableStateLike(ABC):
 
 class StateLike(ReadableStateLike, RecoverableStateLike):
     @abstractmethod
-    def update(self, data: dict) -> None:
+    def update(self, data: dict, **kwargs) -> None:
         pass
 
     @abstractmethod
@@ -117,8 +117,9 @@ class InMemoryStateLike(StateLike):
     def get_by_transformer(self, transformer: Callable) -> Optional[Any]:
         return transformer(self._state)
 
-    def update(self, data: dict) -> None:
-        update_dict(deepcopy(data), self._state)
+    def update(self, data: dict, **kwargs) -> None:
+        copied = kwargs.get("copied", True)
+        update_dict(deepcopy(data) if copied else data, self._state)
 
     def get_state(self, **kwargs) -> dict:
         if kwargs.get("copied", True) is False:
@@ -149,14 +150,14 @@ class InMemoryCommitState(CommitStateLike):
         if node_id is None:
             for key, updates in self._updates.items():
                 for update in updates:
-                    self._state.update(update)
+                    self._state.update(update, copied=False)
             self._updates.clear()
         else:
             node_updates = self._updates.get(node_id)
             if not node_updates:
                 return
             for update in node_updates:
-                self._state.update(update)
+                self._state.update(update, copied=False)
             self._updates[node_id] = []
 
     def rollback(self, node_id: str) -> None:
