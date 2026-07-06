@@ -102,6 +102,10 @@ from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.identity import build_identity_section
 from openjiuwen.harness.workspace.workspace import Workspace
 
+import logging
+
+browser_agent_logger = logging.getLogger("jiuwenswarm.browser_agent")
+
 # Events bridged to the inner ReActAgent.
 _BRIDGE_EVENTS = frozenset(
     {
@@ -1007,11 +1011,53 @@ class DeepAgent(BaseAgent):
                 from openjiuwen.harness.subagents.browser_agent import (
                     create_browser_agent,
                 )
+                factory_kwargs = spec.factory_kwargs or {}
+                settings = factory_kwargs.get("settings")
+                instance = getattr(settings, "instance", None)
+                mcp_cfg = getattr(settings, "mcp_cfg", None)
 
-                return create_browser_agent(
-                    **create_kwargs,
-                    **dict(spec.factory_kwargs or {}),
+                browser_key = getattr(instance, "key", "")
+                mcp_server_id = getattr(mcp_cfg, "server_id", "")
+                mcp_server_name = getattr(mcp_cfg, "server_name", "")
+                workspace_for_log = create_kwargs["workspace"]
+                workspace_root = getattr(workspace_for_log, "root_path", workspace_for_log)
+                browser_agent_logger.info(
+                    "[%s] Creating browser agent: subagent_type=%s, sub_session=%s, parent_agent=%s, workspace=%s, browser_key=%s, mcp_server_id=%s, mcp_server_name=%s",
+                    __name__,
+                    subagent_type,
+                    subsession_id,
+                    self.card.name,
+                    workspace_root,
+                    browser_key,
+                    mcp_server_id,
+                    mcp_server_name,
                 )
+                try:
+                    browser_agent = create_browser_agent(
+                            **create_kwargs,
+                            **dict(spec.factory_kwargs or {}),
+                        )
+                except Exception as e:
+                    browser_agent_logger.error("[%s] Failed to create browser agent: %s", __name__, e)
+                    raise
+
+                browser_agent_logger.info(
+                    "[%s] Browser agent created successfully: subagent_type=%s, sub_session=%s, parent_agent=%s, workspace=%s, browser_key=%s, mcp_server_id=%s, mcp_server_name=%s",
+                    __name__,
+                    subagent_type,
+                    subsession_id,
+                    self.card.name,
+                    workspace_root,
+                    browser_key,
+                    mcp_server_id,
+                    mcp_server_name,
+                )
+                return browser_agent
+
+                # return create_browser_agent(
+                #     **create_kwargs,
+                #     **dict(spec.factory_kwargs or {}),
+                # )
             if normalized_factory == "code_agent":
                 from openjiuwen.harness.subagents.code_agent import (
                     create_code_agent,

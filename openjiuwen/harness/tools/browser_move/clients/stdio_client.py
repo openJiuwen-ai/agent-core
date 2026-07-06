@@ -10,6 +10,10 @@ from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
 from openjiuwen.core.foundation.tool.mcp.client.stdio_client import StdioClient
 from ..utils.parsing import sanitize_json_schema
 
+import logging
+import time
+
+browser_agent_logger = logging.getLogger("jiuwenswarm.browser_agent")
 
 class BrowserMoveStdioClient(StdioClient):
     """browser_move extension of StdioClient.
@@ -191,6 +195,8 @@ class BrowserMoveStdioClient(StdioClient):
         effective_timeout = self._resolve_timeout(timeout)
         for attempt in range(2):
             try:
+                start_time = time.perf_counter()
+                browser_agent_logger.info(f"Calling tool '{tool_name}' via Stdio with arguments: {arguments}")
                 logger.info(f"Calling tool '{tool_name}' via Stdio with arguments: {arguments}")
                 tool_result = await asyncio.wait_for(
                     self._session.call_tool(tool_name, arguments=arguments),
@@ -225,9 +231,16 @@ class BrowserMoveStdioClient(StdioClient):
                     if chunks:
                         result_content = "\n".join(chunks)
                 logger.info(f"Tool '{tool_name}' call completed via Stdio")
+                end_time = time.perf_counter()
+                browser_agent_logger.info(
+                    f"Tool '{tool_name}' call completed via Stdio in {end_time - start_time:.2f}s"
+                )
                 return result_content
             except asyncio.TimeoutError as e:
                 if attempt == 0:
+                    browser_agent_logger.warning(
+                        f"Stdio tool call '{tool_name}' timed out after {effective_timeout:.1f}s, retrying after reconnect"
+                    )
                     logger.warning(
                         f"Stdio tool call '{tool_name}' timed out after"
                         f" {effective_timeout:.1f}s, retrying after reconnect"
@@ -235,6 +248,9 @@ class BrowserMoveStdioClient(StdioClient):
                     connected = await self._reconnect(timeout=effective_timeout)
                     if connected:
                         continue
+                browser_agent_logger.error(
+                    f"Tool call timed out via Stdio: tool='{tool_name}', timeout={effective_timeout:.1f}s"
+                )
                 logger.error(
                     f"Tool call timed out via Stdio: tool='{tool_name}', timeout={effective_timeout:.1f}s"
                 )
@@ -243,12 +259,19 @@ class BrowserMoveStdioClient(StdioClient):
                 ) from e
             except Exception as e:
                 if attempt == 0 and self._is_retryable_transport_error(e):
+                    browser_agent_logger.warning(
+                        f"Stdio tool call '{tool_name}' retry after reconnect: type={type(e).__name__}, repr={e!r}"
+                    )
                     logger.warning(
                         f"Stdio tool call '{tool_name}' retry after reconnect: type={type(e).__name__}, repr={e!r}"
                     )
                     connected = await self._reconnect(timeout=timeout)
                     if connected:
                         continue
+                browser_agent_logger.error(
+                    f"Tool call failed via Stdio: tool='{tool_name}', type={type(e).__name__}, repr={e!r}",
+                    exc_info=True,
+                )
                 logger.error(
                     f"Tool call failed via Stdio: type={type(e).__name__}, repr={e!r}",
                     exc_info=True,

@@ -28,6 +28,8 @@ from .probes import build_card_probe_js, build_interactive_probe_js
 from .service import MAX_ITERATION_MESSAGE, BrowserService, BrowserTaskProgressState
 from .site_profiles import builtin_site_profiles, get_selector_cache
 
+browser_agent_logger = logging.getLogger("jiuwenswarm.browser_agent")
+
 logger = logging.getLogger(__name__)
 
 _BROWSER_PROGRESS_STATE_KEY = "__browser_subagent_progress_state__"
@@ -119,10 +121,13 @@ class BrowserAgentRuntime:
     def _register_runtime_tool(tool_obj: Any, *, tool_name: str) -> None:
         add_result = Runner.resource_mgr.add_tool(tool_obj, tag="agent.playwright.runtime")
         if add_result is None or getattr(add_result, "is_ok", lambda: False)():
+            browser_agent_logger.info("Registered %s tool successfully", tool_name)
             return
         error_value = getattr(add_result, "value", add_result)
         if "already exist" in str(error_value):
+            browser_agent_logger.info("Tool %s already registered", tool_name)
             return
+        browser_agent_logger.error("Failed to register %s tool: %s", tool_name, error_value)
         raise RuntimeError(f"Failed to register {tool_name} tool: {error_value}")
 
     async def cancel_run(self, session_id: str, request_id: Optional[str] = None) -> Dict[str, Any]:
@@ -257,6 +262,12 @@ class BrowserAgentRuntime:
                 )
                 tool = _first_tool(tool)
             except Exception:
+                browser_agent_logger.warning(
+                    "Failed to resolve MCP tool %s using server_id=%s",
+                    tool_name,
+                    candidate,
+                    exc_info=True,
+                )
                 logger.debug(
                     "Failed to resolve MCP tool %s using server_id=%s",
                     tool_name,
@@ -283,6 +294,12 @@ class BrowserAgentRuntime:
                 )
                 tool = _first_tool(tool)
             except Exception:
+                browser_agent_logger.warning(
+                    "Failed to resolve MCP tool %s using server_name=%s",
+                    tool_name,
+                    candidate,
+                    exc_info=True,
+                )
                 logger.debug(
                     "Failed to resolve MCP tool %s using server_name=%s",
                     tool_name,
@@ -293,6 +310,7 @@ class BrowserAgentRuntime:
             if tool is not None:
                 return tool
 
+        browser_agent_logger.error(f"Registered Playwright MCP tool not found: {tool_name}. Tried {', '.join(tried)}")
         raise RuntimeError(f"Registered Playwright MCP tool not found: {tool_name}. Tried {', '.join(tried)}")
 
     async def _get_playwright_run_code_tool(self) -> tuple[Any, str]:
@@ -300,6 +318,10 @@ class BrowserAgentRuntime:
         try:
             return await self._get_playwright_mcp_tool("browser_run_code_unsafe"), "browser_run_code_unsafe"
         except RuntimeError:
+            browser_agent_logger.warning(
+                "browser_run_code_unsafe is unavailable; falling back to browser_run_code",
+                exc_info=True,
+            )
             logger.debug(
                 "browser_run_code_unsafe is unavailable; falling back to browser_run_code",
                 exc_info=True,
@@ -315,9 +337,10 @@ class BrowserAgentRuntime:
 
         success = getattr(result, "success", None)
         if success is False:
+            browser_agent_logger.error("Failed to execute %s: %s", tool_name, getattr(result, "error", ""))
             error = str(getattr(result, "error", "") or "").strip()
             raise RuntimeError(error or f"{tool_name} failed")
-
+        browser_agent_logger.info("Executed %s successfully", tool_name)
         data = getattr(result, "data", None)
         if data is not None:
             return data
@@ -326,6 +349,7 @@ class BrowserAgentRuntime:
 
     async def ensure_runtime_ready(self) -> None:
         await self._service.ensure_runtime_ready()
+        browser_agent_logger.info("Browser runtime is ready: provider=%s", self._service.provider)
         if self._code_executor is not None:
             return
 
@@ -339,6 +363,7 @@ class BrowserAgentRuntime:
     async def ensure_started(self) -> None:
         await self.ensure_runtime_ready()
         await self._service.ensure_started()
+        browser_agent_logger.info("Browser service is started: provider=%s", self._service.provider)
         if self._browser_custom_action_tool is not None:
             return
         from .runtime_tools import (
@@ -384,13 +409,18 @@ class BrowserAgentRuntime:
         request_id: Optional[str] = None,
         timeout_s: Optional[int] = None,
     ) -> Dict[str, Any]:
+        start_time = self._service.get_current_time()
+        result: Dict[str, Any] | None = None
         await self.ensure_started()
-        return await self._service.run_task(
+        result = await self._service.run_task(
             task=task,
             session_id=session_id,
             request_id=request_id,
             timeout_s=timeout_s,
         )
+        end_time = self._service.get_current_time()
+        browser_agent_logger.info("Browser task completed: task=%s, session_id=%s, request_id=%s, duration=%.2f seconds", result.get("task"), result.get("session_id"), result.get("request_id"), end_time - start_time)
+        return result
 
     async def run_custom_action(
         self,
@@ -564,6 +594,7 @@ class BrowserRuntimeRail(AgentRail):
         await self._runtime.ensure_runtime_ready()
         self._ensure_browser_mcp_ability(ctx)
         session = getattr(ctx, "session", None)
+
         if session is None:
             return
         self._hydrate_service_progress_from_session(session)

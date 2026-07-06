@@ -7,6 +7,10 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, AsyncIterator, List, Optional
 
+import logging
+import time
+
+browser_agent_logger = logging.getLogger("jiuwenswarm.browser_agent")
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -108,13 +112,33 @@ class TaskTool(Tool):
 
         logger.info(f"[TaskTool] Invoking subagent with isolated session: {sub_session_id}, query: {task_description}")
 
+        start_time = time.perf_counter()
+
         try:
             # Invoke subagent with isolated session_id
             result = await subagent.invoke({"query": task_description, "conversation_id": sub_session_id})
             output = result.get("output", "")
+            duration = time.perf_counter() - start_time
+            if subagent_type == "browser_agent":
+                browser_agent_logger.info(
+                "Browser subagent task completed: parent_session=%s, sub_session=%s, duration=%.2fs, task=%s",
+                parent_session_id,
+                sub_session_id,
+                duration,
+                task_description,
+            )
             return ToolOutput(success=True, data={"output": output, "agent_id": subagent.card.id}, error=None)
         except Exception as e:
             logger.error(f"[TaskTool] Subagent: {subagent_type} execution failed, error={e}")
+            if subagent_type == "browser_agent":
+                browser_agent_logger.error(
+                    "Browser subagent task failed: parent_session=%s, sub_session=%s, duration=%.2fs, task=%s, error=%s",
+                    parent_session_id,
+                    sub_session_id,
+                    time.perf_counter() - start_time,
+                    task_description,
+                    e,
+                )
             raise build_error(
                 StatusCode.TOOL_TASK_TOOL_INVOKED,
                 reason=f"Subagent {subagent_type} execution failed: {e}",

@@ -41,6 +41,8 @@ _ctx_observer_request_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     default="",
 )
 
+import logging
+browser_agent_logger = logging.getLogger("jiuwenswarm.browser_agent")
 
 @dataclass
 class BrowserTaskProgressState:
@@ -664,7 +666,9 @@ class BrowserService:
                 error_value = getattr(register_result, "value", register_result)
             if "already exist" not in str(error_value):
                 raise RuntimeError(f"Failed to register Playwright MCP server: {error_value}")
-
+            browser_agent_logger.warning("Playwright MCP server not registered: %s", error_value)
+        else:
+            browser_agent_logger.info("Playwright MCP server registered successfully")
         self._registered_cdp_endpoint = self._configured_cdp_endpoint()
         self.started = True
         self._start_heartbeat()

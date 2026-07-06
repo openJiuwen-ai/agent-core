@@ -12,6 +12,10 @@ try:
 except ModuleNotFoundError:
     from openjiuwen.core.foundation.tool.mcp.client.sse_client import SseClient as StreamableHttpClient
 
+import logging
+import time
+
+browser_agent_logger = logging.getLogger("jiuwenswarm.browser_agent")
 
 class BrowserMoveStreamableHttpClient(StreamableHttpClient):
     """browser_move extension of StreamableHttpClient.
@@ -149,6 +153,8 @@ class BrowserMoveStreamableHttpClient(StreamableHttpClient):
 
         for attempt in range(2):
             try:
+                start_time = time.perf_counter()
+                browser_agent_logger.info(f"Calling tool '{tool_name}' via Streamable HTTP with arguments: {arguments}")
                 logger.info(f"Calling tool '{tool_name}' via Streamable HTTP with arguments: {arguments}")
                 tool_result = await self._session.call_tool(tool_name, arguments=arguments)
                 result_content = None
@@ -179,14 +185,19 @@ class BrowserMoveStreamableHttpClient(StreamableHttpClient):
 
                     if chunks:
                         result_content = "\n".join(chunks)
+                browser_agent_logger.info(
+                    f"Tool '{tool_name}' call completed via Streamable HTTP in {time.perf_counter() - start_time:.2f}s with result: {result_content}"
+                )
                 logger.info(f"Tool '{tool_name}' call completed via Streamable HTTP")
                 return result_content
             except Exception as e:
                 if attempt == 0 and self._is_retryable_transport_error(e):
+                    browser_agent_logger.warning(f"Streamable HTTP tool call '{tool_name}' retry after reconnect: {e}")
                     logger.warning(f"Streamable HTTP tool call '{tool_name}' retry after reconnect: {e}")
                     connected = await self._reconnect(timeout=timeout)
                     if connected:
                         continue
+                browser_agent_logger.error(f"Tool call failed via Streamable HTTP: {e}")
                 logger.error(f"Tool call failed via Streamable HTTP: {e}")
                 raise
 

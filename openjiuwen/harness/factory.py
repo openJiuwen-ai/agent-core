@@ -38,6 +38,8 @@ from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.prompts.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
 from openjiuwen.harness.tools import create_vision_tools, is_free_search_enabled
 
+import logging
+browser_agent_logger = logging.getLogger("jiuwenswarm.browser_agent")
 
 def _collect_disabled_skills_from_state(skills_dirs: list[str]) -> list[str]:
     """Read skills_state.json from each skills_dir and collect disabled skill names."""
@@ -376,6 +378,8 @@ def apply_deep_agent_parts(agent: DeepAgent, parts: DeepAgentParts) -> None:
     if parts.tool_instances:
         for tool in parts.tool_instances:
             agent.ability_manager.add_ability(tool.card, tool)
+            if agent.card.name == "browser_agent":
+                browser_agent_logger.info(f"Browser Agent Tool Instance: {tool.card.name}")
             if tool.card is not None:
                 instance_card_ids.add(id(tool.card))
 
@@ -389,6 +393,8 @@ def apply_deep_agent_parts(agent: DeepAgent, parts: DeepAgentParts) -> None:
 
     # Queue rails for lazy async registration (user rails + default rails)
     for rail_inst in parts.rails:
+        if agent.card.name == "browser_agent":
+            browser_agent_logger.info(f"Browser Agent Rail: {type(rail_inst).__name__}")
         agent.add_rail(rail_inst)
 
 

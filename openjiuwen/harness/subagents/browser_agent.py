@@ -7,6 +7,10 @@ from __future__ import annotations
 import dataclasses
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+import logging
+
+browser_logger = logging.getLogger("jiuwenswarm.browser_agent")
+
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard
 from openjiuwen.core.single_agent.rail.base import AgentRail
@@ -273,6 +277,10 @@ def create_browser_agent(
     final_tools = list(tools or []) + injected_tools
     final_mcps = list(mcps or [])
     final_rails = list(rails or []) + injected_rails
+    for i in range(len(final_tools)):
+        browser_logger.info(f"Browser Agent Tool: {final_tools[i].card.name}")
+    for i in range(len(final_rails)):
+        browser_logger.info(f"Browser Agent Rail: {final_rails[i]._runtime}")
 
     return create_deep_agent(
         model=model,

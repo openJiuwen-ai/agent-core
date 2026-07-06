@@ -10,6 +10,10 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
+import logging
+
+browser_agent_logger = logging.getLogger("jiuwenswarm.browser_agent")
+
 if TYPE_CHECKING:
     from .runtime import BrowserAgentRuntime
 
@@ -175,12 +179,14 @@ class BrowserCancelTool(Tool):
         request_id = inputs.get("request_id") or None
         try:
             result = await self._runtime.cancel_run(session_id=session_id, request_id=request_id)
+            browser_agent_logger.info("[%s] Browser task canceled: inputs=%s, result=%s", __name__, inputs, result)
             return ToolOutput(
                 success=bool(result.get("ok", True)),
                 data=result,
                 error=result.get("error"),
             )
         except Exception as exc:
+            browser_agent_logger.error("[%s] Failed to cancel browser task: inputs=%s, error=%s", __name__, inputs, exc)
             return ToolOutput(success=False, error=str(exc))
 
     async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
@@ -210,12 +216,14 @@ class BrowserClearCancelTool(Tool):
         request_id = inputs.get("request_id") or None
         try:
             result = await self._runtime.clear_cancel(session_id=session_id, request_id=request_id)
+            browser_agent_logger.info("[%s] Browser cancellation flag cleared: inputs=%s, result=%s", __name__, inputs, result)
             return ToolOutput(
                 success=bool(result.get("ok", True)),
                 data=result,
                 error=result.get("error"),
             )
         except Exception as exc:
+            browser_agent_logger.error("[%s] Failed to clear browser cancellation flag: inputs=%s, error=%s", __name__, inputs, exc)
             return ToolOutput(success=False, error=str(exc))
 
     async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
@@ -251,12 +259,14 @@ class BrowserCustomActionTool(Tool):
                 request_id=request_id,
                 params=params,
             )
+            browser_agent_logger.info("[%s] Custom browser action (%s) invoked: inputs=%s, result=%s", __name__, action, inputs, result)
             return ToolOutput(
                 success=bool(result.get("ok", True)),
                 data=result,
                 error=result.get("error"),
             )
         except Exception as exc:
+            browser_agent_logger.error("[%s] Failed to invoke custom browser action (%s): inputs=%s, error=%s", __name__, action, inputs, exc)
             return ToolOutput(success=False, error=str(exc))
 
     async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
@@ -330,12 +340,14 @@ class BrowserProbeInteractivesTool(Tool):
                 viewport_only=viewport_only,
                 query=query,
             )
+            browser_agent_logger.info("[%s] Interactives probed successfully: inputs=%s, count=%d", __name__, inputs, len(data.get("items", [])))
             return ToolOutput(
                 success=bool(data.get("ok", True)),
                 data=data,
                 error=data.get("error"),
             )
         except Exception as exc:
+            browser_agent_logger.error("[%s] Failed to probe interactives: inputs=%s, error=%s", __name__, inputs, exc)
             return ToolOutput(success=False, error=str(exc))
 
     async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
@@ -392,12 +404,14 @@ class BrowserProbeCardsTool(Tool):
                 include_buttons=include_buttons,
                 query=query,
             )
+            browser_agent_logger.info("[%s] Cards probed successfully: inputs=%s, count=%d", __name__, inputs, len(data.get("cards", [])))
             return ToolOutput(
                 success=bool(data.get("ok", True)),
                 data=data,
                 error=data.get("error"),
             )
         except Exception as exc:
+            browser_agent_logger.error("[%s] Failed to probe cards: inputs=%s, error=%s", __name__, inputs, exc)
             return ToolOutput(success=False, error=str(exc))
 
     async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
