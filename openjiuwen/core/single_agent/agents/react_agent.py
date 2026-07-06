@@ -1713,7 +1713,7 @@ class ReActAgent(BaseAgent):
                                 context,
                                 tools,
                             )
-                            logger.debug(
+                            logger.info(
                                 "[ReActAgent] model_call done session_id=%s iteration=%s "
                                 "elapsed_ms=%.1f has_tool_calls=%s finish_reason=%s",
                                 _session_id,
