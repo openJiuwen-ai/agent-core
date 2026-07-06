@@ -102,19 +102,22 @@ class SwarmflowTool(AsyncTool):
         }
 
     def launched_description(self, inputs: dict[str, Any]) -> str:
-        path = (inputs.get("script_path") or "").strip()
-        if path:
-            return f"swarmflow: {path}"
-        if (inputs.get("script") or "").strip():
-            return "swarmflow: <inline script>"
-        return "swarmflow:"
+        # `invoke` resolves inline `script` to a concrete script_path before
+        # this runs, so the description always reflects the on-disk path.
+        return f"swarmflow: {(inputs.get('script_path') or '').strip()}"
 
-    def format_launched_message(self, run_id: str, task_id: str) -> str:
-        """Synchronous launch receipt for the leader's current tool round."""
+    def format_launched_message(self, run_id: str, task_id: str, script_path: str) -> str:
+        """Synchronous launch receipt for the leader's current tool round.
+
+        Includes the resolved absolute ``script_path`` so a later re-run /
+        iteration can pass that path instead of resending the source (an inline
+        ``script`` has been materialised to this path by ``invoke``).
+        """
         return self._local_t(
             "swarmflow.launched",
             run_id=run_id,
             task_id=task_id,
+            script_path=script_path,
         )
 
     def format_completed_injection(
@@ -154,11 +157,14 @@ class SwarmflowTool(AsyncTool):
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
         """Validate the script source, admit via governor, launch background run.
 
-        Runs a script from ``script_path`` (disk) or inline ``script`` source
-        (materialised to disk in ``run_background``). ``name`` / ``resume_id``
-        are recognised and rejected with an explicit "not supported yet"
-        message (never a silent no-op), so the surface is honest about what is
-        wired.
+        Runs a script from ``script_path`` (disk) or inline ``script`` source.
+        An inline ``script`` is materialised to disk **here** (synchronously in
+        the launch round) so the launched receipt can report the resolved
+        absolute ``script_path``; the resolved path is threaded into the
+        background inputs, so ``run_background`` and any resume relaunch load
+        from disk uniformly. ``name`` / ``resume_id`` are recognised and
+        rejected with an explicit "not supported yet" message (never a silent
+        no-op), so the surface is honest about what is wired.
         """
         script_path = (inputs.get("script_path") or "").strip()
         script = (inputs.get("script") or "").strip()
@@ -192,10 +198,28 @@ class SwarmflowTool(AsyncTool):
         ticket = admission.ticket
         agent_gate = admission.agent_gate
 
+        # Inline `script`: materialise to disk now so the launched receipt can
+        # report the absolute script_path (a later re-run passes that path
+        # instead of resending the source). Release the ticket if it fails.
+        if not script_path and script:
+            from openjiuwen.agent_teams.context import get_session_id
+            from openjiuwen.agent_teams.workflow.runner import materialize_swarmflow_script
+
+            try:
+                script_path = await materialize_swarmflow_script(
+                    script,
+                    team_name=self._team_name,
+                    session_id=get_session_id(),
+                )
+            except Exception as exc:  # noqa: BLE001 - never escape as an exception
+                await self._governor.release_workflow(ticket)
+                return ToolOutput(success=False, error=f"Failed to materialise inline script: {exc}")
+
         run_id = new_swarmflow_run_id()
         task_id = generate_id(self.card.name)
 
         enriched = dict(inputs)
+        enriched["script_path"] = script_path
         enriched[_RUN_ID_INPUT_KEY] = run_id
         enriched[_WORKFLOW_TICKET_KEY] = ticket
         enriched[_AGENT_GATE_KEY] = agent_gate
@@ -227,7 +251,7 @@ class SwarmflowTool(AsyncTool):
 
         return ToolOutput(
             success=True,
-            data={"status": "launched", "task_id": task_id, "run_id": run_id},
+            data={"status": "launched", "task_id": task_id, "run_id": run_id, "script_path": script_path},
         )
 
     def map_result(self, output: ToolOutput) -> str:
@@ -237,6 +261,7 @@ class SwarmflowTool(AsyncTool):
         return self.format_launched_message(
             run_id=str(data.get("run_id") or ""),
             task_id=str(data.get("task_id") or ""),
+            script_path=str(data.get("script_path") or ""),
         )
 
     async def run_background(self, task_id: str, inputs: dict[str, Any]) -> Any:
@@ -251,14 +276,14 @@ class SwarmflowTool(AsyncTool):
         )
         from openjiuwen.agent_teams.workflow.engine.errors import WorkflowAborted
         from openjiuwen.agent_teams.workflow.observer import WorkflowObserver
-        from openjiuwen.agent_teams.workflow.runner import materialize_swarmflow_script, run_swarmflow
+        from openjiuwen.agent_teams.workflow.runner import run_swarmflow
 
         run_id = inputs[_RUN_ID_INPUT_KEY]
         agent_gate = inputs[_AGENT_GATE_KEY]
         ticket = inputs[_WORKFLOW_TICKET_KEY]
         completion_ctx = inputs.get(_COMPLETION_CTX_KEY) or {}
+        # `invoke` already resolved this (inline `script` materialised to disk).
         script_path = (inputs.get("script_path") or "").strip()
-        script = (inputs.get("script") or "").strip()
         args = inputs.get("args")
         model = self._parent_agent.model
         messager = self._messager
@@ -269,17 +294,6 @@ class SwarmflowTool(AsyncTool):
         # so ``_relaunch`` restores it — otherwise the resumed run would publish
         # progress on the wrong topic and resume from the wrong journal path.
         session_id = get_session_id()
-
-        # Inline ``script`` source: materialise to disk under the workflow-name
-        # directory (idempotent — a resume relaunch rewrites the same path), so
-        # the rest of the run reuses the path-based load / journal pipeline.
-        # Async file I/O (aiofiles) keeps the write off the event loop.
-        if not script_path and script:
-            script_path = await materialize_swarmflow_script(
-                script,
-                team_name=team_name,
-                session_id=session_id,
-            )
 
         controller = getattr(self._parent_agent, "background_task_controller", None)
         abort_event = asyncio.Event()

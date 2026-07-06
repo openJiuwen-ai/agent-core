@@ -99,8 +99,8 @@ per-Leader 单例）。`agents_per_run_cap` 由 `validate_swarmflow_concurrency`
 
 0. 校验 script source（`script_path` / `script` / `name` / `resume_id` 四源 one-of，**`script_path`（磁盘）
    与 `script`（内联源码）当下可执行**，`name` / `resume_id` 返回 "not supported yet"）；四源全缺返回
-   `ToolOutput(success=False)`。内联 `script` 在 `run_background` 落盘到 `workflows/{META.name}/script.py`
-   后复用 path-based 加载链路。
+   `ToolOutput(success=False)`。内联 `script` 在 `invoke`（admit 之后）落盘到 `workflows/{META.name}/script.py`、
+   把绝对 `script_path` 回填 enriched + 进 launched 回执后复用 path-based 加载；materialize 失败先 release ticket 再返回错误。
 1. `governor is None` → `ToolOutput(success=False, error="Swarmflow concurrency governor is not configured")`。
 2. `admit_workflow()` → `None` → 拒绝，**不生成** `run_id`。
 3. `new_swarmflow_run_id()` → `wf_{12hex}`（`tool_swarmflow.py` 模块级函数，**仅在 invoke 铸造**；
