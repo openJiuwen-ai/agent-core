@@ -2,13 +2,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Stale-task sweep on POLL_TASK ticks.
 
-Periodic check of tasks stuck in CLAIMED past the stale threshold
-(every member sweeps tasks assigned to itself; leader additionally
-sweeps all members') and PENDING past the stale threshold (leader
-only). Per-task throttle prevents re-nudging within one stale window
-across both the poll path and the member-status-change path
-(``MemberHandler._nudge_idle_member_with_stale_claims``) — they
-share the same throttle dict by reference.
+Periodic check of tasks stuck in CLAIMED past the stale threshold and
+PENDING past the stale threshold (leader only). Stale-claim nudging is
+**self-only**: every member sweeps the tasks assigned to *itself* and
+feeds its own agent loop — the leader does not reach across processes
+to nudge another member about that member's stale claims. A per-task
+throttle prevents re-nudging within one stale window.
 """
 
 from __future__ import annotations
@@ -51,16 +50,13 @@ class StaleTaskHandler(BaseCoordinationHandler):
         blueprint: TeamAgentBlueprint,
         infra: TeamInfra,
         poll_ctrl: "PollController",
-        stale_claim_throttle: dict[str, float],
     ) -> None:
         super().__init__(host, blueprint, infra, poll_ctrl)
         # task_id -> wall-clock seconds when we last fired a stale-claim
         # nudge. Used only to throttle follow-up nudges; the "is this
         # task stale?" decision itself reads ``task.updated_at`` from
         # the database so we never lose state across process restarts.
-        # Shared by reference with MemberHandler so a poll tick and a
-        # status flip within the same window cannot double-nudge.
-        self._last_stale_nudge = stale_claim_throttle
+        self._last_stale_nudge: dict[str, float] = {}
         # Same idea, but for stale PENDING tasks the leader observes —
         # throttles the leader's self-prompt about long-unclaimed work.
         self._last_pending_nudge: dict[str, float] = {}
@@ -76,15 +72,17 @@ class StaleTaskHandler(BaseCoordinationHandler):
             #     await self._nudge_idle_agent(member_name, from_poll=True)
 
     async def _check_stale_claimed_tasks(self) -> None:
-        """Find claimed tasks that have been running past the stale threshold.
+        """Find own claimed tasks that have been running past the stale threshold.
 
         Measures how long a task has been in CLAIMED state by reading
         the database ``updated_at`` column (bumped on every status
         transition, so for a claimed task it is the claim timestamp).
         When the elapsed time exceeds ``_STALE_CLAIM_SECONDS`` the
-        assignee is nudged via the local agent loop (self) or a direct
-        message (leader → other member). A per-task throttle prevents
-        follow-up polls from re-nudging inside the same stale window.
+        member feeds a nudge into its own agent loop. Only tasks
+        assigned to *this* member are swept — the leader does not nudge
+        another member about that member's stale claims. A per-task
+        throttle prevents follow-up polls from re-nudging inside the
+        same stale window.
         """
         task_manager = self._infra.task_manager
         if task_manager is None:
@@ -92,8 +90,7 @@ class StaleTaskHandler(BaseCoordinationHandler):
 
         claimed = await task_manager.list_tasks(status=TaskStatus.CLAIMED.value)
         own_name = self._blueprint.member_name
-        is_leader = self._blueprint.role == TeamRole.LEADER
-        relevant = [tk for tk in claimed if tk.assignee and (tk.assignee == own_name or is_leader)]
+        relevant = [tk for tk in claimed if tk.assignee and tk.assignee == own_name]
 
         current_ids = {tk.task_id for tk in relevant}
         for tid in [k for k in self._last_stale_nudge if k not in current_ids]:
@@ -118,53 +115,31 @@ class StaleTaskHandler(BaseCoordinationHandler):
             if now - last_nudge < self._STALE_CLAIM_SECONDS:
                 continue
             self._last_stale_nudge[task.task_id] = now
-            await self._nudge_stale_claim(task, now_ms)
-
-    async def _nudge_stale_claim(self, task: Any, now_ms: int) -> None:
-        """Dispatch a stale-claim nudge to self or to the assigned member."""
-        assignee = task.assignee
-        if assignee and assignee == self._blueprint.member_name:
             await self._self_nudge_stale_claim(task, now_ms)
-        elif self._blueprint.role == TeamRole.LEADER and assignee:
-            await self._leader_nudge_stale_claim(task, now_ms)
 
-    @staticmethod
-    def _format_stale_claim_nudge(task: Any, now_ms: int) -> str:
-        return t(
+    async def _self_nudge_stale_claim(self, task: Any, now_ms: int) -> None:
+        """Feed a stale-claim nudge into this member's own agent loop.
+
+        Rendered as a ``<team-event kind="stale-claim">`` and appended
+        (``use_steer=False``) rather than steered: the nudge only tells
+        the member to keep pushing a task it already owns, so it must not
+        interrupt the very round doing that work. The body carries just
+        the task id + title; the member reads full details via
+        ``view_task`` if needed.
+        """
+        content = t(
             "dispatcher.stale_claim_self",
             task_id=task.task_id,
             title=task.title,
-            content=task.content,
             time_info=format_time_context(task.updated_at, now_ms),
         )
-
-    async def _self_nudge_stale_claim(self, task: Any, now_ms: int) -> None:
-        """Feed a nudge input into the local agent loop.
-
-        Wrapped as a ``<team-event kind="stale-claim">`` because it is
-        delivered straight into this member's own loop. The leader's
-        cross-member variant (:meth:`_leader_nudge_stale_claim`) instead
-        goes through ``send_message`` and is wrapped as ``<team-inbound>``
-        by the recipient's ``MessageHandler._format_message`` — so it must
-        not be pre-wrapped here, or the tags would nest.
-        """
-        content = self._format_stale_claim_nudge(task, now_ms)
-        await self._round.deliver_input(render_event(kind="stale-claim", body=content, task_id=task.task_id))
+        await self._round.deliver_input(
+            render_event(kind="stale-claim", body=content, task_id=task.task_id),
+            use_steer=False,
+        )
         team_logger.info(
             "[{}] self-nudged stale claimed task {}",
             self._blueprint.member_name,
-            task.task_id,
-        )
-
-    async def _leader_nudge_stale_claim(self, task: Any, now_ms: int) -> None:
-        """Send a direct reminder to the member holding a stale claim."""
-        if self._infra.message_manager is None:
-            return
-        content = self._format_stale_claim_nudge(task, now_ms)
-        await self._infra.message_manager.send_message(content, task.assignee)
-        team_logger.info(
-            "[leader] nudged {} about stale claimed task {}",
-            task.assignee,
             task.task_id,
         )
 
@@ -173,13 +148,14 @@ class StaleTaskHandler(BaseCoordinationHandler):
 
         Scans pending tasks via ``task.updated_at`` (bumped on every
         status transition). When a task has been pending past
-        ``_STALE_PENDING_SECONDS``, the leader feeds itself an input
-        listing those tasks plus a hint to pick the right teammate and
-        ping them via ``send_message``. The model decides who to
-        notify based on each task's content and the team roster — the
-        dispatcher does not try to do the matching itself. A per-task
-        throttle prevents follow-up polls from re-prompting inside the
-        same stale window.
+        ``_STALE_PENDING_SECONDS``, the leader appends
+        (``use_steer=False``) a self-prompt listing those tasks by id +
+        title plus a hint to pick the right teammate and ping them via
+        ``send_message``. The list stays minimal; the model reads each
+        task's details via ``view_task`` and decides who to notify based
+        on the team roster — the dispatcher does not do the matching
+        itself. A per-task throttle prevents follow-up polls from
+        re-prompting inside the same stale window.
         """
         if self._blueprint.role != TeamRole.LEADER:
             return
@@ -217,10 +193,10 @@ class StaleTaskHandler(BaseCoordinationHandler):
         lines = [t("dispatcher.stale_pending_header")]
         for task in fresh:
             time_info = format_time_context(task.updated_at, now_ms)
-            lines.append(f"- [{task.task_id}] {task.title}: {task.content} ({time_info})")
+            lines.append(f"- [{task.task_id}] {task.title} ({time_info})")
         content = "\n".join(lines)
 
-        await self._round.deliver_input(render_event(kind="stale-pending", body=content))
+        await self._round.deliver_input(render_event(kind="stale-pending", body=content), use_steer=False)
         team_logger.info(
             "[leader] self-prompted about {} stale pending task(s)",
             len(fresh),

@@ -726,97 +726,14 @@ async def test_resume_interrupt_forwards_to_runtime_send():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_member_ready_with_claimed_task_triggers_nudge():
-    """Leader nudges a member returning to READY while still holding a claimed task."""
-    agent = _make_leader()
-    fake_task = MagicMock()
-    fake_task.task_id = "task-1"
-    fake_task.title = "Fix bug"
-    fake_task.content = "Investigate and fix the critical bug"
-    fake_task.updated_at = 0  # stale → triggers nudge path
+async def test_member_status_change_does_not_nudge_about_stale_claims():
+    """Leader no longer reaches across processes on a member status change.
 
-    agent._configurator.task_manager = MagicMock()
-    agent._configurator.task_manager.get_tasks_by_assignee = AsyncMock(return_value=[fake_task])
-    agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock(return_value="msg-1")
-
-    event = EventMessage.from_event(
-        MemberStatusChangedEvent(
-            team_name="test-team",
-            member_name="dev-1",
-            old_status="busy",
-            new_status="ready",
-        )
-    )
-    await agent._coordination.dispatcher.member._handle_leader_member_event(event)
-
-    agent._configurator.task_manager.get_tasks_by_assignee.assert_awaited_once_with(
-        "dev-1",
-        status="claimed",
-    )
-    agent._configurator.message_manager.send_message.assert_awaited_once()
-    content, to_member_name = agent._configurator.message_manager.send_message.await_args.args
-    assert to_member_name == "dev-1"
-    assert "task-1" in content
-    assert "Fix bug" in content
-
-
-@pytest.mark.asyncio
-@pytest.mark.level1
-async def test_member_error_with_claimed_task_triggers_nudge():
-    """Leader also nudges on transition into ERROR when claimed tasks remain."""
-    agent = _make_leader()
-    fake_task = MagicMock()
-    fake_task.task_id = "task-2"
-    fake_task.title = "Ship feature"
-    fake_task.content = "Wrap up the pending PR"
-    fake_task.updated_at = 0  # stale → triggers nudge path
-
-    agent._configurator.task_manager = MagicMock()
-    agent._configurator.task_manager.get_tasks_by_assignee = AsyncMock(return_value=[fake_task])
-    agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock(return_value="msg-2")
-
-    event = EventMessage.from_event(
-        MemberStatusChangedEvent(
-            team_name="test-team",
-            member_name="dev-1",
-            old_status="busy",
-            new_status="error",
-        )
-    )
-    await agent._coordination.dispatcher.member._handle_leader_member_event(event)
-
-    agent._configurator.message_manager.send_message.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-@pytest.mark.level1
-async def test_member_ready_without_claimed_task_skips_nudge():
-    """No message is sent when the member has no claimed tasks."""
-    agent = _make_leader()
-    agent._configurator.task_manager = MagicMock()
-    agent._configurator.task_manager.get_tasks_by_assignee = AsyncMock(return_value=[])
-    agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock()
-
-    event = EventMessage.from_event(
-        MemberStatusChangedEvent(
-            team_name="test-team",
-            member_name="dev-1",
-            old_status="busy",
-            new_status="ready",
-        )
-    )
-    await agent._coordination.dispatcher.member._handle_leader_member_event(event)
-
-    agent._configurator.message_manager.send_message.assert_not_called()
-
-
-@pytest.mark.asyncio
-@pytest.mark.level1
-async def test_member_status_unchanged_skips_nudge():
-    """Redundant READY → READY transitions should not query tasks nor send messages."""
+    Stale-claim nudging is self-only (each member sweeps its own claims
+    on POLL_TASK), so a teammate returning to READY while holding a
+    claimed task must not make the leader query tasks or send a message —
+    the member handler only logs the transition now.
+    """
     agent = _make_leader()
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.get_tasks_by_assignee = AsyncMock()
@@ -827,7 +744,7 @@ async def test_member_status_unchanged_skips_nudge():
         MemberStatusChangedEvent(
             team_name="test-team",
             member_name="dev-1",
-            old_status="ready",
+            old_status="busy",
             new_status="ready",
         )
     )
@@ -1167,24 +1084,54 @@ def _make_pending_task(
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_stale_claim_leader_messages_assignee():
-    """Leader messages a member whose claimed task has aged past the threshold."""
+async def test_stale_claim_leader_ignores_other_members_claim():
+    """Stale-claim nudging is self-only: a leader never messages another member.
+
+    The leader sweeps only tasks assigned to itself; a stale claim held
+    by a teammate is that teammate's own POLL_TASK concern, so the
+    leader neither messages the assignee nor feeds its own loop.
+    """
     agent = _make_leader()
-    # updated_at at wall clock 0 → ancient → well past 60s threshold.
+    # updated_at at wall clock 0 → ancient → well past the threshold.
     stale_task = _make_claimed_task("task-1", assignee="dev-1", updated_at=0)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale_task])
     agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock(return_value="msg-1")
+    agent._configurator.message_manager.send_message = AsyncMock()
+    agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
 
     agent._configurator.task_manager.list_tasks.assert_awaited_once_with(status="claimed")
-    agent._configurator.message_manager.send_message.assert_awaited_once()
-    content, to_name = agent._configurator.message_manager.send_message.await_args.args
-    assert to_name == "dev-1"
-    assert "task-1" in content
+    agent._configurator.message_manager.send_message.assert_not_called()
+    agent.deliver_input.assert_not_called()
+    assert "task-1" not in agent._coordination.dispatcher.stale_task._last_stale_nudge
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_claim_leader_self_nudges_own_claim():
+    """A leader holding its own stale claim self-nudges, id + title only.
+
+    Delivery is an append (``use_steer=False``) and the body must not
+    dump the full task content — the member reads details via view_task.
+    """
+    agent = _make_leader()
+    own_task = _make_claimed_task("task-1", assignee="leader-1", updated_at=0)
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
+
+    agent.deliver_input.assert_awaited_once()
+    body = agent.deliver_input.await_args.args[0]
+    assert agent.deliver_input.await_args.kwargs.get("use_steer") is False
+    assert "task-1" in body
+    assert "Work on task-1" not in body
     assert "task-1" in agent._coordination.dispatcher.stale_task._last_stale_nudge
 
 
@@ -1194,16 +1141,15 @@ async def test_stale_claim_fresh_task_does_not_nudge():
     """A task just claimed (updated_at ≈ now) is under the threshold and skipped."""
     agent = _make_leader()
     fresh_ms = int(time.time() * 1000)
-    fresh_task = _make_claimed_task("task-2", assignee="dev-1", updated_at=fresh_ms)
+    fresh_task = _make_claimed_task("task-2", assignee="leader-1", updated_at=fresh_ms)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[fresh_task])
-    agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock()
+    agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
 
-    agent._configurator.message_manager.send_message.assert_not_called()
+    agent.deliver_input.assert_not_called()
     assert "task-2" not in agent._coordination.dispatcher.stale_task._last_stale_nudge
 
 
@@ -1212,17 +1158,16 @@ async def test_stale_claim_fresh_task_does_not_nudge():
 async def test_stale_claim_throttles_follow_up_polls():
     """After one nudge, follow-up polls in the same window do not re-nudge."""
     agent = _make_leader()
-    stale_task = _make_claimed_task("task-1b", assignee="dev-1", updated_at=0)
+    stale_task = _make_claimed_task("task-1b", assignee="leader-1", updated_at=0)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale_task])
-    agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock(return_value="msg")
+    agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
 
-    agent._configurator.message_manager.send_message.assert_awaited_once()
+    agent.deliver_input.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1247,16 +1192,19 @@ async def test_stale_claim_self_nudge_when_idle():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_stale_claim_self_nudge_steers_when_running():
-    """A running self-owned stale task is nudged via steer rather than start."""
+async def test_stale_claim_self_nudge_appends_when_running():
+    """A running self-owned stale task is appended, never steered.
+
+    The nudge only tells the member to keep pushing the very task its
+    running round is already working, so it must go in as a follow-up
+    (``use_steer=False``) instead of interrupting that round.
+    """
     agent = _make_teammate()
     agent._state.team_member = None
     own_task = _make_claimed_task("task-4", assignee="dev-1", updated_at=0)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
-    # The handler always delivers; the running round receives it as a steer
-    # inside the supervisor, so the test asserts on the delivery seam.
     agent._is_agent_running = lambda: True
     agent.deliver_input = AsyncMock()
 
@@ -1264,6 +1212,7 @@ async def test_stale_claim_self_nudge_steers_when_running():
 
     agent.deliver_input.assert_awaited_once()
     content = agent.deliver_input.await_args.args[0]
+    assert agent.deliver_input.await_args.kwargs.get("use_steer") is False
     assert "task-4" in content
 
 
@@ -1272,12 +1221,11 @@ async def test_stale_claim_self_nudge_steers_when_running():
 async def test_stale_claim_throttle_drops_unrelated_entries():
     """Throttle entries for tasks no longer claimed are cleaned up."""
     agent = _make_leader()
-    still_claimed = _make_claimed_task("task-5", assignee="dev-1", updated_at=0)
+    still_claimed = _make_claimed_task("task-5", assignee="leader-1", updated_at=0)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[still_claimed])
-    agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock()
+    agent.deliver_input = AsyncMock()
 
     agent._coordination.dispatcher.stale_task._last_stale_nudge["task-5"] = 0.0
     agent._coordination.dispatcher.stale_task._last_stale_nudge["task-6"] = 0.0
@@ -1291,7 +1239,11 @@ async def test_stale_claim_throttle_drops_unrelated_entries():
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_stale_pending_leader_self_nudges_with_hint():
-    """Leader self-prompts about stale pending tasks so its LLM picks targets."""
+    """Leader self-prompts about stale pending tasks so its LLM picks targets.
+
+    The prompt lists tasks by id + title only (no content dump) and is
+    appended rather than steered.
+    """
     agent = _make_leader()
     stale = _make_pending_task("p-1", updated_at=0, title="Argue for ACP")
 
@@ -1305,7 +1257,10 @@ async def test_stale_pending_leader_self_nudges_with_hint():
     agent._configurator.task_manager.list_tasks.assert_awaited_once_with(status="pending")
     agent.deliver_input.assert_awaited_once()
     content = agent.deliver_input.await_args.args[0]
+    assert agent.deliver_input.await_args.kwargs.get("use_steer") is False
     assert "p-1" in content
+    assert "Argue for ACP" in content
+    assert "Work on p-1" not in content
     assert "send_message" in content
     assert "claim_task" in content
     assert "p-1" in agent._coordination.dispatcher.stale_task._last_pending_nudge
@@ -1313,15 +1268,13 @@ async def test_stale_pending_leader_self_nudges_with_hint():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_stale_pending_leader_steers_when_running():
-    """A running leader should still receive the hint via steer."""
+async def test_stale_pending_leader_appends_when_running():
+    """A running leader still receives the hint, appended (never steered)."""
     agent = _make_leader()
     stale = _make_pending_task("p-2", updated_at=0)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
-    # The handler always delivers; a running leader receives it as a steer
-    # inside the supervisor, so the test asserts on the delivery seam.
     agent._is_agent_running = lambda: True
     agent.deliver_input = AsyncMock()
 
@@ -1329,6 +1282,7 @@ async def test_stale_pending_leader_steers_when_running():
 
     agent.deliver_input.assert_awaited_once()
     content = agent.deliver_input.await_args.args[0]
+    assert agent.deliver_input.await_args.kwargs.get("use_steer") is False
     assert "p-2" in content
 
 
@@ -1435,7 +1389,6 @@ def _make_member_status_handler(
         ),
         infra=TeamInfra(team_backend=backend),
         poll_ctrl=SimpleNamespace(),
-        stale_claim_throttle={},
     )
     return backend, handler
 

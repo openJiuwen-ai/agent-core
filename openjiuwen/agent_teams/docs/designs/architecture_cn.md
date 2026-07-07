@@ -537,12 +537,12 @@ flowchart LR
 | Handler | 监听事件 | 关键行为 |
 |---------|---------|---------|
 | `AgentLifecycleHandler` | `USER_INPUT` / `STANDBY` / `CLEANED` / `TOOL_APPROVAL_RESULT` | start round / steer / pause_polls / shutdown_self / resume_interrupt |
-| `MemberHandler` | 6 个 `MEMBER_*` | leader 观察所有成员；teammate 仅处理自身；`MEMBER_STATUS_CHANGED → READY/ERROR` 触发滞留 claim nudge |
+| `MemberHandler` | 6 个 `MEMBER_*` | leader 观察所有成员；teammate 仅处理自身（stale-claim nudge 已收敛为 self-only，不在此触发，见 F_53） |
 | `MessageHandler` | `MESSAGE` / `BROADCAST` / `POLL_MAILBOX` + `MEMBER_SHUTDOWN`（fan-out） | 处理未读消息；leader 额外 ack user-bound 消息 + 通知 human-agent inbound；teammate 在 `MEMBER_SHUTDOWN` 自身时 drain 邮箱 |
 | `TaskBoardHandler` | `TASK_CLAIMED` + 4 个 `TASK_*` | targeted assignment + `_nudge_idle_agent` |
 | `StaleTaskHandler` | `POLL_TASK` | 滞留 claim（默认 120s）+ leader 滞留 PENDING |
 
-`MemberHandler` 与 `StaleTaskHandler` 在 `EventDispatcher.__init__` 共享同一 `stale_claim_throttle` dict，确保同一 stale 窗口内不重复 nudge 同一 task。
+stale-claim nudge 是 self-only（成员在 `POLL_TASK` 上扫自己认领的任务并喂自己的 loop，非 steer），`StaleTaskHandler` 用私有 `_last_stale_nudge` 节流本进程内同一 task 的重复 nudge，不再有跨 handler 共享的 throttle（见 F_53）。
 
 ### 6.3 内部事件类型
 
