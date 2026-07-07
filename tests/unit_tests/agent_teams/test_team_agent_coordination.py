@@ -34,6 +34,7 @@ from openjiuwen.agent_teams.schema.events import (
     MemberStatusChangedEvent,
     MessageEvent,
     TaskClaimedEvent,
+    TaskRevokedEvent,
     TaskCompletedEvent,
     TaskCreatedEvent,
     TaskListDrainedEvent,
@@ -877,6 +878,59 @@ async def test_task_claimed_for_self_uses_teammate_template():
     assert "view_task" in content
     # Must not pick the controller-facing HITT variant.
     assert "控制者" not in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_task_revoked_for_self_steers_member_off_task():
+    """A member whose claimed task is reassigned away is steered off it.
+
+    The revoke targets the former assignee (payload.member_name == self),
+    so the handler delivers the ``[任务撤回]`` prompt telling the member to
+    stop and re-survey the board via ``view_task``.
+    """
+    agent = _make_leader()
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskRevokedEvent(
+            team_name="test-team",
+            member_name="leader-1",
+            task_id="task-42",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_revoked(event)
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "[任务撤回]" in content
+    assert "task-42" in content
+    assert "view_task" in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_task_revoked_for_other_member_is_ignored():
+    """A revoke for another member is ignored — no deliver_input.
+
+    The reset already fired TASK_RELEASED to nudge the idle pool; the
+    revoke is a targeted notice only for the member who lost the task.
+    """
+    agent = _make_leader()
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskRevokedEvent(
+            team_name="test-team",
+            member_name="dev-1",
+            task_id="task-9",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_revoked(event)
+
+    agent.deliver_input.assert_not_awaited()
 
 
 @pytest.mark.asyncio

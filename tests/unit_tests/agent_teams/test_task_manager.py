@@ -1456,3 +1456,88 @@ async def test_get_task_detail_reports_blocks_and_blocked_by(task_manager):
     assert detail_b is not None
     assert detail_b.blocked_by == [a.task_id]
     assert detail_b.blocks == []
+
+
+@pytest_asyncio.fixture
+async def member2(task_manager, db):
+    """Create a second BUILD_MODE member 'member2' in test_team.
+
+    Depends on ``task_manager`` so the team and first member exist before
+    the second member row is inserted.
+    """
+    await db.member.create_member(
+        member_name="member2",
+        team_name="test_team",
+        display_name="member2",
+        agent_card=AgentCard().model_dump_json(),
+        status="BUSY",
+        mode=MemberMode.BUILD_MODE.value,
+    )
+    return "member2"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_get_other_claimed_task_finds_other_and_excludes_self(task_manager):
+    """get_other_claimed_task returns a member's other CLAIMED task and
+    excludes the task being (re)claimed itself."""
+    task_a = await task_manager.add(title="A", content="c")
+    assert (await task_manager.assign(task_a.task_id, "member1")).ok
+
+    found = await task_manager.get_other_claimed_task("member1", exclude_task_id="another-id")
+    assert found is not None
+    assert found.task_id == task_a.task_id
+
+    # Excluding the only claim returns None — an idempotent re-claim / re-assign
+    # of the same task must not be flagged as a conflict.
+    assert await task_manager.get_other_claimed_task("member1", exclude_task_id=task_a.task_id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_get_other_claimed_task_none_without_claims(task_manager, member2):
+    """A member holding no claimed task yields None."""
+    assert await task_manager.get_other_claimed_task("member2", exclude_task_id="x") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_reassign_transfers_task_and_revokes_old_assignee(task_manager, member2, message_bus):
+    """reassign moves a claimed task to the new member and fires a targeted
+    TASK_REVOKED for the former assignee (no member-wide cancel). The new
+    owner is notified via TASK_CLAIMED from the assign path, not a message."""
+    task = await task_manager.add(title="T", content="c")
+    assert (await task_manager.assign(task.task_id, "member1")).ok
+
+    result = await task_manager.reassign(task.task_id, "member2")
+    assert result.ok
+
+    refreshed = await task_manager.get(task.task_id)
+    assert refreshed.assignee == "member2"
+    assert refreshed.status == TaskStatus.CLAIMED.value
+
+    revoked = _published_events(message_bus, TeamEvent.TASK_REVOKED)
+    assert len(revoked) == 1
+    assert revoked[0].payload["task_id"] == task.task_id
+    assert revoked[0].payload["member_name"] == "member1"
+
+    claimed = _published_events(message_bus, TeamEvent.TASK_CLAIMED)
+    assert any(c.payload["member_name"] == "member2" for c in claimed)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reassign_missing_new_member_leaves_task_intact(task_manager, message_bus):
+    """A reassign to an unknown member must not strand the task as an
+    ownerless PENDING: the current owner and CLAIMED status stay, and no
+    TASK_REVOKED is emitted."""
+    task = await task_manager.add(title="T", content="c")
+    assert (await task_manager.assign(task.task_id, "member1")).ok
+
+    result = await task_manager.reassign(task.task_id, "ghost")
+    assert not result.ok
+
+    refreshed = await task_manager.get(task.task_id)
+    assert refreshed.assignee == "member1"
+    assert refreshed.status == TaskStatus.CLAIMED.value
+    assert _published_events(message_bus, TeamEvent.TASK_REVOKED) == []
