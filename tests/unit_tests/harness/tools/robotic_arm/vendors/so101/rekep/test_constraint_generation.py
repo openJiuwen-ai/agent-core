@@ -36,17 +36,13 @@ _VALID_RESPONSE = """
 Here is my reasoning about the object geometry...
 
 ```python
-num_stages = 1
-
-def stage1_subgoal_constraint1(end_effector, keypoints):
+def subgoal_constraint1(end_effector, keypoints):
     \"\"\"EE at keypoint 0.\"\"\"
     return float(np.linalg.norm(end_effector - keypoints[0]))
 
-STAGE_CONSTRAINTS = [[stage1_subgoal_constraint1]]
-STAGE_PATH_CONSTRAINTS = [[]]
-STAGE_NAMES = ["grasp"]
-STAGE_MOVABLE_MASK = [[False]]
-STAGE_GRIPPER_ACTION = ["closed"]
+SUBGOAL_CONSTRAINTS = [subgoal_constraint1]
+MOVABLE_MASK = [False]
+GRIPPER_ACTION = "closed"
 grasp_keypoints = [0]
 release_keypoints = []
 approach_elevation_deg = 45
@@ -68,13 +64,13 @@ def test_generate_constraints_parses_valid_vlm_response() -> None:
         vlm=vlm,
     )
 
-    assert result["num_stages"] == 1
-    assert result["stage_names"] == ["grasp"]
+    assert result["gripper_action"] == "closed"
+    assert result["movable_mask"] == [False]
     assert result["approach_elevation_deg"] == 45.0
     assert result["gripper_roll_deg"] == 90.0
     assert result["grasp_keypoints"] == [0]
 
-    fn = result["stage_constraints"][0][0]
+    fn = result["constraints"][0]
     assert fn(keypoints[0], keypoints) == pytest.approx(0.0, abs=1e-6)
 
 
@@ -97,6 +93,25 @@ def test_generate_constraints_includes_task_and_hint_in_prompt() -> None:
     assert "(320, 240)" in vlm.last_prompt
 
 
+def test_generate_constraints_includes_dest_keypoint_in_prompt() -> None:
+    vlm = _FakeVlm(_VALID_RESPONSE)
+    keypoints = np.array([[0.1, 0.0, 0.05], [0.2, 0.1, 0.05]])
+
+    generate_constraints(
+        overlay_rgb=np.zeros((10, 10, 3), dtype=np.uint8),
+        task="place the tape on the book",
+        num_keypoints=2,
+        keypoints_3d=keypoints,
+        ik_solver=_FakeIKSolver(),
+        vlm=vlm,
+        dest_keypoint_index=1,
+    )
+
+    assert vlm.last_prompt is not None
+    assert "Keypoint 1" in vlm.last_prompt
+    assert "keypoints[1]" in vlm.last_prompt
+
+
 def test_generate_constraints_rejects_malicious_vlm_code() -> None:
     vlm = _FakeVlm("```python\nimport os\nos.system('echo pwned')\n```")
 
@@ -111,10 +126,10 @@ def test_generate_constraints_rejects_malicious_vlm_code() -> None:
         )
 
 
-def test_generate_constraints_requires_num_stages() -> None:
-    vlm = _FakeVlm("```python\nSTAGE_NAMES = []\n```")
+def test_generate_constraints_requires_subgoal_constraints() -> None:
+    vlm = _FakeVlm("```python\nMOVABLE_MASK = []\n```")
 
-    with pytest.raises(ValueError, match="num_stages"):
+    with pytest.raises(ValueError, match="SUBGOAL_CONSTRAINTS"):
         generate_constraints(
             overlay_rgb=np.zeros((10, 10, 3), dtype=np.uint8),
             task="grasp the tape",
