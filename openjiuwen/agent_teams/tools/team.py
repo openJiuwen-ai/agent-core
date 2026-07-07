@@ -22,6 +22,9 @@ from typing import (
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
+    from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
+    from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
+    from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.i18n import t
@@ -120,6 +123,7 @@ class TeamBackend:
         plan_id: str | None = None,
         leader_member_name: str | None = None,
         leader_prompt: str = "",
+        org_task_manager: "OrgTaskManager | None" = None,
     ):
         """Initialize agent team manager.
 
@@ -258,6 +262,7 @@ class TeamBackend:
             leader_member_name=self.leader_member_name,
             dispatch_mode=dispatch_mode,
         )
+        self.org_task_manager = org_task_manager
         # Per-human-agent callback fired by the leader's dispatcher when
         # a team-side message reaches the avatar — see
         # ``register_human_agent_inbound`` for the registration surface.

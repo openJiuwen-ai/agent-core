@@ -27,6 +27,13 @@ LEADER_ONLY_TOOLS: set[str] = {
     "async_tasks_list",
     "async_task_output",
     "async_task_cancel",
+    # Organization-level collaboration tools (gated by organization_id).
+    "org_view_tasks",
+    "org_create_task",
+    "org_claim_task",
+    "org_delegate_task",
+    "org_update_task",
+    "org_send_leader_message",
 }
 
 # Tools that only members can use

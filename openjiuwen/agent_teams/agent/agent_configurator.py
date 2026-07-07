@@ -899,6 +899,21 @@ class AgentConfigurator:
 
         team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or "default"
         db = get_shared_db(ctx.db_config)
+        organization_id = None
+        if spec.metadata:
+            organization_id = spec.metadata.get("organization_id") or spec.metadata.get("org_id")
+        org_task_manager = None
+        if organization_id:
+            from openjiuwen.agent_teams.context import get_session_id
+            from openjiuwen.agent_teams.organization.pool import get_process_org_manager
+
+            org_manager = get_process_org_manager(
+                organization_id=str(organization_id),
+                db=db,
+                messager=messager,
+                session_id=get_session_id() or None,
+            )
+            org_task_manager = org_manager.task_pool
 
         is_leader = ctx.role == TeamRole.LEADER
         current_member_name = ctx.member_name or (ctx.team_spec.leader_member_name if ctx.team_spec else "")
@@ -923,6 +938,7 @@ class AgentConfigurator:
             on_team_cleaned=on_team_cleaned,
             on_team_built=on_team_built,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
+            org_task_manager=org_task_manager,
         )
 
         def _snapshot_length() -> int:
