@@ -26,11 +26,12 @@ from openjiuwen.core.common.logging import team_logger
 
 
 class TaskBoardHandler(BaseCoordinationHandler):
-    """Handle TASK_CLAIMED + 6 task-board state-transition events."""
+    """Handle TASK_CLAIMED / TASK_REVOKED + 6 task-board state-transition events."""
 
     EVENT_METHOD_MAP: ClassVar[dict[str, str]] = {
-        # Targeted assignment (message reaches the assignee directly)
+        # Targeted assignment / revocation (reaches the affected member directly)
         TeamEvent.TASK_CLAIMED: "on_task_claimed",
+        TeamEvent.TASK_REVOKED: "on_task_revoked",
         # Task board (everything except TASK_CLAIMED nudges idle agent)
         TeamEvent.TASK_CREATED: "on_task_board_event",
         TeamEvent.TASK_PLAN_REQUEST: "on_task_board_event",
@@ -137,6 +138,40 @@ class TaskBoardHandler(BaseCoordinationHandler):
             member_name,
             payload.task_id,
             is_self_human,
+        )
+        await self._round.deliver_input(content)
+
+    async def on_task_revoked(self, event: EventMessage) -> None:
+        """A task this member held was reassigned away by the leader.
+
+        Mirror of ``on_task_claimed`` for the *losing* side: the payload's
+        ``member_name`` is the former assignee. When it targets self, steer
+        the member off the now-foreign task (it may be mid-work on it) and
+        point it back at the board. Events for other members are ignored —
+        the reset already fired TASK_RELEASED to nudge the idle pool, and
+        the leader drove the reassignment itself.
+
+        A human-agent's claimed task is leader-immutable (reassign is
+        refused upstream by ``UpdateTaskTool`` via ``_is_human_agent_locked``),
+        so a revoke never targets a human avatar — no HITT rendering branch
+        is needed here.
+        """
+        member_name = self._blueprint.member_name
+        if not member_name or self._infra.task_manager is None:
+            return
+        payload = event.get_payload()
+        if payload.member_name != member_name:
+            return
+        await self._poll.resume_polls()
+        content = render_event(
+            kind="task-revoked",
+            body=t("dispatcher.task_revoked_from_self", task_id=payload.task_id),
+            task_id=payload.task_id,
+        )
+        team_logger.info(
+            "[{}] received TASK_REVOKED for self, task_id={}",
+            member_name,
+            payload.task_id,
         )
         await self._round.deliver_input(content)
 

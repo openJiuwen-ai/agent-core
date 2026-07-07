@@ -72,6 +72,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "dispatcher.task_assigned_to_self": (
             "[任务指派] 任务 [{task_id}] 已指派给你，请通过 view_task 工具查看任务详情并执行。"
         ),
+        # agent/coordination/handlers/task_board.py — task reassigned away from this member
+        "dispatcher.task_revoked_from_self": (
+            "[任务撤回] 任务 [{task_id}] 已被转交给其他成员。请立即停止该任务的工作，"
+            "并通过 view_task 查看是否有新的可认领任务。"
+        ),
         # agent/dispatcher.py — message formatting
         "dispatcher.task_plan_approved_to_self": (
             "[计划已批准] 任务 [{task_id}] 的执行计划已通过。请开始执行，完成后用 claim_task(status='completed') 标记完成。"
@@ -239,6 +244,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "dispatcher.task_assigned_to_self": (
             "[Task Assigned] Task [{task_id}] has been assigned to you. "
             "Use view_task to inspect the details and start working on it."
+        ),
+        # agent/coordination/handlers/task_board.py — task reassigned away from this member
+        "dispatcher.task_revoked_from_self": (
+            "[Task Revoked] Task [{task_id}] has been reassigned to another member. "
+            "Stop working on it now and call view_task to find your next available task."
         ),
         # agent/dispatcher.py — message formatting
         "dispatcher.task_plan_approved_to_self": (

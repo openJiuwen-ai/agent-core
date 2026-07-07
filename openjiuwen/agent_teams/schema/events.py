@@ -94,6 +94,7 @@ class TeamEvent:
     TASK_CANCELLED = "task_cancelled"
     TASK_UNBLOCKED = "task_unblocked"
     TASK_RELEASED = "task_released"
+    TASK_REVOKED = "task_revoked"
     TASK_LIST_DRAINED = "task_list_drained"
 
     # Swarmflow orchestration progress (a swarmflow run feeding the spectator leader)
@@ -272,6 +273,19 @@ class TaskReleasedEvent(BaseEventMessage):
     task_id: str = Field(..., description="Task unique identifier")
 
 
+class TaskRevokedEvent(BaseEventMessage):
+    """Event published when a member's claimed task is reassigned away.
+
+    Fired by ``TeamTaskManager.reassign`` and carries the *former*
+    assignee in ``member_name``. Distinct from ``TASK_RELEASED`` (which
+    tells idle teammates the task re-entered the claimable pool): this is
+    a targeted notice to the member who lost the task, so its dispatcher
+    can steer that member off the now-foreign work. The new assignee is
+    notified separately via ``TASK_CLAIMED``.
+    """
+    task_id: str = Field(..., description="Task unique identifier")
+
+
 class TaskListDrainedEvent(BaseEventMessage):
     """Event published when every task in the team task list is terminal.
 
@@ -396,6 +410,7 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.TASK_CANCELLED: TaskCancelledEvent,
     TeamEvent.TASK_UNBLOCKED: TaskUnblockedEvent,
     TeamEvent.TASK_RELEASED: TaskReleasedEvent,
+    TeamEvent.TASK_REVOKED: TaskRevokedEvent,
     TeamEvent.TASK_LIST_DRAINED: TaskListDrainedEvent,
     TeamEvent.WORKFLOW_PROGRESS: WorkflowProgressTeamEvent,
     TeamEvent.WORKTREE_CREATED: WorktreeCreatedEvent,
