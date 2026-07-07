@@ -229,17 +229,21 @@ async def test_after_task_iteration_fires_when_round_fails() -> None:
             await harness.send("will fail")
             # Wait on the cleanup hook rather than a specific harness state —
             # failure-mode state transitions are out of scope for this test.
+            # The failed round is auto-retried once (failure retry), and the
+            # retry fails too — the hook must fire once per round, so wait
+            # for both.
             deadline = asyncio.get_running_loop().time() + 3.0
-            while not fired and asyncio.get_running_loop().time() < deadline:
+            while len(fired) < 2 and asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(0.01)
         finally:
             await harness.stop()
             await consumer
 
-        # Fired exactly once, carrying the error-shaped result the except
-        # branch installs (not a leftover success result).
-        assert len(fired) == 1
-        assert fired[0] == {"result_type": "error", "error": "boom"}
+        # Fired exactly once per failed round (original + its one-shot retry),
+        # each carrying the error-shaped result the except branch installs
+        # (not a leftover success result).
+        assert len(fired) == 2
+        assert fired == [{"result_type": "error", "error": "boom"}] * 2
     finally:
         await Runner.stop()
 

@@ -454,6 +454,11 @@ class DeepAgentSpec(BaseModel):
     enable_task_planning: bool = False
     restrict_to_sandbox: bool = False
     auto_create_workspace: bool = True
+    # For a NativeHarness member this is the slow-round threshold: a round
+    # running longer than this starts emitting periodic slow-round warnings
+    # but is never killed (see NativeHarness._log_slow_round_until_done).
+    # Only DeepAgent's own self-driving task loop still uses it as a real
+    # completion timeout.
     completion_timeout: float = 600.0
     progressive_tool: Optional[ProgressiveToolSpec] = None
     approval_required_tools: Optional[list[str]] = None

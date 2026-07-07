@@ -94,6 +94,12 @@ class ActiveRound:
             ReAct loop via the round's ``submit_round`` steering wiring.
         graceful_abort: When True, the round is finishing under a graceful
             abort; ``_on_round_done`` must not auto-start a next round.
+        failure_retry: When True, this round is the one-shot retry of a round
+            that died abnormally (crashed, or was killed by a completion
+            timeout). Its inbound query was already marked read at deliver
+            time, so without a retry the message would be silently lost. A
+            second abnormal death gives up (goes IDLE with a warning) instead
+            of retrying again, so a deterministic failure cannot loop forever.
         pre_round_snapshot: Snapshot taken just before the round started
             (index 0). pause (which discards the whole round to restart with a
             merged query) and immediate abort with no completed round roll back
@@ -110,6 +116,7 @@ class ActiveRound:
     task: asyncio.Task
     steering_queue: asyncio.Queue
     graceful_abort: bool = False
+    failure_retry: bool = False
     pre_round_snapshot: SafeStateSnapshot | None = None
     last_safe_snapshot: SafeStateSnapshot | None = None
 

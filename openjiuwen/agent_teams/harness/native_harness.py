@@ -850,6 +850,16 @@ class NativeHarness(DeepAgent):
             return
         was_graceful = active.graceful_abort
         is_resume = isinstance(active.original_query, InteractiveInput)
+        # Abnormal death: the round crashed (an inner failure surfaces as a
+        # TASK_FAILED error result, a harness-level failure as ``cmd.error``)
+        # or a completion-timeout kill produced its error result. Control
+        # errors are excluded: "cancelled" belongs to abort/pause (a user
+        # decision, never retried) and "no active round" is a submit-state
+        # mismatch, not a death of this round's work.
+        result_error = (cmd.result or {}).get("error")
+        died_abnormally = cmd.error is not None or (
+            bool(result_error) and result_error not in ("cancelled", "no active round")
+        )
         self._st.active = None
 
         if cmd.error is not None:
@@ -858,6 +868,11 @@ class NativeHarness(DeepAgent):
                 cmd.round_id,
                 cmd.error,
             )
+            await self._emit_round("failed", cmd.round_id, cmd.result)
+        elif died_abnormally:
+            # A watchdog kill is a failure, not a normal finish: surface it to
+            # round subscribers (StreamController maps "failed") instead of
+            # letting a killed round masquerade as a completed one.
             await self._emit_round("failed", cmd.round_id, cmd.result)
         else:
             await self._emit_round("finished", cmd.round_id, cmd.result)
@@ -880,6 +895,39 @@ class NativeHarness(DeepAgent):
         # queued follow-ups and go IDLE.
         if was_graceful:
             self._drain_follow_ups_discard(session)
+            await self._transition(HarnessState.IDLE)
+            return
+
+        # Abnormal death (crash / timeout kill): the round died without
+        # consuming its inbound query, and that message was already marked
+        # read at deliver time — no poll will ever re-deliver it. Retry the
+        # query once on a fresh round so the message is not silently lost; a
+        # second abnormal death gives up loudly so a deterministic failure
+        # cannot loop forever. Handled before the is_aborted check below: a
+        # kill path may set coordinator.is_aborted as a side effect, which
+        # must not be read as a user abort — reset it either way so the next
+        # round starts clean. An InteractiveInput query (interrupt resume) is
+        # not replayable, so it goes straight to the give-up branch.
+        if died_abnormally:
+            self._reset_coordinator()
+            death_reason = cmd.error if cmd.error is not None else result_error
+            if isinstance(active.original_query, str) and not active.failure_retry:
+                logger.warning(
+                    "[NativeHarness] round_id=%s died abnormally (%s); "
+                    "retrying its query once on a new round",
+                    cmd.round_id,
+                    death_reason,
+                )
+                nxt = self._start_round(active.original_query, failure_retry=True)
+                await self._emit_round("started", nxt.round_id)
+                return
+            logger.warning(
+                "[NativeHarness] round_id=%s died abnormally (%s)%s; "
+                "giving up on its query and going idle",
+                cmd.round_id,
+                death_reason,
+                " again after a retry" if active.failure_retry else "",
+            )
             await self._transition(HarnessState.IDLE)
             return
 
@@ -937,7 +985,12 @@ class NativeHarness(DeepAgent):
     # separate class for now to avoid speculative abstraction; the seam is
     # documented so stage 2 can lift them out without reshaping callers.
 
-    def _start_round(self, query: "str | InteractiveInput", is_follow_up: bool = False) -> ActiveRound:
+    def _start_round(
+        self,
+        query: "str | InteractiveInput",
+        is_follow_up: bool = False,
+        failure_retry: bool = False,
+    ) -> ActiveRound:
         """Create an ActiveRound (with a pre-round baseline snapshot) and schedule it.
 
         The round task sets ``_ACTIVE_ROUND`` to this round in its own context
@@ -948,6 +1001,8 @@ class NativeHarness(DeepAgent):
             query: Query to drive this round.
             is_follow_up: Whether this round continues a prior one (passed to
                 ``submit_round`` so the executor treats it as a follow-up).
+            failure_retry: Whether this round is the one-shot retry of a round
+                that died abnormally (see ``_on_round_done``).
         """
         round_id = self._st.next_round_id()
         task_id = uuid.uuid4().hex
@@ -960,6 +1015,7 @@ class NativeHarness(DeepAgent):
             deep_agent=self,
             task=None,  # type: ignore[arg-type]  # assigned right after create_task
             steering_queue=asyncio.Queue(),
+            failure_retry=failure_retry,
             pre_round_snapshot=pre_round,
         )
 

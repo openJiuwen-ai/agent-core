@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import Awaitable, Callable, List, Optional, Tuple, Dict, Any
 
 from openjiuwen.core.common.logging import logger
@@ -29,6 +30,13 @@ from openjiuwen.core.runner.callback.events import ContextEvents
 _ACTIVE_COMPRESSION_RESULT_BUSY = "busy"
 _ACTIVE_COMPRESSION_RESULT_COMPRESSED = "compressed"
 _ACTIVE_COMPRESSION_RESULT_NOOP = "noop"
+
+# How long a processor-lock acquire may block before it is worth a warning.
+# The lock itself has no timeout: a holder wedged on a never-completing await
+# silently hangs every later add_messages / get_context_window on the same
+# context. The guarded acquire keeps retrying (behavior is unchanged once the
+# holder releases) but logs a WARNING per interval so the stall is visible.
+_PROCESSOR_LOCK_WARN_INTERVAL_SECONDS = 120.0
 
 
 class SessionModelContext(ModelContext):
@@ -125,6 +133,51 @@ class SessionModelContext(ModelContext):
     def _resolve_context_model_name(self, kwargs: dict) -> Optional[str]:
         return kwargs.get("model_name") or self._model_name
 
+    async def _acquire_processor_lock(self, caller: str) -> None:
+        """Acquire ``_processor_lock``, warning periodically while blocked.
+
+        Args:
+            caller: Short label of the acquiring operation, included in the
+                warning so a stall points at who is blocked (the holder is
+                then found via the surrounding log context / a stack dump).
+        """
+        waited = 0.0
+        while True:
+            try:
+                await asyncio.wait_for(
+                    self._processor_lock.acquire(),
+                    timeout=_PROCESSOR_LOCK_WARN_INTERVAL_SECONDS,
+                )
+                if waited:
+                    logger.warning(
+                        "context %s (session %s): %s acquired the processor lock "
+                        "after waiting %.0fs",
+                        self._context_id,
+                        self._session_id,
+                        caller,
+                        waited,
+                    )
+                return
+            except asyncio.TimeoutError:
+                waited += _PROCESSOR_LOCK_WARN_INTERVAL_SECONDS
+                logger.warning(
+                    "context %s (session %s): %s has been blocked %.0fs waiting for "
+                    "the processor lock; its holder may be wedged",
+                    self._context_id,
+                    self._session_id,
+                    caller,
+                    waited,
+                )
+
+    @asynccontextmanager
+    async def _guarded_processor_lock(self, caller: str):
+        """``async with`` wrapper around :meth:`_acquire_processor_lock`."""
+        await self._acquire_processor_lock(caller)
+        try:
+            yield
+        finally:
+            self._processor_lock.release()
+
     @_fw.emit_after(ContextEvents.CONTEXT_UPDATED, result_key="messages")
     async def add_messages(
             self,
@@ -142,7 +195,7 @@ class SessionModelContext(ModelContext):
             self._message_buffer.add_back(messages_to_add)
             return messages_to_add
 
-        async with self._processor_lock:
+        async with self._guarded_processor_lock("add_messages"):
             _, messages_to_add = await self._run_add_processors(
                 messages_to_add,
                 force=False,
@@ -187,7 +240,7 @@ class SessionModelContext(ModelContext):
                 history_start=history_start,
             )
 
-        await self._processor_lock.acquire()
+        await self._acquire_processor_lock("compress_context")
         try:
             self._active_compression_in_progress = True
             history_start = len(self._processor_state_recorder.history())
@@ -312,7 +365,7 @@ class SessionModelContext(ModelContext):
                 error_msg="dialogue round should be larger than 0"
             )
 
-        async with self._processor_lock:
+        async with self._guarded_processor_lock("get_context_window"):
             system_messages = (system_messages or [])[:]
 
             # with specific context size
