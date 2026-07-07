@@ -832,11 +832,17 @@ class InferenceAffinityModelClient(BaseModelClient):
                 usage_metadata = None
                 usage = chunk_data.get("usage")
                 if usage:
+                    cache_tokens = 0
+                    prompt_tokens_details = usage.get("prompt_tokens_details")
+                    if prompt_tokens_details:
+                        cache_tokens = prompt_tokens_details.get("cached_tokens", 0) or 0
+
                     usage_metadata = UsageMetadata(
                         model_name=self.model_config.model_name,
                         input_tokens=usage.get("prompt_tokens", 0) or 0,
                         output_tokens=usage.get("completion_tokens", 0) or 0,
                         total_tokens=usage.get("total_tokens", 0) or 0,
+                        cache_tokens=cache_tokens,
                     )
 
                 # Skip empty chunks
