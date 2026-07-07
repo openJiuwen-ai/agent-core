@@ -16,7 +16,6 @@ from openjiuwen.agent_teams.tools.tool_async import (
 from openjiuwen.agent_teams.tools.tool_member import (
     ApprovePlanTool,
     ApproveToolCallTool,
-    ListMembersTool,
     ShutdownMemberTool,
     SpawnBridgeAgentTool,
     SpawnExternalCliTool,
@@ -120,7 +119,6 @@ def create_team_tools(
         "shutdown_member": ShutdownMemberTool(agent_team, t),
         "approve_plan": ApprovePlanTool(agent_team, t),
         "approve_tool": ApproveToolCallTool(agent_team, t),
-        "list_members": ListMembersTool(agent_team, t),
         # Task management
         "create_task": TaskCreateTool(agent_team, t),
         "update_task": UpdateTaskTool(agent_team, t),

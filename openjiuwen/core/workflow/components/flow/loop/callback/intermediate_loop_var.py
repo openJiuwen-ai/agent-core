@@ -15,6 +15,11 @@ class IntermediateLoopVarCallback(LoopCallback):
 
     def first_in_loop(self, session: BaseSession) -> Output:
         local_vars = session.state().get_inputs(self.intermediate_loop_var)
+        # 把中间变量直接写入 state（用 local_vars 的 keys，如 user_num/ss），
+        # 让循环体内节点能引用 ${loop.user_num} 或 ${loop.intermediateLoopVar.ss}（后者解析为 state["ss"]）
+        if local_vars:
+            session.state().update(local_vars)
+            session.state().commit()
         if self.intermediate_loop_var_root:
             local_vars = {self.intermediate_loop_var_root: local_vars}
         return local_vars

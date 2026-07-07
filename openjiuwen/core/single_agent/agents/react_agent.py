@@ -10,6 +10,8 @@ Author: huenrui1@huawei.com
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import asyncio
 import time
 import uuid
@@ -20,6 +22,12 @@ from pydantic import Field, BaseModel
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
+try:
+    from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
+        browser_agent_log_info,
+    )
+except Exception:  # pragma: no cover - browser runtime is optional here
+    browser_agent_log_info = None
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm.schema.config import (
@@ -540,8 +548,13 @@ class ReActAgent(BaseAgent):
             from openjiuwen.core.runner import Runner
             sys_operation = Runner.resource_mgr.get_sys_operation(config.sys_operation_id)
 
-        # Update context_engine if context window limit changed
-        if old_config.context_engine_config != config.context_engine_config:
+        # Update context_engine if context settings or runtime dependencies changed.
+        context_engine_runtime_changed = (
+                old_config.context_engine_config != config.context_engine_config
+                or old_config.workspace != config.workspace
+                or old_config.sys_operation_id != config.sys_operation_id
+        )
+        if context_engine_runtime_changed:
             self.context_engine = ContextEngine(
                 config.context_engine_config,
                 workspace=config.workspace,
@@ -824,7 +837,6 @@ class ReActAgent(BaseAgent):
         call_first_token_time = None
         call_last_token_time = None
         call_chunk_count = 0
-
         try:
             async for chunk in llm.stream(
                     model=self._config.model_name,
@@ -841,6 +853,16 @@ class ReActAgent(BaseAgent):
                     call_first_token_time = time.monotonic()
                 call_last_token_time = time.monotonic()
                 call_chunk_count += 1
+
+                inspectors = ctx.extra.get("_stream_chunk_inspectors") or []
+                if isinstance(inspectors, dict):
+                    inspectors = inspectors.values()
+                for inspector in list(inspectors):
+                    if not callable(inspector):
+                        continue
+                    inspect_result = inspector(ctx, chunk)
+                    if asyncio.iscoroutine(inspect_result):
+                        await inspect_result
 
                 if chunk.reasoning_content:
                     await session.write_stream(OutputSchema(
@@ -1052,6 +1074,139 @@ class ReActAgent(BaseAgent):
             except BaseError as e:
                 logger.warning("Failed to render system message placeholder: %s", e)
 
+
+    @staticmethod
+    def _is_browser_tool_name(tool_name: str) -> bool:
+        lowered_name = str(tool_name or "").lower()
+        return (
+            lowered_name.startswith("browser_")
+            or "browser_" in lowered_name
+            or lowered_name.startswith("mcp_playwright")
+        )
+
+    @staticmethod
+    def _summarize_tool_args_for_log(tool_name: str, tool_args: Any) -> Any:
+        """Redact high-risk tool arguments while keeping generic logs useful."""
+        name = str(tool_name or "")
+        lowered_name = name.lower()
+
+        def parse_args(value: Any) -> Any:
+            if isinstance(value, (dict, list)):
+                return value
+            if not isinstance(value, str):
+                return value
+            text = value.strip()
+            if not text:
+                return value
+            try:
+                return json.loads(text)
+            except (TypeError, ValueError):
+                return value
+
+        def redact_text(value: Any) -> Dict[str, Any]:
+            text = "" if value is None else str(value)
+            return {"redacted": True, "kind": type(value).__name__, "length": len(text)}
+
+        parsed = parse_args(tool_args)
+
+        if lowered_name == "task_tool" and isinstance(parsed, dict):
+            task_description = parsed.get("task_description")
+            task_text = "" if task_description is None else str(task_description)
+            summary: Dict[str, Any] = {
+                "kind": "task_tool",
+                "keys": sorted(str(key) for key in parsed.keys()),
+            }
+            if "subagent_type" in parsed:
+                summary["subagent_type"] = str(parsed.get("subagent_type") or "")[:120]
+            if task_text:
+                task_hash = hashlib.sha256(
+                    task_text.encode("utf-8", errors="ignore")
+                ).hexdigest()[:12]
+                summary["task_description"] = {
+                    "redacted": True,
+                    "length": len(task_text),
+                    "sha256_12": task_hash,
+                }
+            return summary
+
+        is_browser_tool = ReActAgent._is_browser_tool_name(lowered_name)
+        if not is_browser_tool:
+            return tool_args
+
+        if not isinstance(parsed, dict):
+            return {"kind": type(parsed).__name__, "repr_length": len(str(parsed)), "redacted": True}
+
+        if lowered_name == "browser_batch_interact":
+            steps = parsed.get("steps") if isinstance(parsed.get("steps"), list) else []
+            op_counts: Dict[str, int] = {}
+            preview = []
+            value_keys = {
+                "value", "text", "choose_text", "option_text", "option_label",
+                "option_value", "label_value", "option_name", "values",
+            }
+            target_keys = {
+                "selector", "label", "placeholder", "role", "name", "testid",
+                "option_selector", "option_role", "year_selector", "month_selector", "day_selector",
+            }
+            for index, step in enumerate(steps[:10]):
+                if not isinstance(step, dict):
+                    preview.append({"index": index, "kind": type(step).__name__})
+                    continue
+                op = str(step.get("op") or "<missing>")
+                op_counts[op] = op_counts.get(op, 0) + 1
+                keys = {str(key) for key in step.keys()}
+                preview.append({
+                    "index": index,
+                    "op": op[:80],
+                    "target_keys": sorted(keys & target_keys),
+                    "value_keys_redacted": sorted(keys & value_keys),
+                })
+            for step in steps[10:]:
+                if isinstance(step, dict):
+                    op = str(step.get("op") or "<missing>")
+                    op_counts[op] = op_counts.get(op, 0) + 1
+            return {
+                "kind": "browser_batch_interact",
+                "step_count": len(steps),
+                "op_counts": dict(sorted(op_counts.items())),
+                "steps_preview": preview,
+                "truncated": len(steps) > len(preview),
+                "continue_on_error": bool(parsed.get("continue_on_error", False)),
+                "timeout_ms": parsed.get("timeout_ms"),
+                "global_timeout_ms": parsed.get("global_timeout_ms"),
+            }
+
+        if "run_code" in lowered_name or "evaluate" in lowered_name:
+            code = parsed.get("code") or parsed.get("script") or parsed.get("expression") or parsed.get("function")
+            return {
+                "kind": "code_execution",
+                "keys": sorted(str(key) for key in parsed.keys()),
+                "code_length": len(str(code or "")),
+                "code_redacted": True,
+            }
+
+        summary: Dict[str, Any] = {"kind": "dict", "keys": sorted(str(key) for key in parsed.keys())}
+        safe_values: Dict[str, Any] = {}
+        redacted_values: Dict[str, Any] = {}
+        text_keys = {
+            "value", "text", "query", "name", "email", "phone",
+            "mobile", "password", "address", "code", "script", "js",
+        }
+        for key, value in parsed.items():
+            key_str = str(key)
+            key_lower = key_str.lower()
+            if key_lower in text_keys or any(token in key_lower for token in ("password", "token", "secret")):
+                redacted_values[key_str] = redact_text(value)
+            elif key_lower in {
+                "selector", "role", "label", "placeholder", "checked", "timeout", "timeout_ms", "max_items"
+            }:
+                safe_values[key_str] = value if isinstance(value, (bool, int, float)) else str(value)[:120]
+        if safe_values:
+            summary["safe_values"] = safe_values
+        if redacted_values:
+            summary["redacted_values"] = redacted_values
+        return summary
+
     async def _execute_tool_call(
             self,
             ctx: AgentCallbackContext,
@@ -1068,7 +1223,13 @@ class ReActAgent(BaseAgent):
             return []
 
         for tool_call in tool_calls:
-            logger.info(f"Executing tool: {tool_call.name} with args: {tool_call.arguments}")
+            log_args = self._summarize_tool_args_for_log(tool_call.name, tool_call.arguments)
+            tool_name = str(tool_call.name or "")
+            is_browser_tool = self._is_browser_tool_name(tool_name)
+            if is_browser_tool and browser_agent_log_info is not None:
+                browser_agent_log_info("Executing tool: %s with args: %s", tool_name, log_args)
+            else:
+                logger.info("Executing tool: %s with args: %s", tool_name, log_args)
 
         results = await self.ability_manager.execute(
             ctx=ctx,
@@ -1449,14 +1610,6 @@ class ReActAgent(BaseAgent):
             context = await self.context_engine.create_context(
                 session=session
             )
-        context_reloader = context.reloader_tool()
-        if self._config.context_engine_config.enable_reload:
-            self.ability_manager.add(context_reloader.card)
-            from openjiuwen.core.runner import Runner
-            if not Runner.resource_mgr.get_tool(context_reloader.card.id, tag=self.card.id):
-                Runner.resource_mgr.add_tool(context_reloader, tag=self.card.id)
-        else:
-            self.ability_manager.remove(context_reloader.card.name)
         return context
 
     async def invoke(

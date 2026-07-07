@@ -20,8 +20,8 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.agent_evolving.trajectory.types import (
+    LegacyTrajectory,
     LLMCallDetail,
-    Trajectory,
     TrajectoryStep,
 )
 
@@ -98,21 +98,22 @@ class TrajectoryBuilder:
         if self._start_time_ms is None and step.start_time_ms:
             self._start_time_ms = step.start_time_ms
 
-    def build(self) -> Trajectory:
-        """Assemble Trajectory.
+    def build(self) -> LegacyTrajectory:
+        """Assemble a legacy step-based trajectory view.
 
         Returns:
-            Assembled Trajectory with all steps and metadata
+            Assembled trajectory with all steps and metadata.
         """
-        meta: dict[str, Any] = {}
+        meta = dict(self.meta)
+        meta.pop("source", None)
         if self.member_id:
-            meta["member_id"] = self.member_id
-        return Trajectory(
+            meta.setdefault("member_id", self.member_id)
+        return LegacyTrajectory(
             execution_id=_generate_uuid(),
             session_id=self.session_id,
-            source=self.source,
             case_id=self.case_id,
             steps=self.steps,
+            source=self.source,
             cost=self.cost if self.cost["input_tokens"] > 0 else None,
-            meta=dict(self.meta),
+            meta=meta,
         )

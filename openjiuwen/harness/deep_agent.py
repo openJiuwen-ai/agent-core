@@ -53,6 +53,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.harness_config.loader import (
     HarnessConfigLoader,
 )
+from openjiuwen.harness.image_modality_probe import probe_image_support
 from openjiuwen.harness.rails import DeepAgentRail
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from openjiuwen.harness.rails.task_completion_rail import (
@@ -740,6 +741,8 @@ class DeepAgent(BaseAgent):
         if cfg.context_engine_config is not None:
             react_config.context_engine_config = cfg.context_engine_config
         react_config.workspace = cfg.workspace
+        if cfg.sys_operation is not None:
+            react_config.sys_operation_id = cfg.sys_operation.id
 
         react_config.parallel_tool_calls = cfg.parallel_tool_calls
 
@@ -830,6 +833,33 @@ class DeepAgent(BaseAgent):
 
             self.ability_manager.add(mcp_config)
 
+    async def _resolve_read_image_multimodal(self) -> None:
+        """Probe the agent model when read_file image modality is set to auto."""
+        config = self._deep_config
+        if config is None or config.enable_read_image_multimodal is not None:
+            return
+
+        if config.model is None:
+            logger.debug(
+                "[DeepAgent] no model configured; disabling read_file image multimodal",
+            )
+            config.enable_read_image_multimodal = False
+            return
+
+        supported = await probe_image_support(config.model)
+        if supported is None:
+            logger.warning(
+                "[DeepAgent] image multimodal probe inconclusive; "
+                "leaving auto and degrading to metadata-only for this run",
+            )
+            return
+
+        config.enable_read_image_multimodal = supported
+        logger.info(
+            "[DeepAgent] read_file image multimodal auto-detected: %s",
+            supported,
+        )
+
     async def _ensure_initialized(self) -> None:
         """Perform lazy async initialization."""
         if self._initialized:
@@ -852,6 +882,8 @@ class DeepAgent(BaseAgent):
         if self._needs_workspace_init():
             await self.init_workspace()
 
+        await self._resolve_read_image_multimodal()
+        
         self._sync_prompt_builder_references()
 
         # Unregister stale rails left over from a previous configure() cycle.

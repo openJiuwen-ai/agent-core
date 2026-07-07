@@ -14,7 +14,13 @@ from threading import RLock
 from typing import Protocol
 
 from openjiuwen.agent_evolving.trajectory.aggregator import aggregate_member_trajectories
-from openjiuwen.agent_evolving.trajectory.types import Trajectory
+from openjiuwen.agent_evolving.trajectory.types import (
+    LegacyTrajectory,
+    Trajectory,
+    to_legacy_trajectory,
+)
+
+TrajectoryRecord = Trajectory | LegacyTrajectory
 
 
 @dataclass(frozen=True)
@@ -25,7 +31,7 @@ class MemberTrajectorySnapshot:
     session_id: str
     member_id: str
     member_role: str | None
-    trajectory: Trajectory
+    trajectory: TrajectoryRecord
     recorded_at_ms: int
 
     @classmethod
@@ -34,18 +40,19 @@ class MemberTrajectorySnapshot:
         *,
         team_id: str,
         member_id: str,
-        trajectory: Trajectory,
+        trajectory: TrajectoryRecord,
         member_role: str | None = None,
         session_id: str | None = None,
         recorded_at_ms: int | None = None,
     ) -> "MemberTrajectorySnapshot":
         """Create a snapshot with runtime defaults filled in."""
+        legacy = trajectory if isinstance(trajectory, LegacyTrajectory) else to_legacy_trajectory(trajectory)
         return cls(
             team_id=team_id,
-            session_id=session_id if session_id is not None else trajectory.session_id or "",
+            session_id=session_id if session_id is not None else legacy.session_id or "",
             member_id=member_id,
             member_role=member_role,
-            trajectory=trajectory,
+            trajectory=legacy,
             recorded_at_ms=recorded_at_ms if recorded_at_ms is not None else now_ms(),
         )
 
@@ -66,7 +73,7 @@ class TrajectorySource(Protocol):
         team_id: str,
         session_id: str,
         filter_collaborative: bool = True,
-    ) -> Trajectory | None:
+    ) -> LegacyTrajectory | None:
         """Return the aggregated team trajectory for a session."""
 
 
@@ -103,7 +110,7 @@ class InMemoryTrajectoryRegistry:
         team_id: str,
         session_id: str,
         filter_collaborative: bool = True,
-    ) -> Trajectory | None:
+    ) -> LegacyTrajectory | None:
         key = (team_id, session_id)
         with self._lock:
             snapshots = [entry.snapshot for entry in self._snapshots.get(key, {}).values()]
@@ -127,12 +134,13 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _trajectory_for_snapshot(snapshot: MemberTrajectorySnapshot) -> Trajectory:
-    meta = dict(snapshot.trajectory.meta)
+def _trajectory_for_snapshot(snapshot: MemberTrajectorySnapshot) -> LegacyTrajectory:
+    trajectory = to_legacy_trajectory(snapshot.trajectory)
+    meta = dict(trajectory.meta)
     meta["member_id"] = snapshot.member_id
     if snapshot.member_role is not None:
         meta["member_role"] = snapshot.member_role
-    return replace(snapshot.trajectory, meta=meta)
+    return replace(trajectory, meta=meta)
 
 
 def _should_keep_current(

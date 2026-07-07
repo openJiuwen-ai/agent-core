@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.tool import McpServerConfig
+from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents.browser_agent import (
     BROWSER_AGENT_FACTORY_NAME,
@@ -136,6 +137,41 @@ def test_default_wiring_main_agent_has_browser_runtime_rail() -> None:
 
     rails = calls[0].get("rails", [])
     assert any(isinstance(rail, BrowserRuntimeRail) for rail in rails)
+
+
+def test_default_wiring_windows_browser_probe_and_snapshot_results() -> None:
+    calls, fake = _capture_create_deep_agent()
+    with _patch_all(fake)[0]:
+        create_browser_agent(_fake_model(), settings=_fake_settings())
+
+    rails = calls[0].get("rails", [])
+    context_rails = [rail for rail in rails if isinstance(rail, ContextProcessorRail)]
+    assert len(context_rails) == 1
+
+    processors = context_rails[0]._user_processors
+    assert len(processors) == 1
+    key, config = processors[0]
+    assert key == "ToolResultWindowProcessor"
+    # Pin the intended contract literally (not against the source constant) so a
+    # regression like the plain "browser_snapshot" name is actually caught.
+    assert config.tool_names == [
+        "browser_probe_interactives",
+        "browser_probe_cards",
+        "browser_snapshot",
+    ]
+    assert config.keep_last_k == 1
+
+
+def test_caller_context_processor_rail_suppresses_injection() -> None:
+    calls, fake = _capture_create_deep_agent()
+    caller_rail = ContextProcessorRail(preset=False)
+    with _patch_all(fake)[0]:
+        create_browser_agent(_fake_model(), settings=_fake_settings(), rails=[caller_rail])
+
+    rails = calls[0].get("rails", [])
+    context_rails = [rail for rail in rails if isinstance(rail, ContextProcessorRail)]
+    # Only the caller's rail is present; the browser agent does not add its own.
+    assert context_rails == [caller_rail]
 
 
 def test_default_wiring_does_not_add_sys_operation_rail() -> None:

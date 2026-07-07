@@ -108,7 +108,11 @@ class TeamWorkerBackend(AgentBackend):
         self._on_human_replied = on_human_replied
         self._run_id = run_id
         self._run_prefix = self._run_id_prefix(run_id)
-        self._worktrees = SwarmflowWorkerWorktrees(team_name=team_name, build_context=build_context)
+        self._worktrees = SwarmflowWorkerWorktrees(
+            team_name=team_name,
+            build_context=build_context,
+            session_id=session_id,
+        )
         self._t = make_translator(language if language in ("cn", "en") else "cn")
         self._counter = 0
         # Stateful agent_session / human_session manager, built on first use so a

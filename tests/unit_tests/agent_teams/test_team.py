@@ -1235,6 +1235,40 @@ async def test_clean_team_callback_failure_does_not_break_clean(db, message_bus)
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_clean_team_before_callback_failure_aborts_clean(db, message_bus):
+    """A raising on_before_team_cleaned keeps DB rows so cleanup can be retried."""
+    await db.team.create_team(
+        team_name="cb_before_raise_team",
+        display_name="Before Callback Raise Team",
+        leader_member_name="leader1",
+    )
+    cleaned_calls: list[int] = []
+
+    async def _on_before_cleaned() -> None:
+        raise RuntimeError("boom")
+
+    async def _on_cleaned() -> None:
+        cleaned_calls.append(1)
+
+    backend = TeamBackend(
+        team_name="cb_before_raise_team",
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_before_team_cleaned=_on_before_cleaned,
+        on_team_cleaned=_on_cleaned,
+    )
+
+    result = await backend.clean_team()
+
+    assert result is False
+    assert cleaned_calls == []
+    assert await backend.get_team_info() is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_clean_team_no_callback_is_noop(db, message_bus):
     """clean_team success path works when on_team_cleaned is not wired."""
     await db.team.create_team(

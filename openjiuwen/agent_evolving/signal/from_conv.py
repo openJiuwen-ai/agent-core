@@ -17,8 +17,10 @@ from openjiuwen.agent_evolving.signal.base import (
 )
 from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
+    LegacyTrajectory,
     ToolCallDetail,
     Trajectory,
+    to_legacy_trajectory,
 )
 from openjiuwen.core.common.logging import logger
 
@@ -149,7 +151,7 @@ _EXEC_CONTENT_KEYS = (
     "shell_command",
 )
 
-DetectionInput = Union[Trajectory, List[dict]]
+DetectionInput = Union[Trajectory, LegacyTrajectory, List[dict]]
 
 
 class ConversationSignalDetector:
@@ -183,7 +185,7 @@ class ConversationSignalDetector:
         try:
             messages = (
                 self.convert_trajectory_to_messages(input_data)
-                if isinstance(input_data, Trajectory)
+                if isinstance(input_data, (Trajectory, LegacyTrajectory))
                 else list(input_data)
             )
             signals = self._detect_from_messages(messages)
@@ -199,7 +201,7 @@ class ConversationSignalDetector:
 
     def detect_trajectory_signals(
         self,
-        trajectory: Optional[Trajectory],
+        trajectory: Optional[Trajectory | LegacyTrajectory],
         *,
         messages: Optional[List[dict]] = None,
         signal_types: Optional[Set[str]] = None,
@@ -247,7 +249,7 @@ class ConversationSignalDetector:
         messages: List[dict],
     ) -> List[EvolutionSignal]:
         """Use LLM judgment to turn passive user messages into standard signals."""
-        if isinstance(messages, Trajectory):
+        if isinstance(messages, (Trajectory, LegacyTrajectory)):
             raise TypeError(
                 "detect_user_intent() expects normalized messages; call convert_trajectory_to_messages() first."
             )
@@ -297,7 +299,7 @@ class ConversationSignalDetector:
         return [self._make_user_feedback_signal(excerpt, skill_name)]
 
     @staticmethod
-    def convert_trajectory_to_messages(trajectory: Trajectory) -> List[dict]:
+    def convert_trajectory_to_messages(trajectory: Trajectory | LegacyTrajectory) -> List[dict]:
         """Convert Trajectory.steps to message list format.
 
         The message format matches what SignalDetector.detect() expects:
@@ -310,10 +312,11 @@ class ConversationSignalDetector:
         Returns:
             List of message dicts compatible with signal detection logic.
         """
+        legacy = to_legacy_trajectory(trajectory)
         messages: List[dict] = []
         tool_call_id_to_name: Dict[str, str] = {}
 
-        for step in trajectory.steps:
+        for step in legacy.steps:
             if step.kind == "llm" and isinstance(step.detail, LLMCallDetail):
                 for msg in step.detail.messages:
                     messages.append(msg)

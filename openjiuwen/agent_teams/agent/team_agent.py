@@ -510,6 +510,7 @@ class TeamAgent(BaseAgent):
             spec,
             ctx,
             on_teammate_created=self._on_teammate_created,
+            on_before_team_cleaned=self._finalize_team_worktrees_before_clean,
             on_team_cleaned=self._mark_team_cleaned,
             on_team_built=self._mark_team_built,
         )
@@ -780,6 +781,18 @@ class TeamAgent(BaseAgent):
         await self._dispose_tiny_agents()
         self._close_stream()
 
+    async def finalize_non_contributing_worktrees(self) -> None:
+        """Finalize current-session worktrees that did not contribute commits."""
+        if self.role != TeamRole.LEADER:
+            return
+        await self._spawn_manager.worktree_lifecycle.finalize_non_contributing_member_worktrees()
+
+    async def _finalize_team_worktrees_before_clean(self) -> None:
+        """Finalize current-session teammate worktrees before team DB deletion."""
+        if self.role != TeamRole.LEADER:
+            return
+        await self._spawn_manager.worktree_lifecycle.finalize_all_member_worktrees_for_team_clean()
+
     async def conclude_completed_round(self, member_count: int, task_count: int) -> None:
         """Emit a team-completed marker chunk, then close the leader stream.
 
@@ -977,6 +990,7 @@ class TeamAgent(BaseAgent):
         team_logger.info("[{}] build_team completed; latching team DB state", self._member_name() or "?")
         from openjiuwen.agent_teams.runtime.metadata import TEAM_DB_STATE_CREATED
 
+        self._state.team_cleaned = False
         await self._persist_team_db_state(TEAM_DB_STATE_CREATED)
 
     async def _persist_team_db_state(self, db_state: str) -> None:

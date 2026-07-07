@@ -240,12 +240,25 @@ def test_swarmflow_tool_requires_a_script_source():
 
 
 def test_swarmflow_tool_rejects_unsupported_sources():
-    """script / name / resume_id are on the surface but not wired to execution yet."""
+    """name / resume_id are on the surface but not wired to execution yet."""
     tool = _tool(_FakeHarness())
-    for src in ("script", "name", "resume_id"):
+    for src in ("name", "resume_id"):
         out = asyncio.run(tool.invoke({src: "x"}))
         assert out.success is False
         assert "not supported yet" in (out.error or ""), (src, out.error)
+
+
+def test_swarmflow_tool_launches_inline_script():
+    """Inline ``script`` source is wired: it launches like ``script_path``."""
+    harness = _FakeHarness()
+    tool = _tool(harness)
+    out = asyncio.run(tool.invoke({"script": "META = {'name': 'x'}\nasync def run(args):\n    return 1\n"}))
+    assert out.success is True
+    assert out.data["status"] == "launched"
+    assert out.data["run_id"].startswith("wf_")
+    assert len(harness.launched) == 1
+    # launched description marks the inline source (no path yet at launch time)
+    assert harness.launched[0][2] == "swarmflow: <inline script>"
 
 
 def test_swarmflow_tool_refuses_when_concurrent_cap_reached():

@@ -7,15 +7,16 @@ from typing import Any, List, Optional, Dict
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
+    browser_agent_log_info,
+    browser_agent_log_warning,
+)
+from .logging_utils import summarize_tool_arguments_for_log
 try:
     from openjiuwen.core.foundation.tool.mcp.client.streamable_http_client import StreamableHttpClient
 except ModuleNotFoundError:
     from openjiuwen.core.foundation.tool.mcp.client.sse_client import SseClient as StreamableHttpClient
 
-import logging
-import time
-
-browser_agent_logger = logging.getLogger("jiuwenswarm.browser_agent")
 
 class BrowserMoveStreamableHttpClient(StreamableHttpClient):
     """browser_move extension of StreamableHttpClient.
@@ -153,9 +154,10 @@ class BrowserMoveStreamableHttpClient(StreamableHttpClient):
 
         for attempt in range(2):
             try:
-                start_time = time.perf_counter()
-                browser_agent_logger.info(f"Calling tool '{tool_name}' via Streamable HTTP with arguments: {arguments}")
-                logger.info(f"Calling tool '{tool_name}' via Streamable HTTP with arguments: {arguments}")
+                browser_agent_log_info(
+                    f"Calling tool '{tool_name}' via Streamable HTTP with arguments_summary: "
+                    f"{summarize_tool_arguments_for_log(tool_name, arguments)}"
+                )
                 tool_result = await self._session.call_tool(tool_name, arguments=arguments)
                 result_content = None
                 if tool_result.content and len(tool_result.content) > 0:
@@ -185,19 +187,16 @@ class BrowserMoveStreamableHttpClient(StreamableHttpClient):
 
                     if chunks:
                         result_content = "\n".join(chunks)
-                browser_agent_logger.info(
-                    f"Tool '{tool_name}' call completed via Streamable HTTP in {time.perf_counter() - start_time:.2f}s with result: {result_content}"
-                )
-                logger.info(f"Tool '{tool_name}' call completed via Streamable HTTP")
+                browser_agent_log_info(f"Tool '{tool_name}' call completed via Streamable HTTP")
                 return result_content
             except Exception as e:
                 if attempt == 0 and self._is_retryable_transport_error(e):
-                    browser_agent_logger.warning(f"Streamable HTTP tool call '{tool_name}' retry after reconnect: {e}")
-                    logger.warning(f"Streamable HTTP tool call '{tool_name}' retry after reconnect: {e}")
+                    browser_agent_log_warning(
+                        f"Streamable HTTP tool call '{tool_name}' retry after reconnect: {e}"
+                    )
                     connected = await self._reconnect(timeout=timeout)
                     if connected:
                         continue
-                browser_agent_logger.error(f"Tool call failed via Streamable HTTP: {e}")
                 logger.error(f"Tool call failed via Streamable HTTP: {e}")
                 raise
 

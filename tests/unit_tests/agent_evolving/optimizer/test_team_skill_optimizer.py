@@ -15,7 +15,7 @@ from openjiuwen.agent_evolving.experience.types import EvolutionContext
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimizer
 from openjiuwen.agent_evolving.signal.base import EvolutionTarget, make_evolution_signal
-from openjiuwen.agent_evolving.trajectory.types import ToolCallDetail, Trajectory, TrajectoryStep
+from openjiuwen.agent_evolving.trajectory.types import ToolCallDetail, LegacyTrajectory, TrajectoryStep
 
 
 def _make_signal(signal_type: str = "execution_failure"):
@@ -86,7 +86,7 @@ async def test_team_profile_prompt_contains_trajectory_sections_and_existing_scr
         existing_desc_records=[_make_record("ev_desc", target=EvolutionTarget.DESCRIPTION)],
         existing_body_records=[_make_record("ev_body")],
         existing_script_records=[_make_record("ev_script", target=EvolutionTarget.SCRIPT)],
-        trajectory=Trajectory(
+        trajectory=LegacyTrajectory(
             execution_id="exec-1",
             steps=[
                 TrajectoryStep(

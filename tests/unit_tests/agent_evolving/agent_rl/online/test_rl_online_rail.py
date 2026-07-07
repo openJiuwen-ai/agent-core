@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from openjiuwen.agent_evolving.trajectory import LLMCallDetail, Trajectory, TrajectoryStep
+from openjiuwen.agent_evolving.trajectory import LLMCallDetail, LegacyTrajectory, TrajectoryStep
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ModelCallInputs
 
 
@@ -58,10 +58,9 @@ async def test_rl_online_rail_background_evolution_uploads_batch():
         tenant_id="user-1",
         uploader=uploader,
     )
-    trajectory = Trajectory(
+    trajectory = LegacyTrajectory(
         execution_id="traj-1",
         session_id="s1",
-        source="rl_online",
         steps=[
             TrajectoryStep(
                 kind="llm",
@@ -72,6 +71,7 @@ async def test_rl_online_rail_background_evolution_uploads_batch():
                 ),
             )
         ],
+        source="rl_online",
     )
 
     await rail._safe_run_evolution({"trajectory": trajectory})

@@ -21,7 +21,6 @@ LEADER_ONLY_TOOLS: set[str] = {
     "approve_tool",       # Approve or reject a teammate tool call
     "create_task",        # Create tasks (batch / with deps)
     "update_task",        # Update task content / cancel tasks
-    "list_members",       # List all members
     "swarmflow",          # Run a swarmflow orchestration script (gated by enable_swarmflow)
     # Async-tool control — inspect / fetch / cancel background async tasks
     "async_tasks_list",

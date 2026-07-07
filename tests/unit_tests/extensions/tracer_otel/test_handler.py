@@ -19,8 +19,9 @@ from openjiuwen.core.foundation.llm.schema.message import (
     SystemMessage,
     UserMessage,
 )
+from openjiuwen.core.graph.pregel import GraphInterrupt, Interrupt
 from openjiuwen.core.session.tracer.handler import TracerHandlerName
-from openjiuwen.core.session.tracer.data import InvokeType
+from openjiuwen.core.session.tracer.data import InvokeType, NodeStatus
 from openjiuwen.core.session.tracer.span import TraceAgentSpan, SpanManager
 from openjiuwen.core.session.tracer.tracer import Tracer, TracerHandlerRegistry
 from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
@@ -32,6 +33,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_REQUEST_MODEL,
     GEN_AI_SYSTEM,
     GEN_AI_SYSTEM_VALUE,
+    GEN_AI_TOOL_NAME,
     OJ_AGENT_ERROR_MESSAGE,
     OJ_AGENT_INPUTS,
     OJ_AGENT_INVOKE_TYPE,
@@ -472,12 +474,12 @@ class TestOtelWorkflowHandler:
             parent_node_id="",
         )
 
-        # LLM component
+        # LLM component (component_type is type(executor).__name__, e.g. "LLMComponent")
         await handler.on_call_start(
             invoke_id="llm_node",
             metadata={
                 "component_id": "llm_node",
-                "component_type": "LLM",
+                "component_type": "LLMComponent",
                 "component_name": "llm",
                 "workflow_id": "wf1",
             },
@@ -489,6 +491,72 @@ class TestOtelWorkflowHandler:
         finished = _EXPORTER.get_finished_spans()
         llm_span = next(s for s in finished if s.name == "component.llm_node")
         assert llm_span.kind == trace.SpanKind.CLIENT
+        # LLM components get gen_ai.operation.name="chat"
+        assert llm_span.attributes[GEN_AI_OPERATION_NAME] == "chat"
+
+    async def test_workflow_llm_compound_components_tagged_as_chat(self):
+        """IntentDetection / Questioner internally invoke an LLM and are tagged
+        with gen_ai.operation.name="chat" so backends can filter all LLM-invoking
+        nodes. component_type comes from type(executor).__name__ at runtime.
+        Also verifies the "LLM" substring path still matches "LLMComponent".
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        for comp_type, invoke in [
+            ("IntentDetectionComponent", "intent_node"),
+            ("QuestionerComponent", "questioner_node"),
+            ("LLMComponent", "llm_compound_node"),
+            ("LLM", "llm_substring_node"),  # substring match path
+        ]:
+            await handler.on_call_start(
+                invoke_id=invoke,
+                metadata={
+                    "component_id": invoke,
+                    "component_type": comp_type,
+                    "component_name": invoke,
+                    "workflow_id": "wf1",
+                },
+                parent_node_id="",
+            )
+            await handler.on_call_done(invoke_id=invoke)
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 4
+        for s in finished:
+            assert s.kind == trace.SpanKind.CLIENT
+            assert s.attributes[GEN_AI_OPERATION_NAME] == "chat"
+
+    async def test_workflow_tool_component_tagged_as_execute_tool(self):
+        """ToolExecutable → gen_ai.operation.name="execute_tool" (no gen_ai.tool.name).
+
+        Tool 真名未通过 TracerWorkflowUtils._get_component_metadata 传递下来
+        (metadata 中 component_name 实为 node_id)，故不设置 gen_ai.tool.name。
+        component_type 用真实运行时值 "ToolExecutable" (type(executor).__name__)。
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="tool_node",
+            metadata={
+                "component_id": "tool_node",
+                "component_type": "ToolExecutable",
+                "component_name": "tool_node",
+                "workflow_id": "wf1",
+            },
+            parent_node_id="",
+        )
+        await handler.on_call_done(invoke_id="tool_node")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        # Tool components are not LLM → INTERNAL span kind
+        assert s.kind == trace.SpanKind.INTERNAL
+        assert s.attributes[GEN_AI_OPERATION_NAME] == "execute_tool"
+        # gen_ai.tool.name intentionally not set (real tool name not in metadata)
+        assert GEN_AI_TOOL_NAME not in s.attributes
 
     async def test_workflow_non_llm_internal_span(self):
         """Non-LLM component → INTERNAL span kind."""
@@ -569,6 +637,43 @@ class TestOtelWorkflowHandler:
         assert OJ_ERROR in s.attributes
         assert s.attributes[OJ_STATUS] == "error"
         # end_time / elapsed_time set by _set_workflow_end_attrs in error path
+        assert OJ_END_TIME in s.attributes
+        assert OJ_ELAPSED_TIME in s.attributes
+
+    async def test_workflow_invoke_graph_interrupt_marks_interrupted(self):
+        """on_invoke with GraphInterrupt → OJ_STATUS=interrupted, NOT OTel ERROR.
+
+        Mirrors builtin TraceWorkflowHandler: GraphInterrupt is a control-flow
+        signal (e.g. QuestionerComponent pending user input), not a failure.
+        The span must NOT carry StatusCode.ERROR / OJ_ERROR, but should still
+        record the interrupt payload for debuggability and close cleanly.
+        """
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="questioner",
+            metadata={"component_id": "questioner", "component_type": "QuestionerExecutable", "workflow_id": "wf1"},
+            parent_node_id="",
+        )
+        interrupt_exc = GraphInterrupt(Interrupt({"wait_for": "user_input"}))
+        await handler.on_invoke(
+            invoke_id="questioner",
+            exception=interrupt_exc,
+        )
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        # Interrupt is not a failure — OTel span status stays default (UNSET), not ERROR
+        assert s.status.status_code != trace.StatusCode.ERROR
+        # openjiuwen.status reflects interrupt semantics
+        assert s.attributes[OJ_STATUS] == NodeStatus.INTERRUPTED.value
+        # Must NOT write OJ_ERROR (would imply a real failure)
+        assert OJ_ERROR not in s.attributes
+        # Interrupt payload still recorded for debugging (non-error semantics)
+        assert OJ_WORKFLOW_ERROR_MESSAGE in s.attributes
+        # Span still closes cleanly with end attrs
         assert OJ_END_TIME in s.attributes
         assert OJ_ELAPSED_TIME in s.attributes
 

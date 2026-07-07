@@ -314,14 +314,15 @@ STRINGS: dict[str, str] = {
     "swarmflow.script_path": (
         "Path to a swarmflow script file on disk — a Python module with a top-level META (pure literal) "
         "and async def run(args), whose body uses primitives imported via from swarmflow import "
-        "agent()/parallel()/pipeline()/... Highest precedence of the four script sources "
-        "(script_path / script / name / resume_id), and the only one wired to execution today."
+        "agent()/parallel()/pipeline()/... Wired to execution alongside inline script; best for scripts "
+        "already on disk or ones you iterate / resume repeatedly."
     ),
     "swarmflow.script": (
         "Self-contained inline swarmflow script source (avoids writing to disk first). Must begin with a "
         "top-level META (pure literal, no variables / calls / f-strings), then async def run(args), with the "
-        "body using agent()/parallel()/pipeline()/phase() primitives. Interface is in place; execution is "
-        "coming — use script_path for now."
+        "body using agent()/parallel()/pipeline()/phase() primitives. Wired to execution — prefer it for "
+        "simple cases; the framework materialises the source under the workflow's journal directory before "
+        "running."
     ),
     "swarmflow.name": (
         "Name of a saved / named swarmflow workflow, resolved to a self-contained script to run. "

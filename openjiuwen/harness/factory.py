@@ -19,6 +19,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails import (
+    LLMRetryRail,
     SecurityRail,
     SkillUseRail,
     SubagentRail,
@@ -180,12 +181,13 @@ def resolve_deep_agent_parts(
     prompt_mode: Optional[str] = None,
     vision_model_config: Optional[VisionModelConfig] = None,
     audio_model_config: Optional[AudioModelConfig] = None,
-    enable_read_image_multimodal: bool = True,
+    enable_read_image_multimodal: Optional[bool] = None,
     enable_task_planning: bool = False,
     restrict_to_work_dir: bool = True,
     default_mode: AgentMode = AgentMode.NORMAL,
     model_selection: Optional[Dict[Model, str]] = None,
     parallel_tool_calls: bool = True,
+    enable_llm_retry_rail: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgentParts:
     """Assemble DeepAgent config + rails + tools without creating an instance.
@@ -221,7 +223,7 @@ def resolve_deep_agent_parts(
             existing_tool_names.add(tool.card.name)
 
     effective_enable_read_image_multimodal = (
-        enable_read_image_multimodal and not vision_tools_enabled
+        False if vision_tools_enabled else enable_read_image_multimodal
     )
 
     effective_subagents = _inject_general_purpose_subagent(
@@ -340,6 +342,7 @@ def resolve_deep_agent_parts(
 
     default_rails = [
         (SecurityRail, True, lambda: SecurityRail()),
+        (LLMRetryRail, enable_llm_retry_rail, lambda: LLMRetryRail()),
         (TaskPlanningRail, enable_task_planning, _make_task_planning_rail),
         (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
         (SubagentRail, bool(effective_subagents),
@@ -419,12 +422,13 @@ def create_deep_agent(
     prompt_mode: Optional[str] = None,
     vision_model_config: Optional[VisionModelConfig] = None,
     audio_model_config: Optional[AudioModelConfig] = None,
-    enable_read_image_multimodal: bool = True,
+    enable_read_image_multimodal: Optional[bool] = None,
     enable_task_planning: bool = False,
     restrict_to_work_dir: bool = True,
     default_mode: AgentMode = AgentMode.NORMAL,
     model_selection: Optional[Dict[Model, str]] = None,
     parallel_tool_calls: bool = True,
+    enable_llm_retry_rail: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -462,13 +466,15 @@ def create_deep_agent(
         audio_model_config: Shared audio-model
             configuration injected into all audio
             tools registered by DeepAgent rails.
-        enable_read_image_multimodal: When True, read_file attaches image bytes
-            as native multimodal input. When False, read_file returns image
-            metadata only and suggests using vision tools if available.
+        enable_read_image_multimodal: Controls read_file native image attachment.
+            None (default): probe the agent model once during lazy init.
+            True: always attach image bytes as multimodal input.
+            False: return image metadata only and suggest vision tools.
         enable_task_planning: Enable task_planning_rail.
         restrict_to_work_dir: If True, restrict file access to workspace directory.
             If False, allow access to any path including system root.
         default_mode: Initial agent mode (``AgentMode.NORMAL`` or ``AgentMode.PLAN``).
+        enable_llm_retry_rail: Enable default LLMRetryRail for stream frame timeout and repeated-output retries.
         model_selection: Optional model selection config for TaskPlanningRail.
             Dict mapping Model instance to description string. When provided along with
             enable_task_planning, TaskPlanningRail will be configured with model selection,
@@ -506,6 +512,7 @@ def create_deep_agent(
         default_mode=default_mode,
         model_selection=model_selection,
         parallel_tool_calls=parallel_tool_calls,
+        enable_llm_retry_rail=enable_llm_retry_rail,
         **config_kwargs,
     )
     agent = DeepAgent(parts.config.card)

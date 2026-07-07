@@ -149,12 +149,12 @@ class CommitState(StateCollection):
         self._global_state.rollback(self._node_id)
         self._workflow_state.rollback(self._node_id)
 
-    def get_state(self) -> dict:
+    def get_state(self, **kwargs) -> dict:
         return {
-            IO_STATE_KEY: self._io_state.get_state(),
-            GLOBAL_STATE_KEY: self._global_state.get_state() if self._workflow_only else None,
-            COMP_STATE_KEY: self._comp_state.get_state(),
-            WORKFLOW_STATE_KEY: self._workflow_state.get_state()
+            IO_STATE_KEY: self._io_state.get_state(**kwargs),
+            GLOBAL_STATE_KEY: self._global_state.get_state(**kwargs) if self._workflow_only else None,
+            COMP_STATE_KEY: self._comp_state.get_state(**kwargs),
+            WORKFLOW_STATE_KEY: self._workflow_state.get_state(**kwargs)
         }
 
     def set_state(self, state: dict) -> None:

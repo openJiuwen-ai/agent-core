@@ -105,6 +105,7 @@ class TeamBackend:
         enable_bridge: bool = False,
         *,
         external_cli_agents: list[ExternalCliAgentSpec] | None = None,
+        on_before_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_built: Callable[[], Awaitable[None]] | None = None,
         plan_storage_dir: str | None = None,
@@ -149,6 +150,10 @@ class TeamBackend:
                 capability ceiling for external-CLI members:
                 ``spawn_external_cli_agent`` rejects any ``cli_agent`` not
                 declared here.
+            on_before_team_cleaned: Optional async callback fired on the
+                ``clean_team`` SUCCESS path before the team DB row is
+                deleted. Use this for cleanup that still needs member rows
+                and their metadata, such as session-scoped worktree finalize.
             on_team_cleaned: Optional async callback fired exactly once
                 on the ``clean_team`` SUCCESS path. NOT fired on the early
                 ``return False`` path (active members remain). The hosting
@@ -187,6 +192,7 @@ class TeamBackend:
         # Fired once on the build_team / clean_team success paths so the
         # hosting TeamAgent can persist DB lifecycle state and latch
         # state.team_cleaned deterministically inside the leader's round.
+        self._on_before_team_cleaned = on_before_team_cleaned
         self._on_team_cleaned = on_team_cleaned
         self._on_team_built = on_team_built
 
@@ -774,6 +780,13 @@ class TeamBackend:
             team_logger.error(f"Cannot clean team {self.team_name}: not all members are shutdown")
             return False
 
+        if self._on_before_team_cleaned is not None:
+            try:
+                await self._on_before_team_cleaned()
+            except Exception as e:
+                team_logger.error(f"on_before_team_cleaned callback failed for team {self.team_name}: {e}")
+                return False
+
         # Delete team from database
         await self.db.team.delete_team(self.team_name)
 
@@ -787,12 +800,12 @@ class TeamBackend:
                 team_logger.error(f"on_team_cleaned callback failed for team {self.team_name}: {e}")
 
         # Remove registered filesystem paths for the team.  TeamAgent
-        # registers the actual resolved locations of the team shared
-        # workspace, member workspaces, and the team-named parent
-        # directory via ``register_cleanup_path``.  ``shutil.rmtree``
-        # does not follow symlinks, so independent member workspaces
-        # linked in from ``~/.openjiuwen/{member_name}_workspace/`` are
-        # preserved.
+        # registers actual resolved workspace/output paths, not the whole
+        # team_home parent: team_home contains per-session state such as
+        # session-scoped worktrees, and deleting the parent would cross
+        # session boundaries.  ``shutil.rmtree`` does not follow symlinks,
+        # so independent member workspaces linked in from
+        # ``~/.openjiuwen/{member_name}_workspace/`` are preserved.
         await self._remove_cleanup_paths()
 
         # Publish team cleaned event

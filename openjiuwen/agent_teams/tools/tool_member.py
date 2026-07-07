@@ -141,8 +141,11 @@ class SpawnTeammateTool(_SpawnToolBase):
                     "type": "string",
                     "enum": ["worktree"],
                     "description": (
-                        "Optional isolation mode. Use 'worktree' to start the "
-                        "teammate in an isolated git worktree."
+                        "Optional isolation mode. Set 'worktree' only when the "
+                        "user explicitly requests worktree isolation, or when "
+                        "the teammate must modify repository files in an "
+                        "isolated checkout. Omit this field for read-only, "
+                        "game, discussion, research, or standby tasks."
                     ),
                 },
                 "permissions": {

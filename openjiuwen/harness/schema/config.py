@@ -224,7 +224,7 @@ class DeepAgentConfig:
     prompt_mode: Optional[str] = None
     vision_model_config: Optional[VisionModelConfig] = None
     audio_model_config: Optional[AudioModelConfig] = None
-    enable_read_image_multimodal: bool = True
+    enable_read_image_multimodal: Optional[bool] = None
     rails: Optional[List[AgentRail]] = None
     enable_plan_mode: bool = False
     model_selection: Optional[Dict[Model, str]] = None
