@@ -219,8 +219,15 @@ def _build_enter_plan_mode_status(
             return "enter_plan_mode has been called. Proceed with the workflow."
         return "enter_plan_mode 已调用完成。请继续工作流。"
     if language == "en":
-        return "You have NOT called enter_plan_mode yet. Call it NOW as your first action."
-    return "你尚未调用 enter_plan_mode。请立即调用它作为你的第一个操作。"
+        return (
+            "enter_plan_mode has not been called yet. You may run read-only actions "
+            "directly; call enter_plan_mode when you need to create the plan file "
+            "and produce a formal plan."
+        )
+    return (
+        "尚未调用 enter_plan_mode。只读操作可直接执行；如需创建计划文件并生成正式计划，"
+        "可调用 enter_plan_mode。"
+    )
 
 
 def _build_plan_file_info(
@@ -291,7 +298,11 @@ def build_plan_mode_section(
             enter_status = (
                 "enter_plan_mode has been called."
                 if plan_file_path
-                else "You have NOT called enter_plan_mode yet. Call it NOW as your first action."
+                else (
+                    "enter_plan_mode has not been called yet. You may run read-only "
+                    "actions directly; call enter_plan_mode when you need to create "
+                    "the plan file and produce a formal plan."
+                )
             )
             file_info = (
                 f"A plan file already exists at {plan_file_path}. "
@@ -308,7 +319,10 @@ def build_plan_mode_section(
             enter_status = (
                 f"enter_plan_mode 已调用完成。Plan 文件：{plan_file_path}。请继续工作流。"
                 if plan_file_path
-                else "你尚未调用 enter_plan_mode。请立即调用它作为你的第一个操作。"
+                else (
+                    "尚未调用 enter_plan_mode。只读操作可直接执行；如需创建计划文件并生成"
+                    "正式计划，可调用 enter_plan_mode。"
+                )
             )
             file_info = (
                 f"计划文件已存在于 {plan_file_path}。你可以使用 edit_file 工具读取并增量编辑它。"

@@ -12,6 +12,14 @@ from openjiuwen.agent_evolving.trajectory.extractor import TrajectoryExtractor
 from openjiuwen.agent_evolving.trajectory.extractor import (
     TrajectoryExtractor as TracerTrajectoryExtractor,
 )
+from openjiuwen.agent_evolving.trajectory.trace import (
+    TRAJECTORY_TRACE_AGENT_HANDLER_NAME,
+    TRAJECTORY_TRACE_WORKFLOW_HANDLER_NAME,
+    TrajectoryTraceAgentHandler,
+    TrajectoryTraceStateManager,
+    TrajectoryTraceWorkflowHandler,
+    ensure_otlp_handlers_registered,
+)
 from openjiuwen.agent_evolving.trajectory.registry import (
     InMemoryTrajectoryRegistry,
     MemberTrajectorySnapshot,
@@ -25,6 +33,7 @@ from openjiuwen.agent_evolving.trajectory.store import (
 )
 from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
+    LegacyTrajectory,
     StepDetail,
     StepKind,
     ToolCallDetail,
@@ -32,10 +41,13 @@ from openjiuwen.agent_evolving.trajectory.types import (
     TrajectoryStep,
     UpdateKey,
     Updates,
+    to_legacy_trajectory,
+    trajectory_from_legacy,
 )
 
 __all__ = [
     "LLMCallDetail",
+    "LegacyTrajectory",
     "StepDetail",
     "StepKind",
     "ToolCallDetail",
@@ -43,9 +55,17 @@ __all__ = [
     "TrajectoryStep",
     "UpdateKey",
     "Updates",
+    "to_legacy_trajectory",
+    "trajectory_from_legacy",
     "TrajectoryBuilder",
     "TrajectoryExtractor",
     "TracerTrajectoryExtractor",
+    "TRAJECTORY_TRACE_AGENT_HANDLER_NAME",
+    "TRAJECTORY_TRACE_WORKFLOW_HANDLER_NAME",
+    "TrajectoryTraceAgentHandler",
+    "TrajectoryTraceStateManager",
+    "TrajectoryTraceWorkflowHandler",
+    "ensure_otlp_handlers_registered",
     "TrajectoryStore",
     "InMemoryTrajectoryStore",
     "FileTrajectoryStore",

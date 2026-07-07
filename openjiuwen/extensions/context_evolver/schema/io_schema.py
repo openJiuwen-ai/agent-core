@@ -2,12 +2,25 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Memory system schemas for different approaches."""
 
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Dict, Any
+import json
 from datetime import datetime, timezone
 import hashlib
 from pydantic import BaseModel, Field, ConfigDict
 
+from openjiuwen.core.common.logging import context_engine_logger as logger
+
 from ..core.schema import VectorNode
+
+from .io_fallback import (
+    ace_section_and_content_from_metadata,
+    cognition_fields_from_metadata,
+    deserialization_target_algorithm,
+    reasoning_bank_item_dicts_from_metadata,
+    reasoning_bank_query_from_metadata,
+    reme_when_and_content_from_metadata,
+    use_cross_algorithm_fallback,
+)
 
 
 class BaseMemory(BaseModel):
@@ -87,7 +100,7 @@ class ACEMemory(BaseMemory):
 
         # Store all fields in metadata
         metadata = {
-            "type": "ace_memory",
+            "type": "exp_memory",
             "id": self.id,
             "section": self.section,
             "content": self.content,
@@ -117,15 +130,26 @@ class ACEMemory(BaseMemory):
         """
         metadata = node.metadata
 
+        target = deserialization_target_algorithm(cls)
+        if use_cross_algorithm_fallback(node, target):
+            section, content = ace_section_and_content_from_metadata(metadata, node)
+        else:
+            section = str(metadata.get("section") or "general")
+            content = str(metadata.get("content") if metadata.get("content") is not None else "") or str(
+                node.content or ""
+            )
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+
         return cls(
             id=metadata.get("id", ""),
-            section=metadata.get("section", ""),
-            content=metadata.get("content", ""),
+            section=section,
+            content=content,
             helpful=metadata.get("helpful", 0),
             harmful=metadata.get("harmful", 0),
             neutral=metadata.get("neutral", 0),
-            created_at=metadata.get("created_at", ""),
-            updated_at=metadata.get("updated_at", ""),
+            created_at=metadata.get("created_at") or now_iso,
+            updated_at=metadata.get("updated_at") or metadata.get("created_at") or now_iso,
             workspace_id=metadata.get("workspace_id", "default"),
         )
 
@@ -290,13 +314,21 @@ class ReasoningBankMemory(BaseMemory):
         # Combine title, description and content for embedding
         embedding_content = self.query
 
+        now_iso = datetime.now(timezone.utc).isoformat()
+        memory_text = "\n".join(
+            f"{item.title}: {item.content}" for item in self.memory if hasattr(item, "content")
+        ) or self.query
+
         # Store all fields in metadata
         metadata = {
-            "type": "reasoning_bank_memory",
+            "type": "exp_memory",
             "query": self.query,
             "memory": self.memory,
             "label": self.label,
-            "workspace_id": self.workspace_id
+            "workspace_id": self.workspace_id,
+            "memory_text": memory_text,
+            "created_at": now_iso,
+            "updated_at": now_iso,
         }
 
         return VectorNode(
@@ -316,11 +348,61 @@ class ReasoningBankMemory(BaseMemory):
             ReasoningBankMemory instance
         """
         metadata = node.metadata
+        target = deserialization_target_algorithm(cls)
+
+        if use_cross_algorithm_fallback(node, target):
+            dicts = reasoning_bank_item_dicts_from_metadata(metadata, node)
+            memory_items = []
+            for d in dicts:
+                try:
+                    memory_items.append(ReasoningBankMemoryItem.model_validate(d))
+                except Exception as exc:
+                    logger.warning("Failed to validate ReasoningBankMemoryItem, skipping: %s", exc)
+                    continue
+            item_dicts = [
+                {"title": m.title, "description": m.description, "content": m.content}
+                for m in memory_items
+            ]
+            query = reasoning_bank_query_from_metadata(metadata, node, item_dicts)
+        else:
+            raw_memory = metadata.get("memory")
+            if isinstance(raw_memory, str):
+                try:
+                    raw_memory = json.loads(raw_memory)
+                except json.JSONDecodeError:
+                    raw_memory = []
+            memory_items: List[ReasoningBankMemoryItem] = []
+            if isinstance(raw_memory, list):
+                for item in raw_memory:
+                    if hasattr(item, "model_dump"):
+                        try:
+                            item = item.model_dump()
+                        except Exception as exc:
+                            logger.warning("Failed to serialize ReasoningBankMemoryItem, skipping: %s", exc)
+                            continue
+                    if isinstance(item, dict):
+                        try:
+                            memory_items.append(ReasoningBankMemoryItem.model_validate(item))
+                        except Exception as exc:
+                            logger.warning("Failed to validate ReasoningBankMemoryItem, skipping: %s", exc)
+                            continue
+            query = str(metadata.get("query") or "").strip()
+
+        if not str(query).strip() and memory_items:
+            query = memory_items[0].title
+
+        label: Optional[bool] = metadata.get("label")
+        if label is None:
+            is_correct_str = metadata.get("is_correct")
+            if is_correct_str is not None and is_correct_str != "none":
+                label = str(is_correct_str).lower() == "true"
+            elif metadata.get("helpful") is not None or metadata.get("harmful") is not None:
+                label = int(metadata.get("helpful", 0)) > int(metadata.get("harmful", 0))
 
         return cls(
-            query=metadata.get("query", ""),
-            memory=metadata.get("memory", []),
-            label=metadata.get("label", None),
+            query=str(query),
+            memory=memory_items,
+            label=label,
             workspace_id=metadata.get("workspace_id", "default"),
         )
 
@@ -508,7 +590,7 @@ class ReMeMemory(BaseMemory):
 
         # Store all fields in metadata
         metadata = {
-            "type": "reme_memory",
+            "type": "exp_memory",
             "when_to_use": self.when_to_use,
             "content": self.content,
             "score": self.score,
@@ -542,6 +624,7 @@ class ReMeMemory(BaseMemory):
             ReMeMemory instance
         """
         metadata = node.metadata
+        target = deserialization_target_algorithm(cls)
 
         # Reconstruct ReMeMemoryMetadata
         memory_metadata = ReMeMemoryMetadata(
@@ -553,10 +636,20 @@ class ReMeMemory(BaseMemory):
             utility=metadata.get("metadata", {}).get("utility", 0),
         )
 
+        if use_cross_algorithm_fallback(node, target):
+            wt, body = reme_when_and_content_from_metadata(metadata, node)
+        else:
+            wt = str(metadata.get("when_to_use") or "").strip()
+            body = str(metadata.get("content") or "").strip()
+            if not wt:
+                wt = str(node.content or "").strip()
+            if not body:
+                body = str(metadata.get("content", "") or "").strip()
+
         return cls(
             workspace_id=metadata.get("workspace_id", ""),
-            when_to_use=metadata.get("when_to_use", ""),
-            content=metadata.get("content", ""),
+            when_to_use=wt or metadata.get("when_to_use") or node.content or "",
+            content=body if body else str(metadata.get("content", "")),
             score=metadata.get("score", 0.0),
             created_at=metadata.get("created_at", datetime.now(timezone.utc).isoformat()),
             updated_at=metadata.get("updated_at", datetime.now(timezone.utc).isoformat()),
@@ -670,6 +763,142 @@ class ReMeRetrieveResponse(BaseModel):
         }
     )
 
+# ============================================================================
+# Cognition Schemas
+# ============================================================================
+
+
+class CognitionMemory(BaseMemory):
+    """Cognition Memory schema."""
+
+    id: str = Field(description="Memory identifier")
+    query: str = Field(description="Original user query")
+    description: str = Field(description="Summary of what this memory is about")
+    experience: List[str] = Field(default_factory=list, description="List of actionable insights")
+    is_correct: Optional[bool] = Field(default=None, description="Whether the trajectory was successful")
+    attributes: Dict[str, Any] = Field(default_factory=dict, description="Dynamic schema classification tags")
+    created_at: datetime = Field(description="Creation timestamp")
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": "cog_001",
+                "query": "How to connect to database?",
+                "description": "Steps to establish PostgreSQL connection",
+                "experience": ["Use psycopg2", "Always close cursor"],
+                "is_correct": True,
+                "attributes": {"domain": "database", "intent": "connection", "other": "PostgreSQL"},
+                "created_at": "2024-01-01T00:00:00Z"
+            }
+        }
+    )
+
+    def to_vector_node(self) -> VectorNode:
+        """Convert to vector node for storage."""
+        node_id = f"cognition_{self.workspace_id}_{self.id}"
+        
+        # Content used for embedding
+        embedding_content = f"Query: {self.query}\nDescription: {self.description}"
+        
+        memory_text = "\n".join(self.experience) if self.experience else self.description
+        metadata = {
+            "type": "exp_memory",
+            "id": self.id,
+            "workspace_id": self.workspace_id,
+            "query": self.query,
+            "description": self.description,
+            "is_correct": str(self.is_correct) if self.is_correct is not None else "none",
+            "experience_json": json.dumps(self.experience, ensure_ascii=False),
+            "attributes_json": json.dumps(self.attributes, ensure_ascii=False),
+            "memory_text": memory_text,
+            "created_at": self.created_at.isoformat() if isinstance(self.created_at, datetime) else self.created_at
+        }
+        
+        return VectorNode(
+            id=node_id,
+            content=embedding_content,
+            metadata=metadata,
+        )
+
+    @classmethod
+    def from_vector_node(cls, node: VectorNode) -> "CognitionMemory":
+        """Convert from vector node."""
+        metadata = node.metadata
+
+        is_correct_str = metadata.get("is_correct", "none")
+        is_correct = None if is_correct_str == "none" else (is_correct_str.lower() == "true")
+
+        target = deserialization_target_algorithm(cls)
+        if use_cross_algorithm_fallback(node, target):
+            query, description, experience, attributes = cognition_fields_from_metadata(
+                metadata, node
+            )
+        else:
+            try:
+                experience = json.loads(metadata.get("experience_json", "[]"))
+                if not isinstance(experience, list):
+                    experience = []
+                experience = [str(i) for i in experience if i is not None and str(i).strip()]
+            except (json.JSONDecodeError, TypeError):
+                experience = []
+            try:
+                attributes = json.loads(metadata.get("attributes_json", "{}"))
+                if not isinstance(attributes, dict):
+                    attributes = {}
+            except (json.JSONDecodeError, TypeError):
+                attributes = {}
+            query = str(metadata.get("query") or "").strip()
+            description = str(metadata.get("description") or "").strip()
+            if not experience:
+                fallback = metadata.get("memory_text")
+                if fallback:
+                    experience = [str(fallback)]
+            if not description:
+                description = query
+            if not query:
+                query = description
+
+        return cls(
+            workspace_id=metadata.get("workspace_id", "default"),
+            id=metadata.get("id", ""),
+            query=query,
+            description=description,
+            experience=experience,
+            is_correct=is_correct,
+            attributes=attributes,
+            created_at=metadata.get("created_at") or datetime.now(timezone.utc).isoformat()
+        )
+
+
+class CognitionSummarizeRequest(BaseModel):
+    matts: str = Field(default="none")
+    query: str = Field(description="Query for summarization")
+    trajectories: List[str] = Field(description="List of trajectory strings")
+    is_correct: Optional[bool] = Field(default=None)
+
+
+class CognitionSummarizeResponse(BaseModel):
+    status: str = Field(description="Operation status")
+    memory: List[CognitionMemory] = Field(description="Created memory")
+
+
+class CognitionRetrieveRequest(BaseModel):
+    query: str = Field(description="Query to retrieve memories")
+    topk: int = Field(default=5)
+
+
+class CognitionRetrievedMemory(BaseModel):
+    id: str = Field(description="Memory identifier")
+    query: str = Field(description="Original query")
+    description: str = Field(description="Memory description")
+    experience: List[str] = Field(description="Actionable insights")
+
+
+class CognitionRetrieveResponse(BaseModel):
+    status: str = Field(description="Operation status")
+    memory_string: str = Field(description="Formatted memory string")
+    retrieved_memory: List[CognitionRetrievedMemory] = Field(description="List of retrieved memories")
+
 
 # ============================================================================
 # Ours (Custom) Schemas
@@ -719,7 +948,7 @@ class SummarizeResponse(BaseModel):
     """
 
     status: str = Field(description="Operation status")
-    memory: Union[List[ACEMemory], List[ReasoningBankMemory], List[ReMeMemory]] = Field(
+    memory: Union[List[ACEMemory], List[ReasoningBankMemory], List[ReMeMemory], List[CognitionMemory]] = Field(
         description="List of created or updated memories (algorithm-specific)"
     )
 
@@ -758,7 +987,8 @@ class RetrieveResponse(BaseModel):
     retrieved_memory: Union[
         List[ACERetrievedMemory],
         List[ReasoningBankRetrievedMemory],
-        List[ReMeRetrievedMemory]
+        List[ReMeRetrievedMemory],
+        List[CognitionRetrievedMemory]
     ] = Field(description="List of retrieved memories (algorithm-specific)")
     model_config = ConfigDict(
         json_schema_extra={

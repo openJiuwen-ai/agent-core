@@ -22,6 +22,7 @@ from openjiuwen.harness.prompts.sections.skills import (
     build_skills_section,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
 from openjiuwen.harness.tools import BashTool, CodeTool, ReadFileTool, ListSkillTool, SkillTool
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 
@@ -250,10 +251,7 @@ class SkillUseRail(DeepAgentRail):
 
         lang = agent.system_prompt_builder.language
         agent_id = getattr(getattr(agent, "card", None), "id", None)
-        deep_config = getattr(agent, "deep_config", None)
-        enable_read_image_multimodal = bool(
-            getattr(deep_config, "enable_read_image_multimodal", True)
-        )
+        enable_read_image_multimodal = should_enable_read_image_multimodal(agent)
 
         tools.append(
             SkillTool(

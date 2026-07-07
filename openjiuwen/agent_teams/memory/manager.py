@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any, Optional, Set
+from typing import TYPE_CHECKING
 
 from openjiuwen.core.common.logging import memory_logger as logger
 from openjiuwen.agent_teams.memory.manager_params import (
@@ -42,10 +42,10 @@ class TeamMemoryManager:
         Resource Contract
         - register_tools(deep_agent) registers tools that do not yet exist with Runner.resource_mgr,
         and registers capabilities with the same name to deep_agent.ability_manager; simultaneously records
-        
+
         _owned_tool_ids / _owned_tool_names and _deep_agent_for_cleanup for symmetric unmounting
         in close().
-        
+
         - close() will: remove SECTION_NAME from system_prompt_builder, remove registered tools
         from ability_manager by name, remove tools added by this instance from resource_mgr by id,
         and then close MemberMemoryToolkit. If the registration logic was never successfully executed,
@@ -78,14 +78,15 @@ class TeamMemoryManager:
 
         self._team_memory_dir = params.team_memory_dir
 
-        self._toolkit: Optional["MemberMemoryToolkit"] = None
-        self._owned_tool_names: Set[str] = set()
-        self._owned_tool_ids: Set[str] = set()
-        self._deep_agent_for_cleanup: Optional["DeepAgent"] = None
+        self._toolkit: "MemberMemoryToolkit | None" = None
+        self._owned_tool_names: set[str] = set()
+        self._owned_tool_ids: set[str] = set()
+        self._deep_agent_for_cleanup: "DeepAgent | None" = None
 
-        self._shared_manager: Optional["SharedMemoryManager"] = None
+        self._shared_manager: "SharedMemoryManager | None" = None
 
-        self._cached_base_section: Optional[PromptSection] = None
+        self._cached_base_section: PromptSection | None = None
+        self._active_session_id: str | None = None
 
     async def init_toolkit(self) -> bool:
         if self._toolkit is not None:
@@ -138,14 +139,19 @@ class TeamMemoryManager:
             return int(strip_fn((MemoryRail, CodingMemoryRail)))
         return 0
 
+    def _clear_registered_tool_names(self) -> None:
+        self._owned_tool_names.clear()
+
     def register_tools(self, deep_agent: "DeepAgent") -> None:
         """Register memory tools to DeepAgent
            Idempotent: Skip if already registered.
-           Side effects are recorded in ``_owned_*`` and ``_deep_agent_for_cleanup``, 
+           Side effects are recorded in ``_owned_*`` and ``_deep_agent_for_cleanup``,
            and will be reclaimed by ``close()``.
         """
-        if self._owned_tool_names:
+        if self._owned_tool_names and deep_agent is self._deep_agent_for_cleanup:
             return
+        if self._deep_agent_for_cleanup is not None and deep_agent is not self._deep_agent_for_cleanup:
+            self._clear_registered_tool_names()
 
         rails_removed = self._strip_memory_rails_from_deep_agent(deep_agent)
         if rails_removed:
@@ -177,13 +183,13 @@ class TeamMemoryManager:
             except Exception as exc:
                 logger.warning(f"[TeamMemoryManager] Failed to register tool: {exc}")
 
-    async def _fetch_personal_memory_for_prompt(self, query: str) -> Optional[str]:
+    async def _fetch_personal_memory_for_prompt(self, query: str) -> str | None:
         coding = (self._scenario or "general").strip().lower() == "coding"
         workspace = self._workspace
-        index_manager: Optional["MemoryIndexManager"] = (
+        index_manager: "MemoryIndexManager | None" = (
             self._toolkit.manager if self._toolkit else None
         )
-        sys_operation: Optional["SysOperation"] = self._sys_operation
+        sys_operation: "SysOperation | None" = self._sys_operation
 
         has_query = bool(query)
         has_runtime = workspace is not None and sys_operation is not None
@@ -309,6 +315,24 @@ class TeamMemoryManager:
         builder.add_section(section)
 
     async def extract_after_round(self) -> None:
+        await self._extract_with_session_context()
+
+    def bind_session_id(self, session_id: str | None) -> None:
+        self._active_session_id = session_id
+
+    async def _extract_with_session_context(self) -> None:
+        from openjiuwen.agent_teams.context import get_session_id, reset_session_id, set_session_id
+
+        token = None
+        if get_session_id() != self._active_session_id and self._active_session_id:
+            token = set_session_id(self._active_session_id)
+        try:
+            await self._extract_after_round_bound()
+        finally:
+            if token is not None:
+                reset_session_id(token)
+
+    async def _extract_after_round_bound(self) -> None:
         if not self._enable_auto_extract:
             return
         if self._lifecycle != "persistent":
@@ -335,7 +359,6 @@ class TeamMemoryManager:
 
     async def close(self) -> None:
         tool_ids = list(self._owned_tool_ids)
-        tool_names = list(self._owned_tool_names)
         deep_agent = self._deep_agent_for_cleanup
 
         if deep_agent is not None:
@@ -346,15 +369,8 @@ class TeamMemoryManager:
                 except Exception as e:
                     logger.warning(f"[TeamMemoryManager] remove_section failed: {e}")
 
-            am = getattr(deep_agent, "ability_manager", None)
-            if am is not None and tool_names:
-                try:
-                    am.remove(tool_names)
-                except Exception as e:
-                    logger.warning(f"[TeamMemoryManager] ability_manager.remove failed: {e}")
-
+        self._clear_registered_tool_names()
         self._deep_agent_for_cleanup = None
-        self._owned_tool_names.clear()
         self._owned_tool_ids.clear()
 
         for tid in tool_ids:
@@ -371,6 +387,7 @@ class TeamMemoryManager:
             self._toolkit = None
 
         self._cached_base_section = None
+        self._active_session_id = None
 
         logger.info(f"[TeamMemoryManager] Closed for {self._team_name}.{self._member_name}")
 

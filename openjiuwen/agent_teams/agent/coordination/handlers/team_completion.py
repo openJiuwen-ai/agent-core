@@ -106,7 +106,14 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         team_backend = self._infra.team_backend
         if team_backend is None:
             return
-        if self._round.has_in_flight_round() or self._round.is_agent_running():
+        if (
+            self._round.has_in_flight_round()
+            or self._round.is_agent_running()
+            or self._round.has_pending_interrupt()
+        ):
+            team_logger.debug(
+                "[leader] skip team completion while round or interrupt is active"
+            )
             return
 
         snapshot = await team_backend.is_team_completed()
@@ -117,6 +124,7 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         if self._team_completed_emitted:
             return
 
+        await self._finalize_non_contributing_worktrees("team completion")
         await self._publish_team_completed(team_backend.team_name, snapshot)
         self._team_completed_emitted = True
 
@@ -168,11 +176,20 @@ class TeamCompletionHandler(BaseCoordinationHandler):
             payload.team_name,
             payload.task_count,
         )
+        if self._blueprint.role == TeamRole.LEADER:
+            await self._finalize_non_contributing_worktrees("task list drained")
         for callback in self._completion_callbacks:
             try:
                 await callback()
             except Exception as e:
                 team_logger.error("task list drained callback failed: {}", e, exc_info=True)
+
+    async def _finalize_non_contributing_worktrees(self, reason: str) -> None:
+        """Best-effort cleanup of current-session worktrees with no branch commits."""
+        try:
+            await self._lifecycle.finalize_non_contributing_worktrees()
+        except Exception as e:
+            team_logger.error("{} worktree finalization failed: {}", reason, e, exc_info=True)
 
     async def on_team_completed(self, event: EventMessage) -> None:
         """Consume TEAM_COMPLETED — structured log of team completion.

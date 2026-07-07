@@ -181,6 +181,21 @@ def test_create_vision_tools_supports_language():
     assert tools[1].vision_model_config is vision_model_config
 
 
+def test_create_vision_tools_requires_complete_model_config():
+    assert create_vision_tools(vision_model_config=None) == []
+    assert create_vision_tools(vision_model_config=VisionModelConfig()) == []
+    assert (
+        create_vision_tools(
+            vision_model_config=VisionModelConfig(
+                api_key="test-key",
+                base_url="",
+                model="mock-model",
+            ),
+        )
+        == []
+    )
+
+
 def test_image_ocr_tool_returns_clear_error_without_vision_config():
     async def _run():
         await Runner.start()
@@ -202,6 +217,7 @@ def test_vision_model_config_from_env(monkeypatch):
     monkeypatch.setenv("VISION_API_KEY", "vision-key")
     monkeypatch.setenv("VISION_BASE_URL", "https://openrouter.ai/api/v1")
     monkeypatch.delenv("VISION_MODEL", raising=False)
+    monkeypatch.delenv("VISION_MODEL_NAME", raising=False)
 
     config = VisionModelConfig.from_env()
 

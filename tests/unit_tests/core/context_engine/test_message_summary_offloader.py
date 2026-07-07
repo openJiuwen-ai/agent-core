@@ -1,0 +1,286 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
+from openjiuwen.core.context_engine.processor.base import ContextEvent
+from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import (
+    MessageSummaryOffloader,
+    MessageSummaryOffloaderConfig,
+)
+from openjiuwen.core.context_engine.schema.messages import OffloadMixin
+from openjiuwen.core.context_engine.context.context import SessionModelContext
+from openjiuwen.core.foundation.llm import (
+    UserMessage,
+    AssistantMessage,
+    ToolMessage,
+    ModelRequestConfig,
+    ModelClientConfig
+)
+from openjiuwen.core.session.agent import Session
+from tests.unit_tests.core.context_engine._stream_state_helpers import (
+    assert_context_state_pair,
+    capture_context_compression_states,
+)
+
+
+def assert_offload_saved(context: SessionModelContext, offload_msg: OffloadMixin, expected_content: str) -> None:
+    saved_messages = context.save_state()["offload_messages"].get(offload_msg.offload_handle)
+    assert saved_messages
+    saved_content = "\n".join(str(getattr(message, "content", "")) for message in saved_messages)
+    assert expected_content in saved_content
+
+
+class TestMessageSummaryOffloader:
+    """Unit tests for MessageSummaryOffloader"""
+
+    @pytest.fixture
+    def default_config(self):
+        """Create a default configuration for testing"""
+        return MessageSummaryOffloaderConfig()
+
+    @pytest.fixture
+    def custom_config(self):
+        """Create a custom configuration for testing"""
+        return MessageSummaryOffloaderConfig(
+            large_message_threshold=500,
+            offload_message_type=["user", "assistant"],
+        )
+
+    @pytest.fixture
+    def model_config(self):
+        """Create a model configuration for testing"""
+        return ModelRequestConfig(
+            model="test-model",
+            temperature=0.7
+        )
+
+    @pytest.fixture
+    def model_client_config(self):
+        """Create a model client configuration for testing"""
+        return ModelClientConfig(
+            client_id="test-client",
+            client_provider="OpenAI",
+            api_key="test-key",
+            api_base="http://test.api.com"
+        )
+
+    @pytest.mark.asyncio
+    async def test_streams_state_when_message_summary_offloader_triggers(self):
+        session = Session(session_id="message-summary-offloader-stream-session")
+        config = MessageSummaryOffloaderConfig(
+            large_message_threshold=10,
+            offload_message_type=["user"],
+        )
+
+        with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
+              as mock_model_class):
+            mock_model_instance = MagicMock()
+            mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content="summarized content"))
+            mock_model_class.return_value = mock_model_instance
+            engine = ContextEngine(ContextEngineConfig(default_window_message_num=100))
+            context = await engine.create_context(
+                "test_ctx",
+                session,
+                history_messages=[],
+                processors=[("MessageSummaryOffloader", config)],
+            )
+            processor = context._processors[0]  # type: ignore[attr-defined]
+            processor.trigger_add_messages = AsyncMock(return_value=True)  # type: ignore[method-assign]
+            processor.on_add_messages = AsyncMock(
+                return_value=(
+                    ContextEvent(event_type=processor.processor_type(), messages_to_modify=[0]),
+                    [UserMessage(content="trigger")],
+                )
+            )  # type: ignore[method-assign]
+
+            _, states = await capture_context_compression_states(
+                session,
+                lambda: context.add_messages([
+                    UserMessage(content="x" * 100),
+                    UserMessage(content="trigger"),
+                ]),
+            )
+
+        assert_context_state_pair(states, processor_type="MessageSummaryOffloader")
+        assert "modified 1 messages" in states[1].summary
+
+    @pytest.mark.asyncio
+    async def test_init_with_default_config(self, default_config):
+        """Test initialization with default configuration"""
+        with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
+              as mock_model_class):
+            mock_model_instance = MagicMock()
+            mock_model_class.return_value = mock_model_instance
+            
+            offloader = MessageSummaryOffloader(default_config)
+            
+            assert offloader.config == default_config
+            mock_model_class.assert_called_once_with(
+                model_client_config=None,
+                model_config=None
+            )
+
+    @pytest.mark.asyncio
+    async def test_init_with_custom_config(self, custom_config, model_config, model_client_config):
+        """Test initialization with custom configuration including model configs"""
+        with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
+              as mock_model_class):
+            mock_model_instance = MagicMock()
+            mock_model_class.return_value = mock_model_instance
+            
+            custom_config.model = model_config
+            custom_config.model_client = model_client_config
+            offloader = MessageSummaryOffloader(custom_config)
+            
+            assert offloader.config == custom_config
+            mock_model_class.assert_called_once_with(
+                model_client_config=model_client_config,
+                model_config=model_config
+            )
+
+    @pytest.mark.asyncio
+    async def test_offload_message_uses_adaptive_prompt(self, default_config):
+        """Test _offload_message uses the adaptive compression prompt."""
+        original_content = "This is a very long message that needs to be summarized. " * 20
+        original_message = UserMessage(content=original_content)
+        summarized_content = "This is a summarized version of the message."
+        
+        with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
+              as mock_model_class):
+            mock_model_instance = MagicMock()
+            mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content=summarized_content))
+            mock_model_class.return_value = mock_model_instance
+            
+            offloader = MessageSummaryOffloader(default_config)
+            context = SessionModelContext(
+                "context_id", "session_id", ContextEngineConfig(), history_messages=[]
+            )
+            result = await offloader._offload_message(original_message, context)
+            
+            # Verify result is a OffloadMixin
+            assert isinstance(result, OffloadMixin)
+            assert result.role == original_message.role
+            assert summarized_content in result.content
+            assert_offload_saved(context, result, original_message.content)
+            
+            mock_model_instance.invoke.assert_called_once()
+            call_args = mock_model_instance.invoke.call_args[0][0]
+            assert len(call_args) == 1
+            assert isinstance(call_args[0], UserMessage)
+            assert original_content in call_args[0].content
+
+    @pytest.mark.asyncio
+    async def test_offload_message_with_custom_config(self, custom_config):
+        """Test _offload_message with custom compatibility config."""
+        original_content = "This is a very long message that needs to be summarized. " * 20
+        original_message = AssistantMessage(content=original_content)
+        summarized_content = "Custom summarized version."
+        
+        with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
+              as mock_model_class):
+            mock_model_instance = MagicMock()
+            mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content=summarized_content))
+            mock_model_class.return_value = mock_model_instance
+            
+            offloader = MessageSummaryOffloader(custom_config)
+            context = SessionModelContext(
+                "context_id", "session_id", ContextEngineConfig(), history_messages=[]
+            )
+            result = await offloader._offload_message(original_message, context)
+            
+            # Verify result
+            assert isinstance(result, OffloadMixin)
+            assert result.role == original_message.role
+            assert summarized_content in result.content
+            assert_offload_saved(context, result, original_message.content)
+
+            call_args = mock_model_instance.invoke.call_args[0][0]
+            assert len(call_args) == 1
+            assert original_content in call_args[0].content
+
+    @pytest.mark.asyncio
+    async def test_offload_message_with_different_roles(self, default_config):
+        """Test _offload_message with different message roles"""
+        test_cases = [
+            (UserMessage(content="User message"), "user"),
+            (AssistantMessage(content="Assistant message"), "assistant"),
+            (ToolMessage(content="Tool message", tool_call_id="123"), "tool"),
+        ]
+        
+        for original_message, expected_role in test_cases:
+            summarized_content = f"Summarized {expected_role} message"
+            response_content = (
+                '{"compression_strategy":"extractive",'
+                f'"summary":"{summarized_content}",'
+                '"offload_data_explanation":{}}'
+            )
+            
+            with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
+                  as mock_model_class):
+                mock_model_instance = MagicMock()
+                mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content=response_content))
+                mock_model_class.return_value = mock_model_instance
+                
+                offloader = MessageSummaryOffloader(default_config)
+                context = SessionModelContext(
+                    "context_id", "session_id", ContextEngineConfig(), history_messages=[]
+                )
+                result = await offloader._offload_message(original_message, context)
+
+                assert result.role == expected_role
+                assert summarized_content in result.content
+                assert_offload_saved(context, result, original_message.content)
+
+    @pytest.mark.asyncio
+    async def test_offload_message_empty_content(self, default_config):
+        """Test _offload_message with empty content"""
+        original_message = UserMessage(content="")
+        summarized_content = "Empty message summary"
+        response_content = (
+            '{"compression_strategy":"extractive",'
+            f'"summary":"{summarized_content}",'
+            '"offload_data_explanation":{}}'
+        )
+        
+        with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
+              as mock_model_class):
+            mock_model_instance = MagicMock()
+            mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content=response_content))
+            mock_model_class.return_value = mock_model_instance
+            
+            offloader = MessageSummaryOffloader(default_config)
+            context = SessionModelContext(
+                "context_id", "session_id", ContextEngineConfig(), history_messages=[]
+            )
+            result = await offloader._offload_message(original_message, context)
+
+            assert summarized_content in result.content
+            assert_offload_saved(context, result, original_message.content)
+
+    @pytest.mark.asyncio
+    async def test_offload_message_preserves_original_messages(self, default_config):
+        """Test that _offload_message correctly stores original messages"""
+        original_message = UserMessage(content="Original message content")
+        summarized_content = "Summary"
+        
+        with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
+              as mock_model_class):
+            mock_model_instance = MagicMock()
+            mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content=summarized_content))
+            mock_model_class.return_value = mock_model_instance
+            
+            offloader = MessageSummaryOffloader(default_config)
+            context = SessionModelContext(
+                "context_id", "session_id", ContextEngineConfig(), history_messages=[]
+            )
+            result = await offloader._offload_message(
+                original_message,
+                context=context
+            )
+            
+            # Verify original messages are stored
+            assert_offload_saved(context, result, "Original message content")

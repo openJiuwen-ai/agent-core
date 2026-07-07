@@ -31,6 +31,13 @@ if TYPE_CHECKING:
 class MessageHandlerUtils:
 
     @staticmethod
+    def _normalize_model_tool_name(tool_name: str) -> str:
+        normalized = tool_name.strip()
+        if normalized.startswith("<") and normalized.endswith(">"):
+            normalized = normalized[1:-1].strip()
+        return normalized
+
+    @staticmethod
     def format_llm_inputs(
             inputs: Any,
             chat_history: List[BaseMessage],
@@ -82,7 +89,7 @@ class MessageHandlerUtils:
 
         result = []
         for tool_call in tool_calls:
-            tool_name = tool_call.name
+            tool_name = MessageHandlerUtils._normalize_model_tool_name(tool_call.name)
             for workflow in config.workflows:
                 if workflow.name == tool_name:
                     task_type = TaskType.WORKFLOW
@@ -147,6 +154,7 @@ class MessageHandlerUtils:
 
     @staticmethod
     def determine_task_type(tool_name: str, config: AgentConfig) -> TaskType:
+        tool_name = MessageHandlerUtils._normalize_model_tool_name(tool_name)
         for workflow in config.workflows:
             if tool_name == workflow.name:
                 return TaskType.WORKFLOW

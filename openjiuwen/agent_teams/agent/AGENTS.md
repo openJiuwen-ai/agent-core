@@ -11,7 +11,7 @@
 | **静态数据** | `blueprint.py` | `TeamAgentBlueprint`，frozen dataclass。构造时确定的配置，整个生命周期不变（spec、role、member_name、persona 等） |
 | **运行时可变状态** | `state.py` | `TeamAgentState`。**只放跨 operator 的字段**——operator 内部状态（spawn_manager 的 spawned_handles、coordination 的 subscribed_topics 等）留在 operator 自己里 |
 | **每实例资源** | `resources.py` | `PrivateAgentResources`。这个 TeamAgent 独占的资源（DeepAgent、worktree manager、memory manager 等）。每个 member 一份 |
-| **每进程基础设施** | `infra.py` | `TeamInfra`。**进程内**所有 member 共享的资源（messager、db、team_backend 等）。leader 和 teammate 在不同进程，所以 "共享" 是 per-process 而不是跨实例单例 |
+| **每进程基础设施** | `infra.py` | `TeamInfra`。**进程内**所有 member 共享的资源（messager、db、team_backend 等）。leader 和 teammate 在不同进程，所以 "共享" 是 per-process 而不是跨实例单例。也持有 tiny-agent 资源：`tiny_agent_model_resolver`（model_name→TeamModelConfig）+ `tiny_agents`（team-scoped tiny agent 按名缓存，`stop`/`shutdown` 时 dispose）。见 `tiny_agent.py` / F_45 |
 
 新增字段前先想：跨 operator 吗？跨实例吗？跨进程吗？放错象限就会出现"这个状态我看到 3 处都在改"的代码烂味。
 

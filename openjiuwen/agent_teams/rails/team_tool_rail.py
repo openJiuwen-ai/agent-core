@@ -27,11 +27,14 @@ from typing import (
     Set,
 )
 
+from openjiuwen.agent_teams.paths import async_tool_output_dir
 from openjiuwen.agent_teams.tools.team_tools import create_team_tools
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from openjiuwen.agent_teams.models.allocator import Allocation
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -72,6 +75,8 @@ class TeamToolRail(DeepAgentRail):
         messager: Optional[Any] = None,
         swarmflow_model_resolver: Optional[Callable[[str], Any]] = None,
         swarmflow_worker_base_spec: Optional[Any] = None,
+        swarmflow_human_base_spec: Optional[Any] = None,
+        swarmflow_concurrency_governor: Optional[Any] = None,
         team_permissions_enabled: bool = False,
     ) -> None:
         super().__init__()
@@ -90,6 +95,8 @@ class TeamToolRail(DeepAgentRail):
         self._messager = messager
         self._swarmflow_model_resolver = swarmflow_model_resolver
         self._swarmflow_worker_base_spec = swarmflow_worker_base_spec
+        self._swarmflow_human_base_spec = swarmflow_human_base_spec
+        self._swarmflow_concurrency_governor = swarmflow_concurrency_governor
         self._team_permissions_enabled = team_permissions_enabled
         self._tools: list[Tool] | None = None
 
@@ -118,6 +125,8 @@ class TeamToolRail(DeepAgentRail):
             team_name=self._team_name,
             swarmflow_model_resolver=self._swarmflow_model_resolver,
             swarmflow_worker_base_spec=self._swarmflow_worker_base_spec,
+            swarmflow_human_base_spec=self._swarmflow_human_base_spec,
+            concurrency_governor=self._swarmflow_concurrency_governor,
             team_permissions_enabled=self._team_permissions_enabled,
         )
 
@@ -144,7 +153,35 @@ class TeamToolRail(DeepAgentRail):
             for tool in tools:
                 ability_manager.add_ability(tool.card, tool)
 
+        self._wire_async_spill(agent)
+
         self._tools = tools
+
+    def _wire_async_spill(self, agent: Any) -> None:
+        """Wire the async-tool runtime's spill output-dir resolver (phase B).
+
+        An async tool whose rendered result exceeds the runtime's spill
+        threshold writes the full payload to a per-session directory instead of
+        inlining it. The directory is resolved lazily — the session id is only
+        available once a round runs — and registered for cleanup on first use,
+        so ``clean_team`` removes it. No-op when the host exposes no async-tool
+        runtime (a non-NativeHarness DeepAgent).
+        """
+        runtime = getattr(agent, "async_tool_runtime", None)
+        if runtime is None:
+            return
+        team_name = self._team_name
+        team_backend = self._team_backend
+
+        def _resolve_output_dir() -> "Path | None":
+            session_id = getattr(agent, "session_id", None)
+            if not session_id:
+                return None
+            out_dir = async_tool_output_dir(team_name, session_id)
+            team_backend.register_cleanup_path(str(out_dir))
+            return out_dir
+
+        runtime.output_dir_resolver = _resolve_output_dir
 
     def uninit(self, agent: Any) -> None:
         """Remove team tools from the agent and the shared resource manager."""

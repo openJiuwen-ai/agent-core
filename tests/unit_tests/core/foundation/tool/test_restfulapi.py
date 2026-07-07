@@ -277,6 +277,25 @@ class TestRestFulApi:
                 assert result["data"] == response_data
 
     @pytest.mark.asyncio
+    async def test_invoke_passes_proxy_to_request(self, restful_api):
+        """Test proxy resolution is applied to the actual aiohttp request."""
+        mock_response = self._create_json_response({"ok": True})
+
+        with patch('aiohttp.ClientSession') as mock_session_class, \
+                patch(
+                    'openjiuwen.core.foundation.tool.service_api.restful_api.UrlUtils.get_global_proxy_url'
+                ) as mock_get_proxy:
+            mock_get_proxy.return_value = "http://proxy.example.com:8080"
+            mock_session = self._create_mocked_session_context(mock_response)
+            mock_session_class.return_value = mock_session
+
+            with self._ssl_mock_context():
+                await restful_api.invoke({})
+
+            assert "proxy" not in mock_session_class.call_args.kwargs
+            assert mock_session.request.call_args.kwargs["proxy"] == "http://proxy.example.com:8080"
+
+    @pytest.mark.asyncio
     async def test_invoke_with_text_response(self, restful_api):
         """Test invoke method handling plain text response"""
         # Create mocked text response using helper method

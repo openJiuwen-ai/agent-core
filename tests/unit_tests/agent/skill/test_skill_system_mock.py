@@ -25,6 +25,7 @@ Environment variables:
 # -------------------------
 # Standard library imports
 # -------------------------
+import asyncio
 import os
 import unittest
 import uuid
@@ -108,6 +109,10 @@ class MockFS:
         self.fail_read: set[str] = set()
         self.fail_list_dirs: set[str] = set()
         self.fail_list_files: set[str] = set()
+        self.operation_delay = 0.0
+        self.active_calls = 0
+        self.max_active_calls = 0
+        self.call_log: List[tuple[str, str]] = []
 
     @staticmethod
     def _norm(p: str) -> str:
@@ -137,8 +142,22 @@ class MockFS:
             self.files[dir_path].append(file_path)
         self.content[file_path] = content
 
-    async def list_directories(self, path: str, recursive: bool = False):
+    async def _record_call(self, method_name: str, path: str) -> str:
         path = self._norm(path)
+        self.call_log.append((method_name, path))
+        if self.operation_delay <= 0:
+            return path
+
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        try:
+            await asyncio.sleep(self.operation_delay)
+        finally:
+            self.active_calls -= 1
+        return path
+
+    async def list_directories(self, path: str, recursive: bool = False):
+        path = await self._record_call("list_directories", path)
         if path in self.fail_list_dirs:
             return _MockRes(code=1, message=f"list_directories failed: {path}", data=_MockData())
 
@@ -154,7 +173,7 @@ class MockFS:
         return _MockRes(code=0, data=_MockData(root_path=path, list_items=[]))
 
     async def list_files(self, path: str, recursive: bool = False):
-        path = self._norm(path)
+        path = await self._record_call("list_files", path)
         if path in self.fail_list_files:
             return _MockRes(code=1, message=f"list_files failed: {path}", data=_MockData())
 
@@ -163,7 +182,7 @@ class MockFS:
         return _MockRes(code=0, data=_MockData(root_path=path, list_items=items))
 
     async def read_file(self, path: str, mode: str = "text", encoding: str = "utf-8"):
-        path = self._norm(path)
+        path = await self._record_call("read_file", path)
         if path in self.fail_read:
             return _MockRes(code=1, message=f"read_file failed: {path}", data=_MockData(content=None))
         return _MockRes(code=0, data=_MockData(content=self.content.get(path, None)))
@@ -422,6 +441,26 @@ class TestSkillCapability(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(sk)
         self.assertEqual(sk.description, "UT mock skill description")
         self.assertEqual(sk.directory.name, self.mock_skill_name)
+
+    @pytest.mark.asyncio
+    async def test_skill_manager_registers_subdirectories_concurrently(self):
+        """Verify SkillManager: scans sibling skill dirs concurrently to avoid sandbox RPC fan-out latency."""
+        skills_root = "/virtual/multi_skills"
+        self.mock_fs.add_dir(skills_root)
+        for index in range(4):
+            skill_name = f"skill_{index}"
+            skill_dir = f"{skills_root}/{skill_name}"
+            skill_md = f"{skill_dir}/skill.md"
+            self.mock_fs.add_subdir(skills_root, skill_dir)
+            self.mock_fs.add_file(skill_dir, skill_md, _make_skill_md(f"desc {index}"))
+
+        self.mock_fs.operation_delay = 0.01
+        mgr = SkillManager(self.sys_operation_id)
+
+        await mgr.register(Path(skills_root))
+
+        self.assertEqual(set(mgr.get_names()), {f"skill_{index}" for index in range(4)})
+        self.assertGreaterEqual(self.mock_fs.max_active_calls, 2)
 
     @pytest.mark.asyncio
     async def test_skill_manager_register_single_file_ok(self):

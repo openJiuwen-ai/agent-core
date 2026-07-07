@@ -13,7 +13,7 @@ import shlex
 import subprocess
 import threading
 from pathlib import Path, PurePosixPath
-from typing import Any, AsyncIterator, Callable, ClassVar, Dict, List, Optional, Sequence, Tuple, TypeVar
+from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar, Dict, List, Optional, Sequence, Tuple, TypeVar
 
 import httpx
 
@@ -250,6 +250,40 @@ def _is_sandbox_not_found_error(exc: BaseException) -> bool:
             if isinstance(value, str) and _SANDBOX_NOT_FOUND_RE.match(value):
                 return True
     return False
+
+
+# Match jiuwenbox process.py daemon IPC unavailable exec stderr (full message).
+_DAEMON_IPC_UNAVAILABLE_RE = re.compile(
+    r"^sandbox\s+(?P<q>['\"])(?P<id>.+?)(?P=q)\s+"
+    r"daemon IPC channel unavailable;\s+"
+    r"the daemon is not running or its control socket is gone\s*$",
+)
+
+
+def _parse_daemon_ipc_unavailable_sandbox_id(stderr: str) -> Optional[str]:
+    """Return sandbox_id from stderr when the full daemon-unavailable message matches."""
+    match = _DAEMON_IPC_UNAVAILABLE_RE.match((stderr or "").strip())
+    return match.group("id") if match else None
+
+
+def _is_daemon_ipc_unavailable_for_sandbox(
+    result: dict[str, Any],
+    *,
+    sandbox_id: str,
+) -> bool:
+    parsed_id = _parse_daemon_ipc_unavailable_sandbox_id(result.get("stderr") or "")
+    return parsed_id is not None and parsed_id == sandbox_id
+
+
+def _is_sandbox_exec_delivered(
+    result: dict[str, Any],
+    *,
+    sandbox_id: str,
+) -> bool:
+    """True when exec reached the sandbox (command outcome may still be non-zero)."""
+    if int(result.get("exit_code") or 0) == 0:
+        return True
+    return not _is_daemon_ipc_unavailable_for_sandbox(result, sandbox_id=sandbox_id)
 
 
 class _JiuwenBoxClient:
@@ -787,6 +821,85 @@ class _JiuwenBoxProviderMixin:
             self._sandbox_id = new_id
             self._launcher_extra_params(create=True)["sandbox_id"] = new_id
             return new_id
+
+    async def _run_exec_pipeline(
+        self,
+        *,
+        sandbox_op: Callable[[str], dict[str, Any]],
+        local_op: Callable[[], Awaitable[dict[str, Any]]],
+        fallback_on_failure: bool,
+    ) -> Tuple[dict[str, Any], Optional[str]]:
+        """Run sandbox exec through the a→b→c→d pipeline.
+
+        Returns ``(result_dict, error_message)``. ``error_message`` is set only
+        when the pipeline failed and local fallback was not used.
+        """
+        max_retries = _resolve_recreate_retries()
+        stale_sandbox_id = self._get_sandbox_id()
+        last_error: Optional[str] = None
+
+        for attempt in range(max_retries + 1):
+            if attempt == 0:
+                sandbox_id = stale_sandbox_id
+            else:
+                await asyncio.sleep(_SANDBOX_RECREATE_RETRY_SLEEP_SECONDS)
+                logger.info(
+                    "[jiuwenbox] sandbox-not-found auto-recreate attempt %d/%d (stale=%s)",
+                    attempt,
+                    max_retries,
+                    stale_sandbox_id,
+                )
+                try:
+                    sandbox_id = await self._recreate_sandbox_after_loss(
+                        stale_sandbox_id=stale_sandbox_id,
+                    )
+                except Exception as exc:
+                    last_error = str(exc)
+                    logger.warning(
+                        "[jiuwenbox] sandbox recreate failed (attempt %d/%d): %s",
+                        attempt,
+                        max_retries,
+                        exc,
+                    )
+                    continue
+
+            try:
+                result = await asyncio.to_thread(sandbox_op, sandbox_id)
+                if _is_sandbox_exec_delivered(result, sandbox_id=sandbox_id):
+                    return result, None
+                last_error = str(result.get("stderr") or "sandbox exec not delivered")
+                logger.warning(
+                    "[jiuwenbox] sandbox %s daemon IPC unavailable (attempt %d/%d)",
+                    sandbox_id,
+                    attempt,
+                    max_retries,
+                )
+                break
+            except httpx.HTTPStatusError as exc:
+                if _is_sandbox_not_found_error(exc):
+                    last_error = str(exc)
+                    stale_sandbox_id = sandbox_id
+                    logger.warning(
+                        "[jiuwenbox] sandbox %s not found (attempt %d/%d)",
+                        sandbox_id,
+                        attempt,
+                        max_retries,
+                    )
+                    continue
+                last_error = str(exc)
+                break
+            except Exception as exc:
+                last_error = str(exc)
+                break
+
+        if fallback_on_failure:
+            logger.info(
+                "[jiuwenbox] sandbox pipeline failed (%s), falling back to local exec",
+                last_error,
+            )
+            local_result = await local_op()
+            return local_result, None
+        return {}, last_error or "sandbox exec failed"
 
 
 def clear_jiuwenbox_shared_sandbox(base_url: str) -> list[str]:
@@ -1598,64 +1711,45 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
             )
             return self._wrap_shell_local_result(command, cwd, timeout, local_result)
 
-        try:
-            result = await self._execute_with_sandbox_retry(
-                lambda sid: self._get_client().exec(
-                    sid,
-                    ["bash", "-lc", command],
-                    cwd=workdir,
-                    timeout=exec_timeout,
-                    environment=environment,
-                )
+        result, pipeline_error = await self._run_exec_pipeline(
+            sandbox_op=lambda sid: self._get_client().exec(
+                sid,
+                ["bash", "-lc", command],
+                cwd=workdir,
+                timeout=exec_timeout,
+                environment=environment,
+            ),
+            local_op=lambda: _run_local_subprocess(
+                ["bash", "-lc", command],
+                cwd=workdir,
+                env=environment,
+                timeout=exec_timeout,
+            ),
+            fallback_on_failure=fallback_on_failure,
+        )
+        if pipeline_error:
+            return _build_shell_error_result("execute_cmd", pipeline_error, ExecuteCmdResult)
+        if result.get("local"):
+            return self._wrap_shell_local_result(command, cwd, timeout, result)
+
+        stdout = result.get("stdout") or ""
+        stderr = result.get("stderr") or ""
+        exit_code = int(result.get("exit_code") or 0)
+        data = ExecuteCmdData(
+            command=command,
+            cwd=cwd or ".",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+        )
+        if exit_code == 124:
+            return _build_shell_error_result(
+                "execute_cmd",
+                f"execution timeout after {timeout} seconds",
+                ExecuteCmdResult,
+                data=data,
             )
-            stdout = result.get("stdout") or ""
-            stderr = result.get("stderr") or ""
-            exit_code = int(result.get("exit_code") or 0)
-            data = ExecuteCmdData(
-                command=command,
-                cwd=cwd or ".",
-                stdout=stdout,
-                stderr=stderr,
-                exit_code=exit_code,
-            )
-            if exit_code == 124:
-                return _build_shell_error_result(
-                    "execute_cmd",
-                    f"execution timeout after {timeout} seconds",
-                    ExecuteCmdResult,
-                    data=data,
-                )
-            # (b) Fallback to local on non-zero exit when enabled
-            if exit_code != 0 and fallback_on_failure:
-                logger.info(
-                    "[jiuwenbox] sandbox exit_code=%d, falling back to local exec: %s",
-                    exit_code,
-                    command,
-                )
-                local_result = await _run_local_subprocess(
-                    ["bash", "-lc", command],
-                    cwd=workdir,
-                    env=environment,
-                    timeout=exec_timeout,
-                )
-                return self._wrap_shell_local_result(command, cwd, timeout, local_result)
-            return ExecuteCmdResult(code=StatusCode.SUCCESS.code, message=StatusCode.SUCCESS.errmsg, data=data)
-        except Exception as exc:
-            # (b) Fallback to local on sandbox exception when enabled
-            if fallback_on_failure:
-                logger.info(
-                    "[jiuwenbox] sandbox raised %s, falling back to local exec: %s",
-                    type(exc).__name__,
-                    command,
-                )
-                local_result = await _run_local_subprocess(
-                    ["bash", "-lc", command],
-                    cwd=workdir,
-                    env=environment,
-                    timeout=exec_timeout,
-                )
-                return self._wrap_shell_local_result(command, cwd, timeout, local_result)
-            return _build_shell_error_result("execute_cmd", str(exc), ExecuteCmdResult)
+        return ExecuteCmdResult(code=StatusCode.SUCCESS.code, message=StatusCode.SUCCESS.errmsg, data=data)
 
     @staticmethod
     def _wrap_shell_local_result(
@@ -1803,60 +1897,46 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
             )
             return self._wrap_code_local_result(code, language, timeout, local_result)
 
-        try:
-            result = await self._execute_with_sandbox_retry(
-                lambda sid: self._get_client().exec(
-                    sid,
-                    command,
-                    cwd="/tmp",
-                    timeout=exec_timeout,
-                    environment=merged_env,
-                )
+        result, pipeline_error = await self._run_exec_pipeline(
+            sandbox_op=lambda sid: self._get_client().exec(
+                sid,
+                command,
+                cwd="/tmp",
+                timeout=exec_timeout,
+                environment=merged_env,
+            ),
+            local_op=lambda: _run_local_subprocess(
+                command,
+                cwd="/tmp",
+                env=merged_env,
+                timeout=exec_timeout,
+            ),
+            fallback_on_failure=fallback_on_failure,
+        )
+        if pipeline_error:
+            return _build_code_error_result("execute_code", pipeline_error, ExecuteCodeResult, data=data)
+        if result.get("local"):
+            return self._wrap_code_local_result(code, language, timeout, result)
+
+        result_data = ExecuteCodeData(
+            code_content=code,
+            language=language,
+            stdout=result.get("stdout") or "",
+            stderr=result.get("stderr") or "",
+            exit_code=int(result.get("exit_code") or 0),
+        )
+        if result_data.exit_code == 124:
+            return _build_code_error_result(
+                "execute_code",
+                f"execution timeout after {timeout} seconds",
+                ExecuteCodeResult,
+                data=result_data,
             )
-            result_data = ExecuteCodeData(
-                code_content=code,
-                language=language,
-                stdout=result.get("stdout") or "",
-                stderr=result.get("stderr") or "",
-                exit_code=int(result.get("exit_code") or 0),
-            )
-            if result_data.exit_code == 124:
-                return _build_code_error_result(
-                    "execute_code",
-                    f"execution timeout after {timeout} seconds",
-                    ExecuteCodeResult,
-                    data=result_data,
-                )
-            # (b) Fallback to local on non-zero exit when enabled
-            if result_data.exit_code != 0 and fallback_on_failure:
-                logger.info(
-                    "[jiuwenbox] sandbox code exit_code=%d, falling back to local exec",
-                    result_data.exit_code,
-                )
-                local_result = await _run_local_subprocess(
-                    command,
-                    cwd="/tmp",
-                    env=merged_env,
-                    timeout=exec_timeout,
-                )
-                return self._wrap_code_local_result(code, language, timeout, local_result)
-            return ExecuteCodeResult(code=StatusCode.SUCCESS.code,
-                                     message="Code executed successfully", data=result_data)
-        except Exception as exc:
-            # (b) Fallback to local on sandbox exception when enabled
-            if fallback_on_failure:
-                logger.info(
-                    "[jiuwenbox] sandbox code raised %s, falling back to local exec",
-                    type(exc).__name__,
-                )
-                local_result = await _run_local_subprocess(
-                    command,
-                    cwd="/tmp",
-                    env=merged_env,
-                    timeout=exec_timeout,
-                )
-                return self._wrap_code_local_result(code, language, timeout, local_result)
-            return _build_code_error_result("execute_code", str(exc), ExecuteCodeResult, data=data)
+        return ExecuteCodeResult(
+            code=StatusCode.SUCCESS.code,
+            message="Code executed successfully",
+            data=result_data,
+        )
 
     @staticmethod
     def _wrap_code_local_result(

@@ -60,6 +60,7 @@ from openjiuwen.agent_teams.runtime.pool import (
 )
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
+from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
@@ -392,6 +393,14 @@ class TeamRuntimeManager:
         else:
             payloads = [payload]
 
+        # A swarmflow human-session reply is addressed by correlation id, not a
+        # roster member — route it straight to the run's reply topic before the
+        # roster-matching dispatch would fold it as an unknown mention. It bypasses
+        # the interact gate (a lightweight publish, not a leader round).
+        reply = self._as_swarmflow_human_reply(payloads)
+        if reply is not None:
+            return await self._route_swarmflow_human_reply(entry, reply[0], reply[1])
+
         ticket = await entry.interact_gate.admit()
         if ticket is None:
             return DeliverResult.failure("gate_closed")
@@ -404,6 +413,52 @@ class TeamRuntimeManager:
             return await self.dispatch_payloads(entry.agent, payloads)
         finally:
             await entry.interact_gate.consume_done(ticket)
+
+    @staticmethod
+    def _as_swarmflow_human_reply(payloads: list[InteractPayload]) -> Optional[tuple[str, str]]:
+        """Detect a swarmflow human-session reply, returning ``(corr, answer)`` or None.
+
+        A reply is a single ``HumanAgentMessage`` whose ``target`` is
+        ``"swarmflow:<correlation_id>"`` — the convention a UI uses to answer a
+        pending swarmflow human turn (the correlation id rode out on the
+        ``human_prompt`` progress event).
+        """
+        prefix = "swarmflow:"
+        if len(payloads) != 1:
+            return None
+        item = payloads[0]
+        if not isinstance(item, HumanAgentMessage) or not item.target:
+            return None
+        if not item.target.startswith(prefix):
+            return None
+        corr = item.target[len(prefix):]
+        return (corr, item.body) if corr else None
+
+    @staticmethod
+    async def _route_swarmflow_human_reply(
+        entry: "ActiveTeam",
+        correlation_id: str,
+        answer: str,
+    ) -> DeliverResult:
+        """Publish a swarmflow human reply on the run's dedicated reply topic."""
+        from openjiuwen.agent_teams.schema.events import (
+            EventMessage,
+            TeamEvent,
+            swarmflow_human_reply_topic,
+        )
+
+        backend = entry.agent.team_backend
+        messager = getattr(backend, "messager", None) if backend is not None else None
+        if messager is None:
+            return DeliverResult.failure("no_messager")
+        topic = swarmflow_human_reply_topic(entry.current_session_id, entry.team_name)
+        message = EventMessage(
+            event_type=TeamEvent.WORKFLOW_HUMAN_REPLY,
+            payload={"correlation_id": correlation_id, "answer": answer},
+            sender_id="user",
+        )
+        await messager.publish(topic_id=topic, message=message)
+        return DeliverResult.success(None)
 
     @staticmethod
     async def dispatch_payloads(
@@ -657,6 +712,8 @@ class TeamRuntimeManager:
         await db.initialize()
         for session_id in session_ids:
             await db.drop_session_tables_by_id(session_id)
+            if not await remove_session_worktrees(team_name, session_id):
+                team_logger.warning("Failed to remove session worktrees for team={} session={}", team_name, session_id)
 
         for session_id in session_ids:
             await checkpointer.release(session_id)
@@ -719,6 +776,9 @@ class TeamRuntimeManager:
         db = get_shared_db(release_info.db_config)
         await db.initialize()
         await db.drop_session_tables_by_id(session_id)
+        for team_name in release_info.team_names:
+            if not await remove_session_worktrees(team_name, session_id):
+                team_logger.warning("Failed to remove session worktrees for team={} session={}", team_name, session_id)
 
     @staticmethod
     async def _resolve_any_team_session_release_info(

@@ -26,6 +26,7 @@
 | `memory_database.py` | In-memory backend variant for tests |
 | `models.py` | `Team`, `TeamMember` static tables + dynamic per-session `TeamTask*` / `TeamMessage*` factories |
 | `member_options.py` | `TeamMemberOptions` / `MemberModelRef` / `MemberWorktreeOptions` structured options helpers (load/dump/build/merge/get_member_model_ref/get_member_permissions_override). Replaces legacy `model_ref_json` column with unified `options` JSON |
+| `structured_output_tool.py` | `StructuredOutputTool` (`input_params=schema_json`, captures `captured`) + `StructuredOutputFinishRail` (force-finish a round once captured). The generic structured-output tool for any agent with no native `response_format`; reused by swarmflow workers/sessions and tiny agents (`tiny_agent.py`) |
 | `locales/` | i18n strings (`cn.py`, `en.py`) and Markdown description files (`descs/<lang>/<tool>.md`) |
 
 Tools never reach into `TeamDatabase` directly — they go through `TeamBackend` or one of the managers so event publication and state transitions stay centralised.
@@ -81,7 +82,6 @@ PostgreSQL / MySQL backend (`engine.py`), not SQLite.
 | `shutdown_member` | ✓ | | `force=True` skips the normal shutdown sequence |
 | `approve_plan` | ✓ (plan_mode only) | | wired only when `teammate_mode == "plan_mode"` |
 | `approve_tool` | ✓ (plan_mode only) | | same gating as `approve_plan` |
-| `list_members` | ✓ | | excludes the caller from the result |
 | `create_task` | ✓ | | auto-routes `depended_by`-bearing specs to `add_with_priority`; single-spec returns `brief()`, batch returns `tasks`+`failures` |
 | `update_task` | ✓ | | one tool handles title/content edit, cancel, assign (with reassignment reset), and `add_blocked_by` |
 | `view_task` | ✓ | ✓ | `action ∈ {list, get, claimable}`; default `list` |
@@ -89,6 +89,9 @@ PostgreSQL / MySQL backend (`engine.py`), not SQLite.
 | `send_message` | ✓ | ✓ | `to == "*"` → broadcast; leader call auto-starts UNSTARTED members. Also attached to `human_agent` as a user-driven relay channel — the HITT prompt section forbids autonomous use; only user-issued "tell `<member>` …" instructions may trigger it. |
 | `member_complete_task` | | | `human_agent` only — self-only task completion |
 | `workspace_meta` | ✓ | ✓ | workspace lock + version history |
+| `async_tasks_list` | ✓ | | list background async tasks; leader-only, always wired |
+| `async_task_output` | ✓ | | fetch a task's full output (`block`/`timeout`; reads disk spill) |
+| `async_task_cancel` | ✓ | | cancel a still-running background async task |
 
 Plan-mode gating is enforced in the factory:
 
@@ -225,11 +228,22 @@ The ability layer renders tool results with `str(result)` — `MappedToolOutput.
 | Pattern | Tools | Strategy |
 |---|---|---|
 | **Pure text** | `build_team`, `clean_team`, the four `spawn_*` tools, `shutdown_member`, `approve_*` | Confirmation sentence — minimal tokens |
-| **Structured text lines** | `list_members`, `view_task` (list), `create_task` (batch) | One entity per line, dense format |
+| **Structured text lines** | `view_task` (list), `create_task` (batch) | One entity per line, dense format |
 | **Detail text** | `view_task` (get) | Full fields with labeled lines |
 | **Time context** | `view_task` (list + get) | Both tiers render `updated_at` via `timefmt.format_time_context` as `<absolute local time> (<relative diff>)`. `map_result` can't take args, so it calls `get_current_time()` internally and guards on `updated_at is not None` |
 | **Text + behavior guidance** | `claim_task` (completed) | Append `Call view_task now…` after task completion to sustain the autonomous task loop |
 | **Default JSON** | `TeamTool` base | `json.dumps(output.data)` fallback for anything that forgot to override |
+
+### Async tool two-phase text (`AsyncTool` subclasses, e.g. `SwarmflowTool`)
+
+For sync `TeamTool`, `map_result` is the **only** source of LLM-visible tool text. Async tools add a **second outlet in a later round**:
+
+| Phase | Outlet | When | Copy |
+|---|---|---|---|
+| **Launch** | `map_result` | Synchronously after `invoke`, via `_wrap_invoke_with_logging` | Launched receipt (swarmflow → `swarmflow.launched`, includes `run_id` + `task_id`) |
+| **Terminal** | `format_completed_injection` / `format_failed_injection` | Background run ends; `AsyncToolRuntime._run` calls `AsyncToolRecord.format_*` | `swarmflow.completed` / `swarmflow.failed` (includes `run_id`) |
+
+Terminal callbacks are registered at invoke via `launch_async_tool(..., format_completed=, format_failed=)` (closure captures per-run `run_id` + `completion_ctx`). They return `str | None`: non-`None` overrides default `async_tool.*` copy; `None` or unset falls back to default (no `run_id`, only `tool` + `result`/`error`). `run_background` returns the **raw script result** (no string assembly inside); formatting is the terminal callback's job. See `harness/AGENTS.md` (async tool framework), `workflow/AGENTS.md` (SwarmflowTool), `S_20` / `F_47`.
 
 Design principles:
 - **Token efficiency**: only send what the model needs for its next decision.
@@ -256,7 +270,7 @@ Long `_desc` entries can live in Markdown files under `locales/descs/<lang>/<too
 - Supports `{{placeholder}}` interpolation — pass keyword arguments through `t("tool", param="value")`.
 - When migrating a `_desc` from `STRINGS` to a `.md` file, delete the dict entry and leave a comment.
 
-Current `descs/` population: `approve_plan`, `approve_tool`, `build_team`, `claim_task`, `clean_team`, `create_task`, `enter_worktree`, `exit_worktree`, `list_members`, `send_message`, `shutdown_member`, `spawn_bridge_agent`, `spawn_external_cli`, `spawn_human_agent`, `spawn_teammate`, `update_task`, `view_task`, `workspace_meta`.
+Current `descs/` population: `approve_plan`, `approve_tool`, `build_team`, `claim_task`, `clean_team`, `create_task`, `enter_worktree`, `exit_worktree`, `send_message`, `shutdown_member`, `spawn_bridge_agent`, `spawn_external_cli`, `spawn_human_agent`, `spawn_teammate`, `update_task`, `view_task`, `workspace_meta`, `async_tasks_list`, `async_task_output`, `async_task_cancel`.
 
 ## Prompt Layering: Tool Description vs System Prompt
 

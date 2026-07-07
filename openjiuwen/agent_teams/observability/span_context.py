@@ -268,28 +268,47 @@ def set_current_agent_span(span: Span | None) -> None:
     _current_agent_span.set(span)
 
 
-def close_team_agent_spans(team_name: str) -> None:
-    from opentelemetry.trace import Status, StatusCode
+def _stamp_cancelled_if_empty(span: Span) -> None:
+    """Set a cancelled marker on a span that was never given proper output.
+
+    Spans reaching the cascade-close paths had their normal close callback
+    interrupted (e.g. task cancelled mid-LLM-call).
+    """
     from openjiuwen.agent_teams.observability.semconv import LANGFUSE_OBSERVATION_OUTPUT
 
-    # Drain child LLM / tool spans before closing the parent agent span.
-    # This mirrors the cascade-close in ObservabilityRail.after_task_iteration.
-    # Do NOT set Status(OK) — these spans only reach here when their normal
-    # close callback did not fire.
+    if not span.attributes.get(LANGFUSE_OBSERVATION_OUTPUT):
+        span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, "cancelled")
+
+
+def cascade_close_children() -> None:
+    """End all open child llm/tool spans on the current context.
+
+    The single source of truth for cascade-close — called from
+    ``AgentSpanScope.close`` (rail) and ``close_team_agent_spans`` below.
+    Replaces the triplicated loop that used to live in after_task_iteration
+    / after_invoke / close_team_agent_spans. Do NOT set Status(OK) here:
+    these spans only reach this path when their normal close callback did
+    not fire, so leaving status UNSET makes them stand out.
+    """
     for bucket in _tool_span_map.get().values():
         for ts in bucket:
             if ts.is_recording():
-                if not ts.attributes.get(LANGFUSE_OBSERVATION_OUTPUT):
-                    ts.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, "cancelled")
+                _stamp_cancelled_if_empty(ts)
                 ts.end()
     _tool_span_map.set({})
 
     for state in _llm_span_stack.get():
         if state.span.is_recording():
-            if not state.span.attributes.get(LANGFUSE_OBSERVATION_OUTPUT):
-                state.span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, "cancelled")
+            _stamp_cancelled_if_empty(state.span)
             state.span.end()
     _llm_span_stack.set([])
+
+
+def close_team_agent_spans(team_name: str) -> None:
+    from opentelemetry.trace import Status, StatusCode
+
+    # Drain child LLM / tool spans before closing the parent agent span.
+    cascade_close_children()
 
     current = _current_agent_span.get()
     if current is not None and current.is_recording():

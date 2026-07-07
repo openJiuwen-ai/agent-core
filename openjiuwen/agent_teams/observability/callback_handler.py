@@ -522,21 +522,45 @@ class OtelCallbackHandler:
             span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.role", role)
             span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.content", redacted)
 
-        # langfuse.observation.input: show the last N messages for UI readability.
-        # Framework injects a system-reminder user message before each call,
-        # so showing the last 2 captures both the actual query and the reminder.
+        # langfuse.observation.input: delta-based for UI readability.
+        #
+        # LLM calls within one agent span are sequential.  We track the
+        # message count on the agent span (via gen_ai.request.message_count)
+        # and only show messages that are *new* since the previous call:
+        #
+        #   - First call (prev_count == 0):  show all messages except system.
+        #   - Context compression (current < prev): show all except system.
+        #   - Otherwise: show messages[prev_count:].
+        #
         # Full message list is available via gen_ai.prompt.{i}.* attributes.
-        if messages:
-            tail_n = self._config.llm_input_last_n_messages
-            tail = messages[-tail_n:]
-            input_json = json.dumps(
-                [{"role": _message_role(m),
-                  "content": _coerce_message_content(_message_content(m))}
-                 for m in tail],
-                ensure_ascii=False, default=str,
-            )
+        agent_span = get_current_agent_span()
+        prev_count_raw: int = 0
+        if agent_span is not None:
+            prev_attr = agent_span.attributes.get(GEN_AI_REQUEST_MESSAGE_COUNT)
+            if prev_attr is not None:
+                try:
+                    prev_count_raw = int(str(prev_attr))
+                except (ValueError, TypeError):
+                    pass
+
+        if prev_count_raw == 0 or msg_count < prev_count_raw:
+            # First LLM call in this agent span, or context compression
+            # reduced the message count.  Drop system messages so the
+            # input is focused on the dialogue.
+            delta_msgs = [m for m in messages if _message_role(m) != "system"]
         else:
-            input_json = "[]"
+            delta_msgs = messages[prev_count_raw:]
+
+        # Update the count on the agent span for the next LLM call.
+        if agent_span is not None:
+            agent_span.set_attribute(GEN_AI_REQUEST_MESSAGE_COUNT, msg_count)
+
+        input_json = json.dumps(
+            [{"role": _message_role(m),
+              "content": _coerce_message_content(_message_content(m))}
+             for m in delta_msgs],
+            ensure_ascii=False, default=str,
+        ) if delta_msgs else "[]"
         input_max_len = max(self._config.attribute_value_max_length * 10, 81920)
         span.set_attribute(LANGFUSE_OBSERVATION_INPUT,
                            _truncate(input_json, input_max_len))
@@ -701,19 +725,26 @@ class OtelCallbackHandler:
 
     @staticmethod
     def _serialize_tool_inputs(inputs: Any) -> str:
+        """Serialize the tool call's arguments for the tool span input.
+
+        ``ToolCallEvents.TOOL_CALL_STARTED`` carries ``inputs=(args, kwargs)``
+        — a 2-element tuple of positional and keyword arguments from the
+        tool invocation. Preserve the original structure; Session objects
+        are rendered as ``"session:<id>"`` so they remain readable.
+        """
         if inputs is None:
             return ""
 
         def _sanitize(obj: Any) -> Any:
+            if isinstance(obj, dict):
+                return {k: _sanitize(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_sanitize(v) for v in obj]
             if hasattr(obj, "get_session_id"):
                 try:
                     return f"session:{obj.get_session_id()}"
                 except Exception:
                     return "<Session>"
-            if isinstance(obj, dict):
-                return {k: _sanitize(v) for k, v in obj.items()}
-            if isinstance(obj, (list, tuple)):
-                return type(obj)(_sanitize(v) for v in obj)
             return obj
 
         try:

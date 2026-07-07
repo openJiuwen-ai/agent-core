@@ -151,6 +151,7 @@ class TestBranchComponent:
         await self.run_with_expression("length(${start.input}) == 0", [])
         await self.run_with_expression("length(${start.input}) == 0", '')
         await self.run_with_expression("length(${start.input}) == 0", ())
+        await self.run_with_expression("length(${start.input}) == 0", None)
 
     # async def test_branch_condition(self):
     #     workflow = Workflow()

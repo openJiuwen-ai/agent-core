@@ -123,6 +123,10 @@ class FakeReactAgent:
         self.seen_steers: list[str] = []
         self.sleep_seconds: float = 0.0
         self.answer_output: str = ""
+        # When set, ``invoke`` raises this after its sleep window — models an
+        # inner-round failure so tests can exercise the executor's error path
+        # (e.g. AFTER_TASK_ITERATION firing on failure).
+        self.raise_exc: BaseException | None = None
         # Set the moment ``invoke`` enters its sleep window; lets tests wait for
         # the real inner work to actually be in-flight before aborting/pausing,
         # instead of racing the phase transition (RUNNING is set when the round
@@ -182,6 +186,9 @@ class FakeReactAgent:
         finally:
             self.invoke_running.clear()
 
+        if self.raise_exc is not None:
+            raise self.raise_exc
+
         await session.write_stream(
             OutputSchema(type="mock_chunk", index=0, payload={"query": str(query)}),
         )
@@ -207,7 +214,7 @@ def make_card(name: str = "native_harness_test") -> AgentCard:
     return AgentCard(name=name, description="native-harness-test")
 
 
-def make_spec(card: AgentCard | None = None) -> Any:
+def make_spec(card: AgentCard | None = None, *, completion_timeout: float = 600.0) -> Any:
     """Build a fake DeepAgentSpec whose ``resolve_parts`` yields task-loop parts.
 
     Forward construction: NativeHarness configures itself from this spec's
@@ -218,6 +225,7 @@ def make_spec(card: AgentCard | None = None) -> Any:
 
     Args:
         card: Optional card for the spec (and thus the harness).
+        completion_timeout: Round completion timeout in seconds.
 
     Returns:
         A fake spec exposing ``resolve_parts(context) -> DeepAgentParts``.
@@ -229,7 +237,11 @@ def make_spec(card: AgentCard | None = None) -> Any:
     class _FakeSpec:
         def resolve_parts(self, context: Any = None) -> DeepAgentParts:
             return DeepAgentParts(
-                config=DeepAgentConfig(card=agent_card, enable_task_loop=True),
+                config=DeepAgentConfig(
+                    card=agent_card,
+                    enable_task_loop=True,
+                    completion_timeout=completion_timeout,
+                ),
                 rails=[],
                 tool_cards=[],
                 tool_instances=[],

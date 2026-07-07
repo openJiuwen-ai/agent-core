@@ -13,25 +13,26 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.harness.tools.browser_move.clients.streamable_http_client import (
     BrowserMoveStreamableHttpClient,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime import browser_tools as browser_tools_module
 from openjiuwen.harness.tools.browser_move.playwright_runtime.agents import (
     ensure_execute_signature_compat,
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_tools import (
     build_browser_runtime_mcp_config,
 )
-from openjiuwen.harness.tools.browser_move.playwright_runtime import browser_tools as browser_tools_module
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     DEFAULT_BROWSER_TIMEOUT_S,
     DEFAULT_MODEL_NAME,
+    BrowserInstanceConfig,
+    build_playwright_mcp_config,
     build_runtime_settings,
     parse_command_args,
 )
 from openjiuwen.harness.tools.browser_move.utils.parsing import extract_json_object
-
-from openjiuwen.core.foundation.tool import McpServerConfig
 
 
 def _run(coro: Any) -> Any:
@@ -104,7 +105,7 @@ def test_parse_command_args_accepts_json_list() -> None:
 
 
 def test_extract_json_object_handles_fenced_json() -> None:
-    assert extract_json_object("```json\n{\"ok\": true, \"value\": 1}\n```") == {"ok": True, "value": 1}
+    assert extract_json_object('```json\n{"ok": true, "value": 1}\n```') == {"ok": True, "value": 1}
 
 
 def test_build_browser_runtime_mcp_config_disabled_by_default() -> None:
@@ -201,14 +202,17 @@ def test_build_browser_runtime_mcp_config_stdio_passes_child_env_and_maps_openai
 
 
 def test_build_browser_runtime_mcp_config_stdio_uses_explicit_runtime_cwd() -> None:
-    with tempfile.TemporaryDirectory() as tmp, patch.dict(
-        os.environ,
-        {
-            "PLAYWRIGHT_RUNTIME_MCP_ENABLED": "1",
-            "PLAYWRIGHT_RUNTIME_MCP_CLIENT_TYPE": "stdio",
-            "PLAYWRIGHT_RUNTIME_MCP_CWD": tmp,
-        },
-        clear=True,
+    with (
+        tempfile.TemporaryDirectory() as tmp,
+        patch.dict(
+            os.environ,
+            {
+                "PLAYWRIGHT_RUNTIME_MCP_ENABLED": "1",
+                "PLAYWRIGHT_RUNTIME_MCP_CLIENT_TYPE": "stdio",
+                "PLAYWRIGHT_RUNTIME_MCP_CWD": tmp,
+            },
+            clear=True,
+        ),
     ):
         cfg = build_browser_runtime_mcp_config()
 
@@ -305,25 +309,29 @@ def test_local_browser_runtime_server_logs_are_written_under_runtime_log_dir() -
     with tempfile.TemporaryDirectory() as tmp:
         process = MagicMock()
         process.poll.return_value = None
-        with patch.dict(os.environ, {"PLAYWRIGHT_RUNTIME_LOG_DIR": tmp}, clear=False), patch.object(
-            browser_tools_module,
-            "_server_script",
-            return_value=Path(__file__),
-        ), patch.object(
-            browser_tools_module,
-            "_build_child_env",
-            return_value={},
-        ), patch.object(
-            browser_tools_module,
-            "_wait_port_open",
-            return_value=None,
-        ), patch(
-            "openjiuwen.harness.tools.browser_move.playwright_runtime.browser_tools.subprocess.Popen",
-            return_value=process,
-        ) as mock_popen:
-            getattr(browser_tools_module, "_start_local_server")(
-                "streamable-http", "127.0.0.1", 8940, "/mcp"
-            )
+        with (
+            patch.dict(os.environ, {"PLAYWRIGHT_RUNTIME_LOG_DIR": tmp}, clear=False),
+            patch.object(
+                browser_tools_module,
+                "_server_script",
+                return_value=Path(__file__),
+            ),
+            patch.object(
+                browser_tools_module,
+                "_build_child_env",
+                return_value={},
+            ),
+            patch.object(
+                browser_tools_module,
+                "_wait_port_open",
+                return_value=None,
+            ),
+            patch(
+                "openjiuwen.harness.tools.browser_move.playwright_runtime.browser_tools.subprocess.Popen",
+                return_value=process,
+            ) as mock_popen,
+        ):
+            getattr(browser_tools_module, "_start_local_server")("streamable-http", "127.0.0.1", 8940, "/mcp")
             stdout_log = Path(tmp) / "browser_runtime_stdout.log"
             stderr_log = Path(tmp) / "browser_runtime_stderr.log"
             assert stdout_log.exists()
@@ -333,3 +341,41 @@ def test_local_browser_runtime_server_logs_are_written_under_runtime_log_dir() -
 
         assert getattr(browser_tools_module, "_browser_runtime_stdout_handle") is None
         assert getattr(browser_tools_module, "_browser_runtime_stderr_handle") is None
+
+
+# ---------------------------------------------------------------------------
+# Per-agent browser identity (BrowserInstanceConfig) — see plan: keyed server_id
+# ---------------------------------------------------------------------------
+
+
+def test_keyed_instance_suffixes_server_id() -> None:
+    """A non-empty key isolates the MCP registration via a suffixed server_id."""
+    cfg = build_playwright_mcp_config(BrowserInstanceConfig(key="alpha"))
+    assert cfg.server_id == "playwright_official_stdio__alpha"
+    assert cfg.server_name == "playwright-official-alpha"
+
+
+def test_distinct_keys_yield_distinct_server_ids() -> None:
+    """Different keys must not collide on the global resource_mgr registration."""
+    a = build_playwright_mcp_config(BrowserInstanceConfig(key="A"))
+    b = build_playwright_mcp_config(BrowserInstanceConfig(key="B"))
+    assert a.server_id != b.server_id
+
+
+def test_same_key_shares_server_id() -> None:
+    """Same key == intentional sharing of one browser (one MCP registration)."""
+    a = build_playwright_mcp_config(BrowserInstanceConfig(key="shared"))
+    b = build_playwright_mcp_config(BrowserInstanceConfig(key="shared"))
+    assert a.server_id == b.server_id
+
+
+def test_absent_key_preserves_legacy_server_id() -> None:
+    """No key (or empty instance) reproduces the historical constant id."""
+    assert build_playwright_mcp_config().server_id == "playwright_official_stdio"
+    assert build_playwright_mcp_config(BrowserInstanceConfig()).server_id == "playwright_official_stdio"
+
+
+def test_key_is_sanitized_into_server_id() -> None:
+    """Unsafe key characters are normalized so the server_id stays id-safe."""
+    cfg = build_playwright_mcp_config(BrowserInstanceConfig(key="team A/1"))
+    assert cfg.server_id == "playwright_official_stdio__team-A-1"

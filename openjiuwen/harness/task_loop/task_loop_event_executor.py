@@ -197,6 +197,10 @@ class TaskLoopEventExecutor(TaskExecutor):
                     queues.steering
                 )
 
+        # Tracks whether AFTER_TASK_ITERATION fired on the success path so the
+        # error path can fire it exactly once. Round-boundary cleanup rails
+        # (snapshot, otel span close, ...) must run even when the round fails.
+        after_fired = False
         try:
             result = await agent.react_agent.invoke(
                 effective, session, _streaming=True
@@ -208,9 +212,12 @@ class TaskLoopEventExecutor(TaskExecutor):
                     summary = str(result.get("output", ""))[:200]
                     state.task_plan.mark_completed(task_id, summary)
 
-            # Fire AFTER_TASK_ITERATION
+            # Fire AFTER_TASK_ITERATION. Set the guard *before* firing so a
+            # callback raising here does not make the except branch fire the
+            # event a second time — it stays strictly once per round.
             iter_inputs.result = result
             ctx.inputs = iter_inputs
+            after_fired = True
             await ctx.fire(
                 AgentCallbackEvent
                 .AFTER_TASK_ITERATION
@@ -252,6 +259,30 @@ class TaskLoopEventExecutor(TaskExecutor):
             # Mark failed in TaskPlan
             if self._get_plan_task(state, task_id):
                 state.task_plan.mark_cancelled(task_id, str(exc))
+
+            # Fire AFTER_TASK_ITERATION on the failure path too, so per-round
+            # cleanup rails run symmetrically with the success path. Carry an
+            # error-shaped result and the exception; a callback failing here
+            # must not mask the original task error, so swallow + log it.
+            if not after_fired:
+                iter_inputs.result = {
+                    "result_type": "error",
+                    "error": str(exc),
+                }
+                ctx.inputs = iter_inputs
+                ctx.exception = exc
+                try:
+                    await ctx.fire(
+                        AgentCallbackEvent
+                        .AFTER_TASK_ITERATION
+                    )
+                except Exception:
+                    logger.error(
+                        "AFTER_TASK_ITERATION callback failed on the "
+                        "error path for task %s",
+                        task_id,
+                        exc_info=True,
+                    )
 
             payload = ControllerOutputPayload(
                 type=EventType.TASK_FAILED,

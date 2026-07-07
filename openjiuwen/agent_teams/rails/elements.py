@@ -41,6 +41,8 @@ from openjiuwen.agent_teams.rails.team_context import (
     get_model_allocator,
     get_on_teammate_created,
     get_reliability_components,
+    get_swarmflow_concurrency_governor,
+    get_swarmflow_human_base_spec,
     get_swarmflow_model_resolver,
     get_swarmflow_worker_base_spec,
     get_team_backend,
@@ -112,6 +114,8 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         messager=get_messager(context),
         swarmflow_model_resolver=get_swarmflow_model_resolver(context),
         swarmflow_worker_base_spec=get_swarmflow_worker_base_spec(context),
+        swarmflow_human_base_spec=get_swarmflow_human_base_spec(context),
+        swarmflow_concurrency_governor=get_swarmflow_concurrency_governor(context),
         team_permissions_enabled=inp.team_permissions_enabled,
     )
 
@@ -138,7 +142,6 @@ class TeamPolicyInput(ConstructionInput):
         default=False,
         description="Whether teammates see the concrete human-agent roster.",
     )
-    enable_swarmflow: bool = param_field(default=False, description="Whether swarmflow is enabled.")
 
 
 @harness_element(
@@ -166,7 +169,6 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         team_workspace_path=inp.team_workspace_path,
         team_backend=get_team_backend(context),
         expose_human_agents_to_teammates=inp.expose_human_agents_to_teammates,
-        enable_swarmflow=inp.enable_swarmflow,
     )
 
 

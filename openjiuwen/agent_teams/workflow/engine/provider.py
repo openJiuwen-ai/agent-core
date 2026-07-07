@@ -30,11 +30,14 @@ class EngineProvider:
         label: str | None = None,
         phase: str | None = None,
         schema: Any = None,
-        model: str | None = None,
-        timeout: float | None = None,
+        options: dict | None = None,
     ) -> Any:
         return await _p.agent(
-            prompt, label=label, phase=phase, schema=schema, model=model, timeout=timeout
+            prompt,
+            label=label,
+            phase=phase,
+            schema=schema,
+            options=options,
         )
 
     async def parallel(self, thunks: Sequence[Callable[[], Awaitable]]) -> list:
@@ -56,6 +59,41 @@ class EngineProvider:
 
     async def workflow(self, name_or_path: str, args: Any = None) -> Any:
         return await _p.workflow(name_or_path, args)
+
+    @staticmethod
+    def agent_session(
+        *,
+        label: str | None = None,
+        phase: str | None = None,
+        instructions: str | None = None,
+        options: dict | None = None,
+    ) -> Any:
+        return _p.agent_session(
+            label=label, phase=phase, instructions=instructions, options=options
+        )
+
+    @staticmethod
+    def human_session(
+        *,
+        label: str | None = None,
+        phase: str | None = None,
+        instructions: str | None = None,
+        options: dict | None = None,
+    ) -> Any:
+        return _p.human_session(
+            label=label, phase=phase, instructions=instructions, options=options
+        )
+
+    async def human(
+        self,
+        prompt: str,
+        *,
+        schema: Any = None,
+        label: str | None = None,
+        phase: str | None = None,
+        options: dict | None = None,
+    ) -> Any:
+        return await _p.human(prompt, schema=schema, label=label, phase=phase, options=options)
 
     @property
     def budget(self) -> Any:

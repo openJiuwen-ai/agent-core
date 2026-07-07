@@ -1,0 +1,74 @@
+# Swarmflow E2E configuration — a leader that orchestrates a swarmflow script.
+#
+# The leader owns the `swarmflow(script_path, args)` tool (enable_swarmflow);
+# each agent() call in the script runs as a single-shot WORKER derived from the
+# teammate spec below. No worktree / workspace / external tools are needed — the
+# party_planner demo only needs structured LLM output.
+#
+# Model endpoint + key are injected via env vars sourced from
+# config_llm_local.yaml (API_BASE / LEADER_API_KEY / TEAMMATE_API_KEY / MODEL_NAME).
+
+team_name: swarmflow_e2e_team
+lifecycle: persistent
+spawn_mode: inprocess
+enable_swarmflow: true
+
+leader:
+  member_name: team_leader
+  display_name: TeamLeader
+  persona: "工作流编排负责人,擅长用 swarmflow 工具把任务交给一组 agent 并行完成"
+
+x-model-template: &model_template
+  model_client_config:
+    client_provider: OpenAI
+    api_base: "${API_BASE}"
+    api_key: "${LEADER_API_KEY}"
+    timeout: 120
+    rate_limit: 2.0
+    verify_ssl: false
+  model_request_config:
+    model: "${MODEL_NAME}"
+    temperature: 0.2
+    top_p: 0.9
+
+x-shared-agent-spec: &shared_agent_spec
+  language: cn
+  max_iterations: 60
+  completion_timeout: 600.0
+  enable_task_planning: false
+  restrict_to_sandbox: false
+
+agents:
+  leader:
+    <<: *shared_agent_spec
+    model:
+      <<: *model_template
+      model_client_config:
+        client_provider: OpenAI
+        api_base: "${API_BASE}"
+        api_key: "${LEADER_API_KEY}"
+        timeout: 120
+        rate_limit: 2.0
+        verify_ssl: false
+
+  teammate:
+    <<: *shared_agent_spec
+    model:
+      <<: *model_template
+      model_client_config:
+        client_provider: OpenAI
+        api_base: "${API_BASE}"
+        api_key: "${TEAMMATE_API_KEY}"
+        timeout: 120
+        rate_limit: 2.0
+        verify_ssl: false
+
+transport:
+  type: inprocess
+
+storage:
+  type: sqlite
+
+# Runtime block (not part of TeamAgentSpec; consumed by the E2E script).
+runtime:
+  session_id: swarmflow_e2e_session

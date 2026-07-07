@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from openjiuwen.core.foundation.llm.model import Model
@@ -15,6 +16,7 @@ from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
+    BrowserInstanceConfig,
     RuntimeSettings,
     build_browser_guardrails,
     build_playwright_mcp_config,
@@ -31,8 +33,10 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime_tools impo
 try:
     from openjiuwen.harness.prompts import resolve_language
 except ImportError:
+
     def resolve_language(language: Optional[str] = None) -> str:  # type: ignore[misc]
         return language if language in {"cn", "en"} else "cn"
+
 
 if TYPE_CHECKING:
     from openjiuwen.harness.workspace.workspace import Workspace
@@ -116,9 +120,29 @@ DEFAULT_BROWSER_AGENT_DESCRIPTION: Dict[str, str] = {
 }
 
 
+def _coerce_browser_instance(
+    browser_instance: Optional[BrowserInstanceConfig | Dict[str, Any]],
+    browser_key: Optional[str],
+) -> Optional[BrowserInstanceConfig]:
+    """Normalize the per-instance browser config from a model, dict, or bare key.
+
+    A dict form is accepted so the teams manifest can carry browser identity as
+    serializable ``factory_kwargs`` across the spawn wire boundary.
+    """
+    if isinstance(browser_instance, BrowserInstanceConfig):
+        return browser_instance
+    if isinstance(browser_instance, dict):
+        allowed = {f.name for f in dataclasses.fields(BrowserInstanceConfig)}
+        return BrowserInstanceConfig(**{k: v for k, v in browser_instance.items() if k in allowed})
+    if browser_key:
+        return BrowserInstanceConfig(key=str(browser_key))
+    return None
+
+
 def _resolve_runtime_settings(
     model: Model,
     settings: Optional[RuntimeSettings],
+    instance: Optional[BrowserInstanceConfig] = None,
 ) -> RuntimeSettings:
     if settings is not None:
         return settings
@@ -127,19 +151,18 @@ def _resolve_runtime_settings(
         request_model_name = ""
         if model.model_config is not None:
             request_model_name = (
-                getattr(model.model_config, "model", None)
-                or getattr(model.model_config, "model_name", None)
-                or ""
+                getattr(model.model_config, "model", None) or getattr(model.model_config, "model_name", None) or ""
             )
         return RuntimeSettings(
             provider=cc.client_provider,
             api_key=cc.api_key,
             api_base=cc.api_base or "",
             model_name=request_model_name,
-            mcp_cfg=build_playwright_mcp_config(),
+            mcp_cfg=build_playwright_mcp_config(instance),
             guardrails=build_browser_guardrails(),
+            instance=instance,
         )
-    return build_runtime_settings()
+    return build_runtime_settings(instance)
 
 
 def build_browser_agent_config(
@@ -159,19 +182,24 @@ def build_browser_agent_config(
     language: Optional[str] = None,
     prompt_mode: Optional[str] = None,
     settings: Optional[RuntimeSettings] = None,
+    browser_key: Optional[str] = None,
+    browser_instance: Optional[BrowserInstanceConfig | Dict[str, Any]] = None,
 ) -> SubAgentConfig:
     """Build a SubAgentConfig that materializes as create_browser_agent()."""
     resolved_language = resolve_language(language)
-    resolved_settings = _resolve_runtime_settings(model, settings)
+    instance = _coerce_browser_instance(browser_instance, browser_key)
+    resolved_settings = _resolve_runtime_settings(model, settings, instance)
     return SubAgentConfig(
-        agent_card=card or AgentCard(
+        agent_card=card
+        or AgentCard(
             name="browser_agent",
             description=DEFAULT_BROWSER_AGENT_DESCRIPTION.get(
                 resolved_language,
                 DEFAULT_BROWSER_AGENT_DESCRIPTION["cn"],
             ),
         ),
-        system_prompt=system_prompt or DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT.get(
+        system_prompt=system_prompt
+        or DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT.get(
             resolved_language,
             DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT["cn"],
         ),
@@ -210,11 +238,14 @@ def create_browser_agent(
     language: Optional[str] = None,
     prompt_mode: Optional[str] = None,
     settings: Optional[RuntimeSettings] = None,
+    browser_key: Optional[str] = None,
+    browser_instance: Optional[BrowserInstanceConfig | Dict[str, Any]] = None,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create the browser subagent with direct browser MCP tools and helper tools."""
     resolved_language = resolve_language(language)
-    resolved_settings = _resolve_runtime_settings(model, settings)
+    instance = _coerce_browser_instance(browser_instance, browser_key)
+    resolved_settings = _resolve_runtime_settings(model, settings, instance)
 
     final_card = card or AgentCard(
         name="browser_agent",
@@ -235,9 +266,11 @@ def create_browser_agent(
         model_name=resolved_settings.model_name,
         mcp_cfg=resolved_settings.mcp_cfg,
         guardrails=resolved_settings.guardrails,
+        instance=resolved_settings.instance,
     )
     injected_tools = build_browser_runtime_tools(browser_backend, language=resolved_language)
-    injected_rails = [BrowserRuntimeRail(browser_backend)]
+    injected_rails: List[AgentRail] = [BrowserRuntimeRail(browser_backend)]
+
     final_tools = list(tools or []) + injected_tools
     final_mcps = list(mcps or [])
     final_rails = list(rails or []) + injected_rails

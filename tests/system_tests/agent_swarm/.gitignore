@@ -2,3 +2,5 @@ logs/
 workspace/
 docs/
 main.py
+openjiuwen_home/
+.e2e_workdir/

@@ -135,8 +135,9 @@ class TestDockerEnvironmentStartStop:
 
     @staticmethod
     @patch("openjiuwen.agent_evolving.evaluator.evaluator_pipeline.docker_env.DockerEnvironment._run_command")
+    @patch("openjiuwen.agent_evolving.evaluator.evaluator_pipeline.docker_env.DockerEnvironment._check_and_log_encoding")
     @pytest.mark.asyncio
-    async def test_start_success(mock_run_command):
+    async def test_start_success(mock_check_encoding, mock_run_command):
         """Test start method succeeds."""
         mock_run_command.return_value = ExecResult(returncode=0, stdout="container-id-12345")
         
@@ -145,6 +146,7 @@ class TestDockerEnvironmentStartStop:
         
         assert env._container_id == "container-id-12345"
         mock_run_command.assert_called_once()
+        mock_check_encoding.assert_called_once()
 
     @staticmethod
     @patch("openjiuwen.agent_evolving.evaluator.evaluator_pipeline.docker_env.DockerEnvironment._run_command")
@@ -293,6 +295,119 @@ class TestDockerEnvironmentCopy:
         result = await env.copy_from("/src/path", Path("/tmp/file"))
         
         assert result is True
+
+
+class TestDockerEnvironmentGetUtf8Locale:
+    """Test DockerEnvironment._get_utf8_locale_name method."""
+
+    @staticmethod
+    @patch.object(DockerEnvironment, "_locale_path", return_value="/usr/bin/locale")
+    @patch("subprocess.run")
+    def test_get_utf8_locale_c_utf8_first(mock_run, mock_locale_path):
+        """Test _get_utf8_locale_name returns C.utf8 as first priority."""
+        mock_run.return_value = MagicMock(
+            stdout="C\nC.utf8\nen_US.utf8\nPOSIX\n",
+            returncode=0
+        )
+        
+        result = DockerEnvironment._get_utf8_locale_name()
+        
+        assert result == "C.utf8"
+        mock_run.assert_called_once()
+
+    @staticmethod
+    @patch.object(DockerEnvironment, "_locale_path", return_value="/usr/bin/locale")
+    @patch("subprocess.run")
+    def test_get_utf8_locale_c_utf8_uppercase(mock_run, mock_locale_path):
+        """Test _get_utf8_locale_name returns C.UTF-8 if C.utf8 not available."""
+        mock_run.return_value = MagicMock(
+            stdout="C\nC.UTF-8\nen_US.UTF-8\nPOSIX\n",
+            returncode=0
+        )
+        
+        result = DockerEnvironment._get_utf8_locale_name()
+        
+        assert result == "C.UTF-8"
+
+    @staticmethod
+    @patch.object(DockerEnvironment, "_locale_path", return_value="/usr/bin/locale")
+    @patch("subprocess.run")
+    def test_get_utf8_locale_en_us_fallback(mock_run, mock_locale_path):
+        """Test _get_utf8_locale_name falls back to en_US.utf8 when C.utf8 not available."""
+        mock_run.return_value = MagicMock(
+            stdout="C\nen_US.utf8\nPOSIX\n",
+            returncode=0
+        )
+        
+        result = DockerEnvironment._get_utf8_locale_name()
+        
+        assert result == "en_US.utf8"
+
+    @staticmethod
+    @patch.object(DockerEnvironment, "_locale_path", return_value="/usr/bin/locale")
+    @patch("subprocess.run")
+    def test_get_utf8_locale_no_utf8(mock_run, mock_locale_path):
+        """Test _get_utf8_locale_name returns default when no UTF-8 locale available."""
+        mock_run.return_value = MagicMock(
+            stdout="C\nPOSIX\n",
+            returncode=0
+        )
+        
+        result = DockerEnvironment._get_utf8_locale_name()
+        
+        assert result == "en_US.utf8"
+
+    @staticmethod
+    @patch.object(DockerEnvironment, "_locale_path", return_value="/usr/bin/locale")
+    @patch("subprocess.run")
+    def test_get_utf8_locale_exception(mock_run, mock_locale_path):
+        """Test _get_utf8_locale_name handles exception gracefully."""
+        mock_run.side_effect = Exception("locale command failed")
+        
+        result = DockerEnvironment._get_utf8_locale_name()
+        
+        assert result == "en_US.utf8"
+
+
+class TestDockerEnvironmentCheckEncoding:
+    """Test DockerEnvironment._check_and_log_encoding method."""
+
+    @staticmethod
+    @patch("openjiuwen.agent_evolving.evaluator.evaluator_pipeline.docker_env.DockerEnvironment.exec")
+    @pytest.mark.asyncio
+    async def test_check_and_log_encoding_success(mock_exec):
+        """Test _check_and_log_encoding succeeds and logs encoding info."""
+        mock_exec.return_value = ExecResult(
+            returncode=0,
+            stdout="LANG: en_US.utf8\nLC_ALL: en_US.utf8\nLANG=en_US.utf8"
+        )
+        
+        env = DockerEnvironment(image_tag="test-image")
+        env._container_id = "test-container"
+        
+        await env._check_and_log_encoding()
+        
+        mock_exec.assert_called_once()
+        call_args = mock_exec.call_args[0][0]
+        assert "LANG" in call_args
+        assert "LC_ALL" in call_args
+
+    @staticmethod
+    @patch("openjiuwen.agent_evolving.evaluator.evaluator_pipeline.docker_env.DockerEnvironment.exec")
+    @pytest.mark.asyncio
+    async def test_check_and_log_encoding_failure(mock_exec):
+        """Test _check_and_log_encoding handles failure gracefully."""
+        mock_exec.return_value = ExecResult(
+            returncode=1,
+            stderr="command failed"
+        )
+        
+        env = DockerEnvironment(image_tag="test-image")
+        env._container_id = "test-container"
+        
+        await env._check_and_log_encoding()
+        
+        mock_exec.assert_called_once()
 
 
 class TestDockerEnvironmentRunCommand:

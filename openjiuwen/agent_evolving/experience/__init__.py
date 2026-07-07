@@ -2,6 +2,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Experience lifecycle orchestration package."""
 
+from openjiuwen.agent_evolving.experience.archive import (
+    DEFAULT_ARCHIVE_KEEP_LATEST,
+    EvolutionArchivePair,
+    EvolutionArchiveService,
+)
 from openjiuwen.agent_evolving.experience.draft_schema import (
     EvolutionSubject,
     EvolveDraft,
@@ -42,6 +47,9 @@ __all__ = [
     "OnlineEvolutionResult",
     "OnlineEvolutionStatus",
     "OnlineEvolutionOrchestrator",
+    "DEFAULT_ARCHIVE_KEEP_LATEST",
+    "EvolutionArchivePair",
+    "EvolutionArchiveService",
     "EvolutionSubject",
     "ExperienceDraft",
     "EvolveDraft",

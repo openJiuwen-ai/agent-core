@@ -432,6 +432,35 @@ def build_tools_content(
         lines.append(f"- task_tool: {_tool_summary('task_tool')}")
         rendered_names.add("task_tool")
 
+    if language == "cn":
+        lines.extend(
+            [
+                "",
+                "## 工具调用去重规则",
+                "",
+                "- 调用工具前先检查本轮对话中是否已经用相同参数调用过同一工具；如果已有结果，优先基于已有结果继续推理，不要重复调用",
+                "- 如果上一次工具结果为空、无匹配或没有提供新信息，不要用完全相同的参数再次调用；应调整查询条件、换用更合适的工具，或直接说明当前结果不足",
+                "- 只有当任务确实需要分步执行、状态已经变化、参数不同，或前一次结果明确要求继续获取下一部分信息时，才可以再次调用同一工具",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "## Tool Call Deduplication Rules",
+                "",
+                "- Before calling a tool, check whether the same tool has already been called with the same "
+                "arguments in this turn; if a result already exists, reason from that result instead of "
+                "repeating the call",
+                "- If the previous tool result was empty, had no matches, or added no new information, do not "
+                "call again with identical arguments; adjust the query, use a better-suited tool, or explain "
+                "that the current result is insufficient",
+                "- Call the same tool again only when the task genuinely requires multiple steps, state has "
+                "changed, arguments differ, or the previous result clearly asks you to fetch the next part of "
+                "the information",
+            ]
+        )
+
     if "bash" in rendered_names:
         if language == "cn":
             lines.extend(

@@ -47,6 +47,9 @@ def nearest_root(
                 if (start_dir / pattern).exists():
                     return str(start_dir)
 
+            if start_dir == stop:
+                return None
+
             # Then traverse upward, applying exclude_patterns as intended
             # (stop before entering directories with .git, etc.)
             current = start_dir.parent

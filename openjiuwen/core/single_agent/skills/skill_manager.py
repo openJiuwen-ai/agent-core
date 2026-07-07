@@ -1,4 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import asyncio
 from typing import Dict, Optional, Union, List
 
 from pathlib import Path
@@ -196,10 +197,13 @@ class SkillManager:
             # root is a parent directory — iterate subdirectories for multiple skills
             if not dir_items:
                 return
-            for d in dir_items:
-                if not d.path or not d.name:
-                    continue
-                await self._try_register_dir_as_skill(fs, str(d.path), session_id, overwrite)
+            register_tasks = [
+                self._try_register_dir_as_skill(fs, str(d.path), session_id, overwrite)
+                for d in dir_items
+                if d.path and d.name
+            ]
+            if register_tasks:
+                await asyncio.gather(*register_tasks)
 
         if skill_path is not None and isinstance(skill_path, Path):
             await _register_root(skill_path)

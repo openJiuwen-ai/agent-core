@@ -70,6 +70,7 @@ class TeamHarness:
         self._initial_plan_mode_seeded = False
         self._active_agent_session: Optional[Any] = None
         self._native_session_id: Optional[str] = None
+        self._bg_controller: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Construction
@@ -119,6 +120,8 @@ class TeamHarness:
         """
         if self._native is None or self._native.state is HarnessState.TERMINATED:
             self._native = NativeHarness(self._agent_spec, self._build_context)
+        if self._bg_controller is not None:
+            self._native.background_task_controller = self._bg_controller
         child = self._make_child_session(team_session)
         await child.pre_run()
         await self._native.start(session=child)
@@ -134,8 +137,17 @@ class TeamHarness:
         """
         if self._native is not None and self._native.state is not HarnessState.TERMINATED:
             await self._native.stop()
-        self._native_session_id = None
-        self._active_agent_session = None
+        try:
+            if self._active_agent_session is not None:
+                await self._active_agent_session.commit()
+        except Exception:
+            logger.debug(
+                "[TeamHarness] commit raised during teardown, ignoring",
+                exc_info=True,
+            )
+        finally:
+            self._native_session_id = None
+            self._active_agent_session = None
 
     async def run_once(self, content: Any, *, team_session: Optional[Any] = None) -> dict[str, Any]:
         """Run one non-streaming execution; returns the ``Runner.run_agent`` dict.
@@ -374,6 +386,33 @@ class TeamHarness:
         if self._native is not None:
             await self._native.unregister_rail(rail)
 
+    def add_tool(self, tool: Any) -> None:
+        """Register one extra tool instance on the running native (idempotent per id).
+
+        Used for per-turn tools a long-lived session needs transiently — e.g. the
+        ``structured_output`` tool an ``agent_session`` turn mounts only while a
+        schema is requested. The ability manager re-qualifies the id per owner, so
+        concurrent sessions never collide; pair with :meth:`remove_tool` at turn end.
+        """
+        if self._native is not None:
+            self._native.ability_manager.add_ability(tool.card, tool)
+
+    def remove_tool(self, name: str) -> None:
+        """Drop a previously :meth:`add_tool`-ed tool by its (unqualified) name."""
+        if self._native is not None:
+            self._native.ability_manager.remove_ability(name)
+
+    def add_rail(self, rail: Any) -> None:
+        """Queue an extra rail on the native brain (registered on next invoke/start).
+
+        Mirrors :meth:`add_tool` for behavioural constraints — e.g. swarmflow
+        mounts a rail that force-finishes a round once ``structured_output`` is
+        captured. Must be called before the round/turn that should honour it
+        (queued into the native's pending rails, registered at init).
+        """
+        if self._native is not None:
+            self._native.add_rail(rail)
+
     def register_member_tools(self, memory_manager: Any) -> None:
         """Register the team memory toolkit on the underlying agent."""
         if self._native is not None:
@@ -383,6 +422,18 @@ class TeamHarness:
         """Inject loaded memory into the agent's system prompt."""
         if self._native is not None:
             await memory_manager.load_and_inject(self._native, query=query)
+
+    def set_background_task_controller(self, controller: Any) -> None:
+        """Attach the embedder's background task controller (pause/resume surface).
+
+        Stored on the adapter so it survives native rebuilds across run cycles
+        (``start`` re-pushes it to the freshly built native); also pushed to the
+        current native immediately so a controller attached after start takes
+        effect without waiting for the next cycle.
+        """
+        self._bg_controller = controller
+        if self._native is not None:
+            self._native.background_task_controller = controller
 
     # ------------------------------------------------------------------
     # Internal access

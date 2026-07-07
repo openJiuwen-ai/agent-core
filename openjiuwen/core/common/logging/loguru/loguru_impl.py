@@ -4,23 +4,19 @@
 """Loguru-backed logger adapter."""
 
 import copy
+import functools
 import json
 import logging
 import sys
+import threading
 import traceback
 from typing import (
     Any,
     ClassVar,
     Dict,
     List,
+    NamedTuple,
 )
-
-
-def _get_loguru():
-    """Lazy-load loguru to avoid import failure when the package is absent."""
-    from loguru import logger as _logger
-    return _logger
-
 
 from openjiuwen.core.common.logging.base_impl import (
     resolve_log_type_label,
@@ -34,6 +30,107 @@ from openjiuwen.core.common.logging.events import (
 )
 from openjiuwen.core.common.logging.protocol import LoggerProtocol
 from openjiuwen.core.common.logging.utils import get_session_id
+
+
+def _get_loguru():
+    """Lazy-load loguru to avoid import failure when the package is absent."""
+    from loguru import logger as _logger
+    return _logger
+
+
+class _SinkKey(NamedTuple):
+    """Signature identifying a physically-distinct loguru sink.
+
+    Loggers whose sinks share this signature (same target file + identical
+    shaping options) reuse a single loguru sink / file descriptor. Being a
+    ``NamedTuple`` keeps it hashable so it can index the shared-sink registry
+    while giving each shaping option an explicit name.
+    """
+
+    target: str
+    level: Any
+    fmt_key: Any
+    serialize: bool
+    colorize: Any
+    enqueue: bool
+    catch: bool
+    backtrace: bool
+    diagnose: bool
+    rotation: Any
+    retention: Any
+    compression: Any
+    encoding: Any
+
+
+class _SharedSinkRegistry:
+    """Process-global registry that deduplicates loguru sinks by physical target.
+
+    Without this, every ``LoguruLogger`` (one per log_type) adds its own loguru
+    sink for the same file — so N log_types open N file descriptors to the same
+    ``jiuwen.log`` and every record is evaluated against N sink filters. Here a
+    sink with an identical shaping signature (target/format/rotation/...) is
+    added to loguru exactly once; a single dispatch filter fans the record out
+    to the per-log_type filters of whichever loggers route to that sink.
+    """
+
+    class _Entry:
+        __slots__ = ("sink_id", "filters")
+
+        def __init__(self, sink_id: int) -> None:
+            self.sink_id = sink_id
+            # log_type_label -> list of per-logger record_filter callables
+            self.filters: Dict[str, List[Any]] = {}
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._entries: Dict[Any, "_SharedSinkRegistry._Entry"] = {}
+
+    def register(self, key: Any, log_type_label: str, record_filter: Any, add_sink: Any) -> int:
+        """Attach ``log_type_label``'s filter to the sink for ``key``.
+
+        ``add_sink(dispatch_filter) -> sink_id`` is invoked only the first time a
+        sink for ``key`` is needed; ``dispatch_filter`` is the shared loguru
+        filter that routes records to the registered per-log_type filters.
+        """
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                def dispatch_filter(record: Dict[str, Any], _key: Any = key) -> bool:
+                    current = self._entries.get(_key)
+                    if current is None:
+                        return False
+                    fns = current.filters.get(record["extra"].get("log_type"))
+                    if not fns:
+                        return False
+                    # snapshot to stay safe against concurrent register/unregister
+                    return any(fn(record) for fn in tuple(fns))
+
+                sink_id = add_sink(dispatch_filter)
+                entry = self._Entry(sink_id)
+                self._entries[key] = entry
+
+            fns = entry.filters.setdefault(log_type_label, [])
+            if record_filter not in fns:
+                fns.append(record_filter)
+            return entry.sink_id
+
+    def unregister(self, key: Any, log_type_label: str, record_filter: Any, remove_sink: Any) -> None:
+        """Detach ``log_type_label``'s filter; remove the sink when it is unused."""
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return
+            fns = entry.filters.get(log_type_label)
+            if fns and record_filter in fns:
+                fns.remove(record_filter)
+            if fns is not None and not fns:
+                entry.filters.pop(log_type_label, None)
+            if not entry.filters:
+                self._entries.pop(key, None)
+                remove_sink(entry.sink_id)
+
+
+_SHARED_SINK_REGISTRY = _SharedSinkRegistry()
 
 
 class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
@@ -57,6 +154,8 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
         self.config = config.copy()
         self._log_type_label = resolve_log_type_label(log_type)
         self._sink_ids: List[int] = []
+        # shared-sink registrations made by this logger: (sink_key, record_filter)
+        self._shared_registrations: List[Any] = []
         self._handler_sink_ids: Dict[logging.Handler, int] = {}
         self._filters: List[Any] = []
         self._effective_level_no = self._to_level_no(self.config.get("effective_level", self.config.get("level")))
@@ -97,8 +196,63 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
 
         for sink_config in self.config.get("sinks", []):
             sink_options = self._build_sink_options(sink_config)
-            sink_id = self._logger.add(**sink_options)
+            key = self._sink_key(sink_options)
+            record_filter = sink_options["filter"]
+
+            # Bind sink_options by value here; functools.partial captures the
+            # current loop value, avoiding the late-binding closure pitfall.
+            add_sink = functools.partial(self._add_shared_sink, sink_options)
+            sink_id = _SHARED_SINK_REGISTRY.register(
+                key, self._log_type_label, record_filter, add_sink
+            )
             self._sink_ids.append(sink_id)
+            self._shared_registrations.append((key, record_filter))
+
+    def _add_shared_sink(self, sink_options: Dict[str, Any], dispatch_filter: Any) -> int:
+        """Add a loguru sink using ``sink_options`` with the shared dispatch filter.
+
+        Args:
+            sink_options: The sink configuration captured for this call.
+            dispatch_filter: The shared filter routing records to per-log_type filters.
+
+        Returns:
+            The loguru sink id.
+        """
+        opts = dict(sink_options)
+        opts["filter"] = dispatch_filter
+        return self._logger.add(**opts)
+
+    @staticmethod
+    def _sink_key(sink_options: Dict[str, Any]) -> _SinkKey:
+        """Build the ``_SinkKey`` signature for a set of sink options."""
+        sink = sink_options.get("sink")
+        if isinstance(sink, str):
+            target = sink
+        elif sink is sys.stdout:
+            target = "<stdout>"
+        elif sink is sys.stderr:
+            target = "<stderr>"
+        else:
+            target = f"<stream:{id(sink)}>"
+
+        fmt = sink_options.get("format")
+        fmt_key = f"<fn:{id(fmt)}>" if callable(fmt) else fmt
+
+        return _SinkKey(
+            target=target,
+            level=sink_options.get("level"),
+            fmt_key=fmt_key,
+            serialize=bool(sink_options.get("serialize")),
+            colorize=sink_options.get("colorize"),
+            enqueue=bool(sink_options.get("enqueue")),
+            catch=bool(sink_options.get("catch")),
+            backtrace=bool(sink_options.get("backtrace")),
+            diagnose=bool(sink_options.get("diagnose")),
+            rotation=sink_options.get("rotation"),
+            retention=sink_options.get("retention"),
+            compression=sink_options.get("compression"),
+            encoding=sink_options.get("encoding"),
+        )
 
     def _build_sink_options(self, sink_config: Dict[str, Any]) -> Dict[str, Any]:
         target = self._resolve_sink_target(sink_config.get("target"))
@@ -208,7 +362,6 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
                 return False
 
         return True
-
 
     @staticmethod
     def _render_event_text(event_dict: Dict[str, Any]) -> str:
@@ -489,13 +642,28 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
         return self._logger
 
     def close(self) -> None:
+        # Per-instance handler sinks (added via add_handler) are owned outright.
         handler_sink_ids = list(self._handler_sink_ids.values())
         self._handler_sink_ids.clear()
-
-        for sink_id in self._sink_ids + handler_sink_ids:
+        for sink_id in handler_sink_ids:
             try:
                 _get_loguru().remove(sink_id)
             except ValueError:
                 continue
+
+        # File/stream sinks are shared: detach this log_type and let the registry
+        # drop the underlying loguru sink only when no logger routes to it anymore.
+        def _remove_sink(sink_id: int) -> None:
+            try:
+                _get_loguru().remove(sink_id)
+            except ValueError:
+                pass
+
+        registrations = self._shared_registrations
+        self._shared_registrations = []
+        for key, record_filter in registrations:
+            _SHARED_SINK_REGISTRY.unregister(
+                key, self._log_type_label, record_filter, _remove_sink
+            )
 
         self._sink_ids = []

@@ -110,6 +110,10 @@ class TeamLifecycleController(Protocol):
         """Emit a team-completed marker chunk, then close the leader stream."""
         ...
 
+    async def finalize_non_contributing_worktrees(self) -> None:
+        """Remove current-session teammate worktrees that did not contribute commits."""
+        ...
+
 
 @runtime_checkable
 class PollController(Protocol):
@@ -188,7 +192,7 @@ class EventDispatcher:
 
         self._framework = AsyncCallbackFramework(
             enable_metrics=False,
-            enable_logging=False,
+            enable_logging=True,
         )
         # Register order matters for fan-out on shared event_keys.
         # MEMBER_SHUTDOWN is the example: MemberHandler.on_member_event

@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
+from openjiuwen.agent_evolving.experience.archive import EvolutionArchivePair, EvolutionArchiveService
 from openjiuwen.agent_evolving.experience.draft_schema import normalize_subject
 from openjiuwen.core.common.logging import logger
 
@@ -14,8 +15,9 @@ from openjiuwen.core.common.logging import logger
 class ExperienceRebuildService:
     """Prepare deterministic rebuild context without generating the rebuilt skill body."""
 
-    def __init__(self, *, store: Any) -> None:
+    def __init__(self, *, store: Any, archive_service: EvolutionArchiveService | None = None) -> None:
         self._store = store
+        self._archive_service = archive_service or EvolutionArchiveService(store=store)
 
     async def prepare_rebuild_context(
         self,
@@ -33,20 +35,16 @@ class ExperienceRebuildService:
         if not self._store.skill_exists(skill_name, subject_kind=subject_kind):
             return None
 
-        try:
-            await self._store.archive_skill_body(skill_name, subject_kind=subject_kind)
-        except Exception as exc:  # pragma: no cover - logging only
-            logger.warning("[ExperienceRebuildService] skill body archive failed for '%s': %s", skill_name, exc)
+        records_log = await self._store.load_full_evolution_log(skill_name, subject_kind=subject_kind)
 
-        evo_archive: Optional[str] = None
+        archive_pair: Optional[EvolutionArchivePair] = None
         archive_error: Optional[Exception] = None
         try:
-            evo_archive = await self._store.archive_evolutions(skill_name, subject_kind=subject_kind)
+            archive_pair = await self._archive_service.archive_current_pair(skill_name, subject_kind=subject_kind)
         except Exception as exc:
             archive_error = exc
-            logger.warning("[ExperienceRebuildService] evolutions archive failed for '%s': %s", skill_name, exc)
+            logger.warning("[ExperienceRebuildService] archive pair failed for '%s': %s", skill_name, exc)
 
-        records_log = await self._store.load_full_evolution_log(skill_name, subject_kind=subject_kind)
         filtered_records = _filter_rebuild_records(records_log.entries, min_score=min_score)
         context = _build_rebuild_context_payload(
             filtered_records,
@@ -59,13 +57,16 @@ class ExperienceRebuildService:
                 "skill_name": skill_name,
                 "user_intent": user_intent,
                 "min_score": min_score,
-                "archive_path": evo_archive,
+                "archive_path": archive_pair.evolution_archive_name if archive_pair else None,
+                "archive_pair": archive_pair.to_payload() if archive_pair else None,
+                "archive_version": archive_pair.version if archive_pair else None,
                 "archive_error": archive_error,
             }
         )
 
-        if evo_archive:
+        if archive_pair:
             await self._store.clear_evolutions(skill_name, subject_kind=subject_kind)
+            self._archive_service.prune(skill_name, subject_kind=subject_kind)
 
         return context
 

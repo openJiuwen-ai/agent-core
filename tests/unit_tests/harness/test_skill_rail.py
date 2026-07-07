@@ -319,7 +319,22 @@ async def test_skill_rail_skill_tool_reads_multimodal_skill_in_hint_mode(tmp_pat
     )
 
     sys_operation = _make_sys_operation(tmp_path)
-    agent = _make_agent(sys_operation, skills_root)
+    agent = create_deep_agent(
+        model=init_model(
+            provider="OpenAI",
+            model_name="dummy-model",
+            api_key="dummy-key",
+            api_base="https://example.com/v1",
+            verify_ssl=False,
+        ),
+        card=AgentCard(name="test_skill_agent", description="test skill agent"),
+        system_prompt="You are a test assistant.",
+        max_iterations=3,
+        enable_task_loop=False,
+        workspace=skills_root,
+        sys_operation=sys_operation,
+        enable_read_image_multimodal=True,
+    )
     skill_rail = SkillUseRail(
         skills_dir=str(skills_root),
         skill_mode="all",

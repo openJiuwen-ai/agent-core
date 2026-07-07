@@ -12,3 +12,4 @@
 | [AgentMemoryConfig](./memory/config.md) | Agent 级记忆策略配置类（定义需要提取的变量记忆和是否开启长期记忆）。 |
 | [BaseKVStore](./memory/store.md)      | KV 存储抽象基类。 |
 | [BaseDbStore](./memory/store.md)      | 关系型数据库存储抽象基类。 |
+| [LakeBaseMemoryProvider](./memory/external/lakebase_memory_provider.md) | 基于 LakeBase的外部记忆提供者，支持语义检索、记忆类型、分支与版本快照。 |

@@ -22,17 +22,14 @@ from openjiuwen.agent_teams.messager import (
     Messager,
     create_messager,
 )
-from openjiuwen.agent_teams.paths import (
-    independent_member_workspace,
-    team_home,
-)
+from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.paths import (
     team_memory_dir as default_team_memory_dir,
 )
 from openjiuwen.agent_teams.prompts import role_policy
 from openjiuwen.agent_teams.runtime.team_plan import is_team_plan_enabled
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
-from openjiuwen.agent_teams.schema.deep_agent_spec import SysOperationSpec, WorkspaceSpec
+from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec, SysOperationSpec, WorkspaceSpec
 from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
@@ -40,6 +37,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.agent_teams.workspace_layout import ensure_team_member_workspace_link
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.spawn.agent_config import (
     SpawnAgentConfig,
@@ -56,6 +54,12 @@ if TYPE_CHECKING:
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
+_TEAM_WORKTREE_BASH_DENY_PATTERNS = [
+    r"\bgit(?:\s+(?:-[A-Za-z](?:\s+\S+)?|--[^\s;&|]+(?:=\S+)?))*\s+worktree\s+"
+    r"(?:add|remove|prune|move|repair|lock|unlock)\b",
+]
+
+
 def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     if spec.team_mode is not None:
         return spec.team_mode
@@ -68,6 +72,49 @@ def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     avatar_roles = {TeamRole.HUMAN_AGENT, TeamRole.BRIDGE_AGENT}
     non_avatar_predefined = [m for m in spec.predefined_members if m.role_type not in avatar_roles]
     return "hybrid" if non_avatar_predefined else "default"
+
+
+def _apply_team_worktree_shell_guard(rails: list[Any], *, enabled: bool) -> list[Any]:
+    """Merge team-managed worktree shell guards into core.sys_operation rails."""
+    if not enabled:
+        return rails
+    from openjiuwen.agent_teams.rails.builtin_elements import SYS_OPERATION
+
+    guarded: list[Any] = []
+    found_sys_operation = False
+    for rail in rails:
+        if getattr(rail, "type", None) != SYS_OPERATION:
+            guarded.append(rail)
+            continue
+        found_sys_operation = True
+        params = dict(getattr(rail, "params", None) or {})
+        deny_patterns = list(params.get("bash_deny_patterns") or [])
+        for pattern in _TEAM_WORKTREE_BASH_DENY_PATTERNS:
+            if pattern not in deny_patterns:
+                deny_patterns.append(pattern)
+        params["bash_deny_patterns"] = deny_patterns
+        guarded.append(rail.model_copy(update={"params": params}))
+    if not found_sys_operation:
+        guarded.append(
+            RailSpec(
+                type=SYS_OPERATION,
+                params={"bash_deny_patterns": list(_TEAM_WORKTREE_BASH_DENY_PATTERNS)},
+            )
+        )
+    return guarded
+
+
+def _has_team_worktree_shell_guard(rails: list[Any]) -> bool:
+    from openjiuwen.agent_teams.rails.builtin_elements import SYS_OPERATION
+
+    for rail in rails:
+        if getattr(rail, "type", None) != SYS_OPERATION:
+            continue
+        params = getattr(rail, "params", None) or {}
+        deny_patterns = set(params.get("bash_deny_patterns") or [])
+        if all(pattern in deny_patterns for pattern in _TEAM_WORKTREE_BASH_DENY_PATTERNS):
+            return True
+    return False
 
 
 class AgentConfigurator:
@@ -201,6 +248,7 @@ class AgentConfigurator:
         ctx: TeamRuntimeContext,
         *,
         on_teammate_created=None,
+        on_before_team_cleaned=None,
         on_team_cleaned=None,
         on_team_built=None,
     ) -> None:
@@ -238,12 +286,25 @@ class AgentConfigurator:
             spec,
             ctx,
             self.messager,
+            on_before_team_cleaned=on_before_team_cleaned,
             on_team_cleaned=on_team_cleaned,
             on_team_built=on_team_built,
         )
 
         if ctx.role == TeamRole.LEADER and spec.worktree and spec.worktree.enabled:
             self.worktree_manager = self.create_worktree_manager(spec)
+
+        # Tiny-agent model resolver: map a model_name to a TeamModelConfig against
+        # the team pool (None when no pool / unknown name). Stored on infra so
+        # team-scoped tiny agents and ephemeral callers resolve a model name
+        # identically. See openjiuwen.agent_teams.tiny_agent.
+        if ctx.team_spec is not None:
+            from openjiuwen.agent_teams.models.allocator import resolve_member_model
+
+            def _tiny_model_resolver(model_name: str, _team_spec=ctx.team_spec) -> Any:
+                return resolve_member_model(_team_spec, model_name=model_name, model_index=None)
+
+            self._infra.tiny_agent_model_resolver = _tiny_model_resolver
 
     @staticmethod
     def create_workspace_manager(
@@ -366,6 +427,9 @@ class AgentConfigurator:
         ws_spec = agent_spec.workspace or spec.agents.get("leader", agent_spec).workspace
         workspace_is_worktree = bool(ctx.worktree_path)
         if ctx.worktree_path:
+            # Team-managed isolation creates the teammate worktree before this
+            # point. Build the DeepAgent with that worktree as its visible
+            # workspace so shell/file tools start inside the isolated checkout.
             base_ws_spec = ws_spec or WorkspaceSpec()
             ws_spec = base_ws_spec.model_copy(
                 update={
@@ -375,13 +439,9 @@ class AgentConfigurator:
             )
         if ws_spec and ws_spec.stable_base:
             team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
-            base = team_home(team_name) / "workspaces"
-            team_ws_path = base / f"{member_name}_workspace"
-            independent_ws = independent_member_workspace(member_name)
-            if independent_ws.is_dir() and not team_ws_path.exists():
-                base.mkdir(parents=True, exist_ok=True)
-                os.symlink(str(independent_ws), str(team_ws_path), target_is_directory=True)
-            ws_spec = ws_spec.model_copy(update={"root_path": str(team_ws_path)})
+            ws_spec = ws_spec.model_copy(
+                update={"root_path": ensure_team_member_workspace_link(team_name, member_name)}
+            )
 
         workspace_root_path = ws_spec.root_path if ws_spec is not None else None
         should_register_cleanup_path = (
@@ -441,7 +501,6 @@ class AgentConfigurator:
         )
         from openjiuwen.agent_teams.rails.team_context import inject_team_handles
         from openjiuwen.agent_teams.schema.build_context import BuildContext
-        from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
 
         ensure_harness_elements_registered()
 
@@ -480,7 +539,6 @@ class AgentConfigurator:
                     "team_workspace_mount": team_workspace_mount,
                     "team_workspace_path": team_workspace_path,
                     "expose_human_agents_to_teammates": spec.expose_human_agents_to_teammates,
-                    "enable_swarmflow": spec.enable_swarmflow,
                 },
             ),
         ]
@@ -547,12 +605,23 @@ class AgentConfigurator:
         # extras. With a platform-supplied build_context, derive a per-member
         # view and decouple its extras (so members never share handles /
         # caches); otherwise synthesize a minimal context.
+        # Workspace root controls where the agent runs; project_dir controls
+        # project-scoped providers such as LSP and prompt workspace context.
+        # Keep both on the same worktree to avoid a teammate running in the
+        # isolated checkout while project-aware capabilities still point at the
+        # original repository.
+        member_project_dir = ctx.worktree_path if ctx.worktree_path else None
         if spec.build_context is not None:
+            context_overrides: dict[str, Any] = {
+                "member_name": member_name,
+                "role": ctx.role.value,
+                "language": resolved_language,
+                "member_card_id": self._card.id,
+            }
+            if member_project_dir:
+                context_overrides["project_dir"] = member_project_dir
             member_build_context = spec.build_context.derive(
-                member_name=member_name,
-                role=ctx.role.value,
-                language=resolved_language,
-                member_card_id=self._card.id,
+                **context_overrides,
             )
             member_build_context.extras = dict(member_build_context.extras)
         else:
@@ -561,6 +630,7 @@ class AgentConfigurator:
                 member_name=member_name,
                 role=ctx.role.value,
                 member_card_id=self._card.id,
+                project_dir=member_project_dir,
             )
         # Swarmflow worker-model resolver (leader + enable_swarmflow only). A
         # positional pool lookup by ``agent(model=...)`` name hint; None when the
@@ -568,6 +638,8 @@ class AgentConfigurator:
         # leader-only async ``swarmflow`` tool is gated on this being non-None.
         swarmflow_model_resolver: Optional[Callable[[str], Any]] = None
         swarmflow_worker_base_spec = None
+        swarmflow_human_base_spec = None
+        swarmflow_concurrency_governor = None
         if ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
             team_spec_for_models = ctx.team_spec
 
@@ -592,6 +664,10 @@ class AgentConfigurator:
             # straight from it has no team tools by construction.
             base_specs = spec.agents
             swarmflow_worker_base_spec = base_specs.get("teammate") or base_specs.get("leader")
+            # Human-session avatars derive from the human_agent spec; fall back to
+            # the worker base spec so human_session still works when no dedicated
+            # human_agent spec is configured (it just lacks human-tuned persona).
+            swarmflow_human_base_spec = base_specs.get("human_agent") or swarmflow_worker_base_spec
 
             # Workers also need the observability rail for agent spans.
             if swarmflow_worker_base_spec is not None:
@@ -602,6 +678,17 @@ class AgentConfigurator:
                     },
                 )
 
+            from openjiuwen.agent_teams.workflow.concurrency import (
+                ConcurrencyGovernor,
+                validate_swarmflow_concurrency,
+            )
+
+            l2_cap = validate_swarmflow_concurrency(spec.swarmflow_concurrency)
+            swarmflow_concurrency_governor = ConcurrencyGovernor(
+                spec.swarmflow_concurrency,
+                agents_per_run_cap=l2_cap,
+            )
+
         inject_team_handles(
             member_build_context.extras,
             team_backend=self.team_backend,
@@ -611,15 +698,27 @@ class AgentConfigurator:
             on_teammate_created=self._on_teammate_created,
             swarmflow_model_resolver=swarmflow_model_resolver,
             swarmflow_worker_base_spec=swarmflow_worker_base_spec,
+            swarmflow_human_base_spec=swarmflow_human_base_spec,
+            swarmflow_concurrency_governor=swarmflow_concurrency_governor,
             reliability_components=reliability_components,
             permissions_override=ctx.permissions_override,
+            worktree_manager=self.worktree_manager,
         )
 
         # Fold the team rails into the spec rails (after the user rails, to keep
         # the init order consistent with the legacy mount order).
         team_rail_specs.append(observability_rail_spec)
+        base_rails = _apply_team_worktree_shell_guard(
+            list(build_spec.rails or []),
+            enabled=ctx.role in {TeamRole.LEADER, TeamRole.TEAMMATE},
+        )
+        if ctx.role in {TeamRole.LEADER, TeamRole.TEAMMATE} and not _has_team_worktree_shell_guard(base_rails):
+            team_logger.warning(
+                "Team-managed worktree shell guard was not applied for member {} because core.sys_operation is absent",
+                member_name,
+            )
         build_spec = build_spec.model_copy(
-            update={"rails": list(build_spec.rails or []) + team_rail_specs},
+            update={"rails": base_rails + team_rail_specs},
         )
 
         self.harness = TeamHarness.build(
@@ -704,6 +803,7 @@ class AgentConfigurator:
         ctx: TeamRuntimeContext,
         messager: Messager,
         *,
+        on_before_team_cleaned=None,
         on_team_cleaned=None,
         on_team_built=None,
     ) -> TeamBackend:
@@ -719,6 +819,9 @@ class AgentConfigurator:
                 on the ``clean_team`` success path. Wired for every role;
                 only the leader can ever fire it (``clean_team`` is a
                 leader-only tool).
+            on_before_team_cleaned: Optional async callback threaded into
+                ``TeamBackend`` before the team DB row is deleted. Cleanup
+                that needs member metadata should be wired here.
             on_team_built: Optional async callback threaded into the
                 ``TeamBackend`` so the hosting ``TeamAgent`` can persist
                 DB lifecycle state after ``build_team`` succeeds.
@@ -744,6 +847,7 @@ class AgentConfigurator:
             enable_hitt=spec.enable_hitt,
             enable_bridge=spec.enable_bridge,
             external_cli_agents=spec.external_cli_agents,
+            on_before_team_cleaned=on_before_team_cleaned,
             on_team_cleaned=on_team_cleaned,
             on_team_built=on_team_built,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
@@ -754,8 +858,6 @@ class AgentConfigurator:
 
         if self.workspace_manager:
             agent_team.register_cleanup_path(self.workspace_manager.workspace_path)
-
-        agent_team.register_cleanup_path(str(team_home(team_name)))
 
         return agent_team
 

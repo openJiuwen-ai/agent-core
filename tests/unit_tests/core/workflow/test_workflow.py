@@ -2489,3 +2489,38 @@ async def test_topology_b_if_path():
     assert llm2.ran, "LLM2 should execute on if path"
     assert "llm2_if_resp" in rendered, \
         f"Output should contain LLM2 result, got: {rendered}"
+
+
+async def test_nested_branch_barrier_cnf_merge():
+    """Nested branch exits must OR-merge at wait_for_all, not AND across levels."""
+    flow = Workflow()
+    flow.set_start_comp(
+        "start",
+        MockStartNode("start"),
+        inputs_schema={"route": "${route}", "val": "${val}"},
+    )
+
+    outer = BranchComponent()
+    outer.add_branch("${start.route} == 'inner'", "inner")
+    outer.add_branch("${start.route} == 'direct'", "c")
+
+    inner = BranchComponent()
+    inner.add_branch("${start.val} == 1", "a")
+    inner.add_branch("${start.val} == 2", "b")
+
+    flow.add_workflow_comp("outer", outer)
+    flow.add_workflow_comp("inner", inner)
+    flow.add_workflow_comp("a", Node1("a"), inputs_schema={"a": "${start.val}"})
+    flow.add_workflow_comp("b", Node1("b"), inputs_schema={"b": "${start.val}"})
+    flow.add_workflow_comp("c", Node1("c"), inputs_schema={"c": "${start.route}"})
+    flow.add_workflow_comp("merge", CountNode("merge"), wait_for_all=True)
+    flow.set_end_comp("end", MockEndNode("end"), inputs_schema={"count": "${merge.count}"})
+
+    flow.add_connection("start", "outer")
+    flow.add_connection("a", "merge")
+    flow.add_connection("b", "merge")
+    flow.add_connection("c", "merge")
+    flow.add_connection("merge", "end")
+
+    result = await flow.invoke({"route": "inner", "val": 1}, create_workflow_session())
+    assert result.result == {"count": 1}

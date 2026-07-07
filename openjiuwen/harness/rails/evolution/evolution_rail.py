@@ -17,12 +17,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
+from copy import deepcopy
 from enum import Enum
 from typing import Any, List, Optional, Union
 
 from openjiuwen.agent_evolving.signal.from_conv import ConversationSignalDetector
 from openjiuwen.agent_evolving.trajectory import (
     InMemoryTrajectoryStore,
+    LegacyTrajectory,
     LLMCallDetail,
     MemberTrajectorySnapshot,
     ToolCallDetail,
@@ -31,6 +34,8 @@ from openjiuwen.agent_evolving.trajectory import (
     TrajectorySink,
     TrajectoryStep,
     TrajectoryStore,
+    ensure_otlp_handlers_registered,
+    to_legacy_trajectory,
 )
 from openjiuwen.core.common.background_tasks import BackgroundTask
 from openjiuwen.core.common.logging import logger
@@ -208,6 +213,8 @@ class EvolutionRail(DeepAgentRail):
         self._member_role: Optional[str] = None
         self._last_llm_ref: Optional[str] = None
         self._tool_call_parent_refs: dict[str, str] = {}
+        self.trajectory_consumer_id = f"{type(self).__name__}:{id(self):x}"
+        self.trajectory_state_manager = ensure_otlp_handlers_registered()
 
         self._async_evolution = async_evolution
         self._bg_tasks: set[BackgroundTask] = set()
@@ -223,6 +230,15 @@ class EvolutionRail(DeepAgentRail):
     def disabled_skills(self) -> set[str]:
         """Set of skill names excluded from self-optimization."""
         return self._disabled_skills
+
+    def init(self, agent: Any) -> None:
+        """Ensure process-wide trajectory trace handlers are registered."""
+        super().init(agent)
+        self.trajectory_state_manager = ensure_otlp_handlers_registered()
+
+    def uninit(self, agent: Any) -> None:
+        """Run rail cleanup without unregistering process-wide trajectory handlers."""
+        super().uninit(agent)
 
     @classmethod
     def _normalize_name_set(cls, raw: Optional[Union[str, list[str]]]) -> set[str]:
@@ -269,6 +285,7 @@ class EvolutionRail(DeepAgentRail):
                 "[EvolutionRail] reusing trajectory builder session_id=%s",
                 session_id,
             )
+            self._bind_trajectory_trace(ctx)
             await self._on_before_invoke(ctx)
             return
 
@@ -291,6 +308,7 @@ class EvolutionRail(DeepAgentRail):
             member_id,
             self._member_role,
         )
+        self._bind_trajectory_trace(ctx)
 
         # Trigger extension point for subclasses
         await self._on_before_invoke(ctx)
@@ -355,7 +373,7 @@ class EvolutionRail(DeepAgentRail):
         if self._evolution_trigger == EvolutionTriggerPoint.AFTER_MODEL_CALL and self._allow_evolution_trigger(
             EvolutionTriggerPoint.AFTER_MODEL_CALL, ctx
         ):
-            trajectory = self._build_trajectory()
+            trajectory = self._build_trajectory(ctx)
             if trajectory is not None:
                 await self._trigger_evolution(trajectory, ctx)
 
@@ -403,7 +421,7 @@ class EvolutionRail(DeepAgentRail):
         if self._evolution_trigger == EvolutionTriggerPoint.AFTER_TOOL_CALL and self._allow_evolution_trigger(
             EvolutionTriggerPoint.AFTER_TOOL_CALL, ctx
         ):
-            trajectory = self._build_trajectory()
+            trajectory = self._build_trajectory(ctx)
             if trajectory is not None:
                 await self._trigger_evolution(trajectory, ctx)
 
@@ -414,7 +432,7 @@ class EvolutionRail(DeepAgentRail):
         if self._evolution_trigger == EvolutionTriggerPoint.AFTER_TASK_ITERATION and self._allow_evolution_trigger(
             EvolutionTriggerPoint.AFTER_TASK_ITERATION, ctx
         ):
-            trajectory = self._build_trajectory()
+            trajectory = self._build_trajectory(ctx)
             if trajectory is not None:
                 await self._trigger_evolution(trajectory, ctx)
 
@@ -423,23 +441,31 @@ class EvolutionRail(DeepAgentRail):
         if self._builder is None:
             return
 
-        trajectory = self._build_trajectory()
-        if trajectory is None:
-            return
+        trace_id = self._trace_id_from_ctx(ctx)
+        try:
+            trajectory = self._build_trajectory(ctx, finalize=True)
+            if trajectory is None:
+                return
 
-        self._trajectory_store.save(trajectory)
+            self._trajectory_store.save(trajectory)
 
-        self._publish_trajectory_snapshot(trajectory)
+            self._publish_trajectory_snapshot(trajectory)
 
-        # Extension point: called after saving, before builder is cleared
-        await self._on_after_invoke(ctx)
+            # Extension point: called after saving, before builder is cleared
+            await self._on_after_invoke(ctx)
 
-        # Trigger evolution if configured for after_invoke
-        if self._evolution_trigger == EvolutionTriggerPoint.AFTER_INVOKE and self._allow_evolution_trigger(
-            EvolutionTriggerPoint.AFTER_INVOKE, ctx
-        ):
-            await self._trigger_evolution(trajectory, ctx)
-            await self._on_after_evolution_triggered(trajectory, ctx)
+            # Trigger evolution if configured for after_invoke
+            if self._evolution_trigger == EvolutionTriggerPoint.AFTER_INVOKE and self._allow_evolution_trigger(
+                EvolutionTriggerPoint.AFTER_INVOKE, ctx
+            ):
+                await self._trigger_evolution(trajectory, ctx)
+                await self._on_after_evolution_triggered(to_legacy_trajectory(trajectory), ctx)
+        finally:
+            if trace_id is not None:
+                self.trajectory_state_manager.release_trace(
+                    trace_id,
+                    consumer_id=self.trajectory_consumer_id,
+                )
 
     # ---- Trajectory helper methods ----
 
@@ -463,18 +489,151 @@ class EvolutionRail(DeepAgentRail):
         """
         self._builder = None
         self._last_llm_ref = None
+        self._tool_call_parent_refs = {}
 
-    def _build_trajectory(self) -> Optional[Trajectory]:
+    def _build_trajectory(
+        self,
+        ctx: Optional[AgentCallbackContext] = None,
+        *,
+        finalize: bool = False,
+    ) -> Optional[LegacyTrajectory]:
         """Build trajectory from current builder with snapshot.
 
         Returns trajectory on success, None if no builder.
         """
+        trace_trajectory = self._build_trace_trajectory(ctx, finalize=finalize) if ctx is not None else None
+        if trace_trajectory is not None:
+            return self._merge_builder_step_projection(to_legacy_trajectory(trace_trajectory))
         if self._builder is None:
             return None
-        trajectory = self._builder.build()
-        # Snapshot steps to avoid shared-reference mutation
-        trajectory.steps = list(trajectory.steps)
-        return trajectory
+        meta = dict(self._builder.meta)
+        meta.pop("source", None)
+        legacy = LegacyTrajectory(
+            execution_id=str(uuid.uuid4()),
+            steps=list(self._builder.steps),
+            source=self._builder.source,
+            case_id=self._builder.case_id,
+            session_id=self._builder.session_id,
+            cost=self._builder.cost if self._builder.cost["input_tokens"] > 0 else None,
+            meta=meta,
+        )
+        return legacy
+
+    def _merge_builder_step_projection(self, legacy: LegacyTrajectory) -> LegacyTrajectory:
+        """Merge builder-only RL fields into a trace-backed legacy projection."""
+        if self._builder is None or not self._builder.steps:
+            return legacy
+
+        builder_steps = list(self._builder.steps)
+        builder_index = 0
+        for target_step in legacy.steps:
+            while (
+                builder_index < len(builder_steps)
+                and builder_steps[builder_index].kind != target_step.kind
+            ):
+                builder_index += 1
+            if builder_index >= len(builder_steps):
+                break
+
+            source_step = builder_steps[builder_index]
+            builder_index += 1
+            if target_step.reward is None:
+                target_step.reward = source_step.reward
+            if target_step.prompt_token_ids is None:
+                target_step.prompt_token_ids = deepcopy(source_step.prompt_token_ids)
+            if target_step.completion_token_ids is None:
+                target_step.completion_token_ids = deepcopy(source_step.completion_token_ids)
+            if target_step.logprobs is None:
+                target_step.logprobs = deepcopy(source_step.logprobs)
+            for key, value in (source_step.meta or {}).items():
+                if value is not None:
+                    target_step.meta.setdefault(key, deepcopy(value))
+        return legacy
+
+    def _build_trace_trajectory(
+        self,
+        ctx: AgentCallbackContext,
+        *,
+        finalize: bool,
+    ) -> Optional[Trajectory]:
+        trace_id = self._trace_id_from_ctx(ctx)
+        if trace_id is None:
+            return None
+
+        session_id = self._builder.session_id if self._builder is not None else self._session_id_from_ctx(ctx)
+        member_id = self._builder.member_id if self._builder is not None else self._member_id_from_ctx(ctx)
+        meta = dict(self._builder.meta) if self._builder is not None else {}
+        if self._member_role:
+            meta.setdefault("member_role", self._member_role)
+        source = self._trajectory_source_name()
+
+        self.trajectory_state_manager.bind_trace(
+            trace_id,
+            session_id=session_id,
+            source=source,
+            member_id=member_id,
+            meta=meta,
+            consumer_id=self.trajectory_consumer_id,
+        )
+        return self.trajectory_state_manager.build_trajectory(
+            trace_id,
+            session_id=session_id,
+            source=source,
+            member_id=member_id,
+            meta=meta,
+            max_steps=self._max_trajectory_steps,
+            finalize=finalize,
+        )
+
+    def _bind_trajectory_trace(self, ctx: AgentCallbackContext) -> None:
+        trace_id = self._trace_id_from_ctx(ctx)
+        if trace_id is None:
+            return
+        session_id = self._builder.session_id if self._builder is not None else self._session_id_from_ctx(ctx)
+        member_id = self._builder.member_id if self._builder is not None else self._member_id_from_ctx(ctx)
+        meta = dict(self._builder.meta) if self._builder is not None else {}
+        if self._member_role:
+            meta.setdefault("member_role", self._member_role)
+        self.trajectory_state_manager.bind_trace(
+            trace_id,
+            session_id=session_id,
+            source=self._trajectory_source_name(),
+            member_id=member_id,
+            meta=meta,
+            consumer_id=self.trajectory_consumer_id,
+        )
+
+    def _trajectory_source_name(self) -> str:
+        if self._builder is None:
+            return "online"
+        return self._builder.source or "online"
+
+    @staticmethod
+    def _trace_id_from_ctx(ctx: AgentCallbackContext) -> Optional[str]:
+        session = getattr(ctx, "session", None)
+        tracer = session.tracer() if session is not None and hasattr(session, "tracer") else None
+        span_manager = getattr(tracer, "tracer_agent_span_manager", None)
+        trace_id = getattr(span_manager, "_trace_id", None)
+        if trace_id:
+            return str(trace_id)
+        last_span = getattr(span_manager, "last_span", None)
+        trace_id = getattr(last_span, "trace_id", None)
+        return str(trace_id) if trace_id else None
+
+    @staticmethod
+    def _session_id_from_ctx(ctx: AgentCallbackContext) -> str:
+        session = getattr(ctx, "session", None)
+        if session is not None and isinstance(session, Session):
+            return session.get_session_id()
+        inputs = getattr(ctx, "inputs", None)
+        if isinstance(inputs, InvokeInputs):
+            return inputs.conversation_id or ""
+        return ""
+
+    @staticmethod
+    def _member_id_from_ctx(ctx: AgentCallbackContext) -> Optional[str]:
+        agent_card = getattr(getattr(ctx, "agent", None), "card", None)
+        return getattr(agent_card, "id", None)
 
     def _save_trajectory(self, trajectory: Trajectory) -> None:
         """Save trajectory to store."""
@@ -485,15 +644,17 @@ class EvolutionRail(DeepAgentRail):
         team_id = self._team_id
         if sink is None or not team_id:
             return
-        member_id = trajectory.meta.get("member_id")
+        legacy = to_legacy_trajectory(trajectory)
+        member_id = legacy.meta.get("member_id")
         if not member_id:
             return
-        member_role = _normalize_member_role(trajectory.meta.get("member_role")) or self._member_role
+        member_role = _normalize_member_role(legacy.meta.get("member_role")) or self._member_role
         sink.publish_member_trajectory(
             MemberTrajectorySnapshot.make(
                 team_id=team_id,
                 member_id=str(member_id),
                 member_role=member_role,
+                session_id=legacy.session_id,
                 trajectory=trajectory,
             )
         )
@@ -519,7 +680,7 @@ class EvolutionRail(DeepAgentRail):
                 # Prune completed tasks to prevent unbounded growth
                 self._bg_tasks = {t for t in self._bg_tasks if not t.done()}
         else:
-            await self.run_evolution(trajectory, ctx)
+            await self.run_evolution(to_legacy_trajectory(trajectory), ctx)
 
     # ---- Evolution extension points (override as needed, default no-op) ----
 
@@ -793,18 +954,30 @@ class EvolutionRail(DeepAgentRail):
         """Register rail-owned runtime tools with Runner and the agent ability manager."""
         if not tools:
             return
-        Runner.resource_mgr.add_tool(tools)
-        if hasattr(agent, "ability_manager"):
+        ability_manager = getattr(agent, "ability_manager", None)
+        if ability_manager is not None and hasattr(ability_manager, "add_ability"):
             for tool in tools:
-                agent.ability_manager.add(tool.card)
+                ability_manager.add_ability(tool.card, tool)
+            return
+        Runner.resource_mgr.add_tool(tools)
+        if ability_manager is not None:
+            for tool in tools:
+                ability_manager.add(tool.card)
 
     @staticmethod
     def _unregister_runtime_tools(agent: Any, tools: list[Any]) -> None:
         """Remove rail-owned runtime tools from Runner and the agent ability manager."""
+        ability_manager = getattr(agent, "ability_manager", None)
+        if ability_manager is not None and hasattr(ability_manager, "remove_ability"):
+            for tool in tools:
+                name = getattr(tool.card, "name", None)
+                if name:
+                    ability_manager.remove_ability(name)
+            return
         for tool in tools:
             name = getattr(tool.card, "name", None)
-            if name and hasattr(agent, "ability_manager"):
-                agent.ability_manager.remove(name)
+            if name and ability_manager is not None:
+                ability_manager.remove(name)
             tool_id = getattr(tool.card, "id", None)
             if tool_id:
                 Runner.resource_mgr.remove_tool(tool_id)

@@ -107,14 +107,17 @@ class SwitchModeMetadataProvider(ToolMetadataProvider):
 # ---------------------------------------------------------------------------
 
 ENTER_PLAN_MODE_DESCRIPTION_CN = (
-    "初始化 plan 文件并返回文件路径。在 plan 模式下，这必须是你的第一个操作。"
+    "初始化 plan 文件并返回文件路径。在 plan 模式下，如需生成正式计划可调用此工具；"
+    "只读操作（如 gh/git 只读命令、read_file、grep 等）可直接执行，无需先调用本工具。"
     "该工具会创建一个新的 plan 文件（幂等：若已存在则直接返回路径）。"
 )
 
 ENTER_PLAN_MODE_DESCRIPTION_EN = (
-    "Initialize the plan file and return its path. In plan mode this must be "
-    "your very first action. Creates a new plan file (idempotent: returns the "
-    "existing path if already created)."
+    "Initialize the plan file and return its path. In plan mode, call this tool "
+    "when you need to produce a formal plan; read-only actions (e.g. read-only "
+    "gh/git commands, read_file, grep) can be run directly without calling this "
+    "first. Creates a new plan file (idempotent: returns the existing path if "
+    "already created)."
 )
 
 ENTER_PLAN_MODE_INPUT_PARAMS_CN: Dict[str, Any] = {

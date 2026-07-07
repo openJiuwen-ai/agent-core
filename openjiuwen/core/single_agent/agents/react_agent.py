@@ -10,16 +10,24 @@ Author: huenrui1@huawei.com
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import asyncio
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
 
 from pydantic import Field, BaseModel
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
+try:
+    from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
+        browser_agent_log_info,
+    )
+except Exception:  # pragma: no cover - browser runtime is optional here
+    browser_agent_log_info = None
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm.schema.config import (
@@ -65,9 +73,34 @@ from openjiuwen.core.single_agent.prompts.builder import (
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 _IDENTITY_SECTION = "identity"
-_SKILLS_SECTION = "skills"
+_SKILLS_SECTION = "legacy_skills"
 _IDENTITY_SECTION_PRIORITY = 10
 _SKILLS_SECTION_PRIORITY = 90
+_IMAGE_INPUT_SCAN_MAX_DEPTH = 8
+_IMAGE_INPUT_UNSUPPORTED_ERROR_CODES = (
+    "invalid_image_input",
+    "image_input_unsupported",
+    "unsupported_content_type",
+    "unsupported_image",
+    "unsupported_image_input",
+    "unsupported_message_content_type",
+)
+_IMAGE_INPUT_UNSUPPORTED_ERROR_PATTERNS = (
+    "no endpoints found that support image input",
+    "does not accept images",
+    "does not support image",
+    "doesn't accept images",
+    "doesn't support image",
+    "do not support image",
+    "image input is not supported",
+    "image input not supported",
+    "image_url is not supported",
+    "images are not supported",
+    "multimodal input is not supported",
+    "not support image input",
+    "unsupported image",
+    "vision is not supported",
+)
 
 
 def _summarize_tool_call(tc: Any) -> str:
@@ -539,8 +572,13 @@ class ReActAgent(BaseAgent):
             from openjiuwen.core.runner import Runner
             sys_operation = Runner.resource_mgr.get_sys_operation(config.sys_operation_id)
 
-        # Update context_engine if context window limit changed
-        if old_config.context_engine_config != config.context_engine_config:
+        # Update context_engine if context settings or runtime dependencies changed.
+        context_engine_runtime_changed = (
+                old_config.context_engine_config != config.context_engine_config
+                or old_config.workspace != config.workspace
+                or old_config.sys_operation_id != config.sys_operation_id
+        )
+        if context_engine_runtime_changed:
             self.context_engine = ContextEngine(
                 config.context_engine_config,
                 workspace=config.workspace,
@@ -643,7 +681,10 @@ class ReActAgent(BaseAgent):
             rendered_system_prompt: str,
     ) -> None:
         """Update skills section on prompt_builder in the invoke-stage flow."""
-        if not rendered_system_prompt or self._skill_util is None or not self._skill_util.has_skill():
+        if self._skill_util is None:
+            return
+
+        if not rendered_system_prompt or not self._skill_util.has_skill():
             self.prompt_builder.remove_section(_SKILLS_SECTION)
             return
 
@@ -661,7 +702,6 @@ class ReActAgent(BaseAgent):
         if preview_system_prompt:
             preview_messages.insert(0, SystemMessage(content=preview_system_prompt))
         return preview_messages
-
 
     async def _call_model(
             self,
@@ -780,6 +820,7 @@ class ReActAgent(BaseAgent):
         # --- End context window finalization ---
 
         session = ctx.session
+        image_input_present = self._messages_contain_image_input(ctx.inputs.messages)
 
         # Build extra kwargs for LLM calls when KV cache release is enabled.
         extra_kwargs: dict = {}
@@ -798,12 +839,18 @@ class ReActAgent(BaseAgent):
             extra_kwargs["top_logprobs"] = self._config.llm_top_logprobs
 
         if not ctx.extra.get("_streaming"):
-            ai_message = await llm.invoke(
-                model=self._config.model_name,
-                messages=ctx.inputs.messages,
-                tools=ctx.inputs.tools or None,
-                **extra_kwargs,
-            )
+            try:
+                ai_message = await llm.invoke(
+                    model=self._config.model_name,
+                    messages=ctx.inputs.messages,
+                    tools=ctx.inputs.tools or None,
+                    **extra_kwargs,
+                )
+            except Exception as exc:
+                if image_input_present and self._is_image_input_unsupported_error(exc):
+                    ai_message = self._build_image_input_unsupported_message()
+                else:
+                    raise
             ctx.inputs.response = ai_message
             return ai_message
 
@@ -814,37 +861,58 @@ class ReActAgent(BaseAgent):
         call_first_token_time = None
         call_last_token_time = None
         call_chunk_count = 0
+        try:
+            async for chunk in llm.stream(
+                    model=self._config.model_name,
+                    messages=ctx.inputs.messages,
+                    tools=ctx.inputs.tools or None,
+                    **extra_kwargs,
+            ):
+                if accumulated_chunk is None:
+                    accumulated_chunk = chunk
+                else:
+                    accumulated_chunk = accumulated_chunk + chunk
 
-        async for chunk in llm.stream(
-                model=self._config.model_name,
-                messages=ctx.inputs.messages,
-                tools=ctx.inputs.tools or None,
-                **extra_kwargs,
-        ):
-            if accumulated_chunk is None:
-                accumulated_chunk = chunk
-            else:
-                accumulated_chunk = accumulated_chunk + chunk
+                if call_first_token_time is None:
+                    call_first_token_time = time.monotonic()
+                call_last_token_time = time.monotonic()
+                call_chunk_count += 1
 
-            if call_first_token_time is None:
-                call_first_token_time = time.monotonic()
-            call_last_token_time = time.monotonic()
-            call_chunk_count += 1
+                inspectors = ctx.extra.get("_stream_chunk_inspectors") or []
+                if isinstance(inspectors, dict):
+                    inspectors = inspectors.values()
+                for inspector in list(inspectors):
+                    if not callable(inspector):
+                        continue
+                    inspect_result = inspector(ctx, chunk)
+                    if asyncio.iscoroutine(inspect_result):
+                        await inspect_result
 
-            if chunk.reasoning_content:
-                await session.write_stream(OutputSchema(
-                    type="llm_reasoning",
-                    index=chunk_index,
-                    payload={"content": chunk.reasoning_content, "result_type": "answer"},
-                ))
-                chunk_index += 1
-            if chunk.content:
+                if chunk.reasoning_content:
+                    await session.write_stream(OutputSchema(
+                        type="llm_reasoning",
+                        index=chunk_index,
+                        payload={"content": chunk.reasoning_content, "result_type": "answer"},
+                    ))
+                    chunk_index += 1
+                if chunk.content:
+                    await session.write_stream(OutputSchema(
+                        type="llm_output",
+                        index=chunk_index,
+                        payload={"content": chunk.content, "result_type": "answer"},
+                    ))
+                    chunk_index += 1
+        except Exception as exc:
+            if image_input_present and self._is_image_input_unsupported_error(exc):
+                ai_message = self._build_image_input_unsupported_message()
+                ctx.inputs.response = ai_message
                 await session.write_stream(OutputSchema(
                     type="llm_output",
                     index=chunk_index,
-                    payload={"content": chunk.content, "result_type": "answer"},
+                    payload={"content": ai_message.content, "result_type": "answer"},
                 ))
-                chunk_index += 1
+                return ai_message
+            raise
 
         if accumulated_chunk is None:
             ai_message = AssistantMessage(content="", tool_calls=[])
@@ -854,6 +922,7 @@ class ReActAgent(BaseAgent):
                 tool_calls=accumulated_chunk.tool_calls or [],
                 usage_metadata=accumulated_chunk.usage_metadata,
                 reasoning_content=accumulated_chunk.reasoning_content,
+                finish_reason=accumulated_chunk.finish_reason,
                 prompt_token_ids=accumulated_chunk.prompt_token_ids,
                 completion_token_ids=accumulated_chunk.completion_token_ids,
                 logprobs=accumulated_chunk.logprobs,
@@ -866,9 +935,10 @@ class ReActAgent(BaseAgent):
             perf_metrics["total_latency_ms"] = round(call_latency, 2)
             if call_first_token_time is not None:
                 perf_metrics["ttft_ms"] = round((call_first_token_time - call_start_time) * 1000, 2)
-            if call_first_token_time is not None and call_last_token_time is not None and call_chunk_count > 1:
+            output_tokens = ai_message.usage_metadata.output_tokens
+            if call_first_token_time is not None and call_last_token_time is not None and output_tokens > 1:
                 perf_metrics["tpot_ms"] = round(
-                    (call_last_token_time - call_first_token_time) / (call_chunk_count - 1) * 1000, 2
+                    (call_last_token_time - call_first_token_time) / (output_tokens - 1) * 1000, 2
                 )
 
             await session.write_stream(OutputSchema(
@@ -881,6 +951,122 @@ class ReActAgent(BaseAgent):
                 },
             ))
         return ai_message
+
+    @staticmethod
+    def _messages_contain_image_input(messages: Optional[List[Any]]) -> bool:
+        if not messages:
+            return False
+
+        for message in messages:
+            content = getattr(message, "content", None)
+            if isinstance(message, dict):
+                content = message.get("content")
+            if ReActAgent._json_like_contains_image_input(content):
+                return True
+        return False
+
+    @staticmethod
+    def _json_like_contains_image_input(
+            value: Any,
+            depth: int = 0,
+    ) -> bool:
+        if depth > _IMAGE_INPUT_SCAN_MAX_DEPTH:
+            return False
+
+        if isinstance(value, dict):
+            value_type = value.get("type")
+            if value_type in ("image", "image_url"):
+                return True
+            if "image_url" in value or "image" in value:
+                return True
+            for child in value.values():
+                if ReActAgent._json_like_contains_image_input(child, depth + 1):
+                    return True
+            return False
+
+        if isinstance(value, (list, tuple)):
+            for child in value:
+                if ReActAgent._json_like_contains_image_input(child, depth + 1):
+                    return True
+            return False
+
+        return False
+
+    @staticmethod
+    def _iter_exception_error_values(value: Any, depth: int = 0) -> Iterable[str]:
+        if depth > _IMAGE_INPUT_SCAN_MAX_DEPTH or value is None:
+            return
+
+        if isinstance(value, str):
+            yield value
+            return
+
+        if isinstance(value, (int, float)):
+            yield str(value)
+            return
+
+        if isinstance(value, dict):
+            for child in value.values():
+                yield from ReActAgent._iter_exception_error_values(child, depth + 1)
+            return
+
+        if isinstance(value, (list, tuple)):
+            for child in value:
+                yield from ReActAgent._iter_exception_error_values(child, depth + 1)
+            return
+
+    @staticmethod
+    def _extract_exception_error_values(exc: Exception) -> List[str]:
+        values = [str(exc)]
+
+        for attr in ("code", "status_code", "message", "body"):
+            attr_value = getattr(exc, attr, None)
+            values.extend(ReActAgent._iter_exception_error_values(attr_value))
+
+        response = getattr(exc, "response", None)
+        if response is not None:
+            values.extend(
+                ReActAgent._iter_exception_error_values(
+                    getattr(response, "status_code", None)
+                )
+            )
+            json_fn = getattr(response, "json", None)
+            if callable(json_fn):
+                try:
+                    values.extend(ReActAgent._iter_exception_error_values(json_fn()))
+                except (TypeError, ValueError):
+                    pass
+            text = getattr(response, "text", None)
+            values.extend(ReActAgent._iter_exception_error_values(text))
+
+        return values
+
+    @staticmethod
+    def _is_image_input_unsupported_error(exc: Exception) -> bool:
+        values = ReActAgent._extract_exception_error_values(exc)
+        lowered_values = [value.lower() for value in values if value]
+        for value in lowered_values:
+            normalized = value.replace("-", "_").replace(" ", "_")
+            for code in _IMAGE_INPUT_UNSUPPORTED_ERROR_CODES:
+                if normalized == code or normalized.endswith(f"_{code}"):
+                    return True
+
+        text = "\n".join(lowered_values)
+        for pattern in _IMAGE_INPUT_UNSUPPORTED_ERROR_PATTERNS:
+            if pattern in text:
+                return True
+
+        return False
+
+    @staticmethod
+    def _build_image_input_unsupported_message() -> AssistantMessage:
+        return AssistantMessage(
+            content=(
+                "当前主模型或模型服务端点不支持图片输入，因此无法直接读取这张图片的内容。"
+                "请切换到支持视觉输入的主模型，或配置专用视觉模型工具后再读取图片。"
+            ),
+            tool_calls=[],
+        )
 
     @staticmethod
     def _render_system_messages(
@@ -912,6 +1098,139 @@ class ReActAgent(BaseAgent):
             except BaseError as e:
                 logger.warning("Failed to render system message placeholder: %s", e)
 
+
+    @staticmethod
+    def _is_browser_tool_name(tool_name: str) -> bool:
+        lowered_name = str(tool_name or "").lower()
+        return (
+            lowered_name.startswith("browser_")
+            or "browser_" in lowered_name
+            or lowered_name.startswith("mcp_playwright")
+        )
+
+    @staticmethod
+    def _summarize_tool_args_for_log(tool_name: str, tool_args: Any) -> Any:
+        """Redact high-risk tool arguments while keeping generic logs useful."""
+        name = str(tool_name or "")
+        lowered_name = name.lower()
+
+        def parse_args(value: Any) -> Any:
+            if isinstance(value, (dict, list)):
+                return value
+            if not isinstance(value, str):
+                return value
+            text = value.strip()
+            if not text:
+                return value
+            try:
+                return json.loads(text)
+            except (TypeError, ValueError):
+                return value
+
+        def redact_text(value: Any) -> Dict[str, Any]:
+            text = "" if value is None else str(value)
+            return {"redacted": True, "kind": type(value).__name__, "length": len(text)}
+
+        parsed = parse_args(tool_args)
+
+        if lowered_name == "task_tool" and isinstance(parsed, dict):
+            task_description = parsed.get("task_description")
+            task_text = "" if task_description is None else str(task_description)
+            summary: Dict[str, Any] = {
+                "kind": "task_tool",
+                "keys": sorted(str(key) for key in parsed.keys()),
+            }
+            if "subagent_type" in parsed:
+                summary["subagent_type"] = str(parsed.get("subagent_type") or "")[:120]
+            if task_text:
+                task_hash = hashlib.sha256(
+                    task_text.encode("utf-8", errors="ignore")
+                ).hexdigest()[:12]
+                summary["task_description"] = {
+                    "redacted": True,
+                    "length": len(task_text),
+                    "sha256_12": task_hash,
+                }
+            return summary
+
+        is_browser_tool = ReActAgent._is_browser_tool_name(lowered_name)
+        if not is_browser_tool:
+            return tool_args
+
+        if not isinstance(parsed, dict):
+            return {"kind": type(parsed).__name__, "repr_length": len(str(parsed)), "redacted": True}
+
+        if lowered_name == "browser_batch_interact":
+            steps = parsed.get("steps") if isinstance(parsed.get("steps"), list) else []
+            op_counts: Dict[str, int] = {}
+            preview = []
+            value_keys = {
+                "value", "text", "choose_text", "option_text", "option_label",
+                "option_value", "label_value", "option_name", "values",
+            }
+            target_keys = {
+                "selector", "label", "placeholder", "role", "name", "testid",
+                "option_selector", "option_role", "year_selector", "month_selector", "day_selector",
+            }
+            for index, step in enumerate(steps[:10]):
+                if not isinstance(step, dict):
+                    preview.append({"index": index, "kind": type(step).__name__})
+                    continue
+                op = str(step.get("op") or "<missing>")
+                op_counts[op] = op_counts.get(op, 0) + 1
+                keys = {str(key) for key in step.keys()}
+                preview.append({
+                    "index": index,
+                    "op": op[:80],
+                    "target_keys": sorted(keys & target_keys),
+                    "value_keys_redacted": sorted(keys & value_keys),
+                })
+            for step in steps[10:]:
+                if isinstance(step, dict):
+                    op = str(step.get("op") or "<missing>")
+                    op_counts[op] = op_counts.get(op, 0) + 1
+            return {
+                "kind": "browser_batch_interact",
+                "step_count": len(steps),
+                "op_counts": dict(sorted(op_counts.items())),
+                "steps_preview": preview,
+                "truncated": len(steps) > len(preview),
+                "continue_on_error": bool(parsed.get("continue_on_error", False)),
+                "timeout_ms": parsed.get("timeout_ms"),
+                "global_timeout_ms": parsed.get("global_timeout_ms"),
+            }
+
+        if "run_code" in lowered_name or "evaluate" in lowered_name:
+            code = parsed.get("code") or parsed.get("script") or parsed.get("expression") or parsed.get("function")
+            return {
+                "kind": "code_execution",
+                "keys": sorted(str(key) for key in parsed.keys()),
+                "code_length": len(str(code or "")),
+                "code_redacted": True,
+            }
+
+        summary: Dict[str, Any] = {"kind": "dict", "keys": sorted(str(key) for key in parsed.keys())}
+        safe_values: Dict[str, Any] = {}
+        redacted_values: Dict[str, Any] = {}
+        text_keys = {
+            "value", "text", "query", "name", "email", "phone",
+            "mobile", "password", "address", "code", "script", "js",
+        }
+        for key, value in parsed.items():
+            key_str = str(key)
+            key_lower = key_str.lower()
+            if key_lower in text_keys or any(token in key_lower for token in ("password", "token", "secret")):
+                redacted_values[key_str] = redact_text(value)
+            elif key_lower in {
+                "selector", "role", "label", "placeholder", "checked", "timeout", "timeout_ms", "max_items"
+            }:
+                safe_values[key_str] = value if isinstance(value, (bool, int, float)) else str(value)[:120]
+        if safe_values:
+            summary["safe_values"] = safe_values
+        if redacted_values:
+            summary["redacted_values"] = redacted_values
+        return summary
+
     async def _execute_tool_call(
             self,
             ctx: AgentCallbackContext,
@@ -928,11 +1247,17 @@ class ReActAgent(BaseAgent):
             return []
 
         for tool_call in tool_calls:
-            logger.info(f"Executing tool: {tool_call.name} with args: {tool_call.arguments}")
+            log_args = self._summarize_tool_args_for_log(tool_call.name, tool_call.arguments)
+            tool_name = str(tool_call.name or "")
+            is_browser_tool = self._is_browser_tool_name(tool_name)
+            if is_browser_tool and browser_agent_log_info is not None:
+                browser_agent_log_info("Executing tool: %s with args: %s", tool_name, log_args)
+            else:
+                logger.info("Executing tool: %s with args: %s", tool_name, log_args)
 
         results = await self.ability_manager.execute(
-            ctx=ctx, 
-            tool_call=tool_calls, 
+            ctx=ctx,
+            tool_call=tool_calls,
             session=session,
             parallel_tool_calls=self._config.parallel_tool_calls,
         )
@@ -1469,7 +1794,8 @@ class ReActAgent(BaseAgent):
                                 content=ai_message.content,
                                 tool_calls=ai_message.tool_calls,
                                 reasoning_content=ai_message.reasoning_content,
-                                usage_metadata=ai_message.usage_metadata
+                                usage_metadata=ai_message.usage_metadata,
+                                finish_reason=ai_message.finish_reason,
                             )
                         )
 

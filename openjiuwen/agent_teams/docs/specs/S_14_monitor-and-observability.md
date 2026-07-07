@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/monitor/`、`openjiuwen/agent_teams/observability/` |
-| 最近一次修订日期 | 2026-06-17 |
+| 最近一次修订日期 | 2026-06-27 |
 | 关联 feature | F_09_team-stream-logging.md |
 
 ## 范围 / 边界
@@ -19,10 +19,12 @@
 2. **`observability/` 子模块**——OpenTelemetry trace 数据采集点。已上线，提供：
    - `setup.py`：`init_observability/shutdown_observability` 管理 OTel 生命周期
    - `config.py`：`ObservabilityConfig` 配置类
-   - `span_context.py`：ContextVar 管理 span 上下文
-   - `callback_handler.py` / `rail.py`：LLM/Tool/Agent span 生命周期
-   - `monitor_handler.py`：Team/Task/Member/Message span 生命周期
+   - `span_context.py`：ContextVar 管理 span 上下文 + `cascade_close_children`（唯一级联排空来源）
+   - `rail.py`：`AgentSpanScope`（agent span 完整生命周期）+ `before_task_iteration`/`after_task_iteration`（多轮 member）+ `before_invoke`/`after_invoke`（单轮 subagent 兜底）
+   - `callback_handler.py`：LLM/Tool span 生命周期，tool span input 自动剥离 session
+   - `monitor_handler.py`：Team/Task/Member/Message span 生命周期，`_event_span_io` 按事件语义拆分 input/output
    - `semconv.py` / `redaction.py`：属性常量 + 脱敏
+   - `subagent_elements.py`：在 team 侧 subagent 工厂注入 ObservabilityRail（idempotent）
 
   Span 树结构、生命周期、ActiveSpanTracker 详细设计见 [F_37_observability-otel-trace.md](../features/F_37_observability-otel-trace.md)。
 
