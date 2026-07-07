@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 from pathlib import Path
 
@@ -13,11 +14,22 @@ import pytest
 httpx = pytest.importorskip("httpx")
 pytest.importorskip("fastapi")
 
-from openjiuwen.agent_evolving.agent_rl.online.gateway.app.bootstrap import build_app_from_config
-from openjiuwen.agent_evolving.agent_rl.online.gateway.config import GatewayConfig
-from openjiuwen.agent_evolving.agent_rl.online.rail.online_rail import RLOnlineRail
-from openjiuwen.agent_evolving.agent_rl.online.rail.uploader import TrajectoryUploader
-from openjiuwen.agent_evolving.trajectory import LLMCallDetail, Trajectory, TrajectoryStep
+build_app_from_config = importlib.import_module(
+    "openjiuwen.agent_evolving.agent_rl.online.gateway.app.bootstrap"
+).build_app_from_config
+GatewayConfig = importlib.import_module(
+    "openjiuwen.agent_evolving.agent_rl.online.gateway.config"
+).GatewayConfig
+RLOnlineRail = importlib.import_module(
+    "openjiuwen.agent_evolving.agent_rl.online.rail.online_rail"
+).RLOnlineRail
+TrajectoryUploader = importlib.import_module(
+    "openjiuwen.agent_evolving.agent_rl.online.rail.uploader"
+).TrajectoryUploader
+trajectory_module = importlib.import_module("openjiuwen.agent_evolving.trajectory")
+LLMCallDetail = trajectory_module.LLMCallDetail
+LegacyTrajectory = trajectory_module.LegacyTrajectory
+TrajectoryStep = trajectory_module.TrajectoryStep
 
 
 class _FakeRedisPipeline:
@@ -239,10 +251,9 @@ async def test_online_gateway_proxy_and_rail_upload_e2e(tmp_path: Path):
                 tenant_id="st-user",
                 uploader=uploader,
             )
-            trajectory = Trajectory(
+            trajectory = LegacyTrajectory(
                 execution_id="traj-st",
                 session_id="session-st",
-                source="rl_online",
                 steps=[
                     TrajectoryStep(
                         kind="llm",
@@ -256,6 +267,7 @@ async def test_online_gateway_proxy_and_rail_upload_e2e(tmp_path: Path):
                         logprobs=[-0.1, -0.2],
                     )
                 ],
+                source="rl_online",
             )
 
             await rail.run_evolution(trajectory)

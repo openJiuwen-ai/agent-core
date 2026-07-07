@@ -16,7 +16,14 @@ from openjiuwen.agent_evolving.trajectory.store import (
     FileTrajectoryStore,
     TrajectoryStore,
 )
-from openjiuwen.agent_evolving.trajectory.types import Trajectory, TrajectoryStep
+from openjiuwen.agent_evolving.trajectory.types import (
+    LegacyTrajectory,
+    Trajectory,
+    TrajectoryStep,
+    to_legacy_trajectory,
+)
+
+TrajectoryRecord = Trajectory | LegacyTrajectory
 
 
 @dataclass
@@ -25,20 +32,20 @@ class TeamTrajectory:
 
     team_id: str
     session_id: str
-    combined: Trajectory
+    combined: LegacyTrajectory
     """All steps merged and sorted by start_time_ms"""
 
-    members: dict[str, Trajectory] = field(default_factory=dict)
-    """member_id -> individual Trajectory"""
+    members: dict[str, LegacyTrajectory] = field(default_factory=dict)
+    """member_id -> individual trajectory"""
 
 
 def aggregate_member_trajectories(
-    trajectories: list[Trajectory],
+    trajectories: list[TrajectoryRecord],
     *,
     team_id: str,
     session_id: str,
     filter_collaborative: bool = True,
-) -> Trajectory:
+) -> LegacyTrajectory:
     """Aggregate member trajectories already loaded in memory."""
     return _build_combined_trajectory(
         _member_trajectories_by_id(
@@ -124,11 +131,11 @@ class TeamTrajectoryAggregator:
 
     def _empty_combined(self, session_id: str) -> TeamTrajectory:
         """Return an empty combined trajectory."""
-        combined = Trajectory(
+        combined = LegacyTrajectory(
             execution_id=f"team-{self._team_id}",
             session_id=session_id,
-            source="online",
             steps=[],
+            source="online",
             meta={"member_count": 0},
         )
         return TeamTrajectory(
@@ -161,7 +168,7 @@ _LEADER_ROLE = "leader"
 _MEMBER_ROLE_META_KEYS: tuple[str, ...] = ("member_role", "role")
 
 
-def filter_member_trajectory(trajectory: Trajectory) -> Trajectory:
+def filter_member_trajectory(trajectory: TrajectoryRecord) -> LegacyTrajectory:
     """Filter a member's trajectory to keep only collaboration-relevant steps.
 
     Retains steps that reflect inter-member behavior:
@@ -172,19 +179,21 @@ def filter_member_trajectory(trajectory: Trajectory) -> Trajectory:
 
     Returns a new Trajectory with filtered steps, preserving all other fields.
     """
-    filtered_steps = [step for step in trajectory.steps if _is_collaborative_step(step)]
+    legacy = to_legacy_trajectory(trajectory)
+    filtered_steps = [step for step in legacy.steps if _is_collaborative_step(step)]
 
-    return Trajectory(
-        execution_id=trajectory.execution_id,
-        session_id=trajectory.session_id,
-        source=trajectory.source,
+    return LegacyTrajectory(
+        execution_id=legacy.execution_id,
+        session_id=legacy.session_id,
         steps=filtered_steps,
-        cost=trajectory.cost,
-        meta=trajectory.meta,
+        source=legacy.source,
+        case_id=legacy.case_id,
+        cost=legacy.cost,
+        meta=dict(legacy.meta),
     )
 
 
-def _is_leader_trajectory(trajectory: Trajectory, member_id: str) -> bool:
+def _is_leader_trajectory(trajectory: LegacyTrajectory, member_id: str) -> bool:
     """Return True when trajectory metadata identifies a leader member."""
     for key in _MEMBER_ROLE_META_KEYS:
         role = trajectory.meta.get(key)
@@ -196,27 +205,28 @@ def _is_leader_trajectory(trajectory: Trajectory, member_id: str) -> bool:
 
 
 def _member_trajectories_by_id(
-    trajectories: list[Trajectory],
+    trajectories: list[TrajectoryRecord],
     *,
     filter_collaborative: bool,
-) -> dict[str, Trajectory]:
-    members: dict[str, Trajectory] = {}
+) -> dict[str, LegacyTrajectory]:
+    members: dict[str, LegacyTrajectory] = {}
     for trajectory in trajectories:
-        member_id = str(trajectory.meta.get("member_id", trajectory.execution_id[:8]))
-        processed = trajectory
-        if filter_collaborative and not _is_leader_trajectory(trajectory, member_id):
-            processed = filter_member_trajectory(trajectory)
+        legacy = to_legacy_trajectory(trajectory)
+        member_id = str(legacy.meta.get("member_id", legacy.execution_id[:8]))
+        processed = legacy
+        if filter_collaborative and not _is_leader_trajectory(legacy, member_id):
+            processed = filter_member_trajectory(legacy)
         if processed.steps:
             members[member_id] = _merge_member_trajectory(members.get(member_id), processed)
     return members
 
 
 def _build_combined_trajectory(
-    members: dict[str, Trajectory],
+    members: dict[str, LegacyTrajectory],
     *,
     team_id: str,
     session_id: str,
-) -> Trajectory:
+) -> LegacyTrajectory:
     all_steps: list[TrajectoryStep] = []
     for trajectory in members.values():
         all_steps.extend(trajectory.steps)
@@ -225,11 +235,11 @@ def _build_combined_trajectory(
     total_input = sum(trajectory.cost.get("input_tokens", 0) for trajectory in members.values() if trajectory.cost)
     total_output = sum(trajectory.cost.get("output_tokens", 0) for trajectory in members.values() if trajectory.cost)
 
-    return Trajectory(
+    return LegacyTrajectory(
         execution_id=f"team-{team_id}",
         session_id=session_id,
-        source="online",
         steps=all_steps,
+        source="online",
         cost={"input_tokens": total_input, "output_tokens": total_output}
         if total_input > 0 or total_output > 0
         else None,
@@ -237,7 +247,10 @@ def _build_combined_trajectory(
     )
 
 
-def _merge_member_trajectory(existing: Optional[Trajectory], new: Trajectory) -> Trajectory:
+def _merge_member_trajectory(
+    existing: Optional[LegacyTrajectory],
+    new: LegacyTrajectory,
+) -> LegacyTrajectory:
     """Merge multiple persisted trajectory snapshots for the same member."""
     if existing is None:
         return new
@@ -247,12 +260,12 @@ def _merge_member_trajectory(existing: Optional[Trajectory], new: Trajectory) ->
     if len(existing.steps) > len(new.steps) and _steps_are_prefix(new.steps, existing.steps):
         return existing
 
-    return Trajectory(
+    return LegacyTrajectory(
         execution_id=existing.execution_id,
         session_id=existing.session_id or new.session_id,
-        source=existing.source,
         case_id=existing.case_id or new.case_id,
         steps=[*existing.steps, *new.steps],
+        source=existing.source or new.source,
         cost=_merge_cost(existing.cost, new.cost),
         meta={**existing.meta, **new.meta},
     )

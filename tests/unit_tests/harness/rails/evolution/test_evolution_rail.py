@@ -14,12 +14,17 @@ from unittest.mock import patch
 from openjiuwen.agent_evolving.trajectory import (
     InMemoryTrajectoryStore,
     LLMCallDetail,
+    LegacyTrajectory,
+    TRAJECTORY_TRACE_AGENT_HANDLER_NAME,
+    TRAJECTORY_TRACE_WORKFLOW_HANDLER_NAME,
     Trajectory,
     TrajectoryBuilder,
     TrajectoryStep,
+    to_legacy_trajectory,
 )
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.session.agent import create_agent_session
+from openjiuwen.core.session.tracer import TracerHandlerRegistry
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -27,6 +32,7 @@ from openjiuwen.core.single_agent.rail.base import (
     ModelCallInputs,
     ToolCallInputs,
 )
+from openjiuwen.core.session.tracer.span import TraceAgentSpan
 from openjiuwen.harness.rails.evolution.contracts import EvolutionSnapshot
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
 from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
@@ -72,6 +78,7 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         event: AgentCallbackEvent,
         inputs: Any,
         agent_id: str = "test_agent",
+        session: Any = None,
     ) -> AgentCallbackContext:
         """Create a mock callback context."""
         agent = MockAgent(card=MockAgentCard(id=agent_id))
@@ -79,7 +86,82 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
             agent=agent,
             event=event,
             inputs=inputs,
+            session=session,
         )
+
+    async def test_trajectory_trace_handlers_are_process_singletons(self):
+        """Multiple rails reuse one registered trajectory handler pair."""
+        other_rail = EvolutionRail(
+            trajectory_store=InMemoryTrajectoryStore(),
+            evolution_trigger=EvolutionTriggerPoint.NONE,
+        )
+
+        self.assertIs(self.rail.trajectory_state_manager, other_rail.trajectory_state_manager)
+        agent_handler = TracerHandlerRegistry.get_agent_handlers()[TRAJECTORY_TRACE_AGENT_HANDLER_NAME]
+        workflow_handler = TracerHandlerRegistry.get_workflow_handlers()[TRAJECTORY_TRACE_WORKFLOW_HANDLER_NAME]
+        self.assertIs(
+            TracerHandlerRegistry.get_agent_handlers()[TRAJECTORY_TRACE_AGENT_HANDLER_NAME],
+            agent_handler,
+        )
+        self.assertIs(
+            TracerHandlerRegistry.get_workflow_handlers()[TRAJECTORY_TRACE_WORKFLOW_HANDLER_NAME],
+            workflow_handler,
+        )
+
+    async def test_shared_trace_state_is_released_after_last_rail_consumer(self):
+        """One rail finishing should not clear a shared trace needed by another rail."""
+        trace_id = "shared-runtime-trace"
+        span_manager = SimpleNamespace(_trace_id=trace_id, last_span=None)
+        tracer = SimpleNamespace(tracer_agent_span_manager=span_manager)
+        session = SimpleNamespace(tracer=lambda: tracer)
+        other_store = InMemoryTrajectoryStore()
+        other_rail = EvolutionRail(
+            trajectory_store=other_store,
+            evolution_trigger=EvolutionTriggerPoint.NONE,
+        )
+
+        for rail in (self.rail, other_rail):
+            await rail.before_invoke(
+                self._create_ctx(
+                    AgentCallbackEvent.BEFORE_INVOKE,
+                    InvokeInputs(query="test query", conversation_id="conv_shared"),
+                    session=session,
+                )
+            )
+
+        span = TraceAgentSpan(trace_id=trace_id, invoke_id="llm-1")
+        agent_handler = TracerHandlerRegistry.get_agent_handlers()[TRAJECTORY_TRACE_AGENT_HANDLER_NAME]
+        await agent_handler.on_llm_start(
+            span,
+            inputs={"inputs": [{"role": "user", "content": "hello"}]},
+            instance_info={"class_name": "test-model"},
+        )
+        await agent_handler.on_llm_end(
+            span,
+            outputs={"outputs": {"role": "assistant", "content": "hi"}},
+        )
+
+        await self.rail.after_invoke(
+            self._create_ctx(
+                AgentCallbackEvent.AFTER_INVOKE,
+                InvokeInputs(query="test query", conversation_id="conv_shared", result={"ok": True}),
+                session=session,
+            )
+        )
+
+        self.assertTrue(self.rail.trajectory_state_manager.is_bound_trace(trace_id))
+
+        await other_rail.after_invoke(
+            self._create_ctx(
+                AgentCallbackEvent.AFTER_INVOKE,
+                InvokeInputs(query="test query", conversation_id="conv_shared", result={"ok": True}),
+                session=session,
+            )
+        )
+
+        self.assertEqual(len(self.store.query(session_id="conv_shared")), 1)
+        self.assertEqual(len(other_store.query(session_id="conv_shared")), 1)
+        self.assertFalse(self.rail.trajectory_state_manager.is_bound_trace(trace_id))
 
     async def test_trajectory_collection_basic(self):
         """Test basic trajectory collection through invoke lifecycle."""
@@ -133,7 +215,7 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         trajectories = self.store.query(session_id="conv_123")
         self.assertEqual(len(trajectories), 1)
 
-        traj = trajectories[0]
+        traj = to_legacy_trajectory(trajectories[0])
         self.assertEqual(traj.session_id, "conv_123")
         self.assertEqual(traj.source, "online")
         self.assertEqual(len(traj.steps), 2)
@@ -147,6 +229,177 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         tool_step = traj.steps[1]
         self.assertEqual(tool_step.kind, "tool")
         self.assertIsNotNone(tool_step.detail)
+
+    async def test_after_invoke_clears_bound_trace_state_after_save(self):
+        """Trace state is scoped to one invoke and cleared after saving."""
+        trace_id = "runtime-trace-1"
+        span_manager = SimpleNamespace(_trace_id=trace_id, last_span=None)
+        tracer = SimpleNamespace(tracer_agent_span_manager=span_manager)
+        session = SimpleNamespace(tracer=lambda: tracer)
+        rail = EvolutionRail(
+            trajectory_store=self.store,
+            evolution_trigger=EvolutionTriggerPoint.NONE,
+        )
+
+        await rail.before_invoke(
+            self._create_ctx(
+                AgentCallbackEvent.BEFORE_INVOKE,
+                InvokeInputs(query="test query", conversation_id="conv_trace"),
+                session=session,
+            )
+        )
+        self.assertTrue(rail.trajectory_state_manager.is_bound_trace(trace_id))
+
+        span = TraceAgentSpan(trace_id=trace_id, invoke_id="llm-1")
+        agent_handler = TracerHandlerRegistry.get_agent_handlers()[TRAJECTORY_TRACE_AGENT_HANDLER_NAME]
+        await agent_handler.on_llm_start(
+            span,
+            inputs={"inputs": [{"role": "user", "content": "hello"}]},
+            instance_info={"class_name": "test-model"},
+        )
+        await agent_handler.on_llm_end(
+            span,
+            outputs={"outputs": {"role": "assistant", "content": "hi"}},
+        )
+
+        await rail.after_invoke(
+            self._create_ctx(
+                AgentCallbackEvent.AFTER_INVOKE,
+                InvokeInputs(query="test query", conversation_id="conv_trace", result={"ok": True}),
+                session=session,
+            )
+        )
+
+        self.assertEqual(len(self.store.query(session_id="conv_trace")), 1)
+        self.assertFalse(rail.trajectory_state_manager.is_bound_trace(trace_id))
+        self.assertIsNone(
+            rail.trajectory_state_manager.build_trajectory(
+                trace_id,
+                session_id="conv_trace",
+                finalize=True,
+            )
+        )
+
+    async def test_trace_trajectory_uses_builder_source(self):
+        """Trace-backed trajectories should preserve subclass-provided source."""
+        trace_id = "runtime-trace-source"
+        span_manager = SimpleNamespace(_trace_id=trace_id, last_span=None)
+        tracer = SimpleNamespace(tracer_agent_span_manager=span_manager)
+        session = SimpleNamespace(tracer=lambda: tracer)
+
+        class SourceRail(EvolutionRail):
+            async def _on_before_invoke(self, ctx):
+                if self._builder is not None:
+                    self._builder.source = "custom_online"
+
+        rail = SourceRail(
+            trajectory_store=self.store,
+            evolution_trigger=EvolutionTriggerPoint.NONE,
+        )
+
+        await rail.before_invoke(
+            self._create_ctx(
+                AgentCallbackEvent.BEFORE_INVOKE,
+                InvokeInputs(query="test query", conversation_id="conv_trace_source"),
+                session=session,
+            )
+        )
+
+        span = TraceAgentSpan(trace_id=trace_id, invoke_id="llm-1")
+        agent_handler = TracerHandlerRegistry.get_agent_handlers()[TRAJECTORY_TRACE_AGENT_HANDLER_NAME]
+        await agent_handler.on_llm_start(
+            span,
+            inputs={"inputs": [{"role": "user", "content": "hello"}]},
+            instance_info={"class_name": "test-model"},
+        )
+        await agent_handler.on_llm_end(
+            span,
+            outputs={"outputs": {"role": "assistant", "content": "hi"}},
+        )
+
+        await rail.after_invoke(
+            self._create_ctx(
+                AgentCallbackEvent.AFTER_INVOKE,
+                InvokeInputs(query="test query", conversation_id="conv_trace_source", result={"ok": True}),
+                session=session,
+            )
+        )
+
+        trajectories = self.store.query(source="custom_online")
+        self.assertEqual(len(trajectories), 1)
+        self.assertEqual(to_legacy_trajectory(trajectories[0]).source, "custom_online")
+        self.assertEqual(self.store.query(source="online"), [])
+
+    async def test_trace_trajectory_merges_builder_rl_fields(self):
+        """Trace-backed trajectories should preserve builder-only RL fields."""
+        trace_id = "runtime-trace-rl"
+        span_manager = SimpleNamespace(_trace_id=trace_id, last_span=None)
+        tracer = SimpleNamespace(tracer_agent_span_manager=span_manager)
+        session = SimpleNamespace(tracer=lambda: tracer)
+
+        class BuilderRlRail(EvolutionRail):
+            async def _on_after_model_call(self, ctx):
+                if self._builder is None or not self._builder.steps:
+                    return
+                last_step = self._builder.steps[-1]
+                last_step.reward = 0.7
+                last_step.prompt_token_ids = [1, 2, 3]
+                last_step.completion_token_ids = [10, 11]
+                last_step.logprobs = [-0.2, -0.3]
+                last_step.meta["turn_id"] = 0
+
+        rail = BuilderRlRail(
+            trajectory_store=self.store,
+            evolution_trigger=EvolutionTriggerPoint.NONE,
+        )
+
+        await rail.before_invoke(
+            self._create_ctx(
+                AgentCallbackEvent.BEFORE_INVOKE,
+                InvokeInputs(query="test query", conversation_id="conv_trace_rl"),
+                session=session,
+            )
+        )
+
+        span = TraceAgentSpan(trace_id=trace_id, invoke_id="llm-1")
+        agent_handler = TracerHandlerRegistry.get_agent_handlers()[TRAJECTORY_TRACE_AGENT_HANDLER_NAME]
+        await agent_handler.on_llm_start(
+            span,
+            inputs={"inputs": [{"role": "user", "content": "hello"}]},
+            instance_info={"class_name": "test-model"},
+        )
+        await agent_handler.on_llm_end(
+            span,
+            outputs={"outputs": {"role": "assistant", "content": "hi"}},
+        )
+
+        await rail.after_model_call(
+            self._create_ctx(
+                AgentCallbackEvent.AFTER_MODEL_CALL,
+                ModelCallInputs(
+                    messages=[{"role": "user", "content": "hello"}],
+                    response={"role": "assistant", "content": "hi"},
+                ),
+                session=session,
+            )
+        )
+
+        await rail.after_invoke(
+            self._create_ctx(
+                AgentCallbackEvent.AFTER_INVOKE,
+                InvokeInputs(query="test query", conversation_id="conv_trace_rl", result={"ok": True}),
+                session=session,
+            )
+        )
+
+        trajectories = self.store.query(session_id="conv_trace_rl")
+        self.assertEqual(len(trajectories), 1)
+        step = to_legacy_trajectory(trajectories[0]).steps[0]
+        self.assertEqual(step.reward, 0.7)
+        self.assertEqual(step.prompt_token_ids, [1, 2, 3])
+        self.assertEqual(step.completion_token_ids, [10, 11])
+        self.assertEqual(step.logprobs, [-0.2, -0.3])
+        self.assertEqual(step.meta["turn_id"], 0)
 
     async def test_extension_points_called(self):
         """Test that extension points are called."""
@@ -269,11 +522,11 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
 
     async def test_async_snapshot_uses_typed_contract_legacy_shape(self):
         messages = [{"role": "user", "content": "hello"}]
-        trajectory = Trajectory(
+        trajectory = LegacyTrajectory(
             execution_id="exec-1",
             session_id="session-1",
-            source="online",
             steps=[TrajectoryStep(kind="llm", detail=LLMCallDetail(model="m", messages=messages))],
+            source="online",
         )
         ctx = self._create_ctx(
             AgentCallbackEvent.AFTER_INVOKE,
@@ -284,7 +537,10 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         snapshot = await self.rail._snapshot_for_evolution(trajectory, ctx)
         typed_snapshot = EvolutionSnapshot.from_legacy_dict(snapshot)
 
-        self.assertIs(typed_snapshot.trajectory, trajectory)
+        self.assertIsInstance(typed_snapshot.trajectory, LegacyTrajectory)
+        self.assertIsNot(typed_snapshot.trajectory, trajectory)
+        self.assertEqual(typed_snapshot.trajectory.execution_id, trajectory.execution_id)
+        self.assertFalse(hasattr(typed_snapshot.trajectory, "otlp_trace"))
         self.assertEqual(typed_snapshot.messages, messages)
         self.assertIsNone(typed_snapshot.skill_name)
 
@@ -394,8 +650,9 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         )
 
         trajectory = rail._build_trajectory()
-        assert trajectory.steps[1].detail.tool_call_id == "call_read_1"
-        assert trajectory.steps[1].meta["parent_llm_call"] == "llm_0001"
+        legacy = to_legacy_trajectory(trajectory)
+        assert legacy.steps[1].detail.tool_call_id == "call_read_1"
+        assert legacy.steps[1].meta["parent_llm_call"] == "llm_0001"
 
     async def test_online_tool_step_uses_matching_tool_call_id_for_parent_ref(self):
         rail = EvolutionRail(async_evolution=False)
@@ -433,8 +690,9 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         )
 
         trajectory = rail._build_trajectory()
-        assert trajectory.steps[2].detail.tool_call_id == "call_read_1"
-        assert trajectory.steps[2].meta["parent_llm_call"] == "llm_0001"
+        legacy = to_legacy_trajectory(trajectory)
+        assert legacy.steps[2].detail.tool_call_id == "call_read_1"
+        assert legacy.steps[2].meta["parent_llm_call"] == "llm_0001"
 
     async def test_after_evolution_triggered_hook_runs_after_trigger(self):
         """Subclasses can observe successful trigger scheduling after evolution starts."""
@@ -616,7 +874,7 @@ class TestEvolutionRailAccumulation(IsolatedAsyncioTestCase):
         rail._save_trajectory(trajectory)
         await rail.run_evolution(trajectory, ctx)
 
-        self.assertEqual(len(trajectory.steps), 2)
+        self.assertEqual(len(to_legacy_trajectory(trajectory).steps), 2)
         self.assertEqual(len(evolution_calls), 1)
         self.assertEqual(len(self.store.query()), 2)  # Round 1 + manual save
 
@@ -750,7 +1008,7 @@ class TestTrajectoryRail(IsolatedAsyncioTestCase):
         # Verify trajectory was saved
         trajectories = self.store.query(session_id="conv_789")
         self.assertEqual(len(trajectories), 1)
-        self.assertEqual(trajectories[0].session_id, "conv_789")
+        self.assertEqual(to_legacy_trajectory(trajectories[0]).session_id, "conv_789")
 
     def test_priority(self):
         """Test that TrajectoryRail has expected priority."""
@@ -924,10 +1182,17 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
             context=MockMessageContext(messages=[{"role": "user", "content": "improve the workflow"}]),
         )
         result = await rail._snapshot_for_evolution(
-            Trajectory(execution_id="test", steps=[], session_id="test", source="online"), ctx
+            LegacyTrajectory(
+                execution_id="test",
+                steps=[],
+                session_id="test",
+                source="online",
+            ),
+            ctx,
         )
         self.assertIsNotNone(result)
         self.assertIn("trajectory", result)
+        self.assertIsInstance(result["trajectory"], LegacyTrajectory)
         self.assertEqual(result["messages"], [])
 
     async def test_safe_run_evolution_catches_exceptions(self):
@@ -940,7 +1205,14 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         rail = FailingRail(trajectory_store=self.store)
         # Should not raise
         await rail._safe_run_evolution(
-            {"trajectory": Trajectory(execution_id="test", steps=[], session_id="test", source="online")}
+            {
+                "trajectory": LegacyTrajectory(
+                    execution_id="test",
+                    steps=[],
+                    session_id="test",
+                    source="online",
+                )
+            }
         )
 
     async def test_safe_run_evolution_respects_total_timeout_hook(self):
@@ -960,7 +1232,14 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
 
         rail = SlowRail(trajectory_store=self.store)
         await rail._safe_run_evolution(
-            {"trajectory": Trajectory(execution_id="test", steps=[], session_id="test", source="online")}
+            {
+                "trajectory": LegacyTrajectory(
+                    execution_id="test",
+                    steps=[],
+                    session_id="test",
+                    source="online",
+                )
+            }
         )
 
         self.assertFalse(rail.completed)
@@ -979,7 +1258,14 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
 
         rail = FailingRail(trajectory_store=self.store)
         await rail._safe_run_evolution(
-            {"trajectory": Trajectory(execution_id="test", steps=[], session_id="test", source="online")}
+            {
+                "trajectory": LegacyTrajectory(
+                    execution_id="test",
+                    steps=[],
+                    session_id="test",
+                    source="online",
+                )
+            }
         )
 
         events = await rail.drain_pending_approval_events()
@@ -997,7 +1283,14 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
 
         rail = SuccessfulRail(trajectory_store=self.store)
         await rail._safe_run_evolution(
-            {"trajectory": Trajectory(execution_id="test", steps=[], session_id="test", source="online")}
+            {
+                "trajectory": LegacyTrajectory(
+                    execution_id="test",
+                    steps=[],
+                    session_id="test",
+                    source="online",
+                )
+            }
         )
 
         self.assertEqual(await rail.drain_pending_approval_events(), [])
@@ -1014,7 +1307,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         for index in range(3):
             await rail._safe_run_evolution(
                 {
-                    "trajectory": Trajectory(
+                    "trajectory": LegacyTrajectory(
                         execution_id=str(index),
                         steps=[],
                         session_id="test",

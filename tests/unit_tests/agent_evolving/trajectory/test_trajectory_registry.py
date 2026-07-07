@@ -9,7 +9,7 @@ from openjiuwen.agent_evolving.trajectory import (
     LLMCallDetail,
     MemberTrajectorySnapshot,
     ToolCallDetail,
-    Trajectory,
+    LegacyTrajectory,
     TrajectoryStep,
 )
 
@@ -19,11 +19,10 @@ def _trajectory(
     session_id: str,
     tool_name: str,
     start_time_ms: int = 1,
-) -> Trajectory:
-    return Trajectory(
+) -> LegacyTrajectory:
+    return LegacyTrajectory(
         execution_id=f"exec-{member_id}-{tool_name}",
         session_id=session_id,
-        source="online",
         steps=[
             TrajectoryStep(
                 kind="tool",
@@ -31,6 +30,7 @@ def _trajectory(
                 start_time_ms=start_time_ms,
             )
         ],
+        source="online",
         meta={"member_id": member_id},
     )
 
@@ -54,7 +54,7 @@ def _snapshot(
     )
 
 
-def _tool_names(trajectory: Trajectory | None) -> list[str]:
+def _tool_names(trajectory: LegacyTrajectory | None) -> list[str]:
     assert trajectory is not None
     return [step.detail.tool_name for step in trajectory.steps if step.detail is not None]
 
@@ -158,10 +158,9 @@ def test_registry_uses_snapshot_member_metadata_for_aggregation() -> None:
             session_id="session-a",
             member_id="leader",
             member_role="leader",
-            trajectory=Trajectory(
+            trajectory=LegacyTrajectory(
                 execution_id="random-execution-id",
                 session_id="session-a",
-                source="online",
                 steps=[
                     TrajectoryStep(
                         kind="llm",
@@ -169,6 +168,7 @@ def test_registry_uses_snapshot_member_metadata_for_aggregation() -> None:
                         meta={"operator_id": "leader/llm_main"},
                     )
                 ],
+                source="online",
             ),
             recorded_at_ms=1000,
         )
@@ -190,10 +190,9 @@ def test_registry_keeps_leader_llm_for_runtime_leader_member_id() -> None:
             team_id="team-a",
             member_id=member_id,
             member_role="leader",
-            trajectory=Trajectory(
+            trajectory=LegacyTrajectory(
                 execution_id="exec-leader",
                 session_id="session-a",
-                source="online",
                 steps=[
                     TrajectoryStep(
                         kind="llm",
@@ -207,6 +206,7 @@ def test_registry_keeps_leader_llm_for_runtime_leader_member_id() -> None:
                         start_time_ms=2,
                     ),
                 ],
+                source="online",
                 meta={"member_id": member_id},
             ),
             recorded_at_ms=1000,

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.agent_evolving.trajectory import LLMCallDetail, Trajectory, TrajectoryStep
+from openjiuwen.agent_evolving.trajectory import LLMCallDetail, LegacyTrajectory, TrajectoryStep
 
 
 class _FakeRedisPipeline:
@@ -267,10 +267,9 @@ async def test_gateway_trajectory_runtime_fills_single_user_default_on_record(tm
 def test_online_trajectory_converter_reads_prompt_and_response_token_ids_from_response():
     from openjiuwen.agent_evolving.agent_rl.online.rail.converter import OnlineTrajectoryConverter
 
-    trajectory = Trajectory(
+    trajectory = LegacyTrajectory(
         execution_id="traj-1",
         session_id="session-1",
-        source="online",
         steps=[
             TrajectoryStep(
                 kind="llm",
@@ -293,6 +292,7 @@ def test_online_trajectory_converter_reads_prompt_and_response_token_ids_from_re
                 ),
             ),
         ],
+        source="online",
     )
 
     batch = OnlineTrajectoryConverter(tenant_id="user-1").convert(trajectory)
@@ -302,14 +302,57 @@ def test_online_trajectory_converter_reads_prompt_and_response_token_ids_from_re
     assert batch.samples[0].response_tokens == [4, 5]
 
 
+@pytest.mark.asyncio
+async def test_online_trajectory_converter_preserves_trace_plain_meta():
+    from openjiuwen.agent_evolving.agent_rl.online.rail.converter import OnlineTrajectoryConverter
+    from openjiuwen.agent_evolving.trajectory import (
+        TrajectoryTraceAgentHandler,
+        TrajectoryTraceStateManager,
+        to_legacy_trajectory,
+    )
+    from openjiuwen.core.session.tracer.span import TraceAgentSpan
+
+    state_manager = TrajectoryTraceStateManager()
+    handler = TrajectoryTraceAgentHandler(state_manager)
+    trace_id = "trace-meta-converter"
+    state_manager.bind_trace(
+        trace_id,
+        session_id="session-1",
+        source="rl_online",
+        meta={
+            "tenant_id": "tenant-1",
+            "status": "ok",
+            "started_at": 123.4,
+            "custom": {"label": "keep"},
+        },
+    )
+    span = TraceAgentSpan(trace_id=trace_id, invoke_id="llm-1")
+    await handler.on_llm_start(
+        span,
+        inputs={"inputs": [{"role": "user", "content": "hello"}]},
+        instance_info={"class_name": "m1"},
+    )
+    await handler.on_llm_end(
+        span,
+        outputs={"outputs": {"role": "assistant", "content": "pong"}},
+    )
+
+    trajectory = state_manager.build_trajectory(trace_id, session_id="session-1", source="rl_online", finalize=True)
+    batch = OnlineTrajectoryConverter(tenant_id="tenant-1").convert(to_legacy_trajectory(trajectory))
+
+    assert batch.trajectory_meta.status == "ok"
+    assert batch.trajectory_meta.extra["tenant_id"] == "tenant-1"
+    assert batch.trajectory_meta.extra["started_at"] == 123.4
+    assert batch.trajectory_meta.extra["custom"] == {"label": "keep"}
+
+
 def test_online_trajectory_converter_normalizes_streaming_logprobs_for_gateway():
     from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.rail_ingest import RailBatchIngestor
     from openjiuwen.agent_evolving.agent_rl.online.rail.converter import OnlineTrajectoryConverter
 
-    trajectory = Trajectory(
+    trajectory = LegacyTrajectory(
         execution_id="traj-stream",
         session_id="session-1",
-        source="online",
         steps=[
             TrajectoryStep(
                 kind="llm",
@@ -323,6 +366,7 @@ def test_online_trajectory_converter_normalizes_streaming_logprobs_for_gateway()
                 logprobs={"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
             ),
         ],
+        source="online",
     )
 
     batch = OnlineTrajectoryConverter(tenant_id="user-1").convert(trajectory).to_dict()
@@ -343,10 +387,9 @@ def test_online_trajectory_converter_tolerates_message_model_dump_failure():
         def model_dump(self):
             raise TypeError("MockValSer")
 
-    trajectory = Trajectory(
+    trajectory = LegacyTrajectory(
         execution_id="traj-broken-message",
         session_id="session-1",
-        source="online",
         steps=[
             TrajectoryStep(
                 kind="llm",
@@ -363,6 +406,7 @@ def test_online_trajectory_converter_tolerates_message_model_dump_failure():
                 ),
             ),
         ],
+        source="online",
     )
 
     batch = OnlineTrajectoryConverter(tenant_id="user-1").convert(trajectory)
