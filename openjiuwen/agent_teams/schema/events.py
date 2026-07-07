@@ -93,6 +93,7 @@ class TeamEvent:
     TASK_COMPLETED = "task_completed"
     TASK_CANCELLED = "task_cancelled"
     TASK_UNBLOCKED = "task_unblocked"
+    TASK_RELEASED = "task_released"
     TASK_LIST_DRAINED = "task_list_drained"
 
     # Swarmflow orchestration progress (a swarmflow run feeding the spectator leader)
@@ -260,6 +261,17 @@ class TaskUnblockedEvent(BaseEventMessage):
     task_id: str = Field(..., description="Task unique identifier")
 
 
+class TaskReleasedEvent(BaseEventMessage):
+    """Event published when a claimed task is reset back to pending.
+
+    Fired by ``TeamTaskManager.reset`` when a member's claim is released
+    (member cancellation / leader reassignment). The task re-enters the
+    claimable pool, so idle teammates are nudged the same way they are
+    for a ``TASK_UNBLOCKED`` event.
+    """
+    task_id: str = Field(..., description="Task unique identifier")
+
+
 class TaskListDrainedEvent(BaseEventMessage):
     """Event published when every task in the team task list is terminal.
 
@@ -383,6 +395,7 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.TASK_COMPLETED: TaskCompletedEvent,
     TeamEvent.TASK_CANCELLED: TaskCancelledEvent,
     TeamEvent.TASK_UNBLOCKED: TaskUnblockedEvent,
+    TeamEvent.TASK_RELEASED: TaskReleasedEvent,
     TeamEvent.TASK_LIST_DRAINED: TaskListDrainedEvent,
     TeamEvent.WORKFLOW_PROGRESS: WorkflowProgressTeamEvent,
     TeamEvent.WORKTREE_CREATED: WorktreeCreatedEvent,

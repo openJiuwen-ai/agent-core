@@ -30,6 +30,7 @@ from openjiuwen.agent_teams.schema.events import (
     TaskListDrainedEvent,
     TaskPlanRequestEvent,
     TaskPlanResponseEvent,
+    TaskReleasedEvent,
     TaskUnblockedEvent,
     TaskUpdatedEvent,
     TeamTopic,
@@ -1221,7 +1222,11 @@ class TeamTaskManager:
     async def reset(self, task_id: str) -> TaskOpResult:
         """Reset a claimed task back to PENDING and clear assignee.
 
-        Useful for re-assigning a task to another member.
+        Useful for re-assigning a task to another member, or for
+        releasing a leaving member's claims back into the claimable pool.
+        Publishes ``TASK_RELEASED`` on success so idle teammates learn
+        the task is claimable again (same downstream nudge as
+        ``TASK_UNBLOCKED``).
 
         Args:
             task_id: Task identifier.
@@ -1239,6 +1244,10 @@ class TeamTaskManager:
                 f"Task {task_id} cannot be reset from status '{existing.status}'; only claimed tasks can be reset"
             )
         team_logger.info(f"Task {task_id} reset successfully")
+        await self._publish_task_event(
+            TaskReleasedEvent(team_name=self.team_name, task_id=task_id),
+            error_label=f"Task released event for {task_id}",
+        )
         return TaskOpResult.success()
 
     async def approve_plan(

@@ -37,6 +37,9 @@ from openjiuwen.agent_teams.schema.events import (
     TaskCompletedEvent,
     TaskCreatedEvent,
     TaskListDrainedEvent,
+    TaskReleasedEvent,
+    TaskUnblockedEvent,
+    TaskUpdatedEvent,
     TeamCleanedEvent,
     TeamCompletedEvent,
     TeamEvent,
@@ -2010,6 +2013,233 @@ async def test_task_completed_with_incomplete_tasks_nudges_leader_board():
     assert "task-2" in content
     # Should NOT contain the "all done" summary prompt
     assert "完成" not in content or "task" in content.lower()
+
+
+# ------------------------------------------------------------------
+# Teammate idle nudge is gated on claimable-set growth
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_teammate_nudged_on_task_created():
+    """A brand-new pending task grows the claimable set, so an idle
+    teammate is nudged to re-evaluate the board."""
+    agent = _make_teammate()
+    claimable = MagicMock()
+    claimable.task_id = "task-9"
+    claimable.title = "Fresh work"
+    claimable.content = "Do it"
+    claimable.status = "pending"
+    claimable.assignee = None
+    claimable.updated_at = 1_700_000_000_000
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[claimable])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCreatedEvent(team_name="test-team", task_id="task-9", status="pending")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
+    agent.deliver_input.assert_awaited_once()
+    assert "task-9" in agent.deliver_input.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_teammate_nudged_on_task_unblocked():
+    """A task whose dependencies clear flips to pending and grows the
+    claimable set, so an idle teammate is nudged."""
+    agent = _make_teammate()
+    unblocked = MagicMock()
+    unblocked.task_id = "task-11"
+    unblocked.title = "Now ready"
+    unblocked.content = "Was blocked"
+    unblocked.status = "pending"
+    unblocked.assignee = None
+    unblocked.updated_at = 1_700_000_000_000
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[unblocked])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskUnblockedEvent(team_name="test-team", task_id="task-11")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
+    agent.deliver_input.assert_awaited_once()
+    assert "task-11" in agent.deliver_input.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_teammate_skips_nudge_on_task_updated():
+    """TASK_UPDATED only edits an existing task; it does not grow the
+    claimable set, so an idle teammate is not woken — no board survey,
+    no deliver_input."""
+    agent = _make_teammate()
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskUpdatedEvent(team_name="test-team", task_id="task-9")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent._configurator.task_manager.list_tasks.assert_not_awaited()
+    agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_teammate_skips_nudge_on_task_completed():
+    """A teammate is not woken when someone else completes a task — it
+    shrinks, not grows, the claimable set."""
+    agent = _make_teammate()
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCompletedEvent(team_name="test-team", task_id="task-9")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent._configurator.task_manager.list_tasks.assert_not_awaited()
+    agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_teammate_nudged_on_task_released():
+    """A reset task re-enters the claimable pool, so an idle teammate is
+    nudged by TASK_RELEASED to pick it up."""
+    agent = _make_teammate()
+    released = MagicMock()
+    released.task_id = "task-13"
+    released.title = "Freed work"
+    released.content = "Was someone else's"
+    released.status = "pending"
+    released.assignee = None
+    released.updated_at = 1_700_000_000_000
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[released])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskReleasedEvent(team_name="test-team", task_id="task-13")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
+    agent.deliver_input.assert_awaited_once()
+    assert "task-13" in agent.deliver_input.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_teammate_board_shows_only_claimable_tasks():
+    """The teammate nudge surfaces only claimable (pending + unassigned)
+    tasks — claimed / in-flight tasks owned by others are excluded."""
+    agent = _make_teammate()
+    claimable = MagicMock()
+    claimable.task_id = "task-free"
+    claimable.title = "Open work"
+    claimable.content = "Grab me"
+    claimable.status = "pending"
+    claimable.assignee = None
+    claimable.updated_at = 1_700_000_000_000
+
+    others = MagicMock()
+    others.task_id = "task-busy"
+    others.title = "Someone's work"
+    others.content = "In progress"
+    others.status = "claimed"
+    others.assignee = "dev-2"
+    others.updated_at = 1_700_000_000_000
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[claimable, others])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCreatedEvent(team_name="test-team", task_id="task-free", status="pending")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "task-free" in content
+    assert "task-busy" not in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_teammate_skips_nudge_when_no_claimable_task():
+    """Even on a claimable-growth event, a teammate is not woken when no
+    task is actually claimable (e.g. the new task was already taken)."""
+    agent = _make_teammate()
+    claimed = MagicMock()
+    claimed.task_id = "task-gone"
+    claimed.title = "Taken"
+    claimed.content = "Already claimed"
+    claimed.status = "claimed"
+    claimed.assignee = "dev-2"
+    claimed.updated_at = 1_700_000_000_000
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[claimed])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCreatedEvent(team_name="test-team", task_id="task-gone", status="pending")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_leader_nudged_on_task_updated_despite_filter():
+    """The teammate nudge filter must not touch the leader: a leader
+    still re-surveys the board on TASK_UPDATED."""
+    agent = _make_leader()
+    incomplete = MagicMock()
+    incomplete.task_id = "task-3"
+    incomplete.title = "Ongoing"
+    incomplete.content = "Work"
+    incomplete.status = "claimed"
+    incomplete.assignee = "dev-1"
+    incomplete.updated_at = 1_700_000_000_000
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[incomplete])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskUpdatedEvent(team_name="test-team", task_id="task-3")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
+    agent.deliver_input.assert_awaited_once()
+    assert "task-3" in agent.deliver_input.await_args.args[0]
 
 
 @pytest.mark.asyncio
