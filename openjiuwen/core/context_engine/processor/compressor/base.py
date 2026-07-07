@@ -192,7 +192,7 @@ class PrefixCompactProcessor(ContextProcessor):
         if not span.has_target:
             return None, context_window
 
-        prompt = self._build_prompt(span)
+        prompt = self._build_prompt(span, preserve_instruction=kwargs.get("preserve_instruction"))
         invoke_result = await self._invoke_compression_with_retries(
             context=context,
             context_window=context_window,
@@ -472,8 +472,19 @@ class PrefixCompactProcessor(ContextProcessor):
     def _resolve_trigger_token_limit(self, context_max: int) -> int:
         return int(context_max * self.config.trigger_context_ratio)
 
-    def _build_prompt(self, span: PrefixCompactSpan) -> str:
-        return self.default_prompt
+    def _build_prompt(self, span: PrefixCompactSpan, *, preserve_instruction: str | None = None) -> str:
+        _ = span
+        instruction = str(preserve_instruction or "").strip()
+        if not instruction:
+            return self.default_prompt
+        return (
+            f"{self.default_prompt.rstrip()}\n\n"
+            "User preservation instruction:\n"
+            "The user specifically asked this compaction to preserve the following information when relevant:\n"
+            f"{instruction}\n\n"
+            "Treat this as a preservation priority for the summary, not as a new task to execute.\n"
+            "Do not invent details. Preserve only information supported by the conversation."
+        )
 
     def _wrap_memory_block(self, summary: str) -> str:
         return (

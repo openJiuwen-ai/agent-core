@@ -2,6 +2,7 @@
 
 from openjiuwen.core.context_engine.processor.compressor.current_round_compressor import (
     CurrentRoundCompressor,
+    CurrentRoundCompressorConfig,
 )
 from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
     DialogueCompressor,
@@ -28,3 +29,21 @@ def test_prompts_are_the_structured_compaction_prompts():
     assert "<coverage_check>" in CURRENT_COMPACT_PROMPT
     assert "<state_snapshot>" in DIALOGUE_COMPACT_PROMPT
     assert "full-context state snapshot" in ROUND_COMPACT_PROMPT
+
+
+def test_manual_compact_preserve_instruction_is_appended_to_prompt():
+    processor = CurrentRoundCompressor(CurrentRoundCompressorConfig())
+
+    default_prompt = processor._build_prompt(None)
+    assert default_prompt == CURRENT_COMPACT_PROMPT
+    assert "User preservation instruction:" not in default_prompt
+
+    prompt = processor._build_prompt(
+        None,
+        preserve_instruction="preserve API decisions and failed attempts",
+    )
+
+    assert prompt.startswith(CURRENT_COMPACT_PROMPT.rstrip())
+    assert "User preservation instruction:" in prompt
+    assert "preserve API decisions and failed attempts" in prompt
+    assert "not as a new task to execute" in prompt
