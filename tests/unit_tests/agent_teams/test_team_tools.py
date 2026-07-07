@@ -13,6 +13,7 @@ from openjiuwen.agent_teams.context import (
     set_session_id,
 )
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.status import (
     MemberMode,
     MemberStatus,
@@ -879,7 +880,9 @@ class TestUpdateTaskTool:
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_assign_reassigns_to_new_member(self, agent_team, t, sample_agent_card, db):
-        """Reassigning a claimed task cancels the old owner and binds the new one."""
+        """Reassigning a claimed task moves it to the new member without a
+        member-wide cancel: the former owner is notified via a targeted
+        TASK_REVOKED event, and cancel_member is never called."""
         for member_name in ("dev-1", "dev-2"):
             await db.member.create_member(
                 member_name=member_name,
@@ -890,6 +893,7 @@ class TestUpdateTaskTool:
             )
         task = await agent_team.task_manager.add(title="Task", content="Content")
         await db.task.claim_task(task.task_id, "dev-1")
+        agent_team.cancel_member = AsyncMock()
 
         tool = UpdateTaskTool(agent_team, t)
         result = await tool.invoke(
@@ -903,6 +907,18 @@ class TestUpdateTaskTool:
         assert "assignee" in result.data["updated_fields"]
         updated = await agent_team.task_manager.get(task.task_id)
         assert updated.assignee == "dev-2"
+
+        # The former owner is not force-cancelled — only the one task moves.
+        agent_team.cancel_member.assert_not_awaited()
+        # A targeted TASK_REVOKED notifies the former assignee (dev-1).
+        revoked = [
+            call.kwargs["message"]
+            for call in agent_team.messager.publish.call_args_list
+            if call.kwargs.get("message") is not None
+            and call.kwargs["message"].event_type == TeamEvent.TASK_REVOKED
+        ]
+        assert len(revoked) == 1
+        assert revoked[0].payload["member_name"] == "dev-1"
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1899,3 +1915,52 @@ async def test_reliability_factory_reuses_injected_components_across_cycles(agen
     # ...wrapping the one reused stateful core.
     assert rail_cycle1._monitor is rail_cycle2._monitor
     assert rail_cycle1._monitor is components.monitor
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_task_rejects_assign_to_member_with_active_claim(agent_team, t, sample_agent_card, db):
+    """One active claim per member: assigning a second task to a member who
+    already holds a CLAIMED task is refused, leaving both tasks untouched."""
+    await db.member.create_member(
+        member_name="dev-1",
+        team_name="test_team",
+        display_name="dev-1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task_a = await agent_team.task_manager.add(title="A", content="c")
+    task_b = await agent_team.task_manager.add(title="B", content="c")
+    await db.task.claim_task(task_a.task_id, "dev-1")
+
+    tool = UpdateTaskTool(agent_team, t)
+    result = await tool.invoke({"task_id": task_b.task_id, "assignee": "dev-1"})
+
+    assert result.success is False
+    assert task_a.task_id in result.error
+    # task_b stays unassigned; task_a still held by dev-1.
+    assert (await agent_team.task_manager.get(task_b.task_id)).assignee is None
+    assert (await agent_team.task_manager.get(task_a.task_id)).assignee == "dev-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_claim_task_rejects_second_concurrent_claim(agent_team, t, sample_agent_card, db):
+    """A teammate holding a CLAIMED task cannot claim a second one."""
+    await db.member.create_member(
+        member_name="leader1",
+        team_name="test_team",
+        display_name="leader1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task_a = await agent_team.task_manager.add(title="A", content="c")
+    task_b = await agent_team.task_manager.add(title="B", content="c")
+    await db.task.claim_task(task_a.task_id, "leader1")
+
+    tool = ClaimTaskTool(agent_team.task_manager, t)
+    result = await tool.invoke({"task_id": task_b.task_id, "status": "claimed"})
+
+    assert result.success is False
+    assert task_a.task_id in result.error
+    assert (await agent_team.task_manager.get(task_b.task_id)).status == TaskStatus.PENDING.value
