@@ -212,7 +212,7 @@ openjiuwen/agent_teams/tools/locales/
 
 | 集合常量 | 成员 |
 |---|---|
-| `LEADER_ONLY_TOOLS` | `build_team`, `clean_team`, `spawn_teammate`, `spawn_human_agent`, `spawn_bridge_agent`, `spawn_external_cli`, `shutdown_member`, `approve_plan`, `approve_tool`, `create_task`, `update_task`, `list_members` |
+| `LEADER_ONLY_TOOLS` | `build_team`, `clean_team`, `spawn_teammate`, `spawn_human_agent`, `spawn_bridge_agent`, `spawn_external_cli`, `shutdown_member`, `approve_plan`, `approve_tool`, `create_task`, `update_task` |
 | `MEMBER_ONLY_TOOLS` | `claim_task` |
 | `SHARED_TOOLS` | `view_task`, `send_message` |
 | `HUMAN_AGENT_TOOLS` | `view_task`, `member_complete_task`, `send_message` |

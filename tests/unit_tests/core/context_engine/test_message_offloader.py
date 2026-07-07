@@ -47,6 +47,13 @@ async def create_context_with_offloader(
     )
 
 
+def assert_offload_saved(ctx, offload_msg: OffloadMixin, expected_content: str) -> None:
+    saved_messages = ctx.save_state()["offload_messages"].get(offload_msg.offload_handle)
+    assert saved_messages
+    saved_content = "\n".join(str(getattr(message, "content", "")) for message in saved_messages)
+    assert expected_content in saved_content
+
+
 class TestMessageOffloader:
     """MessageOffloader unit tests: all cases pass MessageOffloader via create_context."""
 
@@ -147,10 +154,7 @@ class TestMessageOffloader:
         assert len(result) == 5
         offloaded = [m for m in result if isinstance(m, OffloadMixin)]
         assert len(offloaded) == 1
-        reloaded = await ctx.reloader_tool().invoke(
-            dict(offload_handle=offloaded[0].offload_handle, offload_type="in_memory")
-        )
-        assert "x" * 100 in reloaded
+        assert_offload_saved(ctx, offloaded[0], "x" * 100)
 
     @pytest.mark.asyncio
     async def test_streams_state_when_offload_processor_triggers(self):
@@ -312,10 +316,7 @@ class TestMessageOffloader:
         assert isinstance(offload_msg, OffloadMixin)
         assert offload_msg.content.startswith("a" * 10)
         assert "[[OFFLOAD:" in offload_msg.content
-        reloaded = await ctx.reloader_tool().invoke(
-            dict(offload_handle=offload_msg.offload_handle, offload_type="in_memory")
-        )
-        assert long_content in reloaded
+        assert_offload_saved(ctx, offload_msg, long_content)
 
     # ---------- tool_call_id is preserved ----------
     @pytest.mark.asyncio
@@ -338,10 +339,7 @@ class TestMessageOffloader:
         result = ctx.get_messages()
         offload_msg = result[1]
         assert offload_msg.tool_call_id == "critical-tc-123"
-        reloaded = await ctx.reloader_tool().invoke(
-            dict(offload_handle=offload_msg.offload_handle, offload_type="in_memory")
-        )
-        assert "Very long tool response" in reloaded
+        assert_offload_saved(ctx, offload_msg, "Very long tool response")
 
     # ========== Complex end-to-end functional tests ==========
 
@@ -371,10 +369,7 @@ class TestMessageOffloader:
         offloaded = [m for m in result if isinstance(m, OffloadMixin)]
         assert len(offloaded) >= 1
         for m in offloaded:
-            reloaded = await ctx.reloader_tool().invoke(
-                dict(offload_handle=m.offload_handle, offload_type="in_memory")
-            )
-            assert len(reloaded) > 0
+            assert ctx.save_state()["offload_messages"].get(m.offload_handle)
 
     @pytest.mark.asyncio
     async def test_multi_round_dialogue_offload_old_keep_recent(self):
@@ -404,10 +399,7 @@ class TestMessageOffloader:
         assert not isinstance(last_final, OffloadMixin)
         offloaded_tools = [m for m in result if isinstance(m, OffloadMixin)]
         assert len(offloaded_tools) >= 1
-        reloaded = await ctx.reloader_tool().invoke(
-            dict(offload_handle=offloaded_tools[0].offload_handle, offload_type="in_memory")
-        )
-        assert "LONG_TOOL_RESPONSE" in reloaded
+        assert_offload_saved(ctx, offloaded_tools[0], "LONG_TOOL_RESPONSE")
 
     # ========== protected_tool_names: tool protection tests ==========
 
@@ -421,7 +413,7 @@ class TestMessageOffloader:
             offload_message_type=["tool"],
             messages_to_keep=None,
             keep_last_round=False,
-            protected_tool_names=["reload_original_context_messages"],
+            protected_tool_names=["read_file"],
         )
         ctx = await create_context_with_offloader(config)
         long_content = "X" * 200
@@ -430,13 +422,13 @@ class TestMessageOffloader:
             AssistantMessage(
                 content="a",
                 tool_calls=[ToolCall(
-                    id="tc-reload",
-                    name="reload_original_context_messages",
+                    id="tc-read",
+                    name="read_file",
                     type="function",
-                    arguments="{}"
+                    arguments='{"file_path": "offload.json"}'
                 )]
             ),
-            ToolMessage(content=long_content, tool_call_id="tc-reload"),
+            ToolMessage(content=long_content, tool_call_id="tc-read"),
         ]
         await ctx.add_messages(msgs)
         result = ctx.get_messages()
@@ -454,7 +446,7 @@ class TestMessageOffloader:
             offload_message_type=["tool"],
             messages_to_keep=None,
             keep_last_round=False,
-            protected_tool_names=["reload_original_context_messages"],
+            protected_tool_names=["read_file"],
         )
         ctx = await create_context_with_offloader(config)
         long_content = "X" * 200
@@ -632,7 +624,7 @@ class TestMessageOffloader:
             messages_to_keep=None,
             keep_last_round=False,
             protected_tool_names=[
-                "reload_original_context_messages",
+                "read_file",
                 "view_file:*.md",
                 "read:*.py",
             ],
@@ -640,21 +632,21 @@ class TestMessageOffloader:
         ctx = await create_context_with_offloader(config)
         long_content = "X" * 200
 
-        # Test reload_original_context_messages is protected (exact match)
-        msgs_reload = [
+        # Test read_file is protected (exact match)
+        msgs_read = [
             UserMessage(content="u"),
             AssistantMessage(
                 content="a",
                 tool_calls=[ToolCall(
-                    id="tc-reload",
-                    name="reload_original_context_messages",
+                    id="tc-read",
+                    name="read_file",
                     type="function",
-                    arguments="{}"
+                    arguments='{"file_path": "offload.json"}'
                 )]
             ),
-            ToolMessage(content=long_content, tool_call_id="tc-reload"),
+            ToolMessage(content=long_content, tool_call_id="tc-read"),
         ]
-        await ctx.add_messages(msgs_reload)
+        await ctx.add_messages(msgs_read)
         result = ctx.get_messages()
         assert not isinstance(result[2], OffloadMixin)
 

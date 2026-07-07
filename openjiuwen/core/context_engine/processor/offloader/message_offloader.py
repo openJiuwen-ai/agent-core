@@ -51,7 +51,7 @@ class MessageOffloaderConfig(BaseModel):
     offload_message_type: list[Literal["user", "assistant", "tool"]] = Field(default=["tool"])
     """Roles eligible for offloading. Messages whose role is not in this list are always kept."""
 
-    protected_tool_names: list[str] = Field(default=["reload_original_context_messages"])
+    protected_tool_names: list[str] = Field(default=["read_file"])
     """Tool messages produced by these tools are never offloaded, even if they are large."""
 
     trim_size: int = Field(default=100, gt=0)

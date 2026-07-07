@@ -131,6 +131,27 @@ class WorktreeInput(ConstructionInput):
     )
 
 
+class SysOperationInput(ConstructionInput):
+    """Construction inputs for system-operation tools."""
+
+    with_code_tool: bool = param_field(
+        default=False,
+        description="Whether to include the code execution tool.",
+    )
+    read_only: bool = param_field(
+        default=False,
+        description="Whether to expose only read/search/list tools.",
+    )
+    enable_read_image_multimodal: bool | None = param_field(
+        default=None,
+        description="Override image multimodal reads for read_file.",
+    )
+    bash_deny_patterns: list[str] = param_field(
+        default_factory=list,
+        description="Regex patterns denied by BashTool before shell execution.",
+    )
+
+
 def _build_worktree_rail(params: dict[str, Any], context: Any) -> WorktreeRail:
     """Build a WorktreeRail from a serializable worktree config block.
 

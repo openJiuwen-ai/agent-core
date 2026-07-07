@@ -46,7 +46,7 @@ from openjiuwen.agent_evolving.trajectory import (
 from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
     ToolCallDetail,
-    Trajectory,
+    LegacyTrajectory,
     TrajectoryStep,
 )
 from openjiuwen.core.single_agent.rail.base import (
@@ -270,7 +270,7 @@ def _handle_result(
 # ============================================================
 
 
-def build_patch_trajectory(skill_name: str = "deep-research-to-ppt") -> Trajectory:
+def build_patch_trajectory(skill_name: str = "deep-research-to-ppt") -> LegacyTrajectory:
     """Build a trajectory that references an existing team skill (triggers PATCH)."""
     steps = []
     steps.append(
@@ -304,11 +304,11 @@ def build_patch_trajectory(skill_name: str = "deep-research-to-ppt") -> Trajecto
             ),
         )
     )
-    return Trajectory(
+    return LegacyTrajectory(
         execution_id="test-patch-001",
         steps=steps,
-        source="online",
         session_id="test-session-2",
+        source="online",
     )
 
 
@@ -331,16 +331,16 @@ def _build_team_store_trajectory(
     session_id: str,
     steps: list,
     member_role: str | None = None,
-) -> Trajectory:
+) -> LegacyTrajectory:
     """Build a trajectory with member_id meta for team store."""
     meta = {"member_id": member_id}
     if member_role is not None:
         meta["member_role"] = member_role
-    return Trajectory(
+    return LegacyTrajectory(
         execution_id=f"exec-{member_id}",
         session_id=session_id,
-        source="online",
         steps=steps,
+        source="online",
         meta=meta,
     )
 
@@ -380,7 +380,7 @@ def _publish_member_snapshot(
     )
 
 
-def _tool_names(trajectory: Trajectory) -> list[str]:
+def _tool_names(trajectory: LegacyTrajectory) -> list[str]:
     return [step.detail.tool_name for step in trajectory.steps if step.detail is not None]
 
 
@@ -711,7 +711,12 @@ async def test_stage_evolution_from_signals_does_not_hardcode_workflow_signal_se
 
         result = await rail._stage_evolution_from_signals(
             "team-skill-a",
-            trajectory=Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            trajectory=LegacyTrajectory(
+                execution_id="e1",
+                session_id="s1",
+                steps=[],
+                source="online",
+            ),
             signals=[
                 make_evolution_signal(
                     signal_type="trajectory_issue",
@@ -1480,7 +1485,12 @@ async def test_run_evolution_returns_immediately_when_auto_scan_disabled():
         rail._emit_progress = MagicMock()
 
         await rail.run_evolution(
-            Trajectory(execution_id="exec-1", session_id="sess-1", source="online", steps=[]),
+            LegacyTrajectory(
+                execution_id="exec-1",
+                session_id="sess-1",
+                steps=[],
+                source="online",
+            ),
             _MockCtx(),
         )
 
@@ -1539,7 +1549,12 @@ async def test_team_snapshot_consumes_experience_tracker_state():
             session=SimpleNamespace(),
             context=_MsgContext(messages=[{"role": "user", "content": "hello"}]),
         )
-        trajectory = Trajectory(execution_id="exec-1", session_id="test-session", source="online", steps=[])
+        trajectory = LegacyTrajectory(
+            execution_id="exec-1",
+            session_id="test-session",
+            steps=[],
+            source="online",
+        )
 
         snapshot = await rail._snapshot_for_evolution(trajectory, ctx)
 
@@ -1723,9 +1738,19 @@ async def test_team_run_evolution_evaluates_presented_entries_when_no_skill_dete
         presented_entries = [("team-skill-a", record, "snippet")]
 
         await rail.run_evolution(
-            Trajectory(execution_id="exec-1", session_id="sess-1", source="online", steps=[]),
+            LegacyTrajectory(
+                execution_id="exec-1",
+                session_id="sess-1",
+                steps=[],
+                source="online",
+            ),
             snapshot={
-                "trajectory": Trajectory(execution_id="exec-1", session_id="sess-1", source="online", steps=[]),
+                "trajectory": LegacyTrajectory(
+                    execution_id="exec-1",
+                    session_id="sess-1",
+                    steps=[],
+                    source="online",
+                ),
                 "messages": [{"role": "user", "content": "hello"}],
                 "presented_entries": presented_entries,
             },
@@ -1750,7 +1775,12 @@ async def test_team_handle_evolution_from_signals_emits_no_records_outcome():
 
         result = await rail._handle_evolution_from_signals_with_result(
             skill_name="team-skill-a",
-            trajectory=Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            trajectory=LegacyTrajectory(
+                execution_id="e1",
+                session_id="s1",
+                steps=[],
+                source="online",
+            ),
             signals=[
                 make_evolution_signal(
                     signal_type="trajectory_issue",
@@ -1796,7 +1826,12 @@ async def test_team_handle_evolution_emits_persistence_failed_without_auto_appro
 
         result = await rail._handle_evolution_from_signals_with_result(
             skill_name="team-skill-a",
-            trajectory=Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            trajectory=LegacyTrajectory(
+                execution_id="e1",
+                session_id="s1",
+                steps=[],
+                source="online",
+            ),
             signals=[
                 make_evolution_signal(
                     signal_type="trajectory_issue",
@@ -1855,7 +1890,12 @@ async def test_team_run_evolution_does_not_report_persistence_failed_as_ready():
         )
 
         await rail.run_evolution(
-            Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            LegacyTrajectory(
+                execution_id="e1",
+                session_id="s1",
+                steps=[],
+                source="online",
+            ),
             snapshot={"messages": [], "presented_entries": []},
         )
 
@@ -2006,11 +2046,11 @@ async def test_run_evolution_uses_trajectory_source():
         captured: dict[str, Any] = {}
         _capture_trajectory_signals(rail, captured)
 
-        trajectory = Trajectory(
+        trajectory = LegacyTrajectory(
             execution_id="test-001",
             session_id="session-1",
-            source="online",
             steps=[],
+            source="online",
         )
         ctx = _MockCtx()
 
@@ -2020,6 +2060,39 @@ async def test_run_evolution_uses_trajectory_source():
         assert used_trajectory.execution_id == "team-team-a"
         assert used_trajectory.meta["member_count"] == 2
         assert _tool_names(used_trajectory) == ["spawn_member", "read_file", "view_task"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_after_invoke_with_trajectory_source_and_trace_does_not_shadow_source_name():
+    """Configured team trajectory source should not shadow base trace source naming."""
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        source = InMemoryTrajectoryRegistry()
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            auto_save=False,
+            async_evolution=False,
+            team_id="team-a",
+            trajectory_source=source,
+        )
+        rail._evolution_trigger = EvolutionTriggerPoint.NONE
+        rail._builder = TrajectoryBuilder(session_id="session-1", source="online")
+        ctx = _MockCtx(
+            inputs=InvokeInputs(query="round 1", conversation_id="session-1"),
+            session=SimpleNamespace(
+                tracer=lambda: SimpleNamespace(
+                    tracer_agent_span_manager=SimpleNamespace(_trace_id="trace-1")
+                )
+            ),
+        )
+
+        await rail.after_invoke(ctx)
+
+        assert rail._trajectory_source is source
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2063,11 +2136,11 @@ async def test_run_evolution_filters_non_collaborative_steps():
         captured: dict[str, Any] = {}
         _capture_trajectory_signals(rail, captured)
 
-        trajectory = Trajectory(
+        trajectory = LegacyTrajectory(
             execution_id="test-002",
             session_id="session-1",
-            source="online",
             steps=[],
+            source="online",
         )
         ctx = _MockCtx()
 
@@ -2139,11 +2212,11 @@ async def test_run_evolution_keeps_full_leader_trajectory():
         captured: dict[str, Any] = {}
         _capture_trajectory_signals(rail, captured)
 
-        trajectory = Trajectory(
+        trajectory = LegacyTrajectory(
             execution_id="test-003",
             session_id="session-1",
-            source="online",
             steps=[],
+            source="online",
         )
 
         await rail.run_evolution(trajectory, _MockCtx())
@@ -2185,10 +2258,9 @@ def test_detect_used_team_skill_prefers_skill_tool_and_filters_non_team_skill():
             async_evolution=False,
         )
 
-        trajectory = Trajectory(
+        trajectory = LegacyTrajectory(
             execution_id="detect-001",
             session_id="session-1",
-            source="online",
             steps=[
                 TrajectoryStep(
                     kind="tool",
@@ -2205,16 +2277,16 @@ def test_detect_used_team_skill_prefers_skill_tool_and_filters_non_team_skill():
                     ),
                 ),
             ],
+            source="online",
         )
 
         result = rail._detect_used_team_skill(trajectory)
 
         assert result == "deep-research-to-ppt"
 
-        swarm_trajectory = Trajectory(
+        swarm_trajectory = LegacyTrajectory(
             execution_id="detect-001-swarm",
             session_id="session-1",
-            source="online",
             steps=[
                 TrajectoryStep(
                     kind="tool",
@@ -2224,6 +2296,7 @@ def test_detect_used_team_skill_prefers_skill_tool_and_filters_non_team_skill():
                     ),
                 ),
             ],
+            source="online",
         )
 
         assert rail._detect_used_team_skill(swarm_trajectory) == "swarm-research"
@@ -2255,10 +2328,9 @@ def test_detect_used_team_skill_excludes_disabled_skills():
             disabled_skills=["team-skill-a"],
         )
 
-        trajectory = Trajectory(
+        trajectory = LegacyTrajectory(
             execution_id="detect-disabled",
             session_id="session-1",
-            source="online",
             steps=[
                 TrajectoryStep(
                     kind="tool",
@@ -2275,6 +2347,7 @@ def test_detect_used_team_skill_excludes_disabled_skills():
                     ),
                 ),
             ],
+            source="online",
         )
 
         result = rail._detect_used_team_skill(trajectory)
@@ -2301,10 +2374,9 @@ def test_detect_used_team_skill_returns_none_when_all_disabled():
             disabled_skills=["team-skill-x"],
         )
 
-        trajectory = Trajectory(
+        trajectory = LegacyTrajectory(
             execution_id="detect-all-disabled",
             session_id="session-1",
-            source="online",
             steps=[
                 TrajectoryStep(
                     kind="tool",
@@ -2314,6 +2386,7 @@ def test_detect_used_team_skill_returns_none_when_all_disabled():
                     ),
                 ),
             ],
+            source="online",
         )
 
         result = rail._detect_used_team_skill(trajectory)
@@ -2367,10 +2440,9 @@ def test_team_task_completion_helper_covers_terminal_and_non_terminal_text(resul
 
 
 def test_infer_team_skill_from_trajectory_helper_handles_multi_skill_and_no_match():
-    trajectory = Trajectory(
+    trajectory = LegacyTrajectory(
         execution_id="detect-helper",
         session_id="session-1",
-        source="online",
         steps=[
             TrajectoryStep(
                 kind="tool",
@@ -2387,6 +2459,7 @@ def test_infer_team_skill_from_trajectory_helper_handles_multi_skill_and_no_matc
                 ),
             ),
         ],
+        source="online",
     )
 
     assert infer_team_skill_from_trajectory(trajectory, {"team-a", "team-b"}) == "team-a"
@@ -2417,10 +2490,9 @@ def test_detect_used_team_skill_prefers_skills_path_over_legacy_skill_md():
             async_evolution=False,
         )
 
-        trajectory = Trajectory(
+        trajectory = LegacyTrajectory(
             execution_id="detect-002",
             session_id="session-1",
-            source="online",
             steps=[
                 TrajectoryStep(
                     kind="tool",
@@ -2437,6 +2509,7 @@ def test_detect_used_team_skill_prefers_skills_path_over_legacy_skill_md():
                     ),
                 ),
             ],
+            source="online",
         )
 
         result = rail._detect_used_team_skill(trajectory)
@@ -2594,7 +2667,12 @@ async def test_run_evolution_uses_rule_signals_without_user_intent_merge():
         rail._pending_host_events = []
 
         await rail.run_evolution(
-            Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            LegacyTrajectory(
+                execution_id="e1",
+                session_id="s1",
+                steps=[],
+                source="online",
+            ),
             snapshot={"messages": [{"role": "user", "content": "please improve"}]},
         )
 
@@ -2622,7 +2700,12 @@ async def test_run_evolution_cancels_when_no_rule_signals():
         rail._experience_tracker.evaluate_presented = AsyncMock()
 
         await rail.run_evolution(
-            Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            LegacyTrajectory(
+                execution_id="e1",
+                session_id="s1",
+                steps=[],
+                source="online",
+            ),
             snapshot={"messages": [{"role": "user", "content": "please improve"}]},
         )
 
@@ -3004,7 +3087,12 @@ async def test_run_evolution_uses_team_signal_consumer():
         rail._handle_evolution_from_signals_with_result = AsyncMock(side_effect=_consume_signal_with_result)
 
         await rail.run_evolution(
-            Trajectory(execution_id="exec-1", session_id="sess-1", source="online", steps=[]),
+            LegacyTrajectory(
+                execution_id="exec-1",
+                session_id="sess-1",
+                steps=[],
+                source="online",
+            ),
             _MockCtx(),
         )
 
@@ -3103,7 +3191,12 @@ async def test_stage_evolution_from_signals_rejects_legacy_excerpt_arguments():
         await TeamSkillRail._stage_evolution_from_signals(  # type: ignore[misc]
             rail,
             "team-skill-a",
-            trajectory=Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            trajectory=LegacyTrajectory(
+                execution_id="e1",
+                session_id="s1",
+                steps=[],
+                source="online",
+            ),
             excerpt="legacy",
             auto_approve=False,
         )

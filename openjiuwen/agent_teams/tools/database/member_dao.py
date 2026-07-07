@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.schema.status import (
 )
 from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
 from openjiuwen.agent_teams.tools.member_options import (
+    MemberWorktreeOptions,
     set_member_worktree_options,
 )
 from openjiuwen.agent_teams.tools.models import TeamMember
@@ -287,6 +288,7 @@ class MemberDao:
         self,
         member_name: str,
         team_name: str,
+        worktree: MemberWorktreeOptions | None = None,
         *,
         isolation: Optional[str] = None,
         worktree_path: Optional[str] = None,
@@ -305,6 +307,7 @@ class MemberDao:
                 return False
             member.options = set_member_worktree_options(
                 member.options,
+                worktree,
                 isolation=isolation,
                 worktree_path=worktree_path,
             )

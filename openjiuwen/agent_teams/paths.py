@@ -12,6 +12,8 @@ root only needs to update this module.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 from pathlib import Path
 
@@ -134,6 +136,31 @@ def team_session_dir(team_name: str, session_id: str) -> Path:
         session_id: Session identifier (sanitized into one path segment).
     """
     return team_sessions_dir(team_name) / _safe_segment(session_id)
+
+
+def project_worktree_hash(project_dir: str) -> str:
+    """Return the stable project hash segment for session-scoped worktrees.
+
+    The path must already exist. Team-managed worktree isolation is anchored to
+    an explicit project directory; callers should not silently substitute cwd or
+    workspace when this value is missing.
+    """
+    resolved = os.path.realpath(project_dir)
+    if not os.path.isdir(resolved):
+        raise ValueError(f"project_dir does not exist: {project_dir}")
+    return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:12]
+
+
+def team_session_worktrees_dir(
+    team_name: str,
+    session_id: str,
+) -> Path:
+    """Return the session-owned worktree root for a team.
+
+    Layout:
+        ``{team_home}/sessions/{session_id}/worktrees/``
+    """
+    return team_session_dir(team_name, session_id) / "worktrees"
 
 
 def workflow_run_dir(team_name: str, session_id: str, workflow_name: str) -> Path:

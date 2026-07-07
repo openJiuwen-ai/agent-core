@@ -769,6 +769,21 @@ class ReadFileTool(Tool):
         except OSError:
             pass
 
+        if (
+            self._is_plain_text_candidate(file_path)
+            and not user_supplied_limit
+            and size_bytes > self.MAX_SIZE_BYTES
+        ):
+            return ToolOutput(
+                success=False,
+                error=(
+                    f"File content ({size_bytes / 1024:.1f}KB) exceeds maximum allowed size "
+                    f"({self.MAX_SIZE_BYTES // 1024}KB). "
+                    "Use offset and limit parameters to read specific portions of the file, "
+                    "or search for specific content instead of reading the whole file."
+                ),
+            )
+
         try:
             if self._is_pdf(file_path):
                 rendered = await self._read_pdf(file_path, pages)

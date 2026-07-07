@@ -799,31 +799,6 @@ class TestModelContext:
             assert len(ctx) == 1
             assert ctx.get_messages()[0].content == "msg"
 
-    # ---------- reloader_tool ----------
-    @pytest.mark.asyncio
-    async def test_reloader_tool_offload_then_reload_returns_content(self):
-        context = await self.create_context()
-        msgs = [UserMessage(content="secret"), AssistantMessage(content="reply")]
-        context.offload_messages("handle-1", msgs)
-        tool = context.reloader_tool()
-        result = await tool.invoke(dict(offload_handle="handle-1", offload_type="in_memory"))
-        assert "handle-1" in result
-        assert "secret" in result or "reply" in result
-
-    @pytest.mark.asyncio
-    async def test_reloader_tool_nonexistent_returns_failure_message(self):
-        context = await self.create_context()
-        tool = context.reloader_tool()
-        result = await tool.invoke(dict(offload_handle="nonexistent", offload_type="in_memory"))
-        assert "Failed to reload" in result
-        assert "nonexistent" in result
-
-    @pytest.mark.asyncio
-    async def test_reloader_tool_card_id_contains_session_and_context(self):
-        context = await self.create_context()
-        tool = context.reloader_tool()
-        assert "default_session_id" in tool.card.id or "test_context" in tool.card.id
-
     # ---------- offload_messages ----------
     @pytest.mark.asyncio
     async def test_offload_messages_save_state_includes_offload(self):
@@ -863,9 +838,9 @@ class TestModelContext:
             }
         }
         context.load_state(state)
-        tool = context.reloader_tool()
-        result = await tool.invoke(dict(offload_handle="h1", offload_type="in_memory"))
-        assert "offloaded" in result
+        saved = context.save_state()["offload_messages"]
+        assert "h1" in saved
+        assert saved["h1"][0].content == "offloaded"
 
     @pytest.mark.asyncio
     async def test_load_state_empty_state_clears_buffer(self):

@@ -7,6 +7,7 @@ from typing import Optional, Any, Union
 
 REGEX_MAX_LENGTH = 1000
 NESTED_PATH_LIST_PATTERN = re.compile(r'^([\w]+)((?:\[\d+\])*)$')
+REF_PATTERN = re.compile(r"\${([^{}]*)}")
 NESTED_PATH_SPLIT = '.'
 NESTED_PATH_LIST_SPLIT = "["
 
@@ -176,12 +177,9 @@ def extract_origin_key(key: str) -> str:
     :param key: reference key
     :return: origin key
     """
-    if not isinstance(key, str):
+    if not isinstance(key, str) or '$' not in key:
         return key
-    if '$' not in key:
-        return key
-    pattern = re.compile(r"\${([^{}]*)}")
-    match = pattern.search(key, endpos=REGEX_MAX_LENGTH)
+    match = REF_PATTERN.search(key, endpos=REGEX_MAX_LENGTH)
     if match:
         return match.group(1)
     return key

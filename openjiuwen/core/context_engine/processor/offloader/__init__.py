@@ -10,6 +10,10 @@ from openjiuwen.core.context_engine.processor.offloader.tool_result_budget_proce
     ToolResultBudgetProcessor,
     ToolResultBudgetProcessorConfig,
 )
+from openjiuwen.core.context_engine.processor.offloader.tool_result_window_processor import (
+    ToolResultWindowProcessor,
+    ToolResultWindowProcessorConfig,
+)
 
 __all__ = [
     "MessageOffloader",
@@ -18,4 +22,6 @@ __all__ = [
     "MessageSummaryOffloaderConfig",
     "ToolResultBudgetProcessor",
     "ToolResultBudgetProcessorConfig",
+    "ToolResultWindowProcessor",
+    "ToolResultWindowProcessorConfig",
 ]

@@ -110,6 +110,10 @@ class TeamLifecycleController(Protocol):
         """Emit a team-completed marker chunk, then close the leader stream."""
         ...
 
+    async def finalize_non_contributing_worktrees(self) -> None:
+        """Remove current-session teammate worktrees that did not contribute commits."""
+        ...
+
 
 @runtime_checkable
 class PollController(Protocol):

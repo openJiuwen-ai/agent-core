@@ -12,13 +12,13 @@ from openjiuwen.agent_evolving.signal.from_conv import ConversationSignalDetecto
 from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
     ToolCallDetail,
-    Trajectory,
+    LegacyTrajectory,
     TrajectoryStep,
 )
 from openjiuwen.core.foundation.llm import SystemMessage, ToolMessage
 
 
-def _build_trajectory_from_messages(messages: List[dict]) -> Trajectory:
+def _build_trajectory_from_messages(messages: List[dict]) -> LegacyTrajectory:
     """Convert message list to Trajectory for testing.
 
     Creates Trajectory with LLM steps containing messages and tool steps
@@ -66,7 +66,7 @@ def _build_trajectory_from_messages(messages: List[dict]) -> Trajectory:
             ),
         )
 
-    return Trajectory(execution_id="test-exec", steps=steps)
+    return LegacyTrajectory(execution_id="test-exec", steps=steps)
 
 
 def _build_team_member_trajectory(
@@ -75,7 +75,7 @@ def _build_team_member_trajectory(
     tool_args: dict,
     tool_result: str = "",
     meta: dict = None,
-) -> Trajectory:
+) -> LegacyTrajectory:
     """Build a Trajectory with team member context for collaboration signal testing."""
     steps = [
         TrajectoryStep(
@@ -88,11 +88,11 @@ def _build_team_member_trajectory(
             meta=meta or {},
         ),
     ]
-    return Trajectory(
+    return LegacyTrajectory(
         execution_id=f"exec-{member_id}",
         session_id="session-team",
-        source="online",
         steps=steps,
+        source="online",
         meta={"member_id": member_id, "team_id": "team-1"},
     )
 
@@ -103,14 +103,14 @@ class TestConversationSignalDetector:
     def test_empty_trajectory_returns_empty_signals(self) -> None:
         """Empty trajectory should return empty signal list."""
         detector = ConversationSignalDetector()
-        trajectory = Trajectory(execution_id="test", steps=[])
+        trajectory = LegacyTrajectory(execution_id="test", steps=[])
         signals = detector.detect(trajectory)
         assert signals == []
 
     def test_trajectory_with_message_objects_does_not_require_dict_get(self) -> None:
         """Object-style messages in trajectory should not crash signal detection."""
         detector = ConversationSignalDetector()
-        trajectory = Trajectory(
+        trajectory = LegacyTrajectory(
             execution_id="message-object",
             steps=[
                 TrajectoryStep(

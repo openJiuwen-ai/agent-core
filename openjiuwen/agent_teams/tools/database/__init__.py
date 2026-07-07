@@ -153,6 +153,13 @@ class TeamDatabase:
         trace left".
         """
         await self._ensure_initialized()
+        cleanup_success = True
+        from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
+
+        session_id = get_session_id()
+        if session_id:
+            cleanup_success = await remove_session_worktrees(team_name, session_id)
+
         await self.team.delete_team(team_name)
 
         try:
@@ -166,7 +173,7 @@ class TeamDatabase:
             return False
 
         team_logger.info("Force deleted team session data for %s", team_name)
-        return True
+        return cleanup_success
 
     async def close(self) -> None:
         """Close the database engine and release all connections."""

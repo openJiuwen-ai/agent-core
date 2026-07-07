@@ -882,7 +882,6 @@ sequenceDiagram
 | `approve_tool` | `ApproveToolCallTool` | ✓（plan_mode） | | |
 | `create_task` | `TaskCreateTool` | ✓ | | |
 | `update_task` | `UpdateTaskTool` | ✓ | | |
-| `list_members` | `ListMembersTool` | ✓ | | |
 | `claim_task` | `ClaimTaskTool` | | ✓ | |
 | `member_complete_task` | `MemberCompleteTaskTool` | | | ✓ |
 | `view_task` | `ViewTaskToolV2` | ✓ | ✓ | ✓ |
@@ -892,7 +891,7 @@ sequenceDiagram
 ```python
 LEADER_ONLY_TOOLS = {"build_team", "clean_team", "spawn_teammate", "spawn_human_agent",
                      "spawn_bridge_agent", "spawn_external_cli", "shutdown_member",
-                     "approve_plan", "approve_tool", "create_task", "update_task", "list_members"}
+                     "approve_plan", "approve_tool", "create_task", "update_task"}
 MEMBER_ONLY_TOOLS = {"claim_task"}
 SHARED_TOOLS      = {"view_task", "send_message", "workspace_meta"}
 HUMAN_AGENT_TOOLS = {"view_task", "member_complete_task"}

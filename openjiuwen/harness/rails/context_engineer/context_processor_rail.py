@@ -177,9 +177,9 @@ class ContextProcessorRail(DeepAgentRail):
                 (
                     "MessageSummaryOffloader",
                     MessageSummaryOffloaderConfig(
-                        large_message_threshold=10000,
+                        large_message_threshold=15000,
                         offload_message_type=["tool"],
-                        protected_tool_names=["read_file:*SKILL.md", "reload_original_context_messages"],
+                        protected_tool_names=["read_file"],
                         model=model_cfg,
                         model_client=model_client_config,
                     ),
@@ -436,7 +436,7 @@ class ContextProcessorRail(DeepAgentRail):
         if self._system_prompt_builder is None:
             return
 
-        if not self._all_processors:
+        if not self._reload_enabled or not self._all_processors:
             self._system_prompt_builder.remove_section("offload")
             return
 
