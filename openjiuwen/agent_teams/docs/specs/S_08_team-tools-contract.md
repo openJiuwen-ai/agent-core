@@ -19,7 +19,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-07-03 |
+| 最近一次修订日期 | 2026-07-07 |
 | 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md |
 
 ## 范围 / 边界
@@ -125,6 +125,16 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     `description` / `input_params`；`teammate_mode` / `model_config_allocator` /
     `on_teammate_created` 这类运行时句柄属于工具实例的私有字段，禁止下沉
     到 `ToolCard`。
+16. **一成员一活跃 CLAIMED，改派不取消成员**：一个成员同一时刻至多持有一个
+    `CLAIMED` 任务。`ClaimTaskTool`（teammate 自认领）与 `UpdateTaskTool`
+    （leader 指派）在写状态前经 `TeamTaskManager.get_other_claimed_task(member,
+    exclude_task_id)` 校验，命中即拒绝（`exclude_task_id` 放行幂等 re-claim /
+    re-assign 同一任务）；`UpdateTaskTool` 的校验落在 reassignment reset **之前**，
+    拒绝时原任务与当前 owner 均不受扰动。改派已认领任务走
+    `TeamTaskManager.reassign`——**只 reset 目标任务**、发 `TASK_REVOKED` 通知原
+    owner、再 assign 给新 owner，**不再** `cancel_member`（那会连带 reset 原 owner
+    的其它 claim 并取消其 in-flight round）。新 owner 的指派通知复用既有
+    `TASK_CLAIMED`，不额外发消息。见 F_54。
 
 ## 接口契约
 
