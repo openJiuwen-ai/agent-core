@@ -127,6 +127,10 @@ class FakeReactAgent:
         # inner-round failure so tests can exercise the executor's error path
         # (e.g. AFTER_TASK_ITERATION firing on failure).
         self.raise_exc: BaseException | None = None
+        # One-shot variant: raised by exactly one ``invoke`` then cleared, so
+        # tests can model "first round crashes, its retry succeeds" without
+        # racing the harness's automatic failure retry.
+        self.raise_exc_once: BaseException | None = None
         # Set the moment ``invoke`` enters its sleep window; lets tests wait for
         # the real inner work to actually be in-flight before aborting/pausing,
         # instead of racing the phase transition (RUNNING is set when the round
@@ -186,6 +190,10 @@ class FakeReactAgent:
         finally:
             self.invoke_running.clear()
 
+        if self.raise_exc_once is not None:
+            exc_once = self.raise_exc_once
+            self.raise_exc_once = None
+            raise exc_once
         if self.raise_exc is not None:
             raise self.raise_exc
 

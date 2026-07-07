@@ -50,6 +50,15 @@ _T = TypeVar("_T")
 _DB_RETRY_ATTEMPTS = 3
 _DB_RETRY_BASE_DELAY = 0.5
 
+# Watchdog for one DbSessions block (connection checkout + every statement
+# inside the ``async with``). The pool guards checkout with its own
+# ``pool_timeout``, but a statement submitted to a wedged driver thread
+# awaits its result with no timeout at all — a hang there is invisible and
+# permanent. Team DB transactions are small (single-row reads / batched
+# mailbox flushes), so 30s is far beyond any legitimate block; hitting it
+# means the driver is stuck, and a loud TimeoutError beats an eternal hang.
+_DB_SESSION_WATCHDOG_SECONDS = 30.0
+
 
 class DbSessions:
     """Read/write session provider with process-wide write serialisation.
@@ -83,9 +92,23 @@ class DbSessions:
 
     @asynccontextmanager
     async def read(self) -> AsyncIterator[AsyncSession]:
-        """Yield a session for read-only work; the write lock is not held."""
-        async with self._read_session_local() as session:
-            yield session
+        """Yield a session for read-only work; the write lock is not held.
+
+        The whole block runs under ``_DB_SESSION_WATCHDOG_SECONDS`` so a
+        wedged driver surfaces as a loud ``TimeoutError`` instead of hanging
+        the caller forever.
+        """
+        try:
+            async with asyncio.timeout(_DB_SESSION_WATCHDOG_SECONDS):
+                async with self._read_session_local() as session:
+                    yield session
+        except TimeoutError:
+            team_logger.warning(
+                "DbSessions.read() exceeded the %.0fs watchdog; "
+                "the DB driver may be wedged",
+                _DB_SESSION_WATCHDOG_SECONDS,
+            )
+            raise
 
     @asynccontextmanager
     async def write(self) -> AsyncIterator[AsyncSession]:
@@ -95,10 +118,23 @@ class DbSessions:
         ``write()`` or it will deadlock. Compose multi-step writes inside a
         single ``write()`` block, and keep the lock on the outermost public
         method when one write helper delegates to another.
+
+        The session block (not the lock wait — writers legitimately queue
+        behind each other) runs under ``_DB_SESSION_WATCHDOG_SECONDS`` so a
+        wedged driver surfaces as a loud ``TimeoutError``.
         """
         async with self._write_lock:
-            async with self._write_session_local() as session:
-                yield session
+            try:
+                async with asyncio.timeout(_DB_SESSION_WATCHDOG_SECONDS):
+                    async with self._write_session_local() as session:
+                        yield session
+            except TimeoutError:
+                team_logger.warning(
+                    "DbSessions.write() exceeded the %.0fs watchdog; "
+                    "the DB driver may be wedged",
+                    _DB_SESSION_WATCHDOG_SECONDS,
+                )
+                raise
 
 
 async def retry_on_locked(
