@@ -100,6 +100,22 @@ mobile-gui = [
     "uiautomator2>=3.2.0",
     "pillow>=10.0.0",
 ]
+robotic-arm-so101 = [
+    # Install: pip install 'openjiuwen[robotic-arm-so101]'
+    "ikpy>=3.4",
+    "pyrealsense2>=2.55",
+    "scipy>=1.11",
+]
+robotic-arm-so101-rekep = [
+    # Install: pip install 'openjiuwen[robotic-arm-so101-rekep]'
+    # Also needs MobileSAM (weights + package aren't on a normal pip index;
+    # see openjiuwen/harness/tools/robotic_arm/vendors/so101/rekep/keypoint_proposal.py).
+    "openjiuwen[robotic-arm-so101]",
+    "torch>=2.1",
+    "transformers>=4.40",
+    "scikit-learn>=1.3",
+    "openai>=1.0",
+]
 
 online-rl = [
     "fastapi>=0.100",
