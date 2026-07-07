@@ -402,9 +402,22 @@ class UpdateTaskTool(TeamTool):
 
         # Assign task to member. When the task is already claimed by a
         # different member, treat this as a leader-driven reassignment:
-        # cancel the previous claimer's execution, reset the task back to
-        # PENDING, then assign to the new member. Same-member is idempotent.
+        # reset the task back to PENDING and hand it to the new member. The
+        # former assignee is told via a targeted TASK_REVOKED event (not a
+        # member-wide cancel), so only this one task moves — its other
+        # claims and in-flight round survive. Same-member is idempotent.
         if assignee:
+            # One active claim per member: reject before any state change so a
+            # rejected assign never disturbs the current owner or this task.
+            busy = await self.task_manager.get_other_claimed_task(assignee, task_id)
+            if busy:
+                return ToolOutput(
+                    success=False,
+                    error=(
+                        f"Member '{assignee}' already has a claimed task #{busy.task_id}; "
+                        f"wait for it to complete before assigning another."
+                    ),
+                )
             if task.assignee and task.assignee != assignee:
                 if await self._is_human_agent_locked(task):
                     return ToolOutput(
@@ -416,17 +429,9 @@ class UpdateTaskTool(TeamTool):
                             new_assignee=assignee,
                         ),
                     )
-                await self.agent_team.cancel_member(member_name=task.assignee)
-                reset_result = await self.task_manager.reset(task_id)
-                if not reset_result.ok:
-                    return ToolOutput(
-                        success=False,
-                        error=(
-                            f"Failed to reset task before reassigning from "
-                            f"{task.assignee} to {assignee}: {reset_result.reason}"
-                        ),
-                    )
-            assign_result = await self.task_manager.assign(task_id, assignee)
+                assign_result = await self.task_manager.reassign(task_id, assignee)
+            else:
+                assign_result = await self.task_manager.assign(task_id, assignee)
             if not assign_result.ok:
                 return ToolOutput(success=False, error=assign_result.reason)
             updated.append("assignee")
@@ -547,6 +552,17 @@ class ClaimTaskTool(TeamTool):
             return ToolOutput(success=False, error="Task not found")
 
         if status == "claimed":
+            # One active claim per member: refuse a second concurrent claim so a
+            # teammate finishes its current task before picking up another.
+            busy = await self.task_manager.get_other_claimed_task(self.task_manager.member_name, task_id)
+            if busy:
+                return ToolOutput(
+                    success=False,
+                    error=(
+                        f"You already have a claimed task #{busy.task_id}; "
+                        f"complete it before claiming another."
+                    ),
+                )
             claim_result = await self.task_manager.claim(task_id=task_id)
             if not claim_result.ok:
                 return ToolOutput(success=False, error=claim_result.reason)

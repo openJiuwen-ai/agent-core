@@ -31,6 +31,7 @@ from openjiuwen.agent_teams.schema.events import (
     TaskPlanRequestEvent,
     TaskPlanResponseEvent,
     TaskReleasedEvent,
+    TaskRevokedEvent,
     TaskUnblockedEvent,
     TaskUpdatedEvent,
     TeamTopic,
@@ -1249,6 +1250,73 @@ class TeamTaskManager:
             error_label=f"Task released event for {task_id}",
         )
         return TaskOpResult.success()
+
+    async def get_other_claimed_task(
+        self,
+        member_name: str,
+        exclude_task_id: str,
+    ) -> TeamTaskBase | None:
+        """Return a member's CLAIMED task other than ``exclude_task_id``.
+
+        Backs the one-active-claim-per-member invariant enforced at the
+        tool boundary: a claim or leader assignment is rejected when this
+        returns a task. ``exclude_task_id`` keeps an idempotent re-claim /
+        re-assign of the same task from being flagged as a conflict.
+
+        Args:
+            member_name: Member whose claims to inspect.
+            exclude_task_id: Task id to ignore (the one being claimed / assigned).
+
+        Returns:
+            The first other CLAIMED task, or ``None`` when the member holds
+            no claimed task besides ``exclude_task_id``.
+        """
+        claimed = await self.get_tasks_by_assignee(member_name, TaskStatus.CLAIMED.value)
+        for task in claimed:
+            if task.task_id != exclude_task_id:
+                return task
+        return None
+
+    async def reassign(self, task_id: str, new_assignee: str) -> TaskOpResult:
+        """Reassign a claimed task to another member without cancelling anyone.
+
+        Reset the task back to PENDING, notify the former assignee via a
+        targeted ``TASK_REVOKED`` event so its dispatcher can steer it off
+        the now-foreign work, then assign to ``new_assignee`` (which fires
+        ``TASK_CLAIMED`` to notify the new owner). Unlike the old
+        ``cancel_member`` path, this touches only the one task — the former
+        assignee's other claims and its in-flight round stay intact.
+
+        The new assignee is validated *before* the reset so a bad target
+        never strands the task as an ownerless PENDING.
+
+        Args:
+            task_id: Task to reassign.
+            new_assignee: Member to assign the task to.
+
+        Returns:
+            ``TaskOpResult`` describing the outcome.
+        """
+        task = await self.get(task_id)
+        if not task:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+
+        member = await self.db.member.get_member(new_assignee, self.team_name)
+        if not member:
+            return TaskOpResult.fail(f"Member {new_assignee} not found in team {self.team_name}")
+
+        old_assignee = task.assignee
+        reset_result = await self.reset(task_id)
+        if not reset_result.ok:
+            return reset_result
+
+        if old_assignee:
+            await self._publish_task_event(
+                TaskRevokedEvent(team_name=self.team_name, task_id=task_id, member_name=old_assignee),
+                error_label=f"Task revoked event for {task_id} (from {old_assignee})",
+            )
+
+        return await self.assign(task_id, new_assignee)
 
     async def approve_plan(
         self,
