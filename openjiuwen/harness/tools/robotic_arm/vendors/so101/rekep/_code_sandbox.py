@@ -91,8 +91,8 @@ def validate_constraint_code(code: str) -> None:
     """Parse ``code`` and reject anything outside the constraint-function whitelist.
 
     Allowed: top-level function definitions and simple assignments (for
-    ``num_stages``/``STAGE_*``/``grasp_keypoints``/etc.); function bodies
-    limited to assignment/return/expression statements (no loops, no
+    ``SUBGOAL_CONSTRAINTS``/``MOVABLE_MASK``/``grasp_keypoints``/etc.); function
+    bodies limited to assignment/return/expression statements (no loops, no
     conditionals, no exception handling); calls limited to plain numeric
     builtins, ``np``/``numpy`` and the two helper functions injected by
     ``constraint_generation.py``; no dunder/private attribute access.

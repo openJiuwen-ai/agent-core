@@ -1,12 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Shared geometry/IK helpers for the SO-101 executors (mechanical + ReKep).
+"""Shared geometry/IK helpers for the SO-101 ReKep executor.
 
 Ported from a user-supplied ReKep-on-SO101 reference implementation
 (``run_record_skills/core/{ik_solver,custom_ik,helper}.py``); the math is
 unchanged, only reorganized into typed, dependency-injected functions/classes
-so both :class:`So101ArmExecutor` and :class:`So101RekepExecutor` can share
-one implementation instead of each re-deriving it.
+so :class:`So101RekepExecutor` doesn't need to re-derive it inline.
 
 ``ikpy``/``scipy`` are imported lazily inside :class:`IKSolver` so importing
 this module (and running its pure-math unit tests) never requires the

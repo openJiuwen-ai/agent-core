@@ -6,11 +6,11 @@ Ported from a user-supplied ReKep-on-SO101 reference implementation
 (``run_record_skills/core/constraint_generation.py``), with two changes:
 
 1. ``task`` is one ``report_plan`` sub_task's ``description`` (e.g. "grasp the
-   tape"), not the whole multi-object goal -- the outer agent-core model
-   already owns sequencing across sub-tasks (see ``rekep/executor.py``), so
-   the prompt is told this is a single atomic action and should decompose
-   into at most a couple of stages (approach/grasp, or just place), not a
-   whole task's worth of stages.
+   tape"), not the whole multi-object goal, and it is already atomic -- the
+   outer agent-core model owns ALL sequencing/decomposition across sub-tasks
+   (see ``rekep/executor.py``), so this only asks the VLM for a single
+   subgoal (one set of constraints, one gripper action) rather than further
+   splitting the action into its own approach/grasp stages.
 2. The generated code is executed through
    :func:`~.rekep._code_sandbox.safe_exec_constraint_code` (AST-whitelisted,
    restricted builtins) instead of a bare ``exec()``.
@@ -33,10 +33,10 @@ from openjiuwen.harness.tools.robotic_arm.vendors.so101.rekep.vlm_client import 
 
 _CONSTRAINT_PROMPT = """\
 You are controlling a robot arm to perform ONE atomic manipulation action by
-writing Python constraint functions. This action is a single step out of a
-larger plan tracked by another system -- decompose ONLY this action into
-stages (usually 1-2: e.g. "approach" + "grasp", or just "place"), not a
-whole multi-object task.
+writing Python constraint functions. This action is already a single step out
+of a larger plan tracked by another system -- do NOT split it into further
+sub-steps (no separate "approach" then "grasp"); compute ONE target end-effector
+position that satisfies this action.
 
 The image shows the scene with numbered red keypoints. The action is given as text.
 
@@ -56,9 +56,7 @@ Before writing constraints, analyze the target object's geometry:
 
 For this action:
 
-1. Decide num_stages (usually 1-2). If this action involves grasping, grasping
-   MUST be its own stage.
-2. For each stage write constraint functions:
+1. Write constraint function(s):
    fn(end_effector: np.ndarray[3], keypoints: np.ndarray[K,3]) -> float
    cost <= 0 means satisfied. Lower is better.
 
@@ -66,18 +64,21 @@ For this action:
    which returns {"reachable": bool, "ik_error_cm": float}. Use it to verify
    approach points before committing to them. Report if you cannot use it.
 
-3. STAGE_MOVABLE_MASK[stage]: list of bool length K. True = that keypoint
-   moves with the gripper (object being held).
-4. STAGE_GRIPPER_ACTION[i]: "open" or "closed" at END of stage i.
-5. approach_elevation_deg: 90 = straight down, 45 = diagonal, 0 = horizontal.
-6. gripper_roll_deg: rotation of the gripper fingers around the approach axis
+2. MOVABLE_MASK: list of bool length K. True = that keypoint is already held
+   by the gripper and moves rigidly with it (e.g. this action moves an
+   object grasped by an earlier action).
+3. GRIPPER_ACTION: "open" or "closed" -- the gripper state this action should
+   end in.
+4. approach_elevation_deg: 90 = straight down, 45 = diagonal, 0 = horizontal.
+5. gripper_roll_deg: rotation of the gripper fingers around the approach axis
    (0 = default, 90 = good for cylindrical objects).
 
 ## Rules
 - Each constraint takes end_effector [3] and keypoints [K,3], returns float.
 - No if-statements, no loops, no imports. Use np.linalg.norm, abs, etc. only.
 - All positions in METRES, robot base frame.
-- For a grasp stage: ONE subgoal constraint aligning EE with the grasp keypoint.
+- If this action grasps an object: ONE subgoal constraint aligning EE with the
+  grasp keypoint.
 - The image shows colored arrows for the robot's coordinate axes:
   RED = +X (forward), GREEN = +Y (left facing the robot), BLUE = +Z (up).
   Origin is the robot base center.
@@ -85,19 +86,15 @@ For this action:
 ## Output ONLY a Python code block:
 
 ```python
-num_stages = ...
-
-def stage1_subgoal_constraint1(end_effector, keypoints):
+def subgoal_constraint1(end_effector, keypoints):
     ...
 
-STAGE_CONSTRAINTS      = [[...], ...]
-STAGE_PATH_CONSTRAINTS = [[], ...]
-STAGE_NAMES            = [...]
-STAGE_MOVABLE_MASK     = [[False]*K, ...]
-STAGE_GRIPPER_ACTION   = [...]
+SUBGOAL_CONSTRAINTS = [...]
+MOVABLE_MASK         = [False] * K
+GRIPPER_ACTION       = "open"
 
 grasp_keypoints   = [keypoint_index_to_grasp]
-release_keypoints = [stage_index_to_release]
+release_keypoints = [keypoint_index_to_release]
 
 approach_elevation_deg = 90
 gripper_roll_deg       = 0
@@ -126,10 +123,17 @@ def generate_constraints(
     vlm: VlmClient,
     *,
     hint_pixel: Optional[tuple[int, int]] = None,
+    dest_keypoint_index: Optional[int] = None,
     max_tokens: int = 3000,
 ) -> dict[str, Any]:
     """Query the VLM to translate ``task`` (one sub_task's description) into
-    stage constraint functions, executed via the AST-sandboxed exec path."""
+    a single subgoal's constraint functions, executed via the AST-sandboxed exec path.
+
+    ``dest_keypoint_index``, if given, is the index of a keypoint appended by the
+    caller from ``report_plan``'s ``end_x``/``end_y`` (a destination the outer
+    planner pointed at, backprojected to 3D and drawn on ``overlay_rgb`` like any
+    other keypoint) -- not something detected by DINOv2/SAM.
+    """
     kp_report = check_keypoint_reachability(keypoints_3d, ik_solver)
     report_str = reachability_report_str(kp_report)
 
@@ -143,11 +147,21 @@ def generate_constraints(
         else ""
     )
 
+    dest_str = (
+        f"\nKeypoint {dest_keypoint_index} on this image is a destination location the outer "
+        "planner specified for this action, not a detected object -- if this action moves or "
+        f"places something there, write a constraint aligning the moved keypoint with "
+        f"keypoints[{dest_keypoint_index}].\n"
+        if dest_keypoint_index is not None
+        else ""
+    )
+
     prompt = (
         f"{_CONSTRAINT_PROMPT}\n\n"
         f'Action: "{task}"\n'
         f"Number of keypoints in image: {num_keypoints}"
-        f"{hint_str}\n"
+        f"{hint_str}"
+        f"{dest_str}\n"
         f"REACHABILITY REPORT (IK error in cm, <3cm = reachable):\n{report_str}\n\n"
         "Choose approach_elevation_deg based on the grasp keypoint's reachability above.\n"
     )
@@ -171,20 +185,14 @@ def generate_constraints(
         },
     )
 
-    num_stages = namespace.get("num_stages")
-    if num_stages is None:
-        raise ValueError("VLM output is missing num_stages")
-
-    stage_constraints = [[_safe_wrap(fn) for fn in stage] for stage in namespace.get("STAGE_CONSTRAINTS", [])]
-    stage_path_constraints = [[_safe_wrap(fn) for fn in stage] for stage in namespace.get("STAGE_PATH_CONSTRAINTS", [])]
+    subgoal_constraints = namespace.get("SUBGOAL_CONSTRAINTS")
+    if subgoal_constraints is None:
+        raise ValueError("VLM output is missing SUBGOAL_CONSTRAINTS")
 
     return {
-        "num_stages": num_stages,
-        "stage_constraints": stage_constraints,
-        "stage_path_constraints": stage_path_constraints,
-        "stage_names": namespace.get("STAGE_NAMES", []),
-        "stage_movable_mask": namespace.get("STAGE_MOVABLE_MASK", []),
-        "stage_gripper_action": namespace.get("STAGE_GRIPPER_ACTION", []),
+        "constraints": [_safe_wrap(fn) for fn in subgoal_constraints],
+        "movable_mask": namespace.get("MOVABLE_MASK", []),
+        "gripper_action": namespace.get("GRIPPER_ACTION", "open"),
         "grasp_keypoints": namespace.get("grasp_keypoints", []),
         "release_keypoints": namespace.get("release_keypoints", []),
         "approach_elevation_deg": float(namespace.get("approach_elevation_deg", 90)),

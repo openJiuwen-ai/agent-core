@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 # coding: utf-8
-"""Tests for So101RekepExecutor: the per-sub_task multi-stage control loop.
+"""Tests for So101RekepExecutor: SO-101 hardware I/O + the per-sub_task single-subgoal control step.
 
-Hardware I/O and the IK solver are provided by a real So101ArmExecutor wired
-up with fakes (mirroring test_mechanical_executor.py's fixtures); keypoint
-detection and the VLM are injected fakes. Constraint generation and subgoal
-solving run for real (against the fake VLM's canned code and fake IK solver)
-so the stage loop is exercised end to end without any real hardware/network/
-ML dependency.
+The IK solver and robot are injected fakes (``ik_solver=``/``robot=`` -- the
+same injection points ``So101ArmExecutor`` used to expose before it was merged
+into this class); keypoint detection and the VLM are injected fakes too.
+Constraint generation and subgoal solving run for real (against the fake
+VLM's canned code and fake IK solver) so one execute() call is exercised end
+to end without any real hardware/network/ML dependency.
 """
 
 from __future__ import annotations
@@ -19,9 +19,9 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from openjiuwen.core.common.exception.errors import ToolError
 from openjiuwen.harness.tools.robotic_arm.registry import SubTaskExecutorRegistry
 from openjiuwen.harness.tools.robotic_arm.vendors.so101._kinematics import IKResult
-from openjiuwen.harness.tools.robotic_arm.vendors.so101.mechanical_executor import So101ArmExecutor
 from openjiuwen.harness.tools.robotic_arm.vendors.so101.rekep.executor import So101RekepExecutor
 
 
@@ -78,8 +78,10 @@ class _FakeKeypointProposer:
 class _FakeVlm:
     def __init__(self, response: str) -> None:
         self.response = response
+        self.last_prompt: str | None = None
 
     def query(self, prompt, image=None, max_tokens=3000):
+        self.last_prompt = prompt
         return self.response
 
 
@@ -98,31 +100,52 @@ def calibration_files(tmp_path: Path) -> dict:
     }
 
 
-def _make_mechanical(calibration_files: dict, ik_solver=None, robot=None) -> So101ArmExecutor:
-    return So101ArmExecutor(
+def _make_executor(
+    calibration_files: dict,
+    *,
+    ik_solver=None,
+    robot=None,
+    keypoint_proposer=None,
+    vlm_client=None,
+    ik_tolerance_cm: float = 5.0,
+) -> So101RekepExecutor:
+    return So101RekepExecutor(
         **calibration_files,
         workspace_min=[-1.0, -1.0, -1.0],
         workspace_max=[1.0, 1.0, 1.0],
         ik_solver=ik_solver or _FakeIKSolver(),
         robot=robot or _FakeRobot(),
-        ik_tolerance_cm=5.0,
+        ik_tolerance_cm=ik_tolerance_cm,
+        keypoint_proposer=keypoint_proposer or _FakeKeypointProposer(np.zeros((1, 3))),
+        vlm_client=vlm_client or _FakeVlm(_GRASP_RESPONSE),
     )
 
 
-_TWO_STAGE_RESPONSE = """
+_GRASP_RESPONSE = """
 ```python
-num_stages = 2
-
-def stage1_subgoal_constraint1(end_effector, keypoints):
+def subgoal_constraint1(end_effector, keypoints):
     return float(np.linalg.norm(end_effector - keypoints[0]))
 
-STAGE_CONSTRAINTS = [[stage1_subgoal_constraint1], [stage1_subgoal_constraint1]]
-STAGE_PATH_CONSTRAINTS = [[], []]
-STAGE_NAMES = ["approach", "grasp"]
-STAGE_MOVABLE_MASK = [[False], [False]]
-STAGE_GRIPPER_ACTION = ["open", "closed"]
+SUBGOAL_CONSTRAINTS = [subgoal_constraint1]
+MOVABLE_MASK = [False]
+GRIPPER_ACTION = "closed"
 grasp_keypoints = [0]
 release_keypoints = []
+approach_elevation_deg = 90
+gripper_roll_deg = 0
+```
+"""
+
+_PLACE_RESPONSE = """
+```python
+def subgoal_constraint1(end_effector, keypoints):
+    return float(np.linalg.norm(end_effector - keypoints[0]))
+
+SUBGOAL_CONSTRAINTS = [subgoal_constraint1]
+MOVABLE_MASK = [True]
+GRIPPER_ACTION = "open"
+grasp_keypoints = []
+release_keypoints = [0]
 approach_elevation_deg = 90
 gripper_roll_deg = 0
 ```
@@ -133,19 +156,22 @@ def test_registered_as_so101_rekep() -> None:
     assert SubTaskExecutorRegistry._registry.get("so101_rekep") is So101RekepExecutor
 
 
+def test_requires_ik_solver_or_urdf_path(calibration_files: dict) -> None:
+    with pytest.raises(ValueError, match="ik_solver or urdf_path"):
+        So101RekepExecutor(
+            **calibration_files,
+            workspace_min=[-1.0, -1.0, -1.0],
+            workspace_max=[1.0, 1.0, 1.0],
+            keypoint_proposer=_FakeKeypointProposer(np.zeros((1, 3))),
+            vlm_client=_FakeVlm(_GRASP_RESPONSE),
+        )
+
+
 def test_capture_backprojects_full_frame_and_returns_rgb(calibration_files: dict) -> None:
-    mechanical = _make_mechanical(calibration_files)
+    executor = _make_executor(calibration_files, keypoint_proposer=_FakeKeypointProposer(np.zeros((1, 3))))
     rgb = np.zeros((480, 640, 3), dtype=np.uint8)
     depth = np.full((480, 640), 1000, dtype=np.uint16)
-    mechanical._read_frame = MagicMock(return_value=(rgb, depth))
-
-    executor = So101RekepExecutor(
-        workspace_min=[-1.0, -1.0, -1.0],
-        workspace_max=[1.0, 1.0, 1.0],
-        mechanical_executor=mechanical,
-        keypoint_proposer=_FakeKeypointProposer(np.zeros((1, 3))),
-        vlm_client=_FakeVlm(_TWO_STAGE_RESPONSE),
-    )
+    executor._read_frame = MagicMock(return_value=(rgb, depth))
 
     frame = executor.capture()
 
@@ -155,49 +181,58 @@ def test_capture_backprojects_full_frame_and_returns_rgb(calibration_files: dict
 
 
 def test_execute_without_capture_reports_error(calibration_files: dict) -> None:
-    executor = So101RekepExecutor(
-        workspace_min=[-1.0, -1.0, -1.0],
-        workspace_max=[1.0, 1.0, 1.0],
-        mechanical_executor=_make_mechanical(calibration_files),
-        keypoint_proposer=_FakeKeypointProposer(np.zeros((1, 3))),
-        vlm_client=_FakeVlm(_TWO_STAGE_RESPONSE),
-    )
+    executor = _make_executor(calibration_files)
 
     result = executor.execute(Image.new("RGB", (640, 480)), {"description": "grasp the tape"})
 
     assert "NoDepthFrame" in result
 
 
-def test_execute_runs_all_stages_on_success(calibration_files: dict) -> None:
+def test_execute_wraps_unexpected_exception_as_tool_error(calibration_files: dict) -> None:
+    executor = _make_executor(calibration_files)
+    executor._last_points = np.zeros((480, 640, 3))
+    executor._keypoint_proposer.get_keypoints = MagicMock(side_effect=RuntimeError("boom"))
+
+    with pytest.raises(ToolError, match="boom"):
+        executor.execute(Image.new("RGB", (640, 480)), {"description": "grasp the tape"})
+
+
+def test_execute_runs_single_subgoal_on_success(calibration_files: dict) -> None:
     robot = _FakeRobot()
-    mechanical = _make_mechanical(calibration_files, robot=robot)
     keypoints = np.array([[0.1, 0.0, 0.05]])
-    executor = So101RekepExecutor(
-        workspace_min=[-1.0, -1.0, -1.0],
-        workspace_max=[1.0, 1.0, 1.0],
-        mechanical_executor=mechanical,
-        keypoint_proposer=_FakeKeypointProposer(keypoints),
-        vlm_client=_FakeVlm(_TWO_STAGE_RESPONSE),
-    )
+    executor = _make_executor(calibration_files, robot=robot, keypoint_proposer=_FakeKeypointProposer(keypoints))
     executor._last_points = np.zeros((480, 640, 3))
     frame = Image.new("RGB", (640, 480))
 
     result = executor.execute(frame, {"description": "grasp the tape", "start_x": 500, "start_y": 500})
 
-    assert "Completed 2/2 stage(s)" in result
+    assert "Completed 'grasp the tape'" in result
+    assert len(robot.actions) == 1
+    assert robot.actions[0]["gripper.pos"] == executor._gripper_closed_value
+
+
+def test_execute_persists_ee_at_grasp_across_calls(calibration_files: dict) -> None:
+    """'grasp' and 'move the grasped object' are now separate execute() calls
+    (separate report_plan sub_tasks); the rigid-body hold assumption must
+    survive between them via instance state rather than a within-call stage loop."""
+    robot = _FakeRobot()
+    keypoints = np.array([[0.1, 0.0, 0.05]])
+    executor = _make_executor(calibration_files, robot=robot, keypoint_proposer=_FakeKeypointProposer(keypoints))
+    executor._last_points = np.zeros((480, 640, 3))
+    frame = Image.new("RGB", (640, 480))
+
+    executor.execute(frame, {"description": "grasp the tape"})
+    assert executor._ee_at_grasp is not None
+
+    executor._vlm.response = _PLACE_RESPONSE
+    executor.execute(frame, {"description": "place the tape on the book"})
+    assert executor._ee_at_grasp is None
     assert len(robot.actions) == 2
-    assert robot.actions[0]["gripper.pos"] == executor._gripper_open_value
-    assert robot.actions[1]["gripper.pos"] == executor._gripper_closed_value
+    assert robot.actions[1]["gripper.pos"] == executor._gripper_open_value
 
 
 def test_execute_no_keypoints_detected_reports_failure(calibration_files: dict) -> None:
-    executor = So101RekepExecutor(
-        workspace_min=[-1.0, -1.0, -1.0],
-        workspace_max=[1.0, 1.0, 1.0],
-        mechanical_executor=_make_mechanical(calibration_files),
-        keypoint_proposer=_FakeKeypointProposer(np.zeros((0, 3))),
-        vlm_client=_FakeVlm(_TWO_STAGE_RESPONSE),
-    )
+    executor = _make_executor(calibration_files, keypoint_proposer=_FakeKeypointProposer(np.zeros((0, 3))))
     executor._last_points = np.zeros((480, 640, 3))
 
     result = executor.execute(Image.new("RGB", (640, 480)), {"description": "grasp the tape"})
@@ -205,39 +240,50 @@ def test_execute_no_keypoints_detected_reports_failure(calibration_files: dict) 
     assert "no keypoints detected" in result
 
 
-def test_execute_stops_early_on_ik_failure(calibration_files: dict) -> None:
+def test_execute_appends_destination_keypoint_from_end_xy(calibration_files: dict) -> None:
+    """``end_x``/``end_y`` should be backprojected and drawn as one more numbered
+    keypoint on the overlay the VLM sees, distinct from detected object keypoints."""
+    keypoints = np.array([[0.1, 0.0, 0.05]])
+    vlm = _FakeVlm(_GRASP_RESPONSE)
+    executor = _make_executor(calibration_files, keypoint_proposer=_FakeKeypointProposer(keypoints), vlm_client=vlm)
+    last_points = np.zeros((480, 640, 3))
+    last_points[240, 320] = [0.2, 0.05, 0.05]  # end_x=500,end_y=500 on a 640x480 frame -> pixel (320, 240)
+    executor._last_points = last_points
+    frame = Image.new("RGB", (640, 480))
+
+    executor.execute(frame, {"description": "place the tape on the book", "end_x": 500, "end_y": 500})
+
+    assert vlm.last_prompt is not None
+    assert "Number of keypoints in image: 2" in vlm.last_prompt
+    assert "Keypoint 1" in vlm.last_prompt
+    assert "keypoints[1]" in vlm.last_prompt
+
+
+def test_execute_skips_destination_keypoint_on_invalid_depth(calibration_files: dict) -> None:
+    keypoints = np.array([[0.1, 0.0, 0.05]])
+    vlm = _FakeVlm(_GRASP_RESPONSE)
+    executor = _make_executor(calibration_files, keypoint_proposer=_FakeKeypointProposer(keypoints), vlm_client=vlm)
+    executor._last_points = np.full((480, 640, 3), np.nan)  # no valid depth anywhere, incl. the end pixel
+    frame = Image.new("RGB", (640, 480))
+
+    executor.execute(frame, {"description": "place the tape on the book", "end_x": 500, "end_y": 500})
+
+    assert vlm.last_prompt is not None
+    assert "Number of keypoints in image: 1" in vlm.last_prompt
+
+
+def test_execute_stops_on_ik_failure(calibration_files: dict) -> None:
     robot = _FakeRobot()
-    ik_solver = _FakeIKSolver(error_m=0.10)  # 10 cm > 5 cm tolerance -> first stage already fails
-    mechanical = _make_mechanical(calibration_files, ik_solver=ik_solver, robot=robot)
-    executor = So101RekepExecutor(
-        workspace_min=[-1.0, -1.0, -1.0],
-        workspace_max=[1.0, 1.0, 1.0],
-        mechanical_executor=mechanical,
+    ik_solver = _FakeIKSolver(error_m=0.10)  # 10 cm > 5 cm tolerance -> fails
+    executor = _make_executor(
+        calibration_files,
+        ik_solver=ik_solver,
+        robot=robot,
         keypoint_proposer=_FakeKeypointProposer(np.array([[0.1, 0.0, 0.05]])),
-        vlm_client=_FakeVlm(_TWO_STAGE_RESPONSE),
     )
     executor._last_points = np.zeros((480, 640, 3))
 
     result = executor.execute(Image.new("RGB", (640, 480)), {"description": "grasp the tape"})
 
-    assert "stopped at stage 1/2" in result
+    assert "IK error" in result
     assert len(robot.actions) == 0
-
-
-def test_max_stages_caps_the_loop(calibration_files: dict) -> None:
-    robot = _FakeRobot()
-    mechanical = _make_mechanical(calibration_files, robot=robot)
-    executor = So101RekepExecutor(
-        workspace_min=[-1.0, -1.0, -1.0],
-        workspace_max=[1.0, 1.0, 1.0],
-        mechanical_executor=mechanical,
-        keypoint_proposer=_FakeKeypointProposer(np.array([[0.1, 0.0, 0.05]])),
-        vlm_client=_FakeVlm(_TWO_STAGE_RESPONSE),
-        max_stages=1,
-    )
-    executor._last_points = np.zeros((480, 640, 3))
-
-    result = executor.execute(Image.new("RGB", (640, 480)), {"description": "grasp the tape"})
-
-    assert "Completed 1/1 stage(s)" in result
-    assert len(robot.actions) == 1
