@@ -64,9 +64,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "dispatcher.member_shutdown": "[成员事件] 成员 {target_id} 已关闭",
         "dispatcher.member_canceled": "[成员事件] 成员 {target_id} 已取消",
         # agent/dispatcher.py — stale-claim nudges
-        "dispatcher.stale_claim_header": "检测到你已认领且超过 10 分钟未完成的任务（共 {count} 个），请继续推进：",
         "dispatcher.stale_claim_self": (
-            "[催促] 你已认领的任务 [{task_id}] {title}（认领于 {time_info}）仍未完成，请继续推进：{content}"
+            "[催促] 你已认领的任务 [{task_id}] {title}（认领于 {time_info}）仍未完成。"
+            "如需回顾详情请用 view_task；请继续推进，完成后用 claim_task(status='completed') 标记完成。"
         ),
         # agent/dispatcher.py — task assignment notification
         "dispatcher.task_assigned_to_self": (
@@ -114,7 +114,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "dispatcher.task_unassigned_marker": " (待领取)",
         # agent/dispatcher.py — stale-pending leader self-prompt
         "dispatcher.stale_pending_header": (
-            "[催促建议] 以下任务已长时间处于 pending 状态未被认领，"
+            "[催促建议] 以下任务已长时间处于 pending 状态未被认领（如需回顾详情用 view_task）。"
             "请评估每个任务最适合哪位成员，并通过 send_message 工具点名"
             "对方让其使用 claim_task 认领："
         ),
@@ -230,12 +230,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "dispatcher.member_shutdown": "[Member Event] Member {target_id} has shut down",
         "dispatcher.member_canceled": "[Member Event] Member {target_id} has been canceled",
         # agent/dispatcher.py — stale-claim nudges
-        "dispatcher.stale_claim_header": (
-            "Detected {count} task(s) you claimed that have been open for over 10 minutes. Please push forward:"
-        ),
         "dispatcher.stale_claim_self": (
             "[Nudge] Your claimed task [{task_id}] {title} (claimed {time_info}) is still open. "
-            "Please continue: {content}"
+            "Use view_task to review the details; keep pushing it forward and call "
+            "claim_task(status='completed') when done."
         ),
         # agent/dispatcher.py — task assignment notification
         "dispatcher.task_assigned_to_self": (
@@ -289,7 +287,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "dispatcher.task_unassigned_marker": " (unassigned)",
         # agent/dispatcher.py — stale-pending leader self-prompt
         "dispatcher.stale_pending_header": (
-            "[Nudge suggestion] The following tasks have been pending unclaimed for a long time. "
+            "[Nudge suggestion] The following tasks have been pending unclaimed for a long time "
+            "(use view_task to review the details). "
             "Decide which member fits each task best, then use send_message to call them out "
             "and ask them to claim via claim_task:"
         ),

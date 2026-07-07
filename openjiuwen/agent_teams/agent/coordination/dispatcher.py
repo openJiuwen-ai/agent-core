@@ -173,17 +173,12 @@ class EventDispatcher:
         self._round: AgentRoundController = host
         self._blueprint = blueprint
         self._infra = infra
-        # Throttle dict shared by reference between MemberHandler
-        # (status-change path) and StaleTaskHandler (poll path) so the
-        # same task cannot be nudged twice within one stale window
-        # regardless of trigger source.
-        stale_claim_throttle: dict[str, float] = {}
 
         self.lifecycle = AgentLifecycleHandler(host, blueprint, infra, poll_ctrl)
-        self.member = MemberHandler(host, blueprint, infra, poll_ctrl, stale_claim_throttle)
+        self.member = MemberHandler(host, blueprint, infra, poll_ctrl)
         self.message = MessageHandler(host, blueprint, infra, poll_ctrl)
         self.task_board = TaskBoardHandler(host, blueprint, infra, poll_ctrl)
-        self.stale_task = StaleTaskHandler(host, blueprint, infra, poll_ctrl, stale_claim_throttle)
+        self.stale_task = StaleTaskHandler(host, blueprint, infra, poll_ctrl)
         self.team_completion = TeamCompletionHandler(host, blueprint, infra, poll_ctrl)
         # Swarmflow spectator narration. Listens only for WORKFLOW_PROGRESS
         # (a dedicated event_key, no fan-out overlap), so its registration
