@@ -24,7 +24,7 @@ from openjiuwen.harness.schema.state import (
     _SESSION_RUNTIME_ATTR,
     _SESSION_STATE_KEY,
 )
-from openjiuwen.harness.prompts.sections.reload import build_reload_section
+from openjiuwen.harness.prompts.sections.offload import build_offload_section
 
 
 class ContextProcessorRail(DeepAgentRail):
@@ -86,7 +86,6 @@ class ContextProcessorRail(DeepAgentRail):
 
         self._system_prompt_builder = None
         self._all_processors: List[Tuple[str, BaseModel]] = []
-        self._enable_reload = False
 
     @staticmethod
     def _merge_config_with_overrides(
@@ -207,9 +206,6 @@ class ContextProcessorRail(DeepAgentRail):
 
         model_config = getattr(config, "model_config_obj", None)
         model_client_config = getattr(config, "model_client_config", None)
-        context_engine_config = getattr(config, "context_engine_config", None)
-        self._enable_reload = bool(getattr(context_engine_config, "enable_reload", False))
-
         if self._session_memory_config is not None and self._session_memory_mgr is not None:
             if self._session_memory_config.model is None:
                 self._session_memory_config.model = model_config
@@ -414,7 +410,7 @@ class ContextProcessorRail(DeepAgentRail):
 
     async def _maybe_inject_offload_section(self) -> None:
         """Inject offload section if processors are configured."""
-        if not self._all_processors or not self._enable_reload:
+        if not self._has_offload_processor():
             if self._system_prompt_builder is not None:
                 self._system_prompt_builder.remove_section("offload")
             return
@@ -423,4 +419,7 @@ class ContextProcessorRail(DeepAgentRail):
             return
 
         lang = self._system_prompt_builder.language or "cn"
-        self._system_prompt_builder.add_section(build_reload_section(lang))
+        self._system_prompt_builder.add_section(build_offload_section(lang))
+
+    def _has_offload_processor(self) -> bool:
+        return any("offload" in processor_type.lower() for processor_type, _ in self._all_processors)

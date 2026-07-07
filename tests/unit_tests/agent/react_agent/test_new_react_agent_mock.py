@@ -91,8 +91,7 @@ class TestNewReActAgentConfig(unittest.IsolatedAsyncioTestCase):
             ])
             .configure_context_engine(
                 max_context_message_num=100,
-                default_window_round_num=20,
-                enable_reload=True
+                default_window_round_num=20
             )
             .configure_max_iterations(10)
         )
@@ -104,8 +103,7 @@ class TestNewReActAgentConfig(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(config.prompt_template), 1)
         self.assertEqual(config.context_engine_config, ContextEngineConfig(
             max_context_message_num=100,
-            default_window_round_num=20,
-            enable_reload=True
+            default_window_round_num=20
         ))
         self.assertEqual(config.max_iterations, 10)
 

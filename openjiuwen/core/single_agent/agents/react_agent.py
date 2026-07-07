@@ -281,12 +281,11 @@ class ReActAgentConfig(BaseModel):
             self,
             max_context_message_num: Optional[int] = None,
             default_window_round_num: Optional[int] = None,
-            enable_reload: bool = False,
             enable_kv_cache_release: bool = False,
     ) -> 'ReActAgentConfig':
         """
         Configure the context-engine parameters that control how conversation history
-        is truncated, offloaded and reloaded.
+        is truncated and offloaded.
 
         Parameters
         ----------
@@ -298,11 +297,6 @@ class ReActAgentConfig(BaseModel):
             user message → final assistant reply without tool calls).  When set,
             it takes precedence over `default_window_message_num`.  Must be > 0
             if given.
-        enable_reload : bool, default False
-            Whether the agent is allowed to **automatically reload** messages that
-            were previously off-loaded (via hints such as `[[OFFLOAD:...]]`).
-            Enable this if you want the model to retrieve long content on demand;
-            disable it to keep hints as plain text.
         enable_kv_cache_release : bool, default False
             Whether to release GPU KV-cache for offloaded messages via the
             inference backend (e.g. InferenceAffinity).  Matches
@@ -311,7 +305,6 @@ class ReActAgentConfig(BaseModel):
         self.context_engine_config = ContextEngineConfig(
             max_context_message_num=max_context_message_num,
             default_window_round_num=default_window_round_num,
-            enable_reload=enable_reload,
             enable_kv_cache_release=enable_kv_cache_release,
         )
         return self
@@ -1316,14 +1309,6 @@ class ReActAgent(BaseAgent):
             context = await self.context_engine.create_context(
                 session=session
             )
-        context_reloader = context.reloader_tool()
-        if self._config.context_engine_config.enable_reload:
-            self.ability_manager.add(context_reloader.card)
-            from openjiuwen.core.runner import Runner
-            if not Runner.resource_mgr.get_tool(context_reloader.card.id, tag=self.card.id):
-                Runner.resource_mgr.add_tool(context_reloader, tag=self.card.id)
-        else:
-            self.ability_manager.remove(context_reloader.card.name)
         return context
 
     async def invoke(

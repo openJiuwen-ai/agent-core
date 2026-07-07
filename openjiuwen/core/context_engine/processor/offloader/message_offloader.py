@@ -352,13 +352,10 @@ class MessageOffloader(ContextProcessor):
         if not self._is_rule_compressed_message(message):
             content = self._head_tail_preview(
                 content,
-                description="Content truncated and offloaded. Load the OFFLOAD marker for the full original content.",
+                description="Content truncated and offloaded.",
             )
         elif self._rule_compression_requests_original_offload(message):
-            content = (
-                f"{content}\n"
-                "[Original content offloaded. Retrieve full diff with the OFFLOAD marker below.]"
-            )
+            content = f"{content}\n[Original content offloaded.]"
         extra_fields = message.model_dump()
         extra_fields.pop("role", None)
         extra_fields.pop("content", None)
@@ -384,7 +381,7 @@ class MessageOffloader(ContextProcessor):
                 offload_path=offload_path,
                 offloaded_content=getattr(offloaded, "content", None),
             )
-        return offloaded or message
+        return offloaded or original_message
 
     def _is_processable_tool_message(
         self,

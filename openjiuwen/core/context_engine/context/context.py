@@ -18,7 +18,7 @@ from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage
-from openjiuwen.core.foundation.tool import ToolInfo, Tool, ToolCard, tool
+from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.context_engine.base import ModelContext, ContextWindow, ContextStats
 from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
 from openjiuwen.core.context_engine.context.kv_cache_manager import KVCacheManager
@@ -80,40 +80,6 @@ class SessionModelContext(ModelContext):
         self._last_context_window_access_at: float | None = None
         self._kv_cache_manager = KVCacheManager(session_id) if config.enable_kv_cache_release else None
         self._offload_message_buffer = OffloadMessageBuffer()
-        self._offload_message_buffer.set_sys_operation(sys_operation)
-        self._offload_message_buffer.set_workspace_info(
-            workspace.root_path if workspace else "",
-            session_id
-        )
-        self._reloader_tool_card = ToolCard(
-            id=f"reload_{session_id}_{context_id}",
-            name="reload_original_context_messages",
-            description="Retrieve messages that were previously offloaded from the context window."
-                        "Provide the exact handle and storage type returned when the content was offloaded;"
-                        "the tool will fetch the complete original message list and inject "
-                        "it back into the conversation, allowing the model to see the full text "
-                        "as if it had never been removed.",
-            input_params={
-                "type": "object",
-                "properties": {
-                    "offload_handle": {
-                        "description": "A unique identifier or file path pointing to the offloaded content. "
-                                       "When an offload marker contains a path value, pass that path here. "
-                                       "Otherwise pass the marker's handle value.",
-                        "type": "string",
-                    },
-                    "offload_type": {
-                        "description": "The storage backend used when the content was offloaded. Must be one of: "
-                                       "'in_memory': Content was stored in in-memory cache. "
-                                       "Requires offload_handle to be a UUID or key string. "
-                                       "'filesystem': Content was stored in a filesystem-backed file. "
-                                       "Requires offload_handle to be the marker path when present, otherwise the marker handle.",
-                        "type": "string",
-                    },
-                },
-                "required": ["offload_handle", "offload_type"],
-            },
-        )
 
     def __len__(self):
         return self._message_buffer.size()
@@ -1024,15 +990,6 @@ class SessionModelContext(ModelContext):
                 if ContextUtils.is_compression_processor(processor)
             ]
         return processors
-
-    def reloader_tool(self) -> Tool:
-        @tool(card=self._reloader_tool_card)
-        async def reload_original_context_messages(offload_handle: str, offload_type: str) -> str:
-            reloaded_messages = await self._offload_message_buffer.reload(offload_handle, offload_type)
-            if not reloaded_messages:
-                return f"Failed to reload messages with offload_handle={offload_handle} and offload_type={offload_type}"
-            return ContextUtils.format_reloaded_messages(offload_handle, reloaded_messages)
-        return reload_original_context_messages
 
     def offload_messages(self, offload_handle: str, messages: List[BaseMessage]):
         self._offload_message_buffer.offload(offload_handle, "in_memory", messages)

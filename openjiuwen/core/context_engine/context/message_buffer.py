@@ -1,11 +1,8 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-import glob
-import os
 from typing import List, Optional, Union, Dict
 
 from openjiuwen.core.foundation.llm import BaseMessage
-from openjiuwen.core.common.logging import logger
 
 
 class ContextMessageBuffer:
@@ -86,18 +83,6 @@ class OffloadMessageBuffer:
             init_messages: Dict[str, List[BaseMessage]] = None,
     ):
         self._in_memory_offload_messages: Dict[str, List[BaseMessage]] = init_messages or dict()
-        self._sys_operation = None
-        self._workspace_dir = None
-        self._session_id = None
-
-    def set_sys_operation(self, sys_operation):
-        """Set sys_operation for filesystem-based offload reload."""
-        self._sys_operation = sys_operation
-
-    def set_workspace_info(self, workspace_dir: str, session_id: str):
-        """Set workspace info for filesystem-based offload reload."""
-        self._workspace_dir = workspace_dir
-        self._session_id = session_id
 
     def offload(
             self,
@@ -107,56 +92,6 @@ class OffloadMessageBuffer:
     ):
         if offload_type == "in_memory":
             self._in_memory_offload_messages[offload_handle] = messages
-
-    async def reload(
-            self,
-            offload_handle: str,
-            offload_type: str
-    ) -> List[BaseMessage]:
-        if offload_type == "in_memory":
-            return self._in_memory_offload_messages.get(offload_handle, [])
-        if offload_type == "filesystem":
-            return await self._reload_from_filesystem(offload_handle)
-        return []
-
-    async def _reload_from_filesystem(self, offload_handle: str) -> List[BaseMessage]:
-        """Reload messages from filesystem storage."""
-        if self._sys_operation is None:
-            return []
-        # 重建完整文件路径
-        for offload_path in self._filesystem_reload_paths(offload_handle):
-            try:
-                result = await self._sys_operation.fs().read_file(offload_path)
-                if result.code == 0 and result.data:
-                    import json
-                    payload = json.loads(result.data.content)
-                    messages_data = payload.get("messages", [])
-                    messages = []
-                    for msg_data in messages_data:
-                        try:
-                            messages.append(BaseMessage.model_validate(msg_data))
-                        except Exception as e:
-                            logger.warning(f"Failed to validate message: {e}")
-                    return messages
-            except Exception as e:
-                logger.warning(f"Failed to reload messages from filesystem: {e}")
-        return []
-
-    def _filesystem_reload_paths(self, offload_handle: str) -> List[str]:
-        """Return candidate filesystem paths for an offload handle."""
-        if os.path.isabs(offload_handle):
-            return [offload_handle]
-        if not (self._workspace_dir and self._session_id):
-            return [offload_handle]
-
-        offload_dir = os.path.join(
-            self._workspace_dir, "context", self._session_id + "_context", "offload"
-        )
-        exact_path = os.path.join(offload_dir, offload_handle + ".json")
-        paths = [exact_path]
-        prefixed_paths = sorted(glob.glob(os.path.join(offload_dir, f"*_{offload_handle}.json")))
-        paths.extend(path for path in prefixed_paths if path not in paths)
-        return paths
 
     def clear(
             self,

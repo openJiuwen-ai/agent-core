@@ -23,11 +23,17 @@ def _make_agent():
         context_processors=[],
         model_config_obj=ModelRequestConfig(model="test-model"),
         model_client_config=None,
-        context_engine_config=SimpleNamespace(enable_reload=False),
+        context_engine_config=SimpleNamespace(),
+    )
+    system_prompt_builder = SimpleNamespace(
+        language="cn",
+        sections={},
+        add_section=lambda section: system_prompt_builder.sections.__setitem__(section.name, section),
+        remove_section=lambda name: system_prompt_builder.sections.pop(name, None),
     )
     return SimpleNamespace(
         react_agent=SimpleNamespace(_config=config),
-        system_prompt_builder=SimpleNamespace(remove_section=lambda _name: None),
+        system_prompt_builder=system_prompt_builder,
     )
 
 
@@ -52,6 +58,20 @@ def test_context_processor_rail_default_processors_are_the_only_preset():
     assert isinstance(processors["DialogueCompressor"], DialogueCompressorConfig)
     assert isinstance(processors["CurrentRoundCompressor"], CurrentRoundCompressorConfig)
     assert isinstance(processors["RoundLevelCompressor"], RoundLevelCompressorConfig)
+
+
+@pytest.mark.asyncio
+async def test_context_processor_rail_injects_offload_section_before_model_call():
+    rail = ContextProcessorRail(preset=True)
+    agent = _make_agent()
+
+    rail.init(agent)
+    await rail.before_model_call(SimpleNamespace(session=None))
+
+    section = agent.system_prompt_builder.sections["offload"]
+    assert "OFFLOAD" in section.content["cn"]
+    assert "path=<path>" in section.content["cn"]
+    assert "read_file" not in section.content["cn"]
 
 
 def test_context_processor_rail_merges_dict_overrides_for_default_processors():

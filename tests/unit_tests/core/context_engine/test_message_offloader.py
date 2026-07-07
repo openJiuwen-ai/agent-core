@@ -4,7 +4,7 @@ import glob
 import json
 import os
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -72,6 +72,12 @@ def _large_diff() -> str:
     return "\n".join(chunks)
 
 
+def _offloaded_content(message: OffloadMixin) -> str:
+    marker_path = message.content.rsplit("path=", 1)[1].rsplit("]]", 1)[0]
+    payload = json.loads(open(marker_path, encoding="utf-8").read())
+    return payload["messages"][0]["content"]
+
+
 def _python_function_for_offload(name: str, *, line_count: int) -> list[str]:
     return [
         f"def {name}(base: int) -> int:",
@@ -136,13 +142,20 @@ class TestMessageOffloaderAddTrigger:
 
         message = context.get_messages()[0]
         assert isinstance(message, OffloadMixin)
-        reloaded = await context.reloader_tool().invoke(
-            {
-                "offload_handle": message.offload_handle,
-                "offload_type": message.offload_type,
-            }
-        )
-        assert "x" * 61 in reloaded
+        assert _offloaded_content(message) == "x" * 61
+
+    @pytest.mark.asyncio
+    async def test_keeps_original_message_when_filesystem_offload_write_fails(self):
+        context = await create_context(context_window_tokens=100)
+        processor = context._processors[0]  # type: ignore[attr-defined]
+        processor._write_offload_to_file = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+        await context.add_messages(ToolMessage(content="x" * 61, tool_call_id="tc-large"))
+
+        message = context.get_messages()[0]
+        assert not isinstance(message, OffloadMixin)
+        assert message.content == "x" * 61
+        assert "[[OFFLOAD:" not in message.content
 
     @pytest.mark.asyncio
     async def test_rule_compression_offloads_original_message(self):
@@ -156,14 +169,7 @@ class TestMessageOffloaderAddTrigger:
         assert "[[OFFLOAD:" in message.content
         assert message.content.rstrip().endswith("]]")
         assert message.metadata["rule_compression_pass"] == "add"
-        reloaded = await context.reloader_tool().invoke(
-            {
-                "offload_handle": message.offload_handle,
-                "offload_type": message.offload_type,
-            }
-        )
-        assert "same line" in reloaded
-        assert context.save_state()["offload_messages"][message.offload_handle][0].content == content
+        assert _offloaded_content(message) == content
 
     @pytest.mark.asyncio
     async def test_rule_compression_writes_original_to_filesystem_and_preserves_path(
@@ -222,7 +228,7 @@ class TestMessageOffloaderAddTrigger:
         assert isinstance(message, OffloadMixin)
         assert "diff --git a/auth.py b/auth.py" in message.content
         assert "+new_token = get_secure_token()" in message.content
-        assert "Retrieve full diff" in message.content
+        assert "[Original content offloaded.]" in message.content
         assert message.offload_type == "filesystem"
 
         paths = glob.glob(
@@ -394,13 +400,7 @@ class TestMessageOffloaderTtl:
 
         message = context.get_messages()[0]
         assert isinstance(message, OffloadMixin)
-        reloaded = await context.reloader_tool().invoke(
-            {
-                "offload_handle": message.offload_handle,
-                "offload_type": message.offload_type,
-            }
-        )
-        assert content in reloaded
+        assert _offloaded_content(message) == content
 
     @pytest.mark.asyncio
     async def test_ttl_rule_compression_offloads_original_even_when_compressed_fits_budget(self):
@@ -425,14 +425,7 @@ class TestMessageOffloaderTtl:
         assert isinstance(message, OffloadMixin)
         assert message.metadata["rule_compression_pass"] == "ttl"
         assert "[[OFFLOAD:" in message.content
-        reloaded = await context.reloader_tool().invoke(
-            {
-                "offload_handle": message.offload_handle,
-                "offload_type": message.offload_type,
-            }
-        )
-        assert "same line" in reloaded
-        assert context.save_state()["offload_messages"][message.offload_handle][0].content == content
+        assert _offloaded_content(message) == content
 
     @pytest.mark.asyncio
     async def test_writes_absolute_debug_log_for_rule_compression_and_offload(
@@ -571,13 +564,7 @@ class TestMessageOffloaderTtl:
 
         message = context.get_messages()[1]
         assert isinstance(message, OffloadMixin)
-        reloaded = await context.reloader_tool().invoke(
-            {
-                "offload_handle": message.offload_handle,
-                "offload_type": message.offload_type,
-            }
-        )
-        assert content in reloaded
+        assert _offloaded_content(message) == content
 
     @pytest.mark.asyncio
     async def test_context_window_access_time_is_saved_and_restored(self):

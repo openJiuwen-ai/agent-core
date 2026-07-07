@@ -336,38 +336,6 @@ class ContextUtils:
         return messages[:start_index] + target_messages + messages[end_index + 1:]
 
     @staticmethod
-    def format_reloaded_messages(
-            offload_handle: str,
-            messages: List[BaseMessage]
-    ):
-        """
-        Format a list of reloaded messages into a human-readable string for LLM consumption.
-
-        This method creates a structured text representation of messages that were
-        previously offloaded and have now been retrieved. The formatted output
-        includes the offload handle for traceability and each message serialized
-        as JSON for structured parsing by the model.
-
-        Args:
-            offload_handle: The unique identifier of the offloaded content being
-                restored. Used to correlate the reloaded content with its original
-                offload marker (e.g., [[OFFLOAD: handle=xxx, type=...]]).
-            messages: List of BaseMessage objects that have been retrieved from
-                external storage and need to be presented back to the LLM.
-
-        Returns:
-            A formatted string containing the handle reference and serialized
-            messages, suitable for injection back into the conversation context.
-        """
-        formatted_content = f"reload messages with handle={offload_handle}:\n"
-        for i, msg in enumerate(messages, 1):
-            formatted_content += f"message {i}: "
-            formatted_content += json.dumps(msg.model_dump(), ensure_ascii=False)
-            if i != len(messages):
-                formatted_content += "\n"
-        return formatted_content
-
-    @staticmethod
     def find_all_dialogue_round(messages: List[BaseMessage]) -> List[List[Optional[int]]]:
         """
         Build all dialogue round boundaries by scanning messages from end to start.

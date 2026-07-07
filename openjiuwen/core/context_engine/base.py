@@ -6,7 +6,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.foundation.llm import BaseMessage
-from openjiuwen.core.foundation.tool import ToolInfo, Tool
+from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.context_engine.token.base import TokenCounter
 
 
@@ -198,26 +198,6 @@ class ModelContext(ABC):
     def context_window_tokens(self) -> int | None:
         """Return the resolved model context-window size in tokens, if available."""
         return None
-
-    @abstractmethod
-    def reloader_tool(self) -> Tool:
-        """
-        Return a Tool instance for reloading offloaded messages back into context.
-
-        This tool retrieves previously offloaded content using its handle and
-        re-injects the full message text into the active conversation. It is
-        typically invoked when the model encounters a reload hint (e.g.,
-        [[HANDLE:xxx]]) and needs to access the original content that was
-        moved out of context to save token budget.
-
-        The tool accepts two parameters:
-        - offload_handle: UUID or file path pointing to the offloaded content
-        - offload_type: storage backend type ("memory" or "filesystem")
-
-        Returns the complete original message text for insertion back into
-        the message history.
-        """
-
 
 class ContextStats(BaseModel):
     """
