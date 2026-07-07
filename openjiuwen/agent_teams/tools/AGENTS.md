@@ -112,9 +112,9 @@ PostgreSQL / MySQL 后端（`engine.py`），不要用 SQLite。
 | `approve_tool` | ✓（仅 plan_mode） | | 与 `approve_plan` 相同的门控 |
 | `list_members` | ✓ | | 结果里排除调用者自身 |
 | `create_task` | ✓ | | 带 `depended_by` 的 spec 自动路由到 `add_with_priority`；单 spec 返回 `brief()`，批量返回 `tasks`+`failures` |
-| `update_task` | ✓ | | 一个工具处理标题/内容编辑、取消、指派（含 reassignment reset）以及 `add_blocked_by` |
+| `update_task` | ✓ | | 一个工具处理标题/内容编辑、取消、指派以及 `add_blocked_by`；改派已认领任务走 `TeamTaskManager.reassign`（reset + `TASK_REVOKED` 通知原 owner，**不** `cancel_member`），并强制「目标成员至多一个活跃 CLAIMED」，见 F_54 |
 | `view_task` | ✓ | ✓ | `action ∈ {list, get, claimable}`；默认 `list` |
-| `claim_task` | | ✓ | `status ∈ {claimed, completed}`；完成路径追加一句下一步 nudge |
+| `claim_task` | | ✓ | `status ∈ {claimed, completed}`；claim 前强制「本成员至多一个活跃 CLAIMED」（见 F_54）；完成路径追加一句下一步 nudge |
 | `send_message` | ✓ | ✓ | `to == "*"` → 广播；leader 调用会自动拉起 UNSTARTED 成员。也挂到 `human_agent` 作为一条用户驱动的转发通道 —— HITT prompt section 禁止自主使用；只有用户下达的"tell `<member>` …"指令才可触发。 |
 | `member_complete_task` | | | 仅 `human_agent` —— 只能完成自己的任务 |
 | `workspace_meta` | ✓ | ✓ | workspace 锁 + 版本历史 |
