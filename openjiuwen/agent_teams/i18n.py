@@ -109,7 +109,7 @@ STRINGS: dict[str, dict[str, str]] = {
             "- 整体进度是否符合预期"
         ),
         "dispatcher.teammate_task_list": (
-            "当前任务列表如下：\n- 请认领适合你领域的待领取任务\n- 了解相关任务的执行者，必要时与他们协调配合"
+            "以下是当前可认领的任务：\n- 请认领适合你领域的任务\n- 认领后用 view_task 查看详情并开始执行"
         ),
         "dispatcher.task_unassigned_marker": " (待领取)",
         # agent/dispatcher.py — stale-pending leader self-prompt
@@ -282,9 +282,9 @@ STRINGS: dict[str, dict[str, str]] = {
             "- Whether the overall progress matches expectations"
         ),
         "dispatcher.teammate_task_list": (
-            "Current task list:\n"
-            "- Claim pending tasks that fit your domain\n"
-            "- Know who is working on related tasks and coordinate when needed"
+            "Tasks available to claim:\n"
+            "- Claim the ones that fit your domain\n"
+            "- After claiming, use view_task for details and start working"
         ),
         "dispatcher.task_unassigned_marker": " (unassigned)",
         # agent/dispatcher.py — stale-pending leader self-prompt

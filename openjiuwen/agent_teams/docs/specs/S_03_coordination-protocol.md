@@ -8,7 +8,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/coordination/` |
-| 最近一次修订日期 | 2026-06-05 |
+| 最近一次修订日期 | 2026-07-07 |
 | 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md`、`F_14_human-agent-team-event-rendering.md` |
 
 ## 范围 / 边界
@@ -229,7 +229,7 @@ class BaseCoordinationHandler:
 | `AgentLifecycleHandler` | `InnerEventType.USER_INPUT` / `TeamEvent.STANDBY` / `TeamEvent.CLEANED` / `TeamEvent.TOOL_APPROVAL_RESULT` | 无 | `on_user_input` → `_round.deliver_input`；`on_standby` → `_poll.pause_polls`；`on_cleaned` → `_lifecycle.shutdown_self`（leader 跳过）；`on_tool_approval_result` → 构造 `InteractiveInput` → `_round.resume_interrupt` |
 | `MemberHandler` | 6 个 `MEMBER_*`：`SPAWNED` / `RESTARTED` / `STATUS_CHANGED` / `EXECUTION_CHANGED` / `SHUTDOWN` / `CANCELED` | `_last_stale_nudge: dict[str, float]`（与 `StaleTaskHandler` 同一引用） | `on_member_event` 按 role 分流到 `_handle_leader_member_event` / `_handle_teammate_member_event`；leader 在 `MEMBER_STATUS_CHANGED` 且 `new_status ∈ {READY, ERROR}` 时 `_nudge_idle_member_with_stale_claims`；非 leader 仅对自身事件反应：`MEMBER_CANCELED` 触发 `_round.cancel_agent`，且 `HUMAN_AGENT` 角色对自身 `MEMBER_SHUTDOWN` 走 `_shutdown_human_agent`（in-flight 且非 force 不打断、靠 round-end close；空闲或 force 才 `_lifecycle.shutdown_self`）。teammate 的 shutdown 不在此 teardown，走 drain → 末轮 → round-end close_stream |
 | `MessageHandler` | `TeamEvent.MESSAGE` / `TeamEvent.BROADCAST` / `InnerEventType.POLL_MAILBOX` / `TeamEvent.MEMBER_SHUTDOWN`（fan-out） | 无 | `on_message_or_broadcast`：leader 在 MESSAGE 上 `_ack_user_bound_message` + `_notify_human_agent_inbound`，所有 role 接着 `_poll.resume_polls` + `_process_unread_messages`；`on_poll_mailbox` 周期 sweep；`on_member_shutdown_drain` 仅 teammate 给自己 drain（`use_steer=True`） |
-| `TaskBoardHandler` | `TeamEvent.TASK_CLAIMED` + 5 个 `TASK_*`：`CREATED` / `UPDATED` / `COMPLETED` / `CANCELLED` / `UNBLOCKED` | 无 | `on_task_claimed`：targeted 自身 → `deliver_input`；非自身 → 走 `on_task_board_event` 兜底（防 idle leader 错过 board 变更）。`on_task_board_event` 在 `has_in_flight_round()` 否时 `_nudge_idle_agent`，向 idle agent 喂任务清单；leader 全部任务终结时按 lifecycle 喂 all-done prompt |
+| `TaskBoardHandler` | `TeamEvent.TASK_CLAIMED` + 6 个 `TASK_*`：`CREATED` / `UPDATED` / `COMPLETED` / `CANCELLED` / `UNBLOCKED` / `RELEASED` | 无 | `on_task_claimed`：targeted 自身 → `deliver_input`；非自身 → 走 `on_task_board_event` 兜底（防 idle leader 错过 board 变更；teammate 在下一句的过滤下被挡掉，实际只 nudge leader）。`on_task_board_event` → `_nudge_idle_agent`：**leader 每个 board 事件都巡视全部未完成任务；teammate 只被 `_TEAMMATE_NUDGE_EVENTS`（`CREATED` / `UNBLOCKED` / `RELEASED`——会扩大 claimable 池的三类）唤醒，且只渲染 claimable（pending+未指派）任务，别人 in-flight 的 claimed 任务不喂给 teammate**；`resume_polls` 对每个事件都触发（过滤只砍 nudge、不停 poll）。leader 全部任务终结时按 lifecycle 喂 all-done prompt。`TASK_RELEASED` 由 `TeamTaskManager.reset`（成员清理 / leader 改指派）发布，把被释放回 pending 的任务重新播给 idle teammate |
 | `StaleTaskHandler` | `InnerEventType.POLL_TASK` | `_last_stale_nudge`（共享）+ `_last_pending_nudge: dict[str, float]`（私有，仅 leader 用） | `on_poll_task` → `_check_stale_claimed_tasks` + `_check_stale_pending_tasks`。stale claim：`task.updated_at` 超过 `_STALE_CLAIM_SECONDS` (10min) 触发；自己持有 → `deliver_input`，leader 观察他人 → `message_manager.send_message`。stale pending（仅 leader）：超过 `_STALE_PENDING_SECONDS` (10min) 自喂 prompt、由 LLM 决定如何分派 |
 | `TeamCompletionHandler` | `InnerEventType.POLL_TASK` / `TeamEvent.TASK_LIST_DRAINED` / `TeamEvent.TEAM_COMPLETED` | `_team_completed_emitted: bool` + `_completion_callbacks: list`（私有） | `on_poll_task`：leader 且 idle 时评估 `TeamBackend.is_team_completed()`（任务全终态 + 成员全 settled + 无任何未读消息，含广播），按上升沿发 `TEAM_COMPLETED`、下降沿重新武装；**persistent 团队额外调 `self._lifecycle.conclude_completed_round(...)` 结束 leader 流触发 auto-pause（temporary 不调，靠 clean_team 收尾）**。`rearm()`：清上升沿幂等标志，`kernel.start`（冷启动 / resume / recover）每次调一次，使每个 run cycle 独立判定完成。`on_task_list_drained`：记日志 + fire `_completion_callbacks`（`TeamAgent` 在 deepagent 建好后经 `register_completion_callback` 把 `TeamSkillRail.notify_team_completed` 注册进来，注册表非空即 gate）。`on_team_completed`：消费记日志。`POLL_TASK` 与 `StaleTaskHandler` 共享 event_key，注册靠后 → fan-out 在其之后 |
 
@@ -363,6 +363,7 @@ TaskBoardHandler.EVENT_METHOD_MAP = {
     TeamEvent.TASK_COMPLETED:  "on_task_board_event",
     TeamEvent.TASK_CANCELLED:  "on_task_board_event",
     TeamEvent.TASK_UNBLOCKED:  "on_task_board_event",
+    TeamEvent.TASK_RELEASED:   "on_task_board_event",
 }
 
 StaleTaskHandler.EVENT_METHOD_MAP = {

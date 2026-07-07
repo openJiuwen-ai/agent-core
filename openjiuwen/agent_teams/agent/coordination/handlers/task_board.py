@@ -3,10 +3,12 @@
 """Task-board coordination events.
 
 Owns ``TASK_CLAIMED`` (targeted assignment to one member) and the
-five board-state events (``TASK_CREATED`` / ``TASK_UPDATED`` /
-``TASK_COMPLETED`` / ``TASK_CANCELLED`` / ``TASK_UNBLOCKED``) that
-nudge an idle agent to re-evaluate the board. Stale-task sweeping
-on poll ticks lives in :class:`StaleTaskHandler`.
+six board-state events (``TASK_CREATED`` / ``TASK_UPDATED`` /
+``TASK_COMPLETED`` / ``TASK_CANCELLED`` / ``TASK_UNBLOCKED`` /
+``TASK_RELEASED``) that nudge an idle agent to re-evaluate the board.
+A leader is nudged on every one; a teammate only on the subset that
+can grow the claimable pool (see ``_TEAMMATE_NUDGE_EVENTS``).
+Stale-task sweeping on poll ticks lives in :class:`StaleTaskHandler`.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from openjiuwen.core.common.logging import team_logger
 
 
 class TaskBoardHandler(BaseCoordinationHandler):
-    """Handle TASK_CLAIMED + 5 task-board state-transition events."""
+    """Handle TASK_CLAIMED + 6 task-board state-transition events."""
 
     EVENT_METHOD_MAP: ClassVar[dict[str, str]] = {
         # Targeted assignment (message reaches the assignee directly)
@@ -37,7 +39,25 @@ class TaskBoardHandler(BaseCoordinationHandler):
         TeamEvent.TASK_COMPLETED: "on_task_board_event",
         TeamEvent.TASK_CANCELLED: "on_task_board_event",
         TeamEvent.TASK_UNBLOCKED: "on_task_board_event",
+        TeamEvent.TASK_RELEASED: "on_task_board_event",
     }
+
+    # Board events that can *grow* the set of claimable tasks a teammate
+    # cares about: a brand-new pending task appears (TASK_CREATED), a
+    # blocked task's dependencies clear so it flips to pending
+    # (TASK_UNBLOCKED), or a claimed task is reset back to pending and
+    # re-enters the pool (TASK_RELEASED). No other board transition adds
+    # claimable work — TASK_UPDATED only edits an existing pending/blocked
+    # task's title/content, TASK_COMPLETED / TASK_CANCELLED remove tasks,
+    # and TASK_CLAIMED / a plan request shrink or reserve the pool. An
+    # idle teammate is therefore woken only by these three; every other
+    # board event would spend a wasted round re-scanning an unchanged
+    # claimable set. The leader is exempt (see ``on_task_board_event``)
+    # because it owns board-level decisions and must observe every
+    # transition.
+    _TEAMMATE_NUDGE_EVENTS: ClassVar[frozenset[str]] = frozenset(
+        {TeamEvent.TASK_CREATED, TeamEvent.TASK_UNBLOCKED, TeamEvent.TASK_RELEASED}
+    )
 
     async def on_task_claimed(self, event: EventMessage) -> None:
         """Directed assignment from another node.
@@ -46,12 +66,13 @@ class TaskBoardHandler(BaseCoordinationHandler):
         claim targets self, route through ``deliver_input`` (steer /
         queue / start, picked by round state) and skip the board nudge
         — the targeted message already names the task. When the claim
-        targets someone else, fall through to ``on_task_board_event``
-        so the local idle agent (typically the leader observing
-        teammate claims) still gets nudged with the updated board.
-        Without this fallback an idle leader would miss the board
-        change until the next stale-pending poll, which can be up to
-        ``_STALE_PENDING_SECONDS`` away.
+        targets someone else, fall through to ``on_task_board_event``.
+        In practice only the leader is nudged there: a foreign claim
+        shrinks the claimable pool, so ``on_task_board_event`` filters
+        it out for a teammate (TASK_CLAIMED is not in
+        ``_TEAMMATE_NUDGE_EVENTS``). Without this fallback an idle
+        leader would miss the board change until the next stale-pending
+        poll, which can be up to ``_STALE_PENDING_SECONDS`` away.
 
         Self-assignment rendering is role-aware: a teammate / leader
         sees the teammate-oriented ``dispatcher.task_assigned_to_self``
@@ -149,25 +170,47 @@ class TaskBoardHandler(BaseCoordinationHandler):
         await self._round.deliver_input(content)
 
     async def on_task_board_event(self, event: EventMessage) -> None:
-        """Nudge idle agent on TASK_CREATED/UPDATED/COMPLETED/CANCELLED/UNBLOCKED.
+        """Nudge idle agent on TASK_CREATED/UPDATED/COMPLETED/CANCELLED/UNBLOCKED/RELEASED.
 
         Gates on the task-level check, not ``is_agent_running``: nudging
         during the pre-stream or finalize window would call
         ``_start_agent`` and overwrite the still-live agent task.
         TASK_CLAIMED is routed separately to ``on_task_claimed``.
+
+        A teammate is woken only when the claimable set may have grown
+        (``_TEAMMATE_NUDGE_EVENTS`` = TASK_CREATED / TASK_UNBLOCKED /
+        TASK_RELEASED).
+        Any other board churn — a member editing / completing /
+        cancelling a task, or someone else claiming one — never adds
+        claimable work, so waking an idle teammate for it just burns a
+        round. The leader stays exempt: it owns board-level decisions
+        (re-plan / assign / conclude) and must see every transition.
+        ``resume_polls`` fires for every event regardless, so the nudge
+        filter never stalls periodic polling.
         """
         member_name = self._blueprint.member_name
         if not member_name or self._infra.task_manager is None:
             return
         await self._poll.resume_polls()
+        if self._blueprint.role != TeamRole.LEADER and event.event_type not in self._TEAMMATE_NUDGE_EVENTS:
+            team_logger.debug(
+                "[{}] skip teammate nudge: event {} does not grow claimable set",
+                member_name,
+                event.event_type,
+            )
+            return
         team_logger.debug("task trigger detected, nudging idle agent: member_name={}", member_name)
         await self._nudge_idle_agent(member_name)
 
     async def _nudge_idle_agent(self, member_name: str, from_poll: bool = False) -> None:
         """Feed task context to an idle agent.
 
-        Leader: reviews full task board to decide whether to re-plan or conclude.
-        Teammate: reviews claimable tasks to pick one, plus all tasks for coordination context.
+        Leader: reviews the full task board (every incomplete task) to
+        decide whether to re-plan, assign, or conclude.
+        Teammate: sees only claimable tasks (pending + unassigned) to
+        pick one. Tasks already claimed / in-flight by others are not
+        surfaced — a teammate is woken to take on new claimable work,
+        not to survey what everyone else is doing.
 
         Args:
             member_name: The calling member's own name.
@@ -196,14 +239,18 @@ class TaskBoardHandler(BaseCoordinationHandler):
                 await self._round.deliver_input(render_event(kind="all-done", body=prompt))
                 return
             lines = [t("dispatcher.leader_task_board")]
+            board_tasks = incomplete
         else:
-            claimable = [task for task in incomplete if task.status == "pending" and not task.assignee]
-            if not claimable and not incomplete:
+            # Teammate: surface only claimable work (pending + unassigned).
+            # No claimable task means nothing to pick up — stay idle
+            # rather than dump others' in-flight tasks into the round.
+            board_tasks = [task for task in incomplete if task.status == "pending" and not task.assignee]
+            if not board_tasks:
                 return
             lines = [t("dispatcher.teammate_task_list")]
 
         now_ms = get_current_time()
-        for task in incomplete:
+        for task in board_tasks:
             lines.append(render_task_line(task, now_ms=now_ms))
 
         await self._round.deliver_input(render_event(kind="task-board", body="\n".join(lines)))

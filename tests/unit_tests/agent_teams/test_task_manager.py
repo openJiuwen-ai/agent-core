@@ -1125,6 +1125,35 @@ def _published_events(message_bus, event_type: str) -> list:
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_reset_emits_task_released(task_manager, message_bus):
+    """Resetting a claimed task returns it to the claimable pool and
+    publishes TASK_RELEASED so idle teammates learn it is claimable
+    again."""
+    task = await task_manager.add(title="T", content="c")
+    assert await task_manager.claim(task.task_id)
+
+    result = await task_manager.reset(task.task_id)
+    assert result.ok
+
+    released = _published_events(message_bus, TeamEvent.TASK_RELEASED)
+    assert len(released) == 1
+    assert released[0].payload["task_id"] == task.task_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reset_failure_emits_no_task_released(task_manager, message_bus):
+    """A failed reset (task not claimed) must not publish TASK_RELEASED."""
+    task = await task_manager.add(title="T", content="c")
+
+    result = await task_manager.reset(task.task_id)
+    assert not result.ok
+
+    assert _published_events(message_bus, TeamEvent.TASK_RELEASED) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_complete_last_task_emits_task_list_drained(task_manager, message_bus):
     """Completing the only task drains the board and emits TASK_LIST_DRAINED."""
     task = await task_manager.add(title="T", content="c")
