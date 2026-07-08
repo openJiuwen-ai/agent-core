@@ -95,6 +95,8 @@ class TestMessageOffloaderConfig:
             "ttl_message_threshold_ratio",
             "ttl_seconds",
             "protected_tool_names",
+            "enable_debug_dump",
+            "debug_dump_dir",
         }
 
     @pytest.mark.parametrize(
@@ -435,7 +437,10 @@ class TestMessageOffloaderTtl:
     ):
         debug_dir = tmp_path / "debug"
         monkeypatch.setenv("OPENJIUWEN_MESSAGE_OFFLOADER_DEBUG_LOG_DIR", str(debug_dir))
-        context = await create_context(context_window_tokens=100)
+        context = await create_context(
+            MessageOffloaderConfig(enable_debug_dump=True),
+            context_window_tokens=100,
+        )
         content = "\n".join(["same line"] * 10000)
 
         await context.add_messages(ToolMessage(content=content, tool_call_id="tc-debug"))
@@ -458,6 +463,31 @@ class TestMessageOffloaderTtl:
         assert completed["compressed_content"].startswith("same line")
         assert len(completed["compressed_content"]) < len(content)
         assert records[3]["offloaded_content"].endswith(context.get_messages()[0].content)
+
+    @pytest.mark.asyncio
+    async def test_does_not_write_debug_log_by_default(self, monkeypatch, tmp_path):
+        debug_dir = tmp_path / "debug"
+        monkeypatch.setenv("OPENJIUWEN_MESSAGE_OFFLOADER_DEBUG_LOG_DIR", str(debug_dir))
+        context = await create_context(context_window_tokens=100)
+
+        await context.add_messages(ToolMessage(content="x" * 10000, tool_call_id="tc-no-debug"))
+
+        assert not (debug_dir / "message_offloader_debug.jsonl").exists()
+
+    @pytest.mark.asyncio
+    async def test_uses_configured_debug_dump_dir(self, tmp_path):
+        debug_dir = tmp_path / "configured-debug"
+        context = await create_context(
+            MessageOffloaderConfig(
+                enable_debug_dump=True,
+                debug_dump_dir=str(debug_dir),
+            ),
+            context_window_tokens=100,
+        )
+
+        await context.add_messages(ToolMessage(content="x" * 10000, tool_call_id="tc-config-debug"))
+
+        assert (debug_dir / "message_offloader_debug.jsonl").exists()
 
     @pytest.mark.asyncio
     async def test_ttl_traverses_full_model_context_not_only_returned_window(self):

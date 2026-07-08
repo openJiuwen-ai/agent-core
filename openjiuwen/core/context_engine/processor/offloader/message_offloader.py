@@ -22,7 +22,6 @@ MESSAGE_OFFLOADER_DEBUG_LOG_DIR_ENV = "OPENJIUWEN_MESSAGE_OFFLOADER_DEBUG_LOG_DI
 MESSAGE_OFFLOADER_DEBUG_LOG_FILE = "message_offloader_debug.jsonl"
 OffloadStrategy = Literal["rule_then_truncate", "rule_only", "truncate_only"]
 
-_ENABLE_RULE_COMPRESSION_DUMP = True
 _OFFLOAD_STRATEGY: OffloadStrategy = "rule_then_truncate"
 _OFFLOAD_PREVIEW_HEAD_TAIL_CHARS = 2000
 
@@ -55,13 +54,19 @@ class MessageOffloaderConfig(BaseModel):
     )
     """Tool names, or ``tool:argument-pattern`` entries, that must remain inline."""
 
+    enable_debug_dump: bool = Field(default=False)
+    """Persist rule-compression and offload debug records when enabled."""
+
+    debug_dump_dir: str | None = Field(default=None)
+    """Optional directory for MessageOffloader debug records."""
+
 
 @ContextEngine.register_processor()
 class MessageOffloader(ContextProcessor):
     def __init__(self, config: MessageOffloaderConfig):
         super().__init__(config)
         self._rule_pipeline = RuleCompressionPipeline(
-            enable_dump=_ENABLE_RULE_COMPRESSION_DUMP
+            enable_dump=bool(config.enable_debug_dump)
         )
 
     async def trigger_add_messages(
@@ -503,6 +508,8 @@ class MessageOffloader(ContextProcessor):
         message: BaseMessage | None = None,
         **payload: Any,
     ) -> None:
+        if not self.config.enable_debug_dump:
+            return
         log_path = self._debug_log_path(context)
         record = {
             "event": event,
@@ -530,6 +537,8 @@ class MessageOffloader(ContextProcessor):
         return os.path.join(self._debug_log_dir(context), MESSAGE_OFFLOADER_DEBUG_LOG_FILE)
 
     def _debug_log_dir(self, context: ModelContext) -> str:
+        if self.config.debug_dump_dir:
+            return os.path.abspath(self.config.debug_dump_dir)
         env_dir = os.getenv(MESSAGE_OFFLOADER_DEBUG_LOG_DIR_ENV)
         if env_dir:
             return os.path.abspath(env_dir)
