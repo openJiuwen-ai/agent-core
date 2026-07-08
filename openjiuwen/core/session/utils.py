@@ -2,10 +2,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import inspect
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Optional, Any, Union
 
 REGEX_MAX_LENGTH = 1000
+IMMUTABLE_ATOMIC = (str, int, float, bool, type(None), bytes, frozenset, complex)
 NESTED_PATH_LIST_PATTERN = re.compile(r'^([\w]+)((?:\[\d+\])*)$')
 REF_PATTERN = re.compile(r"\${([^{}]*)}")
 NESTED_PATH_SPLIT = '.'
@@ -215,8 +217,10 @@ def expand_nested_structure(data: Any) -> Any:
             current_key, current = root_to_path(key, result, create_if_absent=True)
             current[current_key] = expand_nested_structure(value)
         return result
-    else:
+    elif isinstance(data, IMMUTABLE_ATOMIC):
         return data
+    else:
+        return deepcopy(data)
 
 
 def root_to_path(nested_path: str, source: dict, create_if_absent: bool = False) -> tuple[Union[str, int], dict]:
