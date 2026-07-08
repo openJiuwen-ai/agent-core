@@ -4,14 +4,14 @@
 from openjiuwen.agent_evolving.agent_rl.schemas import trajectory_to_rollouts
 from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
-    Trajectory,
+    LegacyTrajectory,
     TrajectoryStep,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
 
 
 def test_trajectory_to_rollouts_converts_assistant_message_response():
-    traj = Trajectory(
+    traj = LegacyTrajectory(
         execution_id="e1",
         steps=[
             TrajectoryStep(
@@ -35,7 +35,7 @@ def test_trajectory_to_rollouts_converts_assistant_message_response():
 
 
 def test_trajectory_to_rollouts_keeps_dict_response():
-    traj = Trajectory(
+    traj = LegacyTrajectory(
         execution_id="e2",
         steps=[
             TrajectoryStep(

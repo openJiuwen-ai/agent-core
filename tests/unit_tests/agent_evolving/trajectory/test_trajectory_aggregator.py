@@ -13,7 +13,7 @@ from openjiuwen.agent_evolving.trajectory import (
     FileTrajectoryStore,
     InMemoryTrajectoryStore,
     TeamTrajectoryAggregator,
-    Trajectory,
+    LegacyTrajectory,
     TrajectoryBuilder,
 )
 from openjiuwen.agent_evolving.trajectory.types import (
@@ -29,7 +29,7 @@ def _build_member_trajectory(
     member_id: str,
     session_id: str,
     step_count: int = 2,
-) -> Trajectory:
+) -> LegacyTrajectory:
     builder = TrajectoryBuilder(
         session_id=session_id,
         source="online",
@@ -146,7 +146,7 @@ class TestFilterMemberTrajectory:
                 meta={"operator_id": "researcher/llm_main"},
             ),
         ]
-        traj = Trajectory(
+        traj = LegacyTrajectory(
             execution_id="exec-1",
             session_id="sess-1",
             steps=steps,
@@ -170,7 +170,7 @@ class TestFilterMemberTrajectory:
                 meta={"operator_id": "claim_task"},
             ),
         ]
-        traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
+        traj = LegacyTrajectory(execution_id="e1", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
@@ -186,7 +186,7 @@ class TestFilterMemberTrajectory:
                 meta={"invoke_id": "inv-1", "parent_invoke_id": "parent-1"},
             ),
         ]
-        traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
+        traj = LegacyTrajectory(execution_id="e1", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
@@ -206,7 +206,7 @@ class TestFilterMemberTrajectory:
                 meta={"operator_id": "python"},
             ),
         ]
-        traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
+        traj = LegacyTrajectory(execution_id="e1", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
@@ -221,7 +221,7 @@ class TestFilterMemberTrajectory:
                 meta={"operator_id": "custom_debug_tool"},
             ),
         ]
-        traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
+        traj = LegacyTrajectory(execution_id="e1", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
@@ -241,7 +241,7 @@ class TestFilterMemberTrajectory:
                 meta={"operator_id": "write_file"},
             ),
         ]
-        traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
+        traj = LegacyTrajectory(execution_id="e1", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
@@ -261,7 +261,7 @@ class TestFilterMemberTrajectory:
                 meta={"operator_id": "write_file"},
             ),
         ]
-        traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
+        traj = LegacyTrajectory(execution_id="e1", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
@@ -296,7 +296,7 @@ class TestFilterMemberTrajectory:
                 start_time_ms=300,
             ),
         ]
-        traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
+        traj = LegacyTrajectory(execution_id="e1", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
@@ -306,7 +306,7 @@ class TestFilterMemberTrajectory:
 
     def test_empty_trajectory_returns_empty(self):
         """Empty trajectory returns empty, preserves execution_id."""
-        traj = Trajectory(execution_id="e1", session_id="s1", steps=[])
+        traj = LegacyTrajectory(execution_id="e1", session_id="s1", steps=[])
 
         result = filter_member_trajectory(traj)
 
@@ -322,7 +322,7 @@ class TestFilterMemberTrajectory:
                 meta={"operator_id": "claim_task"},
             ),
         ]
-        traj = Trajectory(execution_id="my-exec-123", session_id="s1", steps=steps)
+        traj = LegacyTrajectory(execution_id="my-exec-123", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
@@ -361,7 +361,7 @@ class TestTeamTrajectoryAggregatorWithStore:
             ),
         ]
         store.save(
-            Trajectory(
+            LegacyTrajectory(
                 execution_id="e1",
                 session_id="s1",
                 steps=steps1,
@@ -378,7 +378,7 @@ class TestTeamTrajectoryAggregatorWithStore:
             ),
         ]
         store.save(
-            Trajectory(
+            LegacyTrajectory(
                 execution_id="e2",
                 session_id="s1",
                 steps=steps2,
@@ -411,7 +411,7 @@ class TestTeamTrajectoryAggregatorWithStore:
             ),
         ]
         store.save(
-            Trajectory(
+            LegacyTrajectory(
                 execution_id="e1",
                 session_id="s1",
                 steps=steps,
@@ -459,7 +459,7 @@ class TestTeamTrajectoryAggregatorWithStore:
         ]
 
         store.save(
-            Trajectory(
+            LegacyTrajectory(
                 execution_id="leader-exec",
                 session_id="s1",
                 steps=leader_steps,
@@ -467,7 +467,7 @@ class TestTeamTrajectoryAggregatorWithStore:
             )
         )
         store.save(
-            Trajectory(
+            LegacyTrajectory(
                 execution_id="member-exec",
                 session_id="s1",
                 steps=member_steps,
@@ -491,7 +491,7 @@ class TestTeamTrajectoryAggregatorWithStore:
         leader_id = "jiuwen_team_sess_123_team_leader"
 
         store.save(
-            Trajectory(
+            LegacyTrajectory(
                 execution_id="leader-round-1",
                 session_id="s1",
                 steps=[
@@ -508,7 +508,7 @@ class TestTeamTrajectoryAggregatorWithStore:
             )
         )
         store.save(
-            Trajectory(
+            LegacyTrajectory(
                 execution_id="leader-round-2",
                 session_id="s1",
                 steps=[
@@ -547,7 +547,7 @@ class TestTeamTrajectoryAggregatorWithStore:
         )
 
         store.save(
-            Trajectory(
+            LegacyTrajectory(
                 execution_id="leader-snapshot-1",
                 session_id="s1",
                 steps=[skill_step],
@@ -555,7 +555,7 @@ class TestTeamTrajectoryAggregatorWithStore:
             )
         )
         store.save(
-            Trajectory(
+            LegacyTrajectory(
                 execution_id="leader-snapshot-2",
                 session_id="s1",
                 steps=[skill_step, view_task_step],
@@ -581,7 +581,7 @@ class TestTeamTrajectoryAggregatorWithStore:
         """Old API: trajectories_dir=Path should still work."""
         with tempfile.TemporaryDirectory() as tmp:
             store = FileTrajectoryStore(Path(tmp))
-            traj = Trajectory(
+            traj = LegacyTrajectory(
                 execution_id="e1",
                 session_id="s1",
                 steps=[TrajectoryStep(kind="tool", detail=ToolCallDetail(tool_name="claim_task"), start_time_ms=100)],
@@ -618,10 +618,9 @@ def test_aggregate_member_trajectories_uses_latest_prefix_snapshot():
 
 
 def test_aggregate_member_trajectories_filters_teammate_internals():
-    teammate = Trajectory(
+    teammate = LegacyTrajectory(
         execution_id="teammate-1",
         session_id="session-1",
-        source="online",
         steps=[
             TrajectoryStep(
                 kind="llm",
@@ -635,6 +634,7 @@ def test_aggregate_member_trajectories_filters_teammate_internals():
                 start_time_ms=2,
             ),
         ],
+        source="online",
         meta={"member_id": "researcher", "member_role": "teammate"},
     )
 

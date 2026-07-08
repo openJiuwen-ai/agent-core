@@ -162,7 +162,7 @@ class MessageSummaryOffloaderConfig(BaseModel):
     offload_message_type: list[Literal["user", "assistant", "tool"]] = Field(default=["tool"])
     """Roles eligible for adaptive summary offloading."""
 
-    protected_tool_names: list[str] = Field(default=["reload_original_context_messages"])
+    protected_tool_names: list[str] = Field(default=["read_file"])
     """Tool messages produced by these tools are always kept in full in both modes."""
 
     model: ModelRequestConfig | None = Field(default=None)

@@ -332,7 +332,7 @@ def test_worktree_isolation_sets_worker_workspace_and_removes_clean_worktree(tmp
             self.created: list[str] = []
             self.removed: list[tuple[str, str]] = []
 
-        async def create_owner_worktree(self, slug):
+        async def create_owner_worktree(self, slug, source_dir=None):
             self.created.append(slug)
             return WorktreeCreateResult(
                 worktree_path=str(worktree_path),
@@ -407,7 +407,7 @@ async def run(args):
         def __init__(self):
             self.removed: list[tuple[str, str]] = []
 
-        async def create_owner_worktree(self, slug):
+        async def create_owner_worktree(self, slug, source_dir=None):
             return WorktreeCreateResult(
                 worktree_path=str(worktree_path),
                 worktree_branch=f"worktree-{slug}",

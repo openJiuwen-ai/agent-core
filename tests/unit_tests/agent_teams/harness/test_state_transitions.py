@@ -12,12 +12,10 @@ from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
 from tests.unit_tests.agent_teams.harness.fixtures import (
     FakeReactAgent,
     answer_outputs,
-    answers,
     drain_outputs,
     make_spec,
     mock_chunks,
     start_harness,
-    wait_invoke_running,
     wait_for_state,
 )
 
@@ -49,28 +47,26 @@ async def test_idle_to_running_to_idle_single_round() -> None:
 
 
 @pytest.mark.asyncio
-async def test_completion_timeout_streams_standard_error_result() -> None:
-    """A round timeout is visible on the output stream as a normal error result."""
+async def test_completion_timeout_only_logs_slow_round(caplog: pytest.LogCaptureFixture) -> None:
+    """NativeHarness completion_timeout logs slow rounds without cancelling them."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_spec(completion_timeout=1.0))
-        fake = await start_harness(harness, sleep_seconds=10.0)
+        caplog.set_level("WARNING")
+        harness = NativeHarness(make_spec(completion_timeout=0.01))
+        fake = await start_harness(harness, sleep_seconds=0.05, answer_output="done")
 
         collected: list = []
         consumer = asyncio.create_task(drain_outputs(harness, collected))
         try:
             await harness.send("slow")
-            await wait_invoke_running(fake)
             assert await wait_for_state(harness, HarnessState.IDLE)
         finally:
             await harness.stop()
             await consumer
 
-        error_answers = [item for item in answers(collected) if item.get("result_type") == "error"]
-        assert len(error_answers) == 1
-        assert error_answers[0]["output"] == "Agent round timed out after 1s."
-        assert fake.cancelled_count == 1
-        assert answer_outputs(collected) == ["Agent round timed out after 1s."]
+        assert fake.cancelled_count == 0
+        assert answer_outputs(collected) == ["done"]
+        assert "slow round" in caplog.text
     finally:
         await Runner.stop()
 

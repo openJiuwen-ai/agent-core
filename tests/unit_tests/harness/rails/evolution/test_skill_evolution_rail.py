@@ -34,7 +34,7 @@ from openjiuwen.agent_evolving.signal import (
     SignalDetector,
     make_evolution_signal,
 )
-from openjiuwen.agent_evolving.trajectory.types import LLMCallDetail, ToolCallDetail, Trajectory, TrajectoryStep
+from openjiuwen.agent_evolving.trajectory.types import LLMCallDetail, ToolCallDetail, LegacyTrajectory, TrajectoryStep
 from openjiuwen.agent_evolving.types import ApplyResult
 from openjiuwen.core.foundation.llm import SystemMessage
 from openjiuwen.core.single_agent.rail.base import (
@@ -187,8 +187,8 @@ def _staged_result(request: Any, skill_name: str = "skill-a") -> OnlineEvolution
     )
 
 
-def _trajectory_with_messages(messages: list[dict]) -> Trajectory:
-    return Trajectory(
+def _trajectory_with_messages(messages: list[dict]) -> LegacyTrajectory:
+    return LegacyTrajectory(
         execution_id="exec-1",
         steps=[TrajectoryStep(kind="llm", detail=LLMCallDetail(model="test-model", messages=messages))],
         source="online",
@@ -200,7 +200,7 @@ def _bind_active_request_evidence(
     messages: list[dict],
     *,
     skill_names: list[str] | None = None,
-) -> Trajectory:
+) -> LegacyTrajectory:
     trajectory = _trajectory_with_messages(messages)
     rail._builder = Mock()
     rail._builder.build.return_value = trajectory
@@ -783,7 +783,7 @@ async def test_prepare_tool_uses_rail_owned_trajectory_evidence(tmp_path):
         ability_manager=ability_manager,
         find_rails_by_type=_find_rails_by_type(),
     )
-    trajectory = Trajectory(
+    trajectory = LegacyTrajectory(
         execution_id="exec-prepare-review",
         steps=[
             TrajectoryStep(
@@ -829,7 +829,7 @@ def test_build_review_scoped_materials_keeps_full_trajectory_index():
         )
         for index in range(25)
     ]
-    trajectory = Trajectory(execution_id="exec-1", session_id="session-1", steps=steps)
+    trajectory = LegacyTrajectory(execution_id="exec-1", session_id="session-1", steps=steps)
 
     materials = build_review_scoped_materials(trajectory)
 
@@ -843,7 +843,7 @@ def test_build_review_scoped_materials_keeps_full_trajectory_index():
 
 def test_build_review_scoped_materials_tool_detail_is_bounded():
     long_result = "x" * 5000
-    trajectory = Trajectory(
+    trajectory = LegacyTrajectory(
         execution_id="exec-tool",
         session_id="session-1",
         steps=[
@@ -879,7 +879,7 @@ def test_build_review_scoped_materials_tool_detail_is_bounded():
 async def test_build_user_evolution_request_defers_scope_creation_to_prepare_tool(tmp_path):
     rail = _make_rail(tmp_path)
     rail._ensure_evolve_review_task_available = Mock()
-    trajectory = Trajectory(
+    trajectory = LegacyTrajectory(
         execution_id="exec-request-review",
         steps=[
             TrajectoryStep(
@@ -1749,7 +1749,7 @@ async def test_stage_evolution_from_signals_passes_trajectory_to_orchestrator(tm
             message="none",
         )
     )
-    trajectory = Trajectory(execution_id="exec-1", session_id="session-1", steps=[])
+    trajectory = LegacyTrajectory(execution_id="exec-1", session_id="session-1", steps=[])
 
     await rail._stage_evolution_from_signals(
         "skill-a",
@@ -2110,7 +2110,7 @@ async def test_run_evolution_uses_normalized_messages_for_signal_detection(tmp_p
     detector.bind_llm.return_value = detector
     detector.detect_trajectory_signals.return_value = []
     detector.detect_user_intent = AsyncMock(return_value=[])
-    trajectory = Trajectory(
+    trajectory = LegacyTrajectory(
         execution_id="exec-message-object",
         steps=[
             TrajectoryStep(
@@ -2227,10 +2227,9 @@ async def test_run_evolution_auto_scan_consumes_script_artifact_rule_signal(tmp_
 @pytest.mark.asyncio
 async def test_run_evolution_auto_scan_ignores_team_collaboration_activity(tmp_path):
     rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
-    trajectory = Trajectory(
+    trajectory = LegacyTrajectory(
         execution_id="team-collab",
         session_id="session-team",
-        source="online",
         steps=[
             TrajectoryStep(
                 kind="llm",
@@ -2261,6 +2260,7 @@ async def test_run_evolution_auto_scan_ignores_team_collaboration_activity(tmp_p
                 ),
             ),
         ],
+        source="online",
         meta={"member_id": "researcher", "team_id": "team-1"},
     )
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])

@@ -21,6 +21,7 @@ from typing import (
 
 from pydantic import BaseModel
 
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.schema.status import (
     EXECUTION_TRANSITIONS,
     MEMBER_TRANSITIONS,
@@ -41,6 +42,7 @@ from openjiuwen.agent_teams.tools.database import (
     detect_cycle_in_adjacency,
 )
 from openjiuwen.agent_teams.tools.member_options import (
+    MemberWorktreeOptions,
     set_member_worktree_options,
 )
 from openjiuwen.agent_teams.tools.models import (
@@ -297,9 +299,6 @@ class InMemoryTeamDatabase:
             team_logger.info("Team %s created", team_name)
             return True
 
-    async def team_exists(self, team_name: str) -> bool:
-        return team_name in self._teams
-
     async def get_team(self, team_name: str) -> Optional[Team]:
         return self._teams.get(team_name)
 
@@ -340,10 +339,16 @@ class InMemoryTeamDatabase:
 
     async def force_delete_team_session(self, team_name: str) -> bool:
         """Force delete a team's records and clear in-memory session data."""
+        from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
+
+        session_id = get_session_id()
+        cleanup_success = True
+        if session_id:
+            cleanup_success = await remove_session_worktrees(team_name, session_id)
         deleted = await self.delete_team(team_name)
         await self.drop_cur_session_tables()
         team_logger.info("Force deleted team session data for {}", team_name)
-        return deleted
+        return deleted and cleanup_success
 
     # =====================================================================
     # Member Operations
@@ -391,6 +396,7 @@ class InMemoryTeamDatabase:
         self,
         member_name: str,
         team_name: str,
+        worktree: MemberWorktreeOptions | None = None,
         *,
         isolation: Optional[str] = None,
         worktree_path: Optional[str] = None,
@@ -402,6 +408,7 @@ class InMemoryTeamDatabase:
                 return False
             member.options = set_member_worktree_options(
                 member.options,
+                worktree,
                 isolation=isolation,
                 worktree_path=worktree_path,
             )

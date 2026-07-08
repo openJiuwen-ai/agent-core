@@ -60,6 +60,7 @@ from openjiuwen.agent_teams.runtime.pool import (
 )
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
+from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
@@ -711,6 +712,8 @@ class TeamRuntimeManager:
         await db.initialize()
         for session_id in session_ids:
             await db.drop_session_tables_by_id(session_id)
+            if not await remove_session_worktrees(team_name, session_id):
+                team_logger.warning("Failed to remove session worktrees for team={} session={}", team_name, session_id)
 
         for session_id in session_ids:
             await checkpointer.release(session_id)
@@ -773,6 +776,9 @@ class TeamRuntimeManager:
         db = get_shared_db(release_info.db_config)
         await db.initialize()
         await db.drop_session_tables_by_id(session_id)
+        for team_name in release_info.team_names:
+            if not await remove_session_worktrees(team_name, session_id):
+                team_logger.warning("Failed to remove session worktrees for team={} session={}", team_name, session_id)
 
     @staticmethod
     async def _resolve_any_team_session_release_info(

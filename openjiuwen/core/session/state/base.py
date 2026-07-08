@@ -6,7 +6,6 @@ from typing import Any, Union, Optional, Callable
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import session_logger, LogEventType
 from openjiuwen.core.session.utils import update_dict, get_by_schema
 
 
@@ -26,7 +25,7 @@ Transformer = Callable[[ReadableStateLike], Any]
 class RecoverableStateLike(ABC):
 
     @abstractmethod
-    def get_state(self) -> dict:
+    def get_state(self, **kwargs) -> dict:
         pass
 
     @abstractmethod
@@ -36,7 +35,7 @@ class RecoverableStateLike(ABC):
 
 class StateLike(ReadableStateLike, RecoverableStateLike):
     @abstractmethod
-    def update(self, data: dict) -> None:
+    def update(self, data: dict, **kwargs) -> None:
         pass
 
     @abstractmethod
@@ -118,10 +117,13 @@ class InMemoryStateLike(StateLike):
     def get_by_transformer(self, transformer: Callable) -> Optional[Any]:
         return transformer(self._state)
 
-    def update(self, data: dict) -> None:
-        update_dict(deepcopy(data), self._state)
+    def update(self, data: dict, **kwargs) -> None:
+        copied = kwargs.get("copied", True)
+        update_dict(deepcopy(data) if copied else data, self._state)
 
-    def get_state(self) -> dict:
+    def get_state(self, **kwargs) -> dict:
+        if kwargs.get("copied", True) is False:
+            return self._state
         return deepcopy(self._state)
 
     def set_state(self, state: dict) -> None:
@@ -148,14 +150,14 @@ class InMemoryCommitState(CommitStateLike):
         if node_id is None:
             for key, updates in self._updates.items():
                 for update in updates:
-                    self._state.update(update)
+                    self._state.update(update, copied=False)
             self._updates.clear()
         else:
             node_updates = self._updates.get(node_id)
             if not node_updates:
                 return
             for update in node_updates:
-                self._state.update(update)
+                self._state.update(update, copied=False)
             self._updates[node_id] = []
 
     def rollback(self, node_id: str) -> None:
@@ -177,8 +179,8 @@ class InMemoryCommitState(CommitStateLike):
         if updates:
             self._updates = updates
 
-    def get_state(self) -> dict:
-        return self._state.get_state()
+    def get_state(self, **kwargs) -> dict:
+        return self._state.get_state(**kwargs)
 
     def set_state(self, state: dict) -> None:
         self._state.set_state(state)

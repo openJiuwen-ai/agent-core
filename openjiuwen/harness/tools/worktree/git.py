@@ -167,6 +167,41 @@ async def rev_parse(ref: str, cwd: str) -> str | None:
     return r.stdout if r.ok else None
 
 
+async def create_empty_initial_commit(cwd: str) -> str:
+    """Create an empty initial commit without touching the index.
+
+    ``git commit --allow-empty`` would also commit any staged user files in an
+    unborn repository. Use plumbing commands instead so worktree initialization
+    does not consume pending user changes.
+
+    Args:
+        cwd: Repository working tree directory.
+
+    Returns:
+        The created commit SHA.
+
+    Raises:
+        GitError: If git cannot create or install the commit.
+    """
+    tree = await _run_git(["mktree"], cwd=cwd, check=True)
+    commit = await _run_git(
+        [
+            "-c",
+            "user.name=OpenJiuwen",
+            "-c",
+            "user.email=openjiuwen@example.invalid",
+            "commit-tree",
+            tree.stdout,
+            "-m",
+            "chore: initialize repository for worktrees",
+        ],
+        cwd=cwd,
+        check=True,
+    )
+    await _run_git(["update-ref", "HEAD", commit.stdout], cwd=cwd, check=True)
+    return commit.stdout
+
+
 async def resolve_git_dir(cwd: str) -> str | None:
     """Get the .git directory path (works for worktrees too).
 
@@ -281,7 +316,7 @@ async def worktree_prune(repo_root: str) -> None:
     await _run_git(["worktree", "prune"], cwd=repo_root)
 
 
-async def branch_delete(branch: str, repo_root: str) -> bool:
+async def branch_delete(branch: str, repo_root: str, *, force: bool = False) -> bool:
     """Delete a local git branch.
 
     Args:
@@ -291,7 +326,8 @@ async def branch_delete(branch: str, repo_root: str) -> bool:
     Returns:
         True if deletion succeeded, False otherwise.
     """
-    r = await _run_git(["branch", "-D", branch], cwd=repo_root)
+    flag = "-D" if force else "-d"
+    r = await _run_git(["branch", flag, branch], cwd=repo_root)
     return r.ok
 
 
@@ -378,6 +414,56 @@ async def count_commits_since(
         return int(r.stdout)
     except ValueError:
         return None
+
+
+async def is_ref_ancestor(
+    ancestor_ref: str,
+    descendant_ref: str,
+    cwd: str,
+) -> bool | None:
+    """Return whether one ref is reachable from another.
+
+    Args:
+        ancestor_ref: Ref or SHA expected to be contained.
+        descendant_ref: Ref or SHA expected to contain ``ancestor_ref``.
+        cwd: Working directory inside the repository.
+
+    Returns:
+        True when ``ancestor_ref`` is an ancestor of ``descendant_ref``;
+        False when both refs are valid but not related that way; None when
+        git could not verify the relationship.
+    """
+    r = await _run_git(
+        ["merge-base", "--is-ancestor", ancestor_ref, descendant_ref],
+        cwd=cwd,
+    )
+    if r.returncode == 0:
+        return True
+    if r.returncode == 1:
+        return False
+    return None
+
+
+async def merge_base(
+    first_ref: str,
+    second_ref: str,
+    cwd: str,
+) -> str | None:
+    """Return the best common ancestor for two refs.
+
+    Args:
+        first_ref: First ref or SHA.
+        second_ref: Second ref or SHA.
+        cwd: Working directory inside the repository.
+
+    Returns:
+        Merge-base SHA, or None when git cannot determine one.
+    """
+    r = await _run_git(
+        ["merge-base", first_ref, second_ref],
+        cwd=cwd,
+    )
+    return r.stdout if r.ok and r.stdout else None
 
 
 async def has_unpushed_commits(cwd: str) -> bool | None:

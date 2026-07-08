@@ -88,6 +88,15 @@ def worktree_path_for(base_dir: str, slug: str) -> str:
     return os.path.join(worktrees_dir(base_dir), _flatten_slug(slug))
 
 
+def direct_worktree_path_for(worktrees_parent: str, slug: str) -> str:
+    """Compute worktree path directly under an explicit worktrees directory.
+
+    This is for callers that already own a dedicated ``worktrees`` directory
+    and do not need the generic ``.worktrees`` child.
+    """
+    return os.path.join(worktrees_parent, _flatten_slug(slug))
+
+
 def worktrees_dir(base_dir: str) -> str:
     """Return the parent directory for all worktrees under ``base_dir``.
 

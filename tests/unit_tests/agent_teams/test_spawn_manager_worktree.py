@@ -1,24 +1,39 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Worktree isolation behavior in SpawnManager."""
+"""Focused tests for session-scoped teammate worktrees."""
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
-from openjiuwen.agent_teams.models.pool import ModelPoolEntry
+from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+from openjiuwen.agent_teams.paths import (
+    configure_openjiuwen_home,
+    project_worktree_hash,
+    reset_openjiuwen_home,
+    team_session_worktrees_dir,
+)
 from openjiuwen.agent_teams.schema.build_context import BuildContext
 from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, TeamAgentSpec
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
 from openjiuwen.agent_teams.tools.member_options import (
+    MemberWorktreeOptions,
     build_member_options,
     get_member_worktree,
     set_member_worktree_options,
+)
+from openjiuwen.agent_teams.worktree.naming import build_teammate_worktree_name
+from openjiuwen.agent_teams.worktree.lifecycle import (
+    MemberWorktreeInfo,
+    TeammateWorktreeLifecycle,
+    WorktreeContributionState,
 )
 from openjiuwen.harness.tools.worktree import WorktreeConfig
 from openjiuwen.harness.tools.worktree.models import WorktreeChangeSummary
@@ -27,32 +42,31 @@ from openjiuwen.harness.tools.worktree.models import WorktreeChangeSummary
 class _FakeMemberDao:
     def __init__(self, member: SimpleNamespace) -> None:
         self.member = member
-        self.updates: list[dict[str, str | None]] = []
 
     async def get_member(self, member_name: str, team_name: str) -> SimpleNamespace | None:
         if self.member.member_name == member_name and self.member.team_name == team_name:
             return self.member
         return None
 
+    async def get_team_members(self, team_name: str) -> list[SimpleNamespace]:
+        return [self.member] if self.member.team_name == team_name else []
+
     async def update_member_worktree(
         self,
         member_name: str,
         team_name: str,
-        *,
-        isolation: str | None = None,
-        worktree_path: str | None = None,
+        worktree: MemberWorktreeOptions | None,
     ) -> bool:
         self.member.options = set_member_worktree_options(
             getattr(self.member, "options", None),
-            isolation=isolation,
-            worktree_path=worktree_path,
+            worktree,
         )
-        self.updates.append(
-            {
-                "isolation": isolation,
-                "worktree_path": worktree_path,
-            }
-        )
+        return True
+
+    async def update_member_status(self, member_name: str, team_name: str, status: str) -> bool:
+        if self.member.member_name != member_name or self.member.team_name != team_name:
+            return False
+        self.member.status = status
         return True
 
 
@@ -69,29 +83,31 @@ class _FakeTeamBackend:
 
 
 class _FakeWorktreeManager:
-    def __init__(self, path: str = "/tmp/worktree") -> None:
-        self.path = path
-        self.create_calls: list[str] = []
-        self.create_contexts: list[dict[str, str | None]] = []
+    def __init__(self) -> None:
+        self.worktrees_dir: str | None = None
+        self.create_calls: list[tuple[str, str | None]] = []
         self.count_changes = AsyncMock(return_value=WorktreeChangeSummary())
         self.remove_worktree = AsyncMock(return_value=True)
 
-    async def create_owner_worktree(self, slug: str) -> SimpleNamespace:
-        from openjiuwen.core.sys_operation.cwd import get_cwd, get_project_root, get_workspace
+    def with_worktrees_dir(self, worktrees_dir: str) -> "_FakeWorktreeManager":
+        self.worktrees_dir = worktrees_dir
+        return self
 
-        self.create_calls.append(slug)
-        self.create_contexts.append(
-            {
-                "cwd": get_cwd(),
-                "project_root": get_project_root(),
-                "workspace": get_workspace(),
-            }
-        )
+    async def create_owner_worktree(self, slug: str, *, source_dir: str | None = None) -> SimpleNamespace:
+        self.create_calls.append((slug, source_dir))
+        assert self.worktrees_dir is not None
         return SimpleNamespace(
-            worktree_path=self.path,
+            worktree_path=os.path.join(self.worktrees_dir, slug),
             worktree_branch=f"worktree-{slug}",
             head_commit="base-sha",
         )
+
+
+@pytest.fixture(autouse=True)
+def _session_scope():
+    token = set_session_id("session-1")
+    yield
+    reset_session_id(token)
 
 
 def _member(**overrides) -> SimpleNamespace:
@@ -99,6 +115,7 @@ def _member(**overrides) -> SimpleNamespace:
         "member_name": "dev-one",
         "team_name": "code-team",
         "role": TeamRole.TEAMMATE.value,
+        "status": MemberStatus.READY.value,
         "desc": "developer",
         "options": None,
     }
@@ -106,32 +123,63 @@ def _member(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**data)
 
 
-def _spawn_manager(
-    member: SimpleNamespace,
-    manager: _FakeWorktreeManager,
+def _project(tmp_path) -> str:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    return str(project_dir)
+
+
+def _expected_scope(project_dir: str) -> tuple[str, str, str]:
+    project_hash = project_worktree_hash(project_dir)
+    root = str(team_session_worktrees_dir("code-team", "session-1"))
+    slug = build_teammate_worktree_name(
+        team_name="code-team",
+        member_name="dev-one",
+        session_id="session-1",
+        project_hash=project_hash,
+    )
+    return project_hash, root, slug
+
+
+def _stored_worktree(
     *,
-    model_pool: list[ModelPoolEntry] | None = None,
-    project_dir: str | None = None,
-) -> SpawnManager:
+    path: str,
+    project_dir: str,
+    session_id: str = "session-1",
+    branch: str | None = None,
+    head_commit: str = "base-sha",
+) -> MemberWorktreeOptions:
+    project_hash = project_worktree_hash(project_dir)
+    return MemberWorktreeOptions(
+        isolation="worktree",
+        path=path,
+        session_id=session_id,
+        project_hash=project_hash,
+        managed_root=str(team_session_worktrees_dir("code-team", session_id)),
+        worktree_branch=branch,
+        head_commit=head_commit,
+    )
+
+
+def _spawn_manager(member: SimpleNamespace, manager: _FakeWorktreeManager, project_dir: str) -> SpawnManager:
     team_spec = TeamSpec(
         team_name=member.team_name,
         display_name=member.team_name,
         leader_member_name="leader",
-        model_pool=model_pool or [],
+        model_pool=[],
     )
-    build_context = BuildContext(project_dir=project_dir) if project_dir else None
-    build_context_seed = {"project_dir": project_dir} if project_dir else None
+    build_context = BuildContext(project_dir=project_dir)
+    build_context.mode = "code.team"
     spec = TeamAgentSpec(
         agents={"leader": DeepAgentSpec()},
         team_name=member.team_name,
         worktree=WorktreeConfig(enabled=True),
         build_context=build_context,
-        build_context_seed=build_context_seed,
+        build_context_seed={"project_dir": project_dir, "mode": "code.team"},
     )
     ctx = TeamRuntimeContext(role=TeamRole.LEADER, member_name="leader", team_spec=team_spec)
-    backend = _FakeTeamBackend(member)
     configurator = SimpleNamespace(
-        team_backend=backend,
+        team_backend=_FakeTeamBackend(member),
         spec=spec,
         ctx=ctx,
         team_spec=team_spec,
@@ -148,210 +196,198 @@ def _spawn_manager(
 
 
 @pytest.mark.asyncio
-async def test_build_context_does_not_create_worktree_without_isolation():
-    member = _member()
-    manager = _FakeWorktreeManager(path="/tmp/code-team-dev-one")
-    spawn_manager = _spawn_manager(member, manager)
+async def test_creates_teammate_worktree_under_session_system_dir(tmp_path):
+    project_dir = _project(tmp_path)
+    project_hash, managed_root, slug = _expected_scope(project_dir)
+    member = _member(options=build_member_options(worktree_isolation="worktree"))
+    manager = _FakeWorktreeManager()
+    spawn_manager = _spawn_manager(member, manager, project_dir)
+
+    ctx = await spawn_manager.build_context_from_db("dev-one")
+
+    assert ctx is not None
+    assert ctx.worktree_path == os.path.join(managed_root, slug)
+    assert manager.create_calls == [(slug, project_dir)]
+    worktree = get_member_worktree(member)
+    assert worktree is not None
+    assert worktree.path == ctx.worktree_path
+    assert worktree.session_id == "session-1"
+    assert worktree.project_hash == project_hash
+    assert worktree.managed_root == managed_root
+
+
+@pytest.mark.asyncio
+async def test_does_not_reuse_foreign_session_worktree(tmp_path):
+    project_dir = _project(tmp_path)
+    _, managed_root, slug = _expected_scope(project_dir)
+    foreign = tmp_path / "foreign-session-worktree"
+    foreign.mkdir()
+    member = _member(
+        options=build_member_options(
+            worktree=_stored_worktree(path=str(foreign), project_dir=project_dir, session_id="old-session")
+        )
+    )
+    manager = _FakeWorktreeManager()
+    spawn_manager = _spawn_manager(member, manager, project_dir)
+
+    ctx = await spawn_manager.build_context_from_db("dev-one")
+
+    assert ctx is not None
+    assert ctx.worktree_path == os.path.join(managed_root, slug)
+    assert manager.create_calls == [(slug, project_dir)]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_requested_member_context_does_not_recreate_worktree(tmp_path):
+    project_dir = _project(tmp_path)
+    member = _member(
+        status=MemberStatus.SHUTDOWN_REQUESTED.value,
+        options=build_member_options(worktree_isolation="worktree"),
+    )
+    manager = _FakeWorktreeManager()
+    spawn_manager = _spawn_manager(member, manager, project_dir)
 
     ctx = await spawn_manager.build_context_from_db("dev-one")
 
     assert ctx is not None
     assert ctx.worktree_path is None
-    assert get_member_worktree(member) is None
     assert manager.create_calls == []
-
-
-@pytest.mark.asyncio
-async def test_build_context_creates_and_persists_explicit_teammate_worktree():
-    member = _member(options=build_member_options(worktree_isolation="worktree"))
-    manager = _FakeWorktreeManager(path="/tmp/code-team-dev-one")
-    spawn_manager = _spawn_manager(member, manager)
-
-    ctx = await spawn_manager.build_context_from_db("dev-one")
-
-    assert ctx is not None
-    assert ctx.worktree_path == "/tmp/code-team-dev-one"
     worktree = get_member_worktree(member)
     assert worktree is not None
-    assert worktree.isolation == "worktree"
-    assert worktree.path == "/tmp/code-team-dev-one"
-    assert len(manager.create_calls) == 1
-    assert manager.create_calls[0].startswith("agent-code-team-dev-one-")
-
-
-@pytest.mark.asyncio
-async def test_build_context_reuses_persisted_worktree_without_recreating(tmp_path):
-    existing = tmp_path / "existing"
-    existing.mkdir()
-    member = _member(
-        options=f'{{"worktree": {{"isolation": "worktree", "path": "{existing}"}}}}',
-    )
-    manager = _FakeWorktreeManager()
-    spawn_manager = _spawn_manager(member, manager)
-
-    ctx = await spawn_manager.build_context_from_db("dev-one")
-
-    assert ctx is not None
-    assert ctx.worktree_path == str(existing)
-    assert manager.create_calls == []
-
-
-@pytest.mark.asyncio
-async def test_build_context_reuses_options_worktree_without_recreating(tmp_path):
-    existing = tmp_path / "options-existing"
-    existing.mkdir()
-    member = _member(
-        options=f'{{"worktree": {{"isolation": "worktree", "path": "{existing}"}}}}',
-    )
-    manager = _FakeWorktreeManager()
-    spawn_manager = _spawn_manager(member, manager)
-
-    ctx = await spawn_manager.build_context_from_db("dev-one")
-
-    assert ctx is not None
-    assert ctx.worktree_path == str(existing)
-    assert manager.create_calls == []
-
-
-@pytest.mark.asyncio
-async def test_build_context_recreates_missing_persisted_worktree(tmp_path):
-    stale_path = tmp_path / "missing-worktree"
-    created_path = tmp_path / "created-worktree"
-    member = _member(
-        options=f'{{"worktree": {{"isolation": "worktree", "path": "{stale_path}"}}}}',
-    )
-    manager = _FakeWorktreeManager(path=str(created_path))
-    spawn_manager = _spawn_manager(member, manager)
-
-    ctx = await spawn_manager.build_context_from_db("dev-one")
-
-    assert ctx is not None
-    assert ctx.worktree_path == str(created_path)
-    assert len(manager.create_calls) == 1
-    assert spawn_manager._configurator.team_backend.db.member.updates == [
-        {"isolation": "worktree", "worktree_path": None},
-        {"isolation": "worktree", "worktree_path": str(created_path)},
-    ]
-
-
-@pytest.mark.asyncio
-async def test_build_context_anchors_worktree_creation_to_project_dir(tmp_path):
-    system_workspace = tmp_path / "system-workspace"
-    project_dir = tmp_path / "project"
-    system_workspace.mkdir()
-    project_dir.mkdir()
-    member = _member(options=build_member_options(worktree_isolation="worktree"))
-    manager = _FakeWorktreeManager(path=str(project_dir / ".worktrees" / "created"))
-    spawn_manager = _spawn_manager(member, manager, project_dir=str(project_dir))
-
-    from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace, init_cwd
-
-    init_cwd(str(system_workspace), project_root=str(system_workspace), workspace=str(system_workspace))
-
-    ctx = await spawn_manager.build_context_from_db("dev-one")
-
-    assert ctx is not None
-    assert manager.create_contexts == [
-        {
-            "cwd": str(project_dir),
-            "project_root": str(project_dir),
-            "workspace": str(project_dir),
-        }
-    ]
-    assert get_cwd() == str(system_workspace)
-    assert get_workspace() == str(system_workspace)
-
-
-@pytest.mark.asyncio
-async def test_build_context_resolves_model_ref_from_options(tmp_path):
-    existing = tmp_path / "options-existing"
-    existing.mkdir()
-    member = _member(
-        options=build_member_options(
-            model_ref={"model_name": "gpt-4", "model_index": 1},
-            worktree_isolation="worktree",
-            worktree_path=str(existing),
-        ),
-    )
-    manager = _FakeWorktreeManager()
-    spawn_manager = _spawn_manager(
-        member,
-        manager,
-        model_pool=[
-            ModelPoolEntry(
-                model_name="gpt-4",
-                api_key="key-0",
-                api_base_url="https://one.example",
-                api_provider="openai",
-            ),
-            ModelPoolEntry(
-                model_name="gpt-4",
-                api_key="key-1",
-                api_base_url="https://two.example",
-                api_provider="openai",
-            ),
-        ],
-    )
-
-    ctx = await spawn_manager.build_context_from_db("dev-one")
-
-    assert ctx is not None
-    assert ctx.member_model is not None
-    assert ctx.member_model.model_request_config is not None
-    assert ctx.member_model.model_request_config.model_name == "gpt-4"
-    assert ctx.member_model.model_client_config.api_key == "key-1"
-    assert manager.create_calls == []
-
-
-@pytest.mark.asyncio
-async def test_finalize_removes_clean_worktree_and_clears_metadata(tmp_path, monkeypatch):
-    worktree_path = tmp_path / "worktree"
-    worktree_path.mkdir()
-    member = _member(options=build_member_options(worktree_isolation="worktree"))
-    manager = _FakeWorktreeManager(path=str(worktree_path))
-    spawn_manager = _spawn_manager(member, manager)
-    await spawn_manager.build_context_from_db("dev-one")
-
-    from openjiuwen.harness.tools.worktree import git as worktree_git
-
-    monkeypatch.setattr(
-        worktree_git,
-        "find_canonical_git_root",
-        AsyncMock(return_value=str(tmp_path)),
-    )
-
-    await spawn_manager.worktree_lifecycle.finalize_member_worktree("dev-one")
-
-    manager.count_changes.assert_awaited_once()
-    manager.remove_worktree.assert_awaited_once()
-    worktree = get_member_worktree(member)
-    assert worktree is not None
-    assert worktree.isolation == "worktree"
     assert worktree.path is None
 
 
 @pytest.mark.asyncio
-async def test_finalize_keeps_worktree_when_host_metadata_is_missing(tmp_path, monkeypatch):
-    worktree_path = tmp_path / "worktree"
+async def test_unhealthy_shutdown_requested_member_is_not_restarted(tmp_path):
+    project_dir = _project(tmp_path)
+    member = _member(status=MemberStatus.SHUTDOWN_REQUESTED.value)
+    manager = _FakeWorktreeManager()
+    spawn_manager = _spawn_manager(member, manager, project_dir)
+    spawn_manager.cleanup_teammate = AsyncMock()
+    spawn_manager.restart_teammate = AsyncMock()
+
+    await spawn_manager.on_teammate_unhealthy("dev-one")
+
+    spawn_manager.cleanup_teammate.assert_awaited_once_with("dev-one")
+    spawn_manager.restart_teammate.assert_not_awaited()
+    assert member.status == MemberStatus.SHUTDOWN_REQUESTED.value
+
+
+@pytest.mark.asyncio
+async def test_active_cleanup_removes_clean_non_contributing_worktree(tmp_path, monkeypatch):
+    project_dir = _project(tmp_path)
+    _, managed_root, slug = _expected_scope(project_dir)
+    worktree_path = tmp_path / "review-worktree"
     worktree_path.mkdir()
+    branch = f"worktree-{slug}"
     member = _member(
-        options=f'{{"worktree": {{"isolation": "worktree", "path": "{worktree_path}"}}}}'
+        options=build_member_options(
+            worktree=_stored_worktree(path=str(worktree_path), project_dir=project_dir, branch=branch)
+        )
     )
     manager = _FakeWorktreeManager()
-    spawn_manager = _spawn_manager(member, manager)
+    spawn_manager = _spawn_manager(member, manager, project_dir)
 
     from openjiuwen.harness.tools.worktree import git as worktree_git
 
+    monkeypatch.setattr(worktree_git, "find_canonical_git_root", AsyncMock(return_value=project_dir))
     monkeypatch.setattr(
         worktree_git,
-        "find_canonical_git_root",
-        AsyncMock(return_value=str(tmp_path)),
+        "rev_parse",
+        AsyncMock(side_effect=lambda ref, cwd: "base-sha" if ref in {branch, "base-sha"} else None),
     )
 
-    await spawn_manager.worktree_lifecycle.finalize_member_worktree("dev-one")
+    await spawn_manager.worktree_lifecycle.finalize_non_contributing_member_worktrees()
 
-    manager.count_changes.assert_not_awaited()
-    manager.remove_worktree.assert_not_awaited()
+    manager.remove_worktree.assert_awaited_once_with(str(worktree_path), project_dir, force=False)
     worktree = get_member_worktree(member)
     assert worktree is not None
-    assert worktree.path == str(worktree_path)
+    assert worktree.path is None
+    assert managed_root.endswith("/worktrees")
+
+
+@pytest.mark.asyncio
+async def test_active_cleanup_keeps_contributing_worktree_until_team_clean(tmp_path, monkeypatch):
+    project_dir = _project(tmp_path)
+    _, _, slug = _expected_scope(project_dir)
+    worktree_path = tmp_path / "writer-worktree"
+    worktree_path.mkdir()
+    branch = f"worktree-{slug}"
+    member = _member(
+        options=build_member_options(
+            worktree=_stored_worktree(path=str(worktree_path), project_dir=project_dir, branch=branch)
+        )
+    )
+    manager = _FakeWorktreeManager()
+    spawn_manager = _spawn_manager(member, manager, project_dir)
+
+    from openjiuwen.harness.tools.worktree import git as worktree_git
+
+    monkeypatch.setattr(worktree_git, "find_canonical_git_root", AsyncMock(return_value=project_dir))
+    monkeypatch.setattr(
+        worktree_git,
+        "rev_parse",
+        AsyncMock(side_effect=lambda ref, cwd: {"base-sha": "base-sha", branch: "feature-sha"}.get(ref)),
+    )
+    monkeypatch.setattr(worktree_git, "is_ref_ancestor", AsyncMock(return_value=True))
+
+    await spawn_manager.worktree_lifecycle.finalize_non_contributing_member_worktrees()
+
+    manager.remove_worktree.assert_not_awaited()
+    assert get_member_worktree(member).path == str(worktree_path)
+
+    await spawn_manager.worktree_lifecycle.finalize_all_member_worktrees_for_team_clean()
+
+    manager.remove_worktree.assert_awaited_once_with(str(worktree_path), project_dir, force=True)
+    assert get_member_worktree(member).path is None
+
+
+@pytest.mark.asyncio
+async def test_team_clean_removes_orphaned_session_worktree(tmp_path, monkeypatch):
+    openjiuwen_home = tmp_path / "openjiuwen-home"
+    configure_openjiuwen_home(openjiuwen_home)
+    try:
+        project_dir = _project(tmp_path)
+        orphaned_root = team_session_worktrees_dir("code-team", "old-session")
+        orphaned_worktree = orphaned_root / "agent-code-team-dev-old"
+        orphaned_worktree.mkdir(parents=True)
+
+        member = _member(options=build_member_options(worktree_isolation="worktree"))
+        manager = _FakeWorktreeManager()
+        spawn_manager = _spawn_manager(member, manager, project_dir)
+
+        from openjiuwen.harness.tools.worktree import git as worktree_git
+
+        monkeypatch.setattr(worktree_git, "find_canonical_git_root", AsyncMock(return_value=project_dir))
+
+        await spawn_manager.worktree_lifecycle.finalize_all_member_worktrees_for_team_clean()
+
+        manager.remove_worktree.assert_awaited_once_with(str(orphaned_worktree), project_dir, force=True)
+    finally:
+        reset_openjiuwen_home()
+
+
+@pytest.mark.asyncio
+async def test_contribution_detection_uses_actual_worktree_head_when_branch_changes(monkeypatch):
+    from openjiuwen.harness.tools.worktree import git as worktree_git
+
+    info = MemberWorktreeInfo(
+        worktree_path="/tmp/member-worktree",
+        worktree_name="agent-code-team-dev-one",
+        worktree_branch="worktree-agent-code-team-dev-one",
+        head_commit="base-sha",
+    )
+
+    async def fake_rev_parse(ref: str, cwd: str) -> str | None:
+        if cwd == "/tmp/member-worktree" and ref == "HEAD":
+            return "feature-sha"
+        if cwd == "/repo" and ref in {"base-sha", "worktree-agent-code-team-dev-one"}:
+            return "base-sha"
+        return None
+
+    monkeypatch.setattr(worktree_git, "rev_parse", fake_rev_parse)
+    monkeypatch.setattr(worktree_git, "is_ref_ancestor", AsyncMock(return_value=True))
+
+    state = await TeammateWorktreeLifecycle._classify_worktree_contribution(info, "/repo")
+
+    assert state is WorktreeContributionState.CONTRIBUTED

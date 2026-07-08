@@ -37,6 +37,10 @@ def create_tool_call_list(ids: List[str], names: List[str] = None) -> List[ToolC
             for tc_id, tc_name in zip(ids, names)]
 
 
+def create_tool_call(tool_call_id: str, name: str, arguments: str = "") -> ToolCall:
+    return ToolCall(id=tool_call_id, name=name, type="function", arguments=arguments)
+
+
 async def create_context_with_compressor(
     compressor_config: CurrentRoundCompressorConfig,
     history_messages=None,
@@ -378,4 +382,67 @@ class TestCurrentRoundCompressor:
         assert updated_messages[3].tool_call_id == "tc-1"
         assert modified_indices == [1, 2]
         assert compact_summary == "[CURRENT_ROUND_MEMORY_BLOCK]\ncompressed"
+
+    @pytest.mark.asyncio
+    async def test_multi_compress_reinjects_only_team_calls_from_selected_span(self):
+        with patch(
+            "openjiuwen.core.context_engine.processor.compressor.current_round_compressor.Model",
+            MagicMock(return_value=MagicMock()),
+        ):
+            compressor = CurrentRoundCompressor(
+                CurrentRoundCompressorConfig(
+                    tokens_threshold=100,
+                    min_selected_tokens_for_compression=1,
+                    summary_merge_min_blocks=3,
+                )
+            )
+
+        context_messages = [
+            UserMessage(content="question"),
+            AssistantMessage(
+                content="",
+                tool_calls=[
+                    create_tool_call(
+                        "tc-view",
+                        "view_task",
+                        '{"action": "get", "task_id": "T-7"}',
+                    )
+                ],
+            ),
+            ToolMessage(content="Task #T-7: write docs\nStatus: claimed", tool_call_id="tc-view"),
+            AssistantMessage(content="I inspected it."),
+            AssistantMessage(
+                content="",
+                tool_calls=[
+                    create_tool_call(
+                        "tc-outside",
+                        "send_message",
+                        '{"to": "reviewer", "content": "outside selected span"}',
+                    )
+                ],
+            ),
+            ToolMessage(content="Message sent from lead to reviewer", tool_call_id="tc-outside"),
+        ]
+        compressed_message = UserMessage(content="[CURRENT_ROUND_MEMORY_BLOCK]\ncompressed")
+
+        compressor.compress = AsyncMock(return_value=compressed_message)
+
+        updated_messages, modified_indices, compact_summary = await compressor.multi_compress(
+            context_messages=context_messages,
+            last_user_idx=0,
+            end_idx=2,
+            context=MagicMock(),
+        )
+
+        assert updated_messages is not None
+        assert modified_indices == [1, 2]
+        assert compact_summary.startswith("[CURRENT_ROUND_MEMORY_BLOCK]\ncompressed")
+        assert len(updated_messages) == 6
+        reinjected = updated_messages[2]
+        assert isinstance(reinjected, UserMessage)
+        assert reinjected.content.startswith("[STATE_REINJECTION]\n[TEAM_STATE]")
+        assert "Task-board observations and updates recovered from compressed dialogue:" in reinjected.content
+        assert "查看任务 #T-7 详情 [view_task]" in reinjected.content
+        assert "Task #T-7: write docs Status: claimed" in reinjected.content
+        assert "outside selected span" not in reinjected.content
 

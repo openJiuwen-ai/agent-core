@@ -24,6 +24,11 @@ class MemberWorktreeOptions(BaseModel):
 
     isolation: str | None = None
     path: str | None = None
+    session_id: str | None = None
+    project_hash: str | None = None
+    managed_root: str | None = None
+    worktree_branch: str | None = None
+    head_commit: str | None = None
 
 
 class TeamMemberOptions(BaseModel):
@@ -104,6 +109,7 @@ def merge_legacy_member_options(
 def build_member_options(
     *,
     model_ref: Mapping[str, Any] | None = None,
+    worktree: MemberWorktreeOptions | None = None,
     worktree_isolation: str | None = None,
     worktree_path: str | None = None,
     permissions_override: dict[str, str] | None = None,
@@ -111,7 +117,9 @@ def build_member_options(
     """Build a TeamMember.options JSON string for new writes."""
     parsed = TeamMemberOptions()
     parsed.model_ref = _model_ref_from_mapping(model_ref)
-    if worktree_isolation or worktree_path:
+    if worktree is not None:
+        parsed.worktree = worktree
+    elif worktree_isolation or worktree_path:
         parsed.worktree = MemberWorktreeOptions(
             isolation=worktree_isolation,
             path=worktree_path,
@@ -123,13 +131,16 @@ def build_member_options(
 
 def set_member_worktree_options(
     raw_options: str | None,
+    worktree: MemberWorktreeOptions | None = None,
     *,
-    isolation: str | None,
-    worktree_path: str | None,
+    isolation: str | None = None,
+    worktree_path: str | None = None,
 ) -> str | None:
     """Replace the worktree section inside a TeamMember.options JSON string."""
     parsed = load_member_options(raw_options)
-    if isolation or worktree_path:
+    if worktree is not None:
+        parsed.worktree = worktree
+    elif isolation or worktree_path:
         parsed.worktree = MemberWorktreeOptions(isolation=isolation, path=worktree_path)
     else:
         parsed.worktree = None

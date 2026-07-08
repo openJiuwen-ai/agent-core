@@ -403,7 +403,17 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
         )
         return logging.Formatter(log_format, datefmt="%Y-%m-%d %H:%M:%S")
 
+    _LOG_LEVEL_TO_STD: Dict[LogLevel, int] = {
+        LogLevel.DEBUG: logging.DEBUG,
+        LogLevel.INFO: logging.INFO,
+        LogLevel.WARNING: logging.WARNING,
+        LogLevel.ERROR: logging.ERROR,
+        LogLevel.CRITICAL: logging.CRITICAL,
+    }
+
     def _emit(self, level: str, log_level: LogLevel, msg: str, *args: Any, **kwargs: Any) -> None:
+        if not self._logger.isEnabledFor(self._LOG_LEVEL_TO_STD.get(log_level, logging.INFO)):
+            return
         event_type = kwargs.pop("event_type", None)
         event = kwargs.pop("event", None)
         stacklevel = kwargs.pop("stacklevel", 3)

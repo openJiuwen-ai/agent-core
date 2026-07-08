@@ -837,7 +837,6 @@ class ReActAgent(BaseAgent):
         call_first_token_time = None
         call_last_token_time = None
         call_chunk_count = 0
-
         try:
             async for chunk in llm.stream(
                     model=self._config.model_name,
@@ -854,6 +853,16 @@ class ReActAgent(BaseAgent):
                     call_first_token_time = time.monotonic()
                 call_last_token_time = time.monotonic()
                 call_chunk_count += 1
+
+                inspectors = ctx.extra.get("_stream_chunk_inspectors") or []
+                if isinstance(inspectors, dict):
+                    inspectors = inspectors.values()
+                for inspector in list(inspectors):
+                    if not callable(inspector):
+                        continue
+                    inspect_result = inspector(ctx, chunk)
+                    if asyncio.iscoroutine(inspect_result):
+                        await inspect_result
 
                 if chunk.reasoning_content:
                     await session.write_stream(OutputSchema(
@@ -1601,14 +1610,6 @@ class ReActAgent(BaseAgent):
             context = await self.context_engine.create_context(
                 session=session
             )
-        context_reloader = context.reloader_tool()
-        if self._config.context_engine_config.enable_reload:
-            self.ability_manager.add(context_reloader.card)
-            from openjiuwen.core.runner import Runner
-            if not Runner.resource_mgr.get_tool(context_reloader.card.id, tag=self.card.id):
-                Runner.resource_mgr.add_tool(context_reloader, tag=self.card.id)
-        else:
-            self.ability_manager.remove(context_reloader.card.name)
         return context
 
     async def invoke(

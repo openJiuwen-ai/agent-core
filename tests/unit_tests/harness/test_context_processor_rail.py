@@ -10,6 +10,7 @@ import pytest
 from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
     DialogueCompressorConfig,
 )
+from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.llm import (
     SystemMessage,
     AssistantMessage,
@@ -56,12 +57,12 @@ def _make_sys_operation(tmp_path: Path):
     return Runner.resource_mgr.get_sys_operation(card.id)
 
 
-def _make_agent(sys_operation, workspace):
+def _make_agent(sys_operation, workspace, *, enable_reload: bool = False):
     model = init_model(
         provider="OpenAI", model_name="dummy-model", api_key="dummy-key",
         api_base="https://example.com/v1", verify_ssl=False,
     )
-    return create_deep_agent(
+    agent = create_deep_agent(
         model=model,
         card=AgentCard(name="test", description="test"),
         system_prompt="You are a test assistant.",
@@ -69,7 +70,9 @@ def _make_agent(sys_operation, workspace):
         enable_task_loop=False,
         workspace=workspace,
         sys_operation=sys_operation,
+        context_engine_config=ContextEngineConfig(enable_reload=enable_reload),
     )
+    return agent
 
 
 def _make_model_call_context(agent):
@@ -151,7 +154,7 @@ async def test_init_preset_defaults(tmp_path: Path):
     """Preset processors should have correct default config values."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
+    agent = _make_agent(sys_operation, workspace, enable_reload=True)
     rail = ContextProcessorRail(preset=True)
     await agent.register_rail(rail)
     await agent.ensure_initialized()
@@ -165,9 +168,9 @@ async def test_init_preset_defaults(tmp_path: Path):
     assert "tokens_threshold" not in type(off).model_fields
     assert "messages_to_keep" not in type(off).model_fields
     assert "keep_last_round" not in type(off).model_fields
-    assert off.large_message_threshold == 10000
+    assert off.large_message_threshold == 15000
     assert off.offload_message_type == ["tool"]
-    assert off.protected_tool_names == ["read_file:*SKILL.md", "reload_original_context_messages"]
+    assert off.protected_tool_names == ["read_file"]
     assert off.summary_max_tokens == 900
 
     # DialogueCompressor tests
@@ -288,7 +291,7 @@ async def test_fix_incomplete_tool_context_null_context(tmp_path: Path):
     """fix_incomplete_tool_context should not crash when context is None."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
+    agent = _make_agent(sys_operation, workspace, enable_reload=True)
     await agent.ensure_initialized()
 
     ctx = AgentCallbackContext(
@@ -306,7 +309,7 @@ async def test_before_invoke_and_on_exception_call_fix_context(tmp_path: Path):
     """before_invoke and on_model_exception should call fix_incomplete_tool_context."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
+    agent = _make_agent(sys_operation, workspace, enable_reload=True)
     await agent.ensure_initialized()
 
     tool_call = ToolCall(id="tc", type="function", name="t", arguments="{}")
@@ -1026,7 +1029,7 @@ async def test_offload_section_injected_when_preset_enabled(tmp_path: Path):
     """offload section should be injected when preset=True."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
+    agent = _make_agent(sys_operation, workspace, enable_reload=True)
 
     rail = ContextProcessorRail(preset=True)
     await agent.register_rail(rail)
@@ -1062,11 +1065,31 @@ async def test_offload_section_not_injected_when_no_processors(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_offload_section_not_injected_when_reload_disabled(tmp_path: Path):
+    """offload section should be removed when enable_reload=False."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace, enable_reload=False)
+
+    rail = ContextProcessorRail(preset=True)
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    mock_builder = _MockSystemPromptBuilder(language="cn")
+    rail._system_prompt_builder = mock_builder
+
+    await rail._maybe_inject_offload_section()
+
+    assert not mock_builder.has_section("offload")
+    assert "offload" in mock_builder.removed_sections
+
+
+@pytest.mark.asyncio
 async def test_offload_section_injected_when_user_processors_exist(tmp_path: Path):
     """offload section should be injected when user processors are configured."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
+    agent = _make_agent(sys_operation, workspace, enable_reload=True)
 
     rail = ContextProcessorRail(
         preset=False,
@@ -1088,7 +1111,7 @@ async def test_offload_section_uses_correct_language_cn(tmp_path: Path):
     """offload section should use Chinese hint when language is cn."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
+    agent = _make_agent(sys_operation, workspace, enable_reload=True)
 
     rail = ContextProcessorRail(preset=True)
     await agent.register_rail(rail)
@@ -1102,7 +1125,8 @@ async def test_offload_section_uses_correct_language_cn(tmp_path: Path):
     assert mock_builder.has_section("offload")
     offload_section = next(s for s in mock_builder.added_sections if s.name == "offload")
     assert "cn" in offload_section.content
-    assert "上下文压缩" in offload_section.content["cn"]
+    assert "OFFLOAD" in offload_section.content["cn"]
+    assert "read_file" in offload_section.content["cn"]
 
 
 @pytest.mark.asyncio
@@ -1110,7 +1134,7 @@ async def test_offload_section_uses_correct_language_en(tmp_path: Path):
     """offload section should use English hint when language is en."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
+    agent = _make_agent(sys_operation, workspace, enable_reload=True)
 
     rail = ContextProcessorRail(preset=True)
     await agent.register_rail(rail)
@@ -1132,7 +1156,7 @@ async def test_offload_section_not_injected_when_builder_is_none(tmp_path: Path)
     """offload section should not be injected when system_prompt_builder is None."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
+    agent = _make_agent(sys_operation, workspace, enable_reload=True)
 
     rail = ContextProcessorRail(preset=True)
     await agent.register_rail(rail)
@@ -1148,7 +1172,7 @@ async def test_offload_section_priority(tmp_path: Path):
     """offload section should have priority of 90."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
+    agent = _make_agent(sys_operation, workspace, enable_reload=True)
 
     rail = ContextProcessorRail(preset=True)
     await agent.register_rail(rail)
@@ -1169,7 +1193,7 @@ async def test_uninit_removes_offload_section(tmp_path: Path):
     """uninit should remove offload section from system_prompt_builder."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
+    agent = _make_agent(sys_operation, workspace, enable_reload=True)
 
     rail = ContextProcessorRail(preset=True)
     await agent.register_rail(rail)
@@ -1192,7 +1216,7 @@ async def test_before_model_call_injects_offload_section(tmp_path: Path):
     """before_model_call should call _maybe_inject_offload_section."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
+    agent = _make_agent(sys_operation, workspace, enable_reload=True)
 
     rail = ContextProcessorRail(preset=True)
     await agent.register_rail(rail)
