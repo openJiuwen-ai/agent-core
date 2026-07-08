@@ -214,6 +214,22 @@ ID 精确性要求（极其重要）：
 - 任务 ID 是 UUID 格式，必须从 todo_create 返回值或 todo_list 结果中原样复制
 - 禁止凭记忆推测或修改 ID 中的任何字符，即使只错一个字符也会导致操作失败
 - 如果不确定任务 ID，请先调用 todo_list 获取准确的 ID 列表
+
+UUID 错误自修复规则（必须遵守）：
+当 todo_modify 的返回消息中出现以下任一情况时，说明你提供的 task ID 有误：
+- update/cancel/delete 操作返回 "... item(s) failed: Task with ID 'xxx' not found in current todo list"
+- update 操作返回 "Updated 0 task(s)"（所有 ID 均未命中）
+- delete 操作返回 "No tasks deleted: None of the provided IDs ... were found"
+- cancel 操作返回 "No tasks cancelled: None of the provided IDs ... were found"
+- insert_after/insert_before 操作返回 Target task ... not found 错误
+
+遇到上述情况时，你必须：
+1. 立即调用 todo_list 获取当前所有任务的正确 ID 列表
+2. 根据任务内容（content 字段）匹配找到正确的 ID
+3. 用正确的 ID 重新调用 todo_modify 完成状态更新
+4. 严禁忽略 ID 错误直接跳过——任务状态未正确更新会导致任务永远卡在 in_progress，影响整体进度
+
+典型错误模式：LLM 在流式生成 UUID 时容易将个别字符替换（如 `5aa3fa64` 生成为 `5aa3fe64`，仅 `a→e`的差别），此类错误必须通过上述流程自修复，不得放弃。
 """
 
 TODO_MODIFY_DESCRIPTION_EN = """
@@ -286,6 +302,22 @@ ID Accuracy Requirement (Critical):
 - Task IDs are UUID format and MUST be copied exactly from todo_create results or todo_list output
 - Do NOT guess or modify any character in the ID — even a single wrong character will cause the operation to fail
 - If unsure about task IDs, call todo_list first to get the accurate ID list
+
+UUID Error Self-Correction Rule (Mandatory):
+When todo_modify's return message shows any of the following conditions, it means the task ID you provided is incorrect:
+- update/cancel/delete returns "... item(s) failed: Task with ID 'xxx' not found in current todo list"
+- update returns "Updated 0 task(s)" (all IDs missed)
+- delete returns "No tasks deleted: None of the provided IDs ... were found"
+- cancel returns "No tasks cancelled: None of the provided IDs ... were found"
+- insert_after/insert_before returns Target task ... not found error
+
+When encountering any of the above, you MUST:
+1. Immediately call todo_list to get the correct ID list for all current tasks
+2. Match the correct ID by task content (content) description
+3. Retry todo_modify with the correct ID to complete the status update
+4. NEVER ignore the ID error and skip ahead — failure to correctly update task status will leave the task stuck in in_progress forever, blocking overall progress
+
+Typical error pattern: LLMs often substitute individual characters during streaming UUID generation (e.g., `5aa3fa64` becomes `5aa3fe64`, just `a→e` one character difference). Such errors MUST be self-corrected through the above process — do NOT give up.
 """
 
 TODO_MODIFY_DESCRIPTION: Dict[str, str] = {
