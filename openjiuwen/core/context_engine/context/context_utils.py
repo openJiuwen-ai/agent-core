@@ -103,6 +103,27 @@ class ContextUtils:
     """
 
     @staticmethod
+    def _get_positive_int_by_model_name(mapping: Optional[Dict[str, int]], model_name: str) -> Optional[int]:
+        if not mapping:
+            return None
+
+        value = mapping.get(model_name)
+        if isinstance(value, int) and value > 0:
+            return value
+
+        normalized_model_name = model_name.lower()
+        for candidate_model_name, candidate_value in mapping.items():
+            if (
+                isinstance(candidate_model_name, str)
+                and candidate_model_name.lower() == normalized_model_name
+                and isinstance(candidate_value, int)
+                and candidate_value > 0
+            ):
+                return candidate_value
+
+        return None
+
+    @staticmethod
     def _parse_openrouter_model(model: Any) -> Optional[tuple[str, int]]:
         if not isinstance(model, dict):
             return None
@@ -262,15 +283,19 @@ class ContextUtils:
             return fallback_context_window_tokens
 
         if isinstance(model_name, str) and model_name:
-            if model_context_window_tokens:
-                value = model_context_window_tokens.get(model_name)
-                if isinstance(value, int) and value > 0:
-                    return value
-            builtin = MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS.get(model_name)
-            if isinstance(builtin, int) and builtin > 0:
+            value = ContextUtils._get_positive_int_by_model_name(model_context_window_tokens, model_name)
+            if value is not None:
+                return value
+
+            builtin = ContextUtils._get_positive_int_by_model_name(MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS, model_name)
+            if builtin is not None:
                 return builtin
-            openrouter = _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS.get(model_name)
-            if isinstance(openrouter, int) and openrouter > 0:
+
+            openrouter = ContextUtils._get_positive_int_by_model_name(
+                _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS,
+                model_name,
+            )
+            if openrouter is not None:
                 return openrouter
 
         return DEFAULT_CONTEXT_MAX_TOKENS
