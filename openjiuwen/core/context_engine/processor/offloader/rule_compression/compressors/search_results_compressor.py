@@ -4,7 +4,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from openjiuwen.core.context_engine.processor.offloader.rule_compression.common import meets_savings_ratio
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.common import (
+    meets_savings_ratio,
+    strip_display_line_prefixes
+)
 from openjiuwen.core.context_engine.processor.offloader.rule_compression.types import (
     ContentType,
     RuleCompressionResult,
@@ -59,7 +62,8 @@ class SearchResultsCompressor:
         grouped: dict[str, list[SearchMatch]] = {}
         order: list[str] = []
         unparsed_lines: list[str] = []
-        for position, line in enumerate(content.splitlines()):
+        normalized_content = strip_display_line_prefixes(content)
+        for position, line in enumerate(normalized_content.splitlines()):
             match = parse_search_match(line, position)
             if not match:
                 if line.strip():
@@ -195,18 +199,19 @@ class SearchResultsCompressor:
 
 
 def parse_search_match(line: str, position: int = 0) -> SearchMatch | None:
-    drive_prefix_end = 2 if re.match(r"^[A-Za-z]:[\\/]", line) else 0
-    for marker in re.finditer(r"([:-])(\d+)([:-])", line[drive_prefix_end:]):
+    normalized_line = strip_display_line_prefixes(line)
+    drive_prefix_end = 2 if re.match(r"^[A-Za-z]:[\\/]", normalized_line) else 0
+    for marker in re.finditer(r"([:-])(\d+)([:-])", normalized_line[drive_prefix_end:]):
         start = drive_prefix_end + marker.start()
         end = drive_prefix_end + marker.end()
-        file_path = line[:start]
+        file_path = normalized_line[:start]
         if not file_path:
             continue
         return SearchMatch(
             file_path=file_path,
             line_number=int(marker.group(2)),
-            content=line[end:],
-            original=line,
+            content=normalized_line[end:],
+            original=normalized_line,
             position=position,
         )
     return None

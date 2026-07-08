@@ -6,6 +6,10 @@ from typing import Protocol
 
 from json_repair import loads as repair_json_loads
 
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.common import (
+    strip_display_line_prefixes,
+    strip_display_line_prefixes_preserving_body_whitespace,
+)
 from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.diff_compressor import DiffCompressor
 from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.html_compressor import HtmlCompressor
 from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.json_array_compressor import (
@@ -35,6 +39,26 @@ class RuleCompressor(Protocol):
 class RuleContentRouter:
     """Detect content type and dispatch to one focused deterministic compressor."""
 
+    _SOURCE_EXTENSIONS = frozenset(
+        {
+            ".c",
+            ".cc",
+            ".cpp",
+            ".cxx",
+            ".go",
+            ".h",
+            ".hpp",
+            ".java",
+            ".js",
+            ".jsx",
+            ".mjs",
+            ".py",
+            ".pyi",
+            ".rs",
+            ".ts",
+            ".tsx",
+        }
+    )
     _HTML_STRUCTURAL_TAG_RE = re.compile(
         r"</?(?:html|head|body|article|main|section|div|script|style|nav|footer|aside|"
         r"table|thead|tbody|tr|th|td|ul|ol|li|p|pre|code|strong|span|h[1-6])\b",
@@ -42,10 +66,14 @@ class RuleContentRouter:
     )
     _SEARCH_LINE_RE = re.compile(r"^.+?:\d+[:\-].+$")
     _TIMESTAMP_LOG_LINE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\b")
-    _BUILD_OUTPUT_RE = re.compile(
+    _LOG_RE = re.compile(
         r"(?im)("
         r"^=+ (?:test session starts|failures|errors|short test summary info) =+$|"
         r"^collected \d+ items\b|"
+        r"^Planning next action for user request:|"
+        r"^Tool call requested:|"
+        r"^Tool call completed:|"
+        r"^Tool result received:|"
         r"^(?:FAILED|ERROR) .+::.+(?: - |$)|"
         r"^\d+\s+(?:failed|passed|skipped|errors?|warnings?)\b|"
         r"\b\d+\s+failed,\s+\d+\s+passed\b|"
@@ -70,9 +98,6 @@ class RuleContentRouter:
         r"protected|#include)\b",
         re.MULTILINE,
     )
-    _NUMBERED_LINE_PREFIX_RE = re.compile(
-        r"(?m)^\s*\d+(?:\t|\s+(?=(?:[\[{\]}],?|\"|</?|[A-Za-z_.#-][^\s]*\s*[:{])))"
-    )
     _NUMBERED_SOURCE_LINE_RE = re.compile(
         r"(?m)^\s*\d+\t\s*(?:@|async\s+def|def|class|import|from|try:|if |elif |"
         r"else:|for |while |with |return\b|[A-Za-z_]\w*\s*=)"
@@ -84,15 +109,17 @@ class RuleContentRouter:
             ContentType.GIT_DIFF: DiffCompressor(),
             ContentType.HTML: HtmlCompressor(),
             ContentType.SEARCH_RESULTS: SearchResultsCompressor(),
-            ContentType.BUILD_OUTPUT: LogCompressor(),
+            ContentType.LOG: LogCompressor(),
             ContentType.SOURCE_CODE: SourceCodeCompressor(),
             ContentType.PLAIN_TEXT: PlainTextCompressor(),
         }
 
-    def detect(self, content: str) -> ContentType:
+    def detect(self, content: str, ctx: RuleContext | None = None) -> ContentType:
         text = (content or "").strip()
         if not text:
             return ContentType.PLAIN_TEXT
+        display_text = strip_display_line_prefixes(text)
+        source_text = self._source_detection_text(text)
         json_text = self._json_detection_text(text)
         try:
             parsed = json.loads(json_text)
@@ -100,6 +127,8 @@ class RuleContentRouter:
             parsed = self._repair_json_array(json_text)
         if isinstance(parsed, list):
             return ContentType.JSON_ARRAY
+        if self._has_source_path_hint(ctx) and self._looks_like_source(source_text):
+            return ContentType.SOURCE_CODE
         html_detection_text = self._html_detection_text(text)
         lowered = html_detection_text[:20000].lower()
         if (
@@ -110,14 +139,13 @@ class RuleContentRouter:
             or len(self._HTML_STRUCTURAL_TAG_RE.findall(lowered)) >= 2
         ):
             return ContentType.HTML
-        source_text = self._source_detection_text(text)
-        if source_text != text and self._CODE_RE.search(source_text):
-            return ContentType.SOURCE_CODE
-        if self._BUILD_OUTPUT_RE.search(text):
-            return ContentType.BUILD_OUTPUT
-        if "diff --git " in text or re.search(r"(?m)^@@ .+ @@", text):
+        if self._LOG_RE.search(display_text):
+            return ContentType.LOG
+        if re.search(r"(?m)^diff --git ", display_text) or re.search(r"(?m)^@@ .+ @@", display_text):
             return ContentType.GIT_DIFF
-        lines = [line for line in text.splitlines() if line.strip()]
+        if source_text != text and self._looks_like_source(source_text):
+            return ContentType.SOURCE_CODE
+        lines = [line for line in display_text.splitlines() if line.strip()]
         if lines:
             matches = sum(
                 1
@@ -126,21 +154,29 @@ class RuleContentRouter:
             )
             if matches / len(lines) >= 0.3:
                 return ContentType.SEARCH_RESULTS
-        if self._CODE_RE.search(source_text):
+        if self._looks_like_source(source_text):
             return ContentType.SOURCE_CODE
         return ContentType.PLAIN_TEXT
 
     def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult:
-        content_type = self.detect(content)
-        routed_content = (
-            self._strip_numbered_line_prefixes(content)
-            if content_type in {ContentType.HTML, ContentType.JSON_ARRAY}
-            else content
-        )
+        content_type = self.detect(content, ctx)
+        if content_type == ContentType.GIT_DIFF:
+            routed_content = strip_display_line_prefixes_preserving_body_whitespace(content)
+        else:
+            routed_content = (
+                strip_display_line_prefixes(content)
+                if content_type in {
+                    ContentType.HTML,
+                    ContentType.JSON_ARRAY,
+                    ContentType.SEARCH_RESULTS,
+                    ContentType.LOG,
+                }
+                else content
+            )
         return self._compressors[content_type].compress(routed_content, ctx)
 
     def _json_detection_text(self, content: str) -> str:
-        stripped = self._strip_numbered_line_prefixes(content)
+        stripped = strip_display_line_prefixes(content)
         return stripped if stripped != content else content
 
     def _repair_json_array(self, content: str) -> object | None:
@@ -152,7 +188,7 @@ class RuleContentRouter:
             return None
 
     def _html_detection_text(self, content: str) -> str:
-        stripped = self._strip_numbered_line_prefixes(content)
+        stripped = strip_display_line_prefixes(content)
         return stripped if stripped != content else content
 
     def _source_detection_text(self, content: str) -> str:
@@ -162,10 +198,18 @@ class RuleContentRouter:
     def _strip_numbered_source_lines(self, content: str) -> str:
         if len(self._NUMBERED_SOURCE_LINE_RE.findall(content)) < 2:
             return content
-        return self._strip_numbered_line_prefixes(content)
+        return strip_display_line_prefixes(content)
 
-    def _strip_numbered_line_prefixes(self, content: str) -> str:
-        return self._NUMBERED_LINE_PREFIX_RE.sub("", content)
+    def _has_source_path_hint(self, ctx: RuleContext | None) -> bool:
+        if ctx is None:
+            return False
+        if ctx.tool_name and ctx.tool_name != "read_file":
+            return False
+        path = (ctx.source_path or "").lower()
+        return any(path.endswith(extension) for extension in self._SOURCE_EXTENSIONS)
+
+    def _looks_like_source(self, content: str) -> bool:
+        return bool(self._CODE_RE.search(content) or len(self._NUMBERED_SOURCE_LINE_RE.findall(content)) >= 2)
 
 
 ContentRouter = RuleContentRouter

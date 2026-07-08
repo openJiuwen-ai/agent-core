@@ -315,3 +315,36 @@ def test_html_compressor_preserves_pytest_html_report_tables_when_trafilatura_is
     assert "## Summary" in result.content
     assert "7 tests took 00:00:08." in result.content
     assert "| Failed | tests/test_bad.py::test_bad | 00:00:02 |" in result.content
+
+
+def test_html_compressor_prunes_passed_pytest_report_rows(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "trafilatura",
+        SimpleNamespace(extract=lambda html, **kwargs: "Report generated."),
+    )
+    passed_rows = "\n".join(
+        f"<tr><td>Passed</td><td>tests/test_many.py::test_case_{index}</td><td>ok</td></tr>"
+        for index in range(80)
+    )
+    html = f"""
+    <!doctype html>
+    <html>
+      <head><title>pytest-html report</title></head>
+      <body>
+        <h1>pytest-html report</h1>
+        <table id="results-table">
+          <tr><th>Result</th><th>Test</th><th>Message</th></tr>
+          {passed_rows}
+          <tr><td>Failed</td><td>tests/test_bad.py::test_bad</td><td>AssertionError: boom</td></tr>
+        </table>
+      </body>
+    </html>
+    """
+
+    result = HtmlCompressor().compress(html, _context())
+
+    assert result.modified is True
+    assert result.details["report_rows_removed"] == 80
+    assert "tests/test_bad.py::test_bad" in result.content
+    assert "tests/test_many.py::test_case_1" not in result.content

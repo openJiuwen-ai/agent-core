@@ -17,6 +17,26 @@ _PATH_ARGUMENT_KEYS = frozenset(
         "paths",
     }
 )
+_NON_USER_INPUT_ARGUMENT_KEYS = frozenset(
+    {
+        "trusted_dirs",
+        "preferred_response_language",
+        "files_updated_by_user",
+        "timezone",
+        "timestamp",
+        "encoding",
+        "offset",
+        "limit",
+        "start",
+        "end",
+        "channel",
+        "channels",
+        "frontend",
+        "session_id",
+        "context_id",
+        "request_id",
+    }
+)
 
 
 def extract_query_terms(
@@ -36,6 +56,9 @@ def extract_query_terms(
 
 def _add_terms(terms: set[str], value: str) -> None:
     for match in _TERM_RE.finditer(value):
+        start = match.start()
+        if start > 0 and value[start - 1] in "\\/":
+            continue
         terms.add(match.group(0).lower())
 
 
@@ -49,6 +72,8 @@ def _add_terms_from_value(terms: set[str], value: Any) -> None:
         for key, item in value.items():
             _add_terms_from_value(terms, key)
             if isinstance(key, str) and key.lower() in _PATH_ARGUMENT_KEYS:
+                continue
+            if isinstance(key, str) and key.lower() in _NON_USER_INPUT_ARGUMENT_KEYS:
                 continue
             _add_terms_from_value(terms, item)
         return

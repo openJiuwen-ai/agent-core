@@ -192,6 +192,12 @@ class HtmlCompressor:
             "metadata": extracted.metadata,
         }
         if not candidate or len(_plain_text(candidate)) < ctx.html_min_content_chars:
+            if _looks_like_report_html(content):
+                return self._compress_with_beautifulsoup_fallback(
+                    content,
+                    ctx,
+                    extractor_label="beautifulsoup:report",
+                )
             return RuleCompressionResult(
                 content=content,
                 content_type=ContentType.HTML,
@@ -230,6 +236,7 @@ class HtmlCompressor:
         title = _extract_title(soup)
         is_report = extractor_label.endswith(":report")
         removed_node_count = _remove_report_noise(soup) if is_report else _remove_noise(soup)
+        report_rows_removed = _prune_report_result_rows(soup) if is_report else 0
         if is_report:
             body = soup.find("body")
             main = body if isinstance(body, Tag) else None
@@ -251,6 +258,7 @@ class HtmlCompressor:
             "extractor": extractor_label,
             "main_content_source": source,
             "removed_node_count": removed_node_count,
+            "report_rows_removed": report_rows_removed,
             "duplicate_block_count": duplicate_count,
             "link_count": len(main.find_all("a")),
             "table_count": len(main.find_all("table")),
@@ -365,6 +373,38 @@ def _remove_report_noise(soup: BeautifulSoup) -> int:
         node.decompose()
         removed += 1
     return removed
+
+
+_REPORT_ROW_KEEP_RE = re.compile(
+    r"\b(fail(?:ed|ure)?|error|broken|skipped|xfailed|xpassed|rerun|unexpected|assertionerror|traceback)\b",
+    re.IGNORECASE,
+)
+_REPORT_ROW_DROP_RE = re.compile(r"\b(pass(?:ed)?|ok)\b", re.IGNORECASE)
+
+
+def _prune_report_result_rows(soup: BeautifulSoup) -> int:
+    rows = [row for row in soup.find_all("tr") if isinstance(row, Tag)]
+    data_rows = [
+        row
+        for row in rows
+        if row.find_all("td", recursive=False)
+    ]
+    if not any(_REPORT_ROW_KEEP_RE.search(row.get_text(" ", strip=True)) for row in data_rows):
+        return 0
+
+    removed = 0
+    for row in data_rows:
+        text = _normalize_text(row.get_text(" ", strip=True))
+        if _REPORT_ROW_KEEP_RE.search(text):
+            continue
+        if _REPORT_ROW_DROP_RE.search(text) or _looks_like_test_result_row(text):
+            row.decompose()
+            removed += 1
+    return removed
+
+
+def _looks_like_test_result_row(text: str) -> bool:
+    return "::test" in text or text.startswith("tests/")
 
 
 def _find_main_content(soup: BeautifulSoup, min_chars: int) -> tuple[Tag | None, str]:

@@ -196,6 +196,17 @@ def _compress_numbered_source(
     )
 
 
+def _term_matches_function(term: str, function_text: str) -> bool:
+    """Return True when term appears as a whole word in the function body.
+
+    Substring matching (``term in text``) over-protects: ``type`` matched
+    ``# type: ignore`` and ``isinstance(x, type)`` everywhere. Whole-word
+    matching via ``\\b`` boundaries keeps relevance signals while avoiding
+    incidental hits.
+    """
+    return bool(re.search(r"\b" + re.escape(term) + r"\b", function_text.lower()))
+
+
 def _collect_replacements(
     node: Any,
     content: bytes,
@@ -213,7 +224,7 @@ def _collect_replacements(
         stats["bodies_seen"] += 1
         function_text = content[_start(node):_end(node)].decode("utf-8", errors="replace")
         query_terms = {term.lower() for term in ctx.query_terms if term}
-        if any(term in function_text.lower() for term in query_terms):
+        if any(_term_matches_function(term, function_text) for term in query_terms):
             stats["query_protected_bodies"] += 1
             return
         body_lines = _position_row(_end_position(body)) - _position_row(_start_position(body)) + 1
@@ -311,8 +322,13 @@ def _detect_language(content: str) -> str | None:
 
 
 def _count_syntax_errors(node: Any) -> int:
-    count = int(bool(node.is_error())) + int(bool(node.is_missing()))
-    return count + sum(_count_syntax_errors(child) for child in _named_children(node))
+    count = 0
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        count += int(bool(current.is_error())) + int(bool(current.is_missing()))
+        stack.extend(_named_children(current))
+    return count
 
 
 def _has_syntax_error(node: Any) -> bool:
