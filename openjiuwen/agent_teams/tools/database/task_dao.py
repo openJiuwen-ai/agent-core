@@ -266,6 +266,11 @@ async def _check_cycle_and_compute_new_edges(
         _MutationFailure: when applying ``add_edges`` would introduce a
             cycle.
     """
+    # No new edges cannot introduce a new cycle — the existing graph is
+    # kept acyclic by this very check on every prior edge insertion.
+    if not add_edges:
+        return set()
+
     task_dependency_model = _get_task_dependency_model()
     existing_edges_rows = (
         await session.execute(
