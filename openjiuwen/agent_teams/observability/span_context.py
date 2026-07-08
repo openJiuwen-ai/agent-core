@@ -10,9 +10,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, cast
 
-from opentelemetry import context as otel_context
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
-from opentelemetry.trace import Span, set_span_in_context
+from opentelemetry.trace import Span
 
 from openjiuwen.core.common.logging import team_logger
 
@@ -108,6 +107,7 @@ class ActiveSpanTracker(SpanProcessor):
                 if exclude_team_span and hasattr(span, 'name') and span.name.startswith("team."):
                     continue
 
+                _stamp_cancelled_if_empty(span)
                 span.set_status(Status(StatusCode.OK))
                 span.end()
                 closed_count += 1
@@ -144,6 +144,7 @@ class ActiveSpanTracker(SpanProcessor):
                     if exclude_team_span and hasattr(span, 'name') and span.name.startswith("team."):
                         continue
 
+                    _stamp_cancelled_if_empty(span)
                     span.set_status(Status(StatusCode.OK))
                     span.end()
                     closed_count += 1
@@ -413,21 +414,27 @@ def pop_any_tool_span() -> Span | None:
 def finalize_trace(team_name: str) -> None:
     """Finalize all spans for a team trace.
 
-    Order matters: close the team span first (clearing the ContextVar),
-    then flush all remaining child spans.  This ensures that
-    flush_child_spans falls back to the flush_all_spans path
-    (because _team_span_ctx is now None), which catches any spans
-    that were started after the first flush — a common race in
-    pause / resume cycles where coordination events fire
-    asynchronously.
+    Captures the trace_id *before* closing the team span and passes it
+    explicitly to ``flush_child_spans``.  This prevents the flush from
+    falling through to ``flush_all_spans`` (which would steal spans
+    belonging to other still-running teams) when ``_team_span_ctx`` is
+    cleared by the close above.
 
     Called from Runner's finally block to ensure all spans are
     properly closed.
     """
     from opentelemetry.trace import Status, StatusCode
 
-    # Step 1: Close the team span first (clears ContextVar)
+    # Capture trace_id BEFORE closing the team span — once the span ends,
+    # _team_span_ctx is None and flush_child_spans cannot discover which
+    # trace to target.
     team_span = _team_span_ctx.get()
+    trace_id_for_flush: int | None = None
+    if team_span is not None:
+        if hasattr(team_span, 'context') and team_span.context:
+            trace_id_for_flush = team_span.context.trace_id
+
+    # Step 1: Close the team span (clears ContextVar for the next team).
     if team_span is not None and team_span.is_recording():
         team_logger.info(
             "otel: finalize_trace - closing team span team={} name={} "
@@ -451,8 +458,8 @@ def finalize_trace(team_name: str) -> None:
             team_name,
         )
 
-    # Step 2: Flush all remaining child spans.
-    flush_child_spans()
+    # Step 2: Flush remaining child spans for THIS trace only.
+    flush_child_spans(trace_id=trace_id_for_flush)
 
     team_logger.info("otel: finalize_trace completed for team={}", team_name)
 
@@ -465,22 +472,44 @@ def reset_all() -> None:
     _tool_span_map.set({})
 
 
-def flush_child_spans() -> None:
-    """Flush all pending child spans for current trace."""
+def flush_child_spans(*, trace_id: int | None = None) -> None:
+    """Flush pending child spans for a specific trace.
+
+    When *trace_id* is provided explicitly (the normal path from
+    ``finalize_trace``), only that trace's spans are closed — other
+    teams' spans are never touched.
+
+    When *trace_id* is ``None``, the call site must be operating while
+    ``_team_span_ctx`` is still valid (e.g. ``cascade_close_children``
+    during an agent-span close).  In that case the trace_id is
+    discovered from the current team span.
+
+    The previous ``flush_all_spans`` fallback (when ``_team_span_ctx``
+    was ``None``) has been **removed** — it caused one team's finalize
+    to steal spans belonging to other still-running teams.
+    """
     tracker = get_active_span_tracker()
     if tracker is None:
         return
 
     try:
-        team_span = _team_span_ctx.get()
-        if team_span is not None and hasattr(team_span, 'context') and team_span.context:
-            trace_id = team_span.context.trace_id
-            closed = tracker.flush_spans_for_trace(trace_id, exclude_team_span=True)
+        effective_trace_id: int | None = trace_id
+        if effective_trace_id is None:
+            team_span = _team_span_ctx.get()
+            if team_span is not None and hasattr(team_span, 'context') and team_span.context:
+                effective_trace_id = team_span.context.trace_id
+
+        if effective_trace_id is not None:
+            closed = tracker.flush_spans_for_trace(effective_trace_id, exclude_team_span=True)
             if closed > 0:
-                team_logger.info("flush_child_spans: closed {} spans for trace {:032x}", closed, trace_id)
+                team_logger.info(
+                    "flush_child_spans: closed {} spans for trace {:032x}",
+                    closed, effective_trace_id,
+                )
         else:
-            closed = tracker.flush_all_spans(exclude_team_span=True)
-            if closed > 0:
-                team_logger.info("flush_child_spans: closed {} spans via flush_all_spans", closed)
+            team_logger.warning(
+                "flush_child_spans: cannot determine trace_id — no team span in "
+                "ContextVar and no explicit trace_id provided; skipping flush"
+            )
     except Exception as exc:
         team_logger.warning("flush_child_spans: ActiveSpanTracker failed: {}", exc)
