@@ -26,6 +26,7 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
+from openjiuwen.agent_teams.schema.task import TaskGraphSpec
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.core.single_agent import AgentCard
 
@@ -118,36 +119,6 @@ class TestTeamTaskManager:
         assert task2.task_id in dep_ids
 
 
-class TestAddAsTopPriority:
-    """Test add_as_top_priority functionality"""
-
-    @pytest.mark.asyncio
-    @pytest.mark.level0
-    async def test_add_as_top_priority_blocks_all_pending(self, task_manager):
-        """Test that top:priority task blocks all pending tasks"""
-        # Create existing pending tasks
-        task1 = await task_manager.add(title="Task 1", content="Content 1")
-        task2 = await task_manager.add(title="Task 2", content="Content 2")
-        task3 = await task_manager.add(title="Task 3", content="Content 3")
-
-        # Add top priority task
-        top_task = await task_manager.add_as_top_priority(
-            title="Top Priority Task",
-            content="Urgent content"
-        )
-
-        assert top_task is not None
-        assert top_task.status == TaskStatus.PENDING.value
-
-        # Verify all existing tasks are now blocked
-        task1_updated = await task_manager.get(task1.task_id)
-        task2_updated = await task_manager.get(task2.task_id)
-        task3_updated = await task_manager.get(task3.task_id)
-        assert task1_updated.status == TaskStatus.BLOCKED.value
-        assert task2_updated.status == TaskStatus.BLOCKED.value
-        assert task3_updated.status == TaskStatus.BLOCKED.value
-
-
 class TestAddFailureReasons:
     """Verify that failed creates surface a reason instead of a bare None."""
 
@@ -172,31 +143,22 @@ class TestAddFailureReasons:
 
     @pytest.mark.asyncio
     @pytest.mark.level0
-    async def test_add_with_priority_circular_dep_returns_reason(self, task_manager):
+    async def test_add_graph_circular_dep_returns_reason(self, task_manager):
         """Circular dependency rejection should surface a clear reason."""
         task_a = await task_manager.add(title="A", content="ca", task_id="a")
         assert task_a.ok
 
         # Create B depending on A — fine.
-        task_b = await task_manager.add_with_priority(
-            title="B",
-            content="cb",
-            task_id="b",
-            dependencies=["a"],
-        )
+        task_b = await task_manager.add(title="B", content="cb", task_id="b", dependencies=["a"])
         assert task_b.ok
 
         # Now try to insert C such that A depends on C and C depends on B,
         # which would form A → C → B → A. The DB should reject it.
-        result = await task_manager.add_with_priority(
-            title="C",
-            content="cc",
-            task_id="c",
-            dependencies=["b"],
-            dependent_task_ids=["a"],
+        result = await task_manager.add_graph(
+            [TaskGraphSpec(title="C", content="cc", task_id="c", depends_on=("b",), depended_by=("a",))]
         )
         assert not result.ok
-        assert "c" in result.reason
+        assert result.reason
 
 
 class TestClaimConflict:
@@ -380,123 +342,105 @@ class TestTaskCompletionWithDependencyResolution:
             reset_session_id(token)
 
 
-class TestAddWithPriority:
-    """Test add_with_priority functionality"""
+# ---- add_graph: atomic batch graph creation --------------------------------
 
-    @pytest.mark.asyncio
-    @pytest.mark.level0
-    async def test_add_with_priority_basic(self, task_manager):
-        """Test adding a task with priority (basic case, no dependencies)"""
-        task = await task_manager.add_with_priority(
-            title="Priority Task",
-            content="Priority content"
-        )
 
-        assert task is not None
-        assert task.title == "Priority Task"
-        assert task.status == TaskStatus.PENDING.value
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_add_graph_forward_reference_within_batch(task_manager):
+    """depends_on may reference tasks created later in the same batch."""
+    result = await task_manager.add_graph(
+        [
+            TaskGraphSpec(title="Final", content="c", task_id="final", depends_on=("a1", "a2")),
+            TaskGraphSpec(title="A1", content="c", task_id="a1"),
+            TaskGraphSpec(title="A2", content="c", task_id="a2"),
+        ]
+    )
+    assert result.ok, result.reason
+    assert [t.task_id for t in result.tasks] == ["final", "a1", "a2"]
 
-    @pytest.mark.asyncio
-    @pytest.mark.level0
-    async def test_add_with_priority_dependencies(self, task_manager):
-        """Test adding a task that depends on existing tasks"""
-        # Create existing tasks
-        task1 = await task_manager.add(title="Task 1", content="Content 1")
-        task2 = await task_manager.add(title="Task 2", content="Content 2")
+    statuses = {t.task_id: t.status for t in result.tasks}
+    assert statuses["final"] == TaskStatus.BLOCKED.value
+    assert statuses["a1"] == TaskStatus.PENDING.value
+    assert statuses["a2"] == TaskStatus.PENDING.value
 
-        # Add task that depends on both
-        new_task = await task_manager.add_with_priority(
-            title="Dependent Task",
-            content="Depends on task1 and task2",
-            dependencies=[task1.task_id, task2.task_id]
-        )
+    deps = await task_manager.get_dependencies("final")
+    assert sorted(d.depends_on_task_id for d in deps) == ["a1", "a2"]
 
-        assert new_task is not None
-        assert new_task.status == TaskStatus.BLOCKED.value
 
-        # Verify dependencies
-        deps = await task_manager.get_dependencies(new_task.task_id)
-        dep_ids = [d.depends_on_task_id for d in deps]
-        assert task1.task_id in dep_ids
-        assert task2.task_id in dep_ids
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_add_graph_depended_by_wires_existing_tasks(task_manager):
+    """depended_by inserts a new prerequisite before existing tasks."""
+    task_a = await task_manager.add(title="A", content="c", task_id="a")
+    task_c = await task_manager.add(title="C", content="c", task_id="c")
+    assert task_a.ok and task_c.ok
 
-    @pytest.mark.asyncio
-    @pytest.mark.level0
-    async def test_add_with_priority_dependent_tasks(self, task_manager):
-        """Test adding a task that existing tasks depend on (high priority)"""
-        # Create existing pending tasks
-        task1 = await task_manager.add(title="Task 1", content="Content 1")
-        task2 = await task_manager.add(title="Task 2", content="Content 2")
+    # Insert B between them: B depends on A, C now depends on B.
+    result = await task_manager.add_graph(
+        [TaskGraphSpec(title="B", content="c", task_id="b", depends_on=("a",), depended_by=("c",))]
+    )
+    assert result.ok, result.reason
+    assert result.tasks[0].status == TaskStatus.BLOCKED.value
 
-        # Add high priority task that task1 and task2 depend on
-        priority_task = await task_manager.add_with_priority(
-            title="High Priority Task",
-            content="Critical task",
-            dependent_task_ids=[task1.task_id, task2.task_id]
-        )
+    c_updated = await task_manager.get("c")
+    assert c_updated.status == TaskStatus.BLOCKED.value
+    deps_c = await task_manager.get_dependencies("c")
+    assert "b" in [d.depends_on_task_id for d in deps_c]
 
-        assert priority_task is not None
-        assert priority_task.status == TaskStatus.PENDING.value
 
-        # Verify existing tasks are now BLOCKED
-        task1_updated = await task_manager.get(task1.task_id)
-        task2_updated = await task_manager.get(task2.task_id)
-        assert task1_updated.status == TaskStatus.BLOCKED.value
-        assert task2_updated.status == TaskStatus.BLOCKED.value
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_add_graph_atomic_rollback_on_bad_reference(task_manager):
+    """One bad edge target rolls back the whole batch with the real reason."""
+    result = await task_manager.add_graph(
+        [
+            TaskGraphSpec(title="Good", content="c", task_id="good"),
+            TaskGraphSpec(title="Bad", content="c", task_id="bad", depends_on=("ghost",)),
+        ]
+    )
+    assert not result.ok
+    assert "ghost" in result.reason
+    assert await task_manager.get("good") is None
 
-        # Verify task1 and task2 now depend on priority_task
-        deps1 = await task_manager.get_dependencies(task1.task_id)
-        deps2 = await task_manager.get_dependencies(task2.task_id)
-        assert priority_task.task_id in [d.depends_on_task_id for d in deps1]
-        assert priority_task.task_id in [d.depends_on_task_id for d in deps2]
 
-    @pytest.mark.asyncio
-    @pytest.mark.level0
-    async def test_add_with_priority_bidirectional(self, task_manager):
-        """Test adding a task between other tasks (both dependencies and dependent tasks)"""
-        # Create task A (will be completed)
-        task_a = await task_manager.add(title="Task A", content="Content A")
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_add_graph_existing_id_collision_returns_reason(task_manager):
+    """Colliding with a task already on the board reports the id."""
+    first = await task_manager.add(title="First", content="c", task_id="dup")
+    assert first.ok
 
-        # Create task C (initially pending)
-        task_c = await task_manager.add(title="Task C", content="Content C")
+    result = await task_manager.add_graph([TaskGraphSpec(title="Second", content="c", task_id="dup")])
+    assert not result.ok
+    assert "dup" in result.reason
+    assert "already exists" in result.reason
 
-        # Insert task B between them: B depends on A, C depends on B
-        task_b = await task_manager.add_with_priority(
-            title="Task B",
-            content="Inserted task",
-            dependencies=[task_a.task_id],
-            dependent_task_ids=[task_c.task_id]
-        )
 
-        assert task_b is not None
-        assert task_b.status == TaskStatus.BLOCKED.value  # Depends on task_a
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_add_graph_auto_generates_missing_task_ids(task_manager):
+    """Specs without task_id get generated ids and land normally."""
+    result = await task_manager.add_graph(
+        [
+            TaskGraphSpec(title="Auto 1", content="c"),
+            TaskGraphSpec(title="Auto 2", content="c"),
+        ]
+    )
+    assert result.ok, result.reason
+    ids = [t.task_id for t in result.tasks]
+    assert len(ids) == 2 and len(set(ids)) == 2
+    for task_id in ids:
+        assert await task_manager.get(task_id) is not None
 
-        # Verify task B depends on task A
-        deps_b = await task_manager.get_dependencies(task_b.task_id)
-        assert task_a.task_id in [d.depends_on_task_id for d in deps_b]
 
-        # Verify task C depends on task B
-        deps_c = await task_manager.get_dependencies(task_c.task_id)
-        assert task_b.task_id in [d.depends_on_task_id for d in deps_c]
-
-    @pytest.mark.asyncio
-    @pytest.mark.level0
-    async def test_add_with_priority_custom_task_id(self, task_manager):
-        """Test adding a task with custom task ID"""
-        custom_id = "custom-task-123"
-        task = await task_manager.add_with_priority(
-            title="Custom ID Task",
-            content="Content",
-            task_id=custom_id
-        )
-
-        assert task is not None
-        assert task.task_id == custom_id
-
-        # Verify we can retrieve it with the custom ID
-        retrieved = await task_manager.get(custom_id)
-        assert retrieved is not None
-        assert retrieved.task_id == custom_id
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_add_graph_empty_specs(task_manager):
+    """An empty batch is a no-op success."""
+    result = await task_manager.add_graph([])
+    assert result.ok
+    assert result.tasks == []
 
 
 class TestCancel:
@@ -713,99 +657,40 @@ class TestUpdateTask:
         assert updated_task.content == "Content"
 
 
-class TestAddBatch:
-    """Test add_batch functionality"""
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_add_graph_batch_mixed_new_and_existing_deps(task_manager):
+    """A batch may mix in-batch depends_on and edges to existing tasks."""
+    existing = await task_manager.add(title="Existing", content="c", task_id="existing")
+    assert existing.ok
 
-    @pytest.mark.asyncio
-    @pytest.mark.level1
-    async def test_add_batch_success(self, task_manager):
-        """Test adding multiple tasks in batch successfully"""
-        tasks = [
-            {"title": "Task 1", "content": "Content 1"},
-            {"title": "Task 2", "content": "Content 2"},
-            {"title": "Task 3", "content": "Content 3"}
+    result = await task_manager.add_graph(
+        [
+            TaskGraphSpec(title="T1", content="c", task_id="t1", depends_on=("existing",)),
+            TaskGraphSpec(title="T2", content="c", task_id="t2", depends_on=("t1",)),
+            TaskGraphSpec(title="T3", content="c", task_id="t3"),
         ]
+    )
+    assert result.ok, result.reason
+    statuses = {t.task_id: t.status for t in result.tasks}
+    assert statuses["t1"] == TaskStatus.BLOCKED.value
+    assert statuses["t2"] == TaskStatus.BLOCKED.value
+    assert statuses["t3"] == TaskStatus.PENDING.value
 
-        created_tasks = await task_manager.add_batch(tasks)
 
-        assert len(created_tasks) == 3
-        assert created_tasks[0].title == "Task 1"
-        assert created_tasks[1].title == "Task 2"
-        assert created_tasks[2].title == "Task 3"
-
-    @pytest.mark.asyncio
-    @pytest.mark.level1
-    async def test_add_batch_with_dependencies(self, task_manager):
-        """Test adding multiple tasks in batch with dependencies"""
-        # Create a dependency task first
-        dep_task = await task_manager.add(title="Dependency Task", content="Dep content")
-
-        tasks = [
-            {"title": "Task 1", "content": "Content 1"},
-            {"title": "Task 2", "content": "Content 2", "dependencies": [dep_task.task_id]},
-            {"title": "Task 3", "content": "Content 3"}
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_add_graph_duplicate_ids_within_batch(task_manager):
+    """Duplicate task_ids inside one batch fail atomically with a reason."""
+    result = await task_manager.add_graph(
+        [
+            TaskGraphSpec(title="First", content="c", task_id="same"),
+            TaskGraphSpec(title="Second", content="c", task_id="same"),
         ]
-
-        created_tasks = await task_manager.add_batch(tasks)
-
-        assert len(created_tasks) == 3
-        # Task 2 should be blocked due to dependency
-        assert created_tasks[1].status == "blocked"
-        # Task 1 and 3 should be pending
-        assert created_tasks[0].status == "pending"
-        assert created_tasks[2].status == "pending"
-
-    @pytest.mark.asyncio
-    @pytest.mark.level1
-    async def test_add_batch_with_custom_task_ids(self, task_manager):
-        """Test adding tasks with custom task IDs"""
-        tasks = [
-            {"title": "Task 1", "content": "Content 1", "task_id": "custom-task-1"},
-            {"title": "Task 2", "content": "Content 2", "task_id": "custom-task-2"}
-        ]
-
-        created_tasks = await task_manager.add_batch(tasks)
-
-        assert len(created_tasks) == 2
-        assert created_tasks[0].task_id == "custom-task-1"
-        assert created_tasks[1].task_id == "custom-task-2"
-
-    @pytest.mark.asyncio
-    @pytest.mark.level1
-    async def test_add_batch_with_invalid_tasks(self, task_manager):
-        """Test adding batch with some invalid tasks (missing required fields)"""
-        tasks = [
-            {"title": "Valid Task", "content": "Valid content"},
-            {"title": "Missing content"},  # invalid - no content
-            {"content": "Missing title"},  # invalid - no title
-            {"title": "Another Valid Task", "content": "Valid content"}
-        ]
-
-        created_tasks = await task_manager.add_batch(tasks)
-
-        # Only 2 valid tasks should be created
-        assert len(created_tasks) == 2
-        assert created_tasks[0].title == "Valid Task"
-        assert created_tasks[1].title == "Another Valid Task"
-
-    @pytest.mark.asyncio
-    @pytest.mark.level1
-    async def test_add_batch_empty(self, task_manager):
-        """Test adding empty batch"""
-        created_tasks = await task_manager.add_batch([])
-
-        assert len(created_tasks) == 0
-
-    @pytest.mark.asyncio
-    @pytest.mark.level1
-    async def test_add_batch_single_task(self, task_manager):
-        """Test adding batch with single task"""
-        tasks = [{"title": "Single Task", "content": "Single content"}]
-
-        created_tasks = await task_manager.add_batch(tasks)
-
-        assert len(created_tasks) == 1
-        assert created_tasks[0].title == "Single Task"
+    )
+    assert not result.ok
+    assert "same" in result.reason
+    assert await task_manager.get("same") is None
 
 
 class TestCancelAllTasks:
@@ -1478,26 +1363,25 @@ async def member2(task_manager, db):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_get_other_claimed_task_finds_other_and_excludes_self(task_manager):
-    """get_other_claimed_task returns a member's other CLAIMED task and
-    excludes the task being (re)claimed itself."""
+async def test_get_other_claimed_task_id_finds_other_and_excludes_self(task_manager):
+    """get_other_claimed_task_id returns the task_id of a member's other
+    CLAIMED task and excludes the task being (re)claimed itself."""
     task_a = await task_manager.add(title="A", content="c")
     assert (await task_manager.assign(task_a.task_id, "member1")).ok
 
-    found = await task_manager.get_other_claimed_task("member1", exclude_task_id="another-id")
-    assert found is not None
-    assert found.task_id == task_a.task_id
+    found = await task_manager.get_other_claimed_task_id("member1", exclude_task_id="another-id")
+    assert found == task_a.task_id
 
     # Excluding the only claim returns None — an idempotent re-claim / re-assign
     # of the same task must not be flagged as a conflict.
-    assert await task_manager.get_other_claimed_task("member1", exclude_task_id=task_a.task_id) is None
+    assert await task_manager.get_other_claimed_task_id("member1", exclude_task_id=task_a.task_id) is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_get_other_claimed_task_none_without_claims(task_manager, member2):
+async def test_get_other_claimed_task_id_none_without_claims(task_manager, member2):
     """A member holding no claimed task yields None."""
-    assert await task_manager.get_other_claimed_task("member2", exclude_task_id="x") is None
+    assert await task_manager.get_other_claimed_task_id("member2", exclude_task_id="x") is None
 
 
 @pytest.mark.asyncio

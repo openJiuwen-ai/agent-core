@@ -243,8 +243,8 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "Custom task ID for dependency reference (auto-generated if omitted)",
     "create_task.task.title": "Task title — concise description of the goal",
     "create_task.task.content": "Task details including goals and acceptance criteria",
-    "create_task.task.depends_on": "Prerequisite task IDs that must complete first",
-    "create_task.task.depended_by": "Existing task IDs that should wait for this task (reverse dependency)",
+    "create_task.task.depends_on": "Prerequisite task IDs; may reference tasks created in this same call or existing tasks",
+    "create_task.task.depended_by": "Existing task IDs that should wait for this task (reverse dependency); must not reference tasks created in this same call — express in-batch edges with depends_on on the dependent task",
     # ===== view_task ===========================================================
     # view_task._desc lives in descs/en/view_task.md
     "view_task.action": (

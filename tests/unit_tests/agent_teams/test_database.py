@@ -20,6 +20,7 @@ from openjiuwen.agent_teams.paths import (
     reset_openjiuwen_home,
     team_session_worktrees_dir,
 )
+from openjiuwen.agent_teams.schema.task import NewTaskSpec
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
@@ -1119,16 +1120,14 @@ class TestTaskDependencyOperations:
         await db.task.create_task("task2", "team_bidir1", "Task 2", "Content 2", "pending")
 
         # Create a high priority task that task1 and task2 will depend on
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="priority_task",
-            team_name="team_bidir1",
-            title="Priority Task",
-            content="High priority content",
-            status="pending",
-            dependencies=None,
-            dependent_task_ids=["task1", "task2"]
+        result = await db.task.mutate_dependency_graph(
+            "team_bidir1",
+            new_tasks=[
+                NewTaskSpec(task_id="priority_task", title="Priority Task", content="High priority content", initial_status="pending")
+            ],
+            add_edges=[("task1", "priority_task"), ("task2", "priority_task")],
         )
-        assert success is True
+        assert result.ok is True
 
         # Verify: priority task was created
         priority_task = await db.task.get_task("priority_task")
@@ -1165,16 +1164,14 @@ class TestTaskDependencyOperations:
         await db.task.create_task("task2", "team_bidir2", "Task 2", "Content 2", "completed")
 
         # Create a new task that depends on task1 and task2
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="new_task",
-            team_name="team_bidir2",
-            title="New Task",
-            content="New task content",
-            status="blocked",
-            dependencies=["task1", "task2"],
-            dependent_task_ids=None
+        result = await db.task.mutate_dependency_graph(
+            "team_bidir2",
+            new_tasks=[
+                NewTaskSpec(task_id="new_task", title="New Task", content="New task content", initial_status="blocked")
+            ],
+            add_edges=[("new_task", "task1"), ("new_task", "task2")],
         )
-        assert success is True
+        assert result.ok is True
 
         # Verify: new task was created. Both dependencies are already
         # COMPLETED, so the edges are born resolved and the post-mutation
@@ -1209,16 +1206,14 @@ class TestTaskDependencyOperations:
         await db.task.mutate_dependency_graph("team_bidir3", add_edges=[("taskB", "taskA")])
 
         # Insert taskM such that: taskA -> taskM -> taskB
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="taskM",
-            team_name="team_bidir3",
-            title="Task M (Middle)",
-            content="Middle task content",
-            status="blocked",  # Depends on taskA
-            dependencies=["taskA"],
-            dependent_task_ids=["taskB"]
+        result = await db.task.mutate_dependency_graph(
+            "team_bidir3",
+            new_tasks=[
+                NewTaskSpec(task_id="taskM", title="Task M (Middle)", content="Middle task content", initial_status="blocked")
+            ],
+            add_edges=[("taskM", "taskA"), ("taskB", "taskM")],
         )
-        assert success is True
+        assert result.ok is True
 
         # Verify: taskM was created. taskA is COMPLETED so the edge
         # (taskM -> taskA) is born resolved; refresh flips taskM from
@@ -1263,17 +1258,15 @@ class TestTaskDependencyOperations:
         await db.task.mutate_dependency_graph("team_cycle", add_edges=[("taskA", "taskB")])
 
         # Try to add taskC that would create a cycle
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="taskC",
-            team_name="team_cycle",
-            title="Task C",
-            content="Content C",
-            status="blocked",
-            dependencies=["taskA"],
-            dependent_task_ids=["taskB"]
+        result = await db.task.mutate_dependency_graph(
+            "team_cycle",
+            new_tasks=[
+                NewTaskSpec(task_id="taskC", title="Task C", content="Content C", initial_status="blocked")
+            ],
+            add_edges=[("taskC", "taskA"), ("taskB", "taskC")],
         )
         # Should fail due to circular dependency
-        assert success is False
+        assert result.ok is False
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1285,16 +1278,14 @@ class TestTaskDependencyOperations:
             leader_member_name="leader5"
         )
 
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="task_no_deps",
-            team_name="team_no_deps",
-            title="No Deps Task",
-            content="Content",
-            status="pending",
-            dependencies=None,
-            dependent_task_ids=None
+        result = await db.task.mutate_dependency_graph(
+            "team_no_deps",
+            new_tasks=[
+                NewTaskSpec(task_id="task_no_deps", title="No Deps Task", content="Content", initial_status="pending")
+            ],
+            add_edges=[],
         )
-        assert success is True
+        assert result.ok is True
 
         task = await db.task.get_task("task_no_deps")
         assert task is not None
@@ -1319,16 +1310,14 @@ class TestTaskDependencyOperations:
 
         # Try to create a new task that the completed task would depend on
         # This should fail because completed is a terminal status
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="new_priority",
-            team_name="team_terminal1",
-            title="New Priority Task",
-            content="Content",
-            status="pending",
-            dependencies=None,
-            dependent_task_ids=["task_completed"]
+        result = await db.task.mutate_dependency_graph(
+            "team_terminal1",
+            new_tasks=[
+                NewTaskSpec(task_id="new_priority", title="New Priority Task", content="Content", initial_status="pending")
+            ],
+            add_edges=[("task_completed", "new_priority")],
         )
-        assert success is False
+        assert result.ok is False
 
         # Verify the new task was not created
         new_task = await db.task.get_task("new_priority")
@@ -1349,16 +1338,14 @@ class TestTaskDependencyOperations:
                              "Content", "cancelled")
 
         # Try to create a new task that the cancelled task would depend on
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="new_priority2",
-            team_name="team_terminal2",
-            title="New Priority Task 2",
-            content="Content",
-            status="pending",
-            dependencies=None,
-            dependent_task_ids=["task_cancelled"]
+        result = await db.task.mutate_dependency_graph(
+            "team_terminal2",
+            new_tasks=[
+                NewTaskSpec(task_id="new_priority2", title="New Priority Task 2", content="Content", initial_status="pending")
+            ],
+            add_edges=[("task_cancelled", "new_priority2")],
         )
-        assert success is False
+        assert result.ok is False
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1376,16 +1363,14 @@ class TestTaskDependencyOperations:
 
         # Create a new task that the claimed task would depend on
         # This should succeed because CLAIMED -> BLOCKED is a valid state transition
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="new_priority3",
-            team_name="team_terminal3",
-            title="New Priority Task 3",
-            content="Content",
-            status="pending",
-            dependencies=None,
-            dependent_task_ids=["task_claimed"]
+        result = await db.task.mutate_dependency_graph(
+            "team_terminal3",
+            new_tasks=[
+                NewTaskSpec(task_id="new_priority3", title="New Priority Task 3", content="Content", initial_status="pending")
+            ],
+            add_edges=[("task_claimed", "new_priority3")],
         )
-        assert success is False
+        assert result.ok is False
 
         # Verify: claimed task status is not changed
         claimed_task = await db.task.get_task("task_claimed")
@@ -1402,16 +1387,14 @@ class TestTaskDependencyOperations:
         )
 
         # Try to create a task that depends on a non-existent task
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="new_task",
-            team_name="team_terminal4",
-            title="New Task",
-            content="Content",
-            status="pending",
-            dependencies=["nonexistent_task"],
-            dependent_task_ids=None
+        result = await db.task.mutate_dependency_graph(
+            "team_terminal4",
+            new_tasks=[
+                NewTaskSpec(task_id="new_task", title="New Task", content="Content", initial_status="pending")
+            ],
+            add_edges=[("new_task", "nonexistent_task")],
         )
-        assert success is False
+        assert result.ok is False
 
 
 class TestMessageOperations:

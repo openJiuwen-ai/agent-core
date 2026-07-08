@@ -342,27 +342,22 @@ async def test_mark_messages_read_empty_is_noop(file_db: TeamDatabase) -> None:
 async def test_nested_write_no_deadlock(file_db: TeamDatabase) -> None:
     """A public write that delegates to another write must not self-deadlock.
 
-    ``add_task_with_bidirectional_dependencies`` calls
-    ``mutate_dependency_graph`` internally; only the latter opens the
-    write session, so the non-reentrant lock is acquired once. A regression
+    ``verify_and_fix_task_consistency`` delegates to
+    ``_verify_and_fix_blocked_tasks``; only the latter opens the write
+    session, so the non-reentrant lock is acquired once. A regression
     (double acquire) would hang, which ``wait_for`` surfaces as a timeout.
     """
     team = "team1"
     await file_db.team.create_team(team, "Team 1", "leader")
-    await file_db.task.create_task("base", team, "Base", "content", TaskStatus.PENDING.value)
+    await file_db.task.create_task("base", team, "Base", "content", TaskStatus.BLOCKED.value)
 
-    ok = await asyncio.wait_for(
-        file_db.task.add_task_with_bidirectional_dependencies(
-            "child",
-            team,
-            "Child",
-            "content",
-            TaskStatus.PENDING.value,
-            dependencies=["base"],
-        ),
+    refreshed = await asyncio.wait_for(
+        file_db.task.verify_and_fix_task_consistency(team),
         timeout=5.0,
     )
-    assert ok is True
+    # The blocked task has no unresolved edges, so the sweep flips it back
+    # to PENDING — proving the delegated write completed without deadlock.
+    assert [t.task_id for t in refreshed] == ["base"]
 
 
 @pytest.mark.asyncio

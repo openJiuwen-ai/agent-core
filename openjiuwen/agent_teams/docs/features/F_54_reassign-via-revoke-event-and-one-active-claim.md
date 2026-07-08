@@ -34,9 +34,10 @@ reset」的状态校验而失败，导致 `update_task` 整体返回 `success=Fa
 - **`TeamEvent.TASK_REVOKED` + `TaskRevokedEvent`**：`member_name` 携带**被撤任务的原 owner**。语义与
   `TASK_RELEASED` 正交——`TASK_RELEASED` 面向 idle 池「有活可抢」，`TASK_REVOKED` 是精准投给失去任务
   的那个成员的「停手」通知。反向映射 `_EVENT_CLASS_MAP` 由 `_EVENT_TYPE_MAP` 自动推导，无需手工登记。
-- **「一成员一活跃 CLAIMED」不变量**：由工具边界强制，靠 `TeamTaskManager.get_other_claimed_task(
-  member, exclude_task_id)` 查询支撑；`exclude_task_id` 保证幂等 re-claim / re-assign 同一任务不被误判
-  为冲突。
+- **「一成员一活跃 CLAIMED」不变量**：由工具边界强制，靠 `TeamTaskManager.get_other_claimed_task_id(
+  member, exclude_task_id)` 查询支撑——DB 层单列 `task_id` 投影 + `LIMIT 1` 的存在性探测，只回一个
+  task_id（拼错误消息用）或 `None`，**不物化该成员的全部 claimed 行**；`exclude_task_id` 保证幂等
+  re-claim / re-assign 同一任务不被误判为冲突。
 
 改派后的完整时序（`TeamTaskManager.reassign`）：先校验新成员存在 → `reset`（发 `TASK_RELEASED`）→ 若
 有原 owner 则发 `TASK_REVOKED` → `assign`（发 `TASK_CLAIMED`）。
@@ -57,7 +58,7 @@ reset」的状态校验而失败，导致 `update_task` 整体返回 `success=Fa
    把任务留成无主 PENDING。
 
 4. **「一成员一活跃 CLAIMED」在工具边界强制。** `ClaimTaskTool`（teammate 自认领）和 `UpdateTaskTool`
-   （leader 指派）在真正写状态前各查一次 `get_other_claimed_task`；`UpdateTaskTool` 的检查放在
+   （leader 指派）在真正写状态前各查一次 `get_other_claimed_task_id`；`UpdateTaskTool` 的检查放在
    reassignment reset **之前**，拒绝时原任务与当前 owner 均不受扰动。校验落在工具边界符合模块既有
    原则（不可信的 LLM 输入在进入处校验一次），且外部 CLI 成员复用同一套 `create_team_tools` 也自动
    受约束。

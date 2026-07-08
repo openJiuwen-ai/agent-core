@@ -19,8 +19,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-07-07 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md |
+| 最近一次修订日期 | 2026-07-08 |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md |
 
 ## 范围 / 边界
 
@@ -127,8 +127,9 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     到 `ToolCard`。
 16. **一成员一活跃 CLAIMED，改派不取消成员**：一个成员同一时刻至多持有一个
     `CLAIMED` 任务。`ClaimTaskTool`（teammate 自认领）与 `UpdateTaskTool`
-    （leader 指派）在写状态前经 `TeamTaskManager.get_other_claimed_task(member,
-    exclude_task_id)` 校验，命中即拒绝（`exclude_task_id` 放行幂等 re-claim /
+    （leader 指派）在写状态前经 `TeamTaskManager.get_other_claimed_task_id(member,
+    exclude_task_id)`（DB 层单列 `task_id` 投影 + `LIMIT 1` 的存在性探测，不物化该成员
+    的全部 claimed 行）校验，命中即拒绝（`exclude_task_id` 放行幂等 re-claim /
     re-assign 同一任务）；`UpdateTaskTool` 的校验落在 reassignment reset **之前**，
     拒绝时原任务与当前 owner 均不受扰动。改派已认领任务走
     `TeamTaskManager.reassign`——**只 reset 目标任务**、发 `TASK_REVOKED` 通知原
@@ -245,6 +246,25 @@ if role == "leader" and teammate_mode != "plan_mode":
 - `teammate_mode` 取 `"plan_mode"` 时 leader 拿到全套审批工具；其它取值
   （含默认 `"build_mode"`）一律剥离这两个工具。
 - teammate / human_agent 不受此门禁影响——他们本来就不在 leader 集合里。
+
+### `create_task` 的依赖表示契约（F_55）
+
+`create_task` 的一次调用只有两个使用场景，边的表示方式随场景固定：
+
+1. **批量创建任务图/子图**：批内任务之间的依赖**只用 `depends_on`** 表示，
+   目标可以是同批任务（顺序无关，允许前向引用）或看板已有任务。
+2. **楔入已有依赖链**：`depended_by` 列出需要等待新任务的**已有**任务——
+   这是它唯一的用途。`depended_by` 指向同批任务是同一条边的冗余表示，
+   在工具边界直接拒绝（错误信息教调用方改用对方的 `depends_on`）。
+
+实现不变量：
+
+- 整次调用经 `TeamTaskManager.add_graph` 折成**一次**
+  `mutate_dependency_graph` 原子事务——全批成功或整体失败，失败时
+  `ToolOutput.error` 透传底层真实 reason（环 / ID 冲突 / 引用不存在），
+  不允许再出现"三选一猜测文案"。
+- 工具边界校验：title/content 必填、批内 `task_id` 不重复、
+  `depended_by` 不指向批内任务。存在性 / 环 / 终态拒绝留给 DAO 层。
 
 ## 数据结构
 
@@ -363,7 +383,9 @@ all_tools = {
 - **`schema/task.py` / `schema/team.py`**：工具返回的结构化 `data` 必须
   来自 schema 层的 Pydantic 模型（`TaskSummary` / `TaskDetail` /
   `TaskListResult` / `MemberOpResult` / `TaskCreateResult` /
-  `TaskOpResult`），不允许在工具里现场拼裸 dict。
+  `TaskOpResult`），不允许在工具里现场拼裸 dict。工具 → manager 的
+  批量创建入参 / 出参也是 schema 层模型（`TaskGraphSpec` /
+  `TaskGraphResult`）。
 - **`runtime/`**：`Runner.resource_mgr` 是工具注册的下游消费者；
   `qualify_team_tool_ids` 在 inprocess 下扩展 ID 命名是为了不冲突，
   不要在 runtime 层另立解析规则——所有 `team.` 前缀的认知都在这条

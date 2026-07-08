@@ -746,8 +746,45 @@ class TestTaskCreateTool:
 
         assert result.success is True
         assert result.data["count"] == 3
-        assert result.data["skipped"] == 0
         assert len(result.data["tasks"]) == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_create_batch_with_forward_references(self, agent_team, t):
+        """depends_on may reference tasks created later in the same call."""
+        tool = TaskCreateTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "tasks": [
+                    {"task_id": "final", "title": "Final", "content": "c", "depends_on": ["a1", "a2"]},
+                    {"task_id": "a1", "title": "A1", "content": "c"},
+                    {"task_id": "a2", "title": "A2", "content": "c"},
+                ]
+            }
+        )
+
+        assert result.success is True, result.error
+        statuses = {task["task_id"]: task["status"] for task in result.data["tasks"]}
+        assert statuses["final"] == TaskStatus.BLOCKED.value
+        assert statuses["a1"] == TaskStatus.PENDING.value
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_create_batch_atomic_failure(self, agent_team, t):
+        """A bad reference fails the whole call; nothing is created."""
+        tool = TaskCreateTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "tasks": [
+                    {"task_id": "good", "title": "Good", "content": "c"},
+                    {"task_id": "bad", "title": "Bad", "content": "c", "depends_on": ["ghost"]},
+                ]
+            }
+        )
+
+        assert result.success is False
+        assert "ghost" in result.error
+        assert await agent_team.task_manager.get("good") is None
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -781,6 +818,41 @@ class TestTaskCreateTool:
 
         assert result.success is True
         assert result.data["title"] == "Priority Task"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_create_task_rejects_in_batch_depended_by(self, agent_team, t):
+        """depended_by pointing at a task of the same call is rejected."""
+        tool = TaskCreateTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "tasks": [
+                    {"task_id": "up", "title": "Up", "content": "c"},
+                    {"task_id": "down", "title": "Down", "content": "c", "depended_by": ["up"]},
+                ]
+            }
+        )
+
+        assert result.success is False
+        assert "depends_on" in result.error
+        assert await agent_team.task_manager.get("up") is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_create_task_rejects_duplicate_ids_in_call(self, agent_team, t):
+        """Duplicate task_id within one call is rejected at the boundary."""
+        tool = TaskCreateTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "tasks": [
+                    {"task_id": "same", "title": "First", "content": "c"},
+                    {"task_id": "same", "title": "Second", "content": "c"},
+                ]
+            }
+        )
+
+        assert result.success is False
+        assert "same" in result.error
 
 
 class TestUpdateTaskTool:
