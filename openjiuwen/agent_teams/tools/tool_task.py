@@ -6,6 +6,7 @@
 from typing import Any
 
 from openjiuwen.agent_teams.schema.status import TaskStatus
+from openjiuwen.agent_teams.schema.task import TaskGraphSpec
 from openjiuwen.agent_teams.timefmt import format_time_context
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.agent_teams.tools.locales import Translator
@@ -23,8 +24,12 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 class TaskCreateTool(TeamTool):
     """Create team tasks (Leader only).
 
-    Unified creation: tasks with depended_by auto-route to add_with_priority(),
-    plain tasks route to add() / add_batch().
+    The whole call is one atomic graph mutation via ``add_graph``: edges
+    among tasks of the same call are expressed with ``depends_on`` only
+    (forward references allowed), while ``depended_by`` is reserved for
+    wiring *existing* tasks to depend on a new task (insert into an
+    existing chain). In-batch ``depended_by`` targets are rejected at
+    this boundary as redundant.
     """
 
     def __init__(self, agent_team: TeamBackend, t: Translator):
@@ -69,83 +74,72 @@ class TaskCreateTool(TeamTool):
             "required": ["tasks"],
         }
 
-    async def _create_one(self, spec: dict):
-        """Create one task via the right add path; returns a TaskCreateResult."""
-        if spec.get("depended_by"):
-            return await self.task_manager.add_with_priority(
-                title=spec["title"],
-                content=spec["content"],
-                task_id=spec.get("task_id"),
-                dependencies=spec.get("depends_on"),
-                dependent_task_ids=spec.get("depended_by"),
-            )
-        return await self.task_manager.add(
-            title=spec["title"],
-            content=spec["content"],
-            task_id=spec.get("task_id"),
-            dependencies=spec.get("depends_on"),
-        )
-
     @staticmethod
     def _spec_label(spec: dict) -> str:
         return spec.get("task_id") or spec.get("title") or "<unnamed>"
+
+    def _validate_batch(self, tasks: list[dict]) -> str | None:
+        """Validate batch-level invariants; returns an error string or None.
+
+        In-batch edges have exactly one representation (``depends_on`` on
+        the dependent task), so a ``depended_by`` pointing at a task of the
+        same call is rejected instead of silently deduplicated — the error
+        teaches the caller the canonical form.
+        """
+        batch_ids: set[str] = set()
+        for spec in tasks:
+            if not spec.get("title") or not spec.get("content"):
+                return f"Task {self._spec_label(spec)!r} missing required title/content"
+            task_id = spec.get("task_id")
+            if task_id:
+                if task_id in batch_ids:
+                    return f"Duplicate task_id {task_id!r} in this call"
+                batch_ids.add(task_id)
+
+        for spec in tasks:
+            in_batch_targets = [dep for dep in spec.get("depended_by") or () if dep in batch_ids]
+            if in_batch_targets:
+                return (
+                    f"Task {self._spec_label(spec)!r}: depended_by may only reference "
+                    f"tasks that already exist on the board, but {in_batch_targets} are created "
+                    f"in this same call — express in-batch edges with depends_on on the dependent task"
+                )
+        return None
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         tasks = inputs.get("tasks", [])
         if not tasks:
             return ToolOutput(success=False, error="'tasks' is required")
 
-        if len(tasks) == 1:
-            spec = tasks[0]
-            if not spec.get("title") or not spec.get("content"):
-                return ToolOutput(
-                    success=False,
-                    error=f"Task {self._spec_label(spec)!r} missing required title/content",
-                )
-            result = await self._create_one(spec)
-            if not result.ok:
-                return ToolOutput(success=False, error=result.reason)
-            return ToolOutput(success=True, data=result.task.brief())
+        error = self._validate_batch(tasks)
+        if error:
+            return ToolOutput(success=False, error=error)
 
-        # Batch path — call add* one by one so we can capture per-task reasons
-        # and return them to the LLM. The previous implementation routed
-        # plain specs through add_batch() which silently dropped failures.
-        created: list = []
-        failures: list[dict] = []
-        for spec in tasks:
-            if not spec.get("title") or not spec.get("content"):
-                failures.append(
-                    {
-                        "spec": self._spec_label(spec),
-                        "reason": "missing required title/content",
-                    }
+        # One atomic graph mutation for the whole call: depends_on may
+        # forward-reference tasks later in the batch, and either every
+        # task lands or none does (with the real failure reason).
+        result = await self.task_manager.add_graph(
+            [
+                TaskGraphSpec(
+                    title=spec["title"],
+                    content=spec["content"],
+                    task_id=spec.get("task_id"),
+                    depends_on=tuple(spec.get("depends_on") or ()),
+                    depended_by=tuple(spec.get("depended_by") or ()),
                 )
-                continue
-            result = await self._create_one(spec)
-            if result.ok:
-                created.append(result.task)
-            else:
-                failures.append(
-                    {
-                        "spec": self._spec_label(spec),
-                        "reason": result.reason,
-                    }
-                )
+                for spec in tasks
+            ]
+        )
+        if not result.ok:
+            return ToolOutput(success=False, error=result.reason)
 
-        if not created and failures:
-            joined = "; ".join(f"{f['spec']}: {f['reason']}" for f in failures)
-            return ToolOutput(
-                success=False,
-                error=f"All {len(failures)} task creations failed: {joined}",
-            )
-
+        if len(result.tasks) == 1:
+            return ToolOutput(success=True, data=result.tasks[0].brief())
         return ToolOutput(
             success=True,
             data={
-                "tasks": [t.brief() for t in created],
-                "count": len(created),
-                "skipped": len(failures),
-                "failures": failures,
+                "tasks": [t.brief() for t in result.tasks],
+                "count": len(result.tasks),
             },
         )
 
@@ -159,9 +153,7 @@ class TaskCreateTool(TeamTool):
         # Batch
         tasks = d.get("tasks", [])
         lines = [f"task_id={t['task_id']} title={t['title']}" for t in tasks]
-        lines.append(f"Created {d['count']}, skipped {d.get('skipped', 0)}")
-        for f in d.get("failures", []) or []:
-            lines.append(f"  - skipped {f['spec']}: {f['reason']}")
+        lines.append(f"Created {d['count']}")
         return "\n".join(lines)
 
 
@@ -409,12 +401,12 @@ class UpdateTaskTool(TeamTool):
         if assignee:
             # One active claim per member: reject before any state change so a
             # rejected assign never disturbs the current owner or this task.
-            busy = await self.task_manager.get_other_claimed_task(assignee, task_id)
-            if busy:
+            busy_task_id = await self.task_manager.get_other_claimed_task_id(assignee, task_id)
+            if busy_task_id:
                 return ToolOutput(
                     success=False,
                     error=(
-                        f"Member '{assignee}' already has a claimed task #{busy.task_id}; "
+                        f"Member '{assignee}' already has a claimed task #{busy_task_id}; "
                         f"wait for it to complete before assigning another."
                     ),
                 )
@@ -546,6 +538,8 @@ class ClaimTaskTool(TeamTool):
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         task_id = inputs.get("task_id")
         status = inputs.get("status")
+        if not task_id:
+            return ToolOutput(success=False, error="'task_id' is required")
 
         task = await self.task_manager.get(task_id)
         if not task:
@@ -554,12 +548,12 @@ class ClaimTaskTool(TeamTool):
         if status == "claimed":
             # One active claim per member: refuse a second concurrent claim so a
             # teammate finishes its current task before picking up another.
-            busy = await self.task_manager.get_other_claimed_task(self.task_manager.member_name, task_id)
-            if busy:
+            busy_task_id = await self.task_manager.get_other_claimed_task_id(self.task_manager.member_name, task_id)
+            if busy_task_id:
                 return ToolOutput(
                     success=False,
                     error=(
-                        f"You already have a claimed task #{busy.task_id}; "
+                        f"You already have a claimed task #{busy_task_id}; "
                         f"complete it before claiming another."
                     ),
                 )

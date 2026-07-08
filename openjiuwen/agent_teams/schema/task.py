@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Task view response schemas for view_task tool."""
+"""Task schemas: view responses plus task-graph mutation specs and results."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -124,6 +124,53 @@ class TaskListResult(BaseModel):
 
     tasks: list[TaskSummary]
     count: int
+
+
+@dataclass(frozen=True, slots=True)
+class TaskGraphSpec:
+    """One task in a ``TeamTaskManager.add_graph`` batch.
+
+    ``depends_on`` edges may reference tasks created in the same batch
+    (forward references) or already-existing tasks. ``depended_by`` edges
+    must reference already-existing tasks only — an in-batch edge has
+    exactly one representation (``depends_on`` on the dependent task), so
+    the tool boundary rejects in-batch ``depended_by`` targets as
+    redundant before the batch reaches this layer.
+    """
+
+    title: str
+    content: str
+    task_id: str | None = None
+    depends_on: tuple[str, ...] = ()
+    depended_by: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class TaskGraphResult:
+    """Outcome of ``TeamTaskManager.add_graph``.
+
+    The batch is atomic: on success ``tasks`` carries every created task
+    (statuses reflect the post-mutation refresh pass); on failure nothing
+    was created and ``reason`` carries the real cause from the graph
+    mutation (cycle, missing endpoint, duplicate id, ...).
+    """
+
+    ok: bool
+    reason: str = ""
+    tasks: list[Any] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+    @classmethod
+    def success(cls, tasks: list[Any]) -> "TaskGraphResult":
+        """Build a successful result carrying the created tasks."""
+        return cls(ok=True, tasks=tasks)
+
+    @classmethod
+    def fail(cls, reason: str) -> "TaskGraphResult":
+        """Build a failure result carrying the human-readable cause."""
+        return cls(ok=False, reason=reason)
 
 
 @dataclass(frozen=True, slots=True)

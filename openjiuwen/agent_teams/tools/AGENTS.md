@@ -20,7 +20,7 @@
 | 文件 | 负责 |
 |---|---|
 | `team.py` | `TeamBackend` —— 每个工具都对话的后端对象（spawn/shutdown/clean/approve、名册查询、cleanup-path registry）。`startup_member`（单次 UNSTARTED→STARTING CAS + spawn）、`startup`（经 `startup_member` 批量）、`_spawn_and_publish`（共享 helper）。`approve_tool` 写入 `protocol="json"` 的 DB 消息，作为解除中断的兜底投递 |
-| `task_manager.py` | `TeamTaskManager` —— add/claim/complete/reset/cancel/approve_plan、事件发布、依赖刷新 |
+| `task_manager.py` | `TeamTaskManager` —— add_graph（原子批量图创建，`add` 是其单任务薄封装）/claim/complete/reset/cancel/approve_plan、事件发布、依赖刷新 |
 | `message_manager.py` | `TeamMessageManager` —— 点对点 + 广播发送、已读状态查询 |
 | `database/` | `TeamDatabase` + 建立在共享 `DbSessions` 上的按表 DAO（读写 session 分离 —— 见下文 *数据库并发*）。静态表 + 按 session 的动态表的 SQL 层。测试跑在 sqlite `:memory:` 的 `connection_string` 上（快、无文件） |
 | `models.py` | `Team`、`TeamMember` 静态表 + 按 session 动态生成的 `TeamTask*` / `TeamMessage*` 工厂 |
@@ -45,8 +45,7 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   暴露分别绑定到读者 / 写者工厂的 `read()` / `write()` async-context 访问器。
   `write()` 持有一把进程级 `asyncio.Lock`；`read()` 不持锁。这正是多成员负载下
   阻止 `QueuePool limit ... timed out` 耗尽的东西。写锁是**不可重入**的：当一个公开
-  写委托给另一个（`add_task_with_bidirectional_dependencies` →
-  `mutate_dependency_graph`，`verify_and_fix_task_consistency` →
+  写委托给另一个（`verify_and_fix_task_consistency` →
   `_verify_and_fix_blocked_tasks`）时，只有最内层的 session opener 取锁。
 - **PRAGMA（`engine.py` `_attach_sqlite_pragmas`）** —— 文件后端 SQLite 跑
   `journal_mode=WAL`（数据库级，首次连接时设一次）+ `synchronous=NORMAL` +
@@ -111,7 +110,7 @@ PostgreSQL / MySQL 后端（`engine.py`），不要用 SQLite。
 | `approve_plan` | ✓（仅 plan_mode） | | 仅 `teammate_mode == "plan_mode"` 时接线 |
 | `approve_tool` | ✓（仅 plan_mode） | | 与 `approve_plan` 相同的门控 |
 | `list_members` | ✓ | | 结果里排除调用者自身 |
-| `create_task` | ✓ | | 带 `depended_by` 的 spec 自动路由到 `add_with_priority`；单 spec 返回 `brief()`，批量返回 `tasks`+`failures` |
+| `create_task` | ✓ | | 整次调用经 `add_graph` 做**一次原子图变更**：批内依赖只用 `depends_on`（允许前向引用），`depended_by` 仅可指向已有任务（指向批内任务在工具边界拒绝）；全批成功或整体失败并返回真实 reason。单 spec 返回 `brief()`，批量返回 `tasks`+`count`。见 F_55 |
 | `update_task` | ✓ | | 一个工具处理标题/内容编辑、取消、指派以及 `add_blocked_by`；改派已认领任务走 `TeamTaskManager.reassign`（reset + `TASK_REVOKED` 通知原 owner，**不** `cancel_member`），并强制「目标成员至多一个活跃 CLAIMED」，见 F_54 |
 | `view_task` | ✓ | ✓ | `action ∈ {list, get, claimable}`；默认 `list` |
 | `claim_task` | | ✓ | `status ∈ {claimed, completed}`；claim 前强制「本成员至多一个活跃 CLAIMED」（见 F_54）；完成路径追加一句下一步 nudge |

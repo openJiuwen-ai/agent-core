@@ -168,8 +168,8 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "自定义任务 ID，便于依赖引用（不提供则自动生成）",
     "create_task.task.title": "任务标题，简明描述任务目标",
     "create_task.task.content": "任务详细内容，包含目标和验收标准",
-    "create_task.task.depends_on": "前置依赖的任务 ID 列表",
-    "create_task.task.depended_by": "需要等待本任务完成的现有任务 ID 列表（反向依赖）",
+    "create_task.task.depends_on": "前置依赖的任务 ID 列表；可引用本次调用中一起创建的任务或已有任务",
+    "create_task.task.depended_by": "需要等待本任务完成的已有任务 ID 列表（反向依赖）；不得引用本次调用创建的任务——批内依赖一律用对方的 depends_on 表示",
     # ===== view_task ===========================================================
     # view_task._desc lives in descs/cn/view_task.md
     "view_task.action": "查看模式：'list'（默认，所有任务摘要）、'get'（单个任务详情，需传 task_id）、'claimable'（可认领的 pending 任务）",

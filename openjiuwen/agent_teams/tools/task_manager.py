@@ -46,6 +46,8 @@ from openjiuwen.agent_teams.schema.task import (
     NewTaskSpec,
     TaskCreateResult,
     TaskDetail,
+    TaskGraphResult,
+    TaskGraphSpec,
     TaskListResult,
     TaskOpResult,
     TaskSummary,
@@ -143,50 +145,69 @@ class TeamTaskManager:
         if team_plan_id is not None:
             self.team_plan_id = _safe_token(team_plan_id, "team_plan")
 
-    async def add_batch(self, tasks: List[dict]) -> List[TaskCreateResult]:
-        """Add multiple tasks to the team in batch.
+    async def add_graph(self, specs: list[TaskGraphSpec]) -> TaskGraphResult:
+        """Create a batch of tasks and their dependency edges atomically.
 
-        Creates multiple tasks in a single operation for efficiency. Each
-        task in the list is a dictionary with keys ``title``, ``content``,
-        optional ``task_id`` and ``dependencies``. Invalid specs (missing
-        title/content) are skipped silently.
+        The whole batch flows through a single ``mutate_dependency_graph``
+        call, so ``depends_on`` edges may reference tasks created later in
+        the same batch (forward references) and the batch either fully
+        lands or fully rolls back with the real failure reason.
+
+        ``depended_by`` edges wire *existing* tasks to depend on a new
+        task (insert into an existing chain). The tool boundary rejects
+        in-batch ``depended_by`` targets — see ``TaskGraphSpec``.
 
         Args:
-            tasks: List of task dictionaries.
+            specs: Task specs to create; missing ``task_id`` values are
+                auto-generated.
 
         Returns:
-            List of ``TaskCreateResult`` — one per successfully created
-            task. Failed specs (missing fields, creation errors) are
-            omitted so callers can still treat the return value as a
-            list of created tasks. Because ``TaskCreateResult`` delegates
-            attribute lookups to the wrapped task, existing call sites
-            that iterate and read ``.task_id`` / ``.title`` work
-            unchanged.
+            ``TaskGraphResult`` — created tasks with post-refresh statuses
+            on success, the graph-mutation failure reason otherwise.
         """
-        created_tasks: List[TaskCreateResult] = []
-        for task_spec in tasks:
-            title = task_spec.get("title")
-            content = task_spec.get("content")
-            task_id = task_spec.get("task_id")
-            dependencies = task_spec.get("dependencies")
-
-            if not title or not content:
-                team_logger.warning(f"Skipping invalid task: {task_spec}")
-                continue
-
-            result = await self.add(
-                title=title,
-                content=content,
-                task_id=task_id,
-                dependencies=dependencies,
+        new_tasks: list[NewTaskSpec] = []
+        edges: list[tuple[str, str]] = []
+        for spec in specs:
+            task_id = spec.task_id or str(uuid.uuid4())
+            new_tasks.append(
+                NewTaskSpec(
+                    task_id=task_id,
+                    title=spec.title,
+                    content=spec.content,
+                    initial_status=TaskStatus.PENDING.value,
+                )
             )
-            if result.ok:
-                created_tasks.append(result)
-            else:
-                team_logger.warning(f"Batch add skipped task {task_id or title!r}: {result.reason}")
+            edges.extend((task_id, dep_id) for dep_id in spec.depends_on)
+            edges.extend((dependent_id, task_id) for dependent_id in spec.depended_by)
 
-        team_logger.info(f"Batch added {len(created_tasks)} tasks")
-        return created_tasks
+        mutation = await self.db.task.mutate_dependency_graph(
+            team_name=self.team_name,
+            new_tasks=new_tasks,
+            add_edges=edges,
+        )
+        if not mutation.ok:
+            return TaskGraphResult.fail(mutation.reason)
+
+        # The refresh pass may have flipped PENDING -> BLOCKED for tasks
+        # with unresolved dependencies; reflect that in the returned tasks
+        # and the task-created events.
+        status_by_id = {t.task_id: t.status for t in mutation.refreshed_tasks}
+        created: list[TeamTaskBase] = []
+        for node in new_tasks:
+            status = status_by_id.get(node.task_id, node.initial_status)
+            await self._publish_task_created(node.task_id, status)
+            created.append(
+                TeamTaskBase(
+                    task_id=node.task_id,
+                    team_name=self.team_name,
+                    title=node.title,
+                    content=node.content,
+                    status=status,
+                    assignee=None,
+                )
+            )
+        team_logger.debug(f"Added {len(created)} task(s) with {len(edges)} dependency edge(s)")
+        return TaskGraphResult.success(created)
 
     async def add(
         self,
@@ -195,10 +216,10 @@ class TeamTaskManager:
         task_id: Optional[str] = None,
         dependencies: Optional[List[str]] = None,
     ) -> TaskCreateResult:
-        """Add a task to the team.
+        """Add a single task to the team.
 
-        Creates a task in the team_task table and optionally adds
-        task dependencies to the team_task_dependency table.
+        Thin wrapper over ``add_graph`` for single-task callers (external
+        operator client, internal seeding).
 
         Args:
             title: Task title.
@@ -212,52 +233,22 @@ class TeamTaskManager:
             / ``result.title`` transparently delegates to it); on
             failure ``result.reason`` holds the specific cause.
         """
-        if task_id is None:
-            task_id = str(uuid.uuid4())
+        result = await self.add_graph(
+            [
+                TaskGraphSpec(
+                    title=title,
+                    content=content,
+                    task_id=task_id,
+                    depends_on=tuple(dependencies or ()),
+                )
+            ]
+        )
+        if not result.ok:
+            return TaskCreateResult.fail(f"Failed to create task {task_id or title!r}: {result.reason}")
+        return TaskCreateResult.success(result.tasks[0])
 
-        # Initial seed: PENDING for an isolated task; the graph mutation
-        # path's refresh pass will flip it to BLOCKED if any dependency
-        # is still unresolved at insert time.
-        status = TaskStatus.PENDING.value
-
-        if dependencies:
-            # Edges + node go through the unified mutation primitive so
-            # cycle detection and BLOCKED/PENDING refresh fire as one
-            # atomic step.
-            mutation = await self.db.task.mutate_dependency_graph(
-                team_name=self.team_name,
-                new_tasks=[
-                    NewTaskSpec(
-                        task_id=task_id,
-                        title=title,
-                        content=content,
-                        initial_status=status,
-                    )
-                ],
-                add_edges=[(task_id, dep_id) for dep_id in dependencies],
-            )
-            if not mutation.ok:
-                return TaskCreateResult.fail(f"Failed to create task {task_id}: {mutation.reason}")
-            # Refresh pass may have flipped PENDING -> BLOCKED; reflect
-            # that in the response so the caller and downstream event
-            # carry the right status.
-            for refreshed in mutation.refreshed_tasks:
-                if refreshed.task_id == task_id:
-                    status = refreshed.status
-                    break
-            team_logger.debug(f"Added task {task_id} with dependencies: {dependencies}")
-        else:
-            success = await self.db.task.create_task(
-                task_id=task_id,
-                team_name=self.team_name,
-                title=title,
-                content=content,
-                status=status,
-            )
-            if not success:
-                return TaskCreateResult.fail(f"Failed to create task {task_id} (likely a task_id collision)")
-
-        # Publish task created event
+    async def _publish_task_created(self, task_id: str, status: str) -> None:
+        """Publish a task-created event; log-and-continue on failure."""
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
@@ -272,185 +263,6 @@ class TeamTaskManager:
             team_logger.debug(f"Task created event published: {task_id}")
         except Exception as e:
             team_logger.error(f"Failed to publish task created event for {task_id}: {e}")
-
-        return TaskCreateResult.success(
-            TeamTaskBase(
-                task_id=task_id,
-                team_name=self.team_name,
-                title=title,
-                content=content,
-                status=status,
-                assignee=None,
-            )
-        )
-
-    async def add_with_priority(
-        self,
-        title: str,
-        content: str,
-        task_id: Optional[str] = None,
-        dependencies: Optional[List[str]] = None,
-        dependent_task_ids: Optional[List[str]] = None,
-    ) -> TaskCreateResult:
-        """Add a task with bidirectional dependency support (prioritized task)
-
-        This method allows creating a task that can:
-        1. Depend on existing tasks (dependencies parameter)
-        2. Have existing tasks depend on it (dependent_task_ids parameter)
-        3. Both of the above (inserting the task between other tasks in the dependency chain)
-
-        When existing tasks are made to depend on the new task (dependent_task_ids),
-        their status is automatically updated from 'pending' to 'blocked' if applicable.
-
-        This operation is atomic and prevents circular dependencies.
-
-        Args:
-            title: Task title
-            content: Task content
-            task_id: Optional custom task ID (auto-generated if not provided)
-            dependencies: List of existing task IDs that the new task depends on
-            dependent_task_ids: List of existing task IDs that should depend on the new task
-
-        Returns:
-            ``TaskCreateResult`` describing the outcome. On failure
-            ``result.reason`` typically points at a circular dependency
-            or a conflicting task_id.
-        """
-        if task_id is None:
-            task_id = str(uuid.uuid4())
-
-        # Determine initial status based on dependencies
-        # If the task has dependencies, it starts as BLOCKED
-        if dependencies and len(dependencies) > 0:
-            status = TaskStatus.BLOCKED.value
-        else:
-            status = TaskStatus.PENDING.value
-
-        # Use database method for atomic operation with cycle detection
-        success = await self.db.task.add_task_with_bidirectional_dependencies(
-            task_id=task_id,
-            team_name=self.team_name,
-            title=title,
-            content=content,
-            status=status,
-            dependencies=dependencies,
-            dependent_task_ids=dependent_task_ids,
-        )
-
-        if not success:
-            return TaskCreateResult.fail(
-                f"Failed to create prioritized task {task_id} "
-                f"(circular dependency, missing dependent task, or task_id collision)"
-            )
-
-        # Publish task created event
-        try:
-            await self.messager.publish(
-                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
-                message=EventMessage.from_event(
-                    TaskCreatedEvent(
-                        team_name=self.team_name,
-                        task_id=task_id,
-                        status=status,
-                    )
-                ),
-            )
-            team_logger.debug(f"Task created event published: {task_id}")
-        except Exception as e:
-            team_logger.error(f"Failed to publish task created event for {task_id}: {e}")
-
-        return TaskCreateResult.success(
-            TeamTaskBase(
-                task_id=task_id,
-                team_name=self.team_name,
-                title=title,
-                content=content,
-                status=status,
-                assignee=None,
-            )
-        )
-
-    async def add_as_top_priority(
-        self,
-        title: str,
-        content: str,
-        task_id: Optional[str] = None,
-    ) -> TaskCreateResult:
-        """Add a task as top priority (blocks all existing pending/blockable tasks)
-
-        This method creates a new task and makes all existing tasks that can be blocked
-        (pending or claimed status) depend on it. This ensures the new task is executed
-        before those tasks.
-
-        This is useful for inserting urgent tasks that must be processed before
-        any other pending work.
-
-        This operation is atomic and prevents circular dependencies.
-
-        Args:
-            title: Task title.
-            content: Task content.
-            task_id: Optional custom task ID (auto-generated if not provided).
-
-        Returns:
-            ``TaskCreateResult`` describing the outcome.
-        """
-        if task_id is None:
-            task_id = str(uuid.uuid4())
-
-        # Get all tasks that can be blocked (pending or claimed status)
-        # These tasks will be made to depend on the new top priority task
-        pending_tasks = await self.list_tasks(status=TaskStatus.PENDING.value)
-
-        dependent_task_ids = [task.task_id for task in pending_tasks]
-
-        # Top priority task has no dependencies, so it starts as PENDING.
-        status = TaskStatus.PENDING.value
-
-        # Use database method for atomic operation with cycle detection
-        success = await self.db.task.add_task_with_bidirectional_dependencies(
-            task_id=task_id,
-            team_name=self.team_name,
-            title=title,
-            content=content,
-            status=status,
-            dependencies=None,
-            dependent_task_ids=dependent_task_ids if dependent_task_ids else None,
-        )
-
-        if not success:
-            return TaskCreateResult.fail(
-                f"Failed to create top priority task {task_id} (circular dependency or task_id collision)"
-            )
-
-        team_logger.info(f"Added top priority task {task_id}, blocking {len(dependent_task_ids)} existing tasks")
-
-        # Publish task created event
-        try:
-            await self.messager.publish(
-                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
-                message=EventMessage.from_event(
-                    TaskCreatedEvent(
-                        team_name=self.team_name,
-                        task_id=task_id,
-                        status=status,
-                    )
-                ),
-            )
-            team_logger.debug(f"Task created event published: {task_id}")
-        except Exception as e:
-            team_logger.error(f"Failed to publish task created event for {task_id}: {e}")
-
-        return TaskCreateResult.success(
-            TeamTaskBase(
-                task_id=task_id,
-                team_name=self.team_name,
-                title=title,
-                content=content,
-                status=status,
-                assignee=None,
-            )
-        )
 
     async def list_tasks_with_deps(self, status: Optional[str] = None) -> TaskListResult:
         """List tasks with blocked_by info (summary view, no content).
@@ -1251,31 +1063,26 @@ class TeamTaskManager:
         )
         return TaskOpResult.success()
 
-    async def get_other_claimed_task(
-        self,
-        member_name: str,
-        exclude_task_id: str,
-    ) -> TeamTaskBase | None:
-        """Return a member's CLAIMED task other than ``exclude_task_id``.
+    async def get_other_claimed_task_id(self, member_name: str, exclude_task_id: str) -> str | None:
+        """Return the task_id of a member's CLAIMED task other than
+        ``exclude_task_id``, or None.
 
-        Backs the one-active-claim-per-member invariant enforced at the
-        tool boundary: a claim or leader assignment is rejected when this
-        returns a task. ``exclude_task_id`` keeps an idempotent re-claim /
-        re-assign of the same task from being flagged as a conflict.
+        Backs the one-active-claim-per-member invariant enforced at the tool
+        boundary: a claim or leader assignment is rejected when this returns
+        a task id. ``exclude_task_id`` keeps an idempotent re-claim /
+        re-assign of the same task from being flagged as a conflict. Probes a
+        single ``task_id`` column (``LIMIT 1``) at the DB layer rather than
+        reading the member's full set of claimed-task rows.
 
         Args:
             member_name: Member whose claims to inspect.
             exclude_task_id: Task id to ignore (the one being claimed / assigned).
 
         Returns:
-            The first other CLAIMED task, or ``None`` when the member holds
-            no claimed task besides ``exclude_task_id``.
+            The task_id of one other CLAIMED task, or ``None`` when the member
+            holds no claimed task besides ``exclude_task_id``.
         """
-        claimed = await self.get_tasks_by_assignee(member_name, TaskStatus.CLAIMED.value)
-        for task in claimed:
-            if task.task_id != exclude_task_id:
-                return task
-        return None
+        return await self.db.task.get_other_claimed_task_id(self.team_name, member_name, exclude_task_id)
 
     async def reassign(self, task_id: str, new_assignee: str) -> TaskOpResult:
         """Reassign a claimed task to another member without cancelling anyone.

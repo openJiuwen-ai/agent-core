@@ -188,6 +188,14 @@ async def _stage_new_tasks(
         return
 
     team_task_model = _get_task_model()
+    new_ids = [spec.task_id for spec in new_tasks]
+    existing_result = await session.execute(
+        select(team_task_model.task_id).where(team_task_model.task_id.in_(new_ids))
+    )
+    existing_ids = set(existing_result.scalars().all())
+    if existing_ids:
+        raise _MutationFailure(f"Task id already exists: {', '.join(sorted(existing_ids))}")
+
     seen_ids: set[str] = set()
     for spec in new_tasks:
         if spec.task_id in seen_ids:
@@ -411,6 +419,30 @@ class TaskDao:
                 query = query.where(team_task_model.status == status)
             result = await session.execute(query)
             return result.scalars().all()
+
+    async def get_other_claimed_task_id(
+        self, team_name: str, member_name: str, exclude_task_id: str
+    ) -> Optional[str]:
+        """Return the task_id of one CLAIMED task held by ``member_name``
+        other than ``exclude_task_id``, or None.
+
+        Existence-style probe for the one-active-claim invariant: selects a
+        single ``task_id`` column with ``LIMIT 1`` instead of materializing
+        the member's whole set of claimed-task rows.
+        """
+        team_task_model = _get_task_model()
+        async with self._sessions.read() as session:
+            query = (
+                select(team_task_model.task_id)
+                .where(
+                    team_task_model.team_name == team_name,
+                    team_task_model.assignee == member_name,
+                    team_task_model.status == TaskStatus.CLAIMED.value,
+                    team_task_model.task_id != exclude_task_id,
+                )
+                .limit(1)
+            )
+            return (await session.execute(query)).scalar_one_or_none()
 
     async def claim_task(self, task_id: str, member_name: str) -> bool:
         """Atomically claim a PENDING, unassigned task via a single CAS UPDATE.
@@ -677,40 +709,6 @@ class TaskDao:
                 await session.rollback()
                 team_logger.error("mutate_dependency_graph unexpected error: %s", e)
                 return GraphMutationResult.fail(f"Unexpected error: {e}")
-
-    async def add_task_with_bidirectional_dependencies(
-        self,
-        task_id: str,
-        team_name: str,
-        title: str,
-        content: str,
-        status: str,
-        *,
-        dependencies: Optional[List[str]] = None,
-        dependent_task_ids: Optional[List[str]] = None,
-    ) -> bool:
-        """Create a task and wire it into the dependency chain atomically."""
-        edges: List[tuple[str, str]] = []
-        for dep_id in dependencies or ():
-            edges.append((task_id, dep_id))
-        for dependent_id in dependent_task_ids or ():
-            edges.append((dependent_id, task_id))
-
-        result = await self.mutate_dependency_graph(
-            team_name=team_name,
-            new_tasks=[
-                NewTaskSpec(
-                    task_id=task_id,
-                    title=title,
-                    content=content,
-                    initial_status=status,
-                )
-            ],
-            add_edges=edges,
-        )
-        if not result.ok:
-            team_logger.error("Failed to create task %s: %s", task_id, result.reason)
-        return result.ok
 
     async def get_task_dependencies(self, task_id: str) -> List[TeamTaskDependencyBase]:
         """Get all dependencies for a task."""

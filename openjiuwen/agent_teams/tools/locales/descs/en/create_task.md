@@ -1,19 +1,20 @@
 Create team tasks (Leader only).
 **Tasks should focus on deliverable outcomes and acceptance criteria, not execution steps.**
 
-## When to Use
+## Two Usage Scenarios
 
-- At project start: batch-create the full task DAG
-- During execution: add new tasks discovered during work
-- Insert into existing DAG: set depended_by to create reverse dependencies when a missing prerequisite needs to slot into an existing chain
+1. **Batch-create a task graph/subgraph** (initial DAG at project start, or new tasks discovered during work): pass the whole batch in one call and express edges among them with **depends_on only** — depends_on may reference tasks in the same batch (order-independent, forward references allowed) or tasks already on the board. Do not point depended_by at tasks of the same batch; that is a redundant representation of the same edge and is rejected.
+2. **Insert into an existing chain** (a missing prerequisite surfaces): the new task lists the **existing tasks that must wait for it via depended_by**; those tasks automatically become blocked until the new task completes. depended_by may only reference tasks already on the board.
+
+The whole call is **atomic**: either every task is created or none is, with the concrete failure reason (cycle, id collision, missing referenced task, ...).
 
 ## Task Fields
 
 - **title**: Concise description of the goal (imperative form, e.g. "Implement user auth")
 - **content**: Goals, acceptance criteria, and constraints — not specific operations
 - **task_id** (optional): Custom ID for dependency reference (auto-generated if omitted)
-- **depends_on** (optional): **"who I depend on"** — prerequisite task IDs that must complete before this task can start
-- **depended_by** (optional): **"who depends on me"** (reverse dependency) — existing task IDs that should wait for this task. Listed tasks are automatically blocked until this task completes
+- **depends_on** (optional): **"who I depend on"** — prerequisite task IDs that must complete before this task can start; may reference in-batch or existing tasks
+- **depended_by** (optional): **"who depends on me"** (reverse dependency) — **existing** task IDs that should wait for this task; must not reference in-batch tasks
 
 All tasks start as `pending` (or `blocked` if they have unresolved dependencies).
 
@@ -22,7 +23,7 @@ All tasks start as `pending` (or `blocked` if they have unresolved dependencies)
 - Wrap single tasks in an array — tasks is always an array
 - Describe goals, not steps: content should contain goals, acceptance criteria, and constraints
 - Single owner: each task should be one independently deliverable outcome
-- Use depends_on / depended_by to build the dependency DAG
+- In-batch edges have exactly one spelling: the downstream task depends_on the upstream one; depended_by is reserved for slotting into an existing DAG
 
 ## Granularity Examples
 
