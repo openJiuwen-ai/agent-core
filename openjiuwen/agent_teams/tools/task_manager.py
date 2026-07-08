@@ -852,8 +852,10 @@ class TeamTaskManager:
         unblocked_tasks = result.get("unblocked_tasks") or []
         team_logger.info(f"Task {task_id} cancelled")
 
+        # Carry the (former) assignee so its dispatcher steers it off the
+        # cancelled task via on_task_cancelled, instead of a member-wide cancel.
         await self._publish_task_event(
-            TaskCancelledEvent(team_name=self.team_name, task_id=task_id),
+            TaskCancelledEvent(team_name=self.team_name, task_id=task_id, member_name=task.assignee),
             error_label=f"Task cancelled event for {task_id}",
         )
         await self._publish_unblocked_events(unblocked_tasks)
@@ -890,7 +892,11 @@ class TeamTaskManager:
 
         for task in cancelled_tasks:
             await self._publish_task_event(
-                TaskCancelledEvent(team_name=self.team_name, task_id=task.task_id),
+                TaskCancelledEvent(
+                    team_name=self.team_name,
+                    task_id=task.task_id,
+                    member_name=task.assignee,
+                ),
                 error_label=f"Task cancelled event for {task.task_id}",
             )
         await self._publish_unblocked_events(unblocked_tasks)
@@ -1016,15 +1022,21 @@ class TeamTaskManager:
         if not success:
             return TaskOpResult.fail(
                 f"Task {task_id} cannot be edited while in status '{task.status}'; "
-                f"content updates are only allowed on pending / blocked tasks"
+                f"content updates are allowed on pending / blocked / claimed tasks "
+                f"(plan-mode tasks are locked)"
             )
 
         team_logger.info(f"Task {task_id} updated")
 
+        # A claimed task stays claimed on edit; carry the assignee so its
+        # dispatcher tells it to re-read the revised content (on_task_updated)
+        # instead of the old reset-to-pending + cancel_member.
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
-                message=EventMessage.from_event(TaskUpdatedEvent(team_name=self.team_name, task_id=task_id)),
+                message=EventMessage.from_event(
+                    TaskUpdatedEvent(team_name=self.team_name, task_id=task_id, member_name=task.assignee)
+                ),
             )
             team_logger.debug(f"Task updated event published: {task_id}")
         except Exception as e:
@@ -1085,21 +1097,22 @@ class TeamTaskManager:
         return await self.db.task.get_other_claimed_task_id(self.team_name, member_name, exclude_task_id)
 
     async def reassign(self, task_id: str, new_assignee: str) -> TaskOpResult:
-        """Reassign a claimed task to another member without cancelling anyone.
+        """Hand a claimed task from its current owner to another member.
 
-        Reset the task back to PENDING, notify the former assignee via a
-        targeted ``TASK_REVOKED`` event so its dispatcher can steer it off
-        the now-foreign work, then assign to ``new_assignee`` (which fires
-        ``TASK_CLAIMED`` to notify the new owner). Unlike the old
-        ``cancel_member`` path, this touches only the one task — the former
-        assignee's other claims and its in-flight round stay intact.
+        Atomic assignee swap — the task stays CLAIMED throughout and never
+        bounces through PENDING, so no spurious ``TASK_RELEASED`` wakes idle
+        teammates and there is no claimable-pool window to race into. Fires
+        exactly two targeted events: ``TASK_REVOKED`` tells the former owner
+        to steer off the now-foreign task, ``TASK_CLAIMED`` tells the new
+        owner to pick it up. The former owner's other claims and in-flight
+        round stay intact — this touches only the one task.
 
-        The new assignee is validated *before* the reset so a bad target
-        never strands the task as an ownerless PENDING.
+        The new member is validated *before* the swap so a bad target never
+        disturbs the task.
 
         Args:
-            task_id: Task to reassign.
-            new_assignee: Member to assign the task to.
+            task_id: Task to reassign (must be CLAIMED).
+            new_assignee: Member to hand the task to.
 
         Returns:
             ``TaskOpResult`` describing the outcome.
@@ -1113,17 +1126,24 @@ class TeamTaskManager:
             return TaskOpResult.fail(f"Member {new_assignee} not found in team {self.team_name}")
 
         old_assignee = task.assignee
-        reset_result = await self.reset(task_id)
-        if not reset_result.ok:
-            return reset_result
+        if not old_assignee:
+            return TaskOpResult.fail(f"Task {task_id} has no current assignee to reassign from")
 
-        if old_assignee:
-            await self._publish_task_event(
-                TaskRevokedEvent(team_name=self.team_name, task_id=task_id, member_name=old_assignee),
-                error_label=f"Task revoked event for {task_id} (from {old_assignee})",
+        swapped = await self.db.task.reassign_task(task_id, old_assignee, new_assignee)
+        if not swapped:
+            return TaskOpResult.fail(
+                f"Task {task_id} could not be reassigned; it is no longer claimed by {old_assignee}"
             )
 
-        return await self.assign(task_id, new_assignee)
+        await self._publish_task_event(
+            TaskRevokedEvent(team_name=self.team_name, task_id=task_id, member_name=old_assignee),
+            error_label=f"Task revoked event for {task_id} (from {old_assignee})",
+        )
+        await self._publish_task_event(
+            TaskClaimedEvent(team_name=self.team_name, task_id=task_id, member_name=new_assignee),
+            error_label=f"Task claimed event for {task_id} (to {new_assignee})",
+        )
+        return TaskOpResult.success()
 
     async def approve_plan(
         self,

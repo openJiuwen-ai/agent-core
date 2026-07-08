@@ -189,6 +189,9 @@ STRINGS: dict[str, str] = {
     "update_task.error_human_agent_locked_reassign": (
         "任务 {task_id} 已由人类成员认领，不能改派给 {new_assignee}；人类成员锁定的任务必须由对应人类本人完成"
     ),
+    "update_task.error_human_agent_locked_edit": (
+        "任务 {task_id} 已由人类成员认领，不允许修改其标题/内容；如需变更，请通过 send_message 与对应的人类成员协商"
+    ),
     # ===== claim_task =========================================================
     # claim_task._desc lives in descs/cn/claim_task.md
     "claim_task.task_id": "要领取或完成的任务 ID",

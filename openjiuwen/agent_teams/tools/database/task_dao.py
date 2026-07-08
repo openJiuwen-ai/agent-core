@@ -499,6 +499,47 @@ class TaskDao:
                 )
             return claimed
 
+    async def reassign_task(self, task_id: str, from_assignee: str, to_assignee: str) -> bool:
+        """Atomically hand a CLAIMED task from one member to another.
+
+        Single conditional ``UPDATE`` — ``WHERE assignee = from_assignee AND
+        status = claimed`` — so the task never bounces through PENDING (no
+        spurious TASK_RELEASED, no claimable-pool window an idle teammate
+        could race into). Mirrors ``claim_task``'s CAS discipline: existence /
+        member validation is the caller's job outside the write lock; this
+        method is only the concurrency arbiter.
+
+        Returns:
+            True iff the row was swapped (``rowcount == 1``); False when the
+            task is missing, not in CLAIMED state, or not held by
+            ``from_assignee``.
+        """
+        team_task_model = _get_task_model()
+        now = get_current_time()
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(team_task_model)
+                .where(
+                    team_task_model.task_id == task_id,
+                    team_task_model.assignee == from_assignee,
+                    team_task_model.status == TaskStatus.CLAIMED.value,
+                )
+                .values(assignee=to_assignee, updated_at=now)
+            )
+            await session.commit()
+            swapped = result.rowcount == 1
+            if swapped:
+                team_logger.info("Task %s reassigned from %s to %s", task_id, from_assignee, to_assignee)
+            else:
+                team_logger.debug(
+                    "CAS reassign for task %s (%s -> %s) did not apply (rowcount=%s)",
+                    task_id,
+                    from_assignee,
+                    to_assignee,
+                    result.rowcount,
+                )
+            return swapped
+
     async def reset_task(self, task_id: str) -> Optional[TeamTaskBase]:
         """Reset a claimed or plan_approved task back to pending status and clear assignee."""
         team_task_model = _get_task_model()
@@ -631,10 +672,12 @@ class TaskDao:
                 team_logger.error("Task %s not found", task_id)
                 return False
 
-            if task.status in (
-                TaskStatus.CLAIMED.value,
-                TaskStatus.PLAN_APPROVED.value,
-            ):
+            # PLAN_APPROVED stays locked (plan-mode contract). CLAIMED is now
+            # editable: the leader revises a live task's content and the
+            # assignee is told to re-read via a targeted TASK_UPDATED notice
+            # (see TeamTaskManager.update_task), instead of the old
+            # reset-to-pending + cancel_member.
+            if task.status == TaskStatus.PLAN_APPROVED.value:
                 team_logger.error(
                     "Cannot update task %s because it is currently %s",
                     task_id,

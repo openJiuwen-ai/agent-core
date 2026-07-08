@@ -29,16 +29,16 @@ class TaskBoardHandler(BaseCoordinationHandler):
     """Handle TASK_CLAIMED / TASK_REVOKED + 6 task-board state-transition events."""
 
     EVENT_METHOD_MAP: ClassVar[dict[str, str]] = {
-        # Targeted assignment / revocation (reaches the affected member directly)
+        # Targeted to the affected member (self-branch), else board fallback
         TeamEvent.TASK_CLAIMED: "on_task_claimed",
         TeamEvent.TASK_REVOKED: "on_task_revoked",
-        # Task board (everything except TASK_CLAIMED nudges idle agent)
+        TeamEvent.TASK_CANCELLED: "on_task_cancelled",
+        TeamEvent.TASK_UPDATED: "on_task_updated",
+        # Task board (nudge idle agent / leader observes)
         TeamEvent.TASK_CREATED: "on_task_board_event",
         TeamEvent.TASK_PLAN_REQUEST: "on_task_board_event",
         TeamEvent.TASK_PLAN_RESPONSE: "on_task_plan_decision",
-        TeamEvent.TASK_UPDATED: "on_task_board_event",
         TeamEvent.TASK_COMPLETED: "on_task_board_event",
-        TeamEvent.TASK_CANCELLED: "on_task_board_event",
         TeamEvent.TASK_UNBLOCKED: "on_task_board_event",
         TeamEvent.TASK_RELEASED: "on_task_board_event",
     }
@@ -170,6 +170,70 @@ class TaskBoardHandler(BaseCoordinationHandler):
         )
         team_logger.info(
             "[{}] received TASK_REVOKED for self, task_id={}",
+            member_name,
+            payload.task_id,
+        )
+        await self._round.deliver_input(content)
+
+    async def on_task_cancelled(self, event: EventMessage) -> None:
+        """A task was cancelled; steer its assignee off it if that's me.
+
+        ``member_name`` carries the cancelled task's (former) assignee. When
+        it targets self, deliver a stop-and-resurvey prompt (the member may be
+        mid-work on the now-void task). For any other member, fall through to
+        the board handler so an idle leader still observes the board change
+        (TASK_CANCELLED removes a task — it never nudges teammates).
+
+        A human-agent's claimed task is leader-immutable (cancel is refused
+        upstream), so a cancel never targets a human avatar — no HITT branch.
+        """
+        member_name = self._blueprint.member_name
+        if not member_name or self._infra.task_manager is None:
+            return
+        payload = event.get_payload()
+        if payload.member_name != member_name:
+            await self.on_task_board_event(event)
+            return
+        await self._poll.resume_polls()
+        content = render_event(
+            kind="task-cancelled",
+            body=t("dispatcher.task_cancelled_to_self", task_id=payload.task_id),
+            task_id=payload.task_id,
+        )
+        team_logger.info(
+            "[{}] received TASK_CANCELLED for self, task_id={}",
+            member_name,
+            payload.task_id,
+        )
+        await self._round.deliver_input(content)
+
+    async def on_task_updated(self, event: EventMessage) -> None:
+        """A task's content was edited; tell its assignee to re-read if me.
+
+        ``member_name`` carries the current owner (the task stays CLAIMED on
+        edit). When it targets self, steer the member to re-read the revised
+        content via view_task and continue — it keeps the task. For any other
+        member, fall through to the board handler (leader observes; an edit
+        does not grow the claimable pool, so teammates are not nudged).
+
+        A human-agent's claimed task is leader-immutable (edit is refused
+        upstream), so an update never targets a human avatar — no HITT branch.
+        """
+        member_name = self._blueprint.member_name
+        if not member_name or self._infra.task_manager is None:
+            return
+        payload = event.get_payload()
+        if payload.member_name != member_name:
+            await self.on_task_board_event(event)
+            return
+        await self._poll.resume_polls()
+        content = render_event(
+            kind="task-updated",
+            body=t("dispatcher.task_content_updated_to_self", task_id=payload.task_id),
+            task_id=payload.task_id,
+        )
+        team_logger.info(
+            "[{}] received TASK_UPDATED for self, task_id={}",
             member_name,
             payload.task_id,
         )

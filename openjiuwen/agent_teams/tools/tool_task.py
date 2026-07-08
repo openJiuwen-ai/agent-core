@@ -291,41 +291,6 @@ class UpdateTaskTool(TeamTool):
             "required": ["task_id"],
         }
 
-    async def _is_cancellable_assignee(self, assignee: str | None) -> bool:
-        """Whether an assignee owns an execution process the team can cancel.
-
-        Human-agent members are first-class team members but run no
-        background process — cancel operations must skip all of them,
-        otherwise the backend would try to stop something that never
-        existed.
-        """
-        return bool(assignee) and not await self.agent_team.is_human_agent(assignee)
-
-    async def _cancel_member_if_claimed(self, task_id: str) -> None:
-        """Cancel the assignee if task is currently claimed.
-
-        Skips human-agent members: they own no execution process to cancel.
-        """
-        task = await self.task_manager.get(task_id)
-        if not task or task.status != TaskStatus.CLAIMED.value:
-            return
-        if await self._is_cancellable_assignee(task.assignee):
-            await self.agent_team.cancel_member(member_name=task.assignee)
-
-    async def _cancel_claimed_members(self) -> None:
-        """Cancel all members who have claimed tasks.
-
-        Skips human-agent members so a batch cancel does not try to
-        cancel a member that has no execution process.
-        """
-        claimed_tasks = await self.task_manager.list_tasks(status=TaskStatus.CLAIMED.value)
-        cancelled: set[str] = set()
-        for task in claimed_tasks:
-            if task.assignee in cancelled or not await self._is_cancellable_assignee(task.assignee):
-                continue
-            await self.agent_team.cancel_member(member_name=task.assignee)
-            cancelled.add(task.assignee)
-
     async def _is_human_agent_locked(self, task) -> bool:
         """Whether a task is held by a human-agent member and therefore
         leader-immutable.
@@ -349,10 +314,10 @@ class UpdateTaskTool(TeamTool):
 
         # cancel_all: task_id="*" + status="cancelled"
         if task_id == "*" and status == "cancelled":
-            await self._cancel_claimed_members()
-            # Preserve every human-agent-claimed task in a single batch
-            # cancel. Passing an empty set is fine — the backend treats
-            # None and empty uniformly.
+            # Each cancelled task fires a targeted TASK_CANCELLED carrying its
+            # assignee, so every affected member is steered off its task via
+            # on_task_cancelled — no member-wide cancel needed. Preserve every
+            # human-agent-claimed task (empty set is treated as None).
             skip = set(await self.agent_team.human_agent_names())
             count = await self.agent_team.cancel_all_tasks(skip_assignees=skip or None)
             return ToolOutput(success=True, data={"cancelled_count": count})
@@ -372,7 +337,6 @@ class UpdateTaskTool(TeamTool):
                         task_id=task_id,
                     ),
                 )
-            await self._cancel_member_if_claimed(task_id)
             success = await self.agent_team.cancel_task(task_id=task_id)
             if not success:
                 return ToolOutput(success=False, error="Failed to cancel task")
@@ -381,9 +345,14 @@ class UpdateTaskTool(TeamTool):
         # Collect all field updates in one pass
         updated: list[str] = []
 
-        # Content update (title and/or content)
+        # Content update (title and/or content). A human-agent-claimed task is
+        # leader-immutable (same rule as cancel / reassign); refuse the edit.
         if title or content:
-            await self._cancel_member_if_claimed(task_id)
+            if await self._is_human_agent_locked(task):
+                return ToolOutput(
+                    success=False,
+                    error=self.t("update_task", "error_human_agent_locked_edit", task_id=task_id),
+                )
             result = await self.task_manager.update_task(task_id, title=title, content=content)
             if not result.ok:
                 return ToolOutput(success=False, error=result.reason)

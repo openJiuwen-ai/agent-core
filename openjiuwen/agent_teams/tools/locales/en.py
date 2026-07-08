@@ -280,6 +280,11 @@ STRINGS: dict[str, str] = {
         "reassigned to {new_assignee}. Tasks locked by a human member "
         "must be completed by that human"
     ),
+    "update_task.error_human_agent_locked_edit": (
+        "Task {task_id} is claimed by a human member; its title/content "
+        "cannot be edited. Use send_message to coordinate with that human "
+        "member instead"
+    ),
     # ===== claim_task =========================================================
     # claim_task._desc lives in descs/en/claim_task.md
     "claim_task.task_id": "The ID of the task to claim or complete",
