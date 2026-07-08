@@ -5,6 +5,7 @@ Claim or complete a task (Teammate only).
 **Claim a task to start work:**
 - After finding a pending, unclaimed task via view_task, set status=claimed
 - Pick a task matching your domain expertise
+- **You can hold only ONE in-progress (claimed) task at a time**: if you already have a claimed task, finish it before claiming another — otherwise the claim is refused
 
 **Mark tasks as completed:**
 - When you have completed the work described in a task, set status=completed

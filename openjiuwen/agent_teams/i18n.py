@@ -77,6 +77,14 @@ STRINGS: dict[str, dict[str, str]] = {
             "[任务撤回] 任务 [{task_id}] 已被转交给其他成员。请立即停止该任务的工作，"
             "并通过 view_task 查看是否有新的可认领任务。"
         ),
+        "dispatcher.task_cancelled_to_self": (
+            "[任务取消] 你正在执行的任务 [{task_id}] 已被取消。请立即停止该任务的工作，"
+            "并通过 view_task 查看是否有新的可认领任务。"
+        ),
+        "dispatcher.task_content_updated_to_self": (
+            "[任务变更] 你正在执行的任务 [{task_id}] 的内容已被更新。请通过 view_task "
+            "重新查看最新要求后继续执行（任务仍归你，无需重新认领）。"
+        ),
         # agent/dispatcher.py — message formatting
         "dispatcher.task_plan_approved_to_self": (
             "[计划已批准] 任务 [{task_id}] 的执行计划已通过。请开始执行，完成后用 claim_task(status='completed') 标记完成。"
@@ -249,6 +257,15 @@ STRINGS: dict[str, dict[str, str]] = {
         "dispatcher.task_revoked_from_self": (
             "[Task Revoked] Task [{task_id}] has been reassigned to another member. "
             "Stop working on it now and call view_task to find your next available task."
+        ),
+        "dispatcher.task_cancelled_to_self": (
+            "[Task Cancelled] Task [{task_id}] you were working on has been cancelled. "
+            "Stop working on it now and call view_task to find your next available task."
+        ),
+        "dispatcher.task_content_updated_to_self": (
+            "[Task Updated] The content of task [{task_id}] you are working on has changed. "
+            "Call view_task to re-read the latest requirements, then continue (the task is "
+            "still yours — no need to re-claim)."
         ),
         # agent/dispatcher.py — message formatting
         "dispatcher.task_plan_approved_to_self": (
