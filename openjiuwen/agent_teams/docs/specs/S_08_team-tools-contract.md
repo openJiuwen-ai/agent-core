@@ -132,10 +132,16 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     的全部 claimed 行）校验，命中即拒绝（`exclude_task_id` 放行幂等 re-claim /
     re-assign 同一任务）；`UpdateTaskTool` 的校验落在 reassignment reset **之前**，
     拒绝时原任务与当前 owner 均不受扰动。改派已认领任务走
-    `TeamTaskManager.reassign`——**只 reset 目标任务**、发 `TASK_REVOKED` 通知原
-    owner、再 assign 给新 owner，**不再** `cancel_member`（那会连带 reset 原 owner
-    的其它 claim 并取消其 in-flight round）。新 owner 的指派通知复用既有
-    `TASK_CLAIMED`，不额外发消息。见 F_54。
+    `TeamTaskManager.reassign`——DAO 层**原子 CAS 交换 assignee**（任务全程 CLAIMED，
+    不经 PENDING），发 `TASK_REVOKED` 通知原 owner、`TASK_CLAIMED` 通知新 owner，
+    **不发 `TASK_RELEASED`**（不会 spurious 唤醒空闲 teammate）、**不再** `cancel_member`
+    （那会连带取消原 owner 的其它 claim 与 in-flight round）。见 F_54 / F_56。
+17. **取消 / 编辑已认领任务用任务级信号，不取消成员**：cancel 一个已认领任务、或改其
+    标题 / 内容，都**不再** `cancel_member`。cancel 发 `TASK_CANCELLED`（带 `member_name`）
+    让该成员经 `on_task_cancelled` 停手；编辑**保持任务 CLAIMED**（DAO 放开 CLAIMED 可编辑，
+    仅 PLAN_APPROVED 仍锁），发 `TASK_UPDATED`（带 `member_name`）让该成员经 `on_task_updated`
+    重看后继续。人类成员认领的任务对 cancel / reassign / **改标题·内容**三者都 leader-immutable
+    （HITT 锁），故这些信号的 `member_name` 永不指向 human avatar。见 F_56。
 
 ## 接口契约
 
