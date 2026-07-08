@@ -111,7 +111,7 @@ PostgreSQL / MySQL 后端（`engine.py`），不要用 SQLite。
 | `approve_tool` | ✓（仅 plan_mode） | | 与 `approve_plan` 相同的门控 |
 | `list_members` | ✓ | | 结果里排除调用者自身 |
 | `create_task` | ✓ | | 整次调用经 `add_graph` 做**一次原子图变更**：批内依赖只用 `depends_on`（允许前向引用），`depended_by` 仅可指向已有任务（指向批内任务在工具边界拒绝）；全批成功或整体失败并返回真实 reason。单 spec 返回 `brief()`，批量返回 `tasks`+`count`。见 F_55 |
-| `update_task` | ✓ | | 一个工具处理标题/内容编辑、取消、指派以及 `add_blocked_by`；改派已认领任务走 `TeamTaskManager.reassign`（reset + `TASK_REVOKED` 通知原 owner，**不** `cancel_member`），并强制「目标成员至多一个活跃 CLAIMED」，见 F_54 |
+| `update_task` | ✓ | | 一个工具处理标题/内容编辑、取消、指派以及 `add_blocked_by`。改派走 `TeamTaskManager.reassign`（DAO 原子 CAS 交换 assignee，发 `TASK_REVOKED`+`TASK_CLAIMED`，不发 `TASK_RELEASED`）；取消/编辑发 `TASK_CANCELLED`/`TASK_UPDATED`（带 `member_name`）——三者都**不再** `cancel_member`（编辑保持任务 CLAIMED）。强制「目标成员至多一个活跃 CLAIMED」；人类认领任务对 cancel / reassign / 改标题·内容均 leader-immutable。见 F_54 / F_56 |
 | `view_task` | ✓ | ✓ | `action ∈ {list, get, claimable}`；默认 `list` |
 | `claim_task` | | ✓ | `status ∈ {claimed, completed}`；claim 前强制「本成员至多一个活跃 CLAIMED」（见 F_54）；完成路径追加一句下一步 nudge |
 | `send_message` | ✓ | ✓ | `to == "*"` → 广播；leader 调用会自动拉起 UNSTARTED 成员。也挂到 `human_agent` 作为一条用户驱动的转发通道 —— HITT prompt section 禁止自主使用；只有用户下达的"tell `<member>` …"指令才可触发。 |
