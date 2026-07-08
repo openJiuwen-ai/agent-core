@@ -33,6 +33,7 @@ from openjiuwen.agent_teams.schema.events import (
     MemberShutdownEvent,
     MemberStatusChangedEvent,
     MessageEvent,
+    TaskCancelledEvent,
     TaskClaimedEvent,
     TaskRevokedEvent,
     TaskCompletedEvent,
@@ -931,6 +932,68 @@ async def test_task_revoked_for_other_member_is_ignored():
     await agent._coordination.dispatcher.task_board.on_task_revoked(event)
 
     agent.deliver_input.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_task_cancelled_for_self_steers_member_off_task():
+    """A member whose claimed task is cancelled is steered off it via the
+    [任务取消] prompt (stop working + re-survey the board)."""
+    agent = _make_leader()
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCancelledEvent(team_name="test-team", member_name="leader-1", task_id="task-42")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_cancelled(event)
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "[任务取消]" in content
+    assert "task-42" in content
+    assert "view_task" in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_task_updated_for_self_tells_member_to_reread():
+    """A member whose claimed task's content was edited is told to re-read via
+    the [任务变更] prompt; it keeps the task (no re-claim)."""
+    agent = _make_leader()
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskUpdatedEvent(team_name="test-team", member_name="leader-1", task_id="task-42")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_updated(event)
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "[任务变更]" in content
+    assert "task-42" in content
+    assert "view_task" in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_dispatch_routes_targeted_task_events_to_handlers():
+    """Integration: the real dispatch entry (EVENT_METHOD_MAP + framework)
+    routes TASK_REVOKED / TASK_CANCELLED / TASK_UPDATED to their targeted
+    self-branches — verified through dispatcher.dispatch, not by hand-calling
+    the handler methods (closes the routing gap the unit tests skipped)."""
+    cases = (
+        (TaskRevokedEvent(team_name="test-team", member_name="leader-1", task_id="t-1"), "[任务撤回]"),
+        (TaskCancelledEvent(team_name="test-team", member_name="leader-1", task_id="t-2"), "[任务取消]"),
+        (TaskUpdatedEvent(team_name="test-team", member_name="leader-1", task_id="t-3"), "[任务变更]"),
+    )
+    for event_model, marker in cases:
+        agent = _make_leader()
+        agent.deliver_input = AsyncMock()
+        await agent._coordination.dispatcher.dispatch(EventMessage.from_event(event_model))
+        agent.deliver_input.assert_awaited_once()
+        assert marker in agent.deliver_input.await_args.args[0]
 
 
 @pytest.mark.asyncio
