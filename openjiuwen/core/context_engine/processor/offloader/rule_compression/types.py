@@ -10,7 +10,7 @@ class ContentType(str, Enum):
     GIT_DIFF = "GIT_DIFF"
     HTML = "HTML"
     SEARCH_RESULTS = "SEARCH_RESULTS"
-    BUILD_OUTPUT = "BUILD_OUTPUT"
+    LOG = "LOG"
     SOURCE_CODE = "SOURCE_CODE"
     PLAIN_TEXT = "PLAIN_TEXT"
 
@@ -24,11 +24,15 @@ class RuleContext:
     min_savings_ratio: float = 0.1
     json_csv_min_density: float = 0.8
     query_terms: frozenset[str] = frozenset()
+    tool_name: str | None = None
+    source_path: str | None = None
     search_max_matches_per_file: int = 5
     search_max_total_matches: int = 30
     search_max_files: int = 15
     diff_min_lines: int = 50
     diff_max_context_lines: int = 2
+    diff_max_changed_lines_per_hunk: int = 8
+    diff_max_changed_lines_total: int = 200
     diff_max_hunks_per_file: int = 10
     diff_max_files: int = 20
     html_min_content_chars: int = 100

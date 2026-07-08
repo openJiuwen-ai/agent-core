@@ -82,6 +82,9 @@ class DiffCompressor:
         hunks_omitted = 0
         context_lines_retained = 0
         context_lines_omitted = 0
+        changed_lines_retained = 0
+        changed_lines_omitted = 0
+        changed_lines_remaining = max(ctx.diff_max_changed_lines_total, 0)
         additions = sum(file.additions for file in files)
         deletions = sum(file.deletions for file in files)
 
@@ -93,19 +96,35 @@ class DiffCompressor:
             for hunk in file.hunks:
                 if hunk.position not in selected_positions:
                     continue
-                reduced, retained, omitted = _reduce_context(
+                changed_limit = min(
+                    max(ctx.diff_max_changed_lines_per_hunk, 0),
+                    changed_lines_remaining,
+                )
+                (
+                    reduced,
+                    retained,
+                    omitted,
+                    changed_retained,
+                    changed_omitted,
+                ) = _reduce_hunk_lines(
                     hunk.lines,
                     ctx.diff_max_context_lines,
+                    changed_limit,
                 )
+                changed_lines_remaining = max(changed_lines_remaining - changed_retained, 0)
                 output.append(hunk.header)
                 output.extend(reduced)
                 if omitted:
                     output.append(
                         f"[{omitted} unchanged/context diff lines omitted]"
                     )
+                if changed_omitted:
+                    output.append(f"[{changed_omitted} changed diff lines omitted]")
                 hunks_retained += 1
                 context_lines_retained += retained
                 context_lines_omitted += omitted
+                changed_lines_retained += changed_retained
+                changed_lines_omitted += changed_omitted
             if omitted_for_file:
                 hunks_omitted += omitted_for_file
 
@@ -128,11 +147,18 @@ class DiffCompressor:
             "deletions": deletions,
             "context_lines_retained": context_lines_retained,
             "context_lines_omitted": context_lines_omitted,
+            "changed_lines_retained": changed_lines_retained,
+            "changed_lines_omitted": changed_lines_omitted,
             "original_line_count": original_line_count,
             "compressed_line_count": compressed_line_count,
             "should_offload_original": compressed_line_count < original_line_count * _CCR_RATIO_THRESHOLD,
         }
-        lossy = files_omitted > 0 or hunks_omitted > 0 or context_lines_omitted > 0
+        lossy = (
+            files_omitted > 0
+            or hunks_omitted > 0
+            or context_lines_omitted > 0
+            or changed_lines_omitted > 0
+        )
         if candidate != content and lossy and meets_savings_ratio(content, candidate, ctx):
             return RuleCompressionResult(
                 content=candidate,
@@ -228,21 +254,44 @@ def _parse_diff(content: str) -> tuple[tuple[str, ...], list[DiffFile]]:
     return tuple(preamble), files
 
 
-def _reduce_context(lines: tuple[str, ...], max_context: int) -> tuple[list[str], int, int]:
+def _reduce_hunk_lines(
+    lines: tuple[str, ...],
+    max_context: int,
+    max_changed: int,
+) -> tuple[list[str], int, int, int, int]:
     change_positions = [index for index, line in enumerate(lines) if _is_change_line(line)]
+    priority_changes = [
+        index
+        for index in change_positions
+        if _PRIORITY_RE.search(lines[index])
+    ]
+    selected_changes: set[int] = set(priority_changes[:max_changed])
+    for index in change_positions:
+        if len(selected_changes) >= max_changed:
+            break
+        selected_changes.add(index)
+
     kept: list[str] = []
     context_retained = 0
     context_omitted = 0
+    changed_retained = 0
+    changed_omitted = 0
     for index, line in enumerate(lines):
         if _is_context_line(line):
-            if any(abs(index - change) <= max_context for change in change_positions):
+            if any(abs(index - change) <= max_context for change in selected_changes):
                 kept.append(line)
                 context_retained += 1
             else:
                 context_omitted += 1
+        elif _is_change_line(line):
+            if index in selected_changes:
+                kept.append(line)
+                changed_retained += 1
+            else:
+                changed_omitted += 1
         else:
             kept.append(line)
-    return kept, context_retained, context_omitted
+    return kept, context_retained, context_omitted, changed_retained, changed_omitted
 
 
 def _score_text(text: str, change_count: int, query_terms: frozenset[str]) -> int:

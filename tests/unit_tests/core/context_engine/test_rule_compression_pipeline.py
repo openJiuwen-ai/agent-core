@@ -4,6 +4,10 @@ from pathlib import Path
 from openjiuwen.core.context_engine.processor.offloader.rule_compression.pipeline import (
     RuleCompressionPipeline,
 )
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.search_results_compressor import (
+    SearchResultsCompressor,
+)
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.types import RuleContext
 from openjiuwen.core.foundation.llm import ToolMessage
 
 
@@ -103,3 +107,29 @@ def test_rule_compression_dump_uses_env_directory_without_workspace(tmp_path, mo
     assert payload["original_content"] == original
     assert payload["compressed_content"] == "same line"
     assert compressed.metadata["rule_compression_dump_path"] == str(log_files[0])
+
+
+def test_search_results_compression_ignores_numbered_line_prefixes():
+    content = "\n".join(
+        f"{index}\topenjiuwen/core/context_engine/processor/offloader/message_offloader.py:{index}:"
+        f"    MessageOffloader match {index}"
+        for index in range(1, 9)
+    )
+
+    result = SearchResultsCompressor().compress(
+        content,
+        RuleContext(
+            max_tokens=100,
+            search_max_matches_per_file=3,
+            search_max_total_matches=3,
+            search_max_files=15,
+            count_tokens=lambda text: max(len(text) // 3, 1),
+        ),
+    )
+
+    assert result.modified
+    assert result.details["files_affected"] == 1
+    assert result.details["retained_match_count"] == 3
+    assert "1\topenjiuwen" not in result.content
+    assert "[... and 5 more matches in openjiuwen/core/context_engine/processor/offloader/message_offloader.py]" in result.content
+    assert "more files omitted" not in result.content

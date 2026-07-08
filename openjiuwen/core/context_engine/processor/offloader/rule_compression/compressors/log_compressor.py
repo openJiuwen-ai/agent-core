@@ -63,12 +63,21 @@ class LogCompressor:
 
         lines, stack_count = _classify_lines(raw_lines, ctx.log_stack_trace_max_lines)
         selected, warnings_deduplicated = self._select(lines, ctx)
+        if not selected:
+            selected = _head_tail(lines, min(ctx.log_max_total_lines, 20))
         selected = _add_context(lines, selected, ctx.log_error_context_lines)
         selected = _apply_cap(selected, ctx.log_max_total_lines)
         selected_positions = {line.position for line in selected}
         omitted = len(lines) - len(selected)
-        output = [line.content for line in selected]
         counts = _level_counts(lines)
+        format_detected = _detect_format(raw_lines)
+        output = [
+            (
+                f"[LOG compressed: format={format_detected}, "
+                f"kept={len(selected)}/{len(lines)}, omitted={omitted}]"
+            ),
+            *[line.content for line in selected],
+        ]
         if omitted:
             labels = [
                 f"{counts[level]} {label}"
@@ -80,10 +89,11 @@ class LogCompressor:
                 )
                 if counts[level]
             ]
-            output.append(f"[{omitted} lines omitted: {', '.join(labels)}]")
+            label_text = f": {', '.join(labels)}" if labels else ""
+            output.append(f"[LOG omitted: {omitted} lines{label_text}]")
         candidate = "\n".join(output)
         details: dict[str, Any] = {
-            "format_detected": _detect_format(raw_lines),
+            "format_detected": format_detected,
             "total_lines": len(lines),
             "selected_lines": len(selected),
             "omitted_lines": omitted,
@@ -99,14 +109,14 @@ class LogCompressor:
         if omitted > 0 and meets_savings_ratio(content, candidate, ctx):
             return RuleCompressionResult(
                 content=candidate,
-                content_type=ContentType.BUILD_OUTPUT,
+                content_type=ContentType.LOG,
                 modified=True,
                 lossy=True,
                 details=details,
             )
         return RuleCompressionResult(
             content=content,
-            content_type=ContentType.BUILD_OUTPUT,
+            content_type=ContentType.LOG,
             modified=False,
             lossy=False,
             details=details,
@@ -278,6 +288,16 @@ def _apply_cap(lines: list[LogLine], limit: int) -> list[LogLine]:
     return sorted(selected, key=lambda item: item.position)
 
 
+def _head_tail(lines: list[LogLine], limit: int) -> list[LogLine]:
+    if limit <= 0:
+        return []
+    if len(lines) <= limit:
+        return lines
+    head_count = max(limit // 2, 1)
+    tail_count = max(limit - head_count, 0)
+    return _dedupe_by_position([*lines[:head_count], *lines[-tail_count:]])
+
+
 def _dedupe_by_position(lines: list[LogLine]) -> list[LogLine]:
     return sorted({line.position: replace(line) for line in lines}.values(), key=lambda item: item.position)
 
@@ -289,6 +309,6 @@ def _level_counts(lines: list[LogLine]) -> dict[LogLevel, int]:
 def _unchanged(content: str) -> RuleCompressionResult:
     return RuleCompressionResult(
         content=content,
-        content_type=ContentType.BUILD_OUTPUT,
+        content_type=ContentType.LOG,
         modified=False,
     )

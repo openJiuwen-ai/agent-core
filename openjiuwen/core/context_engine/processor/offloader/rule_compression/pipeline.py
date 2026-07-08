@@ -56,19 +56,21 @@ class RuleCompressionPipeline:
             return message
 
         original = message.content
-        result = self._router.compress(
-            original,
-            RuleContext(
-                max_tokens=max(max_chars // CHARACTERS_PER_TOKEN, 1),
-                head_tokens=max(max_chars // (CHARACTERS_PER_TOKEN * 2), 1),
-                tail_tokens=max(max_chars // (CHARACTERS_PER_TOKEN * 2), 1),
-                count_tokens=lambda text: max(len(text) // CHARACTERS_PER_TOKEN, 1),
-                query_terms=self._query_terms_for_message(
-                    message,
-                    context_messages or context.get_messages(),
-                ),
-            ),
+        tool_name, tool_arguments = self._tool_info_for_message(
+            message,
+            context_messages or context.get_messages(),
         )
+        query_terms = self._query_terms_for_message(context_messages or context.get_messages(), tool_name, tool_arguments)
+        rule_ctx = RuleContext(
+            max_tokens=max(max_chars // CHARACTERS_PER_TOKEN, 1),
+            head_tokens=max(max_chars // (CHARACTERS_PER_TOKEN * 2), 1),
+            tail_tokens=max(max_chars // (CHARACTERS_PER_TOKEN * 2), 1),
+            count_tokens=lambda text: max(len(text) // CHARACTERS_PER_TOKEN, 1),
+            query_terms=query_terms,
+            tool_name=tool_name,
+            source_path=self._source_path_from_tool_arguments(tool_arguments),
+        )
+        result = self._router.compress(original, rule_ctx)
         content = result.content
         if not result.modified:
             return message
@@ -198,8 +200,9 @@ class RuleCompressionPipeline:
 
     def _query_terms_for_message(
         self,
-        message: BaseMessage,
         context_messages: list[BaseMessage],
+        tool_name: str | None,
+        tool_arguments: object,
     ) -> frozenset[str]:
         latest_user_content = ""
         for context_message in reversed(context_messages):
@@ -207,15 +210,33 @@ class RuleCompressionPipeline:
                 latest_user_content = context_message.content
                 break
 
-        tool_name = None
-        tool_arguments = None
+        return extract_query_terms(latest_user_content, tool_name, tool_arguments)
+
+    def _tool_info_for_message(
+        self,
+        message: BaseMessage,
+        context_messages: list[BaseMessage],
+    ) -> tuple[str | None, object]:
         if isinstance(message, ToolMessage):
             tool_call = ContextUtils.resolve_tool_call_from_message(message, context_messages)
             if tool_call is not None:
                 tool_name = ContextUtils.extract_tool_name(tool_call)
                 tool_arguments = self._extract_tool_arguments(tool_call)
+                return tool_name, tool_arguments
+        return None, None
 
-        return extract_query_terms(latest_user_content, tool_name, tool_arguments)
+    @staticmethod
+    def _source_path_from_tool_arguments(tool_arguments: object) -> str | None:
+        arguments = tool_arguments
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(arguments, dict):
+            return None
+        value = arguments.get("file_path") or arguments.get("path")
+        return str(value) if value else None
 
     @staticmethod
     def _extract_tool_arguments(tool_call: object) -> object:

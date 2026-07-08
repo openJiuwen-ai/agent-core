@@ -157,7 +157,7 @@ def test_numbered_python_source_with_diff_markers_is_not_routed_as_git_diff():
     assert RuleContentRouter().detect(content) == ContentType.SOURCE_CODE
 
 
-def test_article_text_with_failure_words_is_not_routed_as_build_output():
+def test_article_text_with_failure_words_is_not_routed_as_log():
     content = "\n".join(
         [
             "URL: https://example.test/news/world",
@@ -171,7 +171,7 @@ def test_article_text_with_failure_words_is_not_routed_as_build_output():
     assert RuleContentRouter().detect(content) == ContentType.PLAIN_TEXT
 
 
-def test_pytest_output_is_routed_as_build_output():
+def test_pytest_output_is_routed_as_log():
     content = "\n".join(
         [
             "============================= test session starts =============================",
@@ -184,10 +184,119 @@ def test_pytest_output_is_routed_as_build_output():
         ]
     )
 
-    assert RuleContentRouter().detect(content) == ContentType.BUILD_OUTPUT
+    assert RuleContentRouter().detect(content) == ContentType.LOG
 
 
-def test_pytest_output_with_embedded_diff_is_routed_as_build_output():
+def test_prefixed_pytest_output_is_routed_as_log():
+    content = "\n".join(
+        f"{line_number:6}\t{line}"
+        for line_number, line in enumerate(
+            [
+                "============================= test session starts =============================",
+                "platform win32 -- Python 3.11.13, pytest-9.0.2",
+                "collected 3 items",
+                "tests/unit/test_demo.py::test_ok PASSED",
+                "tests/unit/test_demo.py::test_bad FAILED",
+                "================================== FAILURES ===================================",
+                "FAILED tests/unit/test_demo.py::test_bad - AssertionError: boom",
+            ],
+            1,
+        )
+    )
+
+    assert RuleContentRouter().detect(content) == ContentType.LOG
+
+
+def test_prefixed_pytest_output_with_source_snippets_prefers_log():
+    content = "\n".join(
+        f"{line_number:6}\t{line}"
+        for line_number, line in enumerate(
+            [
+                "============================= test session starts =============================",
+                "platform win32 -- Python 3.11.13, pytest-9.0.2",
+                "collected 1 item",
+                "tests/unit/test_demo.py::test_bad FAILED",
+                "================================== FAILURES ===================================",
+                "FAILED tests/unit/test_demo.py::test_bad - AssertionError: boom",
+                "from package.module import function_under_test",
+                "def helper():",
+                "    return function_under_test()",
+                "=========================== short test summary info ===========================",
+                "1 failed in 0.01s",
+            ],
+            1,
+        )
+    )
+
+    result = RuleContentRouter().compress(
+        "\n".join([content] * 20),
+        RuleContext(
+            max_tokens=1600,
+            count_tokens=lambda text: max(len(text) // 3, 1),
+        ),
+    )
+
+    assert result.content_type == ContentType.LOG
+    assert result.modified is True
+    assert result.content.startswith("[LOG compressed: format=pytest")
+    assert "[LOG omitted:" in result.content
+
+
+def test_read_file_python_path_prefers_source_code_over_embedded_log_markers():
+    content = "\n".join(
+        f"{line_number:6}\t{line}"
+        for line_number, line in enumerate(
+            [
+                "============================= test session starts =============================",
+                "platform win32 -- Python 3.11.13, pytest-9.0.2",
+                "collected 1 item",
+                "tests/unit/test_demo.py::test_bad FAILED",
+                "================================== FAILURES ===================================",
+                "FAILED tests/unit/test_demo.py::test_bad - AssertionError: boom",
+                "from package.module import function_under_test",
+                "",
+                "class DemoRunner:",
+                "    def run(self):",
+                "        return function_under_test()",
+            ],
+            1,
+        )
+    )
+
+    assert RuleContentRouter().detect(content) == ContentType.LOG
+    assert (
+        RuleContentRouter().detect(
+            content,
+            RuleContext(
+                max_tokens=1600,
+                tool_name="read_file",
+                source_path="/repo/tests/unit/test_demo.py",
+            ),
+        )
+        == ContentType.SOURCE_CODE
+    )
+
+
+def test_decorated_prefixed_pytest_output_is_routed_as_log():
+    content = "\n".join(
+        f"| {line_number} | {line}"
+        for line_number, line in enumerate(
+            [
+                "============================= test session starts =============================",
+                "platform win32 -- Python 3.11.13, pytest-9.0.2",
+                "collected 1 item",
+                "tests/unit/test_demo.py::test_bad FAILED",
+                "================================== FAILURES ===================================",
+                "FAILED tests/unit/test_demo.py::test_bad - AssertionError: boom",
+            ],
+            1,
+        )
+    )
+
+    assert RuleContentRouter().detect(content) == ContentType.LOG
+
+
+def test_pytest_output_with_embedded_diff_is_routed_as_log():
     content = "\n".join(
         [
             "============================= test session starts =============================",
@@ -209,10 +318,10 @@ def test_pytest_output_with_embedded_diff_is_routed_as_build_output():
         ]
     )
 
-    assert RuleContentRouter().detect(content) == ContentType.BUILD_OUTPUT
+    assert RuleContentRouter().detect(content) == ContentType.LOG
 
 
-def test_structured_application_log_is_routed_as_build_output():
+def test_structured_application_log_is_routed_as_log():
     content = "\n".join(
         [
             "2026-06-19 00:00:01 INFO service started",
@@ -223,4 +332,62 @@ def test_structured_application_log_is_routed_as_build_output():
         * 20
     )
 
-    assert RuleContentRouter().detect(content) == ContentType.BUILD_OUTPUT
+    assert RuleContentRouter().detect(content) == ContentType.LOG
+
+
+def test_agent_trace_output_is_routed_as_log():
+    content = "\n".join(
+        [
+            "Planning next action for user request: analyze context offloader behavior. iteration=0",
+            "Tool call requested: search repository for relevant symbols. iteration=0",
+            "Tool call completed: search repository for relevant symbols. durationMs=123",
+            "Tool result received: 20 matches",
+        ]
+        * 40
+    )
+
+    result = RuleContentRouter().compress(
+        content,
+        RuleContext(
+            max_tokens=1600,
+            count_tokens=lambda text: max(len(text) // 3, 1),
+        ),
+    )
+
+    assert result.content_type == ContentType.LOG
+    assert result.modified is True
+    assert result.content.startswith("[LOG compressed: format=generic")
+    assert "[LOG omitted:" in result.content
+
+
+def test_prefixed_git_diff_is_routed_and_compressed_as_git_diff():
+    hunk = [
+        "diff --git a/pkg/demo.py b/pkg/demo.py",
+        "index 1111111..2222222 100644",
+        "--- a/pkg/demo.py",
+        "+++ b/pkg/demo.py",
+        "@@ -1,80 +1,80 @@",
+        " def unchanged_before():",
+        "     return 1",
+        *[f" context line {index}" for index in range(40)],
+        "-old_value = 1",
+        "+new_value = 2",
+        *[f" more context {index}" for index in range(40)],
+    ]
+    content = "\n".join(f"{line_number:6}\t{line}" for line_number, line in enumerate(hunk, 1))
+
+    result = RuleContentRouter().compress(
+        content,
+        RuleContext(
+            max_tokens=1600,
+            diff_min_lines=1,
+            diff_max_context_lines=1,
+            count_tokens=lambda text: max(len(text) // 3, 1),
+        ),
+    )
+
+    assert result.content_type == ContentType.GIT_DIFF
+    assert result.modified is True
+    assert "diff --git a/pkg/demo.py b/pkg/demo.py" in result.content
+    assert "     1\t" not in result.content
+    assert "unchanged/context diff lines omitted" in result.content
