@@ -19,13 +19,13 @@ _LEGACY_READ_FILE_DESCRIPTION: Dict[str, str] = {
 
 READ_FILE_DESCRIPTION: Dict[str, str] = {
     "cn": (
-        "增强版文件读取工具。支持文本、图片、PDF 与 Jupyter Notebook。\n\n"
+        "增强版文件读取工具。支持文本、图片、PDF、Jupyter Notebook 与 Office 文档（.docx/.xlsx/.pptx）。\n\n"
         "PDF 规则：超过 10 页或超过 10MB 的 PDF 必须使用 pages 参数分批读取，"
         "例如 pages='1-10'、'11-20'；每次最多 10 页。收到 [PDF_READ_ERROR] 时，"
         "必须按错误中的 ACTION REQUIRED 使用更小 pages 范围重试，不要再次无 pages 读取同一大 PDF。"
     ),
     "en": (
-        "Enhanced file reader for text, images, PDFs, and Jupyter notebooks.\n\n"
+        "Enhanced file reader for text, images, PDFs, Jupyter notebooks, and Office documents (.docx/.xlsx/.pptx).\n\n"
         "PDF rules: PDFs over 10 pages or 10MB must be read in batches with the pages parameter, "
         "for example pages='1-10' then '11-20'; maximum 10 pages per request. "
         "When [PDF_READ_ERROR] is returned, follow ACTION REQUIRED and retry with a smaller pages range; "

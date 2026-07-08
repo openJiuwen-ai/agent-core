@@ -45,6 +45,7 @@ dependencies = [
     "python-docx>=1.2.0",
     "pdfplumber>=0.11.8",
     "openpyxl>=3.1.0",
+    "python-pptx>=0.6.23",
     # Utilities
     "numpy!=2.4.0",
     "cacheout>=0.16.0",
