@@ -777,8 +777,9 @@ class TestTaskOperations:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_update_claimed_task_fails(self, db):
-        """Test that updating a claimed task fails"""
+    async def test_update_claimed_task_succeeds_plan_approved_locked(self, db):
+        """A CLAIMED task is now editable (edit keeps it claimed; the assignee
+        is told to re-read). A PLAN_APPROVED task stays locked."""
         await db.team.create_team(
             team_name="team_claimed_update",
             display_name="Team Claimed Update",
@@ -792,14 +793,24 @@ class TestTaskOperations:
             status="claimed"
         )
 
-        # Try to update a claimed task - should fail
+        # Editing a claimed task now succeeds.
         success = await db.task.update_task("task_claimed", title="New Title")
-        assert success is False
-
-        # Verify task was not changed
+        assert success is True
         task = await db.task.get_task("task_claimed")
-        assert task.title == "Claimed Task"
-        assert task.content == "Original content"
+        assert task.title == "New Title"
+
+        # A plan_approved task stays locked.
+        await db.task.create_task(
+            task_id="task_plan_approved",
+            team_name="team_claimed_update",
+            title="Plan Approved Task",
+            content="Original content",
+            status="plan_approved"
+        )
+        locked = await db.task.update_task("task_plan_approved", title="Nope")
+        assert locked is False
+        unchanged = await db.task.get_task("task_plan_approved")
+        assert unchanged.title == "Plan Approved Task"
 
     @pytest.mark.asyncio
     @pytest.mark.level1

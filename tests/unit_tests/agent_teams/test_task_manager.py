@@ -1387,11 +1387,14 @@ async def test_get_other_claimed_task_id_none_without_claims(task_manager, membe
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_reassign_transfers_task_and_revokes_old_assignee(task_manager, member2, message_bus):
-    """reassign moves a claimed task to the new member and fires a targeted
-    TASK_REVOKED for the former assignee (no member-wide cancel). The new
-    owner is notified via TASK_CLAIMED from the assign path, not a message."""
+    """reassign atomically swaps the assignee — the task stays CLAIMED and
+    never bounces through PENDING — and fires exactly two targeted events:
+    TASK_REVOKED for the former owner, TASK_CLAIMED for the new owner. It must
+    NOT fire TASK_RELEASED: the task never re-enters the claimable pool, so
+    idle teammates are not spuriously woken."""
     task = await task_manager.add(title="T", content="c")
     assert (await task_manager.assign(task.task_id, "member1")).ok
+    message_bus.publish.reset_mock()
 
     result = await task_manager.reassign(task.task_id, "member2")
     assert result.ok
@@ -1407,6 +1410,9 @@ async def test_reassign_transfers_task_and_revokes_old_assignee(task_manager, me
 
     claimed = _published_events(message_bus, TeamEvent.TASK_CLAIMED)
     assert any(c.payload["member_name"] == "member2" for c in claimed)
+
+    # Atomic swap: no reset means no spurious TASK_RELEASED for idle teammates.
+    assert _published_events(message_bus, TeamEvent.TASK_RELEASED) == []
 
 
 @pytest.mark.asyncio
@@ -1425,3 +1431,45 @@ async def test_reassign_missing_new_member_leaves_task_intact(task_manager, mess
     assert refreshed.assignee == "member1"
     assert refreshed.status == TaskStatus.CLAIMED.value
     assert _published_events(message_bus, TeamEvent.TASK_REVOKED) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_cancel_claimed_task_notifies_assignee(task_manager, message_bus):
+    """Cancelling a claimed task fires TASK_CANCELLED carrying the (former)
+    assignee, so its dispatcher can steer it off — no member-wide cancel."""
+    task = await task_manager.add(title="T", content="c")
+    assert (await task_manager.assign(task.task_id, "member1")).ok
+    message_bus.publish.reset_mock()
+
+    cancelled = await task_manager.cancel(task.task_id)
+    assert cancelled is not None
+
+    events = _published_events(message_bus, TeamEvent.TASK_CANCELLED)
+    assert len(events) == 1
+    assert events[0].payload["task_id"] == task.task_id
+    assert events[0].payload["member_name"] == "member1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_claimed_task_keeps_claim_and_notifies(task_manager, message_bus):
+    """Editing a CLAIMED task now succeeds (no reset) and fires TASK_UPDATED
+    carrying the current owner, so the assignee is told to re-read. The task
+    stays claimed by the same member."""
+    task = await task_manager.add(title="T", content="c")
+    assert (await task_manager.assign(task.task_id, "member1")).ok
+    message_bus.publish.reset_mock()
+
+    result = await task_manager.update_task(task.task_id, content="revised")
+    assert result.ok
+
+    refreshed = await task_manager.get(task.task_id)
+    assert refreshed.status == TaskStatus.CLAIMED.value
+    assert refreshed.assignee == "member1"
+    assert refreshed.content == "revised"
+
+    events = _published_events(message_bus, TeamEvent.TASK_UPDATED)
+    assert len(events) == 1
+    assert events[0].payload["task_id"] == task.task_id
+    assert events[0].payload["member_name"] == "member1"

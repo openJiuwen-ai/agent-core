@@ -2036,3 +2036,91 @@ async def test_claim_task_rejects_second_concurrent_claim(agent_team, t, sample_
     assert result.success is False
     assert task_a.task_id in result.error
     assert (await agent_team.task_manager.get(task_b.task_id)).status == TaskStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_cancel_claimed_task_does_not_cancel_member(agent_team, t, sample_agent_card, db):
+    """Cancelling a claimed task no longer force-cancels its member; the member
+    is steered off via a targeted TASK_CANCELLED event instead."""
+    await db.member.create_member(
+        member_name="dev-1",
+        team_name="test_team",
+        display_name="dev-1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task = await agent_team.task_manager.add(title="Task", content="Content")
+    await db.task.claim_task(task.task_id, "dev-1")
+    agent_team.cancel_member = AsyncMock()
+
+    tool = UpdateTaskTool(agent_team, t)
+    result = await tool.invoke({"task_id": task.task_id, "status": "cancelled"})
+
+    assert result.success is True
+    agent_team.cancel_member.assert_not_awaited()
+    cancelled = [
+        call.kwargs["message"]
+        for call in agent_team.messager.publish.call_args_list
+        if call.kwargs.get("message") is not None and call.kwargs["message"].event_type == TeamEvent.TASK_CANCELLED
+    ]
+    assert any(m.payload["member_name"] == "dev-1" for m in cancelled)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_edit_claimed_task_keeps_claim_without_cancel_member(agent_team, t, sample_agent_card, db):
+    """Editing a claimed task's content keeps it claimed by the same member
+    (no reset, no member-wide cancel); the member is told to re-read via a
+    targeted TASK_UPDATED event."""
+    await db.member.create_member(
+        member_name="dev-1",
+        team_name="test_team",
+        display_name="dev-1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task = await agent_team.task_manager.add(title="Task", content="old")
+    await db.task.claim_task(task.task_id, "dev-1")
+    agent_team.cancel_member = AsyncMock()
+
+    tool = UpdateTaskTool(agent_team, t)
+    result = await tool.invoke({"task_id": task.task_id, "content": "new content"})
+
+    assert result.success is True
+    agent_team.cancel_member.assert_not_awaited()
+    updated = await agent_team.task_manager.get(task.task_id)
+    assert updated.status == TaskStatus.CLAIMED.value
+    assert updated.assignee == "dev-1"
+    assert updated.content == "new content"
+    events = [
+        call.kwargs["message"]
+        for call in agent_team.messager.publish.call_args_list
+        if call.kwargs.get("message") is not None and call.kwargs["message"].event_type == TeamEvent.TASK_UPDATED
+    ]
+    assert any(m.payload["member_name"] == "dev-1" for m in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_edit_human_locked_task_is_refused(agent_team, t, sample_agent_card, db):
+    """A human-agent-claimed task's content is leader-immutable — editing it is
+    refused, same lock as cancel / reassign."""
+    await db.member.create_member(
+        member_name="human-1",
+        team_name="test_team",
+        display_name="human-1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task = await agent_team.task_manager.add(title="Task", content="old")
+    await db.task.claim_task(task.task_id, "human-1")
+    agent_team.is_human_agent = AsyncMock(return_value=True)
+
+    tool = UpdateTaskTool(agent_team, t)
+    result = await tool.invoke({"task_id": task.task_id, "content": "new content"})
+
+    assert result.success is False
+    assert task.task_id in (result.error or "")
+    # Content unchanged since the edit was refused.
+    assert (await agent_team.task_manager.get(task.task_id)).content == "old"
