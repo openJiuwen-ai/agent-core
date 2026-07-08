@@ -114,10 +114,10 @@ def dump_compression_artifact(
 def _resolve_dump_dir(context: ModelContext, config: Any) -> str:
     configured = getattr(config, "compression_dump_dir", None)
     if configured:
-        return str(configured)
+        return _expand_dump_dir_template(str(configured), context)
     env_dir = os.getenv(COMPRESSION_DUMP_DIR_ENV)
     if env_dir:
-        return env_dir
+        return _expand_dump_dir_template(env_dir, context)
     workspace_dir = _workspace_dir(context)
     if not workspace_dir:
         return ""
@@ -133,6 +133,15 @@ def _workspace_dir(context: ModelContext) -> str:
         return str(method() or "")
     except Exception:
         return ""
+
+
+def _expand_dump_dir_template(path: str, context: ModelContext) -> str:
+    if "{session_id}" not in path and "{context_id}" not in path:
+        return path
+    return path.format(
+        session_id=_safe_filename_part(_safe_context_value(context, "session_id", "unknown_session")),
+        context_id=_safe_filename_part(_safe_context_value(context, "context_id", "unknown_context")),
+    )
 
 
 def _safe_context_value(context: ModelContext, method_name: str, fallback: str) -> str:

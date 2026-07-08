@@ -27,10 +27,12 @@ class RuleCompressionPipeline:
         router: RuleContentRouter | None = None,
         time_func: Callable[[], float] = time.time,
         enable_dump: bool = False,
+        dump_dir: str | None = None,
     ) -> None:
         self._router = router or RuleContentRouter()
         self._time_func = time_func
         self._enable_dump = enable_dump
+        self._dump_dir_override = dump_dir
 
     def current_time(self) -> float:
         return self._time_func()
@@ -158,9 +160,11 @@ class RuleCompressionPipeline:
         return dump_path
 
     def _dump_dir(self, context: ModelContext) -> str:
+        if self._dump_dir_override:
+            return self._expand_dump_dir_template(self._dump_dir_override, context)
         env_dir = os.getenv(RULE_COMPRESSION_DUMP_DIR_ENV)
         if env_dir:
-            return env_dir
+            return self._expand_dump_dir_template(env_dir, context)
         workspace_dir = self._workspace_dir(context)
         if not workspace_dir:
             return ""
@@ -170,6 +174,14 @@ class RuleCompressionPipeline:
             "context",
             f"{session_id}_context",
             "rule_compression_logs",
+        )
+
+    def _expand_dump_dir_template(self, path: str, context: ModelContext) -> str:
+        if "{session_id}" not in path and "{context_id}" not in path:
+            return path
+        return path.format(
+            session_id=self._safe_filename_part(self._safe_context_value(context, "session_id", "unknown_session")),
+            context_id=self._safe_filename_part(self._safe_context_value(context, "context_id", "unknown_context")),
         )
 
     @staticmethod

@@ -66,7 +66,8 @@ class MessageOffloader(ContextProcessor):
     def __init__(self, config: MessageOffloaderConfig):
         super().__init__(config)
         self._rule_pipeline = RuleCompressionPipeline(
-            enable_dump=bool(config.enable_debug_dump)
+            enable_dump=bool(config.enable_debug_dump),
+            dump_dir=config.debug_dump_dir,
         )
 
     async def trigger_add_messages(
@@ -538,10 +539,10 @@ class MessageOffloader(ContextProcessor):
 
     def _debug_log_dir(self, context: ModelContext) -> str:
         if self.config.debug_dump_dir:
-            return os.path.abspath(self.config.debug_dump_dir)
+            return os.path.abspath(self._expand_debug_dir_template(self.config.debug_dump_dir, context))
         env_dir = os.getenv(MESSAGE_OFFLOADER_DEBUG_LOG_DIR_ENV)
         if env_dir:
-            return os.path.abspath(env_dir)
+            return os.path.abspath(self._expand_debug_dir_template(env_dir, context))
         workspace_dir = self._workspace_dir(context)
         if workspace_dir:
             return os.path.join(
@@ -552,6 +553,14 @@ class MessageOffloader(ContextProcessor):
             )
         return os.path.abspath(os.path.join("context", "message_offloader_debug_logs"))
 
+    def _expand_debug_dir_template(self, path: str, context: ModelContext) -> str:
+        if "{session_id}" not in path and "{context_id}" not in path:
+            return path
+        return path.format(
+            session_id=self._safe_filename_part(self._safe_context_value(context, "session_id", "unknown_session")),
+            context_id=self._safe_filename_part(self._safe_context_value(context, "context_id", "unknown_context")),
+        )
+
     @staticmethod
     def _workspace_dir(context: ModelContext) -> str:
         workspace_dir = getattr(context, "workspace_dir", None)
@@ -561,6 +570,11 @@ class MessageOffloader(ContextProcessor):
             return os.path.abspath(str(workspace_dir() or ""))
         except Exception:
             return ""
+
+    @staticmethod
+    def _safe_filename_part(value: str) -> str:
+        safe = "".join(char if char.isalnum() or char in "_.-" else "-" for char in value).strip("-")
+        return safe[:80] or "unknown"
 
     @staticmethod
     def _safe_context_value(context: ModelContext, method_name: str, fallback: str) -> str:

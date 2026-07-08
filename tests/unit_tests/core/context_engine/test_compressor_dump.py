@@ -108,6 +108,28 @@ async def test_dump_writes_request_and_post_compression_context(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_dump_expands_session_template_dir(tmp_path):
+    compressor = DialogueCompressor(
+        DialogueCompressorConfig(
+            enable_compression_dump=True,
+            compression_dump_dir=str(
+                tmp_path / "context" / "{session_id}_context" / "debug_artifacts" / "compression"
+            ),
+        )
+    )
+    _attach_executor(compressor)
+    context = _context(session_id="session/with spaces")
+    window = _compressible_window()
+
+    await compressor.on_get_context_window(context, window)
+
+    files = list(
+        (tmp_path / "context" / "session-with-spaces_context" / "debug_artifacts" / "compression").glob("*.json")
+    )
+    assert len(files) == 1
+
+
+@pytest.mark.asyncio
 async def test_dump_uses_env_var_when_config_dir_unset(tmp_path, monkeypatch):
     monkeypatch.setenv(COMPRESSION_DUMP_DIR_ENV, str(tmp_path))
     compressor = DialogueCompressor(DialogueCompressorConfig(enable_compression_dump=True))

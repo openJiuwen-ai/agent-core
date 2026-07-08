@@ -485,9 +485,32 @@ class TestMessageOffloaderTtl:
             context_window_tokens=100,
         )
 
-        await context.add_messages(ToolMessage(content="x" * 10000, tool_call_id="tc-config-debug"))
+        content = "\n".join(["same line"] * 10000)
+
+        await context.add_messages(ToolMessage(content=content, tool_call_id="tc-config-debug"))
 
         assert (debug_dir / "message_offloader_debug.jsonl").exists()
+        assert list(debug_dir.glob("*.json"))
+
+    @pytest.mark.asyncio
+    async def test_expands_session_template_debug_dump_dir(self, tmp_path):
+        context = await create_context(
+            MessageOffloaderConfig(
+                enable_debug_dump=True,
+                debug_dump_dir=str(
+                    tmp_path / "context" / "{session_id}_context" / "debug_artifacts" / "message_offloader"
+                ),
+            ),
+            context_window_tokens=100,
+        )
+
+        content = "\n".join(["same line"] * 10000)
+
+        await context.add_messages(ToolMessage(content=content, tool_call_id="tc-session-debug"))
+
+        debug_dir = tmp_path / "context" / "default_session_id_context" / "debug_artifacts" / "message_offloader"
+        assert (debug_dir / "message_offloader_debug.jsonl").exists()
+        assert list(debug_dir.glob("*.json"))
 
     @pytest.mark.asyncio
     async def test_ttl_traverses_full_model_context_not_only_returned_window(self):
