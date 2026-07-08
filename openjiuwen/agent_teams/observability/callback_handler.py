@@ -251,6 +251,7 @@ class OtelCallbackHandler:
         return kwargs.get("result")
 
     async def on_llm_output(self, *args: Any, **kwargs: Any) -> None:
+        state = None
         try:
             state = pop_llm_span_state()
             if state is None:
@@ -290,8 +291,19 @@ class OtelCallbackHandler:
             )
         except Exception as exc:
             team_logger.warning("otel: on_llm_output failed: {}", exc)
+            # State was already popped — if we don't end the span here it
+            # becomes an orphan (cascade_close_children can't find it) and
+            # is ended later by ActiveSpanTracker.flush_* with no output attrs.
+            if state is not None:
+                try:
+                    if state.span.is_recording():
+                        state.span.set_status(Status(StatusCode.ERROR, f"on_llm_output failed: {exc}"))
+                        state.span.end()
+                except Exception as cleanup_exc:
+                    team_logger.warning("otel: on_llm_output cleanup also failed: {}", cleanup_exc)
 
     async def on_llm_invoke_output(self, *args: Any, **kwargs: Any) -> Any:
+        state = None
         try:
             state = pop_llm_span_state(peek=True)
             if state is None:
@@ -303,9 +315,17 @@ class OtelCallbackHandler:
             self._close_llm_span(state, response)
         except Exception as exc:
             team_logger.warning("otel: on_llm_invoke_output failed: {}", exc)
+            if state is not None:
+                try:
+                    if state.span.is_recording():
+                        state.span.set_status(Status(StatusCode.ERROR, f"on_llm_invoke_output failed: {exc}"))
+                        state.span.end()
+                except Exception as cleanup_exc:
+                    team_logger.warning("otel: on_llm_invoke_output cleanup also failed: {}", cleanup_exc)
         return kwargs.get("result")
 
     async def on_llm_call_error(self, *args: Any, **kwargs: Any) -> None:
+        state = None
         try:
             state = pop_llm_span_state()
             if state is None:
@@ -324,6 +344,13 @@ class OtelCallbackHandler:
                 state.span.end()
         except Exception as exc:
             team_logger.exception("otel: on_llm_call_error failed: {}", exc)
+            if state is not None:
+                try:
+                    if state.span.is_recording():
+                        state.span.set_status(Status(StatusCode.ERROR, "llm call error"))
+                        state.span.end()
+                except Exception as cleanup_exc:
+                    team_logger.warning("otel: on_llm_call_error cleanup also failed: {}", cleanup_exc)
 
     # ------------------------------------------------------------------
     # Tool
@@ -529,29 +556,18 @@ class OtelCallbackHandler:
         msg_count = len(messages)
         span.set_attribute(GEN_AI_REQUEST_MESSAGE_COUNT, msg_count)
 
-        emit_standard_prompt = self._config.backend != "langfuse"
-        for i, m in enumerate(messages):
-            role = _message_role(m)
-            raw_content = _coerce_message_content(_message_content(m))
-            # Per-message prompt attributes (standard + Langfuse)
-            redacted = redact_prompt(raw_content, self._config)
-            if emit_standard_prompt:
-                span.set_attribute(f"{GEN_AI_PROMPT}.{i}.role", role)
-                span.set_attribute(f"{GEN_AI_PROMPT}.{i}.content", redacted)
-            span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.role", role)
-            span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.content", redacted)
-
-        # langfuse.observation.input: delta-based for UI readability.
+        # ── Delta tracking ──────────────────────────────────────────
+        # Use the agent-span attribute gen_ai.request.message_count from the
+        # *previous* LLM call to decide whether this is a subsequent call.
+        # The same decision drives both per-message prompt attributes AND the
+        # langfuse.observation.input JSON.
         #
-        # LLM calls within one agent span are sequential.  We track the
-        # message count on the agent span (via gen_ai.request.message_count)
-        # and only show messages that are *new* since the previous call:
+        #   - First call (prev_count == 0):  emit ALL messages as attributes.
+        #   - Context compression (current < prev): emit ALL messages.
+        #   - Subsequent call: emit only new (delta) messages.
         #
-        #   - First call (prev_count == 0):  show all messages except system.
-        #   - Context compression (current < prev): show all except system.
-        #   - Otherwise: show messages[prev_count:].
-        #
-        # Full message list is available via gen_ai.prompt.{i}.* attributes.
+        # System messages are ALWAYS emitted regardless of delta — they form
+        # the stable instruction baseline that every span needs.
         agent_span = get_current_agent_span()
         prev_count_raw: int = 0
         if agent_span is not None:
@@ -562,10 +578,29 @@ class OtelCallbackHandler:
                 except (ValueError, TypeError):
                     pass
 
-        if prev_count_raw == 0 or msg_count < prev_count_raw:
-            # First LLM call in this agent span, or context compression
-            # reduced the message count.  Drop system messages so the
-            # input is focused on the dialogue.
+        is_first_call = prev_count_raw == 0 or msg_count < prev_count_raw
+        attr_start_idx = 0 if is_first_call else prev_count_raw
+
+        # ── Per-message prompt attributes (delta) ────────────────────
+        emit_standard_prompt = self._config.backend != "langfuse"
+        for i, m in enumerate(messages):
+            role = _message_role(m)
+            is_system = role == "system"
+            # System message → always emit.  Non-system → only emit delta.
+            if not is_system and i < attr_start_idx:
+                continue
+            raw_content = _coerce_message_content(_message_content(m))
+            redacted = redact_prompt(raw_content, self._config)
+            if emit_standard_prompt:
+                span.set_attribute(f"{GEN_AI_PROMPT}.{i}.role", role)
+                span.set_attribute(f"{GEN_AI_PROMPT}.{i}.content", redacted)
+            span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.role", role)
+            span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.content", redacted)
+
+        # ── langfuse.observation.input (delta, same logic) ───────────
+        if is_first_call:
+            # Drop system messages from the observation input — the UI
+            # already shows the full prompt via gen_ai.prompt.{i}.* attrs.
             delta_msgs = [m for m in messages if _message_role(m) != "system"]
         else:
             delta_msgs = messages[prev_count_raw:]
@@ -617,24 +652,33 @@ class OtelCallbackHandler:
             )
             return
 
-        raw_content = _message_content(response)
-        completion_text = _coerce_message_content(raw_content)
-        reasoning_text = str(getattr(response, "reasoning_content", "") or "")
+        try:
+            raw_content = _message_content(response)
+            completion_text = _coerce_message_content(raw_content)
+            reasoning_text = str(getattr(response, "reasoning_content", "") or "")
 
-        tool_calls = getattr(response, "tool_calls", None)
-        tc_json = _serialize_tool_calls(tool_calls)
-        if tc_json:
-            state.span.set_attribute(GEN_AI_TOOL_CALLS, tc_json)
-            if not isinstance(raw_content, str):
-                completion_text = ""
+            tool_calls = getattr(response, "tool_calls", None)
+            tc_json = _serialize_tool_calls(tool_calls)
+            if tc_json:
+                state.span.set_attribute(GEN_AI_TOOL_CALLS, tc_json)
+                if not isinstance(raw_content, str):
+                    completion_text = ""
 
-        self._maybe_record_response_attrs(state, response)
+            self._maybe_record_response_attrs(state, response)
 
-        self._finalize_llm_span_output(
-            state, completion_text, reasoning_text,
-            tc_json=tc_json, response=response,
-            usage=getattr(response, "usage_metadata", None),
-        )
+            self._finalize_llm_span_output(
+                state, completion_text, reasoning_text,
+                tc_json=tc_json, response=response,
+                usage=getattr(response, "usage_metadata", None),
+            )
+        except Exception as exc:
+            team_logger.warning("otel: _close_llm_span failed: {}", exc)
+            try:
+                if state.span.is_recording():
+                    state.span.set_status(Status(StatusCode.ERROR, f"_close_llm_span failed: {exc}"))
+                    state.span.end()
+            except Exception as cleanup_exc:
+                team_logger.warning("otel: _close_llm_span cleanup also failed: {}", cleanup_exc)
 
     def _finalize_llm_span_output(
         self,
@@ -651,88 +695,101 @@ class OtelCallbackHandler:
         Called by both ``_close_llm_span`` (non-streaming) and
         ``on_llm_output`` (streaming final) to avoid ~130 lines of
         duplicated output assembly.
+
+        The main llm.call span is always ended (even on error) so the
+        span never becomes an orphan.  The reasoning sub-span is
+        best-effort and created after the main span is safely closed.
         """
-        redacted_compl = redact_completion(completion_text, self._config)
-        emit_standard_completion = self._config.backend != "langfuse"
-        # Standard gen_ai.completion keys
-        if emit_standard_completion:
-            state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.role", "assistant")
-            state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.content", redacted_compl)
-        # Langfuse-compatible t_ prefix keys
-        state.span.set_attribute(f"{LANGFUSE_GEN_AI_COMPLETION}.0.role", "assistant")
-        state.span.set_attribute(f"{LANGFUSE_GEN_AI_COMPLETION}.0.content", redacted_compl)
+        try:
+            redacted_compl = redact_completion(completion_text, self._config)
+            emit_standard_completion = self._config.backend != "langfuse"
+            # Standard gen_ai.completion keys
+            if emit_standard_completion:
+                state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.role", "assistant")
+                state.span.set_attribute(f"{GEN_AI_COMPLETION}.0.content", redacted_compl)
+            # Langfuse-compatible t_ prefix keys
+            state.span.set_attribute(f"{LANGFUSE_GEN_AI_COMPLETION}.0.role", "assistant")
+            state.span.set_attribute(f"{LANGFUSE_GEN_AI_COMPLETION}.0.content", redacted_compl)
 
-        # Build langfuse.observation.output
-        choice_obj: dict[str, Any] = {"index": 0, "message": {"role": "assistant"}}
-        finish_reason = state.span.attributes.get(GEN_AI_RESPONSE_FINISH_REASON)
-        if finish_reason:
-            choice_obj["finish_reason"] = finish_reason
-        if completion_text:
-            choice_obj["message"]["content"] = completion_text
-        if tc_json:
-            try:
-                choice_obj["message"]["tool_calls"] = json.loads(tc_json)
-            except (json.JSONDecodeError, TypeError):
-                pass
-        response_obj: dict[str, Any] = {"choices": [choice_obj]}
-        if usage:
-            # Dump the whole usage object so cache_tokens / reasoning_tokens
-            # (and any future fields) flow through without per-field filters.
-            dump = usage.model_dump() if hasattr(usage, "model_dump") else vars(usage)
-            if dump:
-                response_obj["usage"] = dump
-        output_json = json.dumps(response_obj, ensure_ascii=False, default=str)
-        state.span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redact_completion(output_json, self._config))
+            # Build langfuse.observation.output
+            choice_obj: dict[str, Any] = {"index": 0, "message": {"role": "assistant"}}
+            finish_reason = state.span.attributes.get(GEN_AI_RESPONSE_FINISH_REASON)
+            if finish_reason:
+                choice_obj["finish_reason"] = finish_reason
+            if completion_text:
+                choice_obj["message"]["content"] = completion_text
+            if tc_json:
+                try:
+                    choice_obj["message"]["tool_calls"] = json.loads(tc_json)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            response_obj: dict[str, Any] = {"choices": [choice_obj]}
+            if usage:
+                # Dump the whole usage object so cache_tokens / reasoning_tokens
+                # (and any future fields) flow through without per-field filters.
+                dump = usage.model_dump() if hasattr(usage, "model_dump") else vars(usage)
+                if dump:
+                    response_obj["usage"] = dump
+            output_json = json.dumps(response_obj, ensure_ascii=False, default=str)
+            state.span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redact_completion(output_json, self._config))
+        finally:
+            # Always end the main llm.call span — even if attribute setting
+            # above threw, the span must not become an orphan.
+            if state.span.is_recording():
+                state.span.set_status(Status(StatusCode.OK))
+                state.span.end()
 
+        # Reasoning sub-span (best-effort; created after the main span is
+        # safely closed so a failure here never orphans the main span).
         if reasoning_text:
-            # Manual span lifecycle: start_time = wall-clock at the first
-            # reasoning chunk; end_time = start + measured duration. finalize
-            # runs long after the last chunk, so a default start would exceed
-            # end_time and collapse duration to 0.
-            reasoning_first_ns = state.reasoning_first_ns
-            reasoning_last_ns = state.reasoning_last_ns
-            reasoning_start_wall_ns = state.reasoning_start_wall_ns
-            has_timing = (
-                reasoning_first_ns is not None
-                and reasoning_last_ns is not None
-                and reasoning_start_wall_ns is not None
-            )
-            start_kwarg: dict[str, Any] = (
-                {"start_time": reasoning_start_wall_ns} if has_timing else {}
-            )
-            reasoning_span = self._tracer().start_span(
-                name="llm.reasoning",
-                context=set_span_in_context(state.span),
-                **start_kwarg,
-            )
-            redacted_reasoning = redact_completion(reasoning_text, self._config)
-            # Standard gen_ai.completion attributes (Langfuse reasoning display)
-            reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.role", "reasoning")
-            reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.is_reasoning", True)
-            reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.content", redacted_reasoning)
-            # Langfuse observation input/output for UI visibility
-            reasoning_span.set_attribute(LANGFUSE_OBSERVATION_INPUT, "llm reasoning")
-            reasoning_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted_reasoning)
-            # Mirror reasoning_tokens onto the reasoning span (also on the
-            # parent llm.call span via _record_usage_attrs). Read straight
-            # from the usage object — never compute it.
-            rt = getattr(usage, "reasoning_tokens", 0) or 0
-            if rt:
-                reasoning_span.set_attribute(GEN_AI_USAGE_REASONING_TOKENS, int(rt))
-            self._stamp_parent_member_name(reasoning_span, fallback=state.span)
-            reasoning_span.set_status(Status(StatusCode.OK))
-            if has_timing:
-                dur_ns = reasoning_last_ns - reasoning_first_ns  # type: ignore[operator]
-                reasoning_span.set_attribute(
-                    GEN_AI_REASONING_DURATION_MS,
-                    dur_ns / 1_000_000.0,
+            try:
+                # Manual span lifecycle: start_time = wall-clock at the first
+                # reasoning chunk; end_time = start + measured duration. finalize
+                # runs long after the last chunk, so a default start would exceed
+                # end_time and collapse duration to 0.
+                reasoning_first_ns = state.reasoning_first_ns
+                reasoning_last_ns = state.reasoning_last_ns
+                reasoning_start_wall_ns = state.reasoning_start_wall_ns
+                has_timing = (
+                    reasoning_first_ns is not None
+                    and reasoning_last_ns is not None
+                    and reasoning_start_wall_ns is not None
                 )
-                reasoning_span.end(end_time=reasoning_start_wall_ns + dur_ns)  # type: ignore[operator]
-            else:
-                reasoning_span.end()
-
-        state.span.set_status(Status(StatusCode.OK))
-        state.span.end()
+                start_kwarg: dict[str, Any] = (
+                    {"start_time": reasoning_start_wall_ns} if has_timing else {}
+                )
+                reasoning_span = self._tracer().start_span(
+                    name="llm.reasoning",
+                    context=set_span_in_context(state.span),
+                    **start_kwarg,
+                )
+                redacted_reasoning = redact_completion(reasoning_text, self._config)
+                # Standard gen_ai.completion attributes (Langfuse reasoning display)
+                reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.role", "reasoning")
+                reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.is_reasoning", True)
+                reasoning_span.set_attribute(f"{GEN_AI_COMPLETION}.0.content", redacted_reasoning)
+                # Langfuse observation input/output for UI visibility
+                reasoning_span.set_attribute(LANGFUSE_OBSERVATION_INPUT, "llm reasoning")
+                reasoning_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted_reasoning)
+                # Mirror reasoning_tokens onto the reasoning span (also on the
+                # parent llm.call span via _record_usage_attrs). Read straight
+                # from the usage object — never compute it.
+                rt = getattr(usage, "reasoning_tokens", 0) or 0
+                if rt:
+                    reasoning_span.set_attribute(GEN_AI_USAGE_REASONING_TOKENS, int(rt))
+                self._stamp_parent_member_name(reasoning_span, fallback=state.span)
+                reasoning_span.set_status(Status(StatusCode.OK))
+                if has_timing:
+                    dur_ns = reasoning_last_ns - reasoning_first_ns  # type: ignore[operator]
+                    reasoning_span.set_attribute(
+                        GEN_AI_REASONING_DURATION_MS,
+                        dur_ns / 1_000_000.0,
+                    )
+                    reasoning_span.end(end_time=reasoning_start_wall_ns + dur_ns)  # type: ignore[operator]
+                else:
+                    reasoning_span.end()
+            except Exception as exc:
+                team_logger.warning("otel: _finalize_llm_span_output reasoning span failed: {}", exc)
 
     @staticmethod
     def _record_usage_attrs(state: LlmSpanState, usage: Any, *, skip_existing: bool = False) -> None:
