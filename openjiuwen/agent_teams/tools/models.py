@@ -10,6 +10,7 @@ Configuration: DatabaseType, DatabaseConfig.
 
 import copy
 import hashlib
+import json
 from typing import Dict, Optional, cast
 
 from sqlalchemy import BigInteger, Index
@@ -119,11 +120,34 @@ class TeamTaskBase(SQLModel):
     # pure write overhead bumped on every status transition.
     status: str = Field(nullable=False, index=True)
     assignee: Optional[str] = Field(default=None, nullable=True)
+    # Verify-gate reviewers: a JSON-encoded list of member names (or NULL). A
+    # task carrying reviewers routes through IN_REVIEW on completion. Stored as
+    # JSON text rather than a normalized join table because v1 verification is
+    # team-scale (small boards, "reviewer contains X" resolved by an in-memory
+    # filter over the status-indexed IN_REVIEW rows), and the list also backs
+    # the future voting mechanism. See F_59.
+    reviewer: Optional[str] = Field(default=None, nullable=True)
     updated_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True)
 
     def brief(self) -> dict:
         """Return a lightweight summary (id + title + status) for write-op responses."""
         return {"task_id": self.task_id, "title": self.title, "status": self.status}
+
+    def reviewers(self) -> list[str]:
+        """Parse the ``reviewer`` JSON column into a member-name list.
+
+        Returns an empty list when unset or malformed — an absent reviewer set
+        means "no verify gate", which the completion path treats as direct
+        COMPLETED.
+        """
+        raw = self.reviewer
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return []
+        return [str(name) for name in parsed] if isinstance(parsed, list) else []
 
 
 class TeamTaskDependencyBase(SQLModel):

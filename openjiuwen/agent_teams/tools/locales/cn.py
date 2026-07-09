@@ -174,11 +174,12 @@ STRINGS: dict[str, str] = {
     "create_task.task.assignee": "承担该任务的成员名称（必填）；该成员必须已存在。无依赖的任务落地即归属它，有依赖的任务在依赖完成后自动转交它",
     "create_task.task.depends_on": "前置依赖的任务 ID 列表；可引用本次调用中一起创建的任务或已有任务",
     "create_task.task.depended_by": "需要等待本任务完成的已有任务 ID 列表（反向依赖）；不得引用本次调用创建的任务——批内依赖一律用对方的 depends_on 表示",
+    "create_task.task.reviewer": "该任务的验证者 member_name 列表（可选，可多个）；这些成员必须已存在且不能是 assignee 本人。配了验证者的任务在 assignee 完成后进入 in_review 等验证，验证通过才 completed",
     # ===== view_task ===========================================================
     # view_task._desc lives in descs/cn/view_task.md
-    "view_task.action": "查看模式：'list'（默认，所有任务摘要）、'get'（单个任务详情，需传 task_id）、'claimable'（可认领的 pending 任务）",
+    "view_task.action": "查看模式：'list'（默认，所有任务摘要）、'get'（单个任务详情，需传 task_id）、'claimable'（可认领的 pending 任务）、'in_review'（指派给你验证、正在 in_review 的任务）",
     "view_task.task_id": "任务 ID — action=get 时必填，其他模式忽略",
-    "view_task.status": "仅 action=list 时使用的状态过滤：pending/claimed/plan_approved/completed/cancelled/blocked，不传则返回全部",
+    "view_task.status": "仅 action=list 时使用的状态过滤：pending/blocked/planning/in_progress/in_review/completed/cancelled，不传则返回全部",
     # ===== update_task =========================================================
     # update_task._desc lives in descs/cn/update_task.md
     "update_task.task_id": "要更新的任务 ID，传 '*' 取消所有任务",
@@ -186,6 +187,7 @@ STRINGS: dict[str, str] = {
     "update_task.title": "新任务标题",
     "update_task.content": "新任务内容",
     "update_task.assignee": "指派任务的目标 member_name（仅当任务当前无 assignee 时生效）。系统会向被指派成员发送通知",
+    "update_task.reviewer": "设置该任务的验证者 member_name 列表（传空列表清除验证）；验证者必须已存在且不能是 assignee。配了验证者后，assignee 完成任务会进入 in_review 等验证",
     "update_task.add_blocked_by": "要添加为新依赖的任务 ID 列表（本任务将被阻塞直到这些任务完成）",
     "update_task.error_human_agent_locked_cancel": (
         "任务 {task_id} 已由人类成员认领，该任务不允许被取消；如需变更，请通过 send_message 与对应的人类成员协商"
@@ -204,6 +206,11 @@ STRINGS: dict[str, str] = {
     # member_complete_task._desc lives in descs/cn/member_complete_task.md
     "member_complete_task.task_id": "要标记完成的任务 ID（必须是 leader 已经指派给你的任务）",
     "member_complete_task.note": "可选的完成说明，便于团队了解你的执行结果或后续注意事项",
+    # ===== verify_task ========================================================
+    # verify_task._desc lives in descs/cn/verify_task.md
+    "verify_task.task_id": "要验证的任务 ID（必须是指派给你验证、当前处于 in_review 的任务）",
+    "verify_task.decision": "验证结论：'pass'（通过，任务转 completed）或 'fail'（打回，任务转回 in_progress 让 author 返工）",
+    "verify_task.feedback": "验证反馈（打回时会定向发给 author 指导返工，通过时可选）",
     # ===== send_message ========================================================
     # send_message._desc lives in descs/cn/send_message.md
     "send_message.to": (

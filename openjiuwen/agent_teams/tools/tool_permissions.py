@@ -32,6 +32,7 @@ LEADER_ONLY_TOOLS: set[str] = {
 MEMBER_ONLY_TOOLS: set[str] = {
     "claim_task",  # Claim or complete a task
     "submit_plan", # Submit a plan before executing in plan_mode
+    "verify_task", # Pass/fail a task in the verify gate (reviewer-guarded)
     # Worktree tools — members work in isolated worktrees
     # "enter_worktree",          # Enter an isolated git worktree
     # "exit_worktree",           # Exit the current worktree session
@@ -56,6 +57,7 @@ SHARED_TOOLS: set[str] = {
 MEMBER_ONLY_TOOLS_SCHEDULED: set[str] = {
     "member_complete_task",  # Complete a task assigned to you
     "submit_plan",           # Submit a plan before executing in plan_mode
+    "verify_task",           # Pass/fail a task in the verify gate (reviewer-guarded)
 }
 
 # All tools available to leader. Dispatch-invariant: the leader's tool *names*
@@ -96,6 +98,7 @@ MEMBER_TOOLS: set[str] = MEMBER_TOOLS_BY_DISPATCH["autonomous"]
 HUMAN_AGENT_TOOLS: set[str] = {
     "view_task",
     "member_complete_task",
+    "verify_task",  # A human member can be assigned as a reviewer (reviewer-guarded)
     "send_message",
 }
 

@@ -19,12 +19,15 @@ Leader defines "what to do", **you decide "how to do it"**. After claiming a tas
 6. **When you have no work in progress, stop and wait** — the system will proactively notify you when new tasks are ready or messages arrive; don't repeatedly poll `view_task`
 
 ## Task State Transitions
-States: pending / blocked / planning / in_progress / completed / cancelled
+States: pending / blocked / planning / in_progress / in_review / completed / cancelled
 
 - Your in-flight task is uniformly `in_progress` (autonomous: you claimed it yourself; scheduled: the Leader assigned it and the framework started it for you — both land here)
 - `planning` is the plan gate under plan_mode: you submit a plan and wait for the Leader's `approve_plan`; once approved the task moves to `in_progress` and you may start executing
+- **Verify gate**: if your task has reviewers, completing it does not finish it directly — it enters `in_review` to await verification; it reaches `completed` only once a reviewer passes it, and a reviewer failure sends it back to `in_progress` for you to rework per the feedback and resubmit
 - If the leader calls `update_task` to change a task's content, it is reset to pending and your ownership of it is revoked
 - completed and cancelled are terminal — no further transitions
+
+**When you are a reviewer**: the Leader may assign you as a reviewer on some tasks. When such a task's author completes it and it enters `in_review`, you are notified; use `view_task(action=in_review)` to see the tasks awaiting your verification, inspect the deliverable, then call `verify_task(decision='pass'|'fail', feedback=...)` — pass completes the task, fail sends it back to the author for rework (your `feedback` reaches the author). You may not verify a task where you are the author.
 
 ## Notification Mechanism
 - **No active polling needed**: The system will proactively notify you when new tasks are ready or new messages arrive

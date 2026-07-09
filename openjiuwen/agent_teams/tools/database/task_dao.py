@@ -209,6 +209,7 @@ async def _stage_new_tasks(
                 content=spec.content,
                 status=spec.initial_status,
                 assignee=spec.assignee,
+                reviewer=spec.reviewer,
                 updated_at=now,
             )
         )
@@ -651,6 +652,96 @@ class TaskDao:
             team_logger.info("Task %s reset from %s to PENDING", task_id, origin_task_status)
 
             return task
+
+    async def submit_for_review(self, task_id: str) -> bool:
+        """Atomically move an IN_PROGRESS task to IN_REVIEW via a CAS UPDATE.
+
+        The verify-gate entry: the author declared the work done and the task
+        carries reviewers, so it enters review instead of completing. A plain
+        status flip — dependencies are *not* resolved here (the task is not
+        done until a reviewer passes it). The author (``assignee``) stays put.
+        ``WHERE status='in_progress'`` makes IN_PROGRESS the sole predecessor.
+
+        Returns:
+            True iff the row moved to IN_REVIEW (``rowcount == 1``); False when
+            the task is missing or not IN_PROGRESS.
+        """
+        team_task_model = _get_task_model()
+        now = get_current_time()
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(team_task_model)
+                .where(
+                    team_task_model.task_id == task_id,
+                    team_task_model.status == TaskStatus.IN_PROGRESS.value,
+                )
+                .values(status=TaskStatus.IN_REVIEW.value, updated_at=now)
+            )
+            await session.commit()
+            submitted = result.rowcount == 1
+            if submitted:
+                team_logger.info("Task %s submitted for review", task_id)
+            else:
+                team_logger.debug(
+                    "CAS submit-for-review for task %s did not apply (rowcount=%s): missing / not in_progress",
+                    task_id,
+                    result.rowcount,
+                )
+            return submitted
+
+    async def revise_task(self, task_id: str) -> bool:
+        """Atomically move an IN_REVIEW task back to IN_PROGRESS (verify fail).
+
+        The verify-gate rework edge: a reviewer failed the task, so it returns
+        to execution for the (still-assigned) author to revise. Plain status
+        flip; ``WHERE status='in_review'`` makes IN_REVIEW the sole predecessor.
+
+        Returns:
+            True iff the row moved to IN_PROGRESS (``rowcount == 1``); False when
+            the task is missing or not IN_REVIEW.
+        """
+        team_task_model = _get_task_model()
+        now = get_current_time()
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(team_task_model)
+                .where(
+                    team_task_model.task_id == task_id,
+                    team_task_model.status == TaskStatus.IN_REVIEW.value,
+                )
+                .values(status=TaskStatus.IN_PROGRESS.value, updated_at=now)
+            )
+            await session.commit()
+            revised = result.rowcount == 1
+            if revised:
+                team_logger.info("Task %s sent back for revision (IN_REVIEW -> IN_PROGRESS)", task_id)
+            else:
+                team_logger.debug(
+                    "CAS revise for task %s did not apply (rowcount=%s): missing / not in_review",
+                    task_id,
+                    result.rowcount,
+                )
+            return revised
+
+    async def set_reviewer(self, task_id: str, reviewer: Optional[str]) -> bool:
+        """Set the ``reviewer`` column (JSON member-name list or NULL).
+
+        Leader-driven reviewer (re)assignment via ``update_task``. Independent
+        of status — reviewers can be attached while the task is still pending /
+        in progress; the value is consulted only when the author completes.
+
+        Returns:
+            True iff the row exists and was updated; False when missing.
+        """
+        team_task_model = _get_task_model()
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(team_task_model)
+                .where(team_task_model.task_id == task_id)
+                .values(reviewer=reviewer)
+            )
+            await session.commit()
+            return result.rowcount == 1
 
     async def approve_plan_task(self, task_id: str) -> Optional[TeamTaskBase]:
         """Approve a task plan for PLAN_MODE members (PLANNING -> IN_PROGRESS).

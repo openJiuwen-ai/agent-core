@@ -93,6 +93,18 @@ STRINGS: dict[str, dict[str, str]] = {
         "dispatcher.task_plan_rejected_to_self": (
             "[计划需修改] 任务 [{task_id}] 的执行计划未通过。请根据反馈修改并重新调用 submit_plan。反馈：{feedback}"
         ),
+        # agent/coordination/handlers/task_board.py — verify gate (F_59)
+        "dispatcher.task_submitted_for_review_to_reviewer": (
+            "[待验证] 任务 [{task_id}] 已由 {author} 提交验证，你是该任务的验证者。请通过 view_task(action=get) "
+            "查看产出，然后用 verify_task(decision='pass'|'fail') 给出验证结论。"
+        ),
+        "dispatcher.task_revision_requested_to_self": (
+            "[验证打回] 你的任务 [{task_id}] 未通过验证，已退回让你返工。请根据反馈修改后，用 "
+            "member_complete_task / claim_task(status='completed') 重新提交。反馈：{feedback}"
+        ),
+        "dispatcher.task_verified_to_self": (
+            "[验证通过] 你的任务 [{task_id}] 已通过验证并标记完成。请通过 view_task 查看是否有新的可认领任务。"
+        ),
         "dispatcher.msg_type_broadcast": "广播消息",
         "dispatcher.msg_type_direct": "单播消息",
         "dispatcher.msg_received": (
@@ -275,6 +287,21 @@ STRINGS: dict[str, dict[str, str]] = {
         "dispatcher.task_plan_rejected_to_self": (
             "[Plan Rejected] Your execution plan for task [{task_id}] needs revision. "
             "Update it and call submit_plan again. Feedback: {feedback}"
+        ),
+        # agent/coordination/handlers/task_board.py — verify gate (F_59)
+        "dispatcher.task_submitted_for_review_to_reviewer": (
+            "[Awaiting Review] {author} submitted task [{task_id}] for verification and you are a "
+            "reviewer. Inspect the deliverable via view_task(action=get), then call "
+            "verify_task(decision='pass'|'fail') with your verdict."
+        ),
+        "dispatcher.task_revision_requested_to_self": (
+            "[Revision Requested] Your task [{task_id}] failed verification and was sent back for "
+            "rework. Revise per the feedback and resubmit via member_complete_task / "
+            "claim_task(status='completed'). Feedback: {feedback}"
+        ),
+        "dispatcher.task_verified_to_self": (
+            "[Verified] Your task [{task_id}] passed verification and is now completed. "
+            "Call view_task to find your next available task."
         ),
         "dispatcher.msg_type_broadcast": "broadcast",
         "dispatcher.msg_type_direct": "direct message",

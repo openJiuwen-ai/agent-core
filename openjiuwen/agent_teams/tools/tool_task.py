@@ -55,6 +55,11 @@ def _task_node_schema(
             "items": {"type": "string"},
             "description": t("create_task", "task.depended_by"),
         },
+        "reviewer": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": t("create_task", "task.reviewer"),
+        },
     }
     properties.update(extra_properties or {})
     return {
@@ -99,6 +104,34 @@ def _validate_task_batch(tasks: list[dict]) -> str | None:
     return None
 
 
+def _clean_reviewers(spec: dict) -> list[str]:
+    """Extract a spec's reviewer list, trimmed and de-blanked."""
+    return [str(r).strip() for r in (spec.get("reviewer") or ()) if str(r).strip()]
+
+
+async def _validate_reviewers(agent_team: TeamBackend, tasks: list[dict]) -> str | None:
+    """Reject a batch whose reviewer names a non-member or the task's own author.
+
+    Reviewers are untrusted input crossing the tool boundary; the DB column has
+    no FK. A member may not review their own task (self-verification), so a
+    reviewer equal to the task's ``assignee`` is rejected.
+    """
+    for spec in tasks:
+        reviewers = _clean_reviewers(spec)
+        if not reviewers:
+            continue
+        assignee = (spec.get("assignee") or "").strip()
+        for reviewer in reviewers:
+            if not await agent_team.member_exists(reviewer):
+                return f"Task {_spec_label(spec)!r}: reviewer {reviewer!r} not found in the team"
+            if assignee and reviewer == assignee:
+                return (
+                    f"Task {_spec_label(spec)!r}: reviewer {reviewer!r} cannot review their own task "
+                    f"(they are the assignee)"
+                )
+    return None
+
+
 class TaskCreateTool(TeamTool):
     """Create team tasks; tasks land unassigned and claimable (autonomous dispatch).
 
@@ -117,6 +150,7 @@ class TaskCreateTool(TeamTool):
                 description=t("create_task"),
             )
         )
+        self.agent_team = agent_team
         self.task_manager = agent_team.task_manager
         self.card.input_params = {
             "type": "object",
@@ -138,6 +172,9 @@ class TaskCreateTool(TeamTool):
         error = _validate_task_batch(tasks)
         if error:
             return ToolOutput(success=False, error=error)
+        error = await _validate_reviewers(self.agent_team, tasks)
+        if error:
+            return ToolOutput(success=False, error=error)
 
         # One atomic graph mutation for the whole call: depends_on may
         # forward-reference tasks later in the batch, and either every
@@ -150,6 +187,7 @@ class TaskCreateTool(TeamTool):
                     task_id=spec.get("task_id"),
                     depends_on=tuple(spec.get("depends_on") or ()),
                     depended_by=tuple(spec.get("depended_by") or ()),
+                    reviewer=tuple(_clean_reviewers(spec)),
                 )
                 for spec in tasks
             ]
@@ -251,6 +289,9 @@ class ScheduledTaskCreateTool(TeamTool):
         error = await self._validate_assignees(tasks)
         if error:
             return ToolOutput(success=False, error=error)
+        error = await _validate_reviewers(self.agent_team, tasks)
+        if error:
+            return ToolOutput(success=False, error=error)
 
         result = await self.task_manager.add_graph(
             [
@@ -261,6 +302,7 @@ class ScheduledTaskCreateTool(TeamTool):
                     depends_on=tuple(spec.get("depends_on") or ()),
                     depended_by=tuple(spec.get("depended_by") or ()),
                     assignee=(spec.get("assignee") or "").strip(),
+                    reviewer=tuple(_clean_reviewers(spec)),
                 )
                 for spec in tasks
             ]
@@ -307,7 +349,7 @@ class ViewTaskToolV2(TeamTool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["get", "list", "claimable"],
+                    "enum": ["get", "list", "claimable", "in_review"],
                     "description": t("view_task", "action"),
                 },
                 "task_id": {"type": "string", "description": t("view_task", "task_id")},
@@ -331,7 +373,10 @@ class ViewTaskToolV2(TeamTool):
                 return ToolOutput(success=True, data=detail.model_dump(exclude_none=True))
             return ToolOutput(success=False, error="Task not found")
 
-        if action == "claimable":
+        if action == "in_review":
+            # Tasks this member must verify (it is a reviewer and status=IN_REVIEW).
+            result = await self.task_manager.list_review_tasks(self.task_manager.member_name)
+        elif action == "claimable":
             result = await self.task_manager.list_tasks_with_deps(
                 status=TaskStatus.PENDING.value,
             )
@@ -362,6 +407,8 @@ class ViewTaskToolV2(TeamTool):
             ]
             if d.get("assignee"):
                 lines.append(f"Assignee: {d['assignee']}")
+            if d.get("reviewer"):
+                lines.append(f"Reviewers: {', '.join(d['reviewer'])}")
             if d.get("updated_at") is not None:
                 lines.append(f"Updated: {format_time_context(d['updated_at'], now_ms)}")
             if d.get("blocked_by"):
@@ -412,6 +459,11 @@ class UpdateTaskTool(TeamTool):
                 "title": {"type": "string", "description": t("update_task", "title")},
                 "content": {"type": "string", "description": t("update_task", "content")},
                 "assignee": {"type": "string", "description": t("update_task", "assignee")},
+                "reviewer": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": t("update_task", "reviewer"),
+                },
                 "add_blocked_by": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -445,6 +497,7 @@ class UpdateTaskTool(TeamTool):
         title = inputs.get("title")
         content = inputs.get("content")
         assignee = inputs.get("assignee")
+        reviewer = inputs.get("reviewer")
         add_blocked_by = inputs.get("add_blocked_by")
 
         # cancel_all: task_id="*" + status="cancelled"
@@ -532,6 +585,25 @@ class UpdateTaskTool(TeamTool):
                 return ToolOutput(success=False, error=assign_result.reason)
             updated.append("assignee")
 
+        # Set / clear verify-gate reviewers. A leader may (re)assign reviewers
+        # at any status; an empty list clears the gate. Reviewers must be real
+        # members and none may be the task's author (no self-verification).
+        if reviewer is not None:
+            reviewer_names = [str(r).strip() for r in reviewer if str(r).strip()]
+            current_assignee = (assignee or task.assignee or "").strip()
+            for name in reviewer_names:
+                if not await self.agent_team.member_exists(name):
+                    return ToolOutput(success=False, error=f"Reviewer '{name}' not found in the team")
+                if current_assignee and name == current_assignee:
+                    return ToolOutput(
+                        success=False,
+                        error=f"Reviewer '{name}' cannot review their own task (they are the assignee)",
+                    )
+            reviewer_result = await self.task_manager.set_reviewer(task_id, reviewer_names)
+            if not reviewer_result.ok:
+                return ToolOutput(success=False, error=reviewer_result.reason)
+            updated.append("reviewer")
+
         # Add dependencies (blocked_by edges)
         if add_blocked_by:
             deps_result = await self.task_manager.add_dependencies(task_id, add_blocked_by)
@@ -541,7 +613,8 @@ class UpdateTaskTool(TeamTool):
 
         if not updated:
             return ToolOutput(
-                success=False, error="No update specified — provide status, title, content, assignee, or add_blocked_by"
+                success=False,
+                error="No update specified — provide status, title, content, assignee, reviewer, or add_blocked_by",
             )
 
         return ToolOutput(
@@ -670,7 +743,14 @@ class ClaimTaskTool(TeamTool):
             complete_result = await self.task_manager.complete(task_id=task_id)
             if not complete_result.ok:
                 return ToolOutput(success=False, error=complete_result.reason)
-            status_change = {"from": task.status, "to": TaskStatus.COMPLETED.value}
+            # A reviewer-carrying task enters IN_REVIEW instead of completing.
+            settled = await self.task_manager.get(task_id)
+            to_status = (
+                TaskStatus.IN_REVIEW.value
+                if settled and settled.status == TaskStatus.IN_REVIEW.value
+                else TaskStatus.COMPLETED.value
+            )
+            status_change = {"from": task.status, "to": to_status}
 
         else:
             return ToolOutput(success=False, error=f"Invalid status: {status}")
@@ -768,12 +848,18 @@ class MemberCompleteTaskTool(TeamTool):
         if not result.ok:
             return ToolOutput(success=False, error=result.reason)
 
+        # The task carries reviewers -> it entered the verify gate (IN_REVIEW)
+        # rather than completing. Report the true outcome so the author knows a
+        # reviewer decision is pending.
+        settled = await self.task_manager.get(task_id)
+        outcome = "in_review" if settled and settled.status == TaskStatus.IN_REVIEW.value else "completed"
+
         note = (inputs.get("note") or "").strip() or None
         return ToolOutput(
             success=True,
             data={
                 "task_id": task_id,
-                "status": "completed",
+                "status": outcome,
                 "note": note,
             },
         )
@@ -782,7 +868,71 @@ class MemberCompleteTaskTool(TeamTool):
         if not output.success:
             return output.error or "Failed to complete task"
         d = output.data
-        line = f"Task #{d['task_id']} completed"
+        if d.get("status") == "in_review":
+            line = f"Task #{d['task_id']} submitted for review — awaiting a reviewer's verdict"
+        else:
+            line = f"Task #{d['task_id']} completed"
         if d.get("note"):
             line += f" (note: {d['note']})"
+        return line
+
+
+class VerifyTaskTool(TeamTool):
+    """Reviewer verdict on a task in the verify gate (reviewer only).
+
+    A task carrying reviewers enters ``IN_REVIEW`` when its author completes.
+    A reviewer named on the task calls this to pass it (``IN_REVIEW ->
+    COMPLETED``, unblocking dependents) or fail it (``IN_REVIEW ->
+    IN_PROGRESS``, rework loop with ``feedback`` directed at the author). The
+    manager enforces that the caller is a reviewer of the task and not its
+    author.
+    """
+
+    def __init__(self, task_manager: TeamTaskManager, t: Translator):
+        super().__init__(
+            ToolCard(
+                id="team.verify_task",
+                name="verify_task",
+                description=t("verify_task"),
+            )
+        )
+        self.task_manager = task_manager
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": t("verify_task", "task_id")},
+                "decision": {
+                    "type": "string",
+                    "enum": ["pass", "fail"],
+                    "description": t("verify_task", "decision"),
+                },
+                "feedback": {"type": "string", "description": t("verify_task", "feedback")},
+            },
+            "required": ["task_id", "decision"],
+        }
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        task_id = (inputs.get("task_id") or "").strip()
+        if not task_id:
+            return ToolOutput(success=False, error="'task_id' is required")
+        decision = (inputs.get("decision") or "").strip()
+        feedback = (inputs.get("feedback") or "").strip()
+
+        result = await self.task_manager.verify_task(task_id, decision, feedback)
+        if not result.ok:
+            return ToolOutput(success=False, error=result.reason)
+        return ToolOutput(
+            success=True,
+            data={"task_id": task_id, "decision": decision.lower(), "feedback": feedback or None},
+        )
+
+    def map_result(self, output: ToolOutput) -> str:
+        if not output.success:
+            return output.error or "Failed to verify task"
+        d = output.data
+        if d["decision"] == "pass":
+            return f"Task #{d['task_id']} verified and completed."
+        line = f"Task #{d['task_id']} sent back for revision"
+        if d.get("feedback"):
+            line += f" (feedback: {d['feedback']})"
         return line

@@ -114,6 +114,7 @@ class TaskDetail(BaseModel):
     content: str
     status: str
     assignee: Optional[str] = None
+    reviewer: list[str] = Field(default_factory=list)
     blocked_by: list[str] = Field(default_factory=list)
     blocks: list[str] = Field(default_factory=list)
     updated_at: Optional[int] = None
@@ -142,6 +143,11 @@ class TaskGraphSpec:
     ``PENDING`` with the assignee on record (assigned, not yet started), a
     blocked one keeps the assignee until its dependencies resolve. Left
     ``None``, the task is claimable by any member.
+
+    ``reviewer`` names the verify-gate reviewers (member names, leader-assigned,
+    may be several). A task carrying reviewers routes through ``IN_REVIEW`` on
+    completion; left empty it completes directly. Orthogonal to ``assignee``
+    (the author) — a reviewer must not be the author.
     """
 
     title: str
@@ -150,6 +156,7 @@ class TaskGraphSpec:
     depends_on: tuple[str, ...] = ()
     depended_by: tuple[str, ...] = ()
     assignee: str | None = None
+    reviewer: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +205,9 @@ class NewTaskSpec:
     content: str
     initial_status: str
     assignee: str | None = None
+    # JSON-encoded reviewer member-name list (or None); written verbatim to the
+    # ``reviewer`` column by ``_stage_new_tasks``.
+    reviewer: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
