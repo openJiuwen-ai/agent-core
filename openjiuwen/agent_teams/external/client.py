@@ -212,9 +212,13 @@ class ExternalTeamClient:
         self._db = db
 
         if self._descriptor.scope == "member":
+            # Same factory, same dispatch mode as an in-process teammate: the
+            # tool set an external CLI member sees must match the system prompt
+            # it was spawned with.
             real_tools = create_team_tools(
                 role="teammate",
                 agent_team=backend,
+                dispatch_mode=self._descriptor.dispatch_mode,
                 lang=self._descriptor.language,
             )
             self._tools = {tool.card.name: tool for tool in real_tools}

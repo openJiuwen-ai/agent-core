@@ -21,15 +21,92 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 # ========== Task Management ==========
 
 
+def _task_node_schema(
+    t: Translator,
+    *,
+    extra_properties: dict[str, Any] | None = None,
+    extra_required: list[str] | None = None,
+) -> dict:
+    """Build the per-task node schema shared by every ``create_task`` variant.
+
+    Property descriptions resolve against the shared ``create_task.*`` locale
+    keys, so a variant reuses them for free and only has to add a key for the
+    properties it introduces (e.g. ``create_task.task.assignee``).
+
+    Args:
+        t: Locale resolver.
+        extra_properties: Variant-specific properties merged into the node.
+        extra_required: Variant-specific required property names.
+
+    Returns:
+        A JSON-schema object describing one task node.
+    """
+    properties: dict[str, Any] = {
+        "task_id": {"type": "string", "description": t("create_task", "task.task_id")},
+        "title": {"type": "string", "description": t("create_task", "task.title")},
+        "content": {"type": "string", "description": t("create_task", "task.content")},
+        "depends_on": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": t("create_task", "task.depends_on"),
+        },
+        "depended_by": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": t("create_task", "task.depended_by"),
+        },
+    }
+    properties.update(extra_properties or {})
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": ["title", "content", *(extra_required or [])],
+    }
+
+
+def _spec_label(spec: dict) -> str:
+    """Human-readable label for a task spec in error messages."""
+    return spec.get("task_id") or spec.get("title") or "<unnamed>"
+
+
+def _validate_task_batch(tasks: list[dict]) -> str | None:
+    """Validate batch-level invariants shared by every ``create_task`` variant.
+
+    Returns an error string, or None when the batch is well-formed. In-batch
+    edges have exactly one representation (``depends_on`` on the dependent
+    task), so a ``depended_by`` pointing at a task of the same call is
+    rejected instead of silently deduplicated — the error teaches the caller
+    the canonical form.
+    """
+    batch_ids: set[str] = set()
+    for spec in tasks:
+        if not spec.get("title") or not spec.get("content"):
+            return f"Task {_spec_label(spec)!r} missing required title/content"
+        task_id = spec.get("task_id")
+        if task_id:
+            if task_id in batch_ids:
+                return f"Duplicate task_id {task_id!r} in this call"
+            batch_ids.add(task_id)
+
+    for spec in tasks:
+        in_batch_targets = [dep for dep in spec.get("depended_by") or () if dep in batch_ids]
+        if in_batch_targets:
+            return (
+                f"Task {_spec_label(spec)!r}: depended_by may only reference "
+                f"tasks that already exist on the board, but {in_batch_targets} are created "
+                f"in this same call — express in-batch edges with depends_on on the dependent task"
+            )
+    return None
+
+
 class TaskCreateTool(TeamTool):
-    """Create team tasks (Leader only).
+    """Create team tasks; tasks land unassigned and claimable (autonomous dispatch).
 
     The whole call is one atomic graph mutation via ``add_graph``: edges
     among tasks of the same call are expressed with ``depends_on`` only
     (forward references allowed), while ``depended_by`` is reserved for
-    wiring *existing* tasks to depend on a new task (insert into an
-    existing chain). In-batch ``depended_by`` targets are rejected at
-    this boundary as redundant.
+    wiring *existing* tasks to depend on a new task. In-batch ``depended_by``
+    targets are rejected at this boundary as redundant.
     """
 
     def __init__(self, agent_team: TeamBackend, t: Translator):
@@ -41,77 +118,24 @@ class TaskCreateTool(TeamTool):
             )
         )
         self.task_manager = agent_team.task_manager
-
-        _task_schema: dict = {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": t("create_task", "task.task_id")},
-                "title": {"type": "string", "description": t("create_task", "task.title")},
-                "content": {"type": "string", "description": t("create_task", "task.content")},
-                "depends_on": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": t("create_task", "task.depends_on"),
-                },
-                "depended_by": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": t("create_task", "task.depended_by"),
-                },
-            },
-            "required": ["title", "content"],
-        }
-
         self.card.input_params = {
             "type": "object",
             "properties": {
                 "tasks": {
                     "type": "array",
-                    "items": _task_schema,
+                    "items": _task_node_schema(t),
                     "description": t("create_task", "tasks"),
                 },
             },
             "required": ["tasks"],
         }
 
-    @staticmethod
-    def _spec_label(spec: dict) -> str:
-        return spec.get("task_id") or spec.get("title") or "<unnamed>"
-
-    def _validate_batch(self, tasks: list[dict]) -> str | None:
-        """Validate batch-level invariants; returns an error string or None.
-
-        In-batch edges have exactly one representation (``depends_on`` on
-        the dependent task), so a ``depended_by`` pointing at a task of the
-        same call is rejected instead of silently deduplicated — the error
-        teaches the caller the canonical form.
-        """
-        batch_ids: set[str] = set()
-        for spec in tasks:
-            if not spec.get("title") or not spec.get("content"):
-                return f"Task {self._spec_label(spec)!r} missing required title/content"
-            task_id = spec.get("task_id")
-            if task_id:
-                if task_id in batch_ids:
-                    return f"Duplicate task_id {task_id!r} in this call"
-                batch_ids.add(task_id)
-
-        for spec in tasks:
-            in_batch_targets = [dep for dep in spec.get("depended_by") or () if dep in batch_ids]
-            if in_batch_targets:
-                return (
-                    f"Task {self._spec_label(spec)!r}: depended_by may only reference "
-                    f"tasks that already exist on the board, but {in_batch_targets} are created "
-                    f"in this same call — express in-batch edges with depends_on on the dependent task"
-                )
-        return None
-
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         tasks = inputs.get("tasks", [])
         if not tasks:
             return ToolOutput(success=False, error="'tasks' is required")
 
-        error = self._validate_batch(tasks)
+        error = _validate_task_batch(tasks)
         if error:
             return ToolOutput(success=False, error=error)
 
@@ -137,22 +161,128 @@ class TaskCreateTool(TeamTool):
             return ToolOutput(success=True, data=result.tasks[0].brief())
         return ToolOutput(
             success=True,
-            data={
-                "tasks": [t.brief() for t in result.tasks],
-                "count": len(result.tasks),
-            },
+            data={"tasks": [task.brief() for task in result.tasks], "count": len(result.tasks)},
         )
 
     def map_result(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Operation failed"
         d = output.data
-        # Single task
         if "task_id" in d and "title" in d:
             return f"Task created: task_id={d['task_id']} title={d['title']}"
-        # Batch
-        tasks = d.get("tasks", [])
-        lines = [f"task_id={t['task_id']} title={t['title']}" for t in tasks]
+        lines = [f"task_id={task['task_id']} title={task['title']}" for task in d.get("tasks", [])]
+        lines.append(f"Created {d['count']}")
+        return "\n".join(lines)
+
+
+def _owner_phrase(task: dict) -> str:
+    """Render a scheduled task's owner and whether it is ready or waiting."""
+    if task.get("status") == TaskStatus.BLOCKED.value:
+        return f"-> {task['assignee']} (blocked; starts once its dependencies complete)"
+    return f"-> {task['assignee']} (assigned; the scheduler starts it)"
+
+
+class ScheduledTaskCreateTool(TeamTool):
+    """Create team tasks, each naming its owner (scheduled dispatch).
+
+    Same atomic ``add_graph`` and same edge rules as ``TaskCreateTool``, plus
+    a required ``assignee`` that rides along in the same mutation: the task
+    rests at PENDING (or BLOCKED, if it has dependencies) *with its owner on
+    record*, and the scheduler moves it to STARTED when execution begins.
+    Members never claim in this mode, so a task without an assignee would
+    never run — hence ``assignee`` is required
+    and the result echoes the owner and landing status.
+    """
+
+    def __init__(self, agent_team: TeamBackend, t: Translator):
+        super().__init__(
+            ToolCard(
+                id="team.create_task",
+                name="create_task",
+                description=t("create_task_scheduled"),
+            )
+        )
+        self.agent_team = agent_team
+        self.task_manager = agent_team.task_manager
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "items": _task_node_schema(
+                        t,
+                        extra_properties={
+                            "assignee": {"type": "string", "description": t("create_task", "task.assignee")},
+                        },
+                        extra_required=["assignee"],
+                    ),
+                    "description": t("create_task", "tasks"),
+                },
+            },
+            "required": ["tasks"],
+        }
+
+    async def _validate_assignees(self, tasks: list[dict]) -> str | None:
+        """Reject a batch that names an assignee the roster does not have.
+
+        The DB column carries no FK to team_member, and the whole batch is
+        one transaction — catching a typo here keeps the graph from landing
+        bound to a member nobody serves.
+        """
+        for spec in tasks:
+            assignee = (spec.get("assignee") or "").strip()
+            if not assignee:
+                return (
+                    f"Task {_spec_label(spec)!r} missing required 'assignee' — "
+                    f"scheduled tasks are never claimed, so every task must name its owner"
+                )
+            if not await self.agent_team.member_exists(assignee):
+                return f"Task {_spec_label(spec)!r}: member {assignee!r} not found in the team"
+        return None
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        tasks = inputs.get("tasks", [])
+        if not tasks:
+            return ToolOutput(success=False, error="'tasks' is required")
+
+        error = _validate_task_batch(tasks)
+        if error:
+            return ToolOutput(success=False, error=error)
+        error = await self._validate_assignees(tasks)
+        if error:
+            return ToolOutput(success=False, error=error)
+
+        result = await self.task_manager.add_graph(
+            [
+                TaskGraphSpec(
+                    title=spec["title"],
+                    content=spec["content"],
+                    task_id=spec.get("task_id"),
+                    depends_on=tuple(spec.get("depends_on") or ()),
+                    depended_by=tuple(spec.get("depended_by") or ()),
+                    assignee=(spec.get("assignee") or "").strip(),
+                )
+                for spec in tasks
+            ]
+        )
+        if not result.ok:
+            return ToolOutput(success=False, error=result.reason)
+
+        # The owner and landing status are the whole point of this variant:
+        # the leader must tell "started now" from "waiting on dependencies"
+        # without a follow-up view_task.
+        briefs = [{**task.brief(), "assignee": task.assignee} for task in result.tasks]
+        if len(briefs) == 1:
+            return ToolOutput(success=True, data=briefs[0])
+        return ToolOutput(success=True, data={"tasks": briefs, "count": len(briefs)})
+
+    def map_result(self, output: ToolOutput) -> str:
+        if not output.success:
+            return output.error or "Operation failed"
+        d = output.data
+        if "task_id" in d and "title" in d:
+            return f"Task created: task_id={d['task_id']} title={d['title']} {_owner_phrase(d)}"
+        lines = [f"task_id={task['task_id']} title={task['title']} {_owner_phrase(task)}" for task in d.get("tasks", [])]
         lines.append(f"Created {d['count']}")
         return "\n".join(lines)
 
@@ -299,7 +429,12 @@ class UpdateTaskTool(TeamTool):
         collaborator can release them (by completing, or by the team
         being cleaned). The leader's only recourse is send_message nudges.
         """
-        return await self.agent_team.is_human_agent(task.assignee) and task.status == TaskStatus.CLAIMED.value
+        active = (
+            TaskStatus.PLANNING.value,
+            TaskStatus.IN_PROGRESS.value,
+            TaskStatus.IN_REVIEW.value,
+        )
+        return await self.agent_team.is_human_agent(task.assignee) and task.status in active
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         task_id = inputs.get("task_id")
@@ -368,14 +503,14 @@ class UpdateTaskTool(TeamTool):
         # member-wide cancel), so only this one task moves — its other
         # claims and in-flight round survive. Same-member is idempotent.
         if assignee:
-            # One active claim per member: reject before any state change so a
+            # One active task per member: reject before any state change so a
             # rejected assign never disturbs the current owner or this task.
-            busy_task_id = await self.task_manager.get_other_claimed_task_id(assignee, task_id)
+            busy_task_id = await self.task_manager.get_other_active_task_id(assignee, task_id)
             if busy_task_id:
                 return ToolOutput(
                     success=False,
                     error=(
-                        f"Member '{assignee}' already has a claimed task #{busy_task_id}; "
+                        f"Member '{assignee}' already has an active task #{busy_task_id}; "
                         f"wait for it to complete before assigning another."
                     ),
                 )
@@ -515,21 +650,21 @@ class ClaimTaskTool(TeamTool):
             return ToolOutput(success=False, error="Task not found")
 
         if status == "claimed":
-            # One active claim per member: refuse a second concurrent claim so a
+            # One active task per member: refuse a second concurrent claim so a
             # teammate finishes its current task before picking up another.
-            busy_task_id = await self.task_manager.get_other_claimed_task_id(self.task_manager.member_name, task_id)
+            busy_task_id = await self.task_manager.get_other_active_task_id(self.task_manager.member_name, task_id)
             if busy_task_id:
                 return ToolOutput(
                     success=False,
                     error=(
-                        f"You already have a claimed task #{busy_task_id}; "
+                        f"You already have an active task #{busy_task_id}; "
                         f"complete it before claiming another."
                     ),
                 )
             claim_result = await self.task_manager.claim(task_id=task_id)
             if not claim_result.ok:
                 return ToolOutput(success=False, error=claim_result.reason)
-            status_change = {"from": task.status, "to": TaskStatus.CLAIMED.value}
+            status_change = {"from": task.status, "to": TaskStatus.IN_PROGRESS.value}
 
         elif status == "completed":
             complete_result = await self.task_manager.complete(task_id=task_id)
@@ -570,15 +705,19 @@ class MemberCompleteTaskTool(TeamTool):
     teammate-only) and from leader's ``UpdateTaskTool`` (which manages
     the team-wide task graph). Wired into ``HUMAN_AGENT_TOOLS`` so the
     user's avatar can mark its leader-assigned tasks as done without
-    inheriting any of leader's coordination authority.
+    inheriting any of leader's coordination authority, and into the
+    scheduled-dispatch member set, where no member claims its own work.
+
+    Behaviour is identical either way; only the description differs, so the
+    caller picks the ``desc_key`` instead of the class.
     """
 
-    def __init__(self, task_manager: TeamTaskManager, t: Translator):
+    def __init__(self, task_manager: TeamTaskManager, t: Translator, *, desc_key: str = "member_complete_task"):
         super().__init__(
             ToolCard(
                 id="team.member_complete_task",
                 name="member_complete_task",
-                description=t("member_complete_task"),
+                description=t(desc_key),
             )
         )
         self.task_manager = task_manager

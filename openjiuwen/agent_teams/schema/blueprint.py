@@ -280,6 +280,17 @@ class TeamAgentSpec(BaseModel):
     "predefined" to lock the roster and drop the leader's
     ``spawn_member`` tool.
     """
+    dispatch_mode: Literal["autonomous", "scheduled"] = "autonomous"
+    """How a task reaches the member that executes it.
+
+    Orthogonal to ``team_mode`` (which governs whether the roster can
+    grow). ``"autonomous"`` (default) puts tasks on a shared board:
+    members claim what matches their expertise, and the leader launches
+    them with a ``send_message`` broadcast. ``"scheduled"`` has the
+    leader assign every task to a named member up front; the scheduling
+    runtime notifies and starts that member, and members lose
+    ``claim_task`` in favour of ``member_complete_task``.
+    """
     transport: Optional[TransportSpec] = None
     """Pluggable transport layer specification.
 
@@ -559,6 +570,7 @@ class TeamAgentSpec(BaseModel):
             display_name=self.team_name,
             leader_member_name=self.leader.member_name,
             language=resolved_language,
+            dispatch_mode=self.dispatch_mode,
             model_pool=team_pool,
             model_pool_strategy=team_strategy,
             external_messager_config=external_messager_config,

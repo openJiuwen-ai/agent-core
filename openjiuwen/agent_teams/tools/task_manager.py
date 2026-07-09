@@ -32,6 +32,7 @@ from openjiuwen.agent_teams.schema.events import (
     TaskPlanResponseEvent,
     TaskReleasedEvent,
     TaskRevokedEvent,
+    TaskStartedEvent,
     TaskUnblockedEvent,
     TaskUpdatedEvent,
     TeamTopic,
@@ -157,6 +158,17 @@ class TeamTaskManager:
         task (insert into an existing chain). The tool boundary rejects
         in-batch ``depended_by`` targets — see ``TaskGraphSpec``.
 
+        ``spec.assignee`` pre-assigns a task (scheduled dispatch) inside the
+        same transaction. Every task is seeded ``PENDING`` regardless of
+        assignee — a scheduled task rests at ``PENDING`` *with an assignee*
+        ("assigned, not yet started") until the scheduler calls
+        ``start_task`` to move it to ``IN_PROGRESS``. Assignment and execution
+        are separate events, so seeding an execution state here would conflate
+        them. A task with unresolved ``depends_on`` is flipped to ``BLOCKED``
+        by the refresh pass and carries its assignee through. ``depended_by``
+        gates the tasks pointing at this one, not this task, so it is not
+        consulted here.
+
         Args:
             specs: Task specs to create; missing ``task_id`` values are
                 auto-generated.
@@ -169,12 +181,16 @@ class TeamTaskManager:
         edges: list[tuple[str, str]] = []
         for spec in specs:
             task_id = spec.task_id or str(uuid.uuid4())
+            # Always seed PENDING. A scheduled pre-assigned task rests at
+            # PENDING(assignee) until the scheduler starts it; the refresh
+            # pass flips it to BLOCKED if it has unresolved dependencies.
             new_tasks.append(
                 NewTaskSpec(
                     task_id=task_id,
                     title=spec.title,
                     content=spec.content,
                     initial_status=TaskStatus.PENDING.value,
+                    assignee=spec.assignee,
                 )
             )
             edges.extend((task_id, dep_id) for dep_id in spec.depends_on)
@@ -203,7 +219,7 @@ class TeamTaskManager:
                     title=node.title,
                     content=node.content,
                     status=status,
-                    assignee=None,
+                    assignee=node.assignee,
                 )
             )
         team_logger.debug(f"Added {len(created)} task(s) with {len(edges)} dependency edge(s)")
@@ -343,15 +359,17 @@ class TeamTaskManager:
         return await self.db.task.get_task(task_id)
 
     async def assign(self, task_id: str, assignee: str) -> TaskOpResult:
-        """Assign a task to a member and mark it as claimed (Leader only).
+        """Assign a task to a member (Leader only).
 
-        Atomically sets the assignee and transitions the task to ``CLAIMED``
-        so leader-driven assignment is symmetric with a member self-claim.
-        Idempotent when the task is already claimed by ``assignee``. Fails
-        when the task is currently held by a different member; the caller
-        must reset the task first (see ``reset``) for true reassignment.
-        Sends a notification message to the assigned member's mailbox on
-        success.
+        Atomically sets the assignee and enters the member's entry gate,
+        symmetric with a member self-serve: a ``BUILD_MODE`` assignee starts
+        executing (``IN_PROGRESS``), a ``PLAN_MODE`` assignee enters the plan
+        gate (``PLANNING``) and must submit a plan for approval before
+        executing. Idempotent when the task is already held by ``assignee`` in
+        that gate. Fails when the task is currently held by a different member;
+        the caller must reset the task first (see ``reset``) for true
+        reassignment. Sends a notification message to the assigned member's
+        mailbox on success.
 
         Args:
             task_id: Task identifier.
@@ -373,8 +391,15 @@ class TeamTaskManager:
         if not member:
             return TaskOpResult.fail(f"Member {assignee} not found in team {self.team_name}")
 
-        # Idempotent re-assign: same member, status already claimed -> no-op success.
-        if task.assignee == assignee and task.status == TaskStatus.CLAIMED.value:
+        # Entry gate mirrors a member self-serve: plan-mode assignees land in
+        # the plan gate (PLANNING) and must get approval; build-mode assignees
+        # start executing (IN_PROGRESS).
+        entry_status = (
+            TaskStatus.PLANNING if member.mode == MemberMode.PLAN_MODE.value else TaskStatus.IN_PROGRESS
+        )
+
+        # Idempotent re-assign: same member, already at its entry gate -> no-op.
+        if task.assignee == assignee and task.status == entry_status.value:
             team_logger.debug(f"Task {task_id} already assigned to {assignee}; no-op")
             return TaskOpResult.success()
 
@@ -383,7 +408,7 @@ class TeamTaskManager:
                 f"Task {task_id} is already claimed by {task.assignee}; reset the task before reassigning to {assignee}"
             )
 
-        success = await self.db.task.claim_task(task_id, assignee)
+        success = await self.db.task.claim_task(task_id, assignee, to_status=entry_status)
         if not success:
             return TaskOpResult.fail(
                 f"Database rejected assign for task {task_id} (invalid state transition from {task.status})"
@@ -454,17 +479,17 @@ class TeamTaskManager:
         if member.mode == MemberMode.PLAN_MODE.value:
             return TaskOpResult.fail(
                 "PLAN_MODE members must call submit_plan first; "
-                "leader approval moves the task from claimed to plan_approved"
+                "leader approval moves the task from planning to in_progress"
             )
 
         # Idempotent re-claim: if the caller already owns this task, succeed silently.
-        if task.assignee == member_name and task.status == TaskStatus.CLAIMED.value:
+        if task.assignee == member_name and task.status == TaskStatus.IN_PROGRESS.value:
             team_logger.debug(f"Task {task_id} already claimed by {member_name}; no-op")
             return TaskOpResult.success()
 
         # Claim conflict must be reported before the state-transition check —
-        # otherwise a CLAIMED task held by someone else surfaces as the
-        # misleading "invalid claimed → claimed transition" error.
+        # otherwise a task held by someone else surfaces as the misleading
+        # "invalid in_progress → in_progress transition" error.
         if task.assignee:
             return TaskOpResult.fail(
                 f"Task {task_id} is already claimed by {task.assignee}, {member_name} cannot claim it"
@@ -473,7 +498,7 @@ class TeamTaskManager:
         # Validate state transition (blocks e.g. COMPLETED/CANCELLED/BLOCKED claims).
         if not is_valid_transition(
             TaskStatus(task.status),
-            TaskStatus.CLAIMED,
+            TaskStatus.IN_PROGRESS,
             TASK_TRANSITIONS,
         ):
             return TaskOpResult.fail(
@@ -516,23 +541,15 @@ class TeamTaskManager:
         Returns:
             ``TaskOpResult`` describing the outcome.
         """
-        # Get member to check mode
+        # Get member to check mode (drives the plan-index write below).
         member = await self.db.member.get_member(self.member_name, self.team_name)
         if not member:
             return TaskOpResult.fail(f"Member {self.member_name} not found in team {self.team_name}")
 
-        # Check if member is in PLAN_MODE
-        if member.mode == MemberMode.PLAN_MODE.value:
-            task = await self.db.task.get_task(task_id)
-            if not task:
-                return TaskOpResult.fail(f"Task {task_id} not found")
-
-            # PLAN_MODE members can only complete PLAN_APPROVED tasks.
-            if task.status != TaskStatus.PLAN_APPROVED.value:
-                return TaskOpResult.fail(
-                    f"PLAN_MODE member cannot complete task {task_id} in status "
-                    f"'{task.status}'; only plan_approved tasks can be completed"
-                )
+        # No plan-mode-specific gate is needed: the transition table forbids
+        # PLANNING -> COMPLETED, so a plan-mode member cannot complete a task
+        # that has not been approved (PLANNING -> IN_PROGRESS). Completion is
+        # uniformly valid only from IN_PROGRESS.
 
         # Complete task atomically - this handles state validation, dependency resolution,
         # and unblocking dependent tasks in a single transaction to prevent race conditions
@@ -542,7 +559,8 @@ class TeamTaskManager:
             if current is None:
                 return TaskOpResult.fail(f"Task {task_id} not found")
             return TaskOpResult.fail(
-                f"Task {task_id} cannot be completed from status '{current.status}' (must be claimed or plan_approved)"
+                f"Task {task_id} cannot be completed from status '{current.status}' "
+                f"(must be in_progress)"
             )
 
         # Extract completed task info and unblocked tasks
@@ -729,7 +747,7 @@ class TeamTaskManager:
         plan_id: str | None = None,
         tool_call_id: str = "",
     ) -> dict[str, Any]:
-        """Snapshot a member execution plan file and reserve the task as CLAIMED."""
+        """Snapshot a member execution plan file and reserve the task as PLANNING."""
         member_name = self.member_name
         member = await self.db.member.get_member(member_name, self.team_name)
         if not member:
@@ -746,7 +764,15 @@ class TeamTaskManager:
                 "task_id": task_id,
                 "message": f"Task {task_id} is assigned to {task.assignee}, not {member_name}",
             }
-        if task.status not in (TaskStatus.PENDING.value, TaskStatus.CLAIMED.value):
+        # PENDING (first submission, reserved into PLANNING below), PLANNING
+        # (re-submit after a reject, stays PLANNING), and IN_PROGRESS (scheduled
+        # owner submits a plan against an already-started task without
+        # re-claiming) are the states a member plan can be recorded from.
+        if task.status not in (
+            TaskStatus.PENDING.value,
+            TaskStatus.PLANNING.value,
+            TaskStatus.IN_PROGRESS.value,
+        ):
             return {
                 "success": False,
                 "task_id": task_id,
@@ -773,15 +799,24 @@ class TeamTaskManager:
             }
 
         if task.status == TaskStatus.PENDING.value:
-            claimed = await self.db.task.claim_task(task_id, member_name)
+            # A PENDING task with no owner is reserved into the plan gate
+            # (PENDING -> PLANNING) by the first submission. Scheduled tasks
+            # never reach here as PENDING with a free assignee.
+            claimed = await self.db.task.claim_task(task_id, member_name, to_status=TaskStatus.PLANNING)
             if not claimed:
                 return {"success": False, "task_id": task_id, "message": "Failed to reserve task for planning"}
+            active_status = TaskStatus.PLANNING.value
         elif task.assignee != member_name:
             return {
                 "success": False,
                 "task_id": task_id,
                 "message": f"Task {task_id} is assigned to {task.assignee}, not {member_name}",
             }
+        else:
+            # Already owned by this member: PLANNING (re-plan after reject) or
+            # IN_PROGRESS (scheduled). Planning records against it without a
+            # status change.
+            active_status = task.status
 
         member_plan_path = self._task_plan_path(task_id, plan_id)
         member_plan_path.parent.mkdir(parents=True, exist_ok=True)
@@ -793,7 +828,7 @@ class TeamTaskManager:
             "team_plan_id": self.team_plan_id,
             "latest_plan_id": plan_id,
             "member_name": member_name,
-            "status": TaskStatus.CLAIMED.value,
+            "status": active_status,
             "member_plan_md": str(member_plan_path),
             "source_plan_path": str(submitted_plan_path),
             "tool_call_id": tool_call_id,
@@ -807,7 +842,7 @@ class TeamTaskManager:
                 team_name=self.team_name,
                 task_id=task_id,
                 member_name=member_name,
-                status=TaskStatus.CLAIMED.value,
+                status=active_status,
                 plan_id=plan_id,
                 member_plan_md=str(member_plan_path),
                 tool_call_id=tool_call_id,
@@ -828,7 +863,7 @@ class TeamTaskManager:
             "success": True,
             "task_id": task_id,
             "plan_id": plan_id,
-            "status": TaskStatus.CLAIMED.value,
+            "status": active_status,
             "member_plan_md": str(member_plan_path),
             "leader_message_id": leader_message_id,
             "message": "Member plan submitted. Wait for leader approval before execution.",
@@ -1022,8 +1057,8 @@ class TeamTaskManager:
         if not success:
             return TaskOpResult.fail(
                 f"Task {task_id} cannot be edited while in status '{task.status}'; "
-                f"content updates are allowed on pending / blocked / claimed tasks "
-                f"(plan-mode tasks are locked)"
+                f"content updates are allowed on pending / blocked / planning / in-progress tasks "
+                f"(in-review tasks are locked)"
             )
 
         team_logger.info(f"Task {task_id} updated")
@@ -1066,7 +1101,8 @@ class TeamTaskManager:
         result = await self.db.task.reset_task(task_id)
         if not result:
             return TaskOpResult.fail(
-                f"Task {task_id} cannot be reset from status '{existing.status}'; only claimed tasks can be reset"
+                f"Task {task_id} cannot be reset from status '{existing.status}'; "
+                f"only planning / in-progress / in-review tasks can be reset"
             )
         team_logger.info(f"Task {task_id} reset successfully")
         await self._publish_task_event(
@@ -1075,31 +1111,86 @@ class TeamTaskManager:
         )
         return TaskOpResult.success()
 
-    async def get_other_claimed_task_id(self, member_name: str, exclude_task_id: str) -> str | None:
-        """Return the task_id of a member's CLAIMED task other than
+    async def get_other_active_task_id(self, member_name: str, exclude_task_id: str) -> str | None:
+        """Return the task_id of a member's active task other than
         ``exclude_task_id``, or None.
 
-        Backs the one-active-claim-per-member invariant enforced at the tool
-        boundary: a claim or leader assignment is rejected when this returns
-        a task id. ``exclude_task_id`` keeps an idempotent re-claim /
-        re-assign of the same task from being flagged as a conflict. Probes a
-        single ``task_id`` column (``LIMIT 1``) at the DB layer rather than
-        reading the member's full set of claimed-task rows.
+        Backs the one-active-task-per-member invariant enforced at the tool
+        boundary: a claim / leader assignment / scheduler start is rejected
+        when this returns a task id. "Active" spans the three owned non-terminal
+        conditions — ``PLANNING`` / ``IN_PROGRESS`` / ``IN_REVIEW``. ``exclude_task_id``
+        keeps an idempotent re-claim / re-assign / re-start of the same task
+        from being flagged as a conflict. Probes a single ``task_id`` column
+        (``LIMIT 1``) at the DB layer rather than reading the member's full
+        active set.
 
         Args:
-            member_name: Member whose claims to inspect.
-            exclude_task_id: Task id to ignore (the one being claimed / assigned).
+            member_name: Member whose active tasks to inspect.
+            exclude_task_id: Task id to ignore (the one being acted on).
 
         Returns:
-            The task_id of one other CLAIMED task, or ``None`` when the member
-            holds no claimed task besides ``exclude_task_id``.
+            The task_id of one other active task, or ``None`` when the member
+            holds none besides ``exclude_task_id``.
         """
-        return await self.db.task.get_other_claimed_task_id(self.team_name, member_name, exclude_task_id)
+        return await self.db.task.get_other_active_task_id(self.team_name, member_name, exclude_task_id)
+
+    async def start_task(self, task_id: str) -> TaskOpResult:
+        """Move a scheduled task from PENDING(assignee) to IN_PROGRESS.
+
+        Called by the scheduler when it dispatches an already-assigned task to
+        its owner and execution begins — assignment (at create time) and
+        execution-start are separate events in scheduled dispatch. Enforces
+        the one-active-task invariant before the CAS: the owner must not
+        already hold another active (PLANNING / IN_PROGRESS / IN_REVIEW) task.
+
+        Args:
+            task_id: The assigned task to start. Its ``assignee`` names the
+                owner; there is no separate member argument.
+
+        Returns:
+            ``TaskOpResult`` carrying the failure reason on error.
+        """
+        task = await self.get(task_id)
+        if not task:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+        member_name = task.assignee
+        if not member_name:
+            return TaskOpResult.fail(f"Task {task_id} has no assignee; cannot start an unassigned task")
+
+        # Idempotent re-start: already running for its owner -> no-op success.
+        if task.status == TaskStatus.IN_PROGRESS.value:
+            team_logger.debug("Task %s already started by %s; no-op", task_id, member_name)
+            return TaskOpResult.success()
+
+        # One active task per member (PLANNING / IN_PROGRESS / IN_REVIEW).
+        busy_task_id = await self.get_other_active_task_id(member_name, task_id)
+        if busy_task_id:
+            return TaskOpResult.fail(
+                f"Member {member_name} already has an active task {busy_task_id}; "
+                f"finish it before starting {task_id}"
+            )
+
+        started = await self.db.task.start_task(task_id, member_name)
+        if not started:
+            return TaskOpResult.fail(
+                f"Task {task_id} cannot be started from status '{task.status}' "
+                f"(only a pending task assigned to {member_name} can start)"
+            )
+
+        await self._publish_task_event(
+            TaskStartedEvent(
+                team_name=self.team_name,
+                task_id=task_id,
+                member_name=member_name,
+            ),
+            error_label=f"Task started event for {task_id}",
+        )
+        return TaskOpResult.success()
 
     async def reassign(self, task_id: str, new_assignee: str) -> TaskOpResult:
-        """Hand a claimed task from its current owner to another member.
+        """Hand an in-progress task from its current owner to another member.
 
-        Atomic assignee swap — the task stays CLAIMED throughout and never
+        Atomic assignee swap — the task stays IN_PROGRESS throughout and never
         bounces through PENDING, so no spurious ``TASK_RELEASED`` wakes idle
         teammates and there is no claimable-pool window to race into. Fires
         exactly two targeted events: ``TASK_REVOKED`` tells the former owner
@@ -1111,7 +1202,7 @@ class TeamTaskManager:
         disturbs the task.
 
         Args:
-            task_id: Task to reassign (must be CLAIMED).
+            task_id: Task to reassign (must be IN_PROGRESS).
             new_assignee: Member to hand the task to.
 
         Returns:
@@ -1154,10 +1245,10 @@ class TeamTaskManager:
     ) -> TaskOpResult:
         """Approve or reject a member plan submission for PLAN_MODE members.
 
-        Plan mode reuses the existing task state machine:
-        PENDING -> CLAIMED when a member submits a plan, then
-        CLAIMED -> PLAN_APPROVED when the leader approves it. A rejection
-        keeps the task in CLAIMED so the member can revise and resubmit a
+        Plan mode drives the plan gate:
+        PENDING -> PLANNING when a member submits a plan, then
+        PLANNING -> IN_PROGRESS when the leader approves it. A rejection
+        keeps the task in PLANNING so the member can revise and resubmit a
         new plan id.
 
         Args:
@@ -1181,10 +1272,11 @@ class TeamTaskManager:
         existing = await self.db.task.get_task(task_id)
         if not existing:
             return TaskOpResult.fail(f"Task {task_id} not found")
-        if existing.status != TaskStatus.CLAIMED.value:
+        # PLANNING is the plan-gate state a plan is decided from.
+        if existing.status != TaskStatus.PLANNING.value:
             return TaskOpResult.fail(
                 f"Task {task_id} cannot be plan-approved from status "
-                f"'{existing.status}'; only claimed tasks can be approved or rejected"
+                f"'{existing.status}'; only a task in planning can be approved or rejected"
             )
         if not existing.assignee:
             return TaskOpResult.fail(f"Task {task_id} has no assignee")
@@ -1212,7 +1304,9 @@ class TeamTaskManager:
 
         tool_call_id = str(plan_index.get("tool_call_id") or "")
 
-        next_status = TaskStatus.PLAN_APPROVED.value if approved else TaskStatus.CLAIMED.value
+        # Rejection keeps the task in PLANNING so the member can revise and
+        # resubmit; approval advances the plan gate to IN_PROGRESS.
+        next_status = TaskStatus.IN_PROGRESS.value if approved else existing.status
         plan_path.parent.mkdir(parents=True, exist_ok=True)
         approval = {
             "task_id": task_id,
@@ -1239,14 +1333,14 @@ class TeamTaskManager:
                     task_id=task_id,
                     member_name=existing.assignee,
                     approved=False,
-                    status=TaskStatus.CLAIMED.value,
+                    status=existing.status,
                     plan_id=plan_id,
                     feedback=feedback,
                     tool_call_id=tool_call_id,
                 ),
                 error_label=f"Task plan response event for {task_id}",
             )
-            team_logger.info(f"Task {task_id} plan rejected; task remains claimed")
+            team_logger.info("Task %s plan rejected; task remains %s", task_id, existing.status)
             return TaskOpResult.success()
 
         task = await self.db.task.approve_plan_task(task_id)
@@ -1262,7 +1356,7 @@ class TeamTaskManager:
                 task_id=task_id,
                 member_name=task.assignee,
                 approved=True,
-                status=TaskStatus.PLAN_APPROVED.value,
+                status=TaskStatus.IN_PROGRESS.value,
                 plan_id=plan_id,
                 feedback=feedback,
                 tool_call_id=tool_call_id,

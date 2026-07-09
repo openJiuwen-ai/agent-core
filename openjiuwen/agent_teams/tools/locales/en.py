@@ -243,6 +243,14 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "Custom task ID for dependency reference (auto-generated if omitted)",
     "create_task.task.title": "Task title — concise description of the goal",
     "create_task.task.content": "Task details including goals and acceptance criteria",
+    # Only the scheduled create_task variant exposes this property; the
+    # description lives under the shared create_task.* key namespace so both
+    # variants read the same strings for the properties they have in common.
+    "create_task.task.assignee": (
+        "Member name that carries this task (required); the member must already exist. "
+        "A task with no dependencies is owned by it immediately; a task with dependencies "
+        "transfers to it automatically once they complete"
+    ),
     "create_task.task.depends_on": "Prerequisite task IDs; may reference tasks created in this same call or existing tasks",
     "create_task.task.depended_by": "Existing task IDs that should wait for this task (reverse dependency); must not reference tasks created in this same call — express in-batch edges with depends_on on the dependent task",
     # ===== view_task ===========================================================
@@ -311,6 +319,16 @@ STRINGS: dict[str, str] = {
     ),
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",
+    # ===== send_message_scheduled (scheduled-mode member variant) ==============
+    # send_message_scheduled._desc lives in descs/en/send_message_scheduled.md
+    # ``content`` / ``summary`` are reused verbatim from the send_message keys
+    # above — only the recipient semantics differ, so only ``to`` is redefined.
+    "send_message_scheduled.to": (
+        'Recipient: only "leader" (a role name — the system delivers it to the real '
+        "Leader; use it for progress, completion, blockers, reassignment requests) "
+        'or "user" (only to reply when an incoming message came from the user). You '
+        "cannot message other members; multicast and broadcast are unavailable in this mode"
+    ),
     # NOTE: worktree tools (enter_worktree / exit_worktree) live in
     # ``openjiuwen.harness.tools.worktree`` and resolve their description
     # / param schema via ``harness.prompts.tools`` providers — no entries

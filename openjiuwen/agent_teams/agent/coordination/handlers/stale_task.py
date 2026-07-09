@@ -72,25 +72,31 @@ class StaleTaskHandler(BaseCoordinationHandler):
             #     await self._nudge_idle_agent(member_name, from_poll=True)
 
     async def _check_stale_claimed_tasks(self) -> None:
-        """Find own claimed tasks that have been running past the stale threshold.
+        """Find own active tasks that have been running past the stale threshold.
 
-        Measures how long a task has been in CLAIMED state by reading
-        the database ``updated_at`` column (bumped on every status
-        transition, so for a claimed task it is the claim timestamp).
-        When the elapsed time exceeds ``_STALE_CLAIM_SECONDS`` the
-        member feeds a nudge into its own agent loop. Only tasks
-        assigned to *this* member are swept — the leader does not nudge
-        another member about that member's stale claims. A per-task
-        throttle prevents follow-up polls from re-nudging inside the
-        same stale window.
+        "Active" spans the three owned non-terminal conditions — PLANNING,
+        IN_PROGRESS, and IN_REVIEW. Measures how long a task
+        has been active by reading the database ``updated_at`` column
+        (bumped on every status transition). When the elapsed time
+        exceeds ``_STALE_CLAIM_SECONDS`` the member feeds a nudge into
+        its own agent loop. Only tasks assigned to *this* member are
+        swept — the leader does not nudge another member about that
+        member's stale work. A per-task throttle prevents follow-up
+        polls from re-nudging inside the same stale window.
         """
         task_manager = self._infra.task_manager
         if task_manager is None:
             return
 
-        claimed = await task_manager.list_tasks(status=TaskStatus.CLAIMED.value)
         own_name = self._blueprint.member_name
-        relevant = [tk for tk in claimed if tk.assignee and tk.assignee == own_name]
+        active: list[Any] = []
+        for status in (
+            TaskStatus.PLANNING.value,
+            TaskStatus.IN_PROGRESS.value,
+            TaskStatus.IN_REVIEW.value,
+        ):
+            active.extend(await task_manager.list_tasks(status=status))
+        relevant = [tk for tk in active if tk.assignee and tk.assignee == own_name]
 
         current_ids = {tk.task_id for tk in relevant}
         for tid in [k for k in self._last_stale_nudge if k not in current_ids]:

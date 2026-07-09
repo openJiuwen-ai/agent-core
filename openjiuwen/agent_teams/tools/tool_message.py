@@ -3,9 +3,17 @@
 
 """Messaging tool: send_message (point-to-point, multicast, and broadcast)."""
 
+from abc import ABC, abstractmethod
 from typing import Any, Awaitable, Callable
 
+from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
 from openjiuwen.agent_teams.tools.locales import Translator
+
+# Role placeholder a scheduled-dispatch member addresses instead of the
+# leader's concrete member_name. The tool resolves it to the real leader at
+# delivery time, so the schema stays stable across leader renames and never
+# leaks a specific identity.
+LEADER_ROLE_RECIPIENT = "leader"
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
@@ -17,8 +25,16 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 # ========== Messaging ==========
 
 
-class SendMessageTool(TeamTool):
-    """Send a message to team members (point-to-point or broadcast)."""
+class _SendMessageBase(TeamTool, ABC):
+    """Shared body of the ``send_message`` variants.
+
+    Variants share ``ToolCard.id`` / ``name`` and the delivery primitives
+    (``_send`` / ``_multicast`` / ``_broadcast``); they differ only in the
+    ``to`` schema and in how ``_dispatch`` routes it. Both the schema and
+    ``_dispatch`` enforce the contract: the schema is what the host LLM
+    sees, while ``_dispatch`` is what an MCP client hits — ``mcp/server.py``
+    invokes the tool directly and never validates against the schema.
+    """
 
     def __init__(
         self,
@@ -26,12 +42,15 @@ class SendMessageTool(TeamTool):
         t: Translator,
         team: TeamBackend | None = None,
         on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
+        *,
+        desc_key: str,
+        to_schema: dict,
     ):
         super().__init__(
             ToolCard(
                 id="team.send_message",
                 name="send_message",
-                description=t("send_message"),
+                description=t(desc_key),
             )
         )
         self.message_manager = message_manager
@@ -40,13 +59,7 @@ class SendMessageTool(TeamTool):
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "to": {
-                    "anyOf": [
-                        {"type": "string"},
-                        {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                    ],
-                    "description": t("send_message", "to"),
-                },
+                "to": to_schema,
                 "content": {"type": "string", "description": t("send_message", "content")},
                 "summary": {"type": "string", "description": t("send_message", "summary")},
             },
@@ -67,21 +80,10 @@ class SendMessageTool(TeamTool):
             team_logger.error(f"send_message failed: {e}")
             return ToolOutput(success=False, error=f"Internal error: {e}")
 
+    @abstractmethod
     async def _dispatch(self, to_raw: Any, content: str, summary: str) -> ToolOutput:
-        """Route the request based on the runtime type of ``to``."""
-        if isinstance(to_raw, list):
-            return await self._multicast(to_raw, content, summary)
-        if isinstance(to_raw, str):
-            to = to_raw.strip()
-            if not to:
-                return ToolOutput(success=False, error="'to' is required")
-            if to == "*":
-                return await self._broadcast(content, summary)
-            return await self._send(to, content, summary)
-        return ToolOutput(
-            success=False,
-            error="'to' must be a string or an array of strings",
-        )
+        """Route the request to a delivery primitive based on ``to``."""
+        ...
 
     async def _broadcast(self, content: str, summary: str) -> ToolOutput:
         await self._auto_start_members()
@@ -100,7 +102,7 @@ class SendMessageTool(TeamTool):
     async def _send(self, to: str, content: str, summary: str) -> ToolOutput:
         # "user" is the pseudo-member representing the human caller; skip
         # roster validation so teammates can reply through the same tool.
-        if self._team and to != "user":
+        if self._team and to != USER_PSEUDO_MEMBER_NAME:
             if not await self._team.member_exists(to):
                 return ToolOutput(success=False, error=f"Member '{to}' not found")
         await self._auto_start_members()
@@ -144,7 +146,7 @@ class SendMessageTool(TeamTool):
                 success=False,
                 error="Cannot mix broadcast '*' with member names; use to='*' for broadcast",
             )
-        if "user" in deduped:
+        if USER_PSEUDO_MEMBER_NAME in deduped:
             return ToolOutput(
                 success=False,
                 error="'user' cannot be combined in multicast; send to user separately",
@@ -244,3 +246,110 @@ class SendMessageTool(TeamTool):
             failed_text = "; ".join(f"{item['to']} — {item['reason']}" for item in failed)
             parts.append(f"failed: {failed_text}")
         return "; ".join(parts)
+
+
+class SendMessageTool(_SendMessageBase):
+    """Full-reach ``send_message``: point-to-point, multicast, or broadcast."""
+
+    def __init__(
+        self,
+        message_manager: TeamMessageManager,
+        t: Translator,
+        team: TeamBackend | None = None,
+        on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
+    ):
+        super().__init__(
+            message_manager,
+            t,
+            team,
+            on_teammate_created,
+            desc_key="send_message",
+            to_schema={
+                "anyOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                ],
+                "description": t("send_message", "to"),
+            },
+        )
+
+    async def _dispatch(self, to_raw: Any, content: str, summary: str) -> ToolOutput:
+        """Route the request based on the runtime type of ``to``."""
+        if isinstance(to_raw, list):
+            return await self._multicast(to_raw, content, summary)
+        if isinstance(to_raw, str):
+            to = to_raw.strip()
+            if not to:
+                return ToolOutput(success=False, error="'to' is required")
+            if to == "*":
+                return await self._broadcast(content, summary)
+            return await self._send(to, content, summary)
+        return ToolOutput(
+            success=False,
+            error="'to' must be a string or an array of strings",
+        )
+
+
+class ReportToLeaderTool(_SendMessageBase):
+    """Scheduled-dispatch member ``send_message``: reaches the leader or the user only.
+
+    Members never coordinate peer-to-peer under scheduled dispatch — the
+    leader routes everything — so the schema offers exactly two recipients
+    (the role word ``"leader"`` and ``"user"``) and drops multicast /
+    broadcast entirely. Replying to the user stays reachable: it is the
+    member's only channel back to the human caller.
+
+    ``"leader"`` is a role placeholder, not a member_name. The tool resolves
+    it to the concrete leader at delivery time, so the schema neither leaks
+    the leader's identity nor requires it to be known at construction.
+    """
+
+    _ALLOWED = (LEADER_ROLE_RECIPIENT, USER_PSEUDO_MEMBER_NAME)
+
+    def __init__(
+        self,
+        message_manager: TeamMessageManager,
+        t: Translator,
+        team: TeamBackend | None = None,
+        on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
+    ):
+        super().__init__(
+            message_manager,
+            t,
+            team,
+            on_teammate_created,
+            desc_key="send_message_scheduled",
+            to_schema={
+                "type": "string",
+                "enum": list(self._ALLOWED),
+                "description": t("send_message_scheduled", "to"),
+            },
+        )
+
+    async def _dispatch(self, to_raw: Any, content: str, summary: str) -> ToolOutput:
+        """Resolve the role word and deliver; reject anything else.
+
+        The enum already tells the host LLM what is reachable. This check is
+        what stops an MCP client — which calls ``invoke`` without validating
+        against the schema — from reaching a peer behind the leader's back.
+        """
+        if not isinstance(to_raw, str):
+            return ToolOutput(success=False, error="'to' must be a string")
+        to = to_raw.strip()
+        if to == USER_PSEUDO_MEMBER_NAME:
+            return await self._send(USER_PSEUDO_MEMBER_NAME, content, summary)
+        if to == LEADER_ROLE_RECIPIENT:
+            leader = (await self._team.resolve_leader_member_name()).strip() if self._team else ""
+            if not leader:
+                return ToolOutput(
+                    success=False,
+                    error="cannot resolve the team leader to deliver to; the team has no leader on record",
+                )
+            return await self._send(leader, content, summary)
+        return ToolOutput(
+            success=False,
+            error=(
+                f"'to' must be one of {list(self._ALLOWED)}; this team runs in scheduled "
+                f"dispatch mode, where members report to the leader instead of contacting peers"
+            ),
+        )

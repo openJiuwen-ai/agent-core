@@ -10,4 +10,4 @@ Human members **reject** `model_name` and `prompt` — the model and startup pro
 
 **Capability requirement**: requires `TeamAgentSpec.enable_hitt=True` and the current build_team instance to leave HITT engaged. When the capability is off, this tool is not even listed in the available tools (and on a runtime downgrade it returns a rejection suggesting spawn_teammate instead).
 
-You must call build_team first. Call order: build_team → create_task → spawn_human_agent → send_message. spawn_human_agent only creates the member record (status: UNSTARTED); the system starts it on the first send_message. `desc` is a long-term role profile — do not bind it to specific tasks (those are delivered via create_task / send_message).
+You must call build_team first. Call order: build_team → spawn_human_agent → create_task. Members exist before tasks. spawn_human_agent only creates the member record (status: UNSTARTED); when it gets started depends on the team's dispatch mode (see the "Task Dispatch" section of your system prompt). `desc` is a long-term role profile — do not bind it to specific tasks (those are delivered via create_task / send_message).

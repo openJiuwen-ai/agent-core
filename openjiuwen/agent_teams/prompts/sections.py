@@ -24,6 +24,8 @@ Section layout (aligned with ``prompt_design.md``):
                           section.
   P:13  team_workflow    — leader workflow (LEADER only)
   P:14  team_lifecycle   — team lifecycle policy (LEADER only)
+  P:15  team_dispatch    — how tasks reach members: autonomous claim vs
+                          scheduled assignment (LEADER + TEAMMATE)
   P:16  team_private_prompt — member-private working agreement (when set)
   P:17  team_extra       — user-supplied base prompt (when set)
   P:65  team_info        — team metadata (after capabilities)
@@ -50,6 +52,7 @@ class TeamSectionName:
     HITT = "team_hitt"
     BRIDGE = "team_bridge"
     WORKFLOW = "team_workflow"
+    DISPATCH = "team_dispatch"
     LIFECYCLE = "team_lifecycle"
     PRIVATE_PROMPT = "team_private_prompt"
     EXTRA = "team_extra"
@@ -68,6 +71,7 @@ _LABELS: dict[str, dict[str, str]] = {
         "member_name_line": "你的 member_name",
         "role_heading": "# 团队角色",
         "workflow_heading": "# 工作流程",
+        "dispatch_heading": "# 任务下发与获取",
         "lifecycle_heading": "# 团队生命周期",
         "private_prompt_heading": "# 私有工作约定",
         "info_heading": "# 团队信息",
@@ -97,6 +101,7 @@ _LABELS: dict[str, dict[str, str]] = {
         "member_name_line": "Your member_name",
         "role_heading": "# Team Role",
         "workflow_heading": "# Workflow",
+        "dispatch_heading": "# Task Dispatch",
         "lifecycle_heading": "# Team Lifecycle",
         "private_prompt_heading": "# Private Working Agreement",
         "info_heading": "# Team Info",
@@ -219,6 +224,54 @@ def build_team_workflow_section(
         name=TeamSectionName.WORKFLOW,
         content={language: body},
         priority=13,
+    )
+
+
+_DISPATCH_MODES: frozenset[str] = frozenset({"autonomous", "scheduled"})
+
+# Only LEADER and TEAMMATE take part in task dispatch. HUMAN_AGENT already
+# carries the "wait for assignment" contract in its HITT section, and
+# BRIDGE_AGENT is a relay avatar that owns no board work.
+_DISPATCH_ROLE_SLUGS: dict[TeamRole, str] = {
+    TeamRole.LEADER: "leader",
+    TeamRole.TEAMMATE: "teammate",
+}
+
+
+def build_team_dispatch_section(
+    *,
+    role: TeamRole,
+    dispatch_mode: str = "autonomous",
+    language: str = "cn",
+) -> Optional[PromptSection]:
+    """Build the task-dispatch section (LEADER + TEAMMATE).
+
+    The dispatch mode is orthogonal to ``team_mode``: ``team_mode`` decides
+    whether the roster can grow, this decides how a task reaches the member
+    who executes it. Keeping them in separate sections avoids a template
+    matrix (``3 x 2``) — each dimension contributes its own file.
+
+    Args:
+        role: Team role; roles outside ``_DISPATCH_ROLE_SLUGS`` get None.
+        dispatch_mode: ``"autonomous"`` (members claim from the board) or
+            ``"scheduled"`` (leader assigns, the scheduler starts members).
+        language: Prompt language.
+
+    Returns:
+        PromptSection wrapping the matching ``dispatch_<mode>_<role>.md``
+        under an H1 heading; ``None`` for roles that own no board work.
+    """
+    slug = _DISPATCH_ROLE_SLUGS.get(role)
+    if slug is None:
+        return None
+    mode = dispatch_mode if dispatch_mode in _DISPATCH_MODES else "autonomous"
+    labels = _labels_for(language)
+    dispatch_text = load_template(f"dispatch_{mode}_{slug}", language).content.strip()
+    body = f"{labels['dispatch_heading']}\n\n{dispatch_text}\n"
+    return PromptSection(
+        name=TeamSectionName.DISPATCH,
+        content={language: body},
+        priority=15,
     )
 
 
@@ -599,6 +652,7 @@ def build_team_static_sections(
     lifecycle: str = "temporary",
     teammate_mode: str = "build_mode",
     team_mode: str = "default",
+    dispatch_mode: str = "autonomous",
     base_prompt: str | None = None,
     language: str = "cn",
     hitt_enabled: bool = False,
@@ -625,6 +679,7 @@ def build_team_static_sections(
         lifecycle: Team lifecycle ("temporary" / "persistent").
         teammate_mode: Teammate execution mode ("build_mode" / "plan_mode").
         team_mode: Team mode ("default" / "predefined" / "hybrid").
+        dispatch_mode: How tasks reach members ("autonomous" / "scheduled").
         base_prompt: Optional user-supplied prompt appended as the extra section.
         language: Prompt language ("cn" / "en").
         hitt_enabled: Whether HITT is enabled for the team; gates the static
@@ -665,6 +720,11 @@ def build_team_static_sections(
             team_mode=team_mode,
             language=language,
         ),
+        build_team_dispatch_section(
+            role=role,
+            dispatch_mode=dispatch_mode,
+            language=language,
+        ),
         build_team_lifecycle_section(
             role=role,
             lifecycle=lifecycle,
@@ -699,6 +759,7 @@ def build_team_member_system_prompt(
     lifecycle: str = "temporary",
     teammate_mode: str = "build_mode",
     team_mode: str = "default",
+    dispatch_mode: str = "autonomous",
     base_prompt: str | None = None,
     language: str = "cn",
     hitt_enabled: bool = False,
@@ -724,6 +785,7 @@ def build_team_member_system_prompt(
         lifecycle=lifecycle,
         teammate_mode=teammate_mode,
         team_mode=team_mode,
+        dispatch_mode=dispatch_mode,
         base_prompt=base_prompt,
         language=language,
         hitt_enabled=hitt_enabled,

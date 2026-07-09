@@ -5,14 +5,14 @@ Claim or complete a task (Teammate only).
 **Claim a task to start work:**
 - After finding a pending, unclaimed task via view_task, set status=claimed
 - Pick a task matching your domain expertise
-- **You can hold only ONE in-progress (claimed) task at a time**: if you already have a claimed task, finish it before claiming another — otherwise the claim is refused
+- **You can hold only ONE in-progress (in_progress) task at a time**: if you already have a task in flight, finish it before claiming another — otherwise the claim is refused
 
 **Mark tasks as completed:**
 - When you have completed the work described in a task, set status=completed
 - IMPORTANT: After completing, call view_task to find your next task
 
 - ONLY mark a task as completed when you have FULLY accomplished it
-- If you encounter errors, blockers, or cannot finish, keep the task as claimed
+- If you encounter errors, blockers, or cannot finish, keep the task as in_progress
 - When blocked, notify the leader via send_message
 - Never mark a task as completed if:
   - Tests are failing
@@ -21,7 +21,7 @@ Claim or complete a task (Teammate only).
 
 ## Status Workflow
 
-`pending` → `claimed` → `completed`
+`pending` → `in_progress` → `completed`
 
 ## Staleness
 

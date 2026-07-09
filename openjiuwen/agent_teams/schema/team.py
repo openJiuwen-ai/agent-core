@@ -282,6 +282,13 @@ class TeamSpec(BaseModel):
     display_name: str
     leader_member_name: Optional[str] = None
     language: Optional[str] = None
+    dispatch_mode: str = "autonomous"
+    """How tasks reach members — mirrors ``TeamAgentSpec.dispatch_mode``.
+
+    Carried on the runtime spec so paths that only see a
+    ``TeamRuntimeContext`` (external CLI member spawn) resolve the same
+    tool set and prompt as in-process members.
+    """
     metadata: dict = Field(default_factory=dict)
     model_pool: list[ModelPoolEntry] = Field(default_factory=list)
     """Optional pool of LLM endpoints shared by every team member.

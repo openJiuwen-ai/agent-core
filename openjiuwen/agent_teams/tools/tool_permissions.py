@@ -48,11 +48,31 @@ SHARED_TOOLS: set[str] = {
     "workspace_meta", # Workspace lock management and version history
 }
 
-# All tools available to leader
+# Member-only tools under scheduled dispatch. The leader assigns every task,
+# so ``claim_task`` — the autonomous-claim path — has no meaning and is not
+# registered; members close out their work with the self-only
+# ``member_complete_task`` instead, exactly as ``human_agent`` already does.
+# ``submit_plan`` stays: plan_mode members still submit plans for approval.
+MEMBER_ONLY_TOOLS_SCHEDULED: set[str] = {
+    "member_complete_task",  # Complete a task assigned to you
+    "submit_plan",           # Submit a plan before executing in plan_mode
+}
+
+# All tools available to leader. Dispatch-invariant: the leader's tool *names*
+# do not change with dispatch mode (``create_task`` gains an ``assignee``
+# property, but it is the same tool).
 LEADER_TOOLS: set[str] = LEADER_ONLY_TOOLS | SHARED_TOOLS
 
-# All tools available to members
-MEMBER_TOOLS: set[str] = MEMBER_ONLY_TOOLS | SHARED_TOOLS
+# All tools available to members, keyed by dispatch mode. Unknown keys raise
+# KeyError at the factory — a silent fallback would hand a scheduled member
+# the autonomous claim path.
+MEMBER_TOOLS_BY_DISPATCH: dict[str, set[str]] = {
+    "autonomous": MEMBER_ONLY_TOOLS | SHARED_TOOLS,
+    "scheduled": MEMBER_ONLY_TOOLS_SCHEDULED | SHARED_TOOLS,
+}
+
+# All tools available to members (autonomous dispatch — the default).
+MEMBER_TOOLS: set[str] = MEMBER_TOOLS_BY_DISPATCH["autonomous"]
 
 # Tools available to the reserved ``human_agent`` role. The human
 # agent acts on its corresponding external user's behalf, so it gets

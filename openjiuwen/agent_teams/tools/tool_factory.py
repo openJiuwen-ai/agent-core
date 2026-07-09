@@ -22,15 +22,16 @@ from openjiuwen.agent_teams.tools.tool_member import (
     SpawnHumanAgentTool,
     SpawnTeammateTool,
 )
-from openjiuwen.agent_teams.tools.tool_message import SendMessageTool
+from openjiuwen.agent_teams.tools.tool_message import ReportToLeaderTool, SendMessageTool
 from openjiuwen.agent_teams.tools.tool_permissions import (
     HUMAN_AGENT_TOOLS,
     LEADER_TOOLS,
-    MEMBER_TOOLS,
+    MEMBER_TOOLS_BY_DISPATCH,
 )
 from openjiuwen.agent_teams.tools.tool_task import (
     ClaimTaskTool,
     MemberCompleteTaskTool,
+    ScheduledTaskCreateTool,
     SubmitPlanTool,
     TaskCreateTool,
     UpdateTaskTool,
@@ -44,6 +45,40 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
 
 
+# ========== Tool Variants ==========
+#
+# A tool "variant" keeps its ``ToolCard.id`` / ``name`` and swaps schema,
+# description, and behaviour. Variant selection happens here, while
+# ``all_tools`` is being constructed — never inside ``invoke``. Downstream
+# (permission sets, ``exclude_tools``, prompts, MCP) stays unaware.
+#
+# These are closed sets, so they are literal tables rather than a registry:
+# a missing combination raises KeyError instead of silently falling back.
+
+_CREATE_TASK_CLASS: dict[str, type] = {
+    "autonomous": TaskCreateTool,
+    "scheduled": ScheduledTaskCreateTool,
+}
+
+# Keyed by (dispatch_mode, "leader" | "member"). Under scheduled dispatch the
+# leader still fans out (broadcast / multicast / auto-start), so only the
+# member side collapses to the report-to-leader form.
+_SEND_MESSAGE_CLASS: dict[tuple[str, str], type] = {
+    ("autonomous", "leader"): SendMessageTool,
+    ("autonomous", "member"): SendMessageTool,
+    ("scheduled", "leader"): SendMessageTool,
+    ("scheduled", "member"): ReportToLeaderTool,
+}
+
+# ``member_complete_task`` behaves identically in both modes — only the prose
+# changes (a scheduled member has no claim path to contrast against), so the
+# variant is a description key rather than a class.
+_MEMBER_COMPLETE_DESC_KEY: dict[str, str] = {
+    "autonomous": "member_complete_task",
+    "scheduled": "member_complete_task_scheduled",
+}
+
+
 # ========== Tool Factory ==========
 
 
@@ -52,6 +87,7 @@ def create_team_tools(
     role: str,
     agent_team: TeamBackend,
     teammate_mode: str = "build_mode",
+    dispatch_mode: str = "autonomous",
     lifecycle: str = "temporary",
     on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
     model_config_allocator: Callable[[str | None], "Allocation | None"] | None = None,
@@ -76,6 +112,10 @@ def create_team_tools(
             are only wired when teammate_mode == "plan_mode", since that's the
             only mode where teammates submit plans and tool calls can be held
             for leader sign-off.
+        dispatch_mode: How tasks reach members — "autonomous" (members claim
+            from a shared board) or "scheduled" (the leader assigns every
+            task). Selects the ``create_task`` / ``send_message`` variants and
+            the member tool set; unknown values raise KeyError.
         lifecycle: Team lifecycle — "temporary" or "persistent". The
             ``clean_team`` tool is only wired for temporary teams; persistent
             teams are torn down through operator-level SDK facades
@@ -106,6 +146,10 @@ def create_team_tools(
     t = make_translator(lang)
     task_mgr = agent_team.task_manager
     msg_mgr = agent_team.message_manager
+    # Variant selection is a construction-time table lookup: every tool below
+    # still has a flat schema and a branch-free ``invoke``.
+    create_task_cls = _CREATE_TASK_CLASS[dispatch_mode]
+    send_message_cls = _SEND_MESSAGE_CLASS[(dispatch_mode, "leader" if role == "leader" else "member")]
 
     all_tools = {
         # Team management
@@ -120,14 +164,16 @@ def create_team_tools(
         "approve_plan": ApprovePlanTool(agent_team, t),
         "approve_tool": ApproveToolCallTool(agent_team, t),
         # Task management
-        "create_task": TaskCreateTool(agent_team, t),
+        "create_task": create_task_cls(agent_team, t),
         "update_task": UpdateTaskTool(agent_team, t),
         "view_task": ViewTaskToolV2(task_mgr, t),
         "claim_task": ClaimTaskTool(task_mgr, t),
         "submit_plan": SubmitPlanTool(task_mgr, t),
-        "member_complete_task": MemberCompleteTaskTool(task_mgr, t),
+        "member_complete_task": MemberCompleteTaskTool(
+            task_mgr, t, desc_key=_MEMBER_COMPLETE_DESC_KEY[dispatch_mode]
+        ),
         # Messaging
-        "send_message": SendMessageTool(
+        "send_message": send_message_cls(
             msg_mgr,
             t,
             team=agent_team,
@@ -159,7 +205,7 @@ def create_team_tools(
     elif role == "leader":
         allowed = LEADER_TOOLS
     else:
-        allowed = MEMBER_TOOLS
+        allowed = MEMBER_TOOLS_BY_DISPATCH[dispatch_mode]
     # Plan tools only make sense in plan_mode.
     if teammate_mode != "plan_mode":
         excluded = {"approve_plan", "submit_plan"}

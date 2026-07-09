@@ -38,6 +38,10 @@ class TaskBoardHandler(BaseCoordinationHandler):
         TeamEvent.TASK_CREATED: "on_task_board_event",
         TeamEvent.TASK_PLAN_REQUEST: "on_task_board_event",
         TeamEvent.TASK_PLAN_RESPONSE: "on_task_plan_decision",
+        # A scheduled task begins execution — the leader observes it; a
+        # teammate is not nudged (a started task is neither pending nor
+        # claimable, so it never grows the claimable pool).
+        TeamEvent.TASK_STARTED: "on_task_board_event",
         TeamEvent.TASK_COMPLETED: "on_task_board_event",
         TeamEvent.TASK_UNBLOCKED: "on_task_board_event",
         TeamEvent.TASK_RELEASED: "on_task_board_event",
