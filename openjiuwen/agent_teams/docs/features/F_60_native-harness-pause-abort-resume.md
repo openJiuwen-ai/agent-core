@@ -113,6 +113,10 @@ hard-cancel 只是叠加的及时性。**
   `lifecycle:"paused"` 接进 dispatch、实现 pause→stop→start = resume 的冷恢复续跑；以及
   `Runner`/runtime 的 `abort_agent_team` / `resume_agent_team` facade。
 
+  > 已由 [[F_61_cold-resume-across-stop-start]] 落地：只持久化一个 `pending_resume` marker
+  > （context 本就随 teardown 的 `commit()` 进 checkpoint），**不**接 dispatch（`COLD_RECOVER`
+  > 已是正确派发，续跑归 kernel），facade 经评估后拒绝（无调用方）。
+
 ## 验证基线
 
 ```
