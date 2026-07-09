@@ -18,13 +18,9 @@ Promp caching layout:
 
 from typing import TYPE_CHECKING, Any, AsyncIterator, List, Mapping, Optional, Union
 
-import httpx
-
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import llm_logger, LogEventType
-from openjiuwen.core.common.security.ssl_utils import SslUtils
-from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.foundation.llm.headers_helper import (
     PROTECTED_HEADERS,
     build_base_headers,
@@ -282,16 +278,18 @@ class AnthropicModelClient(BaseModelClient):
             b = b[:-3]
         return b or None
 
-    def _create_async_anthropic_client(self, timeout: Optional[float] = None) -> "anthropic.AsyncAnthropic":
-        from anthropic import AsyncAnthropic
+    async def _create_async_anthropic_client(self, timeout: Optional[float] = None) -> "anthropic.AsyncAnthropic":
+        """Create an Anthropic Async client backed by the shared connection pool.
 
-        ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
-        verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
+        Mirrors the OpenAI client: the underlying HTTPX transport is drawn from
+        the global ``ConnectorPoolManager`` (keyed by api_base/ssl/proxy) so
+        connections are reused across calls instead of being re-established per
+        request. A per-request ``timeout`` is applied via ``with_options``, which
+        shares the same transport — no new connections.
 
-        http_client = httpx.AsyncClient(
-            proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
-            verify=verify,
-        )
+        The returned client is pooled and shared; callers must NOT close it.
+        """
+        from openjiuwen.core.common.clients.llm_client import create_async_anthropic_client
 
         final_timeout = timeout if timeout is not None else self.model_client_config.timeout
         base_url = self._normalize_base_url(self.model_client_config.api_base)
@@ -303,13 +301,10 @@ class AnthropicModelClient(BaseModelClient):
             metadata={"base_url": base_url},
         )
 
-        return AsyncAnthropic(
-            api_key=self.model_client_config.api_key,
-            base_url=base_url,
-            http_client=http_client,
-            timeout=final_timeout,
-            max_retries=self.model_client_config.max_retries,
-        )
+        client = await create_async_anthropic_client(self.model_client_config, base_url=base_url)
+        if timeout is not None and timeout != self.model_client_config.timeout:
+            return client.with_options(timeout=timeout)
+        return client
 
     def _build_anthropic_params(
             self,
@@ -424,7 +419,7 @@ class AnthropicModelClient(BaseModelClient):
                 max_tokens=params.get("max_tokens"),
             )
 
-            async_client = self._create_async_anthropic_client(timeout=timeout)
+            async_client = await self._create_async_anthropic_client(timeout=timeout)
             response = await async_client.messages.create(**params)
 
             llm_logger.info(
@@ -470,9 +465,6 @@ class AnthropicModelClient(BaseModelClient):
                 StatusCode.MODEL_CALL_FAILED,
                 error_msg=f"Anthropic API async invoke error: {str(e)}",
             ) from e
-        finally:
-            if async_client is not None:
-                await async_client.close()
 
     async def stream(
             self,
@@ -524,7 +516,7 @@ class AnthropicModelClient(BaseModelClient):
                 is_stream=True,
             )
 
-            async_client = self._create_async_anthropic_client(timeout=timeout)
+            async_client = await self._create_async_anthropic_client(timeout=timeout)
 
             # Accumulator state across the stream
             current_text = ""
@@ -580,9 +572,6 @@ class AnthropicModelClient(BaseModelClient):
                 StatusCode.MODEL_CALL_FAILED,
                 error_msg=f"Anthropic API async stream error: {str(e)}",
             ) from e
-        finally:
-            if async_client is not None:
-                await async_client.close()
 
     # ------------------------------------------------------------------
     # response parsing

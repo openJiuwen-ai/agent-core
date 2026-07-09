@@ -182,7 +182,7 @@ class TestCustomHeadersSystem(unittest.IsolatedAsyncioTestCase):
         if request_headers is not None:
             invoke_kwargs["custom_headers"] = request_headers
 
-        with patch.object(model._client, "_create_async_openai_client", return_value=mock_async_client):
+        with patch.object(model._client, "_create_async_openai_client", new=AsyncMock(return_value=mock_async_client)):
             await model.invoke(messages=[UserMessage(content="hello")], **invoke_kwargs)
 
         return mock_async_client.chat.completions.create.call_args.kwargs
@@ -226,7 +226,7 @@ class TestCustomHeadersSystem(unittest.IsolatedAsyncioTestCase):
         if request_headers is not None:
             stream_kwargs["custom_headers"] = request_headers
 
-        with patch.object(model._client, "_create_async_openai_client", return_value=mock_async_client):
+        with patch.object(model._client, "_create_async_openai_client", new=AsyncMock(return_value=mock_async_client)):
             async for _ in model.stream(messages=[UserMessage(content="hello")], **stream_kwargs):
                 pass
 

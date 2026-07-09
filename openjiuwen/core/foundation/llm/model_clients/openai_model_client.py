@@ -3,13 +3,9 @@
 
 from typing import TYPE_CHECKING, List, Optional, AsyncIterator, Union, Any, Mapping
 
-import httpx
-
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import llm_logger, LogEventType
-from openjiuwen.core.common.security.ssl_utils import SslUtils
-from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
     AudioGenerationResponse
 from openjiuwen.core.foundation.llm.schema.message import (
@@ -107,22 +103,23 @@ class OpenAIModelClient(BaseModelClient):
 
         return params
 
-    def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
+    async def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
         """
-        Create an OpenAI Async client with configured SSL/proxy/http client settings.
-        
+        Create an OpenAI Async client backed by the shared connection pool.
+
+        The underlying HTTPX transport is drawn from the global
+        ``ConnectorPoolManager`` (keyed by api_base/ssl/proxy) so connections are
+        reused across calls instead of being re-established per request. A
+        per-request ``timeout`` is applied via ``with_options``, which shares the
+        same transport — no new connections are opened.
+
+        The returned client is pooled and shared; callers must NOT close it
+        (closing it would tear down the shared transport).
+
         Args:
             timeout: Optional timeout override for this specific request
         """
-        from openai import AsyncOpenAI
-
-        ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
-        verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
-
-        http_client = httpx.AsyncClient(
-            proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
-            verify=verify
-        )
+        from openjiuwen.core.common.clients.llm_client import create_async_openai_client
 
         # Use method-level timeout if provided, otherwise use config timeout
         final_timeout = timeout if timeout is not None else self.model_client_config.timeout
@@ -133,13 +130,10 @@ class OpenAIModelClient(BaseModelClient):
             max_retries=self.model_client_config.max_retries
         )
 
-        return AsyncOpenAI(
-            api_key=self.model_client_config.api_key,
-            base_url=self.model_client_config.api_base,
-            http_client=http_client,
-            timeout=final_timeout,
-            max_retries=self.model_client_config.max_retries
-        )
+        client = await create_async_openai_client(self.model_client_config)
+        if timeout is not None and timeout != self.model_client_config.timeout:
+            return client.with_options(timeout=timeout)
+        return client
 
     async def invoke(
             self,
@@ -216,7 +210,7 @@ class OpenAIModelClient(BaseModelClient):
                 top_p=params.get("top_p"),
                 max_tokens=params.get("max_tokens"))
 
-            async_client = self._create_async_openai_client(timeout=timeout)
+            async_client = await self._create_async_openai_client(timeout=timeout)
 
             # Call API
             response = await async_client.chat.completions.create(**params)
@@ -282,9 +276,6 @@ class OpenAIModelClient(BaseModelClient):
                 StatusCode.MODEL_CALL_FAILED,
                 error_msg=f"openAI API async invoke error: {str(e)}"
             ) from e
-        finally:
-            if async_client is not None:
-                await async_client.close()
 
     async def stream(
             self,
@@ -369,7 +360,7 @@ class OpenAIModelClient(BaseModelClient):
                 max_tokens=params.get("max_tokens"),
                 is_stream=True)
 
-            async_client = self._create_async_openai_client(timeout=timeout)
+            async_client = await self._create_async_openai_client(timeout=timeout)
 
             # Call API with streaming
             response_stream = await async_client.chat.completions.create(**params)
@@ -442,9 +433,6 @@ class OpenAIModelClient(BaseModelClient):
                 StatusCode.MODEL_CALL_FAILED,
                 error_msg=f"openAI API async stream error: {error_detail}"
             ) from e
-        finally:
-            if async_client is not None:
-                await async_client.close()
 
     async def generate_image(
             self,

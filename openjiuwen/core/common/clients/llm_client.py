@@ -11,6 +11,7 @@ from openjiuwen.core.common.utils.header_utils import sanitize_headers
 
 if TYPE_CHECKING:
     import httpx
+    from anthropic import AsyncAnthropic
     from openai import AsyncOpenAI, OpenAI
     from openjiuwen.core.foundation.llm import ModelClientConfig
 
@@ -205,6 +206,65 @@ async def create_async_openai_client(config: Union["ModelClientConfig", Dict[str
         openai_kwargs["default_headers"] = custom_headers
 
     return AsyncOpenAI(**openai_kwargs)
+
+
+@get_client_registry().register_client("async_anthropic")
+async def create_async_anthropic_client(config: Union["ModelClientConfig", Dict[str, Any]],
+                                        *,
+                                        base_url: Optional[str] = None,
+                                        **kwargs) -> 'AsyncAnthropic':
+    """
+    Create an asynchronous Anthropic client with proper HTTP connection management.
+
+    Mirrors :func:`create_async_openai_client`: the underlying HTTPX transport is
+    drawn from the shared ``ConnectorPoolManager`` (keyed by ssl/proxy/pool config)
+    so connections are reused across calls instead of being re-established per
+    request. ``base_url`` may be supplied to apply Anthropic-specific
+    normalization (e.g. stripping a trailing ``/v1``); when omitted the config's
+    ``api_base`` is used as-is.
+
+    Args:
+        config: Configuration for the Anthropic client. Can be either:
+               - ModelClientConfig instance
+               - Dictionary with configuration parameters
+        base_url: Optional override for the Anthropic ``base_url`` (after
+                 provider-specific normalization).
+        **kwargs: Additional keyword arguments passed to the HTTPX client configuration
+
+    Returns:
+        AsyncAnthropic: Configured asynchronous Anthropic client instance
+    """
+    from anthropic import AsyncAnthropic
+    from openjiuwen.core.foundation.llm import ModelClientConfig
+
+    # Normalize configuration to ModelClientConfig
+    if not isinstance(config, ModelClientConfig):
+        config = ModelClientConfig(**config)
+
+    # Create HTTPX client with connection pooling
+    httpx_client = await create_httpx_client(
+        config=dict(
+            proxy=UrlUtils.get_global_proxy_url(config.api_base),
+            ssl_verify=config.verify_ssl,
+            ssl_cert=config.ssl_cert,
+            **kwargs
+        ),
+        need_async=True
+    )
+
+    anthropic_kwargs = dict(
+        api_key=config.api_key,
+        base_url=base_url or config.api_base,
+        http_client=httpx_client,
+        timeout=config.timeout,
+        max_retries=config.max_retries,
+    )
+    # Parity with the OpenAI factory: surface sanitized config-level custom
+    # headers as SDK default_headers.
+    if custom_headers := sanitize_headers(getattr(config, "custom_headers", None)):
+        anthropic_kwargs["default_headers"] = custom_headers
+
+    return AsyncAnthropic(**anthropic_kwargs)
 
 
 @get_client_registry().register_client("openai")

@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 from unittest.mock import AsyncMock, MagicMock, patch, ANY, Mock
+import importlib.util
 import pytest
 
 from openjiuwen.core.common.clients.llm_client import (
@@ -9,10 +10,13 @@ from openjiuwen.core.common.clients.llm_client import (
     HttpXConnectorPool,
     create_httpx_client,
     create_async_openai_client,
+    create_async_anthropic_client,
     create_openai_client,
 )
 from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.foundation.llm import ModelClientConfig
+
+_ANTHROPIC_AVAILABLE = importlib.util.find_spec("anthropic") is not None
 
 
 class TestHttpXConnectorPoolConfig:
@@ -494,6 +498,121 @@ class TestCreateOpenAIClients:
         factory_names = [name for name in registered_clients]
         assert any('async_openai' in name for name in factory_names)
         assert any('openai' in name for name in factory_names)
+
+
+class TestCreateAnthropicClients:
+    """Test cases for the Anthropic client factory function."""
+
+    pytestmark = pytest.mark.skipif(
+        not _ANTHROPIC_AVAILABLE, reason="anthropic SDK not installed"
+    )
+
+    @pytest.fixture
+    def mock_create_httpx_client(self):
+        """Mock create_httpx_client function."""
+        with patch('openjiuwen.core.common.clients.llm_client.create_httpx_client') as mock:
+            mock_async_http_client = MagicMock()
+
+            async def async_side_effect(config, need_async=False):
+                if need_async:
+                    return mock_async_http_client
+                return MagicMock()
+
+            mock.side_effect = async_side_effect
+            yield mock, mock_async_http_client
+
+    @pytest.fixture
+    def mock_anthropic(self):
+        """Mock anthropic module."""
+        with patch('anthropic.AsyncAnthropic') as mock_async_anthropic:
+            mock_async_instance = MagicMock()
+            mock_async_anthropic.return_value = mock_async_instance
+            yield {'AsyncAnthropic': mock_async_anthropic, 'async_instance': mock_async_instance}
+
+    @pytest.fixture
+    def mock_url_utils(self):
+        """Mock UrlUtils.get_global_proxy_url."""
+        with patch('openjiuwen.core.common.clients.llm_client.UrlUtils.get_global_proxy_url') as mock:
+            mock.return_value = "http://global-proxy:8080"
+            yield mock
+
+    @pytest.mark.asyncio
+    async def test_create_async_anthropic_client_with_dict_config(
+            self, mock_create_httpx_client, mock_anthropic, mock_url_utils
+    ):
+        """Test creating async Anthropic client with dictionary configuration."""
+        config_dict = {
+            "api_key": "test-api-key",
+            "api_base": "https://api.anthropic.com",
+            "timeout": 30,
+            "max_retries": 3,
+            "client_provider": "anthropic",
+        }
+
+        client = await create_async_anthropic_client(config_dict)
+
+        assert client == mock_anthropic['async_instance']
+        call_kwargs = mock_anthropic['AsyncAnthropic'].call_args.kwargs
+        assert call_kwargs["api_key"] == "test-api-key"
+        assert call_kwargs["base_url"] == "https://api.anthropic.com"
+        assert call_kwargs["timeout"] == 30
+        assert call_kwargs["max_retries"] == 3
+        # No custom_headers configured -> default_headers must not be set.
+        assert "default_headers" not in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_create_async_anthropic_client_forwards_sanitized_custom_headers(
+            self, mock_create_httpx_client, mock_anthropic, mock_url_utils
+    ):
+        """Parity with OpenAI: sanitized config-level custom headers become default_headers."""
+        config_obj = ModelClientConfig(
+            api_key="test-api-key",
+            api_base="https://api.anthropic.com",
+            timeout=30,
+            max_retries=3,
+            verify_ssl=False,
+            client_provider="anthropic",
+            custom_headers={
+                "x-default": "custom-override",
+                "x-tenant": "tenant-a",
+                "X-Request-Num": 7,
+                "Authorization": "Bearer blocked",
+                "Content-Length": "blocked",
+                "X-Blank": "   ",
+            },
+        )
+
+        await create_async_anthropic_client(config_obj)
+
+        call_kwargs = mock_anthropic['AsyncAnthropic'].call_args.kwargs
+        assert call_kwargs["default_headers"] == {
+            "x-default": "custom-override",
+            "x-tenant": "tenant-a",
+            "X-Request-Num": "7",
+        }
+
+    @pytest.mark.asyncio
+    async def test_create_async_anthropic_client_honors_base_url_override(
+            self, mock_create_httpx_client, mock_anthropic, mock_url_utils
+    ):
+        """Explicit base_url override (e.g. /v1-stripped) wins over config.api_base."""
+        config_obj = ModelClientConfig(
+            api_key="test-api-key",
+            api_base="https://openrouter.ai/api/v1",
+            verify_ssl=False,
+            client_provider="anthropic",
+        )
+
+        await create_async_anthropic_client(config_obj, base_url="https://openrouter.ai/api")
+
+        call_kwargs = mock_anthropic['AsyncAnthropic'].call_args.kwargs
+        assert call_kwargs["base_url"] == "https://openrouter.ai/api"
+
+    def test_registration_with_client_registry(self):
+        """Test that the Anthropic client factory is properly registered."""
+        registered_clients = get_client_registry().list_clients()
+        factory_names = [name for name in registered_clients]
+        assert any('async_anthropic' in name for name in factory_names)
 
 
 class TestIntegration:

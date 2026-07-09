@@ -1,6 +1,8 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import asyncio
+import atexit
+import logging
 import time
 from typing import Any, Callable, Dict, Optional
 from abc import abstractmethod
@@ -484,6 +486,38 @@ def get_connector_pool_manager():
 
 # Global instance
 _connector_pool_manager = get_connector_pool_manager()
+
+
+def _atexit_close_connector_pools() -> None:
+    """Best-effort cleanup of all connector pools at interpreter shutdown.
+
+    Connections are also reclaimed by GC and the manager evicts idle pools by
+    TTL/max-idle, but this gives short-lived CLIs and test processes a clean
+    shutdown. Safe with or without a running event loop; never raises since we
+    are already exiting.
+    """
+    manager = get_connector_pool_manager()
+    if manager._closed or not manager._connector_pools:
+        return
+    # close_all() logs at INFO; during interpreter shutdown the logging
+    # handlers' streams may already be closed, which would emit noisy
+    # tracebacks. Silence all logging for the duration of teardown.
+    logging.disable(logging.CRITICAL)
+    try:
+        try:
+            asyncio.get_running_loop()
+            # A loop is still running at exit (unusual); cannot safely schedule
+            # async close here, so fall back to GC/eviction.
+            return
+        except RuntimeError:
+            asyncio.run(manager.close_all())
+    except Exception:
+        pass
+    finally:
+        logging.disable(logging.NOTSET)
+
+
+atexit.register(_atexit_close_connector_pools)
 
 
 @ConnectorPoolManager.register("default")

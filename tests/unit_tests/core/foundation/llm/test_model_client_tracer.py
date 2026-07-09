@@ -70,7 +70,7 @@ class TestOpenAIModelClientTracer:
         mock_async_client.chat.completions.create = AsyncMock(return_value=mock_response)
 
         with patch.object(
-            client, "_create_async_openai_client", return_value=mock_async_client
+            client, "_create_async_openai_client", new=AsyncMock(return_value=mock_async_client)
         ):
             tracer_mock = AsyncMock()
 
@@ -117,7 +117,7 @@ class TestOpenAIModelClientTracer:
         mock_async_client.chat.completions.create = AsyncMock(return_value=chunk_generator())
 
         with patch.object(
-            client, "_create_async_openai_client", return_value=mock_async_client
+            client, "_create_async_openai_client", new=AsyncMock(return_value=mock_async_client)
         ):
             tracer_mock = AsyncMock()
 
@@ -255,7 +255,7 @@ class TestSiliconFlowModelClientTracer:
         mock_async_client.chat.completions.create = AsyncMock(return_value=mock_response)
 
         with patch.object(
-            client, "_create_async_openai_client", return_value=mock_async_client
+            client, "_create_async_openai_client", new=AsyncMock(return_value=mock_async_client)
         ):
             messages = [UserMessage(content="Hello")]
             result = await client.invoke(messages)
@@ -285,7 +285,7 @@ class TestSiliconFlowModelClientTracer:
         mock_async_client.chat.completions.create = AsyncMock(return_value=chunk_generator())
 
         with patch.object(
-            client, "_create_async_openai_client", return_value=mock_async_client
+            client, "_create_async_openai_client", new=AsyncMock(return_value=mock_async_client)
         ):
             messages = [UserMessage(content="Hello")]
             collected = []
