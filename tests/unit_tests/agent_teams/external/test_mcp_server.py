@@ -18,7 +18,7 @@ from openjiuwen.agent_teams.external import ExternalTeamClient
 from openjiuwen.agent_teams.mcp.server import build_server
 from openjiuwen.agent_teams.schema.status import TaskStatus
 
-_MEMBER_TOOLS = {"read_inbox", "view_task", "claim_task", "send_message"}
+_MEMBER_TOOLS = {"read_inbox", "view_task", "claim_task", "verify_task", "send_message"}
 _OPERATOR_TOOLS = {
     "read_inbox",
     "send_message",

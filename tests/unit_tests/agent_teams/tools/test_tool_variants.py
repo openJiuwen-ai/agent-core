@@ -451,3 +451,123 @@ async def test_every_toolset_assembles(db, lang, dispatch_mode, role):
     for tool in tools:
         assert tool.card.description
         assert "{{" not in tool.card.description
+
+
+# ---------------------------------------------------------------------------
+# Verify gate (F_59): reviewer column + verify_task tool
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "role,dispatch_mode,has_verify",
+    [
+        ("teammate", "autonomous", True),
+        ("teammate", "scheduled", True),
+        ("human_agent", "autonomous", True),
+        ("leader", "autonomous", False),
+    ],
+)
+async def test_verify_task_registered_for_members_not_leader(db, role, dispatch_mode, has_verify):
+    """verify_task is a member/reviewer capability; the leader assigns reviewers, not verifies."""
+    is_leader = role == "leader"
+    member = LEADER_NAME if is_leader else DEV_1
+    tools = create_team_tools(
+        role=role,
+        agent_team=_backend(db, member, is_leader),
+        dispatch_mode=dispatch_mode,
+    )
+    assert ("verify_task" in _tool_names(tools)) is has_verify
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_task_carries_reviewer(db):
+    """A leader-created task persists its reviewer list."""
+    backend = _backend(db, LEADER_NAME, True)
+    tools = create_team_tools(role="leader", agent_team=backend)
+    create_task = _by_name(tools, "create_task")
+
+    result = await create_task.invoke(
+        {"tasks": [{"task_id": "r1", "title": "t", "content": "c", "reviewer": [DEV_2]}]}
+    )
+    assert result.success, result.error
+    task = await backend.task_manager.get("r1")
+    assert task.reviewers() == [DEV_2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_task_rejects_reviewer_equal_assignee(db):
+    """A reviewer may not be the task's own author."""
+    backend = _backend(db, LEADER_NAME, True)
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create_task = _by_name(tools, "create_task")
+
+    result = await create_task.invoke(
+        {"tasks": [{"task_id": "r1", "title": "t", "content": "c", "assignee": DEV_1, "reviewer": [DEV_1]}]}
+    )
+    assert not result.success
+    assert "their own task" in result.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_task_rejects_unknown_reviewer(db):
+    """A reviewer must be a real team member."""
+    backend = _backend(db, LEADER_NAME, True)
+    tools = create_team_tools(role="leader", agent_team=backend)
+    create_task = _by_name(tools, "create_task")
+
+    result = await create_task.invoke(
+        {"tasks": [{"task_id": "r1", "title": "t", "content": "c", "reviewer": ["ghost"]}]}
+    )
+    assert not result.success
+    assert "not found" in result.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_verify_task_tool_pass_flow(db):
+    """VerifyTaskTool wires a reviewer's pass verdict through to COMPLETED."""
+    # Leader assigns an author + reviewer, author completes -> IN_REVIEW.
+    leader_tm = TeamTaskManager(team_name=TEAM_NAME, member_name=LEADER_NAME, db=db, messager=AsyncMock(spec=Messager))
+    from openjiuwen.agent_teams.schema.task import TaskGraphSpec
+
+    await leader_tm.add_graph(
+        [TaskGraphSpec(title="w", content="c", task_id="v1", assignee=DEV_1, reviewer=(DEV_2,))]
+    )
+    await leader_tm.start_task("v1")
+    author_tm = TeamTaskManager(team_name=TEAM_NAME, member_name=DEV_1, db=db, messager=AsyncMock(spec=Messager))
+    await author_tm.complete("v1")
+    assert (await db.task.get_task("v1")).status == TaskStatus.IN_REVIEW.value
+
+    # Reviewer DEV_2 verifies via the tool.
+    reviewer_tools = create_team_tools(role="teammate", agent_team=_backend(db, DEV_2, False))
+    verify = _by_name(reviewer_tools, "verify_task")
+    result = await verify.invoke({"task_id": "v1", "decision": "pass"})
+    assert result.success, result.error
+    assert (await db.task.get_task("v1")).status == TaskStatus.COMPLETED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_view_task_in_review_lists_reviewers_tasks(db):
+    """view_task(action=in_review) surfaces the tasks a member must verify."""
+    leader_tm = TeamTaskManager(team_name=TEAM_NAME, member_name=LEADER_NAME, db=db, messager=AsyncMock(spec=Messager))
+    from openjiuwen.agent_teams.schema.task import TaskGraphSpec
+
+    await leader_tm.add_graph(
+        [TaskGraphSpec(title="w", content="c", task_id="v1", assignee=DEV_1, reviewer=(DEV_2,))]
+    )
+    await leader_tm.start_task("v1")
+    author_tm = TeamTaskManager(team_name=TEAM_NAME, member_name=DEV_1, db=db, messager=AsyncMock(spec=Messager))
+    await author_tm.complete("v1")
+
+    reviewer_tools = create_team_tools(role="teammate", agent_team=_backend(db, DEV_2, False))
+    view = _by_name(reviewer_tools, "view_task")
+    assert "in_review" in view.card.input_params["properties"]["action"]["enum"]
+    result = await view.invoke({"action": "in_review"})
+    assert result.success
+    assert [task["task_id"] for task in result.data["tasks"]] == ["v1"]
