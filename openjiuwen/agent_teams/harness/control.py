@@ -94,9 +94,14 @@ class _CmdResume:
     Attributes:
         ack: Future resolved with None after the supervisor has started a
             continuation round from the paused round's preserved context.
+        query: Cold-resume payload. When the harness was stopped and rebuilt,
+            its context comes back from the session checkpoint and the paused
+            round's originating query is supplied here. ``None`` for a warm
+            resume, which reads the query the pause cached in memory.
     """
 
     ack: asyncio.Future
+    query: str | None = None
 
 
 ControlEvent = Union[
