@@ -17,11 +17,30 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
 )
 from openjiuwen.agent_teams.agent.coordination.kernel import CoordinationKernel
 from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.agent_teams.runtime.metadata import (
+    merge_pending_resume,
+    read_pending_resume,
+)
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     TeamEvent,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
+
+
+class _StubSession:
+    """Minimal session exposing the state API the kernel's persistence uses."""
+
+    def __init__(self) -> None:
+        self.state: dict = {}
+
+    def update_state(self, data: dict) -> None:
+        self.state.update(data)
+
+    def get_state(self, key=None):
+        if key is None:
+            return self.state
+        return self.state.get(key)
 
 
 def _make_kernel_host(memory_manager: object | None = None) -> SimpleNamespace:
@@ -190,6 +209,91 @@ async def test_stop_hard_cancels_the_round():
 
     host.stream_controller.drain_agent_task.assert_awaited_once()
     host.stream_controller.pause_agent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_persists_pending_resume_for_a_later_cold_start():
+    """A paused leader records what a cold start needs to continue its round."""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.session_manager.team_session = session
+    host.resources.harness.state = HarnessState.PAUSED
+    host.resources.harness.paused_query = "the original task"
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    await kernel.pause()
+
+    assert read_pending_resume(session, "test-team") == {"query": "the original task"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_records_nothing_when_no_round_was_suspended():
+    """An idle harness had nothing to suspend, so no marker is written."""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.session_manager.team_session = session
+    host.resources.harness.state = HarnessState.IDLE
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    await kernel.pause()
+
+    assert read_pending_resume(session, "test-team") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_resume_paused_round_cold_path_consumes_the_marker():
+    """A rebuilt (IDLE) harness continues the round the marker recorded.
+
+    This is what makes ``pause -> stop -> start`` behave like ``pause -> resume``.
+    """
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.session_manager.team_session = session
+    host.resources.harness.state = HarnessState.IDLE
+    merge_pending_resume(session, "test-team", {"query": "the original task"})
+    kernel = CoordinationKernel(host)
+
+    await kernel.resume_paused_round()
+
+    host.stream_controller.resume_agent.assert_awaited_once_with(query="the original task")
+    assert read_pending_resume(session, "test-team") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_resume_paused_round_warm_path_ignores_the_marker():
+    """A still-PAUSED harness resumes from memory, then drops the marker."""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.session_manager.team_session = session
+    host.resources.harness.state = HarnessState.PAUSED
+    merge_pending_resume(session, "test-team", {"query": "unused"})
+    kernel = CoordinationKernel(host)
+
+    await kernel.resume_paused_round()
+
+    host.stream_controller.resume_agent.assert_awaited_once_with()
+    assert read_pending_resume(session, "test-team") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_resume_paused_round_is_noop_without_a_marker():
+    """Nothing was paused: the idle harness is left alone."""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.session_manager.team_session = session
+    host.resources.harness.state = HarnessState.IDLE
+    kernel = CoordinationKernel(host)
+
+    await kernel.resume_paused_round()
+
+    host.stream_controller.resume_agent.assert_not_awaited()
 
 
 @pytest.mark.asyncio
