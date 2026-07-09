@@ -331,6 +331,30 @@ def _ensure_dynamic_table_indexes(sync_conn) -> None:
                     "Migrated task table %s: folded assignee into (assignee, status), dropped dead updated_at index",
                     table_name,
                 )
+
+            # F_59: add the verify-gate ``reviewer`` column to pre-existing tables.
+            task_columns = {c["name"] for c in inspector.get_columns(table_name)}
+            if "reviewer" not in task_columns:
+                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN reviewer TEXT')
+                team_logger.info("Migrated task table %s: added reviewer column", table_name)
+
+            # F_59: fold the legacy execution states into the condition-named
+            # IN_PROGRESS. claimed / started / plan_approved were all "a member
+            # is executing it"; map them uniformly. Distinguishing an unapproved
+            # plan-mode claim into PLANNING would need the plan index and is a
+            # best-effort refinement deferred (rare, and the row is still
+            # completable via the normal flow once re-owned).
+            legacy_status_result = sync_conn.exec_driver_sql(
+                f"UPDATE \"{table_name}\" SET status='in_progress' "
+                "WHERE status IN ('claimed', 'started', 'plan_approved')"
+            )
+            migrated_rows = legacy_status_result.rowcount or 0
+            if migrated_rows > 0:
+                team_logger.info(
+                    "Migrated task table %s: folded %d legacy execution-status row(s) into in_progress",
+                    table_name,
+                    migrated_rows,
+                )
             continue
 
         if not is_message:

@@ -35,6 +35,7 @@ from openjiuwen.agent_teams.tools.tool_task import (
     SubmitPlanTool,
     TaskCreateTool,
     UpdateTaskTool,
+    VerifyTaskTool,
     ViewTaskToolV2,
 )
 from openjiuwen.agent_teams.tools.tool_team import BuildTeamTool, CleanTeamTool
@@ -169,6 +170,7 @@ def create_team_tools(
         "view_task": ViewTaskToolV2(task_mgr, t),
         "claim_task": ClaimTaskTool(task_mgr, t),
         "submit_plan": SubmitPlanTool(task_mgr, t),
+        "verify_task": VerifyTaskTool(task_mgr, t),
         "member_complete_task": MemberCompleteTaskTool(
             task_mgr, t, desc_key=_MEMBER_COMPLETE_DESC_KEY[dispatch_mode]
         ),

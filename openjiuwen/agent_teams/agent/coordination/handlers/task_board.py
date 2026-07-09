@@ -45,6 +45,10 @@ class TaskBoardHandler(BaseCoordinationHandler):
         TeamEvent.TASK_COMPLETED: "on_task_board_event",
         TeamEvent.TASK_UNBLOCKED: "on_task_board_event",
         TeamEvent.TASK_RELEASED: "on_task_board_event",
+        # Verify gate (F_59): submit targets reviewers, verdict targets the author
+        TeamEvent.TASK_SUBMITTED_FOR_REVIEW: "on_task_submitted_for_review",
+        TeamEvent.TASK_VERIFIED: "on_task_verified",
+        TeamEvent.TASK_REVISION_REQUESTED: "on_task_revision_requested",
     }
 
     # Board events that can *grow* the set of claimable tasks a teammate
@@ -269,6 +273,102 @@ class TaskBoardHandler(BaseCoordinationHandler):
                 feedback=getattr(payload, "feedback", "") or "",
             ),
             task_id=payload.task_id,
+        )
+        await self._round.deliver_input(content)
+
+    async def on_task_submitted_for_review(self, event: EventMessage) -> None:
+        """A task entered the verify gate; wake its reviewers to act.
+
+        The payload's ``member_name`` is the author and ``reviewer`` lists the
+        members who must verify. When *this* member is one of the reviewers,
+        steer it to inspect the deliverable and call ``verify_task``. For any
+        other member, fall through to the board handler so an idle leader still
+        observes the transition (a submit does not grow the claimable pool, so
+        non-reviewer teammates are not nudged).
+        """
+        member_name = self._blueprint.member_name
+        if not member_name or self._infra.task_manager is None:
+            return
+        payload = event.get_payload()
+        reviewers = getattr(payload, "reviewer", None) or []
+        if member_name not in reviewers:
+            await self.on_task_board_event(event)
+            return
+        await self._poll.resume_polls()
+        content = render_event(
+            kind="task-review-request",
+            body=t(
+                "dispatcher.task_submitted_for_review_to_reviewer",
+                task_id=payload.task_id,
+                author=payload.member_name or "?",
+            ),
+            task_id=payload.task_id,
+        )
+        team_logger.info(
+            "[{}] received TASK_SUBMITTED_FOR_REVIEW as reviewer, task_id={}",
+            member_name,
+            payload.task_id,
+        )
+        await self._round.deliver_input(content)
+
+    async def on_task_revision_requested(self, event: EventMessage) -> None:
+        """A reviewer failed the task; steer its author back to rework.
+
+        ``member_name`` carries the author, who still holds the task (it moved
+        IN_REVIEW -> IN_PROGRESS). When it targets self, deliver the reviewer's
+        feedback and point the author at resubmission. For any other member,
+        fall through to the board handler (leader observes).
+        """
+        member_name = self._blueprint.member_name
+        if not member_name or self._infra.task_manager is None:
+            return
+        payload = event.get_payload()
+        if payload.member_name != member_name:
+            await self.on_task_board_event(event)
+            return
+        await self._poll.resume_polls()
+        content = render_event(
+            kind="task-revision",
+            body=t(
+                "dispatcher.task_revision_requested_to_self",
+                task_id=payload.task_id,
+                feedback=getattr(payload, "feedback", "") or "",
+            ),
+            task_id=payload.task_id,
+        )
+        team_logger.info(
+            "[{}] received TASK_REVISION_REQUESTED for self, task_id={}",
+            member_name,
+            payload.task_id,
+        )
+        await self._round.deliver_input(content)
+
+    async def on_task_verified(self, event: EventMessage) -> None:
+        """A reviewer passed the task; free its author to pick up new work.
+
+        ``member_name`` carries the author. The task completed while the author
+        held it in review (the one-active invariant counts IN_REVIEW), so on a
+        pass the author is unblocked — steer it back to the board. For any other
+        member, fall through to the board handler (leader observes; downstream
+        unblocks arrive separately via TASK_UNBLOCKED).
+        """
+        member_name = self._blueprint.member_name
+        if not member_name or self._infra.task_manager is None:
+            return
+        payload = event.get_payload()
+        if payload.member_name != member_name:
+            await self.on_task_board_event(event)
+            return
+        await self._poll.resume_polls()
+        content = render_event(
+            kind="task-verified",
+            body=t("dispatcher.task_verified_to_self", task_id=payload.task_id),
+            task_id=payload.task_id,
+        )
+        team_logger.info(
+            "[{}] received TASK_VERIFIED for self, task_id={}",
+            member_name,
+            payload.task_id,
         )
         await self._round.deliver_input(content)
 

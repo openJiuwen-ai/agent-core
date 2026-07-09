@@ -31,10 +31,13 @@ from openjiuwen.agent_teams.schema.events import (
     TaskPlanRequestEvent,
     TaskPlanResponseEvent,
     TaskReleasedEvent,
+    TaskRevisionRequestedEvent,
     TaskRevokedEvent,
     TaskStartedEvent,
+    TaskSubmittedForReviewEvent,
     TaskUnblockedEvent,
     TaskUpdatedEvent,
+    TaskVerifiedEvent,
     TeamTopic,
 )
 from openjiuwen.agent_teams.schema.status import (
@@ -191,6 +194,7 @@ class TeamTaskManager:
                     content=spec.content,
                     initial_status=TaskStatus.PENDING.value,
                     assignee=spec.assignee,
+                    reviewer=json.dumps(list(spec.reviewer)) if spec.reviewer else None,
                 )
             )
             edges.extend((task_id, dep_id) for dep_id in spec.depends_on)
@@ -342,10 +346,32 @@ class TeamTaskManager:
             content=task.content,
             status=task.status,
             assignee=task.assignee,
+            reviewer=task.reviewers(),
             blocked_by=blocked_by,
             blocks=blocks,
             updated_at=task.updated_at,
         )
+
+    async def list_review_tasks(self, reviewer_name: str) -> TaskListResult:
+        """List IN_REVIEW tasks awaiting ``reviewer_name`` (verify-gate view).
+
+        Backs ``view_task(action=in_review)``: the tasks a reviewer is on the
+        hook to verify. Summary shape mirrors the list view; dependency info is
+        omitted (a task under review is past its prerequisites).
+        """
+        tasks = await self.get_review_tasks(reviewer_name)
+        summaries = [
+            TaskSummary(
+                task_id=task.task_id,
+                title=task.title,
+                status=task.status,
+                assignee=task.assignee,
+                blocked_by=[],
+                updated_at=task.updated_at,
+            )
+            for task in tasks
+        ]
+        return TaskListResult(tasks=summaries, count=len(summaries))
 
     async def get(self, task_id: str) -> Optional[TeamTaskBase]:
         """Get a task by ID
@@ -546,6 +572,14 @@ class TeamTaskManager:
         if not member:
             return TaskOpResult.fail(f"Member {self.member_name} not found in team {self.team_name}")
 
+        # Verify gate: when the task carries reviewers, "done" means "ready for
+        # review" — route IN_PROGRESS -> IN_REVIEW instead of completing. The
+        # member's mental model is unchanged ("I finished"); whether it enters
+        # review is driven by the task's reviewer list, not the member.
+        gated = await self.db.task.get_task(task_id)
+        if gated is not None and gated.reviewers():
+            return await self._submit_for_review(gated)
+
         # No plan-mode-specific gate is needed: the transition table forbids
         # PLANNING -> COMPLETED, so a plan-mode member cannot complete a task
         # that has not been approved (PLANNING -> IN_PROGRESS). Completion is
@@ -595,6 +629,129 @@ class TeamTaskManager:
         await self._publish_unblocked_events(unblocked_tasks)
         await self._maybe_publish_task_list_drained()
         return TaskOpResult.success()
+
+    async def _submit_for_review(self, task) -> TaskOpResult:
+        """Route a completed-by-author task into the verify gate (IN_REVIEW).
+
+        Called from ``complete`` when the task carries reviewers. Plain
+        IN_PROGRESS -> IN_REVIEW flip (no dependency resolution — the task is
+        not done yet); the author stays assigned. Publishes
+        ``TASK_SUBMITTED_FOR_REVIEW`` carrying the reviewer list for the
+        framework to dispatch/notify.
+        """
+        submitted = await self.db.task.submit_for_review(task.task_id)
+        if not submitted:
+            return TaskOpResult.fail(
+                f"Task {task.task_id} cannot be submitted for review from status "
+                f"'{task.status}' (must be in_progress)"
+            )
+        team_logger.info("Task %s submitted for review", task.task_id)
+        await self._publish_task_event(
+            TaskSubmittedForReviewEvent(
+                team_name=self.team_name,
+                task_id=task.task_id,
+                member_name=task.assignee,
+                reviewer=task.reviewers(),
+            ),
+            error_label=f"Task submitted-for-review event for {task.task_id}",
+        )
+        return TaskOpResult.success()
+
+    async def verify_task(self, task_id: str, decision: str, feedback: str = "") -> TaskOpResult:
+        """Reviewer verdict on a task in the verify gate (reviewer only).
+
+        ``decision`` is ``pass`` (IN_REVIEW -> COMPLETED, unblocks dependents)
+        or ``fail`` (IN_REVIEW -> IN_PROGRESS, rework loop with ``feedback``
+        directed at the still-assigned author). Enforces that the task is in
+        ``IN_REVIEW`` and the caller is one of its reviewers (not the author).
+
+        Args:
+            task_id: Task under review.
+            decision: ``pass`` or ``fail``.
+            feedback: Reviewer guidance (carried to the author on ``fail``).
+
+        Returns:
+            ``TaskOpResult`` carrying the failure reason on error.
+        """
+        normalized = decision.strip().lower()
+        if normalized not in ("pass", "fail"):
+            return TaskOpResult.fail(f"verify_task decision must be 'pass' or 'fail', got '{decision}'")
+
+        task = await self.get(task_id)
+        if not task:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+        if task.status != TaskStatus.IN_REVIEW.value:
+            return TaskOpResult.fail(
+                f"Task {task_id} is not under review (status '{task.status}'); nothing to verify"
+            )
+        reviewers = task.reviewers()
+        if self.member_name not in reviewers:
+            return TaskOpResult.fail(
+                f"{self.member_name} is not a reviewer of task {task_id}; cannot verify it"
+            )
+        if self.member_name == task.assignee:
+            return TaskOpResult.fail(f"{self.member_name} cannot verify their own task {task_id}")
+
+        if normalized == "pass":
+            return await self._verify_pass(task)
+        return await self._verify_fail(task, feedback)
+
+    async def _verify_pass(self, task) -> TaskOpResult:
+        """Pass verdict: IN_REVIEW -> COMPLETED, unblocking dependents.
+
+        Reuses ``complete_task`` (which resolves dependencies + cascades) —
+        ``IN_REVIEW -> COMPLETED`` is a valid terminal transition, and the
+        source was already guarded as IN_REVIEW by ``verify_task``.
+        """
+        result = await self.db.task.complete_task(task.task_id)
+        if not result:
+            return TaskOpResult.fail(f"Task {task.task_id} could not be completed from review")
+        completed_task = result.get("task")
+        unblocked_tasks = result.get("unblocked_tasks", [])
+        team_logger.info("Task %s verified (passed) and completed", task.task_id)
+        await self._publish_task_event(
+            TaskVerifiedEvent(
+                team_name=self.team_name,
+                task_id=task.task_id,
+                member_name=completed_task.assignee,
+            ),
+            error_label=f"Task verified event for {task.task_id}",
+        )
+        await self._publish_unblocked_events(unblocked_tasks)
+        await self._maybe_publish_task_list_drained()
+        return TaskOpResult.success()
+
+    async def _verify_fail(self, task, feedback: str) -> TaskOpResult:
+        """Fail verdict: IN_REVIEW -> IN_PROGRESS, rework loop to the author."""
+        revised = await self.db.task.revise_task(task.task_id)
+        if not revised:
+            return TaskOpResult.fail(f"Task {task.task_id} could not be sent back for revision")
+        team_logger.info("Task %s verification failed; sent back to %s for revision", task.task_id, task.assignee)
+        await self._publish_task_event(
+            TaskRevisionRequestedEvent(
+                team_name=self.team_name,
+                task_id=task.task_id,
+                member_name=task.assignee,
+                feedback=feedback,
+            ),
+            error_label=f"Task revision-requested event for {task.task_id}",
+        )
+        return TaskOpResult.success()
+
+    async def get_review_tasks(self, reviewer_name: str) -> List[TeamTaskBase]:
+        """Return IN_REVIEW tasks whose reviewer list contains ``reviewer_name``.
+
+        Fetches the status-indexed IN_REVIEW rows and filters the reviewer
+        membership in memory — v1 verification is team-scale, so a normalized
+        reviewer join table is premature (see F_59). The author of a task is
+        never returned to itself as a review target.
+        """
+        in_review = await self.list_tasks(status=TaskStatus.IN_REVIEW.value)
+        return [
+            task
+            for task in in_review
+            if reviewer_name in task.reviewers() and task.assignee != reviewer_name
+        ]
 
     def _task_plan_dir(self, task_id: str) -> Path:
         return self.plans_dir / self.team_plan_id / "tasks" / _safe_token(task_id, "task")
@@ -1077,6 +1234,32 @@ class TeamTaskManager:
         except Exception as e:
             team_logger.error(f"Failed to publish task updated event for {task_id}: {e}")
 
+        return TaskOpResult.success()
+
+    async def set_reviewer(self, task_id: str, reviewer_names: list[str]) -> TaskOpResult:
+        """Set a task's verify-gate reviewers (Leader only).
+
+        Persists the reviewer member-name list (empty clears the gate). Caller
+        (the tool boundary) validates that reviewers are real members and none
+        is the task's author. Independent of status — reviewers may be attached
+        before or during execution; the list is consulted at completion time.
+
+        Args:
+            task_id: Task to (re)assign reviewers on.
+            reviewer_names: Reviewer member names; empty list clears reviewers.
+
+        Returns:
+            ``TaskOpResult`` describing the outcome.
+        """
+        task = await self.get(task_id)
+        if not task:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+
+        reviewer_json = json.dumps(list(reviewer_names)) if reviewer_names else None
+        ok = await self.db.task.set_reviewer(task_id, reviewer_json)
+        if not ok:
+            return TaskOpResult.fail(f"Task {task_id} reviewer could not be set")
+        team_logger.info("Task %s reviewers set to %s", task_id, reviewer_names or "[]")
         return TaskOpResult.success()
 
     async def reset(self, task_id: str) -> TaskOpResult:

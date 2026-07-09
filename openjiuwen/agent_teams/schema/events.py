@@ -97,6 +97,10 @@ class TeamEvent:
     TASK_RELEASED = "task_released"
     TASK_REVOKED = "task_revoked"
     TASK_LIST_DRAINED = "task_list_drained"
+    # Verify gate (F_59): author submits for review, reviewer passes / fails
+    TASK_SUBMITTED_FOR_REVIEW = "task_submitted_for_review"
+    TASK_VERIFIED = "task_verified"
+    TASK_REVISION_REQUESTED = "task_revision_requested"
 
     # Swarmflow orchestration progress (a swarmflow run feeding the spectator leader)
     WORKFLOW_PROGRESS = "workflow_progress"
@@ -297,6 +301,36 @@ class TaskRevokedEvent(BaseEventMessage):
     task_id: str = Field(..., description="Task unique identifier")
 
 
+class TaskSubmittedForReviewEvent(BaseEventMessage):
+    """Event published when an author submits a task for verification.
+
+    Fired by ``TeamTaskManager.complete`` when the completed task carries
+    reviewers (``IN_PROGRESS -> IN_REVIEW``). ``member_name`` is the author.
+    The framework dispatches / notifies the reviewers listed in ``reviewer``.
+    """
+    task_id: str = Field(..., description="Task unique identifier")
+    reviewer: list[str] = Field(default_factory=list, description="Reviewer member names to notify")
+
+
+class TaskVerifiedEvent(BaseEventMessage):
+    """Event published when a reviewer passes a task (IN_REVIEW -> COMPLETED).
+
+    ``member_name`` is the author (the task's assignee), so the completion
+    unblocks downstream tasks the same way a direct completion does.
+    """
+    task_id: str = Field(..., description="Task unique identifier")
+
+
+class TaskRevisionRequestedEvent(BaseEventMessage):
+    """Event published when a reviewer fails a task (IN_REVIEW -> IN_PROGRESS).
+
+    Rework loop: ``member_name`` is the author, who still holds the task and is
+    steered back to revise it; ``feedback`` carries the reviewer's guidance.
+    """
+    task_id: str = Field(..., description="Task unique identifier")
+    feedback: str = Field(default="", description="Reviewer feedback directing the rework")
+
+
 class TaskListDrainedEvent(BaseEventMessage):
     """Event published when every task in the team task list is terminal.
 
@@ -423,6 +457,9 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.TASK_UNBLOCKED: TaskUnblockedEvent,
     TeamEvent.TASK_RELEASED: TaskReleasedEvent,
     TeamEvent.TASK_REVOKED: TaskRevokedEvent,
+    TeamEvent.TASK_SUBMITTED_FOR_REVIEW: TaskSubmittedForReviewEvent,
+    TeamEvent.TASK_VERIFIED: TaskVerifiedEvent,
+    TeamEvent.TASK_REVISION_REQUESTED: TaskRevisionRequestedEvent,
     TeamEvent.TASK_LIST_DRAINED: TaskListDrainedEvent,
     TeamEvent.WORKFLOW_PROGRESS: WorkflowProgressTeamEvent,
     TeamEvent.WORKTREE_CREATED: WorktreeCreatedEvent,

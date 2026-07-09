@@ -253,17 +253,23 @@ STRINGS: dict[str, str] = {
     ),
     "create_task.task.depends_on": "Prerequisite task IDs; may reference tasks created in this same call or existing tasks",
     "create_task.task.depended_by": "Existing task IDs that should wait for this task (reverse dependency); must not reference tasks created in this same call — express in-batch edges with depends_on on the dependent task",
+    "create_task.task.reviewer": (
+        "Reviewer member names for this task (optional, may be several); they must already exist "
+        "and none may be the assignee. A task with reviewers enters in_review when the assignee "
+        "completes, and only reaches completed once a reviewer passes it"
+    ),
     # ===== view_task ===========================================================
     # view_task._desc lives in descs/en/view_task.md
     "view_task.action": (
         "View mode: 'list' (default, summary of all tasks), "
         "'get' (single task detail, requires task_id), "
-        "'claimable' (pending tasks ready to claim)"
+        "'claimable' (pending tasks ready to claim), "
+        "'in_review' (tasks assigned to you to verify, currently in_review)"
     ),
     "view_task.task_id": "Task ID — required when action=get, ignored otherwise",
     "view_task.status": (
         "Status filter for action=list only: "
-        "pending/claimed/plan_approved/completed/cancelled/blocked. "
+        "pending/blocked/planning/in_progress/in_review/completed/cancelled. "
         "Omit to list all."
     ),
     # ===== update_task =========================================================
@@ -274,6 +280,10 @@ STRINGS: dict[str, str] = {
     "update_task.content": "New task content",
     "update_task.assignee": (
         "member_name to assign this task to (only when currently unassigned). A notification is sent to the assignee"
+    ),
+    "update_task.reviewer": (
+        "Set this task's reviewer member names (an empty list clears the verify gate); reviewers must "
+        "already exist and none may be the assignee. Once set, the assignee's completion enters in_review"
     ),
     "update_task.add_blocked_by": (
         "Task IDs to add as new dependencies (this task will be blocked until those tasks complete)"
@@ -305,6 +315,14 @@ STRINGS: dict[str, str] = {
     "member_complete_task.note": (
         "Optional completion note describing your result or any follow-up the team should know about"
     ),
+    # ===== verify_task ========================================================
+    # verify_task._desc lives in descs/en/verify_task.md
+    "verify_task.task_id": "ID of the task to verify (must be a task assigned to you to review, currently in_review)",
+    "verify_task.decision": (
+        "Verdict: 'pass' (accept — task moves to completed) or 'fail' "
+        "(send back — task returns to in_progress for the author to rework)"
+    ),
+    "verify_task.feedback": "Review feedback (directed to the author on a fail to guide rework; optional on pass)",
     # ===== send_message ========================================================
     # send_message._desc lives in descs/en/send_message.md
     "send_message.to": (
