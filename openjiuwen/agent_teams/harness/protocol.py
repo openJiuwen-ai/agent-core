@@ -29,8 +29,13 @@ class HarnessProtocol(Protocol):
 
     All methods are concurrent-safe by contract: callers may invoke them from
     any coroutine without external locking. The two send/abort knobs
-    (``immediate``) and ``pause`` form the full interaction vocabulary;
-    ``outputs`` is the single streaming channel.
+    (``immediate``) plus ``pause`` / ``resume`` form the full interaction
+    vocabulary; ``outputs`` is the single streaming channel.
+
+    ``abort`` and ``pause`` are distinct verbs. An abort drops the current round:
+    the harness returns to IDLE and a later ``send`` starts a fresh one. A pause
+    stops at the nearest inner ReAct iteration boundary and keeps the round
+    resumable in place, via ``resume``.
     """
 
     @property
@@ -70,7 +75,19 @@ class HarnessProtocol(Protocol):
         ...
 
     async def pause(self) -> None:
-        """Pause the current round; the next send concatenates and restarts it."""
+        """Pause at the nearest inner ReAct iteration boundary; stay resumable.
+
+        A parked model call is interrupted and context rewinds to the previous
+        boundary; a running iteration's tools finish first. Settles to PAUSED.
+        """
+        ...
+
+    async def resume(self) -> None:
+        """Continue a paused round in place, from its preserved context.
+
+        No new user turn is appended: the agent picks up exactly where the pause
+        stopped it. No-op unless the harness is PAUSED.
+        """
         ...
 
 

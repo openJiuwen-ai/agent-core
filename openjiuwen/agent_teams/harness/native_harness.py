@@ -64,6 +64,7 @@ from openjiuwen.harness.schema.state import DeepAgentState
 from openjiuwen.agent_teams.harness.control import (
     _CmdAbort,
     _CmdPause,
+    _CmdResume,
     _CmdRoundFinished,
     _CmdSend,
     _CmdStop,
@@ -71,8 +72,8 @@ from openjiuwen.agent_teams.harness.control import (
 from openjiuwen.agent_teams.harness.async_tools import AsyncToolRuntime
 from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
 from openjiuwen.agent_teams.harness.snapshot_rail import (
-    _ACTIVE_ROUND,
-    SnapshotRail,
+    COOPERATIVE_STOP_TYPE,
+    PhaseSnapshotRail,
     capture_snapshot,
 )
 from openjiuwen.agent_teams.harness.state import (
@@ -160,7 +161,11 @@ class NativeHarness(DeepAgent):
         # ``subscribe(on_state=, on_round=)``. Metrics/logging off — these fire
         # on the supervisor hot path.
         self._events = AsyncCallbackFramework(enable_metrics=False, enable_logging=False)
-        self._snapshot_rail = SnapshotRail()
+        # Tracks inner-loop phase, snapshots iteration boundaries, and drives the
+        # cooperative stop for pause / graceful abort. Holds a back-ref to this
+        # harness: a ContextVar would read None inside the TaskScheduler exec
+        # task where the inner loop actually runs.
+        self._snapshot_rail = PhaseSnapshotRail(self)
         self._forwarder_task: asyncio.Task | None = None
         self._started_event = asyncio.Event()
         self._starting: bool = False
@@ -185,8 +190,9 @@ class NativeHarness(DeepAgent):
         # Mounted after the spec rails so init order matches the legacy path.
         for rail in self._extra_rails:
             self.add_rail(rail)
-        # Round-boundary snapshot rail (AFTER_TASK_ITERATION is a deep event, so
-        # add_rail/register_rail routes it onto this outer DeepAgent).
+        # Phase-tracking + boundary-snapshot rail. add_rail routes per event: the
+        # model/tool/react-iteration hooks bridge onto the inner ReActAgent,
+        # AFTER_TASK_ITERATION stays on this outer DeepAgent.
         self.add_rail(self._snapshot_rail)
 
     # ------------------------------------------------------------------
@@ -504,19 +510,23 @@ class NativeHarness(DeepAgent):
         return await ack
 
     async def abort(self, *, immediate: bool = False) -> None:
-        """Abort the current round.
+        """Abort the current round; the harness settles to IDLE.
 
-        - immediate=False (graceful): the current round runs to completion; the
-          supervisor then stops without starting a continuation. No rollback.
+        - immediate=False (graceful): if the LLM has not started, the loop exits
+          at once; otherwise the in-flight iteration (LLM + tools) runs to
+          completion and the loop exits at the next model-call boundary. No
+          rollback.
         - immediate=True: cancel the scheduler task running the round (truly
-          stopping the LLM/tool work), drop pending input, roll context+state
-          back to the last completed round boundary (or the pre-round baseline
-          if no round completed), and reset the coordinator so the next send can
-          start a fresh round. Tool side effects already performed are NOT
+          stopping the LLM/tool work) and roll context+state back to the nearest
+          inner iteration boundary (or the pre-round baseline if none completed),
+          then reset the coordinator. Tool side effects already performed are NOT
           undone.
 
+        After an abort the round is gone: a later ``send()`` starts a fresh one.
+        Contrast ``pause()`` / ``resume()``, which continue the round in place.
+
         Args:
-            immediate: Cancel immediately (True) or let the current round finish
+            immediate: Interrupt the in-flight iteration (True) or let it finish
                 (False).
         """
         self._require_alive()
@@ -525,18 +535,33 @@ class NativeHarness(DeepAgent):
         await ack
 
     async def pause(self) -> None:
-        """Stop the current round and cache its query for the next send.
+        """Pause at the nearest inner ReAct iteration boundary; stay resumable.
 
-        Cancels the scheduler task running the round, rolls context+state back
-        to the round's pre-round baseline (discarding the whole round), resets
-        the coordinator, and enters PAUSED. The next send() — regardless of
-        ``immediate`` — concatenates onto the cached query and restarts the
-        round with the combined content. Tool side effects already performed are
-        NOT undone.
+        If the inner loop is parked in a model call (no tool_calls committed
+        yet), that call is interrupted and context rewinds to the previous
+        iteration boundary. If an iteration's tools are running, they run to
+        completion first — tool side effects are irreversible — and the loop
+        stops at the following boundary.
+
+        Either way the harness settles to PAUSED with its context preserved at a
+        clean boundary; ``resume()`` continues in place from there. Awaiting this
+        coroutine returns only once PAUSED has been reached.
         """
         self._require_alive()
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._control.put(_CmdPause(ack=ack))
+        await ack
+
+    async def resume(self) -> None:
+        """Resume a paused round in place, continuing from its boundary.
+
+        Starts a continuation round over the preserved context: no new user turn
+        is appended, so the agent picks up exactly where ``pause()`` stopped it.
+        No-op unless the harness is PAUSED.
+        """
+        self._require_alive()
+        ack: asyncio.Future = asyncio.get_running_loop().create_future()
+        await self._control.put(_CmdResume(ack=ack))
         await ack
 
     # ------------------------------------------------------------------
@@ -685,6 +710,8 @@ class NativeHarness(DeepAgent):
             await self._on_abort(cmd)
         elif isinstance(cmd, _CmdPause):
             await self._on_pause(cmd)
+        elif isinstance(cmd, _CmdResume):
+            await self._on_resume(cmd)
         elif isinstance(cmd, _CmdRoundFinished):
             await self._on_round_done(cmd)
         else:  # pragma: no cover - defensive
@@ -757,21 +784,36 @@ class NativeHarness(DeepAgent):
                 # decision drains (FIFO across all RUNNING sends).
                 self.loop_controller.enqueue_follow_up(msg.content)
         elif phase is HarnessState.PAUSED:
-            base = self._st.paused_query or ""
-            if isinstance(msg.content, str):
-                merged: "str | InteractiveInput" = f"{base}\n{msg.content}" if base else msg.content
+            if isinstance(msg.content, InteractiveInput):
+                # An interrupt-resume payload drives its own single round; it
+                # cannot be steered into a continuation.
+                self._st.paused_query = None
+                active = self._start_round(msg.content)
             else:
-                # An InteractiveInput resume cannot be concatenated onto cached
-                # text; start the resume round directly and drop the cache.
-                merged = msg.content
-            self._st.paused_query = None
-            active = self._start_round(merged)
+                # Warm resume + inject: continue the paused round in place and
+                # steer the new content into it (the inner loop drains steering
+                # before its next model call). This supersedes the legacy
+                # "merge onto paused_query and restart the round", which threw
+                # away every iteration the paused round had completed.
+                query = self._st.paused_query or ""
+                self._st.paused_query = None
+                active = self._start_round(query, resume_continuation=True)
+                self._push_steer(msg.content)
             await self._transition(HarnessState.RUNNING)
             await self._emit_round("started", active.round_id)
         self._ack(cmd.ack, seq)
 
     async def _on_abort(self, cmd: _CmdAbort) -> None:
-        """Handle graceful or immediate abort."""
+        """Abort the current round; the harness settles to IDLE either way.
+
+        - **immediate=True**: hard-cancel and rewind to the nearest inner
+          iteration boundary. An iteration in flight (model call or tools) is
+          interrupted; tool side effects already performed are not undone.
+        - **immediate=False** (graceful): arm the cooperative stop. If the LLM
+          has not started, the loop exits at the next ``before_model_call``;
+          otherwise the started iteration (LLM + tools) runs to completion and
+          the loop exits at the following model-call boundary.
+        """
         phase = self._st.phase
         if phase is HarnessState.IDLE:
             self._ack(cmd.ack, None)
@@ -788,10 +830,16 @@ class NativeHarness(DeepAgent):
             self._ack(cmd.ack, None)
             return
 
+        # An abort supersedes a cooperative pause still waiting for its boundary
+        # (phase PAUSING): drop the pause intent and unblock its caller.
+        if active.pause_requested:
+            active.pause_requested = False
+            self._resolve_pause_ack(active)
+
         if cmd.immediate:
             await self._hard_cancel_round(active)
             await self._rollback_to_snapshot(
-                active.last_safe_snapshot or active.pre_round_snapshot,
+                active.last_iter_snapshot or active.pre_round_snapshot,
             )
             self._reset_coordinator()
             await self._emit_round_aborted(active.round_id, "abort")
@@ -799,18 +847,38 @@ class NativeHarness(DeepAgent):
             self._st.active = None
             await self._transition(HarnessState.IDLE)
         else:
-            # Graceful: let the current round finish; mark it so _on_round_done
-            # does not start a continuation, and gate the coordinator so any
-            # task-loop continuation check also stops.
+            # Graceful: PhaseSnapshotRail force-finishes the loop at a model-call
+            # boundary; _on_round_done sees ``graceful_abort`` and goes IDLE
+            # without starting a continuation. (The legacy coordinator.request_abort
+            # never reached the inner loop, which does not read ``is_aborted``.)
             active.graceful_abort = True
-            coordinator = self.loop_coordinator
-            if coordinator is not None:
-                coordinator.request_abort()
+            if phase is HarnessState.PAUSING:
+                # It was cooperatively pausing; it is now a graceful abort.
+                await self._transition(HarnessState.RUNNING)
         self._ack(cmd.ack, None)
 
     async def _on_pause(self, cmd: _CmdPause) -> None:
-        """Cancel current round, roll back to its pre-round baseline, cache query."""
-        if self._st.phase is not HarnessState.RUNNING:
+        """Stop at the nearest inner-iteration boundary; stay resumable.
+
+        Two strategies, picked by where the inner loop currently is:
+
+        - **LLM phase** (``model_call_in_flight``): the exec task is parked in
+          the model-call await — the only place a hard-cancel can land without
+          touching a running tool. Cancel it and rewind to the nearest clean
+          boundary (``last_iter_snapshot``, else the pre-round baseline).
+        - **tool / boundary phase**: a started iteration must run to completion
+          (its tool side effects are irreversible). Arm the cooperative stop and
+          defer the ack; ``PhaseSnapshotRail`` force-finishes the loop at the
+          next model-call boundary and ``_on_round_done`` settles to PAUSED.
+
+        ``pause_requested`` is armed *before* the hard-cancel, so that if the LLM
+        completes while the cancel is being prepared, ``after_model_call`` still
+        force-finishes before any tool starts.
+        """
+        phase = self._st.phase
+        if phase is not HarnessState.RUNNING:
+            # PAUSING: a cooperative pause is already in flight. PAUSED / IDLE /
+            # TERMINATED: nothing to pause.
             self._ack(cmd.ack, None)
             return
 
@@ -820,34 +888,95 @@ class NativeHarness(DeepAgent):
             self._ack(cmd.ack, None)
             return
 
-        # A resume round (InteractiveInput query) cannot be re-merged onto cached
-        # text, so do not cache it; the next send simply starts fresh.
-        cached_query = active.original_query if isinstance(active.original_query, str) else None
-        await self._hard_cancel_round(active)
-        # pause discards the whole round (it will restart with a merged query),
-        # so roll back to the pre-round baseline, not the mid-round snapshot —
-        # otherwise the restarted round's query duplicates the original.
-        await self._rollback_to_snapshot(active.pre_round_snapshot)
-        self._reset_coordinator()
-        await self._emit_round_aborted(active.round_id, "pause")
-        await self._emit_round("paused", active.round_id)
-        self._st.active = None
-        self._st.paused_query = cached_query
-        await self._transition(HarnessState.PAUSED)
+        # Remember the round's originating query: ``resume()`` hands it to the
+        # continuation round as ``original_query`` so a task-plan continuation
+        # can still reuse it. An InteractiveInput resume payload is single-round
+        # and not replayable, so it is not cached.
+        self._st.paused_query = (
+            active.original_query if isinstance(active.original_query, str) else None
+        )
+
+        # Arm the cooperative stop first — it is the correctness authority; the
+        # hard-cancel below is only a promptness optimisation.
+        active.pause_requested = True
+
+        if active.model_call_in_flight:
+            await self._hard_cancel_round(active)
+            await self._rollback_to_snapshot(
+                active.last_iter_snapshot or active.pre_round_snapshot,
+            )
+            self._reset_coordinator()
+            # The interrupted iteration's streamed chunks are void: its
+            # AssistantMessage never landed in context.
+            await self._emit_round_aborted(active.round_id, "pause")
+            await self._emit_round("paused", active.round_id)
+            self._st.active = None
+            await self._transition(HarnessState.PAUSED)
+            self._ack(cmd.ack, None)
+            return
+
+        # Cooperative: let the in-flight iteration finish. The ack is resolved by
+        # ``_on_round_done`` once the round settles at the boundary.
+        active.pause_ack = cmd.ack
+        await self._transition(HarnessState.PAUSING)
+
+    async def _on_resume(self, cmd: _CmdResume) -> None:
+        """Continue a paused round in place, from its preserved context.
+
+        The paused round stopped at a clean inner-iteration boundary, so context
+        already holds every completed iteration. The continuation round drives
+        the ReAct loop over that context without appending a new user turn, and
+        keeps the paused round's query as ``original_query`` so a task-plan
+        continuation can still reuse it.
+        """
+        if self._st.phase is not HarnessState.PAUSED:
+            # Only a paused harness can be resumed; anything else is a no-op.
+            self._ack(cmd.ack, None)
+            return
+
+        query = self._st.paused_query or ""
+        self._st.paused_query = None
+        active = self._start_round(query, resume_continuation=True)
+        await self._transition(HarnessState.RUNNING)
+        await self._emit_round("started", active.round_id)
         self._ack(cmd.ack, None)
 
     async def _on_round_done(self, cmd: _CmdRoundFinished) -> None:
-        """Round finished naturally; reuse DeepAgent's multi-round decision.
+        """Settle a finished round, always resolving a deferred pause ack.
 
-        Mirrors the per-round tail of ``DeepAgent._run_task_loop``: advance the
-        coordinator, persist its stop-condition state, then decide the next
-        action with the same priority — interrupt/abort stop, else follow-up,
-        else remaining task-plan tasks, else IDLE.
+        A cooperative (tool-phase) pause defers its ack until the round settles.
+        Resolve it on every path — paused, graceful, crashed — so a ``pause()``
+        caller never blocks forever.
         """
         active = self._st.active
         if active is None or active.round_id != cmd.round_id:
             # Already superseded by an abort/pause that cancelled this round.
             return
+        try:
+            await self._settle_round_done(active, cmd)
+        finally:
+            self._resolve_pause_ack(active)
+
+    def _resolve_pause_ack(self, active: ActiveRound) -> None:
+        """Resolve a deferred cooperative-pause ack, if one is pending."""
+        ack = active.pause_ack
+        if ack is None:
+            return
+        active.pause_ack = None
+        self._ack(ack, None)
+
+    async def _settle_round_done(
+        self,
+        active: ActiveRound,
+        cmd: _CmdRoundFinished,
+    ) -> None:
+        """Round finished naturally; reuse DeepAgent's multi-round decision.
+
+        Mirrors the per-round tail of ``DeepAgent._run_task_loop``: advance the
+        coordinator, persist its stop-condition state, then decide the next
+        action with the same priority — cooperative pause, else interrupt/abort
+        stop, else follow-up, else remaining task-plan tasks, else IDLE.
+        """
         was_graceful = active.graceful_abort
         is_resume = isinstance(active.original_query, InteractiveInput)
         # Abnormal death: the round crashed (an inner failure surfaces as a
@@ -861,6 +990,15 @@ class NativeHarness(DeepAgent):
             bool(result_error) and result_error not in ("cancelled", "no active round")
         )
         self._st.active = None
+
+        # Cooperative pause settled: the loop force-finished at a clean inner
+        # iteration boundary, so context is already there — no rollback, and no
+        # coordinator advance (this round was suspended, not completed). Queued
+        # follow-ups are preserved for the round that ``resume()`` continues.
+        if active.pause_requested and cmd.error is None and not died_abnormally:
+            await self._emit_round("paused", cmd.round_id)
+            await self._transition(HarnessState.PAUSED)
+            return
 
         if cmd.error is not None:
             logger.error(
@@ -952,7 +1090,10 @@ class NativeHarness(DeepAgent):
             await self._transition(HarnessState.IDLE)
             return
 
-        if self._has_remaining_tasks(session):
+        # A continuation round that resumed a paused InteractiveInput round has
+        # no replayable query, so there is nothing to drive a task-plan
+        # continuation with.
+        if self._has_remaining_tasks(session) and active.original_query:
             nxt = self._start_round(active.original_query)
             await self._emit_round("started", nxt.round_id)
             return
@@ -990,12 +1131,13 @@ class NativeHarness(DeepAgent):
         query: "str | InteractiveInput",
         is_follow_up: bool = False,
         failure_retry: bool = False,
+        resume_continuation: bool = False,
     ) -> ActiveRound:
         """Create an ActiveRound (with a pre-round baseline snapshot) and schedule it.
 
-        The round task sets ``_ACTIVE_ROUND`` to this round in its own context
-        before submitting, so SnapshotRail locates it during the
-        AFTER_TASK_ITERATION hook.
+        ``PhaseSnapshotRail`` locates this round through the harness back-ref
+        (``harness._st.active``), which is valid from the TaskScheduler exec task
+        where the inner loop runs — unlike a ContextVar set here.
 
         Args:
             query: Query to drive this round.
@@ -1003,6 +1145,10 @@ class NativeHarness(DeepAgent):
                 ``submit_round`` so the executor treats it as a follow-up).
             failure_retry: Whether this round is the one-shot retry of a round
                 that died abnormally (see ``_on_round_done``).
+            resume_continuation: Whether this round resumes a paused round from
+                its preserved context. The inner loop then appends no user turn;
+                ``query`` is only kept as ``original_query`` so a task-plan
+                continuation can still reuse it.
         """
         round_id = self._st.next_round_id()
         task_id = uuid.uuid4().hex
@@ -1020,8 +1166,7 @@ class NativeHarness(DeepAgent):
         )
 
         async def _runner() -> None:
-            _ACTIVE_ROUND.set(active)
-            await self._run_round(active, is_follow_up)
+            await self._run_round(active, is_follow_up, resume_continuation)
 
         task = asyncio.create_task(_runner(), name=f"native_harness_round[{round_id}]")
         active.task = task
@@ -1034,7 +1179,12 @@ class NativeHarness(DeepAgent):
         )
         return active
 
-    async def _run_round(self, active: ActiveRound, is_follow_up: bool) -> None:
+    async def _run_round(
+        self,
+        active: ActiveRound,
+        is_follow_up: bool,
+        resume_continuation: bool = False,
+    ) -> None:
         """Drive one outer round through the task-loop kernel.
 
         Submits the round under ``active.task_id`` so an immediate abort can
@@ -1046,6 +1196,8 @@ class NativeHarness(DeepAgent):
         Args:
             active: The round being driven.
             is_follow_up: Whether this round is a follow-up continuation.
+            resume_continuation: Whether this round continues a paused round's
+                preserved context (the inner loop appends no new user turn).
         """
         error: BaseException | None = None
         result: dict | None = None
@@ -1073,22 +1225,24 @@ class NativeHarness(DeepAgent):
                     active.original_query,
                     is_follow_up=is_follow_up,
                     task_id=active.task_id,
+                    resume_continuation=resume_continuation,
                 )
                 result = await self.loop_controller.wait_round_completion()
-                # wait_completion returns a control-error dict ({"error":
-                # "cancelled" / "no active round"}) when the wait itself was
-                # cancelled rather than the round
-                # producing a real result — notably, an immediate abort/pause
-                # cancels this wait task and the handler swallows the
-                # CancelledError into {"error": "cancelled"}. Streaming that as
-                # an (empty) answer is noise: aborted/paused rounds emit their
-                # own round_aborted marker.
-                if not (isinstance(result, dict) and result.get("error")):
+                # Control results must never be streamed as answers:
+                # - {"error": "cancelled" / "no active round"} when the wait
+                #   itself was cancelled (an immediate abort or an LLM-phase
+                #   pause cancels this wait task and the handler swallows the
+                #   CancelledError). Those rounds emit their own round_aborted
+                #   marker.
+                # - the cooperative-stop payload, produced when a pause or a
+                #   graceful abort force-finishes the inner loop at an iteration
+                #   boundary: it carries no answer.
+                if not self._is_control_result(result):
                     await self._write_round_result_to_stream(result, self._session)
                 # Expose the round result to AFTER_INVOKE rails (fired in the
-                # lifecycle's finally). Control-error dicts carry no real answer,
-                # so leave result as None for them.
-                inv_inputs.result = result if isinstance(result, dict) and not result.get("error") else None
+                # lifecycle's finally). Control results carry no real answer, so
+                # leave result as None for them.
+                inv_inputs.result = None if self._is_control_result(result) else result
         except asyncio.CancelledError:
             logger.info("[NativeHarness] round_id=%s cancelled", active.round_id)
             raise
@@ -1104,6 +1258,18 @@ class NativeHarness(DeepAgent):
                     result=result,
                 ),
             )
+
+    @staticmethod
+    def _is_control_result(result: Any) -> bool:
+        """Whether a round result is a control signal rather than a real answer.
+
+        Control results must not be streamed: an ``{"error": ...}`` dict from a
+        cancelled wait, and the cooperative-stop payload that a pause / graceful
+        abort force-finishes the inner loop with.
+        """
+        if not isinstance(result, dict):
+            return False
+        return bool(result.get("error")) or result.get("result_type") == COOPERATIVE_STOP_TYPE
 
     async def _log_slow_round_until_done(self, active: ActiveRound) -> None:
         """Log non-terminal slow-round warnings until the round task finishes."""

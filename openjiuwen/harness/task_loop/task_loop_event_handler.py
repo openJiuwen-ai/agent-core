@@ -240,6 +240,14 @@ class TaskLoopEventHandler(EventHandler):
             else None
         )
 
+        # Set by NativeHarness.resume: continue the paused round's preserved
+        # context instead of appending a new user turn.
+        resume_continuation = (
+            event.metadata.get("_resume_continuation", False)
+            if event.metadata
+            else False
+        )
+
         coordinator = agent.loop_coordinator
         if coordinator is None:
             logger.warning(
@@ -290,6 +298,7 @@ class TaskLoopEventHandler(EventHandler):
             "run_kind": run_kind,
             "run_context": run_context,
             "is_follow_up": is_follow_up,
+            "_resume_continuation": resume_continuation,
         }
 
         try:

@@ -269,7 +269,8 @@ class StreamController:
         """Map a runtime phase transition onto MemberStatus.
 
         ``RUNNING`` → BUSY, ``IDLE`` → READY (and round-chain-end settling).
-        ``PAUSED`` / ``TERMINATED`` leave member status to the lifecycle layer.
+        ``PAUSING`` / ``PAUSED`` / ``TERMINATED`` leave member status to the
+        lifecycle layer.
         """
         if new is HarnessState.RUNNING:
             await self._update_status(MemberStatus.BUSY)
@@ -373,8 +374,31 @@ class StreamController:
         if harness is not None:
             await harness.abort(immediate=False)
 
+    async def pause_agent(self) -> None:
+        """Pause the in-flight round at its nearest inner iteration boundary.
+
+        Unlike :meth:`cancel_agent`, the round is preserved: a parked model call
+        is interrupted and rewound to the previous boundary, while a running
+        iteration's tools finish first. :meth:`resume_agent` continues it.
+        """
+        harness = self._resources.harness
+        if harness is not None:
+            await harness.pause()
+
+    async def resume_agent(self) -> None:
+        """Continue a paused round in place, from its preserved context."""
+        harness = self._resources.harness
+        if harness is not None:
+            await harness.resume()
+
     async def drain_agent_task(self) -> None:
-        """Tear down the in-flight round during lifecycle pause/stop."""
+        """Tear down the in-flight round during lifecycle stop / teardown.
+
+        Hard-cancels the round: used by ``stop`` / ``destroy``, where it is being
+        discarded outright. A lifecycle *pause* must not come here — it routes
+        through :meth:`pause_agent`, which stops at a clean iteration boundary
+        and keeps the round resumable.
+        """
         await self.cancel_agent()
 
     # ------------------------------------------------------------------
