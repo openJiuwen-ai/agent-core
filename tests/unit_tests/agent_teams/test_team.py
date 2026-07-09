@@ -271,7 +271,7 @@ class TestApprovePlan:
 
         assert result is True
         approved_task = await agent_team.task_manager.get(task.task_id)
-        assert approved_task.status == TaskStatus.PLAN_APPROVED.value
+        assert approved_task.status == TaskStatus.IN_PROGRESS.value
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -319,7 +319,7 @@ class TestApprovePlan:
             assert result is True
             mock_send.assert_not_called()
             rejected_task = await agent_team.task_manager.get(task.task_id)
-            assert rejected_task.status == TaskStatus.CLAIMED.value
+            assert rejected_task.status == TaskStatus.PLANNING.value
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -354,7 +354,7 @@ class TestApprovePlan:
             assert result is True
             mock_send.assert_not_called()
             approved_task = await agent_team.task_manager.get(task.task_id)
-            assert approved_task.status == TaskStatus.PLAN_APPROVED.value
+            assert approved_task.status == TaskStatus.IN_PROGRESS.value
 
 
 class TestApproveTool:
@@ -548,8 +548,8 @@ class TestCancelMember:
         # Verify tasks are claimed
         task1_claimed = await db.task.get_task(task1.task_id)
         task2_claimed = await db.task.get_task(task2.task_id)
-        assert task1_claimed.status == TaskStatus.CLAIMED.value
-        assert task2_claimed.status == TaskStatus.CLAIMED.value
+        assert task1_claimed.status == TaskStatus.IN_PROGRESS.value
+        assert task2_claimed.status == TaskStatus.IN_PROGRESS.value
         assert task1_claimed.assignee == "member1"
         assert task2_claimed.assignee == "member1"
 
@@ -923,7 +923,7 @@ class TestCancelAllTasks:
         """Test cancelling tasks with mixed statuses"""
         # Create tasks with different statuses
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
         await db.task.claim_task("task2", "member1")
         await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "cancelled")
         await db.task.create_task("task4", "test_team", "Task 4", "Content 4", "completed")

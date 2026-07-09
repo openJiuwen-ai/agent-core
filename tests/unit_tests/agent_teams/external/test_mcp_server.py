@@ -102,7 +102,7 @@ async def test_member_claim_then_complete_via_real_tool(team_db, make_descriptor
     await _call_text(server, "claim_task", {"task_id": "t1", "status": "claimed"})
     task = await team_db.task.get_task("t1")
     assert task.assignee == "dev-1"
-    assert task.status == TaskStatus.CLAIMED.value
+    assert task.status == TaskStatus.IN_PROGRESS.value
 
     text = await _call_text(server, "claim_task", {"task_id": "t1", "status": "completed"})
     task = await team_db.task.get_task("t1")

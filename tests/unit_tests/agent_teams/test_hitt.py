@@ -420,7 +420,7 @@ async def test_cancel_task_owned_by_human_agent_is_refused(built_team, db):
     assert "人类成员" in out.error
     # Task itself must still be claimed by human_agent.
     task = await built_team.task_manager.get("t-1")
-    assert task.status == TaskStatus.CLAIMED.value
+    assert task.status == TaskStatus.IN_PROGRESS.value
     assert task.assignee == HUMAN_AGENT_MEMBER_NAME
 
 
@@ -459,7 +459,7 @@ async def test_cancel_all_preserves_human_agent_claimed_task(built_team, db):
 
     preserved = await built_team.task_manager.get("t-human")
     released = await built_team.task_manager.get("t-open")
-    assert preserved.status == TaskStatus.CLAIMED.value
+    assert preserved.status == TaskStatus.IN_PROGRESS.value
     assert released.status == TaskStatus.CANCELLED.value
 
 
@@ -768,8 +768,8 @@ async def test_cancel_all_preserves_all_human_members(multi_human_backend, db):
     out = await tool.invoke({"task_id": "*", "status": "cancelled"})
     assert out.success is True
 
-    assert (await multi_human_backend.task_manager.get("t-designer")).status == TaskStatus.CLAIMED.value
-    assert (await multi_human_backend.task_manager.get("t-pm")).status == TaskStatus.CLAIMED.value
+    assert (await multi_human_backend.task_manager.get("t-designer")).status == TaskStatus.IN_PROGRESS.value
+    assert (await multi_human_backend.task_manager.get("t-pm")).status == TaskStatus.IN_PROGRESS.value
     assert (await multi_human_backend.task_manager.get("t-open")).status == TaskStatus.CANCELLED.value
 
 

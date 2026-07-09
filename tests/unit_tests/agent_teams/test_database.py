@@ -651,7 +651,7 @@ class TestTaskOperations:
             team_name="team11",
             title="Task 2",
             content="Content",
-            status="claimed"
+            status="in_progress"
         )
 
         success = await db.task.update_task_status("task2", "completed")
@@ -777,9 +777,9 @@ class TestTaskOperations:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_update_claimed_task_succeeds_plan_approved_locked(self, db):
-        """A CLAIMED task is now editable (edit keeps it claimed; the assignee
-        is told to re-read). A PLAN_APPROVED task stays locked."""
+    async def test_update_in_progress_task_succeeds_in_review_locked(self, db):
+        """An IN_PROGRESS task is editable (edit keeps it in progress; the
+        assignee is told to re-read). An IN_REVIEW task stays locked."""
         await db.team.create_team(
             team_name="team_claimed_update",
             display_name="Team Claimed Update",
@@ -790,27 +790,27 @@ class TestTaskOperations:
             team_name="team_claimed_update",
             title="Claimed Task",
             content="Original content",
-            status="claimed"
+            status="in_progress"
         )
 
-        # Editing a claimed task now succeeds.
+        # Editing an in-progress task now succeeds.
         success = await db.task.update_task("task_claimed", title="New Title")
         assert success is True
         task = await db.task.get_task("task_claimed")
         assert task.title == "New Title"
 
-        # A plan_approved task stays locked.
+        # An in-review task stays locked.
         await db.task.create_task(
-            task_id="task_plan_approved",
+            task_id="task_in_review",
             team_name="team_claimed_update",
-            title="Plan Approved Task",
+            title="In Review Task",
             content="Original content",
-            status="plan_approved"
+            status="in_review"
         )
-        locked = await db.task.update_task("task_plan_approved", title="Nope")
+        locked = await db.task.update_task("task_in_review", title="Nope")
         assert locked is False
-        unchanged = await db.task.get_task("task_plan_approved")
-        assert unchanged.title == "Plan Approved Task"
+        unchanged = await db.task.get_task("task_in_review")
+        assert unchanged.title == "In Review Task"
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1361,19 +1361,18 @@ class TestTaskDependencyOperations:
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_add_task_with_claimed_dependent_fails(self, db):
-        """Test that adding a dependency to a claimed task fails (claimed -> blocked is invalid)"""
+        """An in-progress task rejects a new prerequisite dependency."""
         await db.team.create_team(
             team_name="team_terminal3",
             display_name="Team Terminal3",
             leader_member_name="leader8"
         )
 
-        # Create a claimed task
+        # Create an in-progress task
         await db.task.create_task("task_claimed", "team_terminal3", "Task Claimed",
-                             "Content", "claimed")
+                             "Content", "in_progress")
 
-        # Create a new task that the claimed task would depend on
-        # This should succeed because CLAIMED -> BLOCKED is a valid state transition
+        # Wiring a new prerequisite into an executing task is rejected.
         result = await db.task.mutate_dependency_graph(
             "team_terminal3",
             new_tasks=[
@@ -1383,9 +1382,9 @@ class TestTaskDependencyOperations:
         )
         assert result.ok is False
 
-        # Verify: claimed task status is not changed
+        # Verify: the in-progress task status is not changed
         claimed_task = await db.task.get_task("task_claimed")
-        assert (claimed_task.status == "claimed")
+        assert (claimed_task.status == "in_progress")
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -2005,7 +2004,7 @@ class TestCancelAllTasks:
 
         # Create tasks with different statuses
         await db.task.create_task("task1", "team_mixed_cancel", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "team_mixed_cancel", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task2", "team_mixed_cancel", "Task 2", "Content 2", "in_progress")
         await db.task.create_task("task3", "team_mixed_cancel", "Task 3", "Content 3", "blocked")
         await db.task.create_task("task4", "team_mixed_cancel", "Task 4", "Content 4", "cancelled")
         await db.task.create_task("task5", "team_mixed_cancel", "Task 5", "Content 5", "completed")
@@ -2106,11 +2105,11 @@ class TestResetTask:
             content="Content",
             status="pending"
         )
-        # Claim task to set assignee (this sets status to claimed)
+        # Claim task to set assignee (this sets status to in_progress)
         await db.task.claim_task("task_reset", "member1")
 
         task_before = await db.task.get_task("task_reset")
-        assert task_before.status == "claimed"
+        assert task_before.status == "in_progress"
         assert task_before.assignee == "member1"
 
         # Reset task
@@ -2279,8 +2278,8 @@ class TestGetTasksByAssignee:
         await db.task.create_task("task2", "team_assignee_filter", "Task 2", "Content 2", "pending")
         await db.task.claim_task("task2", "member1")
 
-        # Get claimed tasks
-        claimed_tasks = await db.task.get_tasks_by_assignee("team_assignee_filter", "member1", "claimed")
+        # Get in-progress tasks
+        claimed_tasks = await db.task.get_tasks_by_assignee("team_assignee_filter", "member1", "in_progress")
         assert len(claimed_tasks) == 1
         assert claimed_tasks[0].task_id == "task2"
 
@@ -3237,9 +3236,9 @@ async def test_cancel_all_tasks_does_not_resurrect_terminal_tasks(db):
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_mutate_dependency_graph_rejects_terminal_target(db):
-    """Adding an edge whose source is already CLAIMED is rejected.
+    """Adding an edge whose source is already IN_PROGRESS is rejected.
 
-    The CLAIMED task is mid-execution; silently re-blocking it would
+    The IN_PROGRESS task is mid-execution; silently re-blocking it would
     surprise the assignee. Same protection applies to terminal statuses.
     """
     await db.team.create_team(team_name="team_reject_terminal", display_name="T", leader_member_name="leader")
@@ -3259,7 +3258,7 @@ async def test_mutate_dependency_graph_rejects_terminal_target(db):
         add_edges=[("claimed_task", "upstream")],
     )
     assert result.ok is False
-    assert "claimed" in result.reason
+    assert "in_progress" in result.reason
 
 
 @pytest.mark.asyncio

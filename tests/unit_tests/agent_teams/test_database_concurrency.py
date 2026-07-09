@@ -208,7 +208,7 @@ async def test_concurrent_claim_same_task_single_winner(file_db: TeamDatabase) -
     assert sum(results) == 1
 
     task = await file_db.task.get_task("t1")
-    assert task.status == TaskStatus.CLAIMED.value
+    assert task.status == TaskStatus.IN_PROGRESS.value
     assert task.assignee is not None
 
 
