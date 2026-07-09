@@ -104,20 +104,30 @@ class StructuredOutputFinishRail(AgentRail):
     until it happens to stop, burning iterations and tokens.
 
     This rail makes the terminal action terminal: an ``after_tool_call`` hook
-    requests a force-finish as soon as ``structured_output`` is invoked, ending
-    the round deterministically regardless of the model. The backend reads the
-    result off the :class:`StructuredOutputTool` instance, so the force-finish
-    payload itself is irrelevant.
+    requests a force-finish as soon as ``structured_output`` is captured (i.e.
+    the call succeeded), ending the round deterministically regardless of the
+    model. A failed call (e.g. malformed arguments) does NOT force-finish, so
+    the error tool_message reaches the model for self-correction. The backend
+    reads the result off the :class:`StructuredOutputTool` instance, so the
+    force-finish payload itself is irrelevant.
     """
 
     priority: int = 900
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Force-finish the round when the captured tool was ``structured_output``."""
+        """Force-finish the round only when ``structured_output`` succeeded.
+
+        A failed call (e.g. malformed JSON arguments that fail to parse) must
+        NOT force-finish: the error tool_message needs to flow back to the
+        model so it can self-correct. Force-finishing on failure would swallow
+        the error and end the round with no structured result captured.
+        """
         inputs = ctx.inputs
         if not isinstance(inputs, ToolCallInputs):
             return
         if inputs.tool_name != _STRUCTURED_OUTPUT_NAME:
+            return
+        if ctx.exception is not None:
             return
         ctx.request_force_finish({"accepted": True})
 

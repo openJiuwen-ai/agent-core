@@ -29,6 +29,16 @@ class NumberedSourceLine:
     line_number: int
 
 
+@dataclass
+class ReplacementCollector:
+    content: bytes
+    config: LanguageConfig
+    ctx: RuleContext
+    replacements: list[tuple[int, int, bytes]]
+    stats: dict[str, int]
+    row_replacements: list[tuple[int, int]] | None = None
+
+
 _LANGUAGES: dict[str, LanguageConfig] = {
     "python": LanguageConfig(frozenset({"function_definition"}), frozenset({"block"}), "#", True),
     "javascript": LanguageConfig(
@@ -68,7 +78,8 @@ _DETECTION_PATTERNS = {
 
 
 class SourceCodeCompressor:
-    def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult:
+    @staticmethod
+    def compress(content: str, ctx: RuleContext) -> RuleCompressionResult:
         numbered_lines = _numbered_source_lines(content)
         if numbered_lines is not None:
             return _compress_numbered_source(content, numbered_lines, ctx)
@@ -89,7 +100,7 @@ class SourceCodeCompressor:
         content_bytes = content.encode("utf-8")
         replacements: list[tuple[int, int, bytes]] = []
         stats = {"bodies_seen": 0, "bodies_compressed": 0, "query_protected_bodies": 0}
-        _collect_replacements(root, content_bytes, config, ctx, replacements, stats)
+        _collect_replacements(root, ReplacementCollector(content_bytes, config, ctx, replacements, stats))
         if not replacements:
             return _unchanged(content, language=language, details={**stats, "syntax_valid": True})
 
@@ -147,12 +158,14 @@ def _compress_numbered_source(
     stats = {"bodies_seen": 0, "bodies_compressed": 0, "query_protected_bodies": 0}
     _collect_replacements(
         root,
-        clean_bytes,
-        config,
-        ctx,
-        replacements,
-        stats,
-        row_replacements=row_replacements,
+        ReplacementCollector(
+            clean_bytes,
+            config,
+            ctx,
+            replacements,
+            stats,
+            row_replacements,
+        ),
     )
     details: dict[str, Any] = {
         "language": language,
@@ -204,52 +217,38 @@ def _term_matches_function(term: str, function_text: str) -> bool:
     matching via ``\\b`` boundaries keeps relevance signals while avoiding
     incidental hits.
     """
-    return bool(re.search(r"\b" + re.escape(term) + r"\b", function_text.lower()))
+    pattern = r"\b{}\b".format(re.escape(term))
+    return bool(re.search(pattern, function_text.lower()))
 
 
-def _collect_replacements(
-    node: Any,
-    content: bytes,
-    config: LanguageConfig,
-    ctx: RuleContext,
-    replacements: list[tuple[int, int, bytes]],
-    stats: dict[str, int],
-    *,
-    row_replacements: list[tuple[int, int]] | None = None,
-) -> None:
-    if _kind(node) in config.function_nodes:
-        body = _body_node(node, config)
+def _collect_replacements(node: Any, collector: ReplacementCollector) -> None:
+    if _kind(node) in collector.config.function_nodes:
+        body = _body_node(node, collector.config)
         if body is None:
             return
-        stats["bodies_seen"] += 1
-        function_text = content[_start(node):_end(node)].decode("utf-8", errors="replace")
-        query_terms = {term.lower() for term in ctx.query_terms if term}
+        collector.stats["bodies_seen"] += 1
+        function_text = collector.content[_start(node):_end(node)].decode("utf-8", errors="replace")
+        query_terms = {term.lower() for term in collector.ctx.query_terms if term}
         if any(_term_matches_function(term, function_text) for term in query_terms):
-            stats["query_protected_bodies"] += 1
+            collector.stats["query_protected_bodies"] += 1
             return
         body_lines = _position_row(_end_position(body)) - _position_row(_start_position(body)) + 1
-        if body_lines <= ctx.source_max_body_lines:
+        if body_lines <= collector.ctx.source_max_body_lines:
             return
-        replacements.append((_start(body), _end(body), _omission_body(body, content, config)))
-        if row_replacements is not None:
-            row_replacements.append(
+        collector.replacements.append(
+            (_start(body), _end(body), _omission_body(body, collector.content, collector.config))
+        )
+        if collector.row_replacements is not None:
+            collector.row_replacements.append(
                 (
                     _position_row(_start_position(body)),
                     _position_row(_end_position(body)),
                 )
             )
-        stats["bodies_compressed"] += 1
+        collector.stats["bodies_compressed"] += 1
         return
     for child in _named_children(node):
-        _collect_replacements(
-            child,
-            content,
-            config,
-            ctx,
-            replacements,
-            stats,
-            row_replacements=row_replacements,
-        )
+        _collect_replacements(child, collector)
 
 
 def _apply_numbered_row_replacements(
@@ -269,7 +268,7 @@ def _apply_numbered_row_replacements(
             f"{indent}{config.comment_prefix} [function body omitted; original lines "
             f"{first.line_number}-{last.line_number}, reload original source for details]"
         )
-        output[start_row : end_row + 1] = [
+        output[start_row:end_row + 1] = [
             NumberedSourceLine(prefix=first.prefix, code=marker, line_number=first.line_number)
         ]
     return "\n".join(f"{line.prefix}{line.code}" for line in output)
@@ -303,16 +302,15 @@ def _omission_body(body: Any, content: bytes, config: LanguageConfig) -> bytes:
 
 
 def _detect_language(content: str) -> str | None:
-    candidates = [
-        language
-        for language, patterns in _DETECTION_PATTERNS.items()
-        if any(re.search(pattern, content) for pattern in patterns)
-    ]
+    candidates: list[str] = []
+    for language, patterns in _DETECTION_PATTERNS.items():
+        if any(re.search(pattern, content) for pattern in patterns):
+            candidates.append(language)
     best: tuple[int, int, str] | None = None
     for rank, language in enumerate(candidates):
         try:
             root = get_parser(language).parse(content).root_node()
-        except Exception:
+        except (TypeError, ValueError):
             continue
         errors = _count_syntax_errors(root)
         score = (errors, rank, language)

@@ -149,7 +149,9 @@ def _render_background_tasks_section(ctx: ReinjectContext) -> list[str]:
             task_id = task.get("task_id") or "unknown"
             status = task.get("status") or "unknown"
             if status == "running":
-                lines.append(f'Background agent "{description}" ({task_id}) is still running. Do NOT spawn a duplicate.')
+                lines.append(
+                    f'Background agent "{description}" ({task_id}) is still running. Do NOT spawn a duplicate.'
+                )
             elif status in {"completed", "error", "canceled"}:
                 lines.append(
                     f'Background agent "{description}" ({task_id}) status={status}. '
@@ -627,14 +629,17 @@ def parse_jsonish_tool_result(result_text: str) -> Any:
         return {}
     try:
         return json.loads(result_text)
-    except Exception:
-        pass
+    except (TypeError, ValueError):
+        return _parse_data_field(result_text)
+
+
+def _parse_data_field(result_text: str) -> Any:
     match = re.search(r"\bdata=(?P<data>\{.*?\})(?:\s+\w+=|$)", result_text, flags=re.DOTALL)
     if not match:
         return {}
     try:
         parsed = ast.literal_eval(match.group("data"))
-    except Exception:
+    except (SyntaxError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
 

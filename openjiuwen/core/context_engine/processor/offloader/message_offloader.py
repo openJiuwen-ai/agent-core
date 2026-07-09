@@ -66,8 +66,8 @@ class MessageOffloader(ContextProcessor):
     def __init__(self, config: MessageOffloaderConfig):
         super().__init__(config)
         self._rule_pipeline = RuleCompressionPipeline(
-            enable_dump=bool(config.enable_debug_dump),
-            dump_dir=config.debug_dump_dir,
+            enable_dump=bool(getattr(config, "enable_debug_dump", False)),
+            dump_dir=getattr(config, "debug_dump_dir", None),
         )
 
     async def trigger_add_messages(
@@ -509,7 +509,7 @@ class MessageOffloader(ContextProcessor):
         message: BaseMessage | None = None,
         **payload: Any,
     ) -> None:
-        if not self.config.enable_debug_dump:
+        if not getattr(self.config, "enable_debug_dump", False):
             return
         log_path = self._debug_log_path(context)
         record = {
@@ -538,8 +538,9 @@ class MessageOffloader(ContextProcessor):
         return os.path.join(self._debug_log_dir(context), MESSAGE_OFFLOADER_DEBUG_LOG_FILE)
 
     def _debug_log_dir(self, context: ModelContext) -> str:
-        if self.config.debug_dump_dir:
-            return os.path.abspath(self._expand_debug_dir_template(self.config.debug_dump_dir, context))
+        debug_dump_dir = getattr(self.config, "debug_dump_dir", None)
+        if debug_dump_dir:
+            return os.path.abspath(self._expand_debug_dir_template(debug_dump_dir, context))
         env_dir = os.getenv(MESSAGE_OFFLOADER_DEBUG_LOG_DIR_ENV)
         if env_dir:
             return os.path.abspath(self._expand_debug_dir_template(env_dir, context))
@@ -635,7 +636,7 @@ class MessageOffloader(ContextProcessor):
             return False
         tool_name = ContextUtils.extract_tool_name(tool_call)
         tool_args = self._extract_tool_args(tool_call)
-        for protected in self.config.protected_tool_names:
+        for protected in getattr(self.config, "protected_tool_names", ["read_file"]):
             if ":" not in protected:
                 if tool_name == protected:
                     return True

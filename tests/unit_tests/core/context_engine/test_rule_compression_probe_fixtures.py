@@ -1,11 +1,11 @@
 import json
 
-from examples.context_engine.rule_compression_fixtures import SCENARIOS
 from openjiuwen.core.context_engine.processor.offloader.rule_compression import (
     ContentType,
     RuleContentRouter,
     RuleContext,
 )
+from tests.unit_tests.core.context_engine.rule_compression_fixtures import SCENARIOS
 
 
 def test_probe_scenarios_exercise_each_rule_compressor():

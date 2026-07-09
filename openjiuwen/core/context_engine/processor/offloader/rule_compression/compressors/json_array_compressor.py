@@ -184,15 +184,11 @@ class JsonArrayCompressor:
         minimum_coverage = max(int(len(rows) * 0.8), 1)
         keys = sorted({key for row in rows for key in row})
         for key in keys:
-            values = [
-                row[key]
-                for row in rows
-                if key in row
-                and (
-                    row[key] is None
-                    or isinstance(row[key], (str, int, float, bool))
-                )
-            ]
+            values: list[Any] = []
+            for row in rows:
+                value = row.get(key)
+                if key in row and (value is None or isinstance(value, (str, int, float, bool))):
+                    values.append(value)
             if len(values) < minimum_coverage:
                 continue
             counts = Counter(
@@ -252,12 +248,12 @@ class JsonArrayCompressor:
 def _load_json_array(content: str) -> list[Any] | None:
     try:
         rows = json.loads(content)
-    except Exception:
+    except (TypeError, ValueError):
         stripped = content.lstrip()
         if not stripped.startswith("["):
             return None
         try:
             rows = repair_json_loads(content)
-        except Exception:
+        except (TypeError, ValueError):
             return None
     return rows if isinstance(rows, list) else None

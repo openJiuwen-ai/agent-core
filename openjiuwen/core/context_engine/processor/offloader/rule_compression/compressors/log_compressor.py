@@ -79,18 +79,9 @@ class LogCompressor:
             *[line.content for line in selected],
         ]
         if omitted:
-            labels = [
-                f"{counts[level]} {label}"
-                for level, label in (
-                    (LogLevel.ERROR, "ERROR"),
-                    (LogLevel.FAIL, "FAIL"),
-                    (LogLevel.WARN, "WARN"),
-                    (LogLevel.INFO, "INFO"),
-                )
-                if counts[level]
-            ]
+            labels = _nonzero_level_labels(counts)
             label_text = f": {', '.join(labels)}" if labels else ""
-            output.append(f"[LOG omitted: {omitted} lines{label_text}]")
+            output.append(f"[LOG omitted: {omitted} lines omitted{label_text}]")
         candidate = "\n".join(output)
         details: dict[str, Any] = {
             "format_detected": format_detected,
@@ -138,6 +129,19 @@ class LogCompressor:
             selected.extend(trace[: ctx.log_stack_trace_max_lines])
         selected.extend(summaries)
         return _dedupe_by_position(selected), len(warnings) - len(deduped_warnings)
+
+
+def _nonzero_level_labels(counts: dict[LogLevel, int]) -> list[str]:
+    labels: list[str] = []
+    for level, label in (
+        (LogLevel.ERROR, "ERROR"),
+        (LogLevel.FAIL, "FAIL"),
+        (LogLevel.WARN, "WARN"),
+        (LogLevel.INFO, "INFO"),
+    ):
+        if counts[level]:
+            labels.append(f"{counts[level]} {label}")
+    return labels
 
 
 def _classify_lines(lines: list[str], max_trace_lines: int) -> tuple[list[LogLine], int]:

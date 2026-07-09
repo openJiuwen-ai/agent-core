@@ -10,8 +10,12 @@ from openjiuwen.core.context_engine.processor.offloader.rule_compression.common 
     strip_display_line_prefixes,
     strip_display_line_prefixes_preserving_body_whitespace,
 )
-from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.diff_compressor import DiffCompressor
-from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.html_compressor import HtmlCompressor
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.diff_compressor import (
+    DiffCompressor,
+)
+from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.html_compressor import (
+    HtmlCompressor,
+)
 from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.json_array_compressor import (
     JsonArrayCompressor,
 )
@@ -33,7 +37,8 @@ from openjiuwen.core.context_engine.processor.offloader.rule_compression.types i
 
 
 class RuleCompressor(Protocol):
-    def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult: ...
+    def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult:
+        ...
 
 
 class RuleContentRouter:
@@ -131,13 +136,7 @@ class RuleContentRouter:
             return ContentType.SOURCE_CODE
         html_detection_text = self._html_detection_text(text)
         lowered = html_detection_text[:20000].lower()
-        if (
-            "<!doctype html" in lowered
-            or "<html" in lowered
-            or "<head" in lowered
-            or "<body" in lowered
-            or len(self._HTML_STRUCTURAL_TAG_RE.findall(lowered)) >= 2
-        ):
+        if self._looks_like_html(lowered):
             return ContentType.HTML
         if self._LOG_RE.search(display_text):
             return ContentType.LOG
@@ -175,21 +174,28 @@ class RuleContentRouter:
             )
         return self._compressors[content_type].compress(routed_content, ctx)
 
-    def _json_detection_text(self, content: str) -> str:
+    @staticmethod
+    def _json_detection_text(content: str) -> str:
         stripped = strip_display_line_prefixes(content)
         return stripped if stripped != content else content
 
-    def _repair_json_array(self, content: str) -> object | None:
+    @staticmethod
+    def _repair_json_array(content: str) -> object | None:
         if not content.lstrip().startswith("["):
             return None
         try:
             return repair_json_loads(content)
-        except Exception:
+        except (TypeError, ValueError):
             return None
 
-    def _html_detection_text(self, content: str) -> str:
+    @staticmethod
+    def _html_detection_text(content: str) -> str:
         stripped = strip_display_line_prefixes(content)
         return stripped if stripped != content else content
+
+    def _looks_like_html(self, content: str) -> bool:
+        html_prefixes = ("<!doctype html", "<html", "<head", "<body")
+        return content.startswith(html_prefixes) or len(self._HTML_STRUCTURAL_TAG_RE.findall(content)) >= 2
 
     def _source_detection_text(self, content: str) -> str:
         stripped = self._strip_numbered_source_lines(content)

@@ -31,7 +31,7 @@ from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     SystemMessage,
     ToolMessage,
-    UserMessage, BaseMessage, ToolCall,
+    UserMessage, BaseMessage,
 )
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
@@ -493,9 +493,9 @@ class TestContextEngine:
                 DialogueCompressorConfig(min_target_context_ratio=0.5),
             )],
         )
-        processor = context._processors[0]  # type: ignore[attr-defined]
-        processor._compression_executor = MagicMock()  # type: ignore[attr-defined]
-        processor._compression_executor.invoke = AsyncMock(  # type: ignore[attr-defined]
+        processor = context._processors[0]
+        processor._compression_executor = MagicMock()
+        processor._compression_executor.invoke = AsyncMock(
             return_value=CompressionResult(AssistantMessage(content="historical compact state"))
         )
         await context.add_messages(
@@ -516,9 +516,9 @@ class TestContextEngine:
         assert result["result"] == "noop"
         assert not any(
             state["status"] == "started" and state["processor"] == "DialogueCompressor"
-            for state in context._processor_state_recorder.history()  # type: ignore[attr-defined]
+            for state in context._processor_state_recorder.history()
         )
-        processor._compression_executor.invoke.assert_not_called()  # type: ignore[attr-defined]
+        processor._compression_executor.invoke.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_compress_context_returns_busy_message_when_passive_compression_running(self, engine, session):

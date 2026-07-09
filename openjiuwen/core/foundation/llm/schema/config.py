@@ -13,6 +13,7 @@ from openjiuwen.core.common.exception.errors import build_error
 class ProviderType(str, Enum):
     """ModelClientProvider type"""
     OpenAI = "OpenAI"
+    OpenAIAccount = "OpenAIAccount"
     OpenRouter = "OpenRouter"
     Anthropic = "Anthropic"
     SiliconFlow = "SiliconFlow"
@@ -29,9 +30,9 @@ class ModelClientConfig(BaseModel):
     client_provider: Union[ProviderType, str] = Field(
         ...,
         description="Service provider identification, Enumeration value: OpenAI, OpenRouter, "
-                    "SiliconFlow, DashScope, InferenceAffinity or ICBC"
+                    "OpenAIAccount, SiliconFlow, DashScope, InferenceAffinity or ICBC"
     )
-    api_key: str = Field(..., description="API key")
+    api_key: str = Field(default="", description="API key")
     api_base: str = Field(..., description="API base URL")
     timeout: float = Field(default=60.0, gt=0, description="Request timeout in seconds (must be greater than 0)")
     stream_first_chunk_timeout: Optional[float] = Field(
@@ -58,12 +59,14 @@ class ModelClientConfig(BaseModel):
     def validate_client_provider(self) -> Self:
         """Validate and normalize client_provider."""
         if isinstance(self.client_provider, ProviderType):
+            self._validate_api_key_for_provider(self.client_provider.value)
             return self
         provider = self.client_provider.value if isinstance(self.client_provider, ProviderType) \
             else str(self.client_provider)
         provider = provider.strip()
         if provider in ProviderType.__members__:
             self.client_provider = provider
+            self._validate_api_key_for_provider(provider)
             return self
 
         # Normalize common lowercase/mixed-case provider values to canonical keys.
@@ -71,6 +74,7 @@ class ModelClientConfig(BaseModel):
         normalized_provider = provider_map.get(provider.lower())
         if normalized_provider:
             self.client_provider = normalized_provider
+            self._validate_api_key_for_provider(normalized_provider)
             return self
 
         from openjiuwen.core.common.clients import get_client_registry
@@ -80,12 +84,20 @@ class ModelClientConfig(BaseModel):
         supported_types = list(set(supported_types))
         if provider in supported_types:
             self.client_provider = provider
+            self._validate_api_key_for_provider(provider)
             return self
         else:
             raise build_error(
                 StatusCode.MODEL_PROVIDER_INVALID,
                 error_msg=f"unavailable model provider: {provider},"
                           f"and available providers are: {supported_types}"
+            )
+
+    def _validate_api_key_for_provider(self, provider: str) -> None:
+        if provider != ProviderType.OpenAIAccount.value and not str(self.api_key or "").strip():
+            raise build_error(
+                StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                error_msg="api_key is required for non-OpenAIAccount providers."
             )
 
 

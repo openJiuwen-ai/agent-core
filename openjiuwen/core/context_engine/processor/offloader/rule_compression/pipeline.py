@@ -62,7 +62,11 @@ class RuleCompressionPipeline:
             message,
             context_messages or context.get_messages(),
         )
-        query_terms = self._query_terms_for_message(context_messages or context.get_messages(), tool_name, tool_arguments)
+        query_terms = self._query_terms_for_message(
+            context_messages or context.get_messages(),
+            tool_name,
+            tool_arguments,
+        )
         rule_ctx = RuleContext(
             max_tokens=max(max_chars // CHARACTERS_PER_TOKEN, 1),
             head_tokens=max(max_chars // (CHARACTERS_PER_TOKEN * 2), 1),
@@ -210,8 +214,8 @@ class RuleCompressionPipeline:
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-")
         return safe[:80] or "unknown"
 
+    @staticmethod
     def _query_terms_for_message(
-        self,
         context_messages: list[BaseMessage],
         tool_name: str | None,
         tool_arguments: object,
@@ -224,8 +228,8 @@ class RuleCompressionPipeline:
 
         return extract_query_terms(latest_user_content, tool_name, tool_arguments)
 
+    @staticmethod
     def _tool_info_for_message(
-        self,
         message: BaseMessage,
         context_messages: list[BaseMessage],
     ) -> tuple[str | None, object]:
@@ -233,7 +237,7 @@ class RuleCompressionPipeline:
             tool_call = ContextUtils.resolve_tool_call_from_message(message, context_messages)
             if tool_call is not None:
                 tool_name = ContextUtils.extract_tool_name(tool_call)
-                tool_arguments = self._extract_tool_arguments(tool_call)
+                tool_arguments = RuleCompressionPipeline._extract_tool_arguments(tool_call)
                 return tool_name, tool_arguments
         return None, None
 

@@ -199,6 +199,7 @@ class ModelContext(ABC):
         """Return the resolved model context-window size in tokens, if available."""
         return None
 
+
 class ContextStats(BaseModel):
     """
     Token-usage snapshot for any context container

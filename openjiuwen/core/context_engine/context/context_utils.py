@@ -113,12 +113,11 @@ class ContextUtils:
 
         normalized_model_name = model_name.lower()
         for candidate_model_name, candidate_value in mapping.items():
-            if (
-                isinstance(candidate_model_name, str)
-                and candidate_model_name.lower() == normalized_model_name
-                and isinstance(candidate_value, int)
-                and candidate_value > 0
-            ):
+            if not isinstance(candidate_model_name, str):
+                continue
+            if candidate_model_name.lower() != normalized_model_name:
+                continue
+            if isinstance(candidate_value, int) and candidate_value > 0:
                 return candidate_value
 
         return None

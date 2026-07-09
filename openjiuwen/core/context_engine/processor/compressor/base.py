@@ -406,24 +406,27 @@ class PrefixCompactProcessor(ContextProcessor):
         # Lazy import avoids a circular dependency: compression_dump imports
         # from this module (PrefixCompactProcessor, PrefixCompactSpan).
         from openjiuwen.core.context_engine.processor.compressor.support.compression_dump import (
+            CompressionDumpInput,
             dump_compression_artifact,
         )
 
         try:
             dump_compression_artifact(
-                processor=self,
-                context=context,
-                context_window=context_window,
-                config=self.config,
-                processor_type=self.processor_type(),
-                original_messages=original_messages,
-                span=span,
-                prompt=prompt,
-                request=request,
-                response_content=response_content,
-                summary=summary,
-                new_messages=new_messages,
-                usage=self._current_compression_usage(),
+                CompressionDumpInput(
+                    processor=self,
+                    context=context,
+                    context_window=context_window,
+                    config=self.config,
+                    processor_type=self.processor_type(),
+                    original_messages=original_messages,
+                    span=span,
+                    prompt=prompt,
+                    request=request,
+                    response_content=response_content,
+                    summary=summary,
+                    new_messages=new_messages,
+                    usage=self._current_compression_usage(),
+                )
             )
         except Exception as exc:  # pragma: no cover - tracing must not break compression
             logger.warning("[%s] compression dump failed: %s", self.processor_type(), exc, exc_info=True)
@@ -547,6 +550,10 @@ class PrefixCompactProcessor(ContextProcessor):
                 logger.warning("[%s] message token counter failed: %s", self.processor_type(), exc)
         return sum(self._estimate_text_tokens(_message_content_to_text(message)) for message in messages)
 
+    def count_messages_tokens(self, messages: list[BaseMessage], context: ModelContext) -> int:
+        """Count message tokens for diagnostics and extension points."""
+        return self._count_messages_tokens(messages, context)
+
     @staticmethod
     def _resolve_context_max(context: ModelContext, kwargs: dict[str, Any]) -> int:
         return ContextUtils.resolve_context_max(
@@ -554,6 +561,11 @@ class PrefixCompactProcessor(ContextProcessor):
             fallback_context_window_tokens=getattr(context, "_context_window_tokens", None),
             model_context_window_tokens=getattr(context, "_model_context_window_tokens", None),
         )
+
+    @staticmethod
+    def resolve_context_max(context: ModelContext, kwargs: dict[str, Any]) -> int:
+        """Resolve the configured context limit for diagnostics and extension points."""
+        return PrefixCompactProcessor._resolve_context_max(context, kwargs)
 
     @staticmethod
     def _estimate_text_tokens(text: str) -> int:

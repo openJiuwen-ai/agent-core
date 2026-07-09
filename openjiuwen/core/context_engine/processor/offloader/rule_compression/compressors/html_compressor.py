@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from importlib import import_module
+from importlib.util import find_spec
 import re
 from typing import Any
 
@@ -221,8 +222,8 @@ class HtmlCompressor:
             details=details,
         )
 
+    @staticmethod
     def _compress_with_beautifulsoup_fallback(
-        self,
         content: str,
         ctx: RuleContext,
         *,
@@ -283,12 +284,9 @@ class HtmlCompressor:
 
 
 def _parse_html(content: str) -> BeautifulSoup:
-    try:
-        import lxml  # noqa: F401
-
+    if find_spec("lxml") is not None:
         return BeautifulSoup(content, "lxml")
-    except ImportError:
-        return BeautifulSoup(content, "html.parser")
+    return BeautifulSoup(content, "html.parser")
 
 
 def _looks_like_report_html(content: str) -> bool:

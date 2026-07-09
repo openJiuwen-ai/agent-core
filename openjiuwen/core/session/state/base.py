@@ -35,7 +35,7 @@ class RecoverableStateLike(ABC):
 
 class StateLike(ReadableStateLike, RecoverableStateLike):
     @abstractmethod
-    def update(self, data: dict, **kwargs) -> None:
+    def update(self, data: dict) -> None:
         pass
 
     @abstractmethod
@@ -46,6 +46,10 @@ class StateLike(ReadableStateLike, RecoverableStateLike):
 class CommitStateLike(StateLike):
     @abstractmethod
     def update_by_id(self, node_id: str, data: dict) -> None:
+        pass
+
+    @abstractmethod
+    def update_by_id_and_commit(self, node_id: str, data: dict) -> None:
         pass
 
     @abstractmethod
@@ -117,9 +121,8 @@ class InMemoryStateLike(StateLike):
     def get_by_transformer(self, transformer: Callable) -> Optional[Any]:
         return transformer(self._state)
 
-    def update(self, data: dict, **kwargs) -> None:
-        copied = kwargs.get("copied", True)
-        update_dict(deepcopy(data) if copied else data, self._state)
+    def update(self, data: dict) -> None:
+        update_dict(data, self._state)
 
     def get_state(self, **kwargs) -> dict:
         if kwargs.get("copied", True) is False:
@@ -146,18 +149,27 @@ class InMemoryCommitState(CommitStateLike):
             self._updates[node_id] = []
         self._updates[node_id].append(deepcopy(data))
 
+    def update_by_id_and_commit(self, node_id: str, data: dict) -> None:
+        # Update state directly without staging in _updates, skipping the enqueue deepcopy.
+        # Isolation is guaranteed by expand_nested_structure inside update() (it rebuilds
+        # dict/list containers and deepcopies mutable non-container leaves), so data never
+        # shares mutable references with the committed state. Not rollback-able by design.
+        if node_id is None:
+            raise build_error(StatusCode.ERROR, msg="can not update state by none node_id")
+        self._state.update(data)
+
     def commit(self, node_id: str = None) -> None:
         if node_id is None:
             for key, updates in self._updates.items():
                 for update in updates:
-                    self._state.update(update, copied=False)
+                    self._state.update(update)
             self._updates.clear()
         else:
             node_updates = self._updates.get(node_id)
             if not node_updates:
                 return
             for update in node_updates:
-                self._state.update(update, copied=False)
+                self._state.update(update)
             self._updates[node_id] = []
 
     def rollback(self, node_id: str) -> None:

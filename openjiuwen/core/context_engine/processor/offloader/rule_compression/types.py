@@ -11,6 +11,7 @@ class ContentType(str, Enum):
     HTML = "HTML"
     SEARCH_RESULTS = "SEARCH_RESULTS"
     LOG = "LOG"
+    BUILD_OUTPUT = "LOG"
     SOURCE_CODE = "SOURCE_CODE"
     PLAIN_TEXT = "PLAIN_TEXT"
 

@@ -149,8 +149,8 @@ class TestMessageOffloaderAddTrigger:
     @pytest.mark.asyncio
     async def test_keeps_original_message_when_filesystem_offload_write_fails(self):
         context = await create_context(context_window_tokens=100)
-        processor = context._processors[0]  # type: ignore[attr-defined]
-        processor._write_offload_to_file = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        processor = context._processors[0]
+        processor._write_offload_to_file = AsyncMock(return_value=False)
 
         await context.add_messages(ToolMessage(content="x" * 61, tool_call_id="tc-large"))
 
@@ -270,7 +270,7 @@ class TestMessageOffloaderAddTrigger:
         message = context.get_messages()[1]
         assert message.content == "x" * 100
         assert not isinstance(message, OffloadMixin)
-        states = context._processor_state_recorder.history()  # type: ignore[attr-defined]
+        states = context._processor_state_recorder.history()
         assert [state["status"] for state in states] == ["started", "noop"]
 
     @pytest.mark.asyncio
@@ -293,8 +293,8 @@ class TestMessageOffloaderTtl:
             MessageOffloaderConfig(ttl_seconds=10),
             context_window_tokens=50002,
         )
-        processor = context._processors[0]  # type: ignore[attr-defined]
-        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        processor = context._processors[0]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         messages = [
             ToolMessage(content=character * 30001, tool_call_id=f"tc-{character}")
             for character in ("a", "b", "c")
@@ -302,11 +302,11 @@ class TestMessageOffloaderTtl:
         await context.add_messages(messages)
 
         await context.get_context_window()
-        processor._rule_pipeline._time_func = MagicMock(return_value=105.0)  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=105.0)
         await context.get_context_window()
         assert all(not message.metadata.get("rule_compressed_at") for message in context.get_messages())
 
-        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)
         await context.get_context_window()
 
         assert all(isinstance(message, OffloadMixin) for message in context.get_messages())
@@ -317,8 +317,8 @@ class TestMessageOffloaderTtl:
             MessageOffloaderConfig(ttl_seconds=10),
             context_window_tokens=50002,
         )
-        processor = context._processors[0]  # type: ignore[attr-defined]
-        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        processor = context._processors[0]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         await context.add_messages(
             [
                 ToolMessage(content=character * 15000, tool_call_id=f"tc-{character}")
@@ -326,21 +326,21 @@ class TestMessageOffloaderTtl:
             ]
         )
         await context.get_context_window()
-        router_compress = processor._rule_pipeline._router.compress  # type: ignore[attr-defined]
-        processor._rule_pipeline._router.compress = MagicMock(wraps=router_compress)  # type: ignore[attr-defined]
+        router_compress = processor._rule_pipeline._router.compress
+        processor._rule_pipeline._router.compress = MagicMock(wraps=router_compress)
 
-        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)
         await context.get_context_window()
 
         assert all(not message.metadata.get("rule_compressed_at") for message in context.get_messages())
         assert all(isinstance(message, OffloadMixin) for message in context.get_messages())
-        assert processor._rule_pipeline._router.compress.call_count == 6  # type: ignore[attr-defined]
+        assert processor._rule_pipeline._router.compress.call_count == 6
 
     @pytest.mark.asyncio
     async def test_ttl_skips_context_below_half_capacity(self):
         context = await create_context(MessageOffloaderConfig(ttl_seconds=10))
-        processor = context._processors[0]  # type: ignore[attr-defined]
-        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        processor = context._processors[0]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         await context.add_messages(
             [
                 ToolMessage(content="a" * 40, tool_call_id="tc-a"),
@@ -349,7 +349,7 @@ class TestMessageOffloaderTtl:
         )
         await context.get_context_window()
 
-        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)
         await context.get_context_window()
 
         assert all(not message.metadata.get("rule_compressed_at") for message in context.get_messages())
@@ -365,8 +365,8 @@ class TestMessageOffloaderTtl:
             ),
             context_window_tokens=100,
         )
-        processor = context._processors[0]  # type: ignore[attr-defined]
-        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        processor = context._processors[0]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         await context.add_messages(
             [
                 ToolMessage(content="a" * 100, tool_call_id="tc-a"),
@@ -375,7 +375,7 @@ class TestMessageOffloaderTtl:
         )
         await context.get_context_window()
 
-        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)
         await context.get_context_window()
 
         assert all(not isinstance(message, OffloadMixin) for message in context.get_messages())
@@ -391,13 +391,13 @@ class TestMessageOffloaderTtl:
             ),
             context_window_tokens=100,
         )
-        processor = context._processors[0]  # type: ignore[attr-defined]
-        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        processor = context._processors[0]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         content = "x" * 100
         await context.add_messages(ToolMessage(content=content, tool_call_id="tc-ttl"))
         await context.get_context_window()
 
-        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)
         await context.get_context_window()
 
         message = context.get_messages()[0]
@@ -414,13 +414,13 @@ class TestMessageOffloaderTtl:
             ),
             context_window_tokens=100,
         )
-        processor = context._processors[0]  # type: ignore[attr-defined]
-        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        processor = context._processors[0]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         content = "\n".join(["same line"] * 20)
         await context.add_messages(ToolMessage(content=content, tool_call_id="tc-ttl-repeat"))
         await context.get_context_window()
 
-        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)
         await context.get_context_window()
 
         message = context.get_messages()[0]
@@ -519,8 +519,8 @@ class TestMessageOffloaderTtl:
             context_window_tokens=50002,
             default_window_message_num=1,
         )
-        processor = context._processors[0]  # type: ignore[attr-defined]
-        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        processor = context._processors[0]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         await context.add_messages(
             [
                 ToolMessage(content=character * 30001, tool_call_id=f"tc-{character}")
@@ -529,7 +529,7 @@ class TestMessageOffloaderTtl:
         )
         await context.get_context_window()
 
-        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)
         window = await context.get_context_window()
 
         assert len(window.context_messages) <= 1
@@ -538,8 +538,8 @@ class TestMessageOffloaderTtl:
     @pytest.mark.asyncio
     async def test_ttl_skips_messages_that_were_already_rule_compressed(self):
         context = await create_context(MessageOffloaderConfig(ttl_seconds=10))
-        processor = context._processors[0]  # type: ignore[attr-defined]
-        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        processor = context._processors[0]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         await context.add_messages(
             [UserMessage(content="context filler " * 12)]
             + [
@@ -554,17 +554,17 @@ class TestMessageOffloaderTtl:
         tool_messages = [message for message in context.get_messages() if message.role == "tool"]
         contents_before_ttl = [message.content for message in tool_messages]
         timestamps_before_ttl = [message.metadata["rule_compressed_at"] for message in tool_messages]
-        router_compress = processor._rule_pipeline._router.compress  # type: ignore[attr-defined]
-        processor._rule_pipeline._router.compress = MagicMock(wraps=router_compress)  # type: ignore[attr-defined]
+        router_compress = processor._rule_pipeline._router.compress
+        processor._rule_pipeline._router.compress = MagicMock(wraps=router_compress)
 
-        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)
         await context.get_context_window()
 
         tool_messages = [message for message in context.get_messages() if message.role == "tool"]
         assert all(isinstance(message, OffloadMixin) for message in tool_messages)
         assert [message.content for message in tool_messages] == contents_before_ttl
         assert [message.metadata["rule_compressed_at"] for message in tool_messages] == timestamps_before_ttl
-        processor._rule_pipeline._router.compress.assert_not_called()  # type: ignore[attr-defined]
+        processor._rule_pipeline._router.compress.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_ttl_skips_protected_tool_messages(self):
@@ -576,8 +576,8 @@ class TestMessageOffloaderTtl:
             ),
             context_window_tokens=100,
         )
-        processor = context._processors[0]  # type: ignore[attr-defined]
-        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        processor = context._processors[0]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         content = "x" * 100
         await context.add_messages(
             [
@@ -587,7 +587,7 @@ class TestMessageOffloaderTtl:
         )
         await context.get_context_window()
 
-        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)
         await context.get_context_window()
 
         message = context.get_messages()[1]
@@ -601,8 +601,8 @@ class TestMessageOffloaderTtl:
             MessageOffloaderConfig(ttl_seconds=10),
             context_window_tokens=50002,
         )
-        processor = context._processors[0]  # type: ignore[attr-defined]
-        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        processor = context._processors[0]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         content = "x" * 30001
         await context.add_messages(
             [
@@ -612,7 +612,7 @@ class TestMessageOffloaderTtl:
         )
         await context.get_context_window()
 
-        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)  # type: ignore[attr-defined]
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)
         await context.get_context_window()
 
         message = context.get_messages()[1]
@@ -622,8 +622,8 @@ class TestMessageOffloaderTtl:
     @pytest.mark.asyncio
     async def test_context_window_access_time_is_saved_and_restored(self):
         context = await create_context(MessageOffloaderConfig(ttl_seconds=10))
-        processor = context._processors[0]  # type: ignore[attr-defined]
-        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)  # type: ignore[attr-defined]
+        processor = context._processors[0]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         await context.get_context_window()
 
         restored = await create_context(MessageOffloaderConfig(ttl_seconds=10))

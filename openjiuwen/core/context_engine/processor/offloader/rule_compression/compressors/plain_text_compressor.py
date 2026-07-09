@@ -9,8 +9,8 @@ from openjiuwen.core.context_engine.processor.offloader.rule_compression.common 
 
 
 class PlainTextCompressor:
-    def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult:
-        _ = ctx
+    @staticmethod
+    def compress(content: str, ctx: RuleContext) -> RuleCompressionResult:
         seen: set[str] = set()
         lines: list[str] = []
         for line in content.splitlines():

@@ -14,9 +14,9 @@ from openjiuwen.core.foundation.llm import (
     AssistantMessage, BaseMessage, UserMessage, ModelRequestConfig, ModelClientConfig, Model
 )
 from openjiuwen.core.context_engine.base import ModelContext
-from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloader
-from openjiuwen.core.context_engine.processor.base import ContextEvent
-from openjiuwen.core.context_engine.processor.budget_guard import (
+from openjiuwen.core.context_engine.processor.legacy.base import ContextEvent
+from openjiuwen.core.context_engine.processor.legacy.offloader.message_offloader import MessageOffloader
+from openjiuwen.core.context_engine.processor.legacy.budget_guard import (
     count_messages_tokens,
     effective_context_budget,
     truncate_message_content_to_fixed_head_tail_if_over_token_limit,
@@ -827,6 +827,12 @@ class MessageSummaryOffloader(MessageOffloader):
         """
         error_message = str(exc).lower()
         return any(keyword in error_message for keyword in CONTEXT_OVERFLOW_KEYWORDS)
+
+    def load_state(self, state: dict[str, Any]) -> None:
+        return
+
+    def save_state(self) -> dict[str, Any]:
+        return {}
 
     def _validate_config(self):
         """Skip truncation-specific parent validation."""

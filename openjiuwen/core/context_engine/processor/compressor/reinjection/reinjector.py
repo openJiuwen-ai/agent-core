@@ -5,6 +5,7 @@ from typing import Any, Callable, Protocol
 
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
 
+
 class ReinjectBuilder(Protocol):
     def __call__(self, ctx: "ReinjectContext") -> str | list[BaseMessage]:
         ...

@@ -64,7 +64,9 @@ class ContextProcessorRail(DeepAgentRail):
         """
         super().__init__()
         if preset_name is not None:
-            raise ValueError("ContextProcessorRail no longer supports named presets; only the default processor set is available.")
+            raise ValueError(
+                "ContextProcessorRail no longer supports named presets; only the default processor set is available."
+            )
 
         self._preset = preset
         self._user_processors: List[Tuple[str, Union[BaseModel, Dict]]] = []
@@ -161,8 +163,8 @@ class ContextProcessorRail(DeepAgentRail):
 
         return result
 
+    @staticmethod
     def _build_preset_processors(
-            self,
             model_config=None,
             model_client_config=None,
     ) -> List[Tuple[str, BaseModel]]:

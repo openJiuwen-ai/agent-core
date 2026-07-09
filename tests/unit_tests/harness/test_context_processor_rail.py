@@ -14,6 +14,18 @@ from openjiuwen.core.context_engine import (
     MessageOffloaderConfig,
     RoundLevelCompressorConfig,
 )
+from openjiuwen.core.context_engine.processor.compressor.current_round_compressor import CurrentRoundCompressor
+from openjiuwen.core.context_engine.processor.legacy.compressor import (
+    LegacyCurrentRoundCompressor,
+    LegacyCurrentRoundCompressorConfig,
+    LegacyDialogueCompressorConfig,
+    LegacyRoundLevelCompressorConfig,
+    MicroCompactProcessorConfig,
+)
+from openjiuwen.core.context_engine.processor.legacy.context_processor_rail import (
+    ContextProcessorRail as LegacyContextProcessorRail,
+)
+from openjiuwen.core.context_engine.processor.legacy.offloader import MessageSummaryOffloaderConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
 
@@ -58,6 +70,43 @@ def test_context_processor_rail_default_processors_are_the_only_preset():
     assert isinstance(processors["DialogueCompressor"], DialogueCompressorConfig)
     assert isinstance(processors["CurrentRoundCompressor"], CurrentRoundCompressorConfig)
     assert isinstance(processors["RoundLevelCompressor"], RoundLevelCompressorConfig)
+
+
+def test_legacy_context_processor_rail_default_processors_are_opt_in():
+    rail = LegacyContextProcessorRail(preset=True)
+    agent = _make_agent()
+
+    rail.init(agent)
+
+    processors = _processor_map(agent)
+    assert list(processors) == [
+        "MessageSummaryOffloader",
+        "LegacyDialogueCompressor",
+        "LegacyCurrentRoundCompressor",
+        "LegacyRoundLevelCompressor",
+    ]
+    assert isinstance(processors["MessageSummaryOffloader"], MessageSummaryOffloaderConfig)
+    assert isinstance(processors["LegacyDialogueCompressor"], LegacyDialogueCompressorConfig)
+    assert isinstance(processors["LegacyCurrentRoundCompressor"], LegacyCurrentRoundCompressorConfig)
+    assert isinstance(processors["LegacyRoundLevelCompressor"], LegacyRoundLevelCompressorConfig)
+
+
+def test_legacy_context_processor_rail_maps_old_override_keys_to_legacy_types():
+    rail = LegacyContextProcessorRail(
+        preset=True,
+        processors=[
+            ("DialogueCompressor", {"tokens_threshold": 12345}),
+            ("CurrentRoundCompressor", {"messages_to_keep": 4}),
+        ],
+    )
+    agent = _make_agent()
+
+    rail.init(agent)
+
+    processors = _processor_map(agent)
+    assert "DialogueCompressor" not in processors
+    assert processors["LegacyDialogueCompressor"].tokens_threshold == 12345
+    assert processors["LegacyCurrentRoundCompressor"].messages_to_keep == 4
 
 
 @pytest.mark.asyncio
@@ -155,6 +204,19 @@ def test_context_processor_registry_contains_current_processor_names():
     assert "DialogueCompressor" in ContextEngine._PROCESSOR_MAP
     assert "CurrentRoundCompressor" in ContextEngine._PROCESSOR_MAP
     assert "RoundLevelCompressor" in ContextEngine._PROCESSOR_MAP
+    assert ContextEngine._PROCESSOR_MAP["CurrentRoundCompressor"] is CurrentRoundCompressor
+    assert ContextEngine._PROCESSOR_MAP["LegacyCurrentRoundCompressor"] is LegacyCurrentRoundCompressor
+
+
+@pytest.mark.asyncio
+async def test_context_engine_can_create_legacy_processor_context():
+    context = await ContextEngine().create_context(
+        processors=[
+            ("MicroCompactProcessor", MicroCompactProcessorConfig()),
+        ],
+    )
+
+    assert context._processors[0].processor_type() == "MicroCompactProcessor"
 
 
 def test_context_processor_rail_preset_false_accepts_complete_configs_only():
