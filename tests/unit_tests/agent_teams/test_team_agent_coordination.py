@@ -36,12 +36,15 @@ from openjiuwen.agent_teams.schema.events import (
     TaskCancelledEvent,
     TaskClaimedEvent,
     TaskRevokedEvent,
+    TaskRevisionRequestedEvent,
     TaskCompletedEvent,
     TaskCreatedEvent,
     TaskListDrainedEvent,
     TaskReleasedEvent,
+    TaskSubmittedForReviewEvent,
     TaskUnblockedEvent,
     TaskUpdatedEvent,
+    TaskVerifiedEvent,
     TeamCleanedEvent,
     TeamCompletedEvent,
     TeamEvent,
@@ -796,6 +799,96 @@ async def test_task_claimed_for_other_member_falls_through_to_board_nudge():
     content = agent.deliver_input.await_args.args[0]
     assert "task-7" in content
     assert "Investigate crash" in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_submitted_for_review_wakes_the_reviewer():
+    """A member named in the reviewer list is steered to verify the task."""
+    agent = _make_teammate()  # member_name = dev-1
+    agent._configurator.task_manager = MagicMock()
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskSubmittedForReviewEvent(
+            team_name="test-team",
+            member_name="author-1",
+            task_id="task-9",
+            reviewer=["dev-1"],
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_submitted_for_review(event)
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "task-9" in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_submitted_for_review_ignored_by_non_reviewer_teammate():
+    """A teammate not on the reviewer list is not nudged (no claimable growth)."""
+    agent = _make_teammate()  # member_name = dev-1
+    agent._configurator.task_manager = MagicMock()
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskSubmittedForReviewEvent(
+            team_name="test-team",
+            member_name="author-1",
+            task_id="task-9",
+            reviewer=["someone-else"],
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_submitted_for_review(event)
+
+    agent.deliver_input.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_revision_requested_steers_the_author():
+    """A verify fail steers the author (member_name) back with the feedback."""
+    agent = _make_teammate()  # member_name = dev-1
+    agent._configurator.task_manager = MagicMock()
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskRevisionRequestedEvent(
+            team_name="test-team",
+            member_name="dev-1",
+            task_id="task-9",
+            feedback="add tests",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_revision_requested(event)
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "task-9" in content
+    assert "add tests" in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_verified_frees_the_author():
+    """A verify pass steers the author back to the board (it was held in review)."""
+    agent = _make_teammate()  # member_name = dev-1
+    agent._configurator.task_manager = MagicMock()
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskVerifiedEvent(
+            team_name="test-team",
+            member_name="dev-1",
+            task_id="task-9",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_verified(event)
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "task-9" in content
 
 
 @pytest.mark.asyncio

@@ -26,7 +26,10 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.tools.database.engine import _ensure_team_member_options_column
+from openjiuwen.agent_teams.tools.database.engine import (
+    _ensure_dynamic_table_indexes,
+    _ensure_team_member_options_column,
+)
 from openjiuwen.agent_teams.tools.member_options import (
     build_member_options,
     get_member_options,
@@ -139,6 +142,60 @@ class TestTeamDatabaseInit:
             assert options.model_ref is not None
             assert options.model_ref.model_name == "gpt-4"
             assert options.model_ref.model_index == 1
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level0
+    def test_task_migration_adds_reviewer_and_folds_legacy_statuses(self):
+        """A pre-F_59 task table gains the reviewer column and legacy execution
+        statuses (claimed / started / plan_approved) fold into in_progress."""
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_task_legacy (
+                        task_id TEXT PRIMARY KEY,
+                        team_name TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        assignee TEXT,
+                        updated_at BIGINT
+                    )
+                    """
+                )
+                rows = [
+                    ("t_claimed", "claimed"),
+                    ("t_started", "started"),
+                    ("t_plan", "plan_approved"),
+                    ("t_pending", "pending"),
+                    ("t_done", "completed"),
+                ]
+                for task_id, status in rows:
+                    conn.exec_driver_sql(
+                        "INSERT INTO team_task_legacy (task_id, team_name, title, content, status) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (task_id, "team", "t", "c", status),
+                    )
+
+                _ensure_dynamic_table_indexes(conn)
+
+                columns = {col["name"] for col in inspect(conn).get_columns("team_task_legacy")}
+                statuses = {
+                    row["task_id"]: row["status"]
+                    for row in conn.exec_driver_sql(
+                        "SELECT task_id, status FROM team_task_legacy"
+                    ).mappings().all()
+                }
+
+            assert "reviewer" in columns
+            assert statuses["t_claimed"] == "in_progress"
+            assert statuses["t_started"] == "in_progress"
+            assert statuses["t_plan"] == "in_progress"
+            # Non-legacy statuses are untouched.
+            assert statuses["t_pending"] == "pending"
+            assert statuses["t_done"] == "completed"
         finally:
             engine.dispose()
 
