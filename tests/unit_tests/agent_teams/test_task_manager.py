@@ -200,7 +200,7 @@ class TestClaimConflict:
         assert "already claimed by m1" in second.reason
 
         task_state = await m1.get(task.task_id)
-        assert task_state.status == TaskStatus.CLAIMED.value
+        assert task_state.status == TaskStatus.IN_PROGRESS.value
         assert task_state.assignee == "m1"
 
 
@@ -768,7 +768,7 @@ class TestResetTask:
         await task_manager.claim(task.task_id)
 
         task_claimed = await task_manager.get(task.task_id)
-        assert task_claimed.status == TaskStatus.CLAIMED.value
+        assert task_claimed.status == TaskStatus.IN_PROGRESS.value
         assert task_claimed.assignee == "member1"
 
         result = await task_manager.reset(task.task_id)
@@ -867,10 +867,10 @@ class TestGetTasksByAssignee:
         task2 = await task_manager.add(title="Task 2", content="Content 2")
         await task_manager.claim(task2.task_id)
 
-        # Get only claimed tasks
+        # Get only in-progress tasks
         claimed_tasks = await task_manager.get_tasks_by_assignee(
             member_name="member1",
-            status=TaskStatus.CLAIMED.value
+            status=TaskStatus.IN_PROGRESS.value
         )
         assert len(claimed_tasks) == 1
         assert claimed_tasks[0].task_id == task2.task_id
@@ -979,7 +979,7 @@ class TestAssign:
 
         assert result.ok
         refreshed = await task_manager.get(task.task_id)
-        assert refreshed.status == TaskStatus.CLAIMED.value
+        assert refreshed.status == TaskStatus.IN_PROGRESS.value
         assert refreshed.assignee == "member1"
 
     @pytest.mark.asyncio
@@ -1165,7 +1165,7 @@ async def test_plan_mode_submit_approve_and_complete(db, message_bus, tmp_path):
         plan_path=str(draft_plan_path),
     )
     assert submit_result["success"] is True
-    assert submit_result["status"] == TaskStatus.CLAIMED.value
+    assert submit_result["status"] == TaskStatus.PLANNING.value
     first_plan_id = submit_result["plan_id"]
     assert submit_result["leader_message_id"]
     leader_messages = await db.message.get_messages("plan_team", "leader")
@@ -1177,7 +1177,7 @@ async def test_plan_mode_submit_approve_and_complete(db, message_bus, tmp_path):
     assert Path(submit_result["member_plan_md"]).resolve() != draft_plan_path.resolve()
 
     claimed_task = await manager.get(task.task_id)
-    assert claimed_task.status == TaskStatus.CLAIMED.value
+    assert claimed_task.status == TaskStatus.PLANNING.value
     assert claimed_task.assignee == "member1"
 
     before_approval = await manager.complete(task.task_id)
@@ -1191,7 +1191,7 @@ async def test_plan_mode_submit_approve_and_complete(db, message_bus, tmp_path):
     )
     assert rejection_result.ok
     rejected_task = await manager.get(task.task_id)
-    assert rejected_task.status == TaskStatus.CLAIMED.value
+    assert rejected_task.status == TaskStatus.PLANNING.value
     task_plan_dir = tmp_path / "plans" / "plan_1" / "tasks" / task.task_id
     assert not (task_plan_dir / "approval.json").exists()
     assert not (task_plan_dir / "manifest.json").exists()
@@ -1219,7 +1219,7 @@ async def test_plan_mode_submit_approve_and_complete(db, message_bus, tmp_path):
         plan_path=str(revised_plan_path),
     )
     assert resubmit_result["success"] is True
-    assert resubmit_result["status"] == TaskStatus.CLAIMED.value
+    assert resubmit_result["status"] == TaskStatus.PLANNING.value
     second_plan_id = resubmit_result["plan_id"]
     assert second_plan_id != first_plan_id
 
@@ -1236,7 +1236,7 @@ async def test_plan_mode_submit_approve_and_complete(db, message_bus, tmp_path):
     assert plan_index["task_plans"][second_plan_id]["decision"] == "approve"
 
     approved_task = await manager.get(task.task_id)
-    assert approved_task.status == TaskStatus.PLAN_APPROVED.value
+    assert approved_task.status == TaskStatus.IN_PROGRESS.value
     assert approved_task.assignee == "member1"
 
     complete_result = await manager.complete(task.task_id)
@@ -1246,6 +1246,36 @@ async def test_plan_mode_submit_approve_and_complete(db, message_bus, tmp_path):
 
     index = json.loads((tmp_path / "plans" / "index.json").read_text(encoding="utf-8"))
     assert index["tasks"][task.task_id]["status"] == TaskStatus.COMPLETED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_in_progress_task_rejects_new_dependency(db, message_bus, tmp_path):
+    """An IN_PROGRESS task is being executed, so it cannot gain a new prerequisite."""
+    await db.team.create_team(team_name="dep_team", display_name="DT", leader_member_name="leader")
+    await db.member.create_member(
+        member_name="member1",
+        team_name="dep_team",
+        display_name="member1",
+        agent_card=AgentCard().model_dump_json(),
+        status="READY",
+        mode=MemberMode.BUILD_MODE.value,
+    )
+    manager = TeamTaskManager(
+        team_name="dep_team", member_name="member1", db=db, messager=message_bus, plans_dir=tmp_path / "plans"
+    )
+    await manager.add_graph(
+        [
+            TaskGraphSpec(title="running", content="c", task_id="r", assignee="member1"),
+            TaskGraphSpec(title="prereq", content="c", task_id="pre"),
+        ]
+    )
+    assert (await manager.start_task("r")).ok
+    assert (await manager.get("r")).status == TaskStatus.IN_PROGRESS.value
+
+    # Wiring "r depends on pre" is rejected — r is already executing.
+    result = await manager.add_dependencies("r", ["pre"])
+    assert not result.ok
 
 
 @pytest.mark.asyncio
@@ -1363,31 +1393,31 @@ async def member2(task_manager, db):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_get_other_claimed_task_id_finds_other_and_excludes_self(task_manager):
-    """get_other_claimed_task_id returns the task_id of a member's other
-    CLAIMED task and excludes the task being (re)claimed itself."""
+async def test_get_other_active_task_id_finds_other_and_excludes_self(task_manager):
+    """get_other_active_task_id returns the task_id of a member's other
+    active task and excludes the task being (re)acted on itself."""
     task_a = await task_manager.add(title="A", content="c")
     assert (await task_manager.assign(task_a.task_id, "member1")).ok
 
-    found = await task_manager.get_other_claimed_task_id("member1", exclude_task_id="another-id")
+    found = await task_manager.get_other_active_task_id("member1", exclude_task_id="another-id")
     assert found == task_a.task_id
 
-    # Excluding the only claim returns None — an idempotent re-claim / re-assign
-    # of the same task must not be flagged as a conflict.
-    assert await task_manager.get_other_claimed_task_id("member1", exclude_task_id=task_a.task_id) is None
+    # Excluding the only active task returns None — an idempotent re-claim /
+    # re-assign of the same task must not be flagged as a conflict.
+    assert await task_manager.get_other_active_task_id("member1", exclude_task_id=task_a.task_id) is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_get_other_claimed_task_id_none_without_claims(task_manager, member2):
-    """A member holding no claimed task yields None."""
-    assert await task_manager.get_other_claimed_task_id("member2", exclude_task_id="x") is None
+async def test_get_other_active_task_id_none_without_active(task_manager, member2):
+    """A member holding no active task yields None."""
+    assert await task_manager.get_other_active_task_id("member2", exclude_task_id="x") is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_reassign_transfers_task_and_revokes_old_assignee(task_manager, member2, message_bus):
-    """reassign atomically swaps the assignee — the task stays CLAIMED and
+    """reassign atomically swaps the assignee — the task stays IN_PROGRESS and
     never bounces through PENDING — and fires exactly two targeted events:
     TASK_REVOKED for the former owner, TASK_CLAIMED for the new owner. It must
     NOT fire TASK_RELEASED: the task never re-enters the claimable pool, so
@@ -1401,7 +1431,7 @@ async def test_reassign_transfers_task_and_revokes_old_assignee(task_manager, me
 
     refreshed = await task_manager.get(task.task_id)
     assert refreshed.assignee == "member2"
-    assert refreshed.status == TaskStatus.CLAIMED.value
+    assert refreshed.status == TaskStatus.IN_PROGRESS.value
 
     revoked = _published_events(message_bus, TeamEvent.TASK_REVOKED)
     assert len(revoked) == 1
@@ -1419,7 +1449,7 @@ async def test_reassign_transfers_task_and_revokes_old_assignee(task_manager, me
 @pytest.mark.level1
 async def test_reassign_missing_new_member_leaves_task_intact(task_manager, message_bus):
     """A reassign to an unknown member must not strand the task as an
-    ownerless PENDING: the current owner and CLAIMED status stay, and no
+    ownerless PENDING: the current owner and IN_PROGRESS status stay, and no
     TASK_REVOKED is emitted."""
     task = await task_manager.add(title="T", content="c")
     assert (await task_manager.assign(task.task_id, "member1")).ok
@@ -1429,7 +1459,7 @@ async def test_reassign_missing_new_member_leaves_task_intact(task_manager, mess
 
     refreshed = await task_manager.get(task.task_id)
     assert refreshed.assignee == "member1"
-    assert refreshed.status == TaskStatus.CLAIMED.value
+    assert refreshed.status == TaskStatus.IN_PROGRESS.value
     assert _published_events(message_bus, TeamEvent.TASK_REVOKED) == []
 
 
@@ -1454,9 +1484,9 @@ async def test_cancel_claimed_task_notifies_assignee(task_manager, message_bus):
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_update_claimed_task_keeps_claim_and_notifies(task_manager, message_bus):
-    """Editing a CLAIMED task now succeeds (no reset) and fires TASK_UPDATED
+    """Editing an IN_PROGRESS task now succeeds (no reset) and fires TASK_UPDATED
     carrying the current owner, so the assignee is told to re-read. The task
-    stays claimed by the same member."""
+    stays in progress under the same member."""
     task = await task_manager.add(title="T", content="c")
     assert (await task_manager.assign(task.task_id, "member1")).ok
     message_bus.publish.reset_mock()
@@ -1465,7 +1495,7 @@ async def test_update_claimed_task_keeps_claim_and_notifies(task_manager, messag
     assert result.ok
 
     refreshed = await task_manager.get(task.task_id)
-    assert refreshed.status == TaskStatus.CLAIMED.value
+    assert refreshed.status == TaskStatus.IN_PROGRESS.value
     assert refreshed.assignee == "member1"
     assert refreshed.content == "revised"
 

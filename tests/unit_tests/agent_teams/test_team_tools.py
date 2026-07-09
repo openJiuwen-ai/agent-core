@@ -570,7 +570,7 @@ class TestApprovePlanTool:
         assert result.success is True
         assert result.error is None
         approved_task = await agent_team.task_manager.get(task.task_id)
-        assert approved_task.status == TaskStatus.PLAN_APPROVED.value
+        assert approved_task.status == TaskStatus.IN_PROGRESS.value
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -589,7 +589,7 @@ class TestApprovePlanTool:
 
         assert result.success is False
         approved_task = await agent_team.task_manager.get(task.task_id)
-        assert approved_task.status == TaskStatus.CLAIMED.value
+        assert approved_task.status == TaskStatus.PLANNING.value
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -608,7 +608,7 @@ class TestApprovePlanTool:
 
         assert result.success is True
         rejected_task = await agent_team.task_manager.get(task.task_id)
-        assert rejected_task.status == TaskStatus.CLAIMED.value
+        assert rejected_task.status == TaskStatus.PLANNING.value
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -913,7 +913,7 @@ class TestUpdateTaskTool:
     async def test_cancel_all_tasks(self, agent_team, t, db):
         """Test cancel all tasks via task_id='*'"""
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
 
         tool = UpdateTaskTool(agent_team, t)
         result = await tool.invoke({"task_id": "*", "status": "cancelled"})
@@ -1144,7 +1144,7 @@ class TestViewTaskToolV2:
     async def test_invoke_list_tasks_by_status(self, agent_team, t, db):
         """Test list action returns summary with blocked_by, no content"""
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
         await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
@@ -1163,7 +1163,7 @@ class TestViewTaskToolV2:
     async def test_invoke_default_action_is_list(self, agent_team, t, db):
         """Test default action is list (returns all tasks, not just pending)"""
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
         await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
@@ -1177,7 +1177,7 @@ class TestViewTaskToolV2:
     async def test_invoke_claimable(self, agent_team, t, db):
         """Test claimable action returns only pending tasks"""
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
         await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
@@ -1224,7 +1224,7 @@ class TestClaimTaskTool:
 
         assert result.success is True
         assert "status" in result.data["updated_fields"]
-        assert result.data["status_change"]["to"] == "claimed"
+        assert result.data["status_change"]["to"] == "in_progress"
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -2090,7 +2090,7 @@ async def test_edit_claimed_task_keeps_claim_without_cancel_member(agent_team, t
     assert result.success is True
     agent_team.cancel_member.assert_not_awaited()
     updated = await agent_team.task_manager.get(task.task_id)
-    assert updated.status == TaskStatus.CLAIMED.value
+    assert updated.status == TaskStatus.IN_PROGRESS.value
     assert updated.assignee == "dev-1"
     assert updated.content == "new content"
     events = [

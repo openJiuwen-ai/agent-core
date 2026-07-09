@@ -771,7 +771,7 @@ async def test_task_claimed_for_other_member_falls_through_to_board_nudge():
     incomplete_task.task_id = "task-7"
     incomplete_task.title = "Investigate crash"
     incomplete_task.content = "Reproduce and root-cause"
-    incomplete_task.status = "claimed"
+    incomplete_task.status = "in_progress"
     incomplete_task.assignee = "dev-1"
     incomplete_task.updated_at = 1_700_000_000_000
 
@@ -813,7 +813,7 @@ async def test_task_claimed_for_other_member_nudges_leader_via_steer_when_busy()
     incomplete_task.task_id = "task-8"
     incomplete_task.title = "In progress"
     incomplete_task.content = "Working"
-    incomplete_task.status = "claimed"
+    incomplete_task.status = "in_progress"
     incomplete_task.assignee = "dev-1"
     incomplete_task.updated_at = 1_700_000_000_000
 
@@ -1177,7 +1177,7 @@ def _make_claimed_task(
     task.task_id = task_id
     task.title = title
     task.content = f"Work on {task_id}"
-    task.status = "claimed"
+    task.status = "in_progress"
     task.assignee = assignee
     task.updated_at = updated_at
     return task
@@ -1220,7 +1220,10 @@ async def test_stale_claim_leader_ignores_other_members_claim():
 
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
 
-    agent._configurator.task_manager.list_tasks.assert_awaited_once_with(status="claimed")
+    # The scan sweeps the three owned in-flight nodes: PLANNING, IN_PROGRESS,
+    # IN_REVIEW. Either way it stays self-only and never touches a teammate.
+    surveyed = {c.kwargs.get("status") for c in agent._configurator.task_manager.list_tasks.await_args_list}
+    assert surveyed == {"planning", "in_progress", "in_review"}
     agent._configurator.message_manager.send_message.assert_not_called()
     agent.deliver_input.assert_not_called()
     assert "task-1" not in agent._coordination.dispatcher.stale_task._last_stale_nudge
@@ -2058,7 +2061,7 @@ async def test_task_completed_with_incomplete_tasks_nudges_leader_board():
     incomplete_task.task_id = "task-2"
     incomplete_task.title = "Pending task"
     incomplete_task.content = "In progress"
-    incomplete_task.status = "claimed"
+    incomplete_task.status = "in_progress"
     incomplete_task.assignee = "member-2"
     incomplete_task.updated_at = 1_700_000_000_000
 
@@ -2236,7 +2239,7 @@ async def test_teammate_board_shows_only_claimable_tasks():
     others.task_id = "task-busy"
     others.title = "Someone's work"
     others.content = "In progress"
-    others.status = "claimed"
+    others.status = "in_progress"
     others.assignee = "dev-2"
     others.updated_at = 1_700_000_000_000
 
@@ -2266,7 +2269,7 @@ async def test_teammate_skips_nudge_when_no_claimable_task():
     claimed.task_id = "task-gone"
     claimed.title = "Taken"
     claimed.content = "Already claimed"
-    claimed.status = "claimed"
+    claimed.status = "in_progress"
     claimed.assignee = "dev-2"
     claimed.updated_at = 1_700_000_000_000
 
@@ -2293,7 +2296,7 @@ async def test_leader_nudged_on_task_updated_despite_filter():
     incomplete.task_id = "task-3"
     incomplete.title = "Ongoing"
     incomplete.content = "Work"
-    incomplete.status = "claimed"
+    incomplete.status = "in_progress"
     incomplete.assignee = "dev-1"
     incomplete.updated_at = 1_700_000_000_000
 
