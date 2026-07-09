@@ -10,9 +10,9 @@
 
 ### 触发机制
 
-- 在 `AFTER_TASK_ITERATION` 生命周期回调中检测 `spawn_member` 调用次数
-- 当调用次数达到阈值（默认 2 次）时，通过 `TaskLoopController` 注入 follow_up
-- 用户确认后，调用 `team-skill-creator` 技能执行创建
+- 等待团队任务完成后，基于当前团队执行中记录到的调用检测 `spawn_member` 次数
+- 当调用次数达到阈值（默认 2 次）且未使用已有 Team/Swarm Skill 时，通过 `TaskLoopController` 注入简短 follow_up 唤起下一轮
+- 完整自检规则通过系统提示词注入；如果 Agent 判断存在可复用团队协作价值，必须通过普通回复文本确认。用户确认后，调用 `swarmskill-creator` 或兼容的团队技能创建 Skill。如果 creator 不可用，Agent 应通过普通回复文本提醒用户。
 
 ```text
 class TeamSkillCreateRail(
@@ -148,6 +148,9 @@ rails = [SubagentRail(), interrupt_rail, skill_rail, team_rail]
 
 - 监听 `view_task` 工具结果，检测"所有任务已完成"
 - 支持被动轨迹分析和主动用户请求两种演进路径
+- `signal_trigger` 控制被动团队完成态扫描；`auto_scan` 是兼容别名。二者默认关闭。
+- `review_trigger` 控制团队完成后的自检 follow_up 注入；`completion_followup_enabled` 是兼容别名。二者默认关闭。
+- 迁移期如果同时传入新旧参数名，以新参数名的值为准。
 - `auto_scan=False` 会关闭被动完成态扫描，也会关闭 `notify_team_completed()` 的被动触发。
 - 被动演进使用聚合后的协作轨迹证据。Team completion、team skill attribution 和 runtime role attribution 是启发式 host bridge 信号，不是强 contract。
 
@@ -162,7 +165,8 @@ class TeamSkillRail(
     trajectory_source: Optional[TrajectorySource] = None,
     trajectory_sink: Optional[TrajectorySink] = None,
     member_role: Optional[str] = None,
-    auto_scan: bool = True,
+    auto_scan: Optional[bool] = None,
+    signal_trigger: Optional[bool] = None,
     auto_save: bool = False,
     review_runtime: EvolutionReviewRuntime,
     async_evolution: bool = True,
@@ -177,6 +181,10 @@ class TeamSkillRail(
     eval_interval: int = 5,
     evolution_total_timeout_secs: float = 600.0,
     disabled_skills: Optional[Union[str, list[str]]] = None,
+    fuzzy_review: Optional[bool] = None,
+    fuzzy_review_interval: int = 5,
+    completion_followup_enabled: Optional[bool] = None,
+    review_trigger: Optional[bool] = None,
 )
 ```
 
@@ -190,7 +198,8 @@ class TeamSkillRail(
 * **trajectory_source** (TrajectorySource, 可选): 运行时聚合成员轨迹证据的 source。
 * **trajectory_sink** (TrajectorySink, 可选): 发布当前成员最新轨迹 snapshot 的 sink。
 * **member_role** (str, 可选): 写入 snapshot 的成员角色。团队技能演进默认是 `"leader"`。
-* **auto_scan** (bool): 是否检测被动 team completion 并触发被动演进，默认 `True`。
+* **auto_scan** (bool, 可选): `signal_trigger` 的兼容别名；已设置 `signal_trigger` 时忽略该值。
+* **signal_trigger** (bool, 可选): 是否检测被动 team completion 并触发被动演进，默认 `False`。
 * **auto_save** (bool): 是否自动保存生成的经验记录，默认 `False`（需用户审批）。
 * **review_runtime** (EvolutionReviewRuntime): 主动审核与中断复用的共享运行时（必填）。
 * **async_evolution** (bool): 是否异步执行演进，默认 `True`。
@@ -205,6 +214,10 @@ class TeamSkillRail(
 * **eval_interval** (int): 经验展示评分检查间隔，必须大于等于 1。
 * **evolution_total_timeout_secs** (float): 后台演进总超时预算，默认 600s。
 * **disabled_skills** (Optional[Union[str, list[str]]], 可选): 排除自优化范围的技能拒绝列表。支持单个技能名（字符串）或多个技能名（字符串列表）。
+* **fuzzy_review** (bool, 可选): 继承自 `SkillEvolutionRail` 的普通周期性 fuzzy review 开关；TeamSkillRail 默认关闭。
+* **fuzzy_review_interval** (int): 继承 fuzzy review 两次检查之间的非 follow_up task iteration 数，必须大于等于 1。
+* **completion_followup_enabled** (bool, 可选): `review_trigger` 的兼容别名；已设置 `review_trigger` 时忽略该值。
+* **review_trigger** (bool, 可选): 团队完成后是否注入简短演进自检 follow_up，默认 `False`。
 
 ### 运行时轨迹 Source/Sink
 
