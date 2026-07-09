@@ -9,15 +9,30 @@ SESSION_SPAWN / rails / state）。`TeamHarness` 在其上做 team 适配。
 
 ```
 harness/
-├── protocol.py        # HarnessProtocol（结构化契约，isinstance 校验）
+├── protocol.py        # HarnessProtocol（结构化契约，isinstance 校验）：send / abort / pause / resume / stop / outputs
 ├── native_harness.py  # NativeHarness(DeepAgent)：supervisor + round 驱动 + send/steer/follow_up；run_once 非流式单次 invoke（不开 supervisor，返回 Runner.run_agent 格式 dict）
 ├── team_harness.py    # TeamHarness：在 NativeHarness 上做 team 适配（build / role）；run_once 转发（单轮 worker 入口）
-├── control.py         # _CmdSend / _CmdAbort / _CmdPause / _CmdRoundFinished / _CmdStop
-├── state.py           # HarnessInternalState / InboxMessage / ActiveRound / HarnessState
+├── control.py         # _CmdSend / _CmdAbort / _CmdPause / _CmdResume / _CmdRoundFinished / _CmdStop
+├── state.py           # HarnessInternalState / InboxMessage / ActiveRound / HarnessState / RoundPhase
 ├── outputs.py         # _OutputIterator / _END 输出迭代
-├── snapshot_rail.py   # SnapshotRail：round 边界快照（回滚用）
+├── snapshot_rail.py   # PhaseSnapshotRail：inner-loop 阶段追踪 + iteration/round 边界快照 + cooperative stop
 └── async_tools.py     # 异步后台工具框架（AsyncTool / AsyncToolRuntime / render_result_text）
 ```
+
+## pause / abort / resume（两个正交动词）
+
+停止点一律落在 **inner ReAct iteration 边界**。`abort` 丢弃当前 round（→ IDLE，下次 `send` 起
+全新 round）；`pause` 停在干净边界并**保留 round**（→ PAUSED，`resume` 原地续跑，不追加新的
+user turn）。
+
+`PhaseSnapshotRail` 是正确性权威：它在 `before/after_model_call` 上做 cooperative
+`force_finish`，保证 loop 总能停在边界、**绝不打断运行中的 tool**（副作用不可撤销）；supervisor
+的 hard-cancel 只是及时性优化，且 gated 到 `model_call_in_flight`（只能落在 parked 的 LLM
+`await`）。tool 阶段的 pause 经 `PAUSING` 过渡态等待边界，ack 延迟到 `_on_round_done` resolve。
+
+该 rail 用 **harness back-ref**（`harness._st.active`）定位活跃 round —— inner loop 跑在
+TaskScheduler 的 exec task 里，ContextVar 读不到。详见 [`S_18`](../docs/specs/S_18_harness-interaction-contract.md)
+与 [`F_60`](../docs/features/F_60_native-harness-pause-abort-resume.md)。
 
 ## 异步工具框架（`async_tools.py`）
 
