@@ -43,7 +43,8 @@ async def _build_member_system_prompt(
 
     Args:
         team_agent: The leader TeamAgent (source of the team backend roster).
-        spec: The team spec carrying lifecycle / teammate_mode / team_mode.
+        spec: The team spec carrying lifecycle / teammate_mode / team_mode /
+            dispatch_mode.
         ctx: The external CLI member's runtime context (role / desc / language).
         member_name: The member's semantic identifier.
 
@@ -62,6 +63,7 @@ async def _build_member_system_prompt(
         lifecycle=spec.lifecycle,
         teammate_mode=spec.teammate_mode,
         team_mode=_resolve_team_mode(spec),
+        dispatch_mode=spec.dispatch_mode,
         language=language,
         hitt_enabled=hitt_enabled,
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,

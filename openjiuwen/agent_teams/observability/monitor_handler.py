@@ -193,7 +193,7 @@ class OtelTeamMonitorHandler:
         if etype == TeamEvent.TASK_UPDATED:
             return _json.dumps({"task_id": payload.get("task_id")}, ensure_ascii=False), p  # payload carries the update
         if etype == TeamEvent.TASK_PLAN_REQUEST:
-            return p, _json.dumps({"plan_id": payload.get("plan_id"), "status": payload.get("status", "claimed")},
+            return p, _json.dumps({"plan_id": payload.get("plan_id"), "status": payload.get("status", "planning")},
                                   ensure_ascii=False)
         if etype == TeamEvent.TASK_PLAN_RESPONSE:
             return _json.dumps({"plan_id": payload.get("plan_id")}, ensure_ascii=False), _json.dumps(
@@ -617,19 +617,19 @@ class OtelTeamMonitorHandler:
         """Return the task status this event advances the task to.
 
         Plan-mode events carry the effective status in ``payload['status']``
-        (claimed / plan_approved). Legacy events derive it from the type.
+        (planning / in_progress). Legacy events derive it from the type.
         Falls back to "" when unknown.
         """
         if etype in (TeamEvent.TASK_PLAN_REQUEST, TeamEvent.TASK_PLAN_RESPONSE):
             status = payload.get("status")
             if status:
                 return str(status)
-            # plan_response without an explicit status: approved -> plan_approved
+            # plan_response without an explicit status: approved -> in_progress
             if etype == TeamEvent.TASK_PLAN_RESPONSE:
-                return "plan_approved" if bool(payload.get("approved", False)) else "claimed"
-            return "claimed"
+                return "in_progress" if bool(payload.get("approved", False)) else "planning"
+            return "planning"
         if etype == TeamEvent.TASK_CLAIMED:
-            return "claimed"
+            return "in_progress"
         if etype == TeamEvent.TASK_UNBLOCKED:
             return "unblocked"
         if etype == TeamEvent.TASK_UPDATED:

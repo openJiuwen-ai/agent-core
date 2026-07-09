@@ -12,4 +12,4 @@ CLI members reject `model_name` (the model lives on the CLI side). The framework
 
 **Capability requirement**: `TeamAgentSpec.external_cli_agents` must be non-empty (at least one CLI kind declared). With no CLI kinds declared, this tool is not listed in the available tools.
 
-You must call build_team first. Call order: build_team → create_task → spawn_external_cli → send_message. spawn_external_cli only creates the member record (status: UNSTARTED); the system starts it on the first send_message. `prompt` is a long-term role setup — do not bind it to specific tasks (those are delivered via create_task / send_message).
+You must call build_team first. Call order: build_team → spawn_external_cli → create_task. Members exist before tasks. spawn_external_cli only creates the member record (status: UNSTARTED); when it gets started depends on the team's dispatch mode (see the "Task Dispatch" section of your system prompt). `prompt` is a long-term role setup — do not bind it to specific tasks (those are delivered via create_task / send_message).

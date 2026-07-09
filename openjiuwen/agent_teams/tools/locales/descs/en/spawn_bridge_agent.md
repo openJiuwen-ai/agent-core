@@ -13,4 +13,4 @@ Bridge an external independent agent (e.g. claudecode / codex / hermes) into the
 
 **Capability requirement**: requires `TeamAgentSpec.enable_bridge=True` and the current build_team instance to leave Bridge engaged. When the capability is off, this tool is not even listed in the available tools.
 
-You must call build_team first. Call order: build_team → create_task → spawn_bridge_agent → send_message. spawn_bridge_agent only creates the member record (status: UNSTARTED); the system starts it on the first send_message. `prompt` is a long-term role setup and remote briefing — do not bind it to specific tasks (those are delivered via create_task / send_message).
+You must call build_team first. Call order: build_team → spawn_bridge_agent → create_task. Members exist before tasks. spawn_bridge_agent only creates the member record (status: UNSTARTED); when it gets started depends on the team's dispatch mode (see the "Task Dispatch" section of your system prompt). `prompt` is a long-term role setup and remote briefing — do not bind it to specific tasks (those are delivered via create_task / send_message).

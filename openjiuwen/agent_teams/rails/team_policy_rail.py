@@ -58,8 +58,8 @@ class TeamPolicyRail(DeepAgentRail):
     Sections fall into two delivery lanes:
 
       * **System-prompt builder** (cache-stable prefix) -- role, HITT
-        collaboration contract, bridge self-contract, workflow, lifecycle,
-        private-prompt, extra. All static: built once at ``__init__`` and
+        collaboration contract, bridge self-contract, workflow, dispatch,
+        lifecycle, private-prompt, extra. All static: built once at ``__init__`` and
         re-added to the builder on every ``before_model_call`` (cheap dict
         insert). Team-state churn never touches this prefix.
       * **Prompt attachment tail** (per round, disposable) -- ``team_members``
@@ -87,6 +87,7 @@ class TeamPolicyRail(DeepAgentRail):
         teammate_mode: str = "build_mode",
         language: str = "cn",
         team_mode: str = "default",
+        dispatch_mode: str = "autonomous",
         base_prompt: str | None = None,
         team_workspace_mount: str | None = None,
         team_workspace_path: str | None = None,
@@ -120,6 +121,7 @@ class TeamPolicyRail(DeepAgentRail):
             lifecycle=lifecycle,
             teammate_mode=teammate_mode,
             team_mode=team_mode,
+            dispatch_mode=dispatch_mode,
             base_prompt=base_prompt,
             hitt_enabled=hitt_enabled,
         )
@@ -232,6 +234,7 @@ class TeamPolicyRail(DeepAgentRail):
         lifecycle: str,
         teammate_mode: str,
         team_mode: str,
+        dispatch_mode: str,
         base_prompt: str | None,
         hitt_enabled: bool,
     ) -> list[PromptSection]:
@@ -243,6 +246,7 @@ class TeamPolicyRail(DeepAgentRail):
             lifecycle=lifecycle,
             teammate_mode=teammate_mode,
             team_mode=team_mode,
+            dispatch_mode=dispatch_mode,
             base_prompt=base_prompt,
             language=self._language,
             hitt_enabled=hitt_enabled,

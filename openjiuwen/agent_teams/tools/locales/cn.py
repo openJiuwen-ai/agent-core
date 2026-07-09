@@ -168,6 +168,10 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "自定义任务 ID，便于依赖引用（不提供则自动生成）",
     "create_task.task.title": "任务标题，简明描述任务目标",
     "create_task.task.content": "任务详细内容，包含目标和验收标准",
+    # Only the scheduled create_task variant exposes this property; the
+    # description lives under the shared create_task.* key namespace so both
+    # variants read the same strings for the properties they have in common.
+    "create_task.task.assignee": "承担该任务的成员名称（必填）；该成员必须已存在。无依赖的任务落地即归属它，有依赖的任务在依赖完成后自动转交它",
     "create_task.task.depends_on": "前置依赖的任务 ID 列表；可引用本次调用中一起创建的任务或已有任务",
     "create_task.task.depended_by": "需要等待本任务完成的已有任务 ID 列表（反向依赖）；不得引用本次调用创建的任务——批内依赖一律用对方的 depends_on 表示",
     # ===== view_task ===========================================================
@@ -211,6 +215,16 @@ STRINGS: dict[str, str] = {
     ),
     "send_message.content": "消息内容，应包含明确的行动指引或信息",
     "send_message.summary": "5-10 词摘要，用于消息预览和日志",
+    # ===== send_message_scheduled (scheduled-mode member variant) ==============
+    # send_message_scheduled._desc lives in descs/cn/send_message_scheduled.md
+    # ``content`` / ``summary`` are reused verbatim from the send_message keys
+    # above — only the recipient semantics differ, so only ``to`` is redefined.
+    "send_message_scheduled.to": (
+        '收件人：只能是 "leader"（角色名，系统自动投递给真正的 Leader；'
+        '用于汇报进展、完成结果、阻塞、改派请求）'
+        '或 "user"（仅当收到的消息来源是 user 时用于回复）。'
+        "本模式下不能发给其他成员，也不支持多播和广播"
+    ),
     # NOTE: worktree tools (enter_worktree / exit_worktree) live in
     # ``openjiuwen.harness.tools.worktree`` and resolve their description
     # / param schema via ``harness.prompts.tools`` providers — no entries

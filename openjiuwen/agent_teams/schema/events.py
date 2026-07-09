@@ -90,6 +90,7 @@ class TeamEvent:
     TASK_PLAN_RESPONSE = "task_plan_response"
     TASK_UPDATED = "task_updated"
     TASK_CLAIMED = "task_claimed"
+    TASK_STARTED = "task_started"
     TASK_COMPLETED = "task_completed"
     TASK_CANCELLED = "task_cancelled"
     TASK_UNBLOCKED = "task_unblocked"
@@ -221,7 +222,7 @@ class TaskCreatedEvent(BaseEventMessage):
 class TaskPlanRequestEvent(BaseEventMessage):
     """Event published when a member submits an execution plan for approval."""
     task_id: str = Field(..., description="Task unique identifier")
-    status: str = Field(default="claimed", description="Task status after submission")
+    status: str = Field(default="planning", description="Task status after submission")
     plan_id: Optional[str] = Field(default=None, description="Member plan submission identifier")
     member_plan_md: Optional[str] = Field(default=None, description="Path to submitted member plan")
     tool_call_id: str = Field(default="", description="submit_plan tool call ID when available")
@@ -244,6 +245,16 @@ class TaskUpdatedEvent(BaseEventMessage):
 
 class TaskClaimedEvent(BaseEventMessage):
     """Event published when a task is claimed by a member"""
+    task_id: str = Field(..., description="Task unique identifier")
+
+
+class TaskStartedEvent(BaseEventMessage):
+    """Event published when a scheduled task begins execution.
+
+    Distinct from ``TaskClaimedEvent`` (ownership/assignment): in scheduled
+    dispatch a task is assigned at PENDING and only later moves to IN_PROGRESS
+    when the scheduler dispatches it to the assignee.
+    """
     task_id: str = Field(..., description="Task unique identifier")
 
 
@@ -406,6 +417,7 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.TASK_PLAN_RESPONSE: TaskPlanResponseEvent,
     TeamEvent.TASK_UPDATED: TaskUpdatedEvent,
     TeamEvent.TASK_CLAIMED: TaskClaimedEvent,
+    TeamEvent.TASK_STARTED: TaskStartedEvent,
     TeamEvent.TASK_COMPLETED: TaskCompletedEvent,
     TeamEvent.TASK_CANCELLED: TaskCancelledEvent,
     TeamEvent.TASK_UNBLOCKED: TaskUnblockedEvent,

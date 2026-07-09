@@ -519,6 +519,7 @@ class AgentConfigurator:
                 type=TEAM_TOOL,
                 params={
                     "teammate_mode": teammate_mode,
+                    "dispatch_mode": spec.dispatch_mode,
                     "lifecycle": spec.lifecycle,
                     "exclude_tools": exclude,
                     "qualify_ids": spec.spawn_mode == "inprocess",
@@ -533,6 +534,7 @@ class AgentConfigurator:
                     "lifecycle": spec.lifecycle,
                     "teammate_mode": teammate_mode,
                     "team_mode": _resolve_team_mode(spec),
+                    "dispatch_mode": spec.dispatch_mode,
                     "base_prompt": agent_spec.system_prompt,
                     "team_workspace_mount": team_workspace_mount,
                     "team_workspace_path": team_workspace_path,

@@ -178,6 +178,10 @@ class TeamBackend:
         self.member_name = member_name
         self.is_leader = is_leader
         self.leader_member_name = str(leader_member_name or (member_name if is_leader else "")).strip()
+        # Lazily-resolved leader name for members that were not handed one at
+        # construction. The leader is fixed for a team's life, so the DB row is
+        # queried once and cached. See ``resolve_leader_member_name``.
+        self._leader_name_cache: str | None = None
         self.db = db
         self.messager = messager
         self.teammate_mode = teammate_mode
@@ -730,12 +734,18 @@ class TeamBackend:
 
         team_logger.info(f"Cancelling execution for member {member_name}")
 
-        # Reset all CLAIMED tasks assigned to this member
-        claimed_tasks = await self.task_manager.get_tasks_by_assignee(
-            member_name=member_name, status=TaskStatus.CLAIMED.value
-        )
+        # Reset all active (PLANNING / IN_PROGRESS / IN_REVIEW) tasks held by
+        # this member back into the claimable pool.
+        active_statuses = {
+            TaskStatus.PLANNING.value,
+            TaskStatus.IN_PROGRESS.value,
+            TaskStatus.IN_REVIEW.value,
+        }
+        owned_tasks = await self.task_manager.get_tasks_by_assignee(member_name=member_name)
         reset_count = 0
-        for task in claimed_tasks:
+        for task in owned_tasks:
+            if task.status not in active_statuses:
+                continue
             if await self.task_manager.reset(task.task_id):
                 reset_count += 1
                 team_logger.info(f"Reset task {task.task_id} from member {member_name}")
@@ -893,6 +903,26 @@ class TeamBackend:
             True when the member exists in this team.
         """
         return await self.db.member.member_exists(member_name, self.team_name)
+
+    async def resolve_leader_member_name(self) -> str:
+        """Return the team's leader member_name, from the DB row when needed.
+
+        The leader is a persistent property of the team — ``build_team`` writes
+        it to the ``team_info`` row — so it is the single source of truth and
+        does not need threading through spawn / descriptor plumbing. A leader
+        (or a backend handed the name at construction) already knows it and
+        skips the query; a plain member resolves it from the row and caches the
+        result, since the leader never changes for the life of a team.
+
+        Returns:
+            The leader member_name, or ``""`` when the team row is absent.
+        """
+        if self.leader_member_name:
+            return self.leader_member_name
+        if self._leader_name_cache is None:
+            team = await self.db.team.get_team(self.team_name)
+            self._leader_name_cache = (team.leader_member_name if team else "") or ""
+        return self._leader_name_cache
 
     async def list_members(self) -> List[TeamMember]:
         """List all team members

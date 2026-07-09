@@ -10,12 +10,17 @@ from openjiuwen.agent_teams.schema.status import TaskStatus
 
 TASK_TERMINAL_STATUSES = frozenset({TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value})
 
+# Statuses that forbid a task from gaining a *new* prerequisite dependency —
+# it is either terminal or already in flight (planning / executing / under
+# review), so wiring a fresh upstream edge into it would be incoherent. Only
+# affects a task acting as a dependency edge's source. See F_59.
 TASK_DEPENDENCY_REJECT_STATUSES = frozenset(
     {
         TaskStatus.COMPLETED.value,
         TaskStatus.CANCELLED.value,
-        TaskStatus.CLAIMED.value,
-        TaskStatus.PLAN_APPROVED.value,
+        TaskStatus.PLANNING.value,
+        TaskStatus.IN_PROGRESS.value,
+        TaskStatus.IN_REVIEW.value,
     }
 )
 

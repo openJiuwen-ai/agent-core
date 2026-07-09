@@ -105,7 +105,7 @@ class TaskDetail(BaseModel):
 
     ``updated_at`` is the millisecond wall-clock timestamp of the last
     status transition. Its semantic meaning depends on ``status`` —
-    when status=claimed it is the claim time, when status=completed it
+    when status=in_progress it is the start time, when status=completed it
     is the completion time, etc.
     """
 
@@ -136,6 +136,12 @@ class TaskGraphSpec:
     exactly one representation (``depends_on`` on the dependent task), so
     the tool boundary rejects in-batch ``depended_by`` targets as
     redundant before the batch reaches this layer.
+
+    ``assignee`` pre-assigns the task as part of the same atomic mutation
+    (scheduled dispatch): an unblocked pre-assigned task lands as
+    ``PENDING`` with the assignee on record (assigned, not yet started), a
+    blocked one keeps the assignee until its dependencies resolve. Left
+    ``None``, the task is claimable by any member.
     """
 
     title: str
@@ -143,6 +149,7 @@ class TaskGraphSpec:
     task_id: str | None = None
     depends_on: tuple[str, ...] = ()
     depended_by: tuple[str, ...] = ()
+    assignee: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,13 +187,17 @@ class NewTaskSpec:
     Edges are passed separately via the ``add_edges`` argument so a single
     atomic mutation can both insert nodes and wire them up. ``initial_status``
     is the caller-supplied seed; the post-mutation refresh pass may flip it
-    between ``PENDING`` and ``BLOCKED`` based on the resulting edge set.
+    between ``PENDING`` and ``BLOCKED`` based on the resulting edge set — it
+    only ever touches ``PENDING`` / ``BLOCKED`` rows, so a pre-assigned task
+    seeded ``PENDING`` keeps its owner (and its BLOCKED flip) through the
+    mutation.
     """
 
     task_id: str
     title: str
     content: str
     initial_status: str
+    assignee: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

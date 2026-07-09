@@ -10,4 +10,4 @@
 
 **能力前提**：需要 `TeamAgentSpec.enable_hitt=True` 且当前 build_team 实例未禁用 HITT。能力关闭时本工具不会出现在可用工具列表中（运行时降级则返回拒绝并提示改用 spawn_teammate）。
 
-必须先调用 build_team。调用顺序：build_team → create_task → spawn_human_agent → send_message。spawn_human_agent 只创建成员记录（状态为 UNSTARTED），首次 send_message 时系统自动拉起。`desc` 是长期角色画像，不要绑定到具体任务——任务通过 create_task / send_message 下发。
+必须先调用 build_team。调用顺序：build_team → spawn_human_agent → create_task。成员先于任务存在。spawn_human_agent 只创建成员记录（状态为 UNSTARTED），何时被拉起取决于团队的调度模式（见系统提示词《任务下发与获取》一节）。`desc` 是长期角色画像，不要绑定到具体任务——任务通过 create_task / send_message 下发。

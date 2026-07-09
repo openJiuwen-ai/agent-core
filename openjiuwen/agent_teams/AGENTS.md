@@ -87,7 +87,7 @@ customizer 后处理）。
 
 | 文件 | 职责 |
 |---|---|
-| `team_policy_rail.py` | `TeamPolicyRail`：所有团队 section 均静态（role / HITT 协作契约 [gate `hitt_enabled`] / bridge avatar 自契约 [仅 BRIDGE_AGENT] / workflow / lifecycle / private / extra + 两个说明 section），init 建一次注入 `SystemPromptBuilder`（前缀 KV cache 稳定）；仅 churn 的 `team_members`（统一名册，人类标 `[human]`）/ `team_info` 经探针缓存刷新后挂 `prompt_attachment_manager`（`_sync_dynamic_sections` 不碰 builder）。见 F_46 / F_50 / F_52 |
+| `team_policy_rail.py` | `TeamPolicyRail`：所有团队 section 均静态（role / HITT 协作契约 [gate `hitt_enabled`] / bridge avatar 自契约 [仅 BRIDGE_AGENT] / workflow / dispatch [gate `dispatch_mode`，LEADER + TEAMMATE] / lifecycle / private / extra + 两个说明 section），init 建一次注入 `SystemPromptBuilder`（前缀 KV cache 稳定）；仅 churn 的 `team_members`（统一名册，人类标 `[human]`）/ `team_info` 经探针缓存刷新后挂 `prompt_attachment_manager`（`_sync_dynamic_sections` 不碰 builder）。见 F_46 / F_50 / F_52 |
 | `confirm_payload.py` | `TeamConfirmPayload` + `TeamPermissionConfirmResponse`：team-specific confirmation payload/response models（extend harness base classes with `decided_by` tracking） |
 | `team_permission_rail.py` | `TeamPermissionRail` + `TeamApprovalOrchestrator`：team-mode permission guardrail；继承 `PermissionInterruptRail`，leader-mediated ASK resolution + session-scoped auto-confirm（`_persist_allow_always=False`）。`enable_permissions=True` 时替代 `TeamToolApprovalRail` |
 | `tool_approval_rail.py` | `TeamToolApprovalRail`：teammate 调工具时通过消息向 leader 申请审批的中断 rail（`enable_permissions=False` 时使用） |

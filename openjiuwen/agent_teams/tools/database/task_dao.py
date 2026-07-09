@@ -208,6 +208,7 @@ async def _stage_new_tasks(
                 title=spec.title,
                 content=spec.content,
                 status=spec.initial_status,
+                assignee=spec.assignee,
                 updated_at=now,
             )
         )
@@ -425,15 +426,18 @@ class TaskDao:
             result = await session.execute(query)
             return result.scalars().all()
 
-    async def get_other_claimed_task_id(
+    async def get_other_active_task_id(
         self, team_name: str, member_name: str, exclude_task_id: str
     ) -> Optional[str]:
-        """Return the task_id of one CLAIMED task held by ``member_name``
+        """Return the task_id of one *active* task held by ``member_name``
         other than ``exclude_task_id``, or None.
 
-        Existence-style probe for the one-active-claim invariant: selects a
-        single ``task_id`` column with ``LIMIT 1`` instead of materializing
-        the member's whole set of claimed-task rows.
+        Existence-style probe for the one-active-task invariant: a member
+        may hold at most one in-flight task at a time. "Active" spans the
+        three non-terminal owned conditions — ``PLANNING`` (plan gate),
+        ``IN_PROGRESS`` (executing), and ``IN_REVIEW`` (verify gate, author
+        stays on the hook). Selects a single ``task_id`` column with
+        ``LIMIT 1`` instead of materializing the member's whole active set.
         """
         team_task_model = _get_task_model()
         async with self._sessions.read() as session:
@@ -442,27 +446,86 @@ class TaskDao:
                 .where(
                     team_task_model.team_name == team_name,
                     team_task_model.assignee == member_name,
-                    team_task_model.status == TaskStatus.CLAIMED.value,
+                    team_task_model.status.in_(
+                        (
+                            TaskStatus.PLANNING.value,
+                            TaskStatus.IN_PROGRESS.value,
+                            TaskStatus.IN_REVIEW.value,
+                        )
+                    ),
                     team_task_model.task_id != exclude_task_id,
                 )
                 .limit(1)
             )
             return (await session.execute(query)).scalar_one_or_none()
 
-    async def claim_task(self, task_id: str, member_name: str) -> bool:
+    async def start_task(self, task_id: str, member_name: str) -> bool:
+        """Atomically move an assigned PENDING task to IN_PROGRESS via a CAS.
+
+        Scheduled-dispatch counterpart of ``claim_task``: the assignee was
+        fixed at create time, so this only flips the status once execution
+        begins. The predicate ``WHERE assignee = member AND status = pending``
+        makes PENDING the sole valid predecessor and requires the task to
+        already belong to ``member_name`` — the scheduler starts a task on
+        behalf of its recorded owner, it does not (re)assign here.
+
+        Returns:
+            True iff the row moved to IN_PROGRESS (``rowcount == 1``); False
+            when the task is missing, not pending, or not owned by
+            ``member_name``.
+        """
+        team_task_model = _get_task_model()
+        now = get_current_time()
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(team_task_model)
+                .where(
+                    team_task_model.task_id == task_id,
+                    team_task_model.assignee == member_name,
+                    team_task_model.status == TaskStatus.PENDING.value,
+                )
+                .values(status=TaskStatus.IN_PROGRESS.value, updated_at=now)
+            )
+            await session.commit()
+            started = result.rowcount == 1
+            if started:
+                team_logger.info("Task %s started by member %s", task_id, member_name)
+            else:
+                team_logger.debug(
+                    "CAS start for task %s by %s did not apply (rowcount=%s): "
+                    "missing / not pending / not owned by this member",
+                    task_id,
+                    member_name,
+                    result.rowcount,
+                )
+            return started
+
+    async def claim_task(
+        self,
+        task_id: str,
+        member_name: str,
+        *,
+        to_status: TaskStatus = TaskStatus.IN_PROGRESS,
+    ) -> bool:
         """Atomically claim a PENDING, unassigned task via a single CAS UPDATE.
 
-        Shared persistence step for teammate self-claim and leader-side
-        assign. Both callers (``TeamTaskManager.claim`` / ``.assign``)
-        already validate existence, member, conflict, and the state
-        transition with reads taken *outside* the write lock; this method
-        is only the concurrency arbiter. Expressing the claim as one
-        conditional ``UPDATE`` — ``WHERE assignee IS NULL AND status =
-        pending`` (PENDING is the sole valid predecessor of CLAIMED) — keeps
-        the write-lock critical section to a single statement instead of the
-        old SELECT-then-UPDATE, so the process-wide write lock is held for
-        less time under contention (benefiting every writer, not just this
-        one). Only one racing caller can match the row, so exactly one wins.
+        Shared persistence step for teammate self-claim (``to_status`` defaults
+        to ``IN_PROGRESS``) and plan reservation (``TeamTaskManager.submit_plan``
+        passes ``to_status=PLANNING``). Callers already validate existence,
+        member, conflict, and the state transition with reads taken *outside*
+        the write lock; this method is only the concurrency arbiter. Expressing
+        the claim as one conditional ``UPDATE`` — ``WHERE assignee IS NULL AND
+        status = pending`` (PENDING is the sole valid predecessor of both
+        targets) — keeps the write-lock critical section to a single statement
+        instead of the old SELECT-then-UPDATE, so the process-wide write lock is
+        held for less time under contention. Only one racing caller can match
+        the row, so exactly one wins.
+
+        Args:
+            task_id: Task to claim.
+            member_name: Member taking ownership.
+            to_status: Target condition — ``IN_PROGRESS`` for a build-mode
+                claim, ``PLANNING`` to reserve for plan submission.
 
         Returns:
             True iff this call claimed the row (``rowcount == 1``); False
@@ -480,7 +543,7 @@ class TaskDao:
                     team_task_model.status == TaskStatus.PENDING.value,
                 )
                 .values(
-                    status=TaskStatus.CLAIMED.value,
+                    status=to_status.value,
                     assignee=member_name,
                     updated_at=now,
                 )
@@ -500,10 +563,10 @@ class TaskDao:
             return claimed
 
     async def reassign_task(self, task_id: str, from_assignee: str, to_assignee: str) -> bool:
-        """Atomically hand a CLAIMED task from one member to another.
+        """Atomically hand an IN_PROGRESS task from one member to another.
 
         Single conditional ``UPDATE`` — ``WHERE assignee = from_assignee AND
-        status = claimed`` — so the task never bounces through PENDING (no
+        status = in_progress`` — so the task never bounces through PENDING (no
         spurious TASK_RELEASED, no claimable-pool window an idle teammate
         could race into). Mirrors ``claim_task``'s CAS discipline: existence /
         member validation is the caller's job outside the write lock; this
@@ -511,8 +574,7 @@ class TaskDao:
 
         Returns:
             True iff the row was swapped (``rowcount == 1``); False when the
-            task is missing, not in CLAIMED state, or not held by
-            ``from_assignee``.
+            task is missing, not IN_PROGRESS, or not held by ``from_assignee``.
         """
         team_task_model = _get_task_model()
         now = get_current_time()
@@ -522,7 +584,7 @@ class TaskDao:
                 .where(
                     team_task_model.task_id == task_id,
                     team_task_model.assignee == from_assignee,
-                    team_task_model.status == TaskStatus.CLAIMED.value,
+                    team_task_model.status == TaskStatus.IN_PROGRESS.value,
                 )
                 .values(assignee=to_assignee, updated_at=now)
             )
@@ -541,8 +603,18 @@ class TaskDao:
             return swapped
 
     async def reset_task(self, task_id: str) -> Optional[TeamTaskBase]:
-        """Reset a claimed or plan_approved task back to pending status and clear assignee."""
+        """Reset an in-flight task back to pending status and clear assignee.
+
+        Accepts the three owned non-terminal conditions — ``PLANNING`` (plan
+        gate), ``IN_PROGRESS`` (executing), and ``IN_REVIEW`` (verify gate);
+        all are valid predecessors of PENDING.
+        """
         team_task_model = _get_task_model()
+        _RESETTABLE = (
+            TaskStatus.PLANNING.value,
+            TaskStatus.IN_PROGRESS.value,
+            TaskStatus.IN_REVIEW.value,
+        )
         async with self._sessions.write() as session:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
@@ -550,9 +622,9 @@ class TaskDao:
                 team_logger.error("Task %s not found", task_id)
                 return None
 
-            if task.status != TaskStatus.CLAIMED.value:
+            if task.status not in _RESETTABLE:
                 team_logger.error(
-                    "Cannot reset task %s with status %s, only CLAIMED tasks can be reset",
+                    "Cannot reset task %s with status %s, only planning / in-progress / in-review tasks can be reset",
                     task_id,
                     task.status,
                 )
@@ -581,7 +653,11 @@ class TaskDao:
             return task
 
     async def approve_plan_task(self, task_id: str) -> Optional[TeamTaskBase]:
-        """Approve a task plan for PLAN_MODE members."""
+        """Approve a task plan for PLAN_MODE members (PLANNING -> IN_PROGRESS).
+
+        "Plan approved" is exactly this ``PLANNING -> IN_PROGRESS`` edge — the
+        task leaves the plan gate and starts executing.
+        """
         team_task_model = _get_task_model()
         async with self._sessions.write() as session:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
@@ -592,21 +668,21 @@ class TaskDao:
 
             if not is_valid_transition(
                 TaskStatus(task.status),
-                TaskStatus.PLAN_APPROVED,
+                TaskStatus.IN_PROGRESS,
                 TASK_TRANSITIONS,
             ):
                 team_logger.error(
                     "Invalid state transition for task %s: %s -> %s",
                     task_id,
                     task.status,
-                    TaskStatus.PLAN_APPROVED.value,
+                    TaskStatus.IN_PROGRESS.value,
                 )
                 return None
 
-            task.status = TaskStatus.PLAN_APPROVED.value
+            task.status = TaskStatus.IN_PROGRESS.value
             task.updated_at = get_current_time()
             await session.commit()
-            team_logger.info("Task %s approved from CLAIMED to PLAN_APPROVED", task_id)
+            team_logger.info("Task %s plan approved (PLANNING -> IN_PROGRESS)", task_id)
 
             return task
 
@@ -672,12 +748,13 @@ class TaskDao:
                 team_logger.error("Task %s not found", task_id)
                 return False
 
-            # PLAN_APPROVED stays locked (plan-mode contract). CLAIMED is now
-            # editable: the leader revises a live task's content and the
-            # assignee is told to re-read via a targeted TASK_UPDATED notice
+            # IN_REVIEW stays locked: a task submitted for verification is
+            # frozen so the reviewer evaluates against stable content. PLANNING
+            # and IN_PROGRESS are editable — the leader revises a live task and
+            # the assignee is told to re-read via a targeted TASK_UPDATED notice
             # (see TeamTaskManager.update_task), instead of the old
             # reset-to-pending + cancel_member.
-            if task.status == TaskStatus.PLAN_APPROVED.value:
+            if task.status == TaskStatus.IN_REVIEW.value:
                 team_logger.error(
                     "Cannot update task %s because it is currently %s",
                     task_id,
