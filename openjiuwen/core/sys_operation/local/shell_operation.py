@@ -241,6 +241,19 @@ def _normalize_windows_paths_for_bash(command: str) -> str:
 class ShellOperation(BaseShellOperation):
     """Shell operation"""
 
+    @staticmethod
+    def _inject_ps_utf8(command: str) -> str:
+        """Set UTF-8 console output encoding for Windows PowerShell subprocesses.
+
+        Sets $OutputEncoding and [Console]::OutputEncoding to UTF-8 so all
+        PowerShell stdout/stderr output is UTF-8 regardless of the file's
+        original encoding. This solves garbled output in the Python subprocess
+        pipe, while leaving file-read encoding up to the caller (guided by
+        prompt instructions).
+        """
+        prefix = "$OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        return prefix + command
+
     # 已知在无 TTY 环境下会挂死的命令模式。
     # 每个条目: (pattern, description, auto_env_overrides | None)
     # auto_env_overrides 会在检测到时自动注入环境变量，降低挂死概率。
@@ -307,9 +320,11 @@ class ShellOperation(BaseShellOperation):
                 powershell_command = _unwrap_powershell_command(command)
                 if powershell_command is not None:
                     exe = _available_powershell()
+                    powershell_command = ShellOperation._inject_ps_utf8(powershell_command)
                     return [exe, "-NoProfile", "-NonInteractive", "-Command", powershell_command], False, "powershell"
                 if _looks_like_powershell(command):
                     exe = _available_powershell()
+                    command = ShellOperation._inject_ps_utf8(command)
                     return [exe, "-NoProfile", "-NonInteractive", "-Command", command], False, "powershell"
                 if _looks_like_posix(command):
                     exe = _available_bash(allow_wsl=False)
@@ -319,6 +334,7 @@ class ShellOperation(BaseShellOperation):
             if shell_type == ShellType.POWERSHELL:
                 exe = _available_powershell()
                 command = _unwrap_powershell_command(command) or command
+                command = ShellOperation._inject_ps_utf8(command)
                 return [exe, "-NoProfile", "-NonInteractive", "-Command", command], False, "powershell"
             if shell_type == ShellType.CMD:
                 return command, True, "cmd"
@@ -346,6 +362,7 @@ class ShellOperation(BaseShellOperation):
                 raise build_error(StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR,
                                   execution="_resolve_execution_plan",
                                   error_msg="shell 'powershell' is not available on this system")
+            command = ShellOperation._inject_ps_utf8(command)
             return [exe, "-NoProfile", "-NonInteractive", "-Command", command], False, "powershell"
         if shell_type == ShellType.CMD:
             raise build_error(StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR,

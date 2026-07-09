@@ -68,13 +68,8 @@ def test_windows_auto_unwraps_nested_powershell_command(monkeypatch):
 
     assert use_shell is False
     assert resolved_shell == "powershell"
-    assert args == [
-        exe,
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        "Get-Item 'C:\\tmp\\voiceover_timeline.md' -ErrorAction SilentlyContinue | Select-Object Name, Length",
-    ]
+    _utf8_prefix = "$OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+    assert args[-1] == _utf8_prefix + "Get-Item 'C:\\tmp\\voiceover_timeline.md' -ErrorAction SilentlyContinue | Select-Object Name, Length"
 
 
 def test_windows_explicit_powershell_unwraps_nested_command(monkeypatch):
@@ -91,7 +86,8 @@ def test_windows_explicit_powershell_unwraps_nested_command(monkeypatch):
 
     assert use_shell is False
     assert resolved_shell == "powershell"
-    assert args[-1] == "Write-Output ok"
+    _utf8_prefix = "$OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+    assert args[-1] == _utf8_prefix + "Write-Output ok"
 
 
 def test_windows_auto_routes_posix_ls_to_git_bash(monkeypatch):

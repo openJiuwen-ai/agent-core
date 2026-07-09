@@ -89,6 +89,37 @@ class AsyncProcessHandler:
         self._queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
         self._is_executed = False
 
+    def _decode_output(self, data: bytes | bytearray, *, stream: bool = False) -> str:
+        """Decode subprocess output with encoding fallback.
+
+        Tries the primary encoding first (default UTF-8). If that fails,
+        falls back to GB18030 (superset of GBK/GB2312 for Chinese text).
+        Final fallback is latin-1 (never fails, preserves raw bytes).
+
+        In stream mode (stream=True), chunk boundaries may split multi-byte
+        characters, so fallback decoding is inappropriate — use errors='replace'
+        instead to avoid silent data corruption.
+        """
+        try:
+            return data.decode(self._encoding)
+        except (UnicodeDecodeError, LookupError):
+            if stream:
+                # Chunk boundary may split multi-byte chars; fallback encoding
+                # would decode truncated bytes as wrong characters. Use 'replace'
+                # to avoid silent data corruption.
+                return data.decode(self._encoding, errors='replace')
+            if self._encoding.lower() not in ("utf-8", "utf8"):
+                try:
+                    return data.decode("utf-8")
+                except (UnicodeDecodeError, LookupError):
+                    sys_operation_logger.warning("Failed to decode output with UTF-8 encoding")
+                    pass
+            try:
+                return data.decode("gb18030")
+            except (UnicodeDecodeError, LookupError):
+                sys_operation_logger.warning("Failed to decode output with GB18030 encoding")
+                return data.decode("latin-1", errors="replace")
+
     def _kill_process_tree(self) -> None:
         """Kill the subprocess and all its children using process group.
 
@@ -147,7 +178,7 @@ class AsyncProcessHandler:
         ]
 
         def _decode(buf: bytearray) -> str:
-            return buf.decode(self._encoding, errors='replace')
+            return self._decode_output(buf)
 
         async def _finish_readers(grace: float) -> None:
             try:
@@ -355,7 +386,7 @@ class AsyncProcessHandler:
                                                         "returncode": self._process.returncode,
                                                         "queue_size": self._queue.qsize()})
                     break
-                data = chunk.decode(self._encoding, errors="replace")
+                data = self._decode_output(chunk, stream=True)
                 event = StreamEvent(type=stream_type, data=data)
                 await self._queue.put(event)
                 total_num += 1

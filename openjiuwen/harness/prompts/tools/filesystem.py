@@ -23,8 +23,25 @@ READ_FILE_DESCRIPTION: Dict[str, str] = {
 }
 
 WRITE_FILE_DESCRIPTION: Dict[str, str] = {
-    "cn": "写入文件内容。如果文件已存在，将完全覆盖。",
-    "en": "Write file contents. Overwrites existing files only after a full read_file call.",
+    "cn": (
+        "写入文件内容。如果文件已存在，将完全覆盖。\n\n"
+        "大文件写入（分批写入）：\n"
+        "1. 第一次调用：使用 write_file 创建文件，content 仅含骨架或首段（保持短小）\n"
+        "2. 后续调用：使用 edit_file 分多次追加剩余内容\n\n"
+        "⚠️ 对于有先后顺序的分批写入，必须串行执行：等待前一次写入完成后再发起下一次写入。\n"
+        "⚠️ 每个分片必须是语法完整的（尤其是JS或者python等脚本类文件）：确保括号、引号、字符串正确闭合。\n"
+        "⚠️ 如果某次写入失败，不要继续写入后续分片，先检查并修复失败原因。"
+    ),
+    "en": (
+        "Write file contents. Overwrites existing files only after a full read_file call.\n\n"
+        "Large files (batch writing):\n"
+        "1. First call: use write_file to create the file with a short skeleton or first chunk\n"
+        "2. Subsequent calls: use edit_file to append remaining content in multiple calls\n\n"
+        "⚠️ For sequential batch writing, operations must be executed serially: "
+        " wait for the previous write to complete before initiating the next one.\n"
+        "⚠️ Each chunk must be syntactically complete: ensure brackets, quotes, strings are properly closed.\n"
+        "⚠️ If a write fails, do not continue writing subsequent chunks; check and fix the failure first."
+    ),
 }
 
 _LEGACY_EDIT_FILE_DESCRIPTION: Dict[str, str] = {
