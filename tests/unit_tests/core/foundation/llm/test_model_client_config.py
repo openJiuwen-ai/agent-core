@@ -57,6 +57,27 @@ def test_model_client_config_allows_registered_string_provider():
     assert cfg.client_provider == provider
 
 
+def test_model_client_config_requires_api_key_for_non_openai_account_provider():
+    with pytest.raises(BaseError) as error:
+        ModelClientConfig(
+            client_provider=ProviderType.OpenAI,
+            api_base="http://localhost",
+        )
+
+    assert error.value.code == StatusCode.MODEL_SERVICE_CONFIG_ERROR.code
+    assert "api_key is required for non-OpenAIAccount providers" in str(error.value)
+
+
+def test_model_client_config_allows_openai_account_without_api_key():
+    cfg = ModelClientConfig(
+        client_provider=ProviderType.OpenAIAccount,
+        api_base="http://localhost",
+    )
+
+    assert cfg.client_provider == ProviderType.OpenAIAccount
+    assert cfg.api_key == ""
+
+
 def test_model_client_config_timeout_must_be_positive():
     with pytest.raises(ValidationError) as error:
         ModelClientConfig(
