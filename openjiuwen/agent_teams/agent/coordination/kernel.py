@@ -16,6 +16,7 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventMessage,
     InnerEventType,
 )
+from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
@@ -194,6 +195,10 @@ class CoordinationKernel:
         if self._dispatcher is not None:
             self._dispatcher.team_completion.rearm()
         self._lifecycle_state = "running"
+        # Warm resume: a lifecycle pause left this member's round suspended at a
+        # clean boundary. Now that the session, stream and event bus are back,
+        # continue it in place instead of idling until a new message arrives.
+        await self.resume_paused_round()
 
     async def pause(self) -> None:
         # Idempotent: ignore if not currently running. Pause is only a valid
@@ -204,7 +209,11 @@ class CoordinationKernel:
             return
         host = self._host
         team_logger.info("[{}] coordination pausing (persistent)", host.member_name or "?")
-        await self.drain_agent_task()
+        # Pause, do not tear down: the round stops at a clean inner-iteration
+        # boundary and stays resumable in place. This used to hard-cancel via
+        # ``drain_agent_task`` → ``abort(immediate=True)``, which threw away
+        # everything the member had done in the round it interrupted mid-way.
+        await self.pause_agent_round()
         host.persist_allocator_state()
         # Extract team memories while the session is still bound and the DB
         # is accessible. Moved from finalize_round so extraction runs once
@@ -436,7 +445,31 @@ class CoordinationKernel:
         )
 
     async def drain_agent_task(self) -> None:
+        """Hard-cancel the in-flight round. Stop / teardown paths only."""
         await self._host.stream_controller.drain_agent_task()
+
+    async def pause_agent_round(self) -> None:
+        """Pause the in-flight round at its nearest inner iteration boundary."""
+        await self._host.stream_controller.pause_agent()
+
+    async def resume_paused_round(self) -> None:
+        """Continue a round that a lifecycle pause suspended, if any.
+
+        ``pause`` stops the member's round at a clean inner-iteration boundary
+        and keeps it in memory (the harness itself is never stopped). Once
+        ``start`` has rebound the session and reopened the stream, this picks
+        that round back up in place — otherwise the member would idle until a
+        new message arrived, silently dropping the work it was suspended
+        mid-way through.
+        """
+        harness = self._host.resources.harness
+        if harness is None or harness.state is not HarnessState.PAUSED:
+            return
+        team_logger.info(
+            "[{}] resuming the paused round in place",
+            self._host.member_name or "?",
+        )
+        await self._host.stream_controller.resume_agent()
 
     def close_stream(self) -> None:
         self._host.stream_controller.close_stream()

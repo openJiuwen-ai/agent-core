@@ -1689,11 +1689,18 @@ class ReActAgent(BaseAgent):
             _sq = inputs.get("_steering_queue")
             if _sq is not None:
                 ctx.bind_steering_queue(_sq)
+            # Harness-driven continuation (NativeHarness.resume): continue the
+            # loop over the existing context, without a new user turn.
+            if inputs.get("_resume_continuation"):
+                ctx.extra["_resume_continuation"] = True
 
         try:
             async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
                 user_input = ctx.inputs.query
-                if not user_input:
+                # A continuation round carries no new query: it picks the
+                # preserved context of a paused round back up in place.
+                resume_continuation = bool(ctx.extra.get("_resume_continuation"))
+                if not user_input and not resume_continuation:
                     raise ValueError("Input must contain 'query'")
 
                 hitl_state = self._hitl_handler.load(session)
@@ -1742,7 +1749,7 @@ class ReActAgent(BaseAgent):
                             pass  # invoke_inputs.result already set by _handle_resume/_commit_interrupt
                         else:
                             start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
-                else:
+                elif not resume_continuation:
                     await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
 
                 if invoke_inputs.result is None:
