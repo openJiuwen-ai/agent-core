@@ -221,6 +221,15 @@ class NativeHarness(DeepAgent):
         """Owned (or injected) session id, or None before ``start()``."""
         return self._session.get_session_id() if self._session is not None else None
 
+    @property
+    def paused_query(self) -> str | None:
+        """Originating query of the paused round, when PAUSED.
+
+        The coordination layer persists this so a later cold start can continue
+        the round: ``pause -> stop -> start`` becomes ``pause -> resume``.
+        """
+        return self._st.paused_query
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -552,16 +561,24 @@ class NativeHarness(DeepAgent):
         await self._control.put(_CmdPause(ack=ack))
         await ack
 
-    async def resume(self) -> None:
+    async def resume(self, *, query: str | None = None) -> None:
         """Resume a paused round in place, continuing from its boundary.
 
         Starts a continuation round over the preserved context: no new user turn
         is appended, so the agent picks up exactly where ``pause()`` stopped it.
-        No-op unless the harness is PAUSED.
+
+        - **warm** (harness is PAUSED): the round is still in memory and its
+          cached query is reused; ``query`` is ignored.
+        - **cold** (harness is IDLE and ``query`` is given): this harness was
+          rebuilt after a stop and its context was restored from the session
+          checkpoint. Continue over that context, using the query the pause
+          recorded.
+
+        No-op in any other state.
         """
         self._require_alive()
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
-        await self._control.put(_CmdResume(ack=ack))
+        await self._control.put(_CmdResume(ack=ack, query=query))
         await ack
 
     # ------------------------------------------------------------------
@@ -923,18 +940,26 @@ class NativeHarness(DeepAgent):
     async def _on_resume(self, cmd: _CmdResume) -> None:
         """Continue a paused round in place, from its preserved context.
 
-        The paused round stopped at a clean inner-iteration boundary, so context
-        already holds every completed iteration. The continuation round drives
-        the ReAct loop over that context without appending a new user turn, and
-        keeps the paused round's query as ``original_query`` so a task-plan
-        continuation can still reuse it.
+        - **warm** (PAUSED): the round stopped at a clean inner-iteration
+          boundary and its context is still in memory.
+        - **cold** (IDLE + ``cmd.query``): this harness was rebuilt after a stop;
+          its context came back from the session checkpoint, and the caller
+          supplies the query the pause recorded.
+
+        Either way the continuation round drives the ReAct loop over the existing
+        context without appending a new user turn, and keeps that query as
+        ``original_query`` so a task-plan continuation can still reuse it.
         """
-        if self._st.phase is not HarnessState.PAUSED:
-            # Only a paused harness can be resumed; anything else is a no-op.
+        phase = self._st.phase
+        if phase is HarnessState.PAUSED:
+            query = self._st.paused_query or ""
+        elif phase is HarnessState.IDLE and cmd.query is not None:
+            query = cmd.query
+        else:
+            # Only a paused (warm) or checkpoint-restored (cold) harness resumes.
             self._ack(cmd.ack, None)
             return
 
-        query = self._st.paused_query or ""
         self._st.paused_query = None
         active = self._start_round(query, resume_continuation=True)
         await self._transition(HarnessState.RUNNING)

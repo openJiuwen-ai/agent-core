@@ -226,6 +226,9 @@ class CoordinationKernel:
             await host.spawn_manager.cancel_recovery_tasks()
             await host.spawn_manager.shutdown_all_handles()
             self._persist_team_lifecycle("paused")
+            # Make a later cold start (pause -> stop -> start) continue this
+            # round rather than idle waiting for a new message.
+            self._persist_pending_resume()
         messager = host.infra.messager
         if messager and host.role == TeamRole.LEADER:
             from openjiuwen.agent_teams.context import get_session_id
@@ -317,6 +320,80 @@ class CoordinationKernel:
         except Exception as e:
             team_logger.warning(
                 "[{}] failed to persist team lifecycle: {}",
+                host.member_name or "?",
+                e,
+            )
+
+    def _persist_pending_resume(self) -> None:
+        """Record what a later cold start needs to continue the paused round.
+
+        ``pause`` suspends the round at a clean inner-iteration boundary and the
+        run cycle's teardown commits its context. Persisting this marker makes
+        ``pause -> stop -> start`` equivalent to ``pause -> resume``: the
+        cold-started harness continues that round instead of idling until a new
+        message arrives.
+
+        The recorded query is not replayed into the continuation's context (that
+        is restored from the checkpoint) — it drives the rounds that *follow* it:
+        a task-plan continuation, or a failure retry.
+
+        Leader-only, mirroring ``_persist_team_lifecycle`` — teammates are shut
+        down by ``pause`` and re-spawned from the roster by ``recover_team``, so
+        they have no in-memory round to carry across a restart.
+        """
+        host = self._host
+        session = host.session_manager.team_session
+        team_name = host.team_name
+        harness = host.resources.harness
+        if session is None or team_name is None or harness is None:
+            return
+        # Nothing was suspended (no in-flight round), so nothing to continue.
+        if harness.state is not HarnessState.PAUSED:
+            return
+        from openjiuwen.agent_teams.runtime.metadata import merge_pending_resume
+
+        try:
+            merge_pending_resume(session, team_name, {"query": harness.paused_query or ""})
+        except Exception as e:
+            team_logger.warning(
+                "[{}] failed to persist pending resume: {}",
+                host.member_name or "?",
+                e,
+            )
+
+    def _read_pending_resume(self) -> dict | None:
+        """Return the persisted cold-resume marker, if any."""
+        host = self._host
+        session = host.session_manager.team_session
+        team_name = host.team_name
+        if session is None or team_name is None:
+            return None
+        from openjiuwen.agent_teams.runtime.metadata import read_pending_resume
+
+        try:
+            return read_pending_resume(session, team_name)
+        except Exception as e:
+            team_logger.warning(
+                "[{}] failed to read pending resume: {}",
+                host.member_name or "?",
+                e,
+            )
+            return None
+
+    def _clear_pending_resume(self) -> None:
+        """Drop the cold-resume marker once the round has been continued."""
+        host = self._host
+        session = host.session_manager.team_session
+        team_name = host.team_name
+        if session is None or team_name is None:
+            return
+        from openjiuwen.agent_teams.runtime.metadata import clear_pending_resume
+
+        try:
+            clear_pending_resume(session, team_name)
+        except Exception as e:
+            team_logger.warning(
+                "[{}] failed to clear pending resume: {}",
                 host.member_name or "?",
                 e,
             )
@@ -455,21 +532,43 @@ class CoordinationKernel:
     async def resume_paused_round(self) -> None:
         """Continue a round that a lifecycle pause suspended, if any.
 
-        ``pause`` stops the member's round at a clean inner-iteration boundary
-        and keeps it in memory (the harness itself is never stopped). Once
-        ``start`` has rebound the session and reopened the stream, this picks
-        that round back up in place — otherwise the member would idle until a
-        new message arrived, silently dropping the work it was suspended
-        mid-way through.
+        Two paths, both reached from the tail of ``start`` (session, stream and
+        event bus are back by then):
+
+        - **warm**: the harness is still PAUSED in this process — ``pause`` never
+          stops it — so the suspended round is in memory.
+        - **cold**: the harness was stopped and rebuilt, its context restored from
+          the session checkpoint. The marker ``pause`` persisted names the round's
+          originating query, making ``pause -> stop -> start`` behave exactly like
+          ``pause -> resume``.
+
+        Without this the member would idle until a new message arrived, silently
+        dropping the work it was suspended mid-way through.
         """
         harness = self._host.resources.harness
-        if harness is None or harness.state is not HarnessState.PAUSED:
+        if harness is None:
+            return
+
+        if harness.state is HarnessState.PAUSED:
+            team_logger.info(
+                "[{}] resuming the paused round in place",
+                self._host.member_name or "?",
+            )
+            await self._host.stream_controller.resume_agent()
+            self._clear_pending_resume()
+            return
+
+        pending = self._read_pending_resume()
+        if pending is None:
             return
         team_logger.info(
-            "[{}] resuming the paused round in place",
+            "[{}] resuming the paused round from the session checkpoint",
             self._host.member_name or "?",
         )
-        await self._host.stream_controller.resume_agent()
+        await self._host.stream_controller.resume_agent(
+            query=str(pending.get("query") or ""),
+        )
+        self._clear_pending_resume()
 
     def close_stream(self) -> None:
         self._host.stream_controller.close_stream()

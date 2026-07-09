@@ -385,11 +385,15 @@ class StreamController:
         if harness is not None:
             await harness.pause()
 
-    async def resume_agent(self) -> None:
-        """Continue a paused round in place, from its preserved context."""
+    async def resume_agent(self, *, query: str | None = None) -> None:
+        """Continue a paused round in place, from its preserved context.
+
+        ``query`` drives a cold resume (the harness was rebuilt and its context
+        restored from a checkpoint); a warm resume needs none.
+        """
         harness = self._resources.harness
         if harness is not None:
-            await harness.resume()
+            await harness.resume(query=query)
 
     async def drain_agent_task(self) -> None:
         """Tear down the in-flight round during lifecycle stop / teardown.

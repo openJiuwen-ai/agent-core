@@ -82,11 +82,13 @@ class HarnessProtocol(Protocol):
         """
         ...
 
-    async def resume(self) -> None:
+    async def resume(self, *, query: str | None = None) -> None:
         """Continue a paused round in place, from its preserved context.
 
         No new user turn is appended: the agent picks up exactly where the pause
-        stopped it. No-op unless the harness is PAUSED.
+        stopped it. ``query`` drives a *cold* resume — a rebuilt harness whose
+        context was restored from a checkpoint — and is ignored by a warm one.
+        No-op unless the harness is PAUSED (warm) or IDLE with a query (cold).
         """
         ...
 
