@@ -16,6 +16,7 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.agent.coordination.kernel import CoordinationKernel
+from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     TeamEvent,
@@ -33,6 +34,8 @@ def _make_kernel_host(memory_manager: object | None = None) -> SimpleNamespace:
             harness=SimpleNamespace(
                 stop=AsyncMock(),
                 dispose=AsyncMock(),
+                # Not PAUSED, so kernel.start's warm-resume hook stays inert.
+                state=HarnessState.IDLE,
             ),
         ),
         infra=SimpleNamespace(
@@ -51,6 +54,8 @@ def _make_kernel_host(memory_manager: object | None = None) -> SimpleNamespace:
         stream_controller=SimpleNamespace(
             stream_queue=object(),
             drain_agent_task=AsyncMock(),
+            pause_agent=AsyncMock(),
+            resume_agent=AsyncMock(),
             close_stream=MagicMock(),
             stop=AsyncMock(),
         ),
@@ -152,6 +157,39 @@ async def test_pause_extracts_memory_once_and_stop_after_pause_does_not_repeat()
     await kernel.stop()
     memory_manager.extract_after_round.assert_awaited_once()
     memory_manager.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_stops_at_boundary_and_never_hard_cancels():
+    """kernel.pause pauses the round; it must never hard-cancel it.
+
+    Regression guard for the root cause: pause used to route through
+    ``drain_agent_task`` → ``abort(immediate=True)``, throwing away everything
+    the member had done in the round it interrupted mid-way.
+    """
+    host = _make_kernel_host()
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    await kernel.pause()
+
+    host.stream_controller.pause_agent.assert_awaited_once()
+    host.stream_controller.drain_agent_task.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_stop_hard_cancels_the_round():
+    """kernel.stop tears the round down: it is discarded outright."""
+    host = _make_kernel_host()
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    await kernel.stop()
+
+    host.stream_controller.drain_agent_task.assert_awaited_once()
+    host.stream_controller.pause_agent.assert_not_awaited()
 
 
 @pytest.mark.asyncio

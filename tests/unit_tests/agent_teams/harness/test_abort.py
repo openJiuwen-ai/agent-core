@@ -119,13 +119,13 @@ async def test_immediate_abort_resets_coordinator_next_round_runs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_immediate_abort_rolls_back_to_last_safe_snapshot() -> None:
-    """immediate abort restores context to the last completed round boundary.
+async def test_immediate_abort_rolls_back_to_nearest_boundary() -> None:
+    """immediate abort restores context to the nearest clean boundary.
 
-    Round 1 completes (SnapshotRail captures last_safe_snapshot via the
-    executor's AFTER_TASK_ITERATION). Round 2's invoke is cancelled mid-sleep;
-    the immediate abort rolls the context back to the round-1 snapshot, so the
-    current-round message segment matches what it was after round 1.
+    Round 1 completes. Round 2 is cancelled while parked in its first model call,
+    so it has completed no inner iteration of its own — its nearest clean
+    boundary is its pre-round baseline, which is exactly the state left by round
+    1. The current-round segment therefore matches what it was after round 1.
     """
     await Runner.start()
     try:
@@ -139,18 +139,20 @@ async def test_immediate_abort_rolls_back_to_last_safe_snapshot() -> None:
             await harness.send("round1")
             assert await wait_for_state(harness, HarnessState.IDLE)
             msgs_after_round1 = len(ctx.get_messages(with_history=False))
-            assert msgs_after_round1 == 1  # round1 appended its user message
+            # round1 appended its user message + one assistant message per
+            # completed inner iteration.
+            assert msgs_after_round1 == 2
 
-            # Round 2: long-running, cancelled mid-flight.
+            # Round 2: parked in its model call, cancelled mid-flight.
             fake.sleep_seconds = 5.0
             await harness.send("round2")
             await wait_invoke_running(fake)
-            # round2 appended its user message before sleeping.
-            assert len(ctx.get_messages(with_history=False)) == 2
+            # round2 appended its user message before entering the model call.
+            assert len(ctx.get_messages(with_history=False)) == msgs_after_round1 + 1
             await harness.abort(immediate=True)
             assert await wait_for_state(harness, HarnessState.IDLE)
 
-            # Rolled back to the round-1 boundary snapshot.
+            # Rolled back to round 2's nearest boundary (its pre-round baseline).
             assert len(ctx.get_messages(with_history=False)) == msgs_after_round1
         finally:
             await harness.stop()
