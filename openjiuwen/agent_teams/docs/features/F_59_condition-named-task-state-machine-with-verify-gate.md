@@ -5,10 +5,10 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-07-09 |
-| 状态 | **分阶段交付**：Phase 1（条件命名状态机 + plan 闸，折叠 F_58）**已实现**；Phase 2（reviewer / verify 闸，使 `IN_REVIEW` 可达）**待建** |
+| 状态 | **分阶段交付，均已实现**：Phase 1（条件命名状态机 + plan 闸，折叠 F_58）；Phase 2（reviewer / verify 闸，使 `IN_REVIEW` 可达） |
 | 范围（Phase 1） | `schema/status.py`（枚举 + 转移表）、`schema/events.py`、`schema/task.py`、`tools/database/graph.py`、`tools/database/task_dao.py`、`tools/task_manager.py`、`tools/tool_task.py`、`tools/team.py`、`agent/coordination/handlers/stale_task.py`、`observability/monitor_handler.py`、`prompts/`、`tools/locales/descs/`、`docs/specs/S_08`·`S_12` |
-| 范围（Phase 2，待建） | `reviewer` 列（`models.py`/`schema/task.py`/DAO/迁移）、`verify_task` 工具、`member_complete` 分流 `IN_REVIEW`、`view_task(action=in_review)`、`TASK_SUBMITTED_FOR_REVIEW`/`TASK_VERIFIED`/`TASK_REVISION_REQUESTED` 事件、reviewer 权限集与 prompt |
-| 测试基线（Phase 1） | `python -m pytest tests/unit_tests/agent_teams` → **1800 passed / 16 skipped**（改 9 个测试文件的旧状态断言，删 1 个 F_58 `STARTED` 镜像用例，重命名 1 个） |
+| 范围（Phase 2） | `reviewer` 列（`tools/models.py` + `tools/database/engine.py` 迁移 + `schema/task.py` + DAO）、`verify_task` 工具（`tool_task.py`）、`member_complete` 分流 `IN_REVIEW`（`task_manager.py`）、`view_task(action=in_review)`、`TASK_SUBMITTED_FOR_REVIEW`/`TASK_VERIFIED`/`TASK_REVISION_REQUESTED` 事件、reviewer 权限集（`tool_permissions.py`/`tool_factory.py`）、事件路由（`agent/coordination/handlers/task_board.py` + `i18n.py`）、描述（`locales/`） |
+| 测试基线 | `python -m pytest tests/unit_tests/agent_teams` → Phase 1 后 **1800 passed / 16 skipped**；Phase 2 新增 `test_verify_gate.py`（11 例）+ `test_tool_variants.py` verify-gate 段 + 3 个 coordination 用例 + 1 个 DB 迁移用例 |
 | Refs | #751 |
 | 关系 | **取代 F_58 的 `STARTED`**（折叠，`STARTED` 不进 git 历史），保留 F_58 的其余成果（见 §与 F_57/F_58 的关系）；延续 F_57 的工具形态框架 |
 
@@ -231,6 +231,28 @@ F_58 未提交，本设计**取代它的 `STARTED`**，但保留其余全部：
 `PLANNING`。plan-mode 完成门控（旧"只能完成 PLAN_APPROVED"）由转移表 `PLANNING → COMPLETED`
 非法天然兜底，故删除。DAO `claim_task(to_status=...)` 参数化承载 `IN_PROGRESS` / `PLANNING`
 两个目标。
+
+### Phase 2 实现补充：reviewer / verify 闸落地
+
+- **reviewer 存储**：`TeamTaskBase.reviewer` 是 JSON 编码的 member 名列表（nullable），
+  `reviewers()` 解析成 `list[str]`。不建规范化 join 表——v1 验证是 team 级、任务板小，
+  `get_review_tasks` 用状态索引取 `IN_REVIEW` 行再在内存里过滤"reviewer 含我"即可；列表也为
+  未来投票预留。迁移在 `engine._ensure_dynamic_table_indexes` 里 `ALTER TABLE ADD COLUMN
+  reviewer` + 旧执行态值折叠（`claimed`/`started`/`plan_approved → in_progress`）。
+- **完成分流**：`complete()` 先查任务 `reviewers()`，非空 → `submit_for_review`（`IN_PROGRESS →
+  IN_REVIEW` 纯翻转，不解依赖、author 不释放），发 `TASK_SUBMITTED_FOR_REVIEW`；空 → 原
+  `complete_task`（`→ COMPLETED` + 解依赖）。`member_complete_task` / `claim_task(completed)`
+  完成后 re-fetch 任务，据实反馈"已完成"或"已提交验证"。
+- **`verify_task` 守卫**：任务须 `IN_REVIEW`、caller ∈ reviewer 列、caller ≠ author（不可自验）。
+  `pass` 复用 `complete_task`（`IN_REVIEW → COMPLETED` + 解依赖）发 `TASK_VERIFIED`；`fail` 走
+  `revise_task`（`IN_REVIEW → IN_PROGRESS`）发 `TASK_REVISION_REQUESTED`（feedback 定向 author）。
+- **框架分发（in-process）**：`TaskBoardHandler` 路由三事件——`TASK_SUBMITTED_FOR_REVIEW` 唤醒
+  reviewer 列里的成员去验证、`TASK_REVISION_REQUESTED` 唤醒 author 返工、`TASK_VERIFIED` 释放
+  author（验证期被一活跃约束卡住，通过后去找新活）。reviewer 拉取用 `view_task(action=in_review)`。
+- **权限**：`verify_task` 进三个成员集（autonomous / scheduled / human_agent），不进 leader
+  集——reviewer 是成员能力，工具自身守卫 reviewer 成员资格。**人类 reviewer 的自动通知未做**：
+  HUMAN_AGENT 事件白名单保持不变（HITT 模型下人类 avatar 不自主 nudge、由 controller 驱动），
+  人类可在 controller 指令下用 `verify_task`，自动派发留作 HITT follow-up。
 
 ## 影响面（改动清单，实现时展开）
 
