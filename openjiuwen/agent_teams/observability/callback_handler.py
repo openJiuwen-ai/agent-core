@@ -289,8 +289,9 @@ class OtelCallbackHandler:
                 tc_json=tc_json, response=kwargs.get("response"),
                 usage=kwargs.get("usage"),
             )
-        except Exception as exc:
-            team_logger.warning("otel: on_llm_output failed: {}", exc)
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                team_logger.warning("otel: on_llm_output failed: {}", exc)
             # State was already popped — if we don't end the span here it
             # becomes an orphan (cascade_close_children can't find it) and
             # is ended later by ActiveSpanTracker.flush_* with no output attrs.
@@ -301,6 +302,8 @@ class OtelCallbackHandler:
                         state.span.end()
                 except Exception as cleanup_exc:
                     team_logger.warning("otel: on_llm_output cleanup also failed: {}", cleanup_exc)
+            if not isinstance(exc, Exception):
+                raise
 
     async def on_llm_invoke_output(self, *args: Any, **kwargs: Any) -> Any:
         state = None
@@ -313,8 +316,9 @@ class OtelCallbackHandler:
             state = pop_llm_span_state()
             response = kwargs.get("result")
             self._close_llm_span(state, response)
-        except Exception as exc:
-            team_logger.warning("otel: on_llm_invoke_output failed: {}", exc)
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                team_logger.warning("otel: on_llm_invoke_output failed: {}", exc)
             if state is not None:
                 try:
                     if state.span.is_recording():
@@ -322,6 +326,8 @@ class OtelCallbackHandler:
                         state.span.end()
                 except Exception as cleanup_exc:
                     team_logger.warning("otel: on_llm_invoke_output cleanup also failed: {}", cleanup_exc)
+            if not isinstance(exc, Exception):
+                raise
         return kwargs.get("result")
 
     async def on_llm_call_error(self, *args: Any, **kwargs: Any) -> None:
@@ -342,8 +348,9 @@ class OtelCallbackHandler:
                 else:
                     state.span.set_status(Status(StatusCode.ERROR, "llm call error"))
                 state.span.end()
-        except Exception as exc:
-            team_logger.exception("otel: on_llm_call_error failed: {}", exc)
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                team_logger.exception("otel: on_llm_call_error failed: {}", exc)
             if state is not None:
                 try:
                     if state.span.is_recording():
@@ -351,6 +358,8 @@ class OtelCallbackHandler:
                         state.span.end()
                 except Exception as cleanup_exc:
                     team_logger.warning("otel: on_llm_call_error cleanup also failed: {}", cleanup_exc)
+            if not isinstance(exc, Exception):
+                raise
 
     # ------------------------------------------------------------------
     # Tool
@@ -671,14 +680,17 @@ class OtelCallbackHandler:
                 tc_json=tc_json, response=response,
                 usage=getattr(response, "usage_metadata", None),
             )
-        except Exception as exc:
-            team_logger.warning("otel: _close_llm_span failed: {}", exc)
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                team_logger.warning("otel: _close_llm_span failed: {}", exc)
             try:
                 if state.span.is_recording():
                     state.span.set_status(Status(StatusCode.ERROR, f"_close_llm_span failed: {exc}"))
                     state.span.end()
             except Exception as cleanup_exc:
                 team_logger.warning("otel: _close_llm_span cleanup also failed: {}", cleanup_exc)
+            if not isinstance(exc, Exception):
+                raise
 
     def _finalize_llm_span_output(
         self,
