@@ -205,7 +205,7 @@ class TestSkillCreateRailPrompts:
 
         prompt = builder.build()
 
-        assert prompt.index("## 演进协议") < prompt.index("## 技能沉淀自检")
+        assert prompt.index("## 技能演进自检") < prompt.index("## 技能沉淀自检")
         assert "用户确认创建后，使用 `skill-creator`" in prompt
         assert "用户确认创建新 Skill 不是确认 Skill 演进" in prompt
         assert "不要调用 `prepare_skill_evolution`、`evolve_review_task` 或 `evolve_skill_experiences`" in prompt
@@ -217,7 +217,7 @@ class TestSkillCreateRailPrompts:
 
         prompt = builder.build()
 
-        assert prompt.index("## Evolution Protocol") < prompt.index("## Skill Capture Self-Check")
+        assert prompt.index("## Skill Evolution Self-Check") < prompt.index("## Skill Capture Self-Check")
         assert "use `skill-creator` or a compatible skill creation capability" in prompt
         assert "User confirmation to create a new Skill is not consent for Skill evolution" in prompt
         assert "do not call" in prompt

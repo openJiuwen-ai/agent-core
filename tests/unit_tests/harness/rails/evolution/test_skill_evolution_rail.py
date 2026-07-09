@@ -23,12 +23,6 @@ from openjiuwen.agent_evolving.experience import (
 )
 from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
-from openjiuwen.agent_evolving.prompts.sections import (
-    EVOLUTION_FUZZY_REVIEW_PROMPT_CN,
-    EVOLUTION_FUZZY_REVIEW_PROMPT_EN,
-    EVOLUTION_FUZZY_REVIEW_RULES_CN,
-    EVOLUTION_FUZZY_REVIEW_RULES_EN,
-)
 from openjiuwen.agent_evolving.signal import (
     EvolutionSignal,
     SignalDetector,
@@ -367,7 +361,9 @@ def test_properties_and_clear_processed_signals(tmp_path):
     rail.clear_processed_signals()
 
     assert rail.auto_scan is False
+    assert rail.signal_trigger is False
     assert rail.fuzzy_review is True
+    assert rail.review_trigger is True
     assert rail.auto_save is False
     assert rail.processed_signal_keys == set()
 
@@ -375,10 +371,73 @@ def test_properties_and_clear_processed_signals(tmp_path):
 
     assert rail.auto_scan is False
     assert rail.fuzzy_review is False
+    assert rail.review_trigger is False
 
-    rail.fuzzy_review = True
+    rail.signal_trigger = True
+    rail.review_trigger = True
 
+    assert rail.auto_scan is True
     assert rail.fuzzy_review is True
+
+
+def test_signal_and_review_trigger_constructor_aliases(tmp_path):
+    rail = SkillEvolutionRail(
+        skills_dir=str(tmp_path),
+        llm=Mock(),
+        model="dummy",
+        signal_trigger=False,
+        review_trigger=False,
+        review_runtime=_default_review_runtime(),
+    )
+
+    assert rail.auto_scan is False
+    assert rail.fuzzy_review is False
+
+    rail = SkillEvolutionRail(
+        skills_dir=str(tmp_path),
+        llm=Mock(),
+        model="dummy",
+        auto_scan=False,
+        signal_trigger=False,
+        fuzzy_review=False,
+        review_trigger=False,
+        review_runtime=_default_review_runtime(),
+    )
+
+    assert rail.signal_trigger is False
+    assert rail.review_trigger is False
+
+
+def test_signal_and_review_trigger_defaults_off(tmp_path):
+    rail = SkillEvolutionRail(
+        skills_dir=str(tmp_path),
+        llm=Mock(),
+        model="dummy",
+        review_runtime=_default_review_runtime(),
+    )
+
+    assert rail.signal_trigger is False
+    assert rail.auto_scan is False
+    assert rail.review_trigger is False
+    assert rail.fuzzy_review is False
+
+
+def test_signal_and_review_trigger_constructor_prefers_new_names(tmp_path):
+    rail = SkillEvolutionRail(
+        skills_dir=str(tmp_path),
+        llm=Mock(),
+        model="dummy",
+        auto_scan=True,
+        signal_trigger=False,
+        fuzzy_review=True,
+        review_trigger=False,
+        review_runtime=_default_review_runtime(),
+    )
+
+    assert rail.signal_trigger is False
+    assert rail.auto_scan is False
+    assert rail.review_trigger is False
+    assert rail.fuzzy_review is False
 
 
 def test_auto_save_defaults_false_and_setter_still_updates(tmp_path):
@@ -964,8 +1023,26 @@ async def test_evolution_protocol_section_is_injected_without_command_parsing(tm
     section = builder.get_section(SectionName.EVOLUTION_PROTOCOL)
     assert section is not None
     assert section.name == SectionName.EVOLUTION_PROTOCOL
-    assert "当前轮必须立即进入工具流程" in section.content["cn"]
-    assert "最小必要澄清" in section.content["cn"]
+    assert "## 技能演进自检" in section.content["cn"]
+    for heading in (
+        "### 判断场景",
+        "#### 应考虑演进",
+        "#### 不应演进",
+        "### 用户意图信号",
+        "### 回复与确认规则",
+        "#### 最终回复",
+        "#### 用户确认",
+        "#### 工具执行",
+    ):
+        assert heading in section.content["cn"]
+    assert "### 核心原则" not in section.content["cn"]
+    assert "#### 运行时 follow-up" not in section.content["cn"]
+    assert "不要因为创建确认调用" not in section.content["cn"]
+    assert "流程过时" in section.content["cn"]
+    assert "环境不匹配" in section.content["cn"]
+    assert "fallback 缺失" in section.content["cn"]
+    assert "无法抽象成 Skill 的流程、环境前置条件、fallback 或排障路径更新" in section.content["cn"]
+    assert "prepare_skill_evolution" in section.content["cn"]
     assert ctx.inputs.messages == original_messages
 
 
@@ -981,8 +1058,18 @@ async def test_evolution_protocol_section_supports_english(tmp_path):
     section = builder.get_section(SectionName.EVOLUTION_PROTOCOL)
     assert section is not None
     assert section.name == SectionName.EVOLUTION_PROTOCOL
-    assert "immediately enter the tool" in section.content["en"]
-    assert "minimum necessary clarification" in section.content["en"]
+    assert "## Skill Evolution Self-Check" in section.content["en"]
+    assert "### Decision Scenarios" in section.content["en"]
+    assert "#### Consider Evolving" in section.content["en"]
+    assert "#### Do Not Evolve" in section.content["en"]
+    assert "### User Intent Signals" in section.content["en"]
+    assert "### Reply And Confirmation Rules" in section.content["en"]
+    assert "#### Tool Execution" in section.content["en"]
+    assert "#### Runtime Follow-Up" not in section.content["en"]
+    assert "from creation confirmation" not in section.content["en"]
+    assert "Skill workflow is outdated" in section.content["en"]
+    assert "environment mismatch" in section.content["en"]
+    assert "missing preconditions, fallback, or troubleshooting guidance" in section.content["en"]
 
 
 def _make_task_iteration_ctx(
@@ -1138,18 +1225,32 @@ def test_fuzzy_review_interval_must_be_positive(tmp_path):
         _make_rail(tmp_path, fuzzy_review_interval=0)
 
 
-def test_cn_fuzzy_review_prompts_share_rule_text():
-    assert EVOLUTION_FUZZY_REVIEW_RULES_CN in EVOLUTION_FUZZY_REVIEW_PROMPT_CN
-    assert EVOLUTION_FUZZY_REVIEW_RULES_CN in _FUZZY_REVIEW_PROMPT_CN
+def test_cn_fuzzy_review_prompt_references_standing_rules():
+    assert "运行时自动插入的 Skill 演进 follow-up" in _FUZZY_REVIEW_PROMPT_CN
+    assert "请参考“技能演进自检”规则" in _FUZZY_REVIEW_PROMPT_CN
+    assert "常驻提示词" not in _FUZZY_REVIEW_PROMPT_CN
+    assert "prepare_skill_evolution" not in _FUZZY_REVIEW_PROMPT_CN
 
 
-def test_en_fuzzy_review_prompts_share_rule_text():
-    assert EVOLUTION_FUZZY_REVIEW_RULES_EN in EVOLUTION_FUZZY_REVIEW_PROMPT_EN
-    assert EVOLUTION_FUZZY_REVIEW_RULES_EN in _FUZZY_REVIEW_PROMPT_EN
+def test_en_fuzzy_review_prompt_references_standing_rules():
+    assert "runtime-inserted Skill evolution follow-up" in _FUZZY_REVIEW_PROMPT_EN
+    assert 'Refer to the "Skill Evolution Self-Check" rules' in _FUZZY_REVIEW_PROMPT_EN
+    assert "standing" not in _FUZZY_REVIEW_PROMPT_EN
+    assert "prepare_skill_evolution" not in _FUZZY_REVIEW_PROMPT_EN
+
+
+def test_fuzzy_review_followup_prompt_is_tagged(tmp_path):
+    rail = _make_rail(tmp_path)
+
+    prompt = rail._build_fuzzy_review_followup_prompt()
+
+    assert prompt.startswith("<auto_skill_evolution_review_followup>")
+    assert prompt.endswith("</auto_skill_evolution_review_followup>")
+    assert "技能演进自检" in prompt
 
 
 @pytest.mark.asyncio
-async def test_evolution_protocol_section_omits_fuzzy_review_when_disabled(tmp_path):
+async def test_evolution_protocol_section_omits_runtime_followup_rules(tmp_path):
     rail = _make_rail(tmp_path, fuzzy_review=False)
     builder = SystemPromptBuilder(language="en")
     agent = SimpleNamespace(system_prompt_builder=builder)
@@ -1159,6 +1260,8 @@ async def test_evolution_protocol_section_omits_fuzzy_review_when_disabled(tmp_p
 
     section = builder.get_section(SectionName.EVOLUTION_PROTOCOL)
     assert section is not None
+    assert "Runtime Follow-Up" not in section.content["en"]
+    assert "runtime-inserted Skill evolution follow-up" not in section.content["en"]
 
 
 @pytest.mark.asyncio

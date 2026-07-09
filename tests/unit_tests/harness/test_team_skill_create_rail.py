@@ -244,7 +244,7 @@ class TestTeamSkillCreateRailPrompts:
 
         prompt = builder.build()
 
-        assert prompt.index("## 团队 Skill 演进关注点") < prompt.index("## 团队技能沉淀自检")
+        assert prompt.index("## 团队 Skill 演进自检") < prompt.index("## 团队技能沉淀自检")
         assert "用户确认创建后，使用 `swarmskill-creator`" in prompt
         assert "用户确认创建新团队技能不是确认 Swarm Skill 演进" in prompt
         assert "不要调用 `prepare_skill_evolution`、`evolve_review_task`" in prompt
@@ -257,7 +257,7 @@ class TestTeamSkillCreateRailPrompts:
 
         prompt = builder.build()
 
-        assert prompt.index("## Team Skill Evolution Focus") < prompt.index("## Team Skill Capture Self-Check")
+        assert prompt.index("## Team Skill Evolution Self-Check") < prompt.index("## Team Skill Capture Self-Check")
         assert "use `swarmskill-creator` or a compatible team skill creation capability" in prompt
         assert "User confirmation to create a new team skill is not consent for" in prompt
         assert "Swarm Skill evolution" in prompt

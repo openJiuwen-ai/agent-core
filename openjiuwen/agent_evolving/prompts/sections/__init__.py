@@ -3,10 +3,6 @@
 """Agent evolution prompt section builders."""
 
 from openjiuwen.agent_evolving.prompts.sections.evolution import (
-    EVOLUTION_FUZZY_REVIEW_PROMPT_CN,
-    EVOLUTION_FUZZY_REVIEW_PROMPT_EN,
-    EVOLUTION_FUZZY_REVIEW_RULES_CN,
-    EVOLUTION_FUZZY_REVIEW_RULES_EN,
     EVOLUTION_PROTOCOL_PROMPT,
     TEAM_EVOLUTION_PROTOCOL_PROMPT,
     build_evolution_protocol_section,
@@ -19,10 +15,6 @@ from openjiuwen.agent_evolving.prompts.sections.skill_creation import (
 )
 
 __all__ = [
-    "EVOLUTION_FUZZY_REVIEW_PROMPT_CN",
-    "EVOLUTION_FUZZY_REVIEW_PROMPT_EN",
-    "EVOLUTION_FUZZY_REVIEW_RULES_CN",
-    "EVOLUTION_FUZZY_REVIEW_RULES_EN",
     "EVOLUTION_PROTOCOL_PROMPT",
     "TEAM_EVOLUTION_PROTOCOL_PROMPT",
     "build_evolution_protocol_section",
