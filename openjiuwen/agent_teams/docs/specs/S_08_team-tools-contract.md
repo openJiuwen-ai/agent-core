@@ -195,6 +195,16 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     ——那会给原子的 `create_task` 引入不可回滚的部分成功态。`PENDING(assignee) → IN_PROGRESS` 由
     `TeamTaskManager.start_task`（调度器调用）完成，`BLOCKED(assignee)` 依赖解除后回
     `PENDING(assignee)` 等调度器开工——这些何时发生属 runtime 调度器职责，不是工具层的补丁。
+20. **verify 闸：reviewer 由 leader 指派，验证由 reviewer 裁决**（F_59）。任务的 `reviewer`
+    列（JSON member 名列表）经 `create_task` / `update_task` 由 leader 指派，可多个，须是真实成员
+    且 ≠ `assignee`（不可自审）。author 经 `member_complete_task` / `claim_task(completed)` 完成时，
+    `complete()` 按有无 reviewer 分流：有 → `IN_PROGRESS → IN_REVIEW`（发 `TASK_SUBMITTED_FOR_REVIEW`，
+    不解依赖、author 不释放）；无 → 直接 `COMPLETED`。reviewer 经 `verify_task(decision)` 裁决：
+    `pass` → `IN_REVIEW → COMPLETED`（解依赖，发 `TASK_VERIFIED`）/ `fail` → `IN_REVIEW → IN_PROGRESS`
+    （返工，`feedback` 定向 author，发 `TASK_REVISION_REQUESTED`）。`verify_task` 守卫：任务须
+    `IN_REVIEW`、caller ∈ `reviewer` 列且 ≠ author；进 autonomous / scheduled / human_agent 成员集，
+    不进 leader 集。多 reviewer v1「首个裁决即生效」，投票机制留后。`view_task(action=in_review)`
+    是 reviewer 拉取待验证任务的入口。
 
 ## 接口契约
 
