@@ -70,12 +70,16 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 class CapabilityOverrides:
     """Runtime capability overrides for a single build_team call.
 
-    Both flags default to None, meaning "inherit the spec ceiling".
-    Pass True/False to explicitly enable or disable the capability for this run.
+    Flags default to None, meaning "inherit the spec ceiling". Pass
+    True/False to explicitly enable or disable the capability for this run.
+    The dispatch mode is NOT overridable here — it is static spec
+    configuration (F_62): prompts and tool shapes are assembled per mode at
+    build time, so one team instance never changes mode at runtime.
     """
 
     enable_hitt: bool | None = None
     enable_bridge: bool | None = None
+    enable_task_verification: bool | None = None
 
 
 class TeamBackend:
@@ -105,6 +109,8 @@ class TeamBackend:
         enable_hitt: bool = False,
         enable_bridge: bool = False,
         *,
+        dispatch_mode: str = "autonomous",
+        enable_task_verification: bool = False,
         external_cli_agents: list[ExternalCliAgentSpec] | None = None,
         on_before_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
@@ -146,6 +152,13 @@ class TeamBackend:
                 When False, ``spawn_bridge_agent`` returns failure and
                 predefined BRIDGE_AGENT members are skipped at
                 ``build_team`` time.
+            dispatch_mode: The team's dispatch mode, straight from
+                ``TeamAgentSpec.dispatch_mode`` (F_62). Static configuration —
+                identical on every member process; selects ``verify_task``'s
+                verdict policy through the task manager.
+            enable_task_verification: Spec-level "verification expected"
+                ceiling (F_62); ``build_team`` may override the runtime
+                instance flag, mirroring ``enable_hitt``.
             external_cli_agents: Static launch configs for external CLI
                 agents (``TeamAgentSpec.external_cli_agents``). The
                 non-empty set of declared ``cli_agent`` names is the
@@ -205,6 +218,14 @@ class TeamBackend:
         # on the same flag for dynamic spawn.
         self._spec_enable_bridge: bool = enable_bridge
         self._enable_bridge: bool = enable_bridge
+        # Dispatch mode (F_62): static spec configuration, identical on every
+        # member process. Prompts and tool shapes are assembled per mode at
+        # build time; nothing flips it at runtime.
+        self.dispatch_mode: str = dispatch_mode
+        # Verification expectation (F_62): spec ceiling + runtime effective
+        # flag, mirroring the ``enable_hitt`` pattern.
+        self._spec_enable_task_verification: bool = enable_task_verification
+        self._enable_task_verification: bool = enable_task_verification
         # Fired once on the build_team / clean_team success paths so the
         # hosting TeamAgent can persist DB lifecycle state and latch
         # state.team_cleaned deterministically inside the leader's round.
@@ -220,6 +241,7 @@ class TeamBackend:
             plans_dir=plan_storage_dir,
             team_plan_id=plan_id,
             leader_member_name=self.leader_member_name,
+            dispatch_mode=dispatch_mode,
         )
         # Per-human-agent callback fired by the leader's dispatcher when
         # a team-side message reaches the avatar — see
@@ -1128,11 +1150,14 @@ class TeamBackend:
                 ``leader_prompt`` constructor arg, not here).
             overrides: Optional runtime capability overrides. Use
                 ``CapabilityOverrides(enable_hitt=True/False)`` to override
-                the HITT or bridge capability ceiling for this run. None
-                means each flag inherits its spec ceiling.
+                the HITT or bridge capability ceiling for this run; None means
+                each flag inherits its spec ceiling. ``dispatch_mode`` follows
+                the F_62 rule instead: None -> "autonomous", "scheduled" must
+                be explicit and requires the spec ceiling.
         """
         enable_hitt = overrides.enable_hitt if overrides is not None else None
         enable_bridge = overrides.enable_bridge if overrides is not None else None
+        enable_task_verification = overrides.enable_task_verification if overrides is not None else None
         # Step A: enforce spec ceiling
         if enable_hitt is True and not self._spec_enable_hitt:
             from openjiuwen.core.common.exception.codes import StatusCode
@@ -1165,8 +1190,16 @@ class TeamBackend:
         self._enable_hitt = effective_enable_hitt
         effective_enable_bridge = self._spec_enable_bridge if enable_bridge is None else enable_bridge
         self._enable_bridge = effective_enable_bridge
+        effective_task_verification = (
+            self._spec_enable_task_verification
+            if enable_task_verification is None
+            else enable_task_verification
+        )
+        self._enable_task_verification = effective_task_verification
 
-        # Create team in database
+        # Create team in database. dispatch_mode is recorded from the spec
+        # (informational — the spec is the runtime source of truth, F_62);
+        # the effective verification flag is persisted alongside.
         team_name = self.team_name
         leader_member_name = self.member_name
         success = await self.db.team.create_team(
@@ -1174,6 +1207,8 @@ class TeamBackend:
             display_name=display_name,
             leader_member_name=leader_member_name,
             desc=desc,
+            dispatch_mode=self.dispatch_mode,
+            enable_task_verification=effective_task_verification,
         )
 
         if not success:
@@ -1425,6 +1460,15 @@ class TeamBackend:
         off" while ``spawn_human_agent`` waits to be called.
         """
         return self._enable_hitt
+
+    def task_verification_enabled(self) -> bool:
+        """Whether task verification is expected for this team instance.
+
+        Prompt-level guidance flag (F_62): the leader is asked to assign
+        reviewers when creating tasks. The reviewer machinery itself works
+        regardless of this flag.
+        """
+        return self._enable_task_verification
 
     # ------------------------------------------------------------------
     # Bridge-agent surface

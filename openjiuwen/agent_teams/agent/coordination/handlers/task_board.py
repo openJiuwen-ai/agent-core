@@ -457,3 +457,54 @@ class TaskBoardHandler(BaseCoordinationHandler):
             lines.append(render_task_line(task, now_ms=now_ms))
 
         await self._round.deliver_input(render_event(kind="task-board", body="\n".join(lines)))
+
+
+class ScheduledTaskBoardHandler(TaskBoardHandler):
+    """Task-board reactions of a scheduled-dispatch team instance (F_62).
+
+    Under scheduled dispatch every task handoff — start, review request,
+    rework, verified — arrives as a leader-identity mailbox message from the
+    scheduler (``agent/scheduling/``), and the leader's board awareness comes
+    from the scheduler's digests and escalations. What remains for the
+    event-driven side is therefore only:
+
+    * the targeted ownership steers inherited from the base class
+      (``TASK_CLAIMED`` / ``TASK_REVOKED`` / ``TASK_CANCELLED`` /
+      ``TASK_UPDATED`` — the leader's ``update_task`` works the same in both
+      modes), and
+    * keeping periodic polling alive on board churn.
+
+    The verify-gate self-steers and the idle-agent board surveys of the base
+    class would double-deliver next to the scheduler's mails, so this class
+    redefines what a board event *means* in this mode: resume polls, nothing
+    else. Selection happens where handlers are assembled
+    (``EventDispatcher``), never inside a handler method.
+    """
+
+    EVENT_METHOD_MAP: ClassVar[dict[str, str]] = {
+        **TaskBoardHandler.EVENT_METHOD_MAP,
+        # Review voting exists only under scheduled dispatch: votes are pure
+        # board observability — the leader-side scheduler tallies them.
+        TeamEvent.TASK_REVIEW_VOTE: "on_task_board_event",
+        # The verify-gate handoffs are the scheduler's mails in this mode.
+        TeamEvent.TASK_SUBMITTED_FOR_REVIEW: "on_task_board_event",
+        TeamEvent.TASK_VERIFIED: "on_task_board_event",
+        TeamEvent.TASK_REVISION_REQUESTED: "on_task_board_event",
+    }
+
+    async def on_task_board_event(self, event: EventMessage) -> None:
+        """Board churn in scheduled dispatch: keep polling alive, wake nobody.
+
+        There is no claimable pool (every task is pre-assigned) and the
+        scheduler owns both member handoffs and leader awareness — an
+        event-driven survey here would only burn rounds.
+        """
+        member_name = self._blueprint.member_name
+        if not member_name or self._infra.task_manager is None:
+            return
+        await self._poll.resume_polls()
+        team_logger.debug(
+            "[{}] scheduled dispatch: board event {} observed, no nudge",
+            member_name,
+            event.event_type,
+        )

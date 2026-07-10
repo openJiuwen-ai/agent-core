@@ -4,7 +4,8 @@
 """Team SQLModel definitions and dynamic model factories.
 
 Static tables: Team, TeamMember.
-Dynamic (per-session) tables: TeamTask, TeamTaskDependency, TeamMessage, MessageReadStatus.
+Dynamic (per-session) tables: TeamTask, TeamTaskDependency, TeamMessage,
+MessageReadStatus, TeamTaskReviewVote.
 Configuration: DatabaseType, DatabaseConfig.
 """
 
@@ -24,6 +25,7 @@ TEAM_DYNAMIC_TABLE_PREFIXES = (
     "team_task_",
     "team_message_",
     "message_read_status_",
+    "team_review_vote_",
 )
 TEAM_STATIC_TABLES_TO_CLEAR = (
     "team_info",
@@ -42,6 +44,13 @@ class Team(SQLModel, table=True):
     leader_member_name: str = Field(nullable=False)
     desc: Optional[str] = Field(default=None, nullable=True)
     prompt: Optional[str] = Field(default=None, nullable=True)
+    # Effective dispatch mode chosen by the leader at build_team time
+    # ("autonomous" / "scheduled", F_62). Persisted so cold recovery — which
+    # rebuilds the leader backend from the spec ceiling — restores the same
+    # per-instance choice (scheduler activation, verify_task policy).
+    dispatch_mode: str = Field(default="autonomous", nullable=False)
+    # Effective "verification expected" flag chosen at build_team time (F_62).
+    enable_task_verification: bool = Field(default=False, nullable=False)
     created: int = Field(sa_type=BigInteger, nullable=False)
     # Bumped on every roster-affecting write so consumers (e.g.
     # TeamPolicyRail prompt cache) can probe a single column for change
@@ -125,8 +134,17 @@ class TeamTaskBase(SQLModel):
     # JSON text rather than a normalized join table because v1 verification is
     # team-scale (small boards, "reviewer contains X" resolved by an in-memory
     # filter over the status-indexed IN_REVIEW rows), and the list also backs
-    # the future voting mechanism. See F_59.
+    # the voting mechanism (vote rows live in team_review_vote_*). See F_59/F_62.
     reviewer: Optional[str] = Field(default=None, nullable=True)
+    # Review round counter (F_62): bumped atomically with every
+    # IN_PROGRESS -> IN_REVIEW flip so votes of a superseded round are
+    # naturally void (vote rows record the round they were cast in). 0 means
+    # the task never entered review.
+    review_round: int = Field(default=0, nullable=False)
+    # Per-task review-round ceiling (F_62): when a round beyond this ceiling
+    # still fails, the scheduler escalates to the leader instead of looping
+    # rework. NULL falls back to ``TeamAgentSpec.default_max_review_rounds``.
+    max_review_rounds: Optional[int] = Field(default=None, nullable=True)
     updated_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True)
 
     def brief(self) -> dict:
@@ -157,6 +175,29 @@ class TeamTaskDependencyBase(SQLModel):
     # No index on team_name (A1) — see TeamTaskBase.
     team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE")
     resolved: Optional[bool] = Field(default=False, nullable=True, index=True)
+
+
+class TeamTaskReviewVoteBase(SQLModel):
+    """Base class for review vote tables (one per session). See F_62.
+
+    Append-only vote facts for the verify gate under scheduled dispatch: a
+    reviewer changing their mind INSERTs a new row and the tally takes each
+    reviewer's latest row (highest ``id``) within the task's current
+    ``review_round`` — no UPDATE path, no lost-update window, and the full
+    voting history stays auditable. Verdict policy (threshold math) lives in
+    the leader-side scheduler, not here.
+    """
+    __abstract__ = True
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    # No index on team_name (A1) — see TeamTaskBase.
+    team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE")
+    task_id: str = Field(nullable=False)
+    review_round: int = Field(nullable=False)
+    reviewer: str = Field(nullable=False)
+    decision: str = Field(nullable=False)
+    feedback: Optional[str] = Field(default=None, nullable=True)
+    created_at: int = Field(sa_type=BigInteger, nullable=False)
 
 
 class TeamMessageBase(SQLModel):
@@ -227,6 +268,7 @@ _task_models: Dict[str, type[TeamTaskBase]] = {}
 _task_dependency_models: Dict[str, type[TeamTaskDependencyBase]] = {}
 _message_models: Dict[str, type[TeamMessageBase]] = {}
 _message_read_status_models: Dict[str, type[MessageReadStatusBase]] = {}
+_review_vote_models: Dict[str, type[TeamTaskReviewVoteBase]] = {}
 
 
 def _get_task_model() -> type[TeamTaskBase]:
@@ -345,9 +387,40 @@ def _get_message_read_status_model() -> type[MessageReadStatusBase]:
     return _message_read_status_models[session_id]
 
 
+def _get_review_vote_model() -> type[TeamTaskReviewVoteBase]:
+    """Get or create the dynamic review-vote model for the current session.
+
+    Table name deliberately avoids the ``team_task_`` prefix so the
+    task-table migration sweep in ``database/engine.py`` never
+    misclassifies it.
+    """
+    session_id = get_session_id()
+    if session_id not in _review_vote_models:
+        suffix = _sanitize_session_id_for_table(session_id)
+        class_name = f"TeamTaskReviewVote_{suffix}"
+        table_name = f"team_review_vote_{suffix}"
+
+        # Composite (task_id, review_round): the only read is "votes of one
+        # task's current round" (tally + dispatch bookkeeping), so a single
+        # composite serves it and INSERT pays 2 B-tree writes (PK + 1).
+        attrs = {
+            "__tablename__": table_name,
+            "__table_args__": (
+                Index(f"ix_{table_name}_task_round", "task_id", "review_round"),
+            ),
+        }
+
+        model_cls = SQLModelMetaclass(class_name, (TeamTaskReviewVoteBase,), attrs, table=True)
+
+        _review_vote_models[session_id] = cast(type[TeamTaskReviewVoteBase], model_cls)
+
+    return _review_vote_models[session_id]
+
+
 def _clear_session_model_cache(session_id: str) -> None:
     """Clear cached dynamic models for a session so they are rebuilt on next access."""
     _task_models.pop(session_id, None)
     _task_dependency_models.pop(session_id, None)
     _message_models.pop(session_id, None)
     _message_read_status_models.pop(session_id, None)
+    _review_vote_models.pop(session_id, None)

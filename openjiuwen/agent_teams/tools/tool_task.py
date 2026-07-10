@@ -226,10 +226,12 @@ class ScheduledTaskCreateTool(TeamTool):
     Same atomic ``add_graph`` and same edge rules as ``TaskCreateTool``, plus
     a required ``assignee`` that rides along in the same mutation: the task
     rests at PENDING (or BLOCKED, if it has dependencies) *with its owner on
-    record*, and the scheduler moves it to STARTED when execution begins.
-    Members never claim in this mode, so a task without an assignee would
-    never run — hence ``assignee`` is required
-    and the result echoes the owner and landing status.
+    record*, and the scheduler starts it when execution begins. Members never
+    claim in this mode, so a task without an assignee would never run — hence
+    ``assignee`` is required and the result echoes the owner and landing
+    status. ``max_review_rounds`` optionally caps the verify-gate rework loop
+    of one task (requires ``reviewer``, F_62); beyond it the scheduler
+    escalates to the leader instead of looping.
     """
 
     def __init__(self, agent_team: TeamBackend, t: Translator):
@@ -251,6 +253,11 @@ class ScheduledTaskCreateTool(TeamTool):
                         t,
                         extra_properties={
                             "assignee": {"type": "string", "description": t("create_task", "task.assignee")},
+                            "max_review_rounds": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": t("create_task", "task.max_review_rounds"),
+                            },
                         },
                         extra_required=["assignee"],
                     ),
@@ -278,6 +285,22 @@ class ScheduledTaskCreateTool(TeamTool):
                 return f"Task {_spec_label(spec)!r}: member {assignee!r} not found in the team"
         return None
 
+    @staticmethod
+    def _validate_review_rounds(tasks: list[dict]) -> str | None:
+        """Reject a round ceiling on a task that has no reviewers to vote."""
+        for spec in tasks:
+            rounds = spec.get("max_review_rounds")
+            if rounds is None:
+                continue
+            if not isinstance(rounds, int) or isinstance(rounds, bool) or rounds < 1:
+                return f"Task {_spec_label(spec)!r}: 'max_review_rounds' must be an integer >= 1"
+            if not _clean_reviewers(spec):
+                return (
+                    f"Task {_spec_label(spec)!r}: 'max_review_rounds' only applies to reviewed "
+                    f"tasks — set 'reviewer' as well, or drop the round ceiling"
+                )
+        return None
+
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         tasks = inputs.get("tasks", [])
         if not tasks:
@@ -287,6 +310,9 @@ class ScheduledTaskCreateTool(TeamTool):
         if error:
             return ToolOutput(success=False, error=error)
         error = await self._validate_assignees(tasks)
+        if error:
+            return ToolOutput(success=False, error=error)
+        error = self._validate_review_rounds(tasks)
         if error:
             return ToolOutput(success=False, error=error)
         error = await _validate_reviewers(self.agent_team, tasks)
@@ -301,8 +327,9 @@ class ScheduledTaskCreateTool(TeamTool):
                     task_id=spec.get("task_id"),
                     depends_on=tuple(spec.get("depends_on") or ()),
                     depended_by=tuple(spec.get("depended_by") or ()),
-                    assignee=(spec.get("assignee") or "").strip(),
+                    assignee=(spec.get("assignee") or "").strip() or None,
                     reviewer=tuple(_clean_reviewers(spec)),
+                    max_review_rounds=spec.get("max_review_rounds"),
                 )
                 for spec in tasks
             ]
@@ -310,21 +337,29 @@ class ScheduledTaskCreateTool(TeamTool):
         if not result.ok:
             return ToolOutput(success=False, error=result.reason)
 
-        # The owner and landing status are the whole point of this variant:
-        # the leader must tell "started now" from "waiting on dependencies"
-        # without a follow-up view_task.
+        # The owner and landing status are the whole point of the scheduled
+        # contract: the leader must tell "starts now" from "waiting on
+        # dependencies" without a follow-up view_task. Autonomous-effective
+        # batches carry no assignee and render like the claimable variant.
         briefs = [{**task.brief(), "assignee": task.assignee} for task in result.tasks]
         if len(briefs) == 1:
             return ToolOutput(success=True, data=briefs[0])
         return ToolOutput(success=True, data={"tasks": briefs, "count": len(briefs)})
+
+    @staticmethod
+    def _task_line(task: dict) -> str:
+        line = f"task_id={task['task_id']} title={task['title']}"
+        if task.get("assignee"):
+            line += f" {_owner_phrase(task)}"
+        return line
 
     def map_result(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Operation failed"
         d = output.data
         if "task_id" in d and "title" in d:
-            return f"Task created: task_id={d['task_id']} title={d['title']} {_owner_phrase(d)}"
-        lines = [f"task_id={task['task_id']} title={task['title']} {_owner_phrase(task)}" for task in d.get("tasks", [])]
+            return f"Task created: {self._task_line(d)}"
+        lines = [self._task_line(task) for task in d.get("tasks", [])]
         lines.append(f"Created {d['count']}")
         return "\n".join(lines)
 
@@ -464,6 +499,11 @@ class UpdateTaskTool(TeamTool):
                     "items": {"type": "string"},
                     "description": t("update_task", "reviewer"),
                 },
+                "max_review_rounds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": t("update_task", "max_review_rounds"),
+                },
                 "add_blocked_by": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -498,6 +538,7 @@ class UpdateTaskTool(TeamTool):
         content = inputs.get("content")
         assignee = inputs.get("assignee")
         reviewer = inputs.get("reviewer")
+        max_review_rounds = inputs.get("max_review_rounds")
         add_blocked_by = inputs.get("add_blocked_by")
 
         # cancel_all: task_id="*" + status="cancelled"
@@ -604,6 +645,29 @@ class UpdateTaskTool(TeamTool):
                 return ToolOutput(success=False, error=reviewer_result.reason)
             updated.append("reviewer")
 
+        # Cap the verify-gate rework loop (F_62). Meaningful only for a
+        # reviewed task — the ceiling counts review rounds, so a task with
+        # no reviewers (current or being set in this same call) has nothing
+        # to count.
+        if max_review_rounds is not None:
+            if not isinstance(max_review_rounds, int) or isinstance(max_review_rounds, bool) or max_review_rounds < 1:
+                return ToolOutput(success=False, error="'max_review_rounds' must be an integer >= 1")
+            effective_reviewers = (
+                [str(r).strip() for r in reviewer if str(r).strip()] if reviewer is not None else task.reviewers()
+            )
+            if not effective_reviewers:
+                return ToolOutput(
+                    success=False,
+                    error=(
+                        "'max_review_rounds' only applies to reviewed tasks — "
+                        "set 'reviewer' as well, or drop the round ceiling"
+                    ),
+                )
+            rounds_result = await self.task_manager.set_max_review_rounds(task_id, max_review_rounds)
+            if not rounds_result.ok:
+                return ToolOutput(success=False, error=rounds_result.reason)
+            updated.append("max_review_rounds")
+
         # Add dependencies (blocked_by edges)
         if add_blocked_by:
             deps_result = await self.task_manager.add_dependencies(task_id, add_blocked_by)
@@ -614,7 +678,10 @@ class UpdateTaskTool(TeamTool):
         if not updated:
             return ToolOutput(
                 success=False,
-                error="No update specified — provide status, title, content, assignee, reviewer, or add_blocked_by",
+                error=(
+                    "No update specified — provide status, title, content, assignee, "
+                    "reviewer, max_review_rounds, or add_blocked_by"
+                ),
             )
 
         return ToolOutput(
@@ -881,19 +948,20 @@ class VerifyTaskTool(TeamTool):
     """Reviewer verdict on a task in the verify gate (reviewer only).
 
     A task carrying reviewers enters ``IN_REVIEW`` when its author completes.
-    A reviewer named on the task calls this to pass it (``IN_REVIEW ->
-    COMPLETED``, unblocking dependents) or fail it (``IN_REVIEW ->
-    IN_PROGRESS``, rework loop with ``feedback`` directed at the author). The
-    manager enforces that the caller is a reviewer of the task and not its
-    author.
+    A reviewer named on the task calls this with a ``pass`` / ``fail``
+    decision. What the verdict does is the team's dispatch-mode policy
+    (selected in the manager, described by the per-mode ``desc_key``):
+    autonomous applies the first verdict directly; scheduled records a vote
+    and the leader-side scheduler settles the tally (F_62). The manager
+    enforces that the caller is a reviewer of the task and not its author.
     """
 
-    def __init__(self, task_manager: TeamTaskManager, t: Translator):
+    def __init__(self, task_manager: TeamTaskManager, t: Translator, *, desc_key: str = "verify_task"):
         super().__init__(
             ToolCard(
                 id="team.verify_task",
                 name="verify_task",
-                description=t("verify_task"),
+                description=t(desc_key),
             )
         )
         self.task_manager = task_manager
@@ -921,15 +989,26 @@ class VerifyTaskTool(TeamTool):
         result = await self.task_manager.verify_task(task_id, decision, feedback)
         if not result.ok:
             return ToolOutput(success=False, error=result.reason)
-        return ToolOutput(
-            success=True,
-            data={"task_id": task_id, "decision": decision.lower(), "feedback": feedback or None},
-        )
+        data: dict[str, Any] = {"task_id": task_id, "decision": decision.lower(), "feedback": feedback or None}
+        if result.data:
+            # Scheduled dispatch (F_62): the call recorded a vote, no verdict
+            # yet — surface the tally so the reviewer knows where the round
+            # stands without a follow-up view_task.
+            data["tally"] = result.data
+        return ToolOutput(success=True, data=data)
 
     def map_result(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to verify task"
         d = output.data
+        tally = d.get("tally")
+        if tally:
+            return (
+                f"Vote recorded for task #{d['task_id']}: {d['decision']} "
+                f"(round {tally['review_round']}: pass {tally['pass_count']}, fail {tally['fail_count']}, "
+                f"{tally['reviewer_count']} reviewer(s)). The verdict settles once the tally decides — "
+                f"no further action needed from you."
+            )
         if d["decision"] == "pass":
             return f"Task #{d['task_id']} verified and completed."
         line = f"Task #{d['task_id']} sent back for revision"

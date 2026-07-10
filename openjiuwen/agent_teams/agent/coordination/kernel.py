@@ -24,6 +24,7 @@ from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.coordination.dispatcher import EventDispatcher
+    from openjiuwen.agent_teams.agent.scheduling import TeamScheduler
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 
 
@@ -46,6 +47,10 @@ class CoordinationKernel:
         self._subscribed_topics: list[str] = []
         self._event_bus: Optional[EventBus] = None
         self._dispatcher: Optional["EventDispatcher"] = None
+        # Leader-only scheduled-dispatch decision engine (F_62). Constructed
+        # dormant at setup; armed when the team's effective dispatch mode is
+        # "scheduled" (build_team choice / recovery restore).
+        self._scheduler: Optional["TeamScheduler"] = None
         # Lifecycle state machine for pause/stop idempotency.
         # Transitions: idle -> running (start) -> paused (pause) -> stopped (stop).
         # ``stopped`` is terminal for this kernel instance; subsequent
@@ -69,14 +74,24 @@ class CoordinationKernel:
         if blueprint is None or infra is None:
             raise RuntimeError("CoordinationKernel.setup() requires configured blueprint and infra")
         event_bus = EventBus(role=role)
+        # F_62: the dispatch mode is static spec configuration — every role
+        # assembles its mode-owned handler variants directly from it.
         dispatcher = EventDispatcher(
             host,
             blueprint=blueprint,
             infra=infra,
             poll_ctrl=event_bus,
+            dispatch_mode=blueprint.spec.dispatch_mode,
         )
         self._event_bus = event_bus
         self._dispatcher = dispatcher
+        # The scheduler exists only where it has a job: the leader of a
+        # scheduled-dispatch team. It stays dormant until the team
+        # materializes (build_team / an existing team row at start).
+        if role == TeamRole.LEADER and blueprint.spec.dispatch_mode == "scheduled":
+            from openjiuwen.agent_teams.agent.scheduling import TeamScheduler
+
+            self._scheduler = TeamScheduler(host, blueprint=blueprint, infra=infra)
 
     @property
     def event_bus(self) -> Optional[EventBus]:
@@ -87,6 +102,11 @@ class CoordinationKernel:
     def dispatcher(self) -> Optional["EventDispatcher"]:
         """Return the event dispatcher, or None before setup()."""
         return self._dispatcher
+
+    @property
+    def scheduler(self) -> Optional["TeamScheduler"]:
+        """Return the leader's scheduled-dispatch engine, or None (non-leader)."""
+        return self._scheduler
 
     @property
     def subscribed_topics(self) -> list[str]:
@@ -144,9 +164,11 @@ class CoordinationKernel:
             if memory_manager is not None:
                 memory_manager.bind_session_id(None)
 
+        team_row_present = False
         if host.role == TeamRole.LEADER and infra.team_backend:
             existing = await infra.team_backend.db.team.get_team(infra.team_backend.team_name)
             if existing is not None:
+                team_row_present = True
                 non_leader_members = await infra.team_backend.list_member_roster()
                 if non_leader_members and all(m.status == MemberStatus.SHUTDOWN.value for m in non_leader_members):
                     team_logger.warning(
@@ -155,6 +177,7 @@ class CoordinationKernel:
                         infra.team_backend.team_name,
                     )
                     await infra.team_backend.clean_team()
+                    team_row_present = False
                 else:
                     await host.recover_team()
 
@@ -184,7 +207,7 @@ class CoordinationKernel:
         if not self._event_bus.is_running:
             if self._dispatcher is None:
                 raise RuntimeError("CoordinationKernel.start() requires setup() before start()")
-            await self._event_bus.start(wake_callback=self._dispatcher.dispatch)
+            await self._event_bus.start(wake_callback=self._build_wake_callback())
         if infra.messager:
             team_name = host.team_name
             if team_name and not self._subscribed_topics:
@@ -194,7 +217,44 @@ class CoordinationKernel:
         # independently — a resumed persistent team can conclude again.
         if self._dispatcher is not None:
             self._dispatcher.team_completion.rearm()
+        # F_62: arm the scheduler when this run cycle starts against an
+        # existing team (the scheduler only exists on scheduled-dispatch
+        # leaders) — activation runs the recovery sweep (start pending
+        # assignments, judge open reviews).
+        if self._scheduler is not None and team_row_present:
+            await self._scheduler.activate()
         self._lifecycle_state = "running"
+
+    def _build_wake_callback(self):
+        """Compose the bus wake callback: coordination first, scheduler second.
+
+        Coordination stays a pure wake-up layer; the scheduler makes its
+        decisions strictly after handlers observed the same event. Non-leader
+        kernels have no scheduler and keep the bare dispatch path.
+        """
+        dispatcher = self._dispatcher
+        scheduler = self._scheduler
+        if scheduler is None:
+            return dispatcher.dispatch
+
+        async def _dispatch_then_schedule(event) -> None:
+            await dispatcher.dispatch(event)
+            await scheduler.on_event(event)
+
+        return _dispatch_then_schedule
+
+    async def notify_team_built(self) -> None:
+        """Arm the scheduler once ``build_team`` materialized the team.
+
+        Called by the host's ``on_team_built`` hook inside the build_team tool
+        call, so a scheduled-dispatch team's scheduler is live before any
+        teammate spawn or task creation — matching the prompt's promise that
+        the framework starts assignees. No-op when there is no scheduler
+        (autonomous teams, non-leader kernels).
+        """
+        if self._scheduler is None:
+            return
+        await self._scheduler.activate()
         # Warm resume: a lifecycle pause left this member's round suspended at a
         # clean boundary. Now that the session, stream and event bus are back,
         # continue it in place instead of idling until a new message arrives.
@@ -209,6 +269,8 @@ class CoordinationKernel:
             return
         host = self._host
         team_logger.info("[{}] coordination pausing (persistent)", host.member_name or "?")
+        if self._scheduler is not None:
+            self._scheduler.deactivate()
         # Pause, do not tear down: the round stops at a clean inner-iteration
         # boundary and stays resumable in place. This used to hard-cancel via
         # ``drain_agent_task`` → ``abort(immediate=True)``, which threw away
@@ -406,6 +468,8 @@ class CoordinationKernel:
             return
         host = self._host
         team_logger.info("[{}] coordination stopping", host.member_name or "?")
+        if self._scheduler is not None:
+            self._scheduler.deactivate()
         await self.drain_agent_task()
         host.persist_allocator_state()
         # Final memory extraction before permanent teardown. Only extract
@@ -465,6 +529,18 @@ class CoordinationKernel:
                     team_logger.error("Event listener error: {}", e)
             if local_member_name and event.sender_id == local_member_name:
                 team_logger.debug("ignoring self-published event: {}", event.event_type)
+                # F_62: the scheduler must observe board changes the leader
+                # process performed itself (create_task, settle). Coordination
+                # must not re-process the echo, so the dropped event degrades
+                # to a bare "board changed" scan hint on the same bus loop.
+                if (
+                    self._scheduler is not None
+                    and self._scheduler.is_active
+                    and str(event.event_type).startswith("task_")
+                ):
+                    await self._event_bus.enqueue(
+                        InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN)
+                    )
                 return
             await self._event_bus.enqueue(event)
 

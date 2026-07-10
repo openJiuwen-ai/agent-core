@@ -28,6 +28,7 @@ from openjiuwen.agent_teams.tools.models import (
     TEAM_STATIC_TABLES_TO_CLEAR,
     _get_message_model,
     _get_message_read_status_model,
+    _get_review_vote_model,
     _get_task_dependency_model,
     _get_task_model,
     _sanitize_session_id_for_table,
@@ -254,6 +255,29 @@ def _ensure_team_member_options_column(sync_conn) -> None:
     team_logger.info("Migrated legacy team_member table: dropped model_ref_json column")
 
 
+def _ensure_team_info_capability_columns(sync_conn) -> None:
+    """Backfill the F_62 capability columns on pre-existing ``team_info`` tables.
+
+    ``dispatch_mode`` / ``enable_task_verification`` store the per-instance
+    effective values chosen at ``build_team`` time. Legacy rows default to
+    the pre-F_62 behavior (autonomous, no verification expectation).
+    """
+    inspector = inspect(sync_conn)
+    if "team_info" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("team_info")}
+    if "dispatch_mode" not in columns:
+        sync_conn.exec_driver_sql(
+            "ALTER TABLE team_info ADD COLUMN dispatch_mode TEXT NOT NULL DEFAULT 'autonomous'"
+        )
+        team_logger.info("Migrated legacy team_info table: added dispatch_mode column")
+    if "enable_task_verification" not in columns:
+        sync_conn.exec_driver_sql(
+            "ALTER TABLE team_info ADD COLUMN enable_task_verification BOOLEAN NOT NULL DEFAULT 0"
+        )
+        team_logger.info("Migrated legacy team_info table: added enable_task_verification column")
+
+
 def _ensure_message_protocol_column(sync_conn) -> None:
     """Backfill the ``protocol`` column on pre-existing per-session message tables.
 
@@ -337,6 +361,16 @@ def _ensure_dynamic_table_indexes(sync_conn) -> None:
             if "reviewer" not in task_columns:
                 sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN reviewer TEXT')
                 team_logger.info("Migrated task table %s: added reviewer column", table_name)
+
+            # F_62: review voting — round counter + per-task round ceiling.
+            if "review_round" not in task_columns:
+                sync_conn.exec_driver_sql(
+                    f'ALTER TABLE "{table_name}" ADD COLUMN review_round INTEGER NOT NULL DEFAULT 0'
+                )
+                team_logger.info("Migrated task table %s: added review_round column", table_name)
+            if "max_review_rounds" not in task_columns:
+                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN max_review_rounds INTEGER')
+                team_logger.info("Migrated task table %s: added max_review_rounds column", table_name)
 
             # F_59: fold the legacy execution states into the condition-named
             # IN_PROGRESS. claimed / started / plan_approved were all "a member
@@ -625,6 +659,7 @@ async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
         await conn.run_sync(SQLModel.metadata.create_all)
         await conn.run_sync(_ensure_team_member_role_column)
         await conn.run_sync(_ensure_team_member_options_column)
+        await conn.run_sync(_ensure_team_info_capability_columns)
 
     return SqlEngines(write_engine, read_engine, write_session_local, read_session_local)
 
@@ -646,9 +681,10 @@ async def create_cur_session_tables(engine: AsyncEngine) -> None:
     dep_model = _get_task_dependency_model()
     message_model = _get_message_model()
     read_status_model = _get_message_read_status_model()
+    review_vote_model = _get_review_vote_model()
 
     async with engine.begin() as conn:
-        for model in (task_model, dep_model, message_model, read_status_model):
+        for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
             await conn.run_sync(model.__table__.create, checkfirst=True)
         await conn.run_sync(_ensure_message_protocol_column)
         await conn.run_sync(_ensure_dynamic_table_indexes)
@@ -673,9 +709,10 @@ async def drop_cur_session_tables(engine: AsyncEngine) -> None:
     dep_model = _get_task_dependency_model()
     message_model = _get_message_model()
     read_status_model = _get_message_read_status_model()
+    review_vote_model = _get_review_vote_model()
 
     async with engine.begin() as conn:
-        for model in (task_model, dep_model, message_model, read_status_model):
+        for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
             await conn.run_sync(model.__table__.drop, checkfirst=True)
 
     team_logger.info("Dropped dynamic tables for session %s", session_id)

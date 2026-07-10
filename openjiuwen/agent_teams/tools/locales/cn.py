@@ -25,6 +25,11 @@ STRINGS: dict[str, str] = {
         "predefined_members 中声明的 HUMAN_AGENT 成员也会被跳过。"
         "用户表达「我要加入团队」时设为 true；明确不需要人类协作时设为 false"
     ),
+    "build_team.enable_task_verification": (
+        "本团队实例是否要求任务校验。可选 true / false / 不传（继承 TeamAgentSpec 配置）。"
+        "开启后你在创建任务时应按自己的判断为任务指派 0~N 个 reviewer（关键交付必配、"
+        "琐碎任务可不配）；带 reviewer 的任务完成后进入验收，通过才算完成"
+    ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/cn/clean_team.md
     # ===== spawn_teammate ======================================================
@@ -171,10 +176,17 @@ STRINGS: dict[str, str] = {
     # Only the scheduled create_task variant exposes this property; the
     # description lives under the shared create_task.* key namespace so both
     # variants read the same strings for the properties they have in common.
-    "create_task.task.assignee": "承担该任务的成员名称（必填）；该成员必须已存在。无依赖的任务落地即归属它，有依赖的任务在依赖完成后自动转交它",
+    "create_task.task.assignee": (
+        "承担该任务的成员名称（必填）；该成员必须已存在。成员不自主认领，无主任务永远不会执行——"
+        "无依赖的任务由调度框架自动开工，有依赖的任务在依赖完成后自动转交承担者"
+    ),
     "create_task.task.depends_on": "前置依赖的任务 ID 列表；可引用本次调用中一起创建的任务或已有任务",
     "create_task.task.depended_by": "需要等待本任务完成的已有任务 ID 列表（反向依赖）；不得引用本次调用创建的任务——批内依赖一律用对方的 depends_on 表示",
     "create_task.task.reviewer": "该任务的验证者 member_name 列表（可选，可多个）；这些成员必须已存在且不能是 assignee 本人。配了验证者的任务在 assignee 完成后进入 in_review 等验证，验证通过才 completed",
+    "create_task.task.max_review_rounds": (
+        "该任务验证返工的轮数上限（可选，整数 ≥1，需同时配 reviewer）；不传用团队默认值。"
+        "验证不通过会打回重做开新一轮，超过上限后不再自动打回，而是升级给你处置"
+    ),
     # ===== view_task ===========================================================
     # view_task._desc lives in descs/cn/view_task.md
     "view_task.action": "查看模式：'list'（默认，所有任务摘要）、'get'（单个任务详情，需传 task_id）、'claimable'（可认领的 pending 任务）、'in_review'（指派给你验证、正在 in_review 的任务）",
@@ -188,6 +200,10 @@ STRINGS: dict[str, str] = {
     "update_task.content": "新任务内容",
     "update_task.assignee": "指派任务的目标 member_name（仅当任务当前无 assignee 时生效）。系统会向被指派成员发送通知",
     "update_task.reviewer": "设置该任务的验证者 member_name 列表（传空列表清除验证）；验证者必须已存在且不能是 assignee。配了验证者后，assignee 完成任务会进入 in_review 等验证",
+    "update_task.max_review_rounds": (
+        "设置该任务验证返工的轮数上限（整数 ≥1，任务需已配或同时配 reviewer）。"
+        "超过上限后验证失败不再自动打回，而是升级给你处置"
+    ),
     "update_task.add_blocked_by": "要添加为新依赖的任务 ID 列表（本任务将被阻塞直到这些任务完成）",
     "update_task.error_human_agent_locked_cancel": (
         "任务 {task_id} 已由人类成员认领，该任务不允许被取消；如需变更，请通过 send_message 与对应的人类成员协商"

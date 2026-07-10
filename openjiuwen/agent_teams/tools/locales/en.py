@@ -32,6 +32,13 @@ STRINGS: dict[str, str] = {
         "Use true when the user wants to join the team; false when human collaboration is "
         "explicitly out of scope"
     ),
+    "build_team.enable_task_verification": (
+        "Whether task verification is expected for this instance; accepts true / false / "
+        "omitted (inherit the TeamAgentSpec setting). When on, assign 0..N reviewers per task "
+        "by your own judgement when creating tasks (critical deliverables should carry "
+        "reviewers; trivial chores may skip them); a reviewed task only completes after "
+        "verification passes"
+    ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/en/clean_team.md
     # ===== spawn_teammate ======================================================
@@ -248,8 +255,9 @@ STRINGS: dict[str, str] = {
     # variants read the same strings for the properties they have in common.
     "create_task.task.assignee": (
         "Member name that carries this task (required); the member must already exist. "
-        "A task with no dependencies is owned by it immediately; a task with dependencies "
-        "transfers to it automatically once they complete"
+        "Members never claim, so an unowned task would never run — a dependency-free task "
+        "is started by the scheduling runtime, and a blocked one transfers automatically "
+        "once its dependencies complete"
     ),
     "create_task.task.depends_on": "Prerequisite task IDs; may reference tasks created in this same call or existing tasks",
     "create_task.task.depended_by": "Existing task IDs that should wait for this task (reverse dependency); must not reference tasks created in this same call — express in-batch edges with depends_on on the dependent task",
@@ -257,6 +265,12 @@ STRINGS: dict[str, str] = {
         "Reviewer member names for this task (optional, may be several); they must already exist "
         "and none may be the assignee. A task with reviewers enters in_review when the assignee "
         "completes, and only reaches completed once a reviewer passes it"
+    ),
+    "create_task.task.max_review_rounds": (
+        "Review-round ceiling for this task's rework loop (optional, integer >= 1, requires "
+        "'reviewer'); omitted uses the team default. Each failed verification sends the task "
+        "back and opens a new round; beyond the ceiling the scheduler stops looping and "
+        "escalates to you instead"
     ),
     # ===== view_task ===========================================================
     # view_task._desc lives in descs/en/view_task.md
@@ -284,6 +298,11 @@ STRINGS: dict[str, str] = {
     "update_task.reviewer": (
         "Set this task's reviewer member names (an empty list clears the verify gate); reviewers must "
         "already exist and none may be the assignee. Once set, the assignee's completion enters in_review"
+    ),
+    "update_task.max_review_rounds": (
+        "Set this task's review-round ceiling (integer >= 1; the task must carry reviewers, or set "
+        "'reviewer' in the same call). Beyond the ceiling a failed verification escalates to you "
+        "instead of looping rework"
     ),
     "update_task.add_blocked_by": (
         "Task IDs to add as new dependencies (this task will be blocked until those tasks complete)"

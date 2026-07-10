@@ -79,6 +79,15 @@ _MEMBER_COMPLETE_DESC_KEY: dict[str, str] = {
     "scheduled": "member_complete_task_scheduled",
 }
 
+# ``verify_task`` shares one schema and one invoke; the verdict *policy*
+# (first-verdict-wins vs. vote recorded for the scheduler to settle, F_62)
+# lives in the manager, so the variant is a description key — the prose must
+# match the policy the caller will actually experience.
+_VERIFY_TASK_DESC_KEY: dict[str, str] = {
+    "autonomous": "verify_task",
+    "scheduled": "verify_task_scheduled",
+}
+
 
 # ========== Tool Factory ==========
 
@@ -170,7 +179,7 @@ def create_team_tools(
         "view_task": ViewTaskToolV2(task_mgr, t),
         "claim_task": ClaimTaskTool(task_mgr, t),
         "submit_plan": SubmitPlanTool(task_mgr, t),
-        "verify_task": VerifyTaskTool(task_mgr, t),
+        "verify_task": VerifyTaskTool(task_mgr, t, desc_key=_VERIFY_TASK_DESC_KEY[dispatch_mode]),
         "member_complete_task": MemberCompleteTaskTool(
             task_mgr, t, desc_key=_MEMBER_COMPLETE_DESC_KEY[dispatch_mode]
         ),
