@@ -8,7 +8,7 @@ from openjiuwen.core.context_engine.processor.offloader.rule_compression.compres
     SearchResultsCompressor,
 )
 from openjiuwen.core.context_engine.processor.offloader.rule_compression.types import RuleContext
-from openjiuwen.core.foundation.llm import ToolMessage
+from openjiuwen.core.foundation.llm import ToolMessage, UserMessage
 
 
 class _Context:
@@ -133,3 +133,17 @@ def test_search_results_compression_ignores_numbered_line_prefixes():
     assert "1\topenjiuwen" not in result.content
     assert "[... and 5 more matches in openjiuwen/core/context_engine/processor/offloader/message_offloader.py]" in result.content
     assert "more files omitted" not in result.content
+
+
+def test_rule_compression_pipeline_adds_builtin_cjk_query_terms():
+    pipeline = RuleCompressionPipeline()
+
+    terms = pipeline._query_terms_for_message(
+        [UserMessage(content="检查密码刷新失败")],
+        tool_name=None,
+        tool_arguments=None,
+    )
+
+    assert "password" in terms
+    assert "refresh" in terms
+    assert "failure" in terms
