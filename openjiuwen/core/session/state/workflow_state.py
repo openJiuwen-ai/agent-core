@@ -132,10 +132,9 @@ class CommitState(StateCollection):
     def commit_user_inputs(self, inputs: Any) -> None:
         if self._io_state is None or inputs is None:
             return
-        self._io_state.update_by_id(self._node_id,
-                                    {self._node_id: inputs} if self._node_id != DEFAULT_NODE_ID else inputs)
-        self._global_state.update_by_id(self._node_id, inputs)
-        self.commit()
+        io_data = {self._node_id: inputs} if self._node_id != DEFAULT_NODE_ID else inputs
+        self._io_state.update_by_id_and_commit(self._node_id, io_data)
+        self._global_state.update_by_id_and_commit(self._node_id, inputs)
 
     def commit(self) -> None:
         self._io_state.commit()

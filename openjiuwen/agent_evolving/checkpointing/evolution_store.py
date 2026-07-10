@@ -313,8 +313,23 @@ class EvolutionStore:
         md_files = list(skill_dir.glob("*.md"))
         return md_files[0] if md_files else None
 
+    def _validate_file_path(self, path: Path) -> None:
+        """Raise if *path* escapes the configured base directories."""
+        resolved = path.expanduser().resolve()
+        for base_dir in self._base_dirs:
+            if resolved == base_dir or resolved.is_relative_to(base_dir):
+                return
+        raise_error(
+            StatusCode.TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR,
+            error_msg=(
+                f"Path '{path}' is outside the allowed skill base directories. "
+                f"Allowed roots: {[str(d) for d in self._base_dirs]}"
+            ),
+        )
+
     async def read_file_text(self, path: Path) -> str:
         """Read a text file, routing through sys_operation when available."""
+        self._validate_file_path(path)
         try:
             if self.sys_operation is not None:
                 result = await self.sys_operation.fs().read_file(str(path), mode="text", encoding="utf-8")

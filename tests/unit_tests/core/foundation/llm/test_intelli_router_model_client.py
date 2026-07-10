@@ -436,11 +436,11 @@ class TestIntelliRouterModelClientInit:
         )
         assert client._router is external_router
 
-    def test_init_no_api_key_required(self):
-        """_validate_config is a no-op — creating client without api_key should work."""
+    def test_init_with_api_key_placeholder(self):
+        """ModelClientConfig validates api_key before IntelliRouter client init."""
         config = ModelClientConfig(
             client_provider=ProviderType.IntelliRouter,
-            api_key="",
+            api_key="placeholder",
             api_base="",
             verify_ssl=False,
         )

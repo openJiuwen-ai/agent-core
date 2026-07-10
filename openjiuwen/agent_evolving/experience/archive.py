@@ -182,6 +182,13 @@ class EvolutionArchiveService:
         await self._store.write_file_text(skill_md, skill_content)
         await self._store.write_file_text(evolution_log, evolution_content)
         await self._store.render_evolution_markdown(name, subject_kind=kind)
+
+        self._remove_file(pair.skill_archive)
+        self._remove_file(pair.evolution_archive)
+        logger.info(
+            "[EvolutionArchiveService] removed consumed archive pair: version=%s", pair.version,
+        )
+
         if prune:
             self.prune(name, subject_kind=kind)
         return True
