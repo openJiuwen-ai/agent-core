@@ -64,7 +64,7 @@ async def db():
         await database.close()
 
 
-def _backend(db, member_name: str, is_leader: bool) -> TeamBackend:
+def _backend(db, member_name: str, is_leader: bool, dispatch_mode: str = "autonomous") -> TeamBackend:
     # No leader_member_name passed: a member resolves it from the team_info DB
     # row (the source of truth), exercising resolve_leader_member_name.
     return TeamBackend(
@@ -73,6 +73,7 @@ def _backend(db, member_name: str, is_leader: bool) -> TeamBackend:
         is_leader=is_leader,
         db=db,
         messager=AsyncMock(spec=Messager),
+        dispatch_mode=dispatch_mode,
     )
 
 
@@ -161,6 +162,8 @@ async def test_create_task_variant_classes_and_schema(db):
 
     assert "assignee" not in node(autonomous)["properties"]
     assert "assignee" in node(scheduled)["properties"]
+    assert "max_review_rounds" not in node(autonomous)["properties"]
+    assert "max_review_rounds" in node(scheduled)["properties"]
     assert "assignee" not in node(autonomous)["required"]
     assert "assignee" in node(scheduled)["required"]
 
@@ -282,7 +285,9 @@ async def test_report_to_leader_rejects_peers_at_invoke(db):
 @pytest.mark.level0
 async def test_scheduled_create_task_rejects_unknown_or_missing_assignee(db):
     """Assignee validation happens at the tool boundary, before the transaction."""
-    tools = create_team_tools(role="leader", agent_team=_backend(db, LEADER_NAME, True), dispatch_mode="scheduled")
+    tools = create_team_tools(
+        role="leader", agent_team=_backend(db, LEADER_NAME, True, dispatch_mode="scheduled"), dispatch_mode="scheduled"
+    )
     create_task = _by_name(tools, "create_task")
 
     missing = await create_task.invoke({"tasks": [{"title": "t", "content": "c"}]})
@@ -304,7 +309,7 @@ async def test_scheduled_create_task_lands_assignee_atomically(db):
     The unblocked task rests at PENDING(assignee) awaiting the scheduler; the
     dependent one is BLOCKED(assignee).
     """
-    backend = _backend(db, LEADER_NAME, True)
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
     tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
     create_task = _by_name(tools, "create_task")
 
@@ -340,7 +345,7 @@ async def test_scheduled_task_starts_and_completes(db):
     ``start_task`` (called by the scheduler) is the only thing that moves a
     task off PENDING in scheduled dispatch; a member never claims.
     """
-    backend = _backend(db, LEADER_NAME, True)
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
     tm = backend.task_manager
     tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
     create_task = _by_name(tools, "create_task")
@@ -370,7 +375,7 @@ async def test_scheduled_task_starts_and_completes(db):
 @pytest.mark.level0
 async def test_scheduled_start_enforces_one_active_task(db):
     """A member may hold at most one active (PLANNING/IN_PROGRESS/IN_REVIEW) task at a time."""
-    backend = _backend(db, LEADER_NAME, True)
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
     tm = backend.task_manager
     tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
     create_task = _by_name(tools, "create_task")
@@ -501,7 +506,7 @@ async def test_create_task_carries_reviewer(db):
 @pytest.mark.level0
 async def test_create_task_rejects_reviewer_equal_assignee(db):
     """A reviewer may not be the task's own author."""
-    backend = _backend(db, LEADER_NAME, True)
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
     tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
     create_task = _by_name(tools, "create_task")
 

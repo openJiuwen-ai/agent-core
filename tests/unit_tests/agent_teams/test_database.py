@@ -199,6 +199,82 @@ class TestTeamDatabaseInit:
         finally:
             engine.dispose()
 
+    @pytest.mark.level1
+    def test_task_migration_adds_review_round_columns(self):
+        """A pre-F_62 task table gains review_round / max_review_rounds."""
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_task_prevote (
+                        task_id TEXT PRIMARY KEY,
+                        team_name TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        assignee TEXT,
+                        reviewer TEXT,
+                        updated_at BIGINT
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    "INSERT INTO team_task_prevote (task_id, team_name, title, content, status) "
+                    "VALUES ('t1', 'team', 't', 'c', 'pending')"
+                )
+
+                _ensure_dynamic_table_indexes(conn)
+
+                columns = {col["name"] for col in inspect(conn).get_columns("team_task_prevote")}
+                row = conn.exec_driver_sql(
+                    "SELECT review_round, max_review_rounds FROM team_task_prevote"
+                ).mappings().one()
+
+            assert "review_round" in columns
+            assert "max_review_rounds" in columns
+            assert row["review_round"] == 0
+            assert row["max_review_rounds"] is None
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level1
+    def test_team_info_migration_adds_capability_columns(self):
+        """A pre-F_62 team_info table gains dispatch_mode / enable_task_verification."""
+        from openjiuwen.agent_teams.tools.database.engine import _ensure_team_info_capability_columns
+
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_info (
+                        team_name TEXT PRIMARY KEY,
+                        display_name TEXT NOT NULL,
+                        leader_member_name TEXT NOT NULL,
+                        created BIGINT NOT NULL
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    "INSERT INTO team_info (team_name, display_name, leader_member_name, created) "
+                    "VALUES ('legacy', 'Legacy', 'leader', 1)"
+                )
+
+                _ensure_team_info_capability_columns(conn)
+
+                columns = {col["name"] for col in inspect(conn).get_columns("team_info")}
+                row = conn.exec_driver_sql(
+                    "SELECT dispatch_mode, enable_task_verification FROM team_info"
+                ).mappings().one()
+
+            assert "dispatch_mode" in columns
+            assert "enable_task_verification" in columns
+            assert row["dispatch_mode"] == "autonomous"
+            assert not row["enable_task_verification"]
+        finally:
+            engine.dispose()
+
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_database_initialize_creates_tables(self, db_config):
