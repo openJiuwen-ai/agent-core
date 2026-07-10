@@ -23,8 +23,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from jiuwen_memory.common.logging import memory_logger
-from jiuwen_memory.memory_core.external.provider import MemoryProvider
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.memory.external.provider import MemoryProvider
 
 
 DEFAULT_RECALL_USER_MEM_NUM = 5
