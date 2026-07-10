@@ -11,6 +11,7 @@ the full conversation context for signal detection and experience extraction.
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -153,6 +154,81 @@ based on this auto-saved skill evolution round.
 
 Output Markdown body only. No code fences. Do not repeat a "skill evolved" heading."""
 
+_SKILL_CREATE_FOLLOW_UP_PROMPT_MANUAL_CN = (
+    "**重要：你必须先向用户确认，不可跳过此步骤。**\n"
+    "系统检测到对话中存在可复用模式，可能值得创建新技能。请按以下步骤执行：\n"
+    "1. 调用 ask_user 向用户确认是否创建；选项：[\"创建\", \"跳过\", \"自定义指令\"]\n"
+    "2. 若用户选择创建或提供自定义指令，调用 **skill-creator** 技能，"
+    "结合当前对话上下文执行创建。\n"
+    "   新技能保存目录：{skills_dir}\n"
+    "   创建原因：{reason}\n"
+    "   建议名称：{suggested_name}\n"
+)
+
+_SKILL_CREATE_FOLLOW_UP_PROMPT_AUTO_CN = (
+    "系统检测到对话中存在可复用模式，已自动触发新技能创建。"
+    "请直接调用 **skill-creator** 技能，结合当前对话上下文执行创建，"
+    "无需再次向用户确认。\n"
+    "   新技能保存目录：{skills_dir}\n"
+    "   创建原因：{reason}\n"
+    "   建议名称：{suggested_name}\n"
+)
+
+_SKILL_CREATE_FOLLOW_UP_PROMPT_MANUAL_EN = (
+    "**Important: You must confirm with the user before proceeding.**\n"
+    "The system detected reusable patterns in this conversation that may "
+    "warrant creating a new skill. Please follow these steps:\n"
+    "1. Call ask_user to confirm with the user; options: "
+    "[\"Create\", \"Skip\", \"Custom instructions\"]\n"
+    "2. If the user chooses Create or provides custom instructions, "
+    "call the **skill-creator** skill with the current conversation "
+    "context to create the skill.\n"
+    "   Skills directory: {skills_dir}\n"
+    "   Reason: {reason}\n"
+    "   Suggested name: {suggested_name}\n"
+)
+
+_SKILL_CREATE_FOLLOW_UP_PROMPT_AUTO_EN = (
+    "The system detected reusable patterns in this conversation and has "
+    "automatically triggered new skill creation. Call the **skill-creator** "
+    "skill directly with the current conversation context to create the skill. "
+    "Do not ask the user again for confirmation.\n"
+    "   Skills directory: {skills_dir}\n"
+    "   Reason: {reason}\n"
+    "   Suggested name: {suggested_name}\n"
+)
+
+_SKILL_CREATE_DEFAULT_REASON = {
+    "cn": "检测到对话中存在可复用模式",
+    "en": "Reusable patterns detected in the conversation",
+}
+
+_SKILL_CREATE_SUGGESTION_REASON = {
+    "cn": "检测到对话中存在可复用工具调用模式",
+    "en": "Reusable tool-call patterns detected in the conversation",
+}
+
+_SKILL_CREATE_APPROVAL_QUESTION = {
+    "cn": (
+        "**新技能创建建议**\n\n"
+        "系统检测到对话中存在可复用工具调用模式，可能值得创建新技能。\n\n"
+        "**创建原因:** {reason}\n\n"
+        "是否创建此新技能？"
+    ),
+    "en": (
+        "**New Skill Creation Suggestion**\n\n"
+        "Reusable tool-call patterns were detected in this conversation "
+        "that may warrant creating a new skill.\n\n"
+        "**Reason:** {reason}\n\n"
+        "Create this new skill?"
+    ),
+}
+
+_SKILL_CREATE_APPROVAL_HEADER = {
+    "cn": "新技能创建",
+    "en": "New Skill Creation",
+}
+
 
 class SkillEvolutionRail(EvolutionRail):
     """Online auto-evolution rail for skill patching and persistence.
@@ -182,7 +258,7 @@ class SkillEvolutionRail(EvolutionRail):
         trajectory_store: Optional[TrajectoryStore] = None,
         eval_interval: int = 1,
         new_skill_detection: bool = True,
-        new_skill_tool_threshold: int = 5,
+        new_skill_tool_threshold: int = 10,
         new_skill_tool_diversity: int = 2,
     ) -> None:
         """Initialize SkillEvolutionRail.
@@ -435,14 +511,7 @@ class SkillEvolutionRail(EvolutionRail):
                 should_propose = await self._should_propose_new_skill(parsed_messages)
                 logger.info("[SkillEvolutionRail] new_skill_conditions_met=%s", should_propose)
                 if should_propose:
-                    proposal = await self._generate_new_skill_proposal(parsed_messages)
-                    if proposal:
-                        overlap = await self._check_skill_overlap(
-                            proposal.get("name", ""),
-                            proposal.get("description", ""),
-                        )
-                        if not overlap:
-                            await self._emit_new_skill_approval(ctx, proposal)
+                    await self._emit_new_skill_create_suggestion(ctx)
 
             # Trigger async evaluation if interval reached
             await self._trigger_async_evaluation(ctx, parsed_messages)
@@ -1603,144 +1672,226 @@ class SkillEvolutionRail(EvolutionRail):
         )
         return len(unique_tools) >= self._new_skill_tool_diversity
 
-    async def _generate_new_skill_proposal(
-        self,
-        parsed_messages: List[dict],
-    ) -> Optional[Dict[str, Any]]:
-        """Generate new skill proposal using optimizer."""
-        existing_skills = self._evolution_store.list_skill_names()
-        return await self._evolver.generate_new_skill_proposal(
-            parsed_messages,
-            existing_skills,
+    # ------------------------------------------------------------------
+    # Path B: new skill creation (threshold-based, no LLM body generation)
+    # ------------------------------------------------------------------
+
+    def _select_skill_creator_prompt_template(self, *, require_user_confirm: bool) -> str:
+        """Pick MANUAL (ask_user) vs AUTO (direct skill-creator) prompt template."""
+        if self._language == "cn":
+            return (
+                _SKILL_CREATE_FOLLOW_UP_PROMPT_MANUAL_CN
+                if require_user_confirm
+                else _SKILL_CREATE_FOLLOW_UP_PROMPT_AUTO_CN
+            )
+        return (
+            _SKILL_CREATE_FOLLOW_UP_PROMPT_MANUAL_EN
+            if require_user_confirm
+            else _SKILL_CREATE_FOLLOW_UP_PROMPT_AUTO_EN
         )
 
-    async def _check_skill_overlap(
+    def _localized_skill_create_text(self, mapping: Dict[str, str]) -> str:
+        """Return localized string; fall back to English for unknown language codes."""
+        return mapping.get(self._language, mapping["en"])
+
+    def _default_skill_create_reason(self) -> str:
+        return self._localized_skill_create_text(_SKILL_CREATE_DEFAULT_REASON)
+
+    def _skill_create_suggestion_reason(self) -> str:
+        return self._localized_skill_create_text(_SKILL_CREATE_SUGGESTION_REASON)
+
+    def _build_skill_create_approval_questions(self, reason: str) -> List[dict]:
+        """Build ask_user questions for manual (non-auto_save) skill creation."""
+        question_template = self._localized_skill_create_text(_SKILL_CREATE_APPROVAL_QUESTION)
+        header = self._localized_skill_create_text(_SKILL_CREATE_APPROVAL_HEADER)
+        return [
+            {
+                "question": question_template.format(reason=reason),
+                "header": header,
+                # Labels stay "Create"/"Skip" for host-side approval routing.
+                "options": [
+                    {"label": "Create", "description": "Initiate skill creation via skill-creator"},
+                    {"label": "Skip", "description": "Discard this suggestion"},
+                ],
+                "multi_select": False,
+            }
+        ]
+
+    def _build_skill_creator_prompt(
         self,
-        proposal_name: str,
-        proposal_desc: str,
-    ) -> bool:
-        """Check if proposed skill overlaps with existing skills.
+        *,
+        suggested_name: str = "",
+        reason: str = "",
+        require_user_confirm: bool = True,
+    ) -> str:
+        """Build a skill-creator follow-up prompt for the host to inject into
+        the next invoke.
 
-        Returns True if overlap detected (should not propose).
+        When ``require_user_confirm`` is True (``auto_save=False``), the prompt
+        instructs the Agent to ask_user before calling **skill-creator**.
+        When False (``auto_save=True``), the Agent should call **skill-creator**
+        directly without another ask_user step.
         """
-        existing_names = self._evolution_store.list_skill_names()
-        proposal_lower = proposal_name.lower()
+        prompt_template = self._select_skill_creator_prompt_template(
+            require_user_confirm=require_user_confirm,
+        )
+        skills_dir = str(self._evolution_store.base_dir)
+        return prompt_template.format(
+            skills_dir=skills_dir,
+            reason=reason or self._default_skill_create_reason(),
+            suggested_name=suggested_name or "",
+        )
 
-        for existing in existing_names:
-            # Simple name containment check
-            if proposal_lower in existing.lower() or existing.lower() in proposal_lower:
-                logger.info(
-                    "[SkillEvolutionRail] new skill proposal '%s' overlaps with existing '%s'",
-                    proposal_name,
-                    existing,
-                )
-                return True
-
-        return False
-
-    async def _emit_new_skill_approval(
+    async def _emit_new_skill_create_suggestion(
         self,
         ctx: AgentCallbackContext,
-        proposal: Dict[str, Any],
     ) -> None:
-        """Emit approval event for new skill creation or auto-create if auto_save enabled."""
-        pending = PendingSkillCreation(
-            name=proposal.get("name", ""),
-            description=proposal.get("description", ""),
-            body=proposal.get("body", ""),
-            reason=proposal.get("reason", ""),
+        """Emit a skill-creator follow-up suggestion for the host.
+
+        No longer calls ``EvolutionStore.create_skill()`` — the host receives
+        a ``skill_creator_prompt`` and is responsible for launching a new
+        invoke that calls the **skill-creator** skill.
+
+        Two modes:
+        - ``auto_save=True``: skip ask_user, emit ``skill_creator_follow_up``
+          event directly (host dispatches immediately).
+        - ``auto_save=False``: emit ``chat.ask_user_question`` for UI approval
+          + a companion ``skill_creator_follow_up`` event keyed by the same
+          ``request_id``.  When the user approves, the host calls
+          ``on_approve_new_skill(request_id)`` to retrieve the prompt.
+        """
+        # Check skill-creator availability
+        skills_dir = str(self._evolution_store.base_dir)
+        skill_creator_path = os.path.join(skills_dir, "skill-creator", "SKILL.md")
+        if not os.path.isfile(skill_creator_path):
+            logger.info(
+                "[SkillEvolutionRail] skill_creator not found at %s, "
+                "skipping new skill creation suggestion",
+                skill_creator_path,
+            )
+            return
+
+        reason = self._skill_create_suggestion_reason()
+        require_user_confirm = not self._auto_save
+        prompt = self._build_skill_creator_prompt(
+            suggested_name="",
+            reason=reason,
+            require_user_confirm=require_user_confirm,
         )
-        proposal_id = pending.proposal_id
+        proposal_id = f"skill_create_{uuid.uuid4().hex[:8]}"
+
+        # Store minimal metadata for host consumption
+        pending = PendingSkillCreation(
+            name="",
+            description="",
+            body="",  # deprecated — body is generated by skill-creator
+            reason=reason,
+        )
+        pending.proposal_id = proposal_id
         self._pending_skill_proposals[proposal_id] = pending
 
         if self._auto_save:
-            # Auto-save mode: directly create the new skill without approval
-            try:
-                result = await self._evolution_store.create_skill(
-                    name=pending.name,
-                    description=pending.description,
-                    body=pending.body,
-                )
-                if result:
-                    self._pending_skill_proposals.pop(proposal_id, None)
-                    self._record_new_skill(
-                        pending.name,
-                        description=pending.description,
-                        reason=pending.reason,
-                    )
-                    logger.info(
-                        "[SkillEvolutionRail] auto-created new skill: %s (proposal_id=%s)",
-                        pending.name,
-                        proposal_id,
-                    )
-                else:
-                    logger.error(
-                        "[SkillEvolutionRail] failed to auto-create skill: %s "
-                        "(proposal_id=%s retained for retry)",
-                        pending.name,
-                        proposal_id,
-                    )
-            except Exception as exc:
-                logger.error(
-                    "[SkillEvolutionRail] auto-create new skill failed for %s "
-                    "(proposal_id=%s retained for retry): %s",
-                    pending.name,
-                    proposal_id,
-                    exc,
-                )
+            # Auto-save mode: dedicated follow-up event (no ask_user UI).
+            # Hosts should dispatch on type/action == skill_creator_follow_up
+            # without rendering a question dialog.
+            event = OutputSchema(
+                type="skill_creator_follow_up",
+                index=0,
+                payload={
+                    "action": "skill_creator_follow_up",
+                    "request_id": proposal_id,
+                    "skill_create_meta": {
+                        "skills_dir": skills_dir,
+                        "reason": reason,
+                        "suggested_name": "",
+                        "auto_save": True,
+                    },
+                    "skill_creator_prompt": prompt,
+                },
+            )
+            self._pending_approval_events.append(event)
+            # Name is unknown until skill-creator runs; use proposal_id so the
+            # suggestion is auditable in run_summary (empty name is a no-op).
+            self._record_new_skill(
+                name=proposal_id,
+                description="",
+                reason=reason,
+            )
+            logger.info(
+                "[SkillEvolutionRail] skill_create_suggestion: auto_save emitted "
+                "skill_creator_follow_up (proposal_id=%s, prompt_chars=%d)",
+                proposal_id,
+                len(prompt),
+            )
         else:
-            # Approval-required mode: emit approval request
-            questions = [
-                {
-                    "question": (
-                        f"**New Skill Proposal: '{pending.name}'**\n\n"
-                        f"{pending.description}\n\n"
-                        f"**Reason:** {pending.reason}\n\n"
-                        "Create this new skill?"
-                    ),
-                    "header": "New Skill Creation",
-                    "options": [
-                        {"label": "Create", "description": "Create the new skill with proposed content"},
-                        {"label": "Skip", "description": "Discard this proposal"},
-                    ],
-                    "multi_select": False,
-                }
-            ]
+            # Approval-required mode: emit ask_user_question + companion follow_up
+            questions = self._build_skill_create_approval_questions(reason)
             event = OutputSchema(
                 type="chat.ask_user_question",
                 index=0,
                 payload={
+                    "action": "skill_creator_follow_up",
                     "request_id": proposal_id,
-                    "_new_skill_data": {
-                        "name": pending.name,
-                        "description": pending.description,
-                        "body": pending.body,
+                    "skill_create_meta": {
+                        "skills_dir": skills_dir,
+                        "reason": reason,
+                        "suggested_name": "",
+                        "auto_save": False,
                     },
+                    "skill_creator_prompt": prompt,
                     "questions": questions,
                 },
             )
             self._pending_approval_events.append(event)
             logger.info(
-                "[SkillEvolutionRail] buffered new skill approval request (%s) for '%s'",
+                "[SkillEvolutionRail] skill_create_suggestion: buffered approval "
+                "request (%s) with skill_creator_follow_up action",
                 proposal_id,
-                pending.name,
             )
 
+    def take_pending_skill_create_prompts(self) -> Dict[str, str]:
+        """Return and clear all pending skill_creator_prompt values.
+
+        Keyed by request_id for host-side correlation.
+        Useful as a fallback when the host cannot parse OutputSchema payloads.
+        """
+        result: Dict[str, str] = {}
+        require_user_confirm = not self._auto_save
+        for req_id, pending in list(self._pending_skill_proposals.items()):
+            reason = pending.reason
+            prompt = self._build_skill_creator_prompt(
+                suggested_name="",
+                reason=reason,
+                require_user_confirm=require_user_confirm,
+            )
+            result[req_id] = prompt
+        self._pending_skill_proposals.clear()
+        logger.info(
+            "[SkillEvolutionRail] take_pending_skill_create_prompts: returning %d prompt(s)",
+            len(result),
+        )
+        return result
+
     async def on_approve_new_skill(self, request_id: str) -> Optional[str]:
-        """Handle approval of new skill creation.
+        """Handle approval of new skill creation and return a skill_creator_prompt.
+
+        **Deprecated**: this method no longer calls ``EvolutionStore.create_skill()``.
+        Instead it returns a formatted ``skill_creator_prompt`` string that the host
+        must inject into a new invoke to run the **skill-creator** skill.
 
         Args:
-            request_id: The proposal ID
+            request_id: The proposal ID (from ``_emit_new_skill_create_suggestion``).
 
         Returns:
-            Name of created skill, or None if failed
+            A ``skill_creator_prompt`` string ready for ``agent.invoke(query=prompt, ...)``,
+            or ``None`` if the request_id is unknown.
         """
         pending = self._pending_skill_proposals.pop(request_id, None)
         if not pending:
             if self._auto_save:
                 logger.info(
                     "[SkillEvolutionRail] on_approve_new_skill: request_id=%s not pending "
-                    "(likely auto-created or unknown)",
+                    "(likely already dispatched via auto_save)",
                     request_id,
                 )
             else:
@@ -1751,27 +1902,24 @@ class SkillEvolutionRail(EvolutionRail):
             return None
 
         try:
-            result = await self._evolution_store.create_skill(
-                name=pending.name,
-                description=pending.description,
-                body=pending.body,
+            # User already approved via ask_user_question; use AUTO template
+            # so the follow-up invoke does not ask for confirmation again.
+            prompt = self._build_skill_creator_prompt(
+                suggested_name="",
+                reason=pending.reason,
+                require_user_confirm=False,
             )
-            if result:
-                logger.info(
-                    "[SkillEvolutionRail] user approved new skill creation: %s",
-                    pending.name,
-                )
-                return pending.name
-            else:
-                logger.error(
-                    "[SkillEvolutionRail] failed to create skill: %s",
-                    pending.name,
-                )
-                return None
+            logger.info(
+                "[SkillEvolutionRail] on_approve_new_skill: returning "
+                "skill_creator_prompt (%d chars) for request_id=%s",
+                len(prompt),
+                request_id,
+            )
+            return prompt
         except Exception as exc:
             logger.error(
                 "[SkillEvolutionRail] on_approve_new_skill failed for %s: %s",
-                pending.name,
+                request_id,
                 exc,
             )
             return None
@@ -1782,7 +1930,7 @@ class SkillEvolutionRail(EvolutionRail):
         if pending:
             logger.info(
                 "[SkillEvolutionRail] user rejected new skill creation: %s",
-                pending.name,
+                pending.name or request_id,
             )
 
     async def rollback_skill(self, skill_name: str, version: Optional[str] = None) -> bool:

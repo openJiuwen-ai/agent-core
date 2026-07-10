@@ -1165,7 +1165,15 @@ async def test_run_evolution_multiple_attributed_skills_no_fallback(tmp_path):
 
 @pytest.mark.asyncio
 async def test_should_propose_new_skill_meets_thresholds(tmp_path):
-    rail = _make_rail(tmp_path)
+    rail = SkillEvolutionRail(
+        skills_dir=str(tmp_path / "skills"),
+        llm=Mock(),
+        model="dummy-model",
+        new_skill_tool_threshold=10,
+        new_skill_tool_diversity=2,
+    )
+    rail._evolution_store = Mock()
+    rail._evolver = Mock()
     messages = [
         {
             "role": "assistant",
@@ -1174,8 +1182,13 @@ async def test_should_propose_new_skill_meets_thresholds(tmp_path):
                 {"name": "read_file", "arguments": ""},
                 {"name": "write_file", "arguments": ""},
                 {"name": "run_bash", "arguments": ""},
+                {"name": "grep", "arguments": ""},
+                {"name": "ls", "arguments": ""},
                 {"name": "read_file", "arguments": ""},
                 {"name": "write_file", "arguments": ""},
+                {"name": "python", "arguments": ""},
+                {"name": "git", "arguments": ""},
+                {"name": "read_file", "arguments": ""},
             ],
         },
     ]
@@ -1184,15 +1197,23 @@ async def test_should_propose_new_skill_meets_thresholds(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_should_propose_new_skill_too_few_tool_calls(tmp_path):
-    rail = _make_rail(tmp_path)
+async def test_should_propose_new_skill_below_tool_count_threshold(tmp_path):
+    """Fewer tool calls than new_skill_tool_threshold should not propose."""
+    rail = SkillEvolutionRail(
+        skills_dir=str(tmp_path / "skills"),
+        llm=Mock(),
+        model="dummy-model",
+        new_skill_tool_threshold=10,
+        new_skill_tool_diversity=2,
+    )
+    rail._evolution_store = Mock()
+    rail._evolver = Mock()
     messages = [
         {
             "role": "assistant",
             "content": "",
             "tool_calls": [
                 {"name": "read_file", "arguments": ""},
-                {"name": "write_file", "arguments": ""},
             ],
         },
     ]
@@ -1202,8 +1223,16 @@ async def test_should_propose_new_skill_too_few_tool_calls(tmp_path):
 
 @pytest.mark.asyncio
 async def test_should_propose_new_skill_insufficient_diversity(tmp_path):
-    # 5 tool calls but all the same tool
-    rail = _make_rail(tmp_path)
+    """Enough tool calls but unique tools below diversity threshold."""
+    rail = SkillEvolutionRail(
+        skills_dir=str(tmp_path / "skills"),
+        llm=Mock(),
+        model="dummy-model",
+        new_skill_tool_threshold=10,
+        new_skill_tool_diversity=2,
+    )
+    rail._evolution_store = Mock()
+    rail._evolver = Mock()
     messages = [
         {
             "role": "assistant",
@@ -1214,10 +1243,14 @@ async def test_should_propose_new_skill_insufficient_diversity(tmp_path):
                 {"name": "read_file", "arguments": ""},
                 {"name": "read_file", "arguments": ""},
                 {"name": "read_file", "arguments": ""},
+                {"name": "read_file", "arguments": ""},
+                {"name": "read_file", "arguments": ""},
+                {"name": "read_file", "arguments": ""},
+                {"name": "read_file", "arguments": ""},
+                {"name": "read_file", "arguments": ""},
             ],
         },
     ]
-    # default diversity threshold is 2, only 1 unique tool → False
     result = await rail._should_propose_new_skill(messages)
     assert result is False
 
@@ -1231,115 +1264,185 @@ async def test_should_propose_new_skill_no_tool_calls(tmp_path):
 
 
 # =============================================================================
-# _check_skill_overlap Tests
+# _emit_new_skill_create_suggestion Tests
 # =============================================================================
 
 
 @pytest.mark.asyncio
-async def test_check_skill_overlap_detects_containment(tmp_path):
-    rail = _make_rail(tmp_path)
-    rail._evolution_store.list_skill_names = Mock(return_value=["data-analysis", "report-gen"])
-    # "data" is contained in "data-analysis"
-    result = await rail._check_skill_overlap("data", "analyze data")
-    assert result is True
-
-
-@pytest.mark.asyncio
-async def test_check_skill_overlap_no_overlap(tmp_path):
-    rail = _make_rail(tmp_path)
-    rail._evolution_store.list_skill_names = Mock(return_value=["data-analysis", "report-gen"])
-    result = await rail._check_skill_overlap("code-review", "review source code")
-    assert result is False
-
-
-@pytest.mark.asyncio
-async def test_check_skill_overlap_empty_name(tmp_path):
-    rail = _make_rail(tmp_path)
-    rail._evolution_store.list_skill_names = Mock(return_value=["data-analysis"])
-    # Empty proposal name is contained in "data-analysis" as empty string
-    result = await rail._check_skill_overlap("", "some description")
-    assert result is True
-
-
-@pytest.mark.asyncio
-async def test_check_skill_overlap_no_existing_skills(tmp_path):
-    rail = _make_rail(tmp_path)
-    rail._evolution_store.list_skill_names = Mock(return_value=[])
-    result = await rail._check_skill_overlap("brand-new-skill", "something new")
-    assert result is False
-
-
-# =============================================================================
-# _emit_new_skill_approval Tests
-# =============================================================================
-
-
-@pytest.mark.asyncio
-async def test_emit_new_skill_approval_buffers_event(tmp_path):
+async def test_emit_new_skill_create_suggestion_manual_emits_follow_up_event(tmp_path):
+    """auto_save=False: emits skill_creator_follow_up with ask_user_question."""
     rail = _make_rail(tmp_path, auto_save=False)
     ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-    proposal = {
-        "name": "my-skill",
-        "description": "Does something",
-        "body": "## Instructions\nDo stuff",
-        "reason": "Useful pattern",
-    }
-    await rail._emit_new_skill_approval(ctx, proposal)
+
+    # Ensure skill-creator is "installed" for the check
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(exist_ok=True)
+    (skills_dir / "skill-creator").mkdir(exist_ok=True)
+    (skills_dir / "skill-creator" / "SKILL.md").write_text("# skill-creator\n")
+
+    # Rebuild rail with real path
+    rail = SkillEvolutionRail(
+        skills_dir=str(skills_dir),
+        llm=Mock(),
+        model="dummy-model",
+        auto_save=False,
+    )
+    rail._evolution_store = Mock()
+    rail._evolution_store.base_dir = skills_dir
+    rail._evolver = Mock()
+
+    await rail._emit_new_skill_create_suggestion(ctx)
 
     events = rail.drain_pending_approval_events()
     assert len(events) == 1
     event = events[0]
-    assert event.type == "chat.ask_user_question"
     payload = event.payload
-    assert payload["_new_skill_data"]["name"] == "my-skill"
-    request_id = payload["request_id"]
-    # UUID-based prefix for skill creation
-    assert request_id.startswith("skill_create_")
-    assert request_id in rail._pending_skill_proposals
+    assert payload["action"] == "skill_creator_follow_up"
+    assert payload["skill_creator_prompt"]
+    assert "skill-creator" in payload["skill_creator_prompt"]
+    assert "ask_user" in payload["skill_creator_prompt"]
+    assert payload["skill_create_meta"]["auto_save"] is False
+    assert payload["questions"]  # ask_user_question
 
 
 @pytest.mark.asyncio
-async def test_emit_new_skill_approval_unique_ids(tmp_path):
-    """Two concurrent proposals must not share the same request_id."""
-    rail = _make_rail(tmp_path, auto_save=False)
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-    proposal_a = {"name": "skill-a", "description": "A", "body": "", "reason": ""}
-    proposal_b = {"name": "skill-b", "description": "B", "body": "", "reason": ""}
+async def test_emit_new_skill_create_suggestion_auto_save_emits_follow_up(tmp_path):
+    """auto_save=True: emits skill_creator_follow_up directly without ask_user."""
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(exist_ok=True)
+    (skills_dir / "skill-creator").mkdir(exist_ok=True)
+    (skills_dir / "skill-creator" / "SKILL.md").write_text("# skill-creator\n")
 
-    await rail._emit_new_skill_approval(ctx, proposal_a)
-    await rail._emit_new_skill_approval(ctx, proposal_b)
+    rail = SkillEvolutionRail(
+        skills_dir=str(skills_dir),
+        llm=Mock(),
+        model="dummy-model",
+        auto_save=True,
+    )
+    rail._evolution_store = Mock()
+    rail._evolution_store.base_dir = skills_dir
+    rail._evolver = Mock()
+
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    await rail._emit_new_skill_create_suggestion(ctx)
 
     events = rail.drain_pending_approval_events()
-    ids = {e.payload["request_id"] for e in events}
-    assert len(ids) == 2  # must be distinct
+    assert len(events) == 1
+    event = events[0]
+    # Dedicated type — not chat.ask_user_question (no empty questions UI).
+    assert event.type == "skill_creator_follow_up"
+    payload = event.payload
+    assert payload["action"] == "skill_creator_follow_up"
+    assert "questions" not in payload
+    assert payload["skill_creator_prompt"]
+    assert "skill-creator" in payload["skill_creator_prompt"]
+    assert "ask_user" not in payload["skill_creator_prompt"]
+    assert "无需再次向用户确认" in payload["skill_creator_prompt"]
+    assert payload["skill_create_meta"]["auto_save"] is True
+    # Empty name would be a no-op in _record_new_skill; proposal_id must be recorded.
+    request_id = payload["request_id"]
+    assert rail._run_summary is not None
+    assert rail._run_summary["new_skills"] == [
+        {
+            "name": request_id,
+            "description": "",
+            "reason": payload["skill_create_meta"]["reason"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_emit_new_skill_create_suggestion_uses_english_reason_and_question(tmp_path):
+    """English rail should not inject Chinese reason/question text."""
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(exist_ok=True)
+    (skills_dir / "skill-creator").mkdir(exist_ok=True)
+    (skills_dir / "skill-creator" / "SKILL.md").write_text("# skill-creator\n")
+
+    rail = SkillEvolutionRail(
+        skills_dir=str(skills_dir),
+        llm=Mock(),
+        model="dummy-model",
+        auto_save=False,
+        language="en",
+    )
+    rail._evolution_store = Mock()
+    rail._evolution_store.base_dir = skills_dir
+    rail._evolver = Mock()
+
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    await rail._emit_new_skill_create_suggestion(ctx)
+
+    payload = rail.drain_pending_approval_events()[0].payload
+    prompt = payload["skill_creator_prompt"]
+    question = payload["questions"][0]["question"]
+
+    assert "Reusable tool-call patterns" in prompt
+    assert "检测到" not in prompt
+    assert "Reusable tool-call patterns" in question
+    assert "创建原因" not in question
+    assert payload["questions"][0]["header"] == "New Skill Creation"
+
+
+@pytest.mark.asyncio
+async def test_emit_new_skill_create_suggestion_skips_when_skill_creator_missing(tmp_path):
+    """When skill-creator/SKILL.md is missing, no event is emitted."""
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(exist_ok=True)
+    # No skill-creator directory
+
+    rail = SkillEvolutionRail(
+        skills_dir=str(skills_dir),
+        llm=Mock(),
+        model="dummy-model",
+        auto_save=False,
+    )
+    rail._evolution_store = Mock()
+    rail._evolution_store.base_dir = skills_dir
+    rail._evolver = Mock()
+
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    await rail._emit_new_skill_create_suggestion(ctx)
+
+    events = rail.drain_pending_approval_events()
+    assert events == []
 
 
 # =============================================================================
-# on_approve_new_skill / on_reject_new_skill Tests
+# on_approve_new_skill / on_reject_new_skill Tests (deprecated — returns prompt)
 # =============================================================================
 
 
 @pytest.mark.asyncio
-async def test_on_approve_new_skill_creates_skill(tmp_path):
-    rail = _make_rail(tmp_path, auto_save=False)
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-    proposal = {"name": "new-skill", "description": "desc", "body": "body", "reason": "reason"}
+async def test_on_approve_new_skill_returns_prompt_without_create_skill(tmp_path):
+    """on_approve_new_skill now returns a skill_creator_prompt string, not a skill name."""
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(exist_ok=True)
+    (skills_dir / "skill-creator").mkdir(exist_ok=True)
+    (skills_dir / "skill-creator" / "SKILL.md").write_text("# skill-creator\n")
 
-    await rail._emit_new_skill_approval(ctx, proposal)
+    rail = SkillEvolutionRail(
+        skills_dir=str(skills_dir),
+        llm=Mock(),
+        model="dummy-model",
+        auto_save=False,
+    )
+    rail._evolution_store = Mock()
+    rail._evolution_store.base_dir = skills_dir
+    rail._evolver = Mock()
+
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    await rail._emit_new_skill_create_suggestion(ctx)
     events = rail.drain_pending_approval_events()
     request_id = events[0].payload["request_id"]
 
-    rail._evolution_store.create_skill = AsyncMock(return_value=tmp_path / "new-skill")
-
     result = await rail.on_approve_new_skill(request_id)
-
-    rail._evolution_store.create_skill.assert_awaited_once_with(
-        name="new-skill",
-        description="desc",
-        body="body",
-    )
-    assert result == "new-skill"
-    # Proposal should be removed
+    assert result is not None
+    assert "skill-creator" in result
+    # User already approved via ask_user_question; AUTO template must not
+    # instruct the Agent to ask again (avoid double-confirmation).
+    assert "ask_user" not in result
+    assert "无需再次向用户确认" in result
     assert request_id not in rail._pending_skill_proposals
 
 
@@ -1351,42 +1454,24 @@ async def test_on_approve_new_skill_unknown_request_id(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_on_approve_new_skill_store_failure_returns_none(tmp_path):
-    rail = _make_rail(tmp_path, auto_save=False)
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-    proposal = {"name": "fail-skill", "description": "d", "body": "b", "reason": "r"}
-
-    await rail._emit_new_skill_approval(ctx, proposal)
-    events = rail.drain_pending_approval_events()
-    request_id = events[0].payload["request_id"]
-
-    rail._evolution_store.create_skill = AsyncMock(return_value=None)
-    result = await rail.on_approve_new_skill(request_id)
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_on_approve_new_skill_exception_returns_none(tmp_path):
-    rail = _make_rail(tmp_path, auto_save=False)
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-    proposal = {"name": "exc-skill", "description": "d", "body": "b", "reason": "r"}
-
-    await rail._emit_new_skill_approval(ctx, proposal)
-    events = rail.drain_pending_approval_events()
-    request_id = events[0].payload["request_id"]
-
-    rail._evolution_store.create_skill = AsyncMock(side_effect=OSError("disk full"))
-    result = await rail.on_approve_new_skill(request_id)
-    assert result is None
-
-
-@pytest.mark.asyncio
 async def test_on_reject_new_skill_discards_proposal(tmp_path):
-    rail = _make_rail(tmp_path, auto_save=False)
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-    proposal = {"name": "rej-skill", "description": "d", "body": "b", "reason": "r"}
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(exist_ok=True)
+    (skills_dir / "skill-creator").mkdir(exist_ok=True)
+    (skills_dir / "skill-creator" / "SKILL.md").write_text("# skill-creator\n")
 
-    await rail._emit_new_skill_approval(ctx, proposal)
+    rail = SkillEvolutionRail(
+        skills_dir=str(skills_dir),
+        llm=Mock(),
+        model="dummy-model",
+        auto_save=False,
+    )
+    rail._evolution_store = Mock()
+    rail._evolution_store.base_dir = skills_dir
+    rail._evolver = Mock()
+
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    await rail._emit_new_skill_create_suggestion(ctx)
     events = rail.drain_pending_approval_events()
     request_id = events[0].payload["request_id"]
 
@@ -1402,55 +1487,31 @@ async def test_on_reject_new_skill_unknown_id_is_noop(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_emit_new_skill_approval_auto_save_creates_and_clears_pending(tmp_path):
-    rail = _make_rail(tmp_path, auto_save=True)
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-    proposal = {"name": "auto-skill", "description": "d", "body": "b", "reason": "r"}
+async def test_take_pending_skill_create_prompts_returns_and_clears(tmp_path):
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(exist_ok=True)
+    (skills_dir / "skill-creator").mkdir(exist_ok=True)
+    (skills_dir / "skill-creator" / "SKILL.md").write_text("# skill-creator\n")
 
-    rail._evolution_store.create_skill = AsyncMock(return_value=tmp_path / "auto-skill")
-
-    await rail._emit_new_skill_approval(ctx, proposal)
-
-    rail._evolution_store.create_skill.assert_awaited_once_with(
-        name="auto-skill",
-        description="d",
-        body="b",
+    rail = SkillEvolutionRail(
+        skills_dir=str(skills_dir),
+        llm=Mock(),
+        model="dummy-model",
+        auto_save=False,
     )
-    assert rail.drain_pending_approval_events() == []
+    rail._evolution_store = Mock()
+    rail._evolution_store.base_dir = skills_dir
+    rail._evolver = Mock()
+
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    await rail._emit_new_skill_create_suggestion(ctx)
+    # Drain approval events (but proposals remain)
+    rail.drain_pending_approval_events()
+
+    prompts = rail.take_pending_skill_create_prompts()
+    assert len(prompts) == 1
+    assert all("skill-creator" in p for p in prompts.values())
     assert not rail._pending_skill_proposals
-
-
-@pytest.mark.asyncio
-async def test_emit_new_skill_approval_auto_save_failure_retains_pending_for_retry(tmp_path):
-    rail = _make_rail(tmp_path, auto_save=True)
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-    proposal = {"name": "retry-skill", "description": "d", "body": "b", "reason": "r"}
-
-    rail._evolution_store.create_skill = AsyncMock(return_value=None)
-
-    await rail._emit_new_skill_approval(ctx, proposal)
-
-    assert len(rail._pending_skill_proposals) == 1
-    request_id = next(iter(rail._pending_skill_proposals))
-
-    rail._evolution_store.create_skill = AsyncMock(return_value=tmp_path / "retry-skill")
-    result = await rail.on_approve_new_skill(request_id)
-
-    assert result == "retry-skill"
-    assert request_id not in rail._pending_skill_proposals
-
-
-@pytest.mark.asyncio
-async def test_on_approve_new_skill_auto_save_already_created_returns_none(tmp_path):
-    rail = _make_rail(tmp_path, auto_save=True)
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-    proposal = {"name": "done-skill", "description": "d", "body": "b", "reason": "r"}
-
-    rail._evolution_store.create_skill = AsyncMock(return_value=tmp_path / "done-skill")
-    await rail._emit_new_skill_approval(ctx, proposal)
-
-    result = await rail.on_approve_new_skill("skill_create_nonexistent")
-    assert result is None
 
 
 # =============================================================================
@@ -1560,6 +1621,10 @@ async def test_run_evolution_path_b_reached_when_no_primary_skill(tmp_path):
                 {"name": "grep", "arguments": ""},
                 {"name": "ls", "arguments": ""},
                 {"name": "python", "arguments": ""},
+                {"name": "git", "arguments": ""},
+                {"name": "npm", "arguments": ""},
+                {"name": "docker", "arguments": ""},
+                {"name": "curl", "arguments": ""},
             ],
         },
     ]
