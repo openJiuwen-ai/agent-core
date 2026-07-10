@@ -19,8 +19,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-07-09 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md |
+| 最近一次修订日期 | 2026-07-10 |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md |
 
 ## 范围 / 边界
 
@@ -186,25 +186,38 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     参数描述的**复用是免费的**（形态同 `name` → `t(tool, "param")` 同 key），
     **扩展就是加 key**；语义变了的同名参数用新的 desc_key 命名空间
     （`send_message_scheduled.to`）。**绝不让 resolver 学会 variant**。
-19. **`create_task` 的 `assignee` 与任务图同一事务落库**（F_57 / F_59）。scheduled 形态的
-    `assignee` 必填，随 `TaskGraphSpec` → `NewTaskSpec` 进同一次
-    `mutate_dependency_graph`。**每个任务一律 seed `PENDING`**（携带 assignee）：无依赖 →
-    停在 `PENDING(assignee)`（"已指派未开始"），带依赖 → refresh pass 翻成 `BLOCKED(assignee)`。
-    指派与开工是两个事件，故创建期**不再** seed 执行态（F_57 曾对无依赖任务直接
-    seed `CLAIMED`，现一律 `PENDING`）。禁止「建图后逐个 `assign()`、失败的记为 deferred」
-    ——那会给原子的 `create_task` 引入不可回滚的部分成功态。`PENDING(assignee) → IN_PROGRESS` 由
-    `TeamTaskManager.start_task`（调度器调用）完成，`BLOCKED(assignee)` 依赖解除后回
-    `PENDING(assignee)` 等调度器开工——这些何时发生属 runtime 调度器职责，不是工具层的补丁。
-20. **verify 闸：reviewer 由 leader 指派，验证由 reviewer 裁决**（F_59）。任务的 `reviewer`
-    列（JSON member 名列表）经 `create_task` / `update_task` 由 leader 指派，可多个，须是真实成员
-    且 ≠ `assignee`（不可自审）。author 经 `member_complete_task` / `claim_task(completed)` 完成时，
-    `complete()` 按有无 reviewer 分流：有 → `IN_PROGRESS → IN_REVIEW`（发 `TASK_SUBMITTED_FOR_REVIEW`，
-    不解依赖、author 不释放）；无 → 直接 `COMPLETED`。reviewer 经 `verify_task(decision)` 裁决：
-    `pass` → `IN_REVIEW → COMPLETED`（解依赖，发 `TASK_VERIFIED`）/ `fail` → `IN_REVIEW → IN_PROGRESS`
-    （返工，`feedback` 定向 author，发 `TASK_REVISION_REQUESTED`）。`verify_task` 守卫：任务须
-    `IN_REVIEW`、caller ∈ `reviewer` 列且 ≠ author；进 autonomous / scheduled / human_agent 成员集，
-    不进 leader 集。多 reviewer v1「首个裁决即生效」，投票机制留后。`view_task(action=in_review)`
-    是 reviewer 拉取待验证任务的入口。
+19. **`create_task` 的 `assignee` 与任务图同一事务落库**（F_57 / F_59 / F_62）。scheduled
+    形态的 `assignee` **必填**（成员不自主认领，无主任务永远不会执行），随 `TaskGraphSpec` →
+    `NewTaskSpec` 进同一次 `mutate_dependency_graph`。**每个任务一律 seed `PENDING`**
+    （携带 assignee）：无依赖 → 停在 `PENDING(assignee)`（"已指派未开始"），带依赖 →
+    refresh pass 翻成 `BLOCKED(assignee)`。指派与开工是两个事件，故创建期**不再** seed
+    执行态。禁止「建图后逐个 `assign()`、失败的记为 deferred」——那会给原子的
+    `create_task` 引入不可回滚的部分成功态。`PENDING(assignee)` 的开工（build 成员 →
+    `IN_PROGRESS`、plan 成员 → `PLANNING`，DAO `start_task(to_status=...)` 参数化）由
+    `TeamTaskManager.start_task` 完成，调用方是 `agent/scheduling/` 的 `TeamScheduler`
+    （见 `S_22`）。scheduled 形态额外带可选 `max_review_rounds`（整数 ≥1，验证返工轮数
+    上限，须伴随 `reviewer`，亦可经 `update_task` 事后设置）。
+20. **verify 闸：reviewer 由 leader 指派，裁决策略按生效分发模式二分**（F_59 / F_62）。任务的
+    `reviewer` 列（JSON member 名列表）经 `create_task` / `update_task` 由 leader 指派，可多个，
+    须是真实成员且 ≠ `assignee`（不可自审）。author 经 `member_complete_task` /
+    `claim_task(completed)` 完成时，`complete()` 按有无 reviewer 分流：有 → `IN_PROGRESS →
+    IN_REVIEW`（发 `TASK_SUBMITTED_FOR_REVIEW`，不解依赖、author 不释放，同一 UPDATE 里
+    `review_round += 1` 开新轮）；无 → 直接 `COMPLETED`。`verify_task` 守卫两种模式相同：任务须
+    `IN_REVIEW`、caller ∈ `reviewer` 列且 ≠ author；进 autonomous / scheduled / human_agent
+    成员集，不进 leader 集。裁决语义按 dispatch_mode（静态 spec 配置）二分，**描述随语义
+    分离**（desc_key 形态 `_VERIFY_TASK_DESC_KEY`：`verify_task` / `verify_task_scheduled`）：
+    - **autonomous** — 首裁即决：`pass` → `IN_REVIEW → COMPLETED`（解依赖，发 `TASK_VERIFIED`）
+      / `fail` → `IN_REVIEW → IN_PROGRESS`（返工，`feedback` 定向 author，发
+      `TASK_REVISION_REQUESTED`）。
+    - **scheduled**（F_62）— 只记一票：追加票行（`team_review_vote_*`，重复调用 = 改票取最新）
+      + 发 `TASK_REVIEW_VOTE`（带票数快照），**不翻转状态**；判定与翻转由 leader 调度器经
+      `TeamTaskManager.settle_review(decision, feedback)`（无 reviewer 资格守卫、`IN_REVIEW`
+      源态 CAS）完成，阈值/轮数/停摆语义见 `S_22`。
+    `view_task(action=in_review)` 是 reviewer 拉取待验证任务的入口。
+21. **dispatch_mode 是静态 spec 配置，`build_team` 不选择协调模式**（F_62）。系统提示词与
+    工具描述按模式在构建期装配、每套一份、互不混写；`build_team` 的运行时开关只有
+    `enable_hitt` / `enable_task_verification`（后者是提示词驱动的"验证预期"开关，覆盖值
+    随 spec 记录的 `dispatch_mode` 一起写进 `team_info` 行——行是记录，spec 是运行时真相）。
 
 ## 接口契约
 

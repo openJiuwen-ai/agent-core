@@ -14,8 +14,8 @@ does not.
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-07-09 |
-| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）。其余条目见 `docs/features/` |
+| 最近一次修订日期 | 2026-07-10 |
+| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）。其余条目见 `docs/features/` |
 
 ## 范围 / 边界
 
@@ -727,20 +727,46 @@ CANCELLED    -> (terminal)
   驳回保持 `PLANNING`。`assign` 感知 mode：指派 plan_mode 成员落 `PLANNING`、build_mode 落
   `IN_PROGRESS`。`BUILD_MODE` 走 `PENDING → IN_PROGRESS → COMPLETED` 直通。
 - **verify 闸**（`IN_REVIEW`）：任务配了 `reviewer`（`TeamTaskBase.reviewer`，JSON member 名
-  列表）时，成员"做完"经 `complete()` 分流落 `IN_REVIEW` 交验证（发 `TASK_SUBMITTED_FOR_REVIEW`），
-  reviewer 用 `verify_task(decision)` 裁决：pass→`COMPLETED`（解依赖，发 `TASK_VERIFIED`）/
-  fail→`IN_PROGRESS`（返工，author 全程持有，发 `TASK_REVISION_REQUESTED` 带 feedback）。守卫：
-  任务须 `IN_REVIEW`、caller ∈ reviewer 且 ≠ author。`reviewer` 由 leader 经 `create_task` /
-  `update_task` 指派，可多个；多 reviewer v1 采「首个裁决即生效」（见 F_59 §reviewer）。
+  列表）时，成员"做完"经 `complete()` 分流落 `IN_REVIEW` 交验证（发 `TASK_SUBMITTED_FOR_REVIEW`，
+  同一 UPDATE 里 `review_round += 1` 原子开新验证轮）。裁决按**生效分发模式**二分（F_62）：
+  自主模式 reviewer 用 `verify_task(decision)` 首裁即决——pass→`COMPLETED`（解依赖，发
+  `TASK_VERIFIED`）/ fail→`IN_PROGRESS`（返工，author 全程持有，发 `TASK_REVISION_REQUESTED`
+  带 feedback）；调度模式 `verify_task` 只向 `team_review_vote_*` 追加一票（发
+  `TASK_REVIEW_VOTE`），判定与翻转由 leader 调度器经 `settle_review` 完成（见 `S_22`）。
+  守卫两模式相同：任务须 `IN_REVIEW`、caller ∈ reviewer 且 ≠ author。`reviewer` 由 leader 经
+  `create_task` / `update_task` 指派，可多个；`max_review_rounds` 列（NULL → 团队默认）是
+  验证返工轮数上限，超限后调度器升级 leader 而不再自动打回。
 - **一成员至多一个活跃任务**：`get_other_active_task_id` 的活跃集 =
   `{PLANNING, IN_PROGRESS, IN_REVIEW}`，两模式统一。调度成员可持有多个 `PENDING(assignee)`
   排队，但同一时刻至多一个活跃任务。
-- `PENDING → IN_PROGRESS` 在调度模式由 `TeamTaskManager.start_task(task_id)`（调度器调用）经
-  DAO CAS `WHERE assignee=? AND status='pending'` 落库，并发 `TaskStartedEvent`。何时调用
-  （派发/唤醒成员那一刻）属 runtime 调度器职责。
+- 调度模式的开工由 `TeamTaskManager.start_task(task_id)` 经 DAO CAS
+  `WHERE assignee=? AND status='pending'` 落库（目标态镜像 `assign` 的成员 mode 感知：
+  build → `IN_PROGRESS`、plan → `PLANNING`，DAO `start_task(to_status=...)` 参数化），并发
+  `TaskStartedEvent`。调用方是 `agent/scheduling/TeamScheduler`（F_62，见 `S_22`）。
 - `PLANNING` / `IN_PROGRESS` / `IN_REVIEW`（与终态一起）在 `TASK_DEPENDENCY_REJECT_STATUSES`
   里：已在推进的任务不可再被加前置依赖。编辑锁只锁 `IN_REVIEW`（验证期内容冻结）。
-- 见 F_59（取代 F_58 的 `STARTED`）。
+- 见 F_59（取代 F_58 的 `STARTED`）、F_62（投票 + 调度 runtime）。
+
+### 评审投票数据面（F_62）
+
+- **动态票表 `team_review_vote_{session}`**（`TeamTaskReviewVoteBase`，
+  `models._get_review_vote_model`；表名刻意避开 `team_task_` 前缀以免被任务表迁移扫描误判）：
+  `id`（自增 PK）、`team_name`（FK）、`task_id`、`review_round`、`reviewer`、`decision`
+  （pass/fail）、`feedback`（可空）、`created_at`。复合索引 `(task_id, review_round)`。
+  **追加写**：改票 = 再插一行，tally 取每 reviewer 最新一票（`get_review_votes` 按 `id` 升序）；
+  旧轮票由 `review_round` 分区自然作废，全量留痕可审计。
+- **任务行新列**：`review_round INT NOT NULL DEFAULT 0`（`submit_for_review` CAS 原子自增）、
+  `max_review_rounds INT NULL`（per-task 轮数上限）。迁移在
+  `engine._ensure_dynamic_table_indexes`（ALTER ADD COLUMN，幂等）。
+- **`team_info` 新列**：`dispatch_mode TEXT NOT NULL DEFAULT 'autonomous'` 与
+  `enable_task_verification BOOLEAN NOT NULL DEFAULT 0`——build_team 选定的**实例级生效值**，
+  冷恢复回填 `TeamBackend`。静态表迁移 `engine._ensure_team_info_capability_columns`。
+- **spec 配置**（`TeamAgentSpec`，仅 leader 侧消费）：`verify_vote_threshold: float = 2/3`
+  （(0,1]）、`default_max_review_rounds: int = 3`（≥1）、`review_stall_timeout: int = 1800`
+  （秒，>0）、`enable_task_verification: bool = False`（提示词开关）；`dispatch_mode` 语义
+  升级为能力上限。校验在 `_validate_review_settings`。
+- **新事件** `TASK_REVIEW_VOTE`（`TaskReviewVoteEvent`）：`member_name`=author、`reviewer`=
+  投票人、`decision`、`review_round`、`pass_count`/`fail_count`/`reviewer_count` 票数快照。
 
 ### Session checkpoint per-team namespace
 
