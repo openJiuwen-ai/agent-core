@@ -8,7 +8,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/coordination/` |
-| 最近一次修订日期 | 2026-07-08 |
+| 最近一次修订日期 | 2026-07-10 |
 | 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md`、`F_14_human-agent-team-event-rendering.md` |
 
 ## 范围 / 边界
@@ -40,7 +40,7 @@
 3. **每个 `BaseCoordinationHandler` 子类必须声明 `EVENT_METHOD_MAP: ClassVar[dict[str, str]]`**，并提供同名 `async` 方法；`get_callbacks()` 输出的 `event_key → bound method` 是 framework 注册的唯一来源。
 4. **handler 不持有原始 host 引用**。`BaseCoordinationHandler.__init__` 把 host 同时绑成 `self._round`（`AgentRoundController`）与 `self._lifecycle`（`TeamLifecycleController`），子类只准通过这两个窄字段 + `self._poll` / `self._blueprint` / `self._infra` 访问外部状态。
 5. **`EventDispatcher` 不做 event_type → handler 路由**。`dispatch()` 只承担"是否该 trigger"的粗筛，具体 event_key → callback 由 `AsyncCallbackFramework` 解决；同一 event_key 上的多个 handler 走稳定排序的 fan-out。
-6. **fan-out 顺序由 `EventDispatcher.__init__` 元组顺序决定**：`(lifecycle, member, message, task_board, stale_task, team_completion)` 即 framework 注册顺序；同 priority（默认 0）下 Python `list.sort` 稳定，因此 `MEMBER_SHUTDOWN` 上 `MemberHandler.on_member_event` 永远先于 `MessageHandler.on_member_shutdown_drain`，`POLL_TASK` 上 `StaleTaskHandler.on_poll_task` 永远先于 `TeamCompletionHandler.on_poll_task`。
+6. **fan-out 顺序由 `EventDispatcher.__init__` 元组顺序决定**：`(lifecycle, member, message, task_board, stale_task, team_completion, workflow[, reliability])` 即 framework 注册顺序；同 priority（默认 0）下 Python `list.sort` 稳定，因此 `MEMBER_SHUTDOWN` 上 `MemberHandler.on_member_event` 永远先于 `MessageHandler.on_member_shutdown_drain`，`POLL_TASK` 上 stale-task handler 的 `on_poll_task` 永远先于 `TeamCompletionHandler.on_poll_task`。task_board / stale_task 的**类**按构造参数 `dispatch_mode` 查字面量表选定（F_62：`TaskBoardHandler` / `StaleTaskHandler` 为自主模式，`ScheduledTaskBoardHandler` / `ScheduledStaleTaskHandler` 为调度模式，未知值 KeyError）——模式是静态 spec 配置，选择只发生在构造期，handler 方法内无模式分支。
 7. **handler 之间不直接互调**。跨域响应必须通过让两个 handler 各自注册同一个 `event_key`、走 framework fan-out 实现。
 8. **`AsyncCallbackFramework.trigger` 的异常语义是吞 + 续跑**：普通 `Exception` 被框架 log + continue，仅 `AbortError` 上抛。handler 必须自己用 `team_logger.error("...", exc_info=True)` 记录关键失败，**禁止依赖 framework swallow 当作隐式错误处理**。
 9. **stale-claim nudge 是 self-only**（F_53）：每个成员在 `POLL_TASK` 上只扫自己认领的任务并喂自己的 loop（`deliver_input(use_steer=False)`，body 只带 task_id + title），leader 不跨进程催他人。因此不再有跨 handler 共享的 throttle——`_last_stale_nudge` / `_last_pending_nudge` 都是 `StaleTaskHandler` 私有，各自节流本进程内同一 task 的重复 nudge。
@@ -142,6 +142,7 @@ class InnerEventType(str, Enum):
     USER_INPUT = "user_input"
     POLL_MAILBOX = "coordination_poll_mailbox"
     POLL_TASK = "coordination_poll_task"
+    SCHEDULER_SCAN = "scheduler_scan"   # F_62：self 事件的调度器扫描回声，无 handler 监听
     SHUTDOWN = "shutdown"
 
 
@@ -165,18 +166,28 @@ class EventDispatcher:
         blueprint: TeamAgentBlueprint,
         infra: TeamInfra,
         poll_ctrl: PollController,
+        *,
+        dispatch_mode: str = "autonomous",
     ) -> None: ...
 
     # Public attributes — access in tests / debugging
     lifecycle: AgentLifecycleHandler
     member:    MemberHandler
     message:   MessageHandler
-    task_board: TaskBoardHandler
-    stale_task: StaleTaskHandler
+    task_board: TaskBoardHandler        # scheduled 模式下是 ScheduledTaskBoardHandler
+    stale_task: StaleTaskHandler        # scheduled 模式下是 ScheduledStaleTaskHandler
     team_completion: TeamCompletionHandler
+
+    @property
+    def dispatch_mode(self) -> str: ...
 
     async def dispatch(self, event: CoordinationEvent) -> None: ...
 ```
+
+`dispatch_mode` 是**静态 spec 配置**（kernel 传入 `blueprint.spec.dispatch_mode`，每个角色
+相同），决定 task_board / stale_task 的**类**（`_TASK_BOARD_CLASS` / `_STALE_TASK_CLASS`
+字面量表，未知值 KeyError）。全部 handler 在构造期一次装配注册，运行期不变（F_62：模式
+差异属于类，选择属于装配点，handler 方法内无模式分支——调度类的行为差异见 `S_22` 不变量 14）。
 
 `dispatch()` 流程：
 
@@ -267,7 +278,7 @@ class CoordinationKernel:
 构造与启动序约束：
 
 1. `setup(role=...)`：先建 `EventBus(role=role)`，再建 `EventDispatcher(host, blueprint, infra, poll_ctrl=event_bus)`。**此时不绑 wake_callback**——避免引入"构造完但 callback 缺失"的中间态。
-2. `start(session=...)`：在子系统初始化（DB、recover、workspace、memory toolkit）之后调用 `event_bus.start(wake_callback=dispatcher.dispatch)`，闭合 EventBus ↔ EventDispatcher 的循环依赖。这是 wake_callback 唯一允许出现的绑定时机。`start` 末尾把 `_lifecycle_state` 推进到 `"running"`。
+2. `start(session=...)`：在子系统初始化（DB、recover、workspace、memory toolkit）之后调用 `event_bus.start(wake_callback=self._build_wake_callback())`，闭合 EventBus ↔ EventDispatcher 的循环依赖。这是 wake_callback 唯一允许出现的绑定时机。存在调度器（F_62：仅 `spec.dispatch_mode == "scheduled"` 的 leader kernel 在 setup 构造）时，wake 组合为"coordination dispatch → scheduler.on_event"顺序执行，其余保持裸 `dispatcher.dispatch`；leader 分支读到已存在的 team 行且调度器存在时 `scheduler.activate()`——激活扫描即恢复。`start` 末尾把 `_lifecycle_state` 推进到 `"running"`。
 3. session 绑定状态转换走 `SessionManager` 的三方法，**不在 kernel 里手工写 session_id / contextvar / DB 表初始化 / persist_leader_config**：
 
    | 调用位点 | 方法 | 状态转换 |
@@ -279,7 +290,8 @@ class CoordinationKernel:
 4. `pause()` 路径（仅 `_lifecycle_state == "running"` 时执行；否则 no-op）：`drain_agent_task` → `persist_allocator_state` → leader 额外 `_mark_live_teammates(PAUSED)` + `cancel_recovery_tasks` + `shutdown_all_handles` + 持久化 lifecycle="paused" → leader 发布 `TEAM_STANDBY` → `unsubscribe_transport` → `event_bus.stop()` → `close_stream` → `release_session` → `_lifecycle_state = "paused"`。`team_member` 持久态不在此处改（持久状态归 `manager.finalize_member`）。
 5. `stop()` 路径（`_lifecycle_state ∈ {"idle", "stopped"}` 时 no-op；`"paused"` 也允许进入，跑剩下的资源清理）：`drain_agent_task` → `persist_allocator_state` → leader 额外 `_mark_live_teammates(STOPPED)`（与 pause 路径对称，写"为什么 runtime 不在了"）→ `unsubscribe_transport` → `cancel_recovery_tasks` + `shutdown_all_handles` → `memory_manager.close()` → `event_bus.stop()` → `close_stream` → `release_session` → `_lifecycle_state = "stopped"`。teammate kernel 的 `stop()` 不写 `team_member.status`（让 `manager.finalize_member` 决定该写 SHUTDOWN 还是保留外部已写的 STOPPED）。
 6. `finalize_round()`：纯 round-end hook，仅做两件事——`memory_manager.extract_after_round()` + `stream_controller.stream_queue = None`。**不调** `pause()` / `stop()`、不读 `lifecycle` / `shutdown_requested`、不写 `team_member.status`。pause vs stop 决策已上移到 Runner finally 路径的 `manager.finalize` / `finalize_member`（见 `S_06`）。
-7. `subscribe_transport`：`messager.register_direct_message_handler(event_bus.enqueue)` + 对每个 `TeamTopic` `subscribe(topic_str, _filter_self)`；`_filter_self` 先派发 listener、再过滤 `sender_id == local_member_name` 的自发事件，最后 `event_bus.enqueue(event)`。
+7. `subscribe_transport`：`messager.register_direct_message_handler(event_bus.enqueue)` + 对每个 `TeamTopic` `subscribe(topic_str, _filter_self)`；`_filter_self` 先派发 listener、再过滤 `sender_id == local_member_name` 的自发事件，最后 `event_bus.enqueue(event)`。**F_62 例外**：丢弃 self 事件时，若调度器激活且事件类型以 `task_` 开头，改投一个 `InnerEventMessage(SCHEDULER_SCAN)`——coordination 不重放 self 事件，但 leader 侧调度器仍能观察到 leader 进程自己造成的看板变化（详见 `S_22_scheduling-runtime`）。
+8. `notify_team_built()`（F_62）：`TeamAgent._mark_team_built` 在 build_team 成功后调用；存在调度器（scheduled 团队的 leader）则 `scheduler.activate()`，先于任何 teammate spawn / create_task。`pause()` / `stop()` 入口处对称 `scheduler.deactivate()`。
 
 ### `_mark_live_teammates(target_status)`
 
@@ -377,7 +389,7 @@ TeamCompletionHandler.EVENT_METHOD_MAP = {
 }
 ```
 
-`MEMBER_SHUTDOWN` 同时被 `MemberHandler` 和 `MessageHandler` 注册、`POLL_TASK` 同时被 `StaleTaskHandler` 和 `TeamCompletionHandler` 注册——这是合规的 fan-out 用法，不是冲突。注册顺序 `(lifecycle, member, message, task_board, stale_task, team_completion)` 决定了 `member.on_member_event` 先跑、`message.on_member_shutdown_drain` 后跑，以及 `stale_task.on_poll_task` 先跑、`team_completion.on_poll_task` 后跑。
+`MEMBER_SHUTDOWN` 同时被 `MemberHandler` 和 `MessageHandler` 注册、`POLL_TASK` 同时被 stale-task handler 和 `TeamCompletionHandler` 注册——这是合规的 fan-out 用法，不是冲突。注册顺序 `(lifecycle, member, message, task_board, stale_task, team_completion, workflow)` 决定了 `member.on_member_event` 先跑、`message.on_member_shutdown_drain` 后跑，以及 `stale_task.on_poll_task` 先跑、`team_completion.on_poll_task` 后跑。
 
 ### handler 实例字段
 
@@ -433,3 +445,4 @@ EventBus 自身的运行态：
 - **`S_06_runtime-pool-dispatch`**：跨 team 的对象池、7 路 dispatch truth table、`InteractGate` 等并发门禁归 `runtime/`。本文管单个 TeamAgent 内部的事件循环，不感知 pool。**pause vs stop 决策**也在该 spec：`manager.finalize` / `finalize_member` 在 Runner finally 路径决定是否调本文规约的 `pause()` / `stop()`，并写入 leader pool entry 状态与 teammate `team_member` 持久状态。
 - **harness（已存在 docs）**：`AgentRoundController` 的 `deliver_input / cancel_agent / resume_interrupt` 最终落到 `TeamHarness` → `DeepAgent`；具体 round 状态机（pre-stream / streaming / finalize）与 HITL interrupt 语义归 harness。本文只规约"handler 通过窄 protocol 调进去，host 自己分流到 start/follow_up/steer"。
 - **`S_02_team-agent-architecture`**：TeamAgent 四象限分解（blueprint / state / resources / infra）、`SpawnManager` / `RecoveryManager` / `StreamController` 的职责拆分归该 spec。本文复用 `TeamAgentBlueprint` 与 `TeamInfra` 作为 handler 的注入面，但不规约其内部字段。
+- **`S_22_scheduling-runtime`**（F_62）：leader 侧调度决策引擎。kernel 只做四件事——setup 构造（仅 `spec.dispatch_mode == "scheduled"` 的 leader）、start 组合 wake + 团队已存在时激活、`notify_team_built` 激活、pause/stop 失活；决策语义（开工/验票/升级）与 `SCHEDULER_SCAN` 的消费全部归该 spec。task_board / stale_task 的调度模式类（`ScheduledTaskBoardHandler` / `ScheduledStaleTaskHandler`）在构造期按 spec 模式装配（不变量 6）；handler 方法内不出现 dispatch_mode 分支，调度类的行为差异见 S_22 不变量 14。
