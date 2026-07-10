@@ -31,6 +31,7 @@ from openjiuwen.agent_teams.schema.events import (
     TaskPlanRequestEvent,
     TaskPlanResponseEvent,
     TaskReleasedEvent,
+    TaskReviewVoteEvent,
     TaskRevisionRequestedEvent,
     TaskRevokedEvent,
     TaskStartedEvent,
@@ -115,6 +116,7 @@ class TeamTaskManager:
         plans_dir: str | Path | None = None,
         team_plan_id: str | None = None,
         leader_member_name: str | None = None,
+        dispatch_mode: str = "autonomous",
     ):
         """Initialize task manager.
 
@@ -128,6 +130,9 @@ class TeamTaskManager:
             leader_member_name: Leader member name used for member plan
                 review notifications. Falls back to the team row when
                 omitted.
+            dispatch_mode: The team's dispatch mode ("autonomous" /
+                "scheduled"), static from ``TeamAgentSpec.dispatch_mode``
+                (F_62). ``verify_task`` selects its verdict policy by it.
         """
         self.db = db
         self.team_name = team_name
@@ -136,6 +141,7 @@ class TeamTaskManager:
         self.plans_dir = Path(plans_dir) if plans_dir else team_home(team_name) / "team-workspace" / "plans"
         self.team_plan_id = _safe_token(team_plan_id or get_session_id() or team_name, "team_plan")
         self.leader_member_name = str(leader_member_name or "").strip()
+        self._dispatch_mode = dispatch_mode
 
     def configure_plan_storage(
         self,
@@ -195,6 +201,7 @@ class TeamTaskManager:
                     initial_status=TaskStatus.PENDING.value,
                     assignee=spec.assignee,
                     reviewer=json.dumps(list(spec.reviewer)) if spec.reviewer else None,
+                    max_review_rounds=spec.max_review_rounds,
                 )
             )
             edges.extend((task_id, dep_id) for dep_id in spec.depends_on)
@@ -347,6 +354,8 @@ class TeamTaskManager:
             status=task.status,
             assignee=task.assignee,
             reviewer=task.reviewers(),
+            review_round=task.review_round,
+            max_review_rounds=task.max_review_rounds,
             blocked_by=blocked_by,
             blocks=blocks,
             updated_at=task.updated_at,
@@ -660,10 +669,20 @@ class TeamTaskManager:
     async def verify_task(self, task_id: str, decision: str, feedback: str = "") -> TaskOpResult:
         """Reviewer verdict on a task in the verify gate (reviewer only).
 
-        ``decision`` is ``pass`` (IN_REVIEW -> COMPLETED, unblocks dependents)
-        or ``fail`` (IN_REVIEW -> IN_PROGRESS, rework loop with ``feedback``
-        directed at the still-assigned author). Enforces that the task is in
-        ``IN_REVIEW`` and the caller is one of its reviewers (not the author).
+        The verdict policy depends on the team's effective dispatch mode:
+
+        * **autonomous** — first verdict wins: ``pass`` completes the task
+          (IN_REVIEW -> COMPLETED, unblocks dependents), ``fail`` sends it back
+          to the author (IN_REVIEW -> IN_PROGRESS, rework loop) — there is no
+          judge component to tally votes.
+        * **scheduled** (F_62) — the call only records a vote fact (append-only
+          row) and publishes ``TASK_REVIEW_VOTE``; the task stays ``IN_REVIEW``
+          and the leader-side scheduler tallies votes and settles the verdict
+          via ``settle_review``. A repeated call by the same reviewer replaces
+          their previous vote (latest row wins).
+
+        Guards are identical in both modes: the task is ``IN_REVIEW`` and the
+        caller is one of its reviewers (not the author).
 
         Args:
             task_id: Task under review.
@@ -671,7 +690,8 @@ class TeamTaskManager:
             feedback: Reviewer guidance (carried to the author on ``fail``).
 
         Returns:
-            ``TaskOpResult`` carrying the failure reason on error.
+            ``TaskOpResult`` carrying the failure reason on error; under
+            scheduled dispatch ``data`` snapshots the vote tally.
         """
         normalized = decision.strip().lower()
         if normalized not in ("pass", "fail"):
@@ -691,6 +711,104 @@ class TeamTaskManager:
             )
         if self.member_name == task.assignee:
             return TaskOpResult.fail(f"{self.member_name} cannot verify their own task {task_id}")
+
+        if self._dispatch_mode == "scheduled":
+            return await self._record_review_vote(task, normalized, feedback)
+
+        if normalized == "pass":
+            return await self._verify_pass(task)
+        return await self._verify_fail(task, feedback)
+
+    async def _record_review_vote(self, task, decision: str, feedback: str) -> TaskOpResult:
+        """Persist one reviewer vote and publish the tally (scheduled dispatch).
+
+        Vote facts are append-only rows keyed by the task's current
+        ``review_round``; the tally counts each reviewer's latest row, so
+        concurrent reviewers never contend and a re-vote is a plain insert.
+        No transition happens here — the scheduler settles once the tally
+        decides (see ``settle_review``).
+        """
+        await self.db.task.insert_review_vote(
+            self.team_name,
+            task.task_id,
+            task.review_round,
+            self.member_name,
+            decision,
+            feedback or None,
+        )
+        tally = await self.get_review_tally(task)
+        await self._publish_task_event(
+            TaskReviewVoteEvent(
+                team_name=self.team_name,
+                task_id=task.task_id,
+                member_name=task.assignee,
+                reviewer=self.member_name,
+                decision=decision,
+                review_round=task.review_round,
+                pass_count=tally["pass_count"],
+                fail_count=tally["fail_count"],
+                reviewer_count=tally["reviewer_count"],
+            ),
+            error_label=f"Task review vote event for {task.task_id}",
+        )
+        return TaskOpResult.success(data=tally)
+
+    async def get_review_tally(self, task) -> dict[str, Any]:
+        """Snapshot the current-round vote tally of one IN_REVIEW task.
+
+        Latest vote per reviewer wins; votes from members no longer on the
+        task's reviewer list are ignored. Feedback strings of the effective
+        ``fail`` votes are collected for the rework message. Shared by the
+        vote-recording path (event snapshot) and the scheduler's judge pass.
+        """
+        votes = await self.db.task.get_review_votes(task.task_id, task.review_round)
+        reviewers = task.reviewers()
+        latest_decision: dict[str, str] = {}
+        latest_feedback: dict[str, str] = {}
+        for vote in votes:
+            if vote.reviewer not in reviewers:
+                continue
+            latest_decision[vote.reviewer] = vote.decision
+            latest_feedback[vote.reviewer] = vote.feedback or ""
+        fail_feedback = {
+            reviewer: latest_feedback[reviewer]
+            for reviewer, verdict in latest_decision.items()
+            if verdict == "fail" and latest_feedback[reviewer]
+        }
+        pass_count = sum(1 for verdict in latest_decision.values() if verdict == "pass")
+        return {
+            "task_id": task.task_id,
+            "review_round": task.review_round,
+            "pass_count": pass_count,
+            "fail_count": len(latest_decision) - pass_count,
+            "reviewer_count": len(reviewers),
+            "voted": sorted(latest_decision),
+            "fail_feedback": fail_feedback,
+        }
+
+    async def settle_review(self, task_id: str, decision: str, feedback: str = "") -> TaskOpResult:
+        """Framework-side settlement of a tallied review round (F_62).
+
+        Called by the leader-side scheduler once the vote tally decides:
+        ``pass`` completes the task (IN_REVIEW -> COMPLETED, unblocks
+        dependents, publishes ``TASK_VERIFIED``), ``fail`` sends it back for
+        rework (IN_REVIEW -> IN_PROGRESS, publishes
+        ``TASK_REVISION_REQUESTED`` with the aggregated feedback). Unlike
+        ``verify_task`` there is no reviewer-membership guard — the caller is
+        the scheduling runtime, not a member. The DAO status CAS keeps a
+        duplicate settlement from applying twice.
+        """
+        normalized = decision.strip().lower()
+        if normalized not in ("pass", "fail"):
+            return TaskOpResult.fail(f"settle_review decision must be 'pass' or 'fail', got '{decision}'")
+
+        task = await self.get(task_id)
+        if not task:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+        if task.status != TaskStatus.IN_REVIEW.value:
+            return TaskOpResult.fail(
+                f"Task {task_id} is not under review (status '{task.status}'); nothing to settle"
+            )
 
         if normalized == "pass":
             return await self._verify_pass(task)
@@ -1262,6 +1380,24 @@ class TeamTaskManager:
         team_logger.info("Task %s reviewers set to %s", task_id, reviewer_names or "[]")
         return TaskOpResult.success()
 
+    async def set_max_review_rounds(self, task_id: str, max_review_rounds: int) -> TaskOpResult:
+        """Set a task's review-round ceiling (Leader only, F_62).
+
+        Caller (the tool boundary) validates the value and that the task
+        carries reviewers. Consulted by the scheduler's judge pass — a failing
+        round at or beyond the ceiling escalates to the leader instead of
+        looping rework.
+        """
+        task = await self.get(task_id)
+        if not task:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+
+        ok = await self.db.task.set_max_review_rounds(task_id, max_review_rounds)
+        if not ok:
+            return TaskOpResult.fail(f"Task {task_id} max_review_rounds could not be set")
+        team_logger.info("Task %s max_review_rounds set to %s", task_id, max_review_rounds)
+        return TaskOpResult.success()
+
     async def reset(self, task_id: str) -> TaskOpResult:
         """Reset a claimed task back to PENDING and clear assignee.
 
@@ -1318,13 +1454,16 @@ class TeamTaskManager:
         return await self.db.task.get_other_active_task_id(self.team_name, member_name, exclude_task_id)
 
     async def start_task(self, task_id: str) -> TaskOpResult:
-        """Move a scheduled task from PENDING(assignee) to IN_PROGRESS.
+        """Move a scheduled task from PENDING(assignee) into execution.
 
         Called by the scheduler when it dispatches an already-assigned task to
         its owner and execution begins — assignment (at create time) and
-        execution-start are separate events in scheduled dispatch. Enforces
-        the one-active-task invariant before the CAS: the owner must not
-        already hold another active (PLANNING / IN_PROGRESS / IN_REVIEW) task.
+        execution-start are separate events in scheduled dispatch. The entry
+        gate mirrors ``assign``: a ``BUILD_MODE`` owner starts executing
+        (``IN_PROGRESS``), a ``PLAN_MODE`` owner enters the plan gate
+        (``PLANNING``, F_59 scheduled·plan edge). Enforces the one-active-task
+        invariant before the CAS: the owner must not already hold another
+        active (PLANNING / IN_PROGRESS / IN_REVIEW) task.
 
         Args:
             task_id: The assigned task to start. Its ``assignee`` names the
@@ -1340,8 +1479,17 @@ class TeamTaskManager:
         if not member_name:
             return TaskOpResult.fail(f"Task {task_id} has no assignee; cannot start an unassigned task")
 
-        # Idempotent re-start: already running for its owner -> no-op success.
-        if task.status == TaskStatus.IN_PROGRESS.value:
+        # Entry gate mirrors ``assign``: plan-mode owners land in the plan
+        # gate and must get approval before executing.
+        member = await self.db.member.get_member(member_name, self.team_name)
+        entry_status = (
+            TaskStatus.PLANNING
+            if member is not None and member.mode == MemberMode.PLAN_MODE.value
+            else TaskStatus.IN_PROGRESS
+        )
+
+        # Idempotent re-start: already at its entry gate for its owner -> no-op.
+        if task.status == entry_status.value:
             team_logger.debug("Task %s already started by %s; no-op", task_id, member_name)
             return TaskOpResult.success()
 
@@ -1353,7 +1501,7 @@ class TeamTaskManager:
                 f"finish it before starting {task_id}"
             )
 
-        started = await self.db.task.start_task(task_id, member_name)
+        started = await self.db.task.start_task(task_id, member_name, to_status=entry_status)
         if not started:
             return TaskOpResult.fail(
                 f"Task {task_id} cannot be started from status '{task.status}' "

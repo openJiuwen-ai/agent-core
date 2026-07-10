@@ -207,3 +207,27 @@ class StaleTaskHandler(BaseCoordinationHandler):
             "[leader] self-prompted about {} stale pending task(s)",
             len(fresh),
         )
+
+
+class ScheduledStaleTaskHandler(StaleTaskHandler):
+    """Stale-task sweep of a scheduled-dispatch team instance (F_62).
+
+    The poll-tick composition is what differs by mode: the self-owned
+    stale-claim sweep stays (it is the delivery safety net for a member that
+    missed a scheduler handoff), but the leader's stale-PENDING self-prompt
+    belongs to the autonomous claim pool only — under scheduled dispatch a
+    long-PENDING task is normal (pre-assigned, queued behind its owner's
+    one-active limit) and the scheduler starts it the moment the owner frees
+    up. Selection happens in ``EventDispatcher``, never inside a handler.
+    """
+
+    async def on_poll_task(self, event: InnerEventMessage) -> None:
+        """Periodic sweep: flag own stale active tasks only."""
+        member_name = self._blueprint.member_name
+        team_logger.debug(
+            "poll task (scheduled): member_name={}, agent_running={}",
+            member_name,
+            self._round.is_agent_running(),
+        )
+        if member_name and self._infra.task_manager:
+            await self._check_stale_claimed_tasks()

@@ -38,6 +38,8 @@ from openjiuwen.agent_teams.tools.database.graph import (
 from openjiuwen.agent_teams.tools.models import (
     TeamTaskBase,
     TeamTaskDependencyBase,
+    TeamTaskReviewVoteBase,
+    _get_review_vote_model,
     _get_task_dependency_model,
     _get_task_model,
 )
@@ -210,6 +212,7 @@ async def _stage_new_tasks(
                 status=spec.initial_status,
                 assignee=spec.assignee,
                 reviewer=spec.reviewer,
+                max_review_rounds=spec.max_review_rounds,
                 updated_at=now,
             )
         )
@@ -460,18 +463,27 @@ class TaskDao:
             )
             return (await session.execute(query)).scalar_one_or_none()
 
-    async def start_task(self, task_id: str, member_name: str) -> bool:
-        """Atomically move an assigned PENDING task to IN_PROGRESS via a CAS.
+    async def start_task(
+        self,
+        task_id: str,
+        member_name: str,
+        *,
+        to_status: TaskStatus = TaskStatus.IN_PROGRESS,
+    ) -> bool:
+        """Atomically move an assigned PENDING task into execution via a CAS.
 
         Scheduled-dispatch counterpart of ``claim_task``: the assignee was
         fixed at create time, so this only flips the status once execution
         begins. The predicate ``WHERE assignee = member AND status = pending``
         makes PENDING the sole valid predecessor and requires the task to
         already belong to ``member_name`` — the scheduler starts a task on
-        behalf of its recorded owner, it does not (re)assign here.
+        behalf of its recorded owner, it does not (re)assign here. Mirrors
+        ``claim_task``'s ``to_status`` parameterization: ``IN_PROGRESS`` for a
+        build-mode owner, ``PLANNING`` when the owner runs in plan mode (the
+        scheduled entry into the plan gate, F_59/F_62).
 
         Returns:
-            True iff the row moved to IN_PROGRESS (``rowcount == 1``); False
+            True iff the row moved to ``to_status`` (``rowcount == 1``); False
             when the task is missing, not pending, or not owned by
             ``member_name``.
         """
@@ -485,7 +497,7 @@ class TaskDao:
                     team_task_model.assignee == member_name,
                     team_task_model.status == TaskStatus.PENDING.value,
                 )
-                .values(status=TaskStatus.IN_PROGRESS.value, updated_at=now)
+                .values(status=to_status.value, updated_at=now)
             )
             await session.commit()
             started = result.rowcount == 1
@@ -661,6 +673,9 @@ class TaskDao:
         status flip — dependencies are *not* resolved here (the task is not
         done until a reviewer passes it). The author (``assignee``) stays put.
         ``WHERE status='in_progress'`` makes IN_PROGRESS the sole predecessor.
+        ``review_round`` is bumped in the same statement (F_62): opening a new
+        round is atomic with the flip, so votes recorded against a superseded
+        round can never be confused with the current one.
 
         Returns:
             True iff the row moved to IN_REVIEW (``rowcount == 1``); False when
@@ -675,7 +690,11 @@ class TaskDao:
                     team_task_model.task_id == task_id,
                     team_task_model.status == TaskStatus.IN_PROGRESS.value,
                 )
-                .values(status=TaskStatus.IN_REVIEW.value, updated_at=now)
+                .values(
+                    status=TaskStatus.IN_REVIEW.value,
+                    review_round=team_task_model.review_round + 1,
+                    updated_at=now,
+                )
             )
             await session.commit()
             submitted = result.rowcount == 1
@@ -742,6 +761,84 @@ class TaskDao:
             )
             await session.commit()
             return result.rowcount == 1
+
+    async def set_max_review_rounds(self, task_id: str, max_review_rounds: Optional[int]) -> bool:
+        """Set the per-task review-round ceiling (F_62; NULL means team default).
+
+        Leader-driven via ``update_task``. Independent of status — the value
+        is consulted by the scheduler's judge pass when a review round fails.
+
+        Returns:
+            True iff the row exists and was updated; False when missing.
+        """
+        team_task_model = _get_task_model()
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(team_task_model)
+                .where(team_task_model.task_id == task_id)
+                .values(max_review_rounds=max_review_rounds)
+            )
+            await session.commit()
+            return result.rowcount == 1
+
+    async def insert_review_vote(
+        self,
+        team_name: str,
+        task_id: str,
+        review_round: int,
+        reviewer: str,
+        decision: str,
+        feedback: str | None = None,
+    ) -> None:
+        """Append one review-vote fact row (F_62).
+
+        Append-only by design: a reviewer changing their mind inserts a new
+        row and the tally takes each reviewer's latest row, so concurrent
+        votes from different reviewers never contend on a shared row and the
+        voting history stays auditable. No state validation here — the caller
+        (``TeamTaskManager.verify_task``) guards status / reviewer membership
+        outside the write lock.
+        """
+        vote_model = _get_review_vote_model()
+        async with self._sessions.write() as session:
+            session.add(
+                vote_model(
+                    team_name=team_name,
+                    task_id=task_id,
+                    review_round=review_round,
+                    reviewer=reviewer,
+                    decision=decision,
+                    feedback=feedback,
+                    created_at=get_current_time(),
+                )
+            )
+            await session.commit()
+        team_logger.info(
+            "Review vote recorded: task %s round %s reviewer %s decision %s",
+            task_id,
+            review_round,
+            reviewer,
+            decision,
+        )
+
+    async def get_review_votes(self, task_id: str, review_round: int) -> List[TeamTaskReviewVoteBase]:
+        """Return all vote rows of one task's review round, oldest first.
+
+        Ascending ``id`` order lets callers derive "latest vote per reviewer"
+        with a simple dict overwrite pass. Rows of superseded rounds are
+        never read — the round column partitions them out.
+        """
+        vote_model = _get_review_vote_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(vote_model)
+                .where(
+                    vote_model.task_id == task_id,
+                    vote_model.review_round == review_round,
+                )
+                .order_by(vote_model.id.asc())
+            )
+            return list(result.scalars().all())
 
     async def approve_plan_task(self, task_id: str) -> Optional[TeamTaskBase]:
         """Approve a task plan for PLAN_MODE members (PLANNING -> IN_PROGRESS).

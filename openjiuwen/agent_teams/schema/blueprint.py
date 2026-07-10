@@ -281,15 +281,53 @@ class TeamAgentSpec(BaseModel):
     ``spawn_member`` tool.
     """
     dispatch_mode: Literal["autonomous", "scheduled"] = "autonomous"
-    """How a task reaches the member that executes it.
+    """How a task reaches the member that executes it. Static configuration.
 
     Orthogonal to ``team_mode`` (which governs whether the roster can
     grow). ``"autonomous"`` (default) puts tasks on a shared board:
     members claim what matches their expertise, and the leader launches
     them with a ``send_message`` broadcast. ``"scheduled"`` has the
     leader assign every task to a named member up front; the scheduling
-    runtime notifies and starts that member, and members lose
-    ``claim_task`` in favour of ``member_complete_task``.
+    runtime (``agent/scheduling``, F_62) starts each task and performs
+    every handoff — start, review dispatch, rework, verified — as
+    leader-identity mailbox messages, and members lose ``claim_task``
+    in favour of ``member_complete_task``. Prompts and tool shapes are
+    assembled per mode at build time; the mode never changes at runtime.
+    """
+    enable_task_verification: bool = False
+    """Team-level "verification expected" switch for the verify gate.
+
+    Purely prompt-driven: when True the leader's task-creation guidance
+    asks it to assign 0..N reviewers per task by its own judgement (no
+    hard validation — a task the leader deems trivial may still carry no
+    reviewer). The reviewer machinery itself (column, guards, voting) is
+    always available regardless of this flag. Overridable per team
+    instance at ``build_team`` time. See F_62.
+    """
+    verify_vote_threshold: float = 2 / 3
+    """Pass quorum for multi-reviewer verification under scheduled dispatch.
+
+    A task in review completes when ``pass_votes >= ceil(threshold * n)``
+    over ``n = len(reviewer)``, and is sent back for rework as soon as
+    that quorum becomes unreachable. Consumed only by the leader-side
+    scheduler (single judge), so it is not mirrored onto ``TeamSpec``.
+    Range ``0 < threshold <= 1``. See F_62.
+    """
+    default_max_review_rounds: int = 3
+    """Default per-task review-round ceiling (scheduled dispatch).
+
+    Used when a task does not set ``max_review_rounds`` at creation.
+    When a review round beyond this ceiling still fails, the scheduler
+    stops the automatic rework loop and escalates to the leader instead.
+    See F_62.
+    """
+    review_stall_timeout: int = 1800
+    """Seconds before a stalled review round escalates to the leader.
+
+    A round that produced no verdict (including no votes at all) within
+    this window is surfaced to the leader with the current vote status —
+    covering reviewers that never vote, which the round ceiling alone
+    cannot catch. Consumed only by the leader-side scheduler. See F_62.
     """
     transport: Optional[TransportSpec] = None
     """Pluggable transport layer specification.
@@ -492,6 +530,27 @@ class TeamAgentSpec(BaseModel):
             raise ValueError(
                 f"external_cli_agents has duplicate cli_agent name(s) {sorted(duplicates)}; "
                 f"declare each CLI kind at most once",
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_review_settings(self) -> "TeamAgentSpec":
+        """Range-check the verify-gate knobs (F_62).
+
+        The scheduler consumes these without further guarding, so an
+        out-of-range value must fail at spec time, not mid-run.
+        """
+        if not 0 < self.verify_vote_threshold <= 1:
+            raise ValueError(
+                f"verify_vote_threshold must be in (0, 1], got {self.verify_vote_threshold}",
+            )
+        if self.default_max_review_rounds < 1:
+            raise ValueError(
+                f"default_max_review_rounds must be >= 1, got {self.default_max_review_rounds}",
+            )
+        if self.review_stall_timeout <= 0:
+            raise ValueError(
+                f"review_stall_timeout must be > 0 seconds, got {self.review_stall_timeout}",
             )
         return self
 

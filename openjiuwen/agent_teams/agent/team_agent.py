@@ -995,6 +995,9 @@ class TeamAgent(BaseAgent):
 
         self._state.team_cleaned = False
         await self._persist_team_db_state(TEAM_DB_STATE_CREATED)
+        # F_62: build_team may have chosen scheduled dispatch — arm the
+        # scheduler now, before any teammate spawn or task creation.
+        await self._coordination.notify_team_built()
 
     async def _persist_team_db_state(self, db_state: str) -> None:
         """Persist the team DB lifecycle state into the active checkpoint."""

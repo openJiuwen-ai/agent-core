@@ -14,4 +14,4 @@ Verify a task (reviewers only).
 
 - You may only verify tasks assigned to you (you are in the task's reviewer list) that are currently `in_review`.
 - You may not verify a task where you are the author (no self-verification).
-- When a task has several reviewers, v1 is first-verdict-wins — any reviewer's pass completes it, any fail sends it back.
+- With several reviewers, the first verdict wins — any reviewer's pass completes it, any fail sends it back.

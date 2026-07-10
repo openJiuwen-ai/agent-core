@@ -18,17 +18,20 @@ class TaskOpResult:
     so that tool wrappers can surface the real reason back to the LLM
     rather than dropping it into the log sink. ``__bool__`` falls through
     to ``ok`` so legacy ``if result: ...`` call sites keep working.
+    ``data`` optionally carries operation facts the tool layer renders
+    (e.g. the vote tally after a recorded review vote, F_62).
     """
 
     ok: bool
     reason: str = ""
+    data: dict[str, Any] | None = None
 
     def __bool__(self) -> bool:
         return self.ok
 
     @classmethod
-    def success(cls) -> "TaskOpResult":
-        return cls(ok=True)
+    def success(cls, data: dict[str, Any] | None = None) -> "TaskOpResult":
+        return cls(ok=True, data=data)
 
     @classmethod
     def fail(cls, reason: str) -> "TaskOpResult":
@@ -115,6 +118,8 @@ class TaskDetail(BaseModel):
     status: str
     assignee: Optional[str] = None
     reviewer: list[str] = Field(default_factory=list)
+    review_round: int = 0
+    max_review_rounds: Optional[int] = None
     blocked_by: list[str] = Field(default_factory=list)
     blocks: list[str] = Field(default_factory=list)
     updated_at: Optional[int] = None
@@ -157,6 +162,9 @@ class TaskGraphSpec:
     depended_by: tuple[str, ...] = ()
     assignee: str | None = None
     reviewer: tuple[str, ...] = ()
+    # Per-task review-round ceiling (F_62, scheduled dispatch); None uses the
+    # team default. Meaningful only when ``reviewer`` is non-empty.
+    max_review_rounds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +216,9 @@ class NewTaskSpec:
     # JSON-encoded reviewer member-name list (or None); written verbatim to the
     # ``reviewer`` column by ``_stage_new_tasks``.
     reviewer: str | None = None
+    # Per-task review-round ceiling (F_62); None falls back to the team-level
+    # ``TeamAgentSpec.default_max_review_rounds`` at judgement time.
+    max_review_rounds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

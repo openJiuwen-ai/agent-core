@@ -27,8 +27,15 @@ class TeamDao:
         leader_member_name: str,
         desc: Optional[str] = None,
         prompt: Optional[str] = None,
+        dispatch_mode: str = "autonomous",
+        enable_task_verification: bool = False,
     ) -> bool:
-        """Create a new team."""
+        """Create a new team.
+
+        ``dispatch_mode`` / ``enable_task_verification`` persist the effective
+        per-instance capability choices made at ``build_team`` time (F_62) so
+        cold recovery restores them.
+        """
         async with self._sessions.write() as session:
             try:
                 ts = get_current_time()
@@ -38,6 +45,8 @@ class TeamDao:
                     leader_member_name=leader_member_name,
                     desc=desc,
                     prompt=prompt,
+                    dispatch_mode=dispatch_mode,
+                    enable_task_verification=enable_task_verification,
                     created=ts,
                     updated_at=ts,
                 )

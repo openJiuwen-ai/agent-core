@@ -101,6 +101,8 @@ class TeamEvent:
     TASK_SUBMITTED_FOR_REVIEW = "task_submitted_for_review"
     TASK_VERIFIED = "task_verified"
     TASK_REVISION_REQUESTED = "task_revision_requested"
+    # Review voting (F_62): a reviewer recorded a vote; verdict pending
+    TASK_REVIEW_VOTE = "task_review_vote"
 
     # Swarmflow orchestration progress (a swarmflow run feeding the spectator leader)
     WORKFLOW_PROGRESS = "workflow_progress"
@@ -331,6 +333,24 @@ class TaskRevisionRequestedEvent(BaseEventMessage):
     feedback: str = Field(default="", description="Reviewer feedback directing the rework")
 
 
+class TaskReviewVoteEvent(BaseEventMessage):
+    """Event published when a reviewer records a vote (scheduled dispatch).
+
+    Under scheduled dispatch ``verify_task`` only persists the vote — the
+    task stays ``IN_REVIEW`` and the leader-side scheduler tallies votes and
+    settles the verdict. ``member_name`` is the author (consistent with the
+    other verify-gate events); ``reviewer`` is the voter. The counts snapshot
+    the tally after this vote so observers need no extra read.
+    """
+    task_id: str = Field(..., description="Task unique identifier")
+    reviewer: str = Field(..., description="Member who cast this vote")
+    decision: str = Field(..., description="Vote decision: pass or fail")
+    review_round: int = Field(..., description="Review round the vote belongs to")
+    pass_count: int = Field(..., description="Distinct reviewers currently voting pass in this round")
+    fail_count: int = Field(..., description="Distinct reviewers currently voting fail in this round")
+    reviewer_count: int = Field(..., description="Total reviewers assigned to the task")
+
+
 class TaskListDrainedEvent(BaseEventMessage):
     """Event published when every task in the team task list is terminal.
 
@@ -460,6 +480,7 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.TASK_SUBMITTED_FOR_REVIEW: TaskSubmittedForReviewEvent,
     TeamEvent.TASK_VERIFIED: TaskVerifiedEvent,
     TeamEvent.TASK_REVISION_REQUESTED: TaskRevisionRequestedEvent,
+    TeamEvent.TASK_REVIEW_VOTE: TaskReviewVoteEvent,
     TeamEvent.TASK_LIST_DRAINED: TaskListDrainedEvent,
     TeamEvent.WORKFLOW_PROGRESS: WorkflowProgressTeamEvent,
     TeamEvent.WORKTREE_CREATED: WorktreeCreatedEvent,

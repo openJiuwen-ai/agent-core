@@ -847,6 +847,8 @@ class AgentConfigurator:
             leader_prompt=ctx.prompt if is_leader else "",
             enable_hitt=spec.enable_hitt,
             enable_bridge=spec.enable_bridge,
+            dispatch_mode=spec.dispatch_mode,
+            enable_task_verification=spec.enable_task_verification,
             external_cli_agents=spec.external_cli_agents,
             on_before_team_cleaned=on_before_team_cleaned,
             on_team_cleaned=on_team_cleaned,
