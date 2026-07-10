@@ -21,7 +21,6 @@ class TeamSkillCreateRail(
     language: str = "cn",
     auto_trigger: bool = True,
     min_team_members_for_create: int = 2,
-    trajectory_store: Optional[TrajectoryStore] = None,
 )
 ```
 
@@ -31,7 +30,6 @@ class TeamSkillCreateRail(
 * **language** (str): 语言设置，支持 `"cn"` 或 `"en"`。
 * **auto_trigger** (bool): 是否自动触发，默认 `True`。
 * **min_team_members_for_create** (int): 触发阈值，`spawn_member` 调用次数达到此值时触发，默认 2。
-* **trajectory_store** (TrajectoryStore, 可选): 轨迹存储实例。
 
 ### 优先级
 
