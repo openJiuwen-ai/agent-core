@@ -104,59 +104,6 @@ def test_truncated_space_numbered_json_array_is_routed_to_json_array_compressor(
     assert "_omitted" in result.content
 
 
-def test_numbered_python_source_is_routed_to_source_code_compressor():
-    content = "\n".join(
-        [
-            "     1\tfrom __future__ import annotations",
-            "     2\t",
-            "     3\tdef compute_value(base: int) -> int:",
-            "     4\t    total = base",
-            "     5\t    for step in range(20):",
-            "     6\t        total += step",
-            "     7\t        if total % 7 == 0:",
-            "     8\t            total += 1",
-            "     9\t    return total",
-        ]
-    )
-
-    result = RuleContentRouter().compress(
-        content,
-        RuleContext(
-            max_tokens=1600,
-            source_min_lines=1,
-            source_max_body_lines=2,
-            min_savings_ratio=0.0,
-            count_tokens=lambda text: max(len(text) // 3, 1),
-        ),
-    )
-
-    assert result.content_type == ContentType.SOURCE_CODE
-    assert result.modified is True
-    assert "     1\tfrom" in result.content
-    assert "def compute_value" in result.content
-    assert "     4\t    # [function body omitted; original lines 4-9, reload original source for details]" in result.content
-    assert "     5\t" not in result.content
-
-
-def test_numbered_python_source_with_diff_markers_is_not_routed_as_git_diff():
-    content = "\n".join(
-        [
-            "     1\timport re",
-            "     2\t",
-            "     3\tDIFF_HUNK_RE = re.compile(r'(?m)^@@ .+ @@')",
-            "     4\t",
-            "     5\tdef parse_diff_marker(value: str) -> bool:",
-            "     6\t    if 'diff --git ' in value:",
-            "     7\t        return True",
-            "     8\t    if DIFF_HUNK_RE.search(value):",
-            "     9\t        return True",
-            "    10\t    return False",
-        ]
-    )
-
-    assert RuleContentRouter().detect(content) == ContentType.SOURCE_CODE
-
-
 def test_article_text_with_failure_words_is_not_routed_as_log():
     content = "\n".join(
         [
@@ -240,41 +187,6 @@ def test_prefixed_pytest_output_with_source_snippets_prefers_log():
     assert result.modified is True
     assert result.content.startswith("[LOG compressed: format=pytest")
     assert "[LOG omitted:" in result.content
-
-
-def test_read_file_python_path_prefers_source_code_over_embedded_log_markers():
-    content = "\n".join(
-        f"{line_number:6}\t{line}"
-        for line_number, line in enumerate(
-            [
-                "============================= test session starts =============================",
-                "platform win32 -- Python 3.11.13, pytest-9.0.2",
-                "collected 1 item",
-                "tests/unit/test_demo.py::test_bad FAILED",
-                "================================== FAILURES ===================================",
-                "FAILED tests/unit/test_demo.py::test_bad - AssertionError: boom",
-                "from package.module import function_under_test",
-                "",
-                "class DemoRunner:",
-                "    def run(self):",
-                "        return function_under_test()",
-            ],
-            1,
-        )
-    )
-
-    assert RuleContentRouter().detect(content) == ContentType.LOG
-    assert (
-        RuleContentRouter().detect(
-            content,
-            RuleContext(
-                max_tokens=1600,
-                tool_name="read_file",
-                source_path="/repo/tests/unit/test_demo.py",
-            ),
-        )
-        == ContentType.SOURCE_CODE
-    )
 
 
 def test_decorated_prefixed_pytest_output_is_routed_as_log():

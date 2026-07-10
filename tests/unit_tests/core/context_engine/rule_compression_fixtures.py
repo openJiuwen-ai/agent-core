@@ -102,30 +102,6 @@ def build_build_output_payload(line_count: int = 120) -> str:
     return "\n".join(lines)
 
 
-def build_source_code_payload(function_count: int = 40) -> str:
-    lines = [
-        '"""Synthetic Python module for source-code compression probing."""',
-        "from __future__ import annotations",
-        "import logging",
-        "",
-    ]
-    for idx in range(1, function_count + 1):
-        lines.extend(
-            [
-                f"def compute_value_{idx}(base: int) -> int:",
-                f'    """Compute value for probe {idx}."""',
-                "    total = base",
-                "    for step in range(20):",
-                "        total += step * 2",
-                "        if total % 7 == 0:",
-                "            logging.debug('step=%s total=%s', step, total)",
-                "    return total",
-                "",
-            ]
-        )
-    return "\n".join(lines)
-
-
 def build_plain_text_payload(repeat_count: int = 100) -> str:
     unique = [f"Unique narrative block {idx} with explanatory detail." for idx in range(1, 21)]
     repeated = [unique[idx % len(unique)] for idx in range(repeat_count)]
@@ -172,15 +148,6 @@ SCENARIOS: list[CompressionScenario] = [
         query="请调用 probe_build_output 分析测试日志中的失败与告警。",
         build_content=build_build_output_payload,
         expect_marker="lines omitted",
-    ),
-    CompressionScenario(
-        name="source_code",
-        content_type=ContentType.SOURCE_CODE,
-        tool_name="probe_source_code",
-        query="请调用 probe_source_code 阅读源码并说明函数数量。",
-        build_content=build_source_code_payload,
-        expect_modified=True,
-        expect_marker="def compute_value_",
     ),
     CompressionScenario(
         name="plain_text",

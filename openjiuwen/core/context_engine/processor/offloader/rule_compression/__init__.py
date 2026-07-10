@@ -17,9 +17,6 @@ from openjiuwen.core.context_engine.processor.offloader.rule_compression.compres
 from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.search_results_compressor import (
     SearchResultsCompressor,
 )
-from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.source_code_compressor import (
-    SourceCodeCompressor,
-)
 from openjiuwen.core.context_engine.processor.offloader.rule_compression.pipeline import RuleCompressionPipeline
 from openjiuwen.core.context_engine.processor.offloader.rule_compression.router import ContentRouter, RuleContentRouter
 from openjiuwen.core.context_engine.processor.offloader.rule_compression.types import (
@@ -44,5 +41,4 @@ __all__ = [
     "RuleCompressionResult",
     "RuleContext",
     "SearchResultsCompressor",
-    "SourceCodeCompressor",
 ]

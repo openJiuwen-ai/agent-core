@@ -17,9 +17,6 @@ from openjiuwen.core.context_engine.processor.offloader.rule_compression.compres
 from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.search_results_compressor import (
     SearchResultsCompressor,
 )
-from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.source_code_compressor import (
-    SourceCodeCompressor,
-)
 
 __all__ = [
     "DiffCompressor",
@@ -31,5 +28,4 @@ __all__ = [
     "LogCompressor",
     "PlainTextCompressor",
     "SearchResultsCompressor",
-    "SourceCodeCompressor",
 ]

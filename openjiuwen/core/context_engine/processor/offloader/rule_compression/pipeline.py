@@ -76,7 +76,6 @@ class RuleCompressionPipeline:
             count_tokens=lambda text: max(len(text) // CHARACTERS_PER_TOKEN, 1),
             query_terms=query_terms,
             tool_name=tool_name,
-            source_path=self._source_path_from_tool_arguments(tool_arguments),
         )
         result = self._router.compress(original, rule_ctx)
         content = result.content
@@ -216,8 +215,8 @@ class RuleCompressionPipeline:
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-")
         return safe[:80] or "unknown"
 
-    @staticmethod
     def _query_terms_for_message(
+        self,
         context_messages: list[BaseMessage],
         tool_name: str | None,
         tool_arguments: object,
@@ -247,19 +246,6 @@ class RuleCompressionPipeline:
                 tool_arguments = RuleCompressionPipeline._extract_tool_arguments(tool_call)
                 return tool_name, tool_arguments
         return None, None
-
-    @staticmethod
-    def _source_path_from_tool_arguments(tool_arguments: object) -> str | None:
-        arguments = tool_arguments
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments)
-            except (TypeError, ValueError):
-                return None
-        if not isinstance(arguments, dict):
-            return None
-        value = arguments.get("file_path") or arguments.get("path")
-        return str(value) if value else None
 
     @staticmethod
     def _extract_tool_arguments(tool_call: object) -> object:

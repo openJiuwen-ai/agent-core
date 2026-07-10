@@ -12,7 +12,6 @@ class ContentType(str, Enum):
     SEARCH_RESULTS = "SEARCH_RESULTS"
     LOG = "LOG"
     BUILD_OUTPUT = "LOG"
-    SOURCE_CODE = "SOURCE_CODE"
     PLAIN_TEXT = "PLAIN_TEXT"
 
 
@@ -26,7 +25,6 @@ class RuleContext:
     json_csv_min_density: float = 0.8
     query_terms: frozenset[str] = frozenset()
     tool_name: str | None = None
-    source_path: str | None = None
     search_max_matches_per_file: int = 5
     search_max_total_matches: int = 30
     search_max_files: int = 15
@@ -44,8 +42,6 @@ class RuleContext:
     log_max_stack_traces: int = 3
     log_stack_trace_max_lines: int = 20
     log_max_total_lines: int = 100
-    source_min_lines: int = 100
-    source_max_body_lines: int = 5
 
 
 @dataclass(frozen=True)

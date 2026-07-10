@@ -63,7 +63,6 @@ dependencies = [
     "anyio>=4.0.0",
     "loguru>=0.7.3",
     "gitcode-api>=1.2.20",
-    "tree-sitter-language-pack>=1.8.1",
     "pyoxigraph>=0.5.8",
 ]
 
@@ -175,8 +174,8 @@ Changelog = "https://gitcode.com/openJiuwen/agent-core/releases"
 default-groups = ['dev']
 
 [[tool.uv.index]]
-name = "pypi"
-url = "https://pypi.org/simple"
+name = "aliyun"
+url = "https://mirrors.aliyun.com/pypi/simple"
 default = true
 
 [tool.setuptools.packages.find]

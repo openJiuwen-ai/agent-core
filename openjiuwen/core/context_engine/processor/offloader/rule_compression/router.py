@@ -26,9 +26,6 @@ from openjiuwen.core.context_engine.processor.offloader.rule_compression.compres
 from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.search_results_compressor import (
     SearchResultsCompressor,
 )
-from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.source_code_compressor import (
-    SourceCodeCompressor,
-)
 from openjiuwen.core.context_engine.processor.offloader.rule_compression.types import (
     ContentType,
     RuleCompressionResult,
@@ -44,26 +41,6 @@ class RuleCompressor(Protocol):
 class RuleContentRouter:
     """Detect content type and dispatch to one focused deterministic compressor."""
 
-    _SOURCE_EXTENSIONS = frozenset(
-        {
-            ".c",
-            ".cc",
-            ".cpp",
-            ".cxx",
-            ".go",
-            ".h",
-            ".hpp",
-            ".java",
-            ".js",
-            ".jsx",
-            ".mjs",
-            ".py",
-            ".pyi",
-            ".rs",
-            ".ts",
-            ".tsx",
-        }
-    )
     _HTML_STRUCTURAL_TAG_RE = re.compile(
         r"</?(?:html|head|body|article|main|section|div|script|style|nav|footer|aside|"
         r"table|thead|tbody|tr|th|td|ul|ol|li|p|pre|code|strong|span|h[1-6])\b",
@@ -97,16 +74,6 @@ class RuleContentRouter:
         r"^-->\s+.+:\d+:\d+"
         r")"
     )
-    _CODE_RE = re.compile(
-        r"^\s*(?:def|class|import|from|async\s+def|export|function|const|let|var|"
-        r"pub|fn|impl|use|struct|enum|interface|type|package|func|public|private|"
-        r"protected|#include)\b",
-        re.MULTILINE,
-    )
-    _NUMBERED_SOURCE_LINE_RE = re.compile(
-        r"(?m)^\s*\d+\t\s*(?:@|async\s+def|def|class|import|from|try:|if |elif |"
-        r"else:|for |while |with |return\b|[A-Za-z_]\w*\s*=)"
-    )
 
     def __init__(self) -> None:
         self._compressors: dict[ContentType, RuleCompressor] = {
@@ -115,7 +82,6 @@ class RuleContentRouter:
             ContentType.HTML: HtmlCompressor(),
             ContentType.SEARCH_RESULTS: SearchResultsCompressor(),
             ContentType.LOG: LogCompressor(),
-            ContentType.SOURCE_CODE: SourceCodeCompressor(),
             ContentType.PLAIN_TEXT: PlainTextCompressor(),
         }
 
@@ -124,7 +90,6 @@ class RuleContentRouter:
         if not text:
             return ContentType.PLAIN_TEXT
         display_text = strip_display_line_prefixes(text)
-        source_text = self._source_detection_text(text)
         json_text = self._json_detection_text(text)
         try:
             parsed = json.loads(json_text)
@@ -132,8 +97,6 @@ class RuleContentRouter:
             parsed = self._repair_json_array(json_text)
         if isinstance(parsed, list):
             return ContentType.JSON_ARRAY
-        if self._has_source_path_hint(ctx) and self._looks_like_source(source_text):
-            return ContentType.SOURCE_CODE
         html_detection_text = self._html_detection_text(text)
         lowered = html_detection_text[:20000].lower()
         if self._looks_like_html(lowered):
@@ -142,8 +105,6 @@ class RuleContentRouter:
             return ContentType.LOG
         if re.search(r"(?m)^diff --git ", display_text) or re.search(r"(?m)^@@ .+ @@", display_text):
             return ContentType.GIT_DIFF
-        if source_text != text and self._looks_like_source(source_text):
-            return ContentType.SOURCE_CODE
         lines = [line for line in display_text.splitlines() if line.strip()]
         if lines:
             matches = sum(
@@ -153,8 +114,6 @@ class RuleContentRouter:
             )
             if matches / len(lines) >= 0.3:
                 return ContentType.SEARCH_RESULTS
-        if self._looks_like_source(source_text):
-            return ContentType.SOURCE_CODE
         return ContentType.PLAIN_TEXT
 
     def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult:
@@ -196,26 +155,5 @@ class RuleContentRouter:
     def _looks_like_html(self, content: str) -> bool:
         html_prefixes = ("<!doctype html", "<html", "<head", "<body")
         return content.startswith(html_prefixes) or len(self._HTML_STRUCTURAL_TAG_RE.findall(content)) >= 2
-
-    def _source_detection_text(self, content: str) -> str:
-        stripped = self._strip_numbered_source_lines(content)
-        return stripped if stripped != content else content
-
-    def _strip_numbered_source_lines(self, content: str) -> str:
-        if len(self._NUMBERED_SOURCE_LINE_RE.findall(content)) < 2:
-            return content
-        return strip_display_line_prefixes(content)
-
-    def _has_source_path_hint(self, ctx: RuleContext | None) -> bool:
-        if ctx is None:
-            return False
-        if ctx.tool_name and ctx.tool_name != "read_file":
-            return False
-        path = (ctx.source_path or "").lower()
-        return any(path.endswith(extension) for extension in self._SOURCE_EXTENSIONS)
-
-    def _looks_like_source(self, content: str) -> bool:
-        return bool(self._CODE_RE.search(content) or len(self._NUMBERED_SOURCE_LINE_RE.findall(content)) >= 2)
-
 
 ContentRouter = RuleContentRouter

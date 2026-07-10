@@ -29,9 +29,6 @@ from openjiuwen.core.context_engine.processor.offloader.rule_compression.compres
 from openjiuwen.core.context_engine.processor.offloader.rule_compression.pipeline import (
     RuleCompressionPipeline,
 )
-from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.source_code_compressor import (
-    SourceCodeCompressor,
-)
 from openjiuwen.core.foundation.llm import ToolMessage
 
 
@@ -54,7 +51,6 @@ def test_processor_canonical_imports_are_available():
     assert CompressionExecutor.__name__ == "CompressionExecutor"
     assert RuleCompressionPipeline.__name__ == "RuleCompressionPipeline"
     assert DiffCompressor.__name__ == "DiffCompressor"
-    assert SourceCodeCompressor.__name__ == "SourceCodeCompressor"
 
 
 def test_legacy_processor_imports_are_available_from_new_and_old_paths():
