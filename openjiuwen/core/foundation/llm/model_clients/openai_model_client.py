@@ -198,7 +198,6 @@ class OpenAIModelClient(BaseModelClient):
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
-        async_client = None
         try:
             await trigger(
                 LLMCallEvents.LLM_INPUT,
@@ -347,7 +346,6 @@ class OpenAIModelClient(BaseModelClient):
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
-        async_client = None
         try:
             await trigger(
                 LLMCallEvents.LLM_INPUT,
