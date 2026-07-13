@@ -290,13 +290,13 @@ class ConnectorPoolManager(metaclass=Singleton):
         connector_config = config or self._default_config
         key = connector_config.generate_key() if config else self._default_config_key
 
-        logger.debug(f"Getting connector pool: type={connector_pool_type}, key={key}")
+        logger.debug("Getting connector pool: type=%s, key=%s", connector_pool_type, key)
 
         async with self._lock:
             # Check for existing pool
             if key in self._connector_pools:
                 connector_pool = self._connector_pools[key]
-                logger.debug(f"Found existing connector pool with key={key}, ref_count={connector_pool.ref_count}")
+                logger.debug("Found existing connector pool with key=%s, ref_count=%s", key, connector_pool.ref_count)
 
                 # Check if pool is already closed
                 if connector_pool.closed:
@@ -309,7 +309,7 @@ class ConnectorPoolManager(metaclass=Singleton):
                     # lifetime instead of growing on every request.
                     if increment_ref:
                         connector_pool.increment_ref()
-                        logger.debug(f"Incremented ref count for pool {key}, now ref_count={connector_pool.ref_count}")
+                        logger.debug("Incremented ref count for pool %s, now ref_count=%s", key, connector_pool.ref_count)
                     return connector_pool
 
             # Check if maximum number of pools is reached
@@ -377,11 +377,11 @@ class ConnectorPoolManager(metaclass=Singleton):
             raise ValueError(f"Unknown connector type: {connector_pool_type}")
 
         connector_class = self._connector_pool_providers[connector_pool_type]
-        logger.debug(f"Creating connector pool using provider: {connector_pool_type}")
+        logger.debug("Creating connector pool using provider: %s", connector_pool_type)
 
         result = connector_class(config)
         if asyncio.iscoroutine(result):
-            logger.debug(f"Awaiting coroutine result from provider: {connector_pool_type}")
+            logger.debug("Awaiting coroutine result from provider: %s", connector_pool_type)
             result = await result
 
         logger.info(f"Successfully created connector pool of type: {connector_pool_type}")
@@ -399,14 +399,14 @@ class ConnectorPoolManager(metaclass=Singleton):
 
         if config:
             key = config.generate_key()
-            logger.debug(f"Releasing connector pool: key={key}")
+            logger.debug("Releasing connector pool: key=%s", key)
 
             async with self._lock:
                 if key in self._connector_pools:
                     pool = self._connector_pools[key]
                     old_ref = pool.ref_count
                     pool.decrement_ref()
-                    logger.debug(f"Released pool {key}: ref_count changed from {old_ref} to {pool.ref_count}")
+                    logger.debug("Released pool %s: ref_count changed from %s to %s", key, old_ref, pool.ref_count)
                 else:
                     logger.warning(f"Attempted to release non-existent pool: {key}")
         else:
@@ -461,7 +461,7 @@ class ConnectorPoolManager(metaclass=Singleton):
                 close_tasks.append(self._force_remove_pool(key))
 
             if close_tasks:
-                logger.debug(f"Waiting for {len(close_tasks)} pools to close")
+                logger.debug("Waiting for %s pools to close", len(close_tasks))
                 results = await asyncio.gather(*close_tasks, return_exceptions=True)
 
                 # Log any errors from close operations
