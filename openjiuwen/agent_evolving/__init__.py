@@ -51,11 +51,14 @@ from openjiuwen.agent_evolving.trainer import Trainer, Progress, Callbacks
 
 # trajectory
 from openjiuwen.agent_evolving.trajectory import (
+    LegacyTrajectory,
     Trajectory,
     TrajectoryStep,
     UpdateKey,
     Updates,
     TracerTrajectoryExtractor,
+    to_legacy_trajectory,
+    trajectory_from_legacy,
 )
 
 # updater
@@ -113,11 +116,14 @@ _TRAINER = [
 ]
 
 _TRAJECTORY = [
+    "LegacyTrajectory",
     "Trajectory",
     "TrajectoryStep",
     "UpdateKey",
     "Updates",
     "TracerTrajectoryExtractor",
+    "to_legacy_trajectory",
+    "trajectory_from_legacy",
 ]
 
 _UPDATER = [

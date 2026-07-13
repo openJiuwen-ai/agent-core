@@ -3,7 +3,7 @@
 
 import uuid
 from datetime import datetime
-from typing import Optional, Dict, List, Callable, Union, Any
+from typing import Optional, Dict, List, Union, Any
 from pydantic import ConfigDict, Field, BaseModel
 
 
@@ -64,6 +64,8 @@ class TraceWorkflowSpan(Span):
     stream_outputs: Optional[list] = Field(default=None, alias="streamOutputs")
     # for interactive inputs
     interactive_inputs: Optional[Any] = Field(default=None, alias="interactiveInputs")
+    # for retry inner error
+    inner_error: Optional[dict] = Field(default=None, alias="innerError")
 
 
     def append_stream_output(self, chunk):
@@ -129,6 +131,11 @@ class SpanManager:
 
     def end_span(self):
         pass
+
+    @property
+    def trace_id(self) -> str:
+        """Return the trace id shared by all spans in this manager."""
+        return self._trace_id
 
     @property
     def last_span(self):

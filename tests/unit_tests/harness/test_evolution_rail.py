@@ -10,7 +10,9 @@ from unittest import IsolatedAsyncioTestCase
 
 from openjiuwen.agent_evolving.trajectory import (
     InMemoryTrajectoryStore,
+    LegacyTrajectory,
     Trajectory,
+    to_legacy_trajectory,
 )
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -114,7 +116,7 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         trajectories = self.store.query(session_id="conv_123")
         self.assertEqual(len(trajectories), 1)
 
-        traj = trajectories[0]
+        traj = to_legacy_trajectory(trajectories[0])
         self.assertEqual(traj.session_id, "conv_123")
         self.assertEqual(traj.source, "online")
         self.assertEqual(len(traj.steps), 2)
@@ -271,7 +273,7 @@ class TestTrajectoryRail(IsolatedAsyncioTestCase):
         # Verify trajectory was saved
         trajectories = self.store.query(session_id="conv_789")
         self.assertEqual(len(trajectories), 1)
-        self.assertEqual(trajectories[0].session_id, "conv_789")
+        self.assertEqual(to_legacy_trajectory(trajectories[0]).session_id, "conv_789")
 
     def test_priority(self):
         """Test that TrajectoryRail has expected priority."""
@@ -280,6 +282,42 @@ class TestTrajectoryRail(IsolatedAsyncioTestCase):
     def test_inherits_evolution_rail(self):
         """Test that TrajectoryRail inherits EvolutionRail."""
         self.assertIsInstance(self.rail, EvolutionRail)
+
+
+class TestEvolutionRailTraceIdFromCtx(IsolatedAsyncioTestCase):
+    """Tests for EvolutionRail._trace_id_from_ctx public SpanManager API."""
+
+    def test_uses_span_manager_trace_id_property(self):
+        from openjiuwen.core.session.tracer.span import SpanManager
+        from openjiuwen.core.session.tracer.tracer import Tracer
+
+        class _Session:
+            def __init__(self, tracer: Tracer):
+                self._tracer = tracer
+
+            def tracer(self):
+                return self._tracer
+
+        tracer = Tracer()
+        ctx = AgentCallbackContext(
+            agent=MockAgent(card=MockAgentCard(id="agent")),
+            event=AgentCallbackEvent.BEFORE_INVOKE,
+            inputs=InvokeInputs(query="q", conversation_id="c"),
+            session=_Session(tracer),
+        )
+
+        trace_id = EvolutionRail._trace_id_from_ctx(ctx)
+
+        self.assertIsInstance(tracer.tracer_agent_span_manager, SpanManager)
+        self.assertEqual(trace_id, tracer.tracer_agent_span_manager.trace_id)
+
+    def test_returns_none_without_span_manager(self):
+        ctx = AgentCallbackContext(
+            agent=MockAgent(card=MockAgentCard(id="agent")),
+            event=AgentCallbackEvent.BEFORE_INVOKE,
+            inputs=InvokeInputs(query="q", conversation_id="c"),
+        )
+        self.assertIsNone(EvolutionRail._trace_id_from_ctx(ctx))
 
 
 class TestEvolutionRailCustomEvolution(IsolatedAsyncioTestCase):
@@ -352,6 +390,7 @@ class TestEvolutionRailCustomEvolution(IsolatedAsyncioTestCase):
 
         # Verify evolution was called with trajectory
         self.assertEqual(len(self.evolution_calls), 1)
-        traj = self.evolution_calls[0]
+        traj = to_legacy_trajectory(self.evolution_calls[0])
+        self.assertIsInstance(self.evolution_calls[0], LegacyTrajectory)
         self.assertEqual(traj.session_id, "conv_custom")
         self.assertEqual(len(traj.steps), 1)
