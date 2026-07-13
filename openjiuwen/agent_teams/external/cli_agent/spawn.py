@@ -157,11 +157,12 @@ async def build_cli_runtime(
 ) -> ExternalCliRuntime | ReinvokeCliRuntime:
     """Build the member runtime for ``ctx.cli_agent``.
 
-    Picks the runtime by the adapter's ``supports_stdin_injection``:
-    streaming CLIs (claude / codex) launch one long-lived subprocess now and
-    return an :class:`ExternalCliRuntime`; one-shot CLIs (openclaw / hermes)
-    return a :class:`ReinvokeCliRuntime` that launches a fresh subprocess per
-    turn. The returned runtime owns its subprocess(es); ``aclose`` tears down.
+    Claude is handled by its dedicated SDK backend. Other CLI agents are
+    picked by the adapter's ``supports_stdin_injection``: streaming CLIs launch
+    one long-lived subprocess and return an :class:`ExternalCliRuntime`;
+    one-shot CLIs (openclaw / hermes) return a :class:`ReinvokeCliRuntime` that
+    launches a fresh subprocess per turn. The returned runtime owns its
+    subprocess(es); ``aclose`` tears down.
 
     Args:
         ctx: Member runtime context; ``ctx.cli_agent`` names the adapter.
@@ -174,8 +175,8 @@ async def build_cli_runtime(
             CLIs register their MCP server out of band.
         mcp_server_name: Logical name the CLI registers the MCP server under.
         mcp_server_command: Launch argv for the team MCP stdio server.
-        system_prompt: The member's team-rail system prompt. Passed as a launch
-            arg for CLIs that support it (claude ``--append-system-prompt``);
+        system_prompt: The member's team-rail system prompt. Claude receives it
+            through SDK options; other CLIs may receive it as a launch arg.
             CLIs without a flag get it prepended to their first user message by
             the caller, so it is ignored here for them.
         extra_env: Extra environment merged over the inherited env + the
@@ -219,11 +220,9 @@ async def build_cli_runtime(
 
     adapter: CliAgentAdapter = build_adapter(ctx.cli_agent, command_override=command_override)
     # Start from the inherited environment minus any parent agent-session
-    # markers (e.g. CLAUDECODE / CLAUDE_CODE_* when the team itself runs inside
-    # a Claude Code session) so the spawned CLI is a fresh, independent
-    # instance rather than a nested one. The descriptor env is authoritative
-    # for team identity, so it is applied last — a misconfigured extra_env
-    # cannot shadow the join.
+    # markers declared by the adapter. The descriptor env is authoritative for
+    # team identity, so it is applied last — a misconfigured extra_env cannot
+    # shadow the join.
     base_env = {
         key: value
         for key, value in os.environ.items()
@@ -231,9 +230,8 @@ async def build_cli_runtime(
     }
     env = {**base_env, **(extra_env or {}), **descriptor.to_env()}
 
-    # System prompt as a launch arg (claude --append-system-prompt). CLIs
-    # without a flag return [] here and get the prompt prepended to their first
-    # user message by the caller instead.
+    # System prompt as a launch arg. CLIs without a flag return [] here and get
+    # the prompt prepended to their first user message by the caller instead.
     sp_args = tuple(adapter.system_prompt_args(system_prompt or ""))
 
     mcp_args: tuple[str, ...] = ()
