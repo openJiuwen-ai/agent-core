@@ -132,9 +132,8 @@ class _CliRuntimeBase(ABC):
     event bus a NativeHarness uses.
     """
 
-    def __init__(self, *, member_name: str, adapter: CliAgentAdapter):
+    def __init__(self, *, member_name: str):
         self._member_name = member_name
-        self._adapter = adapter
         # Lifecycle phase mapped onto the team's HarnessState vocabulary so the
         # StreamController treats a CLI runtime exactly like a NativeHarness.
         self._phase = HarnessState.IDLE
@@ -428,7 +427,8 @@ class ExternalCliRuntime(_CliRuntimeBase):
         transport: ProcessTransport | None = None,
     ):
         """Bind to a launched CLI subprocess's input/output channels."""
-        super().__init__(member_name=member_name, adapter=adapter)
+        super().__init__(member_name=member_name)
+        self._adapter = adapter
         self._injector = injector
         self._output_lines = output_lines
         self._process = process
@@ -586,7 +586,8 @@ class ReinvokeCliRuntime(_CliRuntimeBase):
                 "active" forever by dribbling output just under the inactivity
                 window.
         """
-        super().__init__(member_name=member_name, adapter=adapter)
+        super().__init__(member_name=member_name)
+        self._adapter = adapter
         self._env = env
         self._cwd = cwd
         self._cli_session_id = cli_session_id or uuid.uuid4().hex

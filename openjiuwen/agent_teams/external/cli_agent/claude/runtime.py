@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator
 
-from openjiuwen.agent_teams.external.cli_agent.adapters import build_adapter
 from openjiuwen.agent_teams.external.cli_agent.claude.options import build_claude_options, load_claude_sdk
 from openjiuwen.agent_teams.external.cli_agent.claude.ssh_transport import build_claude_sdk_ssh_transport
 from openjiuwen.agent_teams.external.runtime import _CliRuntimeBase
@@ -27,7 +26,7 @@ class ClaudeSdkRuntime(_CliRuntimeBase):
         transport: Any | None = None,
     ):
         """Bind SDK options; the SDK client is connected on start."""
-        super().__init__(member_name=member_name, adapter=build_adapter("claude"))
+        super().__init__(member_name=member_name)
         self._options = options
         self._transport = transport
         self._client: Any | None = None
