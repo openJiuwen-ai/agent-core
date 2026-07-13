@@ -15,10 +15,12 @@ it never needs the outer DeepAgent's ``before_invoke``/``after_invoke``.
 
 from __future__ import annotations
 
+import json
+
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail, ToolCallInputs
 from openjiuwen.harness.tools.robotic_arm.config import RoboticArmRuntimeSettings, SubTaskExecutor
-from openjiuwen.harness.tools.robotic_arm.plan_tools import REPORT_PLAN_TOOL_CARD
+from openjiuwen.harness.tools.robotic_arm.plan_tools import REPORT_PLAN_TOOL_CARD, summarize_plan
 
 
 class StepExecutorRail(AgentRail):
@@ -50,9 +52,34 @@ class StepExecutorRail(AgentRail):
         if ctx.inputs.tool_name != REPORT_PLAN_TOOL_CARD.name:
             return
 
-        sub_tasks = ctx.extra.get("last_plan_sub_tasks")
+        # report_plan's own ctx.extra write never runs -- Tool.invoke() is called
+        # without ctx (see ability_manager._execute_single_tool_call), so
+        # kwargs.get("ctx") inside plan_tools.py is always None. ctx.inputs is
+        # populated by the framework directly, independent of the tool's own
+        # kwargs handling, so read the validated call args from there instead.
+        tool_result = ctx.inputs.tool_result
+        if not isinstance(tool_result, str) or not tool_result.startswith("Success:"):
+            return
+
+        # ctx.inputs.tool_args mirrors ToolCall.arguments, which stays the raw
+        # JSON string the model emitted unless AbilityManager had to repair
+        # malformed JSON (see _parse_tool_arguments_with_repair) -- it is only
+        # ever a dict already in that repaired case.
+        tool_args = ctx.inputs.tool_args
+        if isinstance(tool_args, str):
+            try:
+                tool_args = json.loads(tool_args)
+            except (json.JSONDecodeError, TypeError):
+                return
+        if not isinstance(tool_args, dict):
+            return
+        sub_tasks = tool_args.get("sub_tasks")
         if not sub_tasks:
             return
+
+        ctx.extra["last_plan_sub_tasks"] = sub_tasks
+        ctx.extra["last_plan_summary"] = summarize_plan(sub_tasks)
+
         current = next((t for t in sub_tasks if t.get("status") == "in_progress"), None)
         if current is None:
             logger.info("[StepExecutorRail] no in_progress sub-task in the reported plan; skipping execution")
