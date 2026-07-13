@@ -157,6 +157,7 @@ def create_deep_agent(
     enable_read_image_multimodal: bool = True,
     enable_task_planning: bool = False,
     restrict_to_work_dir: bool = True,
+    allowed_paths: Optional[List[str]] = None,
     default_mode: AgentMode = AgentMode.AUTO,
     **config_kwargs: Any,
 ) -> DeepAgent:
@@ -200,6 +201,18 @@ def create_deep_agent(
         enable_task_planning: Enable task_planning_rail.
         restrict_to_work_dir: If True, restrict file access to workspace directory.
             If False, allow access to any path including system root.
+        allowed_paths: Optional list of directory paths allowed by the
+            path-access check when restrict_to_work_dir is True.  A file
+            operation is permitted only when its target falls under one of
+            these entries; this is a path allowlist, not a sandbox boundary.
+            When provided, this list **replaces** the default
+            [workspace, project_root] entries -- the defaults are NOT
+            automatically merged.  When None, falls back to
+            [workspace, project_root] from LocalWorkConfig.  Useful for
+            letting subagents reach trusted directories outside the
+            workspace, e.g. skill installation directories; remember to
+            also include the workspace and project_root paths so the agent
+            keeps access to its own working files.
         default_mode: Initial agent mode (``AgentMode.AUTO`` or ``AgentMode.PLAN``).
         **config_kwargs: Extra fields forwarded to
             DeepAgentConfig.
@@ -238,12 +251,13 @@ def create_deep_agent(
         workspace_obj = workspace
 
     if not isinstance(sys_operation, SysOperation):
+        work_config_kwargs: dict[str, Any] = {"restrict_to_sandbox": restrict_to_work_dir}
+        if allowed_paths is not None:
+            work_config_kwargs["sandbox_root"] = allowed_paths
         sysop_card = SysOperationCard(
                 id=f"{card.name}_{card.id}",
                 mode=OperationMode.LOCAL,
-                work_config=LocalWorkConfig(
-                    restrict_to_sandbox=restrict_to_work_dir,
-                ),
+                work_config=LocalWorkConfig(**work_config_kwargs),
             )
         add_result = Runner.resource_mgr.add_sys_operation(sysop_card)
         if add_result.is_err():
