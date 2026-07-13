@@ -3,9 +3,7 @@
 """
 Unit tests for IntelliRouterModelClient — wraps intelli_router.ReliableRouter.
 """
-import hashlib
 import importlib.util
-import json
 import os
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -19,9 +17,8 @@ from openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client im
     _web_servers,
 )
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
-from openjiuwen.core.foundation.llm.schema.message import UserMessage, AssistantMessage, UsageMetadata
+from openjiuwen.core.foundation.llm.schema.message import UserMessage, AssistantMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
-from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 
 
@@ -45,8 +42,6 @@ def intelli_router_client_config():
     """Create IntelliRouter client config for testing (DashScope-style)."""
     return ModelClientConfig(
         client_provider=ProviderType.IntelliRouter,
-        api_key="placeholder",
-        api_base="http://placeholder",
         verify_ssl=False,
         intelli_router_deployments=[
             {
@@ -134,8 +129,6 @@ class TestIntelliRouterClientConfig:
         """Verify defaults when no intelli_router_* fields are provided."""
         config = ModelClientConfig(
             client_provider=ProviderType.IntelliRouter,
-            api_key="x",
-            api_base="http://x",
         )
         router_config = IntelliRouterClientConfig.from_model_client_config(config)
 
@@ -153,8 +146,6 @@ class TestIntelliRouterClientConfig:
         """Verify enable_observability is correctly extracted."""
         config = ModelClientConfig(
             client_provider=ProviderType.IntelliRouter,
-            api_key="x",
-            api_base="http://x",
             intelli_router_enable_observability=True,
         )
         router_config = IntelliRouterClientConfig.from_model_client_config(config)
@@ -164,8 +155,6 @@ class TestIntelliRouterClientConfig:
         """Verify web_dashboard_port is correctly extracted."""
         config = ModelClientConfig(
             client_provider=ProviderType.IntelliRouter,
-            api_key="x",
-            api_base="http://x",
             intelli_router_web_dashboard_port=9090,
         )
         router_config = IntelliRouterClientConfig.from_model_client_config(config)
@@ -175,8 +164,6 @@ class TestIntelliRouterClientConfig:
         """Verify web_dashboard_port defaults to 0."""
         config = ModelClientConfig(
             client_provider=ProviderType.IntelliRouter,
-            api_key="x",
-            api_base="http://x",
         )
         router_config = IntelliRouterClientConfig.from_model_client_config(config)
         assert router_config.web_dashboard_port == 0
@@ -436,12 +423,10 @@ class TestIntelliRouterModelClientInit:
         )
         assert client._router is external_router
 
-    def test_init_with_api_key_placeholder(self):
-        """ModelClientConfig validates api_key before IntelliRouter client init."""
+    def test_init_without_top_level_credentials(self):
+        """IntelliRouter uses deployment credentials, not top-level api_key/api_base."""
         config = ModelClientConfig(
             client_provider=ProviderType.IntelliRouter,
-            api_key="placeholder",
-            api_base="",
             verify_ssl=False,
         )
         request_config = ModelRequestConfig(model="test")
@@ -849,7 +834,7 @@ class TestIntelliRouterConvertResponse:
             patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
             patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
         ):
-            client = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
+            IntelliRouterModelClient(model_request_config, intelli_router_client_config)
 
         ir_chunk = MagicMock(content="Hello chunk", finish_reason="stop", tool_calls=None, reasoning_content=None, spec=[])
         result = IntelliRouterModelClient._to_ow_chunk(ir_chunk)
@@ -861,7 +846,7 @@ class TestIntelliRouterConvertResponse:
             patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
             patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
         ):
-            client = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
+            IntelliRouterModelClient(model_request_config, intelli_router_client_config)
 
         ir_chunk = MagicMock(content="", finish_reason="null", tool_calls=None, reasoning_content=None, spec=[])
         result = IntelliRouterModelClient._to_ow_chunk(ir_chunk)
@@ -955,8 +940,6 @@ DASHSCOPE_API_BASE = "https://dashscope.aliyuncs.com"
 def _make_dashscope_client_config():
     return ModelClientConfig(
         client_provider=ProviderType.IntelliRouter,
-        api_key="placeholder",
-        api_base="http://placeholder",
         verify_ssl=False,
         intelli_router_deployments=[
             {
@@ -1077,8 +1060,6 @@ class TestIntelliRouterIntegrationDashScope:
 
         client_config = ModelClientConfig(
             client_provider=ProviderType.IntelliRouter,
-            api_key="placeholder",
-            api_base="http://placeholder",
             verify_ssl=False,
         )
         model_request_config = ModelRequestConfig(model="qwen-turbo", max_tokens=30)
