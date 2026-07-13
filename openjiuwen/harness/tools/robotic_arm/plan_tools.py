@@ -84,7 +84,7 @@ def _format_point(item: dict, x_key: str, y_key: str) -> str:
     return f"({x:g}, {y:g})"
 
 
-def _summarize_plan(sub_tasks: List[dict]) -> str:
+def summarize_plan(sub_tasks: List[dict]) -> str:
     lines = [f"Plan ({len(sub_tasks)} sub-task(s)):"]
     for item in sub_tasks:
         start = _format_point(item, "start_x", "start_y")
@@ -108,8 +108,12 @@ async def report_plan_action(sub_tasks: Any, ctx: AgentCallbackContext) -> str:
             return f"Error: InvalidPlan: sub_tasks[{i}] requires non-empty `id` and `description`."
         normalized.append(item)
 
-    summary = _summarize_plan(normalized)
+    summary = summarize_plan(normalized)
 
+    # Best-effort only: the framework's Tool.invoke() never receives ctx (see
+    # ReportPlanTool.invoke below), so this never actually fires at runtime.
+    # StepExecutorRail reads ctx.inputs.tool_args/tool_result instead, which
+    # the framework populates directly regardless of what the tool does.
     if ctx is not None:
         ctx.extra["last_plan_summary"] = summary
         ctx.extra["last_plan_sub_tasks"] = normalized
@@ -134,4 +138,4 @@ def build_plan_tools() -> List[Tool]:
     return [ReportPlanTool(REPORT_PLAN_TOOL_CARD)]
 
 
-__all__ = ["REPORT_PLAN_TOOL_CARD", "ReportPlanTool", "build_plan_tools", "report_plan_action"]
+__all__ = ["REPORT_PLAN_TOOL_CARD", "ReportPlanTool", "build_plan_tools", "report_plan_action", "summarize_plan"]

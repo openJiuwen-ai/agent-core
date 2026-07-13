@@ -1,12 +1,15 @@
 #!/usr/bin/env python
 # coding: utf-8
 """Tests for StepExecutorRail: construction validation and running execution
-after report_plan, all via the inner ReActAgent's own ctx.extra (no cross-layer
-bridging)."""
+after report_plan. ``report_plan``'s own ctx.extra write never fires at runtime
+(Tool.invoke() is called without ctx), so the rail reads sub_tasks off
+ctx.inputs.tool_args/tool_result -- the fields the framework itself populates --
+rather than ctx.extra."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,8 +19,21 @@ from openjiuwen.harness.tools.robotic_arm.config import RoboticArmRuntimeSetting
 from openjiuwen.harness.tools.robotic_arm.rails.step_executor_rail import StepExecutorRail
 
 
-def _make_tool_call_ctx(*, tool_name: str = "report_plan", extra: dict | None = None) -> AgentCallbackContext:
-    ctx = AgentCallbackContext(agent=MagicMock(), inputs=ToolCallInputs(tool_name=tool_name), extra=extra or {})
+def _make_tool_call_ctx(
+    *,
+    tool_name: str = "report_plan",
+    tool_result: str | None = "Success: plan updated.",
+    tool_args: dict | None = None,
+    extra: dict | None = None,
+) -> AgentCallbackContext:
+    # ToolCall.arguments is typed str (openai_model_client.py copies the LLM's
+    # raw function-call JSON string as-is), and AbilityManager only overwrites
+    # it with the parsed dict when JSON repair kicked in -- so ctx.inputs.tool_args
+    # is a JSON string in the common/successful case, not a dict. Serialize here
+    # so tests exercise the same parsing path production traffic hits.
+    raw_args = json.dumps(tool_args) if tool_args is not None else None
+    inputs = ToolCallInputs(tool_name=tool_name, tool_args=raw_args, tool_result=tool_result)
+    ctx = AgentCallbackContext(agent=MagicMock(), inputs=inputs, extra=extra or {})
     ctx.bind_steering_queue(asyncio.Queue())
     return ctx
 
@@ -72,7 +88,9 @@ async def test_ignores_non_tool_call_events() -> None:
 async def test_ignores_other_tool_calls() -> None:
     executor = MagicMock()
     rail = StepExecutorRail(RoboticArmRuntimeSettings(step_executor=executor, health_check=False))
-    ctx = _make_tool_call_ctx(tool_name="some_other_tool", extra={"last_plan_sub_tasks": [{"status": "in_progress"}]})
+    ctx = _make_tool_call_ctx(
+        tool_name="some_other_tool", tool_args={"sub_tasks": [{"id": "s1", "status": "in_progress"}]}
+    )
 
     await rail.after_tool_call(ctx)
 
@@ -80,11 +98,61 @@ async def test_ignores_other_tool_calls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_error_tool_result_is_a_noop() -> None:
+    """report_plan's own validation failed -- must not act on the raw (unvalidated) args."""
+    executor = MagicMock()
+    rail = StepExecutorRail(RoboticArmRuntimeSettings(step_executor=executor, health_check=False))
+    ctx = _make_tool_call_ctx(
+        tool_result="Error: InvalidPlan: `sub_tasks` must be a non-empty array.",
+        tool_args={"sub_tasks": [{"id": "s1", "status": "in_progress"}]},
+    )
+
+    await rail.after_tool_call(ctx)
+
+    executor.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_malformed_tool_args_json_is_a_noop() -> None:
+    """ctx.inputs.tool_args is a raw string in the common case -- must not raise on bad JSON."""
+    executor = MagicMock()
+    rail = StepExecutorRail(RoboticArmRuntimeSettings(step_executor=executor, health_check=False))
+    inputs = ToolCallInputs(tool_name="report_plan", tool_args="{not valid json", tool_result="Success: plan updated.")
+    ctx = AgentCallbackContext(agent=MagicMock(), inputs=inputs, extra={})
+    ctx.bind_steering_queue(asyncio.Queue())
+
+    await rail.after_tool_call(ctx)  # must not raise
+
+    executor.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_already_parsed_dict_tool_args_is_accepted() -> None:
+    """Defensive-only: every current model client (OpenAI, Anthropic, ...) always
+    produces a string ToolCall.arguments, even after AbilityManager's JSON-repair
+    path (_parse_tool_arguments_with_repair returns the repaired *string*, not a
+    dict). No known caller hands the rail a dict, but accept one without raising
+    in case a future caller does."""
+    executor = MagicMock(execute=MagicMock(return_value="Success: picked up the cup"))
+    rail = StepExecutorRail(RoboticArmRuntimeSettings(step_executor=executor, health_check=False))
+    sub_task = {"id": "s1", "description": "pick up the cup", "status": "in_progress"}
+    inputs = ToolCallInputs(
+        tool_name="report_plan", tool_args={"sub_tasks": [sub_task]}, tool_result="Success: plan updated."
+    )
+    ctx = AgentCallbackContext(agent=MagicMock(), inputs=inputs, extra={})
+    ctx.bind_steering_queue(asyncio.Queue())
+
+    await rail.after_tool_call(ctx)
+
+    executor.execute.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_no_sub_tasks_is_a_noop() -> None:
     executor = MagicMock()
     rail = StepExecutorRail(RoboticArmRuntimeSettings(step_executor=executor, health_check=False))
 
-    await rail.after_tool_call(_make_tool_call_ctx(extra={}))
+    await rail.after_tool_call(_make_tool_call_ctx(tool_args={}))
 
     executor.execute.assert_not_called()
 
@@ -93,7 +161,7 @@ async def test_no_sub_tasks_is_a_noop() -> None:
 async def test_no_in_progress_task_is_a_noop() -> None:
     executor = MagicMock()
     rail = StepExecutorRail(RoboticArmRuntimeSettings(step_executor=executor, health_check=False))
-    ctx = _make_tool_call_ctx(extra={"last_plan_sub_tasks": [{"id": "s1", "status": "done"}]})
+    ctx = _make_tool_call_ctx(tool_args={"sub_tasks": [{"id": "s1", "status": "done"}]})
 
     await rail.after_tool_call(ctx)
 
@@ -112,19 +180,26 @@ async def test_executes_in_progress_task_with_raw_model_coordinates() -> None:
         "start_x": 500,
         "start_y": 500,
     }
-    ctx = _make_tool_call_ctx(extra={"last_plan_sub_tasks": [sub_task], "vlm_raw_frame": frame})
+    ctx = _make_tool_call_ctx(tool_args={"sub_tasks": [sub_task]}, extra={"vlm_raw_frame": frame})
 
     await rail.after_tool_call(ctx)
 
     executor.execute.assert_called_once()
     called_frame, called_task = executor.execute.call_args.args
     assert called_frame is frame
-    assert called_task is sub_task
+    # tool_args round-trips through JSON in production (ToolCall.arguments is a
+    # raw string), so the dict identity is never preserved -- only equality.
+    assert called_task == sub_task
     assert called_task["start_x"] == 500
     assert called_task["start_y"] == 500
 
     messages = ctx.drain_steering()
     assert any("Success: picked up the cup" in m for m in messages)
+
+    # The rail must repair the broken tool -> ctx.extra handoff itself, since
+    # report_plan_action's own write never runs (see plan_tools.py).
+    assert ctx.extra["last_plan_sub_tasks"] == [sub_task]
+    assert "pick up the cup" in ctx.extra["last_plan_summary"]
 
 
 @pytest.mark.asyncio
@@ -132,10 +207,8 @@ async def test_executor_exception_is_reported_not_raised() -> None:
     executor = MagicMock(execute=MagicMock(side_effect=RuntimeError("gripper jam")))
     rail = StepExecutorRail(RoboticArmRuntimeSettings(step_executor=executor, health_check=False))
     ctx = _make_tool_call_ctx(
-        extra={
-            "last_plan_sub_tasks": [{"id": "s1", "status": "in_progress"}],
-            "vlm_raw_frame": object(),
-        }
+        tool_args={"sub_tasks": [{"id": "s1", "status": "in_progress"}]},
+        extra={"vlm_raw_frame": object()},
     )
 
     await rail.after_tool_call(ctx)
