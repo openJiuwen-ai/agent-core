@@ -307,10 +307,11 @@ class TestCreateHttpxClient:
 
             client = await create_httpx_client(config_dict, need_async=False)
 
-            # Verify connector pool was requested
+            # Verify connector pool was requested as a shared singleton (no per-call ref bump)
             mock_manager.get_connector_pool.assert_called_once_with(
                 "httpx",
-                config=ANY
+                config=ANY,
+                increment_ref=False,
             )
 
             # Verify config was converted to HttpXConnectorPoolConfig
@@ -348,7 +349,8 @@ class TestCreateHttpxClient:
             # Verify connector pool was requested with same config object
             mock_manager.get_connector_pool.assert_called_once_with(
                 "httpx",
-                config=config_obj
+                config=config_obj,
+                increment_ref=False,
             )
 
             # Verify async client was created with the shared transport only.

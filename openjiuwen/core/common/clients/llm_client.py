@@ -149,7 +149,10 @@ async def create_httpx_client(config: Union[HttpXConnectorPoolConfig, Dict[str, 
         config = HttpXConnectorPoolConfig(**config)
     if config.need_async != need_async:
         config = config.model_copy(update={"need_async": need_async})
-    connector_pool = await get_connector_pool_manager().get_connector_pool("httpx", config=config)
+    # Shared, process-lifetime transport: never released per call, so don't bump
+    # the ref count on every request (keeps it at 1 for the pool's lifetime).
+    connector_pool = await get_connector_pool_manager().get_connector_pool(
+        "httpx", config=config, increment_ref=False)
 
     # The shared transport already owns SSL and proxy, so we must NOT pass
     # verify=/proxy= here — doing so would make httpx build a *second*

@@ -84,3 +84,28 @@ class TestTcpConnectorPoolIntegration:
         assert pool1.ref_count == 2  # 初始1 + 1次获取
         await manager.release_connector_pool(config=config)
         await manager.release_connector_pool(config=config)
+
+    async def test_shared_pool_does_not_increment_ref(self):
+        """increment_ref=False keeps ref_count at 1 across many fetches.
+
+        Shared singletons (the LLM httpx transport, the aiohttp connector) are
+        never released per call, so they opt out of the per-fetch ref bump —
+        otherwise ref_count would grow unbounded with every request.
+        """
+        manager = ConnectorPoolManager(max_pools=5)
+        manager._closed = False
+        manager._connector_pools.clear()
+        config = ConnectorPoolConfig(limit=77, limit_per_host=7)
+
+        pool = await manager.get_connector_pool(config=config, increment_ref=False)
+        assert pool.ref_count == 1  # creation ref only
+
+        for _ in range(5):
+            again = await manager.get_connector_pool(config=config, increment_ref=False)
+            assert again is pool
+        assert pool.ref_count == 1  # no growth across repeated shared fetches
+
+        # Default (increment_ref=True) still bumps — backward compatible.
+        pooled = await manager.get_connector_pool(config=config)
+        assert pooled is pool
+        assert pooled.ref_count == 2

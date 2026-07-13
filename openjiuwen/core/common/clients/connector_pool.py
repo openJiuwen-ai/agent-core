@@ -264,12 +264,18 @@ class ConnectorPoolManager(metaclass=Singleton):
         return decorator
 
     async def get_connector_pool(self, connector_pool_type: str = "default", *,
-                                 config: Optional[ConnectorPoolConfig] = None) -> ConnectorPool:
+                                 config: Optional[ConnectorPoolConfig] = None,
+                                 increment_ref: bool = True) -> ConnectorPool:
         """Get or create a connector pool.
 
         Args:
             connector_pool_type: Type of connector pool to get/create.
             config: Optional configuration for the pool.
+            increment_ref: If True (default), bump the pool's reference count on
+                every fetch. Long-lived shared singletons (e.g. the LLM httpx
+                transport, which is never released per call) pass False so the
+                ref count stays at its creation value of 1 instead of growing
+                per request.
 
         Returns:
             A connector pool instance.
@@ -298,9 +304,12 @@ class ConnectorPoolManager(metaclass=Singleton):
                     del self._connector_pools[key]
                     logger.warning(f"Removed closed connector pool, key={key}, config={config}")
                 else:
-                    # Increment reference count and return
-                    connector_pool.increment_ref()
-                    logger.debug(f"Incremented ref count for pool {key}, now ref_count={connector_pool.ref_count}")
+                    # Increment reference count and return. Shared singletons pass
+                    # increment_ref=False so the count stays at 1 for the pool's
+                    # lifetime instead of growing on every request.
+                    if increment_ref:
+                        connector_pool.increment_ref()
+                        logger.debug(f"Incremented ref count for pool {key}, now ref_count={connector_pool.ref_count}")
                     return connector_pool
 
             # Check if maximum number of pools is reached

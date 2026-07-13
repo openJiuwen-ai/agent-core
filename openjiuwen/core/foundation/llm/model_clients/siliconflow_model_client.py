@@ -93,7 +93,7 @@ class SiliconFlowModelClient(BaseModelClient):
             ssl_cert=self.model_client_config.ssl_cert,
         )
         connector_pool = await get_connector_pool_manager().get_connector_pool(
-            connector_pool_type="default", config=pool_config,
+            connector_pool_type="default", config=pool_config, increment_ref=False,
         )
 
         # Use method-level timeout if provided, otherwise use config timeout
