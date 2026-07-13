@@ -15,7 +15,8 @@ MEMORY_PROMPT_CN = """# 记忆使用策略（主动模式）
 
 ## 存储层级
 
-- `USER.md`：用户画像、稳定偏好、身份信息、长期习惯。
+- `IDENTITY.md`：Agent 自身身份、名字、角色定位、用户为 Agent 指定的称呼。用户说“你叫 X”“以后你叫 X”“你的名字是 X”时，应读取并更新工作区根目录的 `IDENTITY.md`。
+- `USER.md`：用户本人的画像、稳定偏好、身份信息、长期习惯。不要把 Agent 自身名字作为权威身份写入 `USER.md`。
 - `MEMORY.md`：长期背景知识、稳定事实、重要决策、跨会话可复用信息。
 - `memory/daily_memory/YYYY-MM-DD.md`：每日会话记录、任务进展、阶段性上下文、当天有后续价值的信息。
 
@@ -24,6 +25,7 @@ MEMORY_PROMPT_CN = """# 记忆使用策略（主动模式）
 普通用户对话中，如果发现有长期价值的信息，可以主动写入记忆。用户明确要求“记住、记录、保存、以后参考”时，应优先写入记忆。
 
 写入位置：
+- Agent 自身身份、名字、角色定位、用户为 Agent 指定的称呼：写入 `IDENTITY.md`，使用 `read_file` / `edit_file`。
 - 用户身份、偏好、稳定习惯：写入 `USER.md`。
 - 长期背景、稳定事实、重要决策：写入 `MEMORY.md`。
 - 当天事件、任务进展、阶段性记录：写入 `memory/daily_memory/YYYY-MM-DD.md`。
@@ -42,7 +44,8 @@ Historical memory content is not included in the prompt by default. Cross-sessio
 
 ## Storage Hierarchy
 
-- `USER.md`: User profile, stable preferences, identity information, and long-term habits.
+- `IDENTITY.md`: The agent's own identity, name, role, and user-assigned name. When the user says "your name is X", "from now on you are called X", or similar, read and update the workspace-root `IDENTITY.md`.
+- `USER.md`: The user's own profile, stable preferences, identity information, and long-term habits. Do not store the agent's own name as the authoritative identity in `USER.md`.
 - `MEMORY.md`: Long-term background knowledge, stable facts, important decisions, and reusable cross-session information.
 - `memory/daily_memory/YYYY-MM-DD.md`: Daily session logs, task progress, staged context, and information from the day that may be useful later.
 
@@ -51,6 +54,7 @@ Historical memory content is not included in the prompt by default. Cross-sessio
 In ordinary user conversations, when you discover information with long-term value, you may write it to memory proactively. When the user explicitly asks you to "remember", "record", "save", or "refer to this later", prioritize writing it to memory.
 
 Choose the storage location by content type:
+- Agent identity, name, role, and user-assigned name: write to `IDENTITY.md` with `read_file` / `edit_file`.
 - User identity, preferences, and stable habits: write to `USER.md`.
 - Long-term background, stable facts, and important decisions: write to `MEMORY.md`.
 - Daily events, task progress, and staged records: write to `memory/daily_memory/YYYY-MM-DD.md`.
@@ -117,7 +121,8 @@ MEMORY_INACTIVE_PROMPT_CN = """# 记忆使用策略（被动模式）
 
 ## 存储层级
 
-- `USER.md`：用户画像、稳定偏好、身份信息、长期习惯。
+- `IDENTITY.md`：Agent 自身身份、名字、角色定位、用户为 Agent 指定的称呼。
+- `USER.md`：用户本人的画像、稳定偏好、身份信息、长期习惯。不要把 Agent 自身名字作为权威身份写入 `USER.md`。
 - `MEMORY.md`：长期背景知识、稳定事实、重要决策。
 - `memory/daily_memory/YYYY-MM-DD.md`：每日会话记录、任务进展、阶段性上下文。
 
@@ -130,6 +135,7 @@ MEMORY_INACTIVE_PROMPT_CN = """# 记忆使用策略（被动模式）
 
 ## 写入规则
 
+- Agent 自身身份、名字、角色定位、用户为 Agent 指定的称呼：写入 `IDENTITY.md`，使用 `read_file` / `edit_file`。
 - 用户身份、偏好、稳定习惯：写入 `USER.md`。
 - 长期背景、稳定事实、重要决策：写入 `MEMORY.md`。
 - 当天事件、任务进展、阶段性记录：写入 `memory/daily_memory/YYYY-MM-DD.md`。
@@ -148,7 +154,8 @@ Historical memory content is not included in the prompt by default. Use memory t
 
 ## Storage Hierarchy
 
-- `USER.md`: User profile, stable preferences, identity information, and long-term habits.
+- `IDENTITY.md`: The agent's own identity, name, role, and user-assigned name.
+- `USER.md`: The user's own profile, stable preferences, identity information, and long-term habits. Do not store the agent's own name as the authoritative identity in `USER.md`.
 - `MEMORY.md`: Long-term background knowledge, stable facts, and important decisions.
 - `memory/daily_memory/YYYY-MM-DD.md`: Daily session logs, task progress, and staged context.
 
@@ -161,6 +168,7 @@ Historical memory content is not included in the prompt by default. Use memory t
 
 ## Write Rules
 
+- Agent identity, name, role, and user-assigned name: write to `IDENTITY.md` with `read_file` / `edit_file`.
 - User identity, preferences, and stable habits: write to `USER.md`.
 - Long-term background, stable facts, and important decisions: write to `MEMORY.md`.
 - Daily events, task progress, and staged records: write to `memory/daily_memory/YYYY-MM-DD.md`.
