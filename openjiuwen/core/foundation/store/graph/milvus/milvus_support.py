@@ -628,6 +628,7 @@ class MilvusGraphStore(GraphStore):
             ranker=ranker,
             limit=k,
             output_fields=list(output_fields),
+            timeout=self.config.timeout,
         )[0]
         result = [dict(distance=r.get("distance")) | r.get("entity", {}) for r in result]
 
