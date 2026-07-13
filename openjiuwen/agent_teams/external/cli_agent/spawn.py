@@ -5,8 +5,7 @@
 
 Builds the team-join descriptor from the member's runtime context, launches
 the CLI with that descriptor in its environment (so a team-member MCP server
-the CLI spawns inherits it), and returns an :class:`ExternalCliRuntime`
-bound to the subprocess via stdin (input) and a stdout line iterator.
+the CLI spawns inherits it), and returns a CLI member runtime.
 
 An external CLI member runs in a separate process. Its MCP server writes the
 shared file-backed sqlite database directly and publishes runtime events via
@@ -28,7 +27,7 @@ from openjiuwen.agent_teams.external.cli_agent.injector import StdinPipeInjector
 from openjiuwen.agent_teams.external.cli_agent.transport.base import StreamReaderLike
 from openjiuwen.agent_teams.external.cli_agent.transport.local import LocalTransport
 from openjiuwen.agent_teams.external.descriptor import TeamJoinDescriptor
-from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime, ReinvokeCliRuntime
+from openjiuwen.agent_teams.external.runtime import CliRuntimeBase, ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
@@ -154,7 +153,7 @@ async def build_cli_runtime(
     system_prompt: str | None = None,
     extra_env: dict[str, str] | None = None,
     ssh_transport: SshTransportConfig | None = None,
-) -> ExternalCliRuntime | ReinvokeCliRuntime:
+) -> CliRuntimeBase:
     """Build the member runtime for ``ctx.cli_agent``.
 
     Claude is handled by its dedicated SDK backend. Other CLI agents are
@@ -182,8 +181,8 @@ async def build_cli_runtime(
         extra_env: Extra environment merged over the inherited env + the
             team-join descriptor (descriptor wins is not desired, so this is
             applied last only for non-descriptor keys).
-        ssh_transport: Optional ssh endpoint config. When set, the streaming
-            CLI process is launched remotely via ssh.
+        ssh_transport: Optional ssh endpoint config. Currently supported only
+            by the Claude SDK backend.
     """
     if not ctx.cli_agent:
         raise_error(

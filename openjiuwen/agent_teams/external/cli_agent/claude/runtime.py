@@ -9,13 +9,13 @@ from typing import Any, AsyncIterator
 
 from openjiuwen.agent_teams.external.cli_agent.claude.options import build_claude_options, load_claude_sdk
 from openjiuwen.agent_teams.external.cli_agent.claude.ssh_transport import build_claude_sdk_ssh_transport
-from openjiuwen.agent_teams.external.runtime import _CliRuntimeBase
+from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.stream.base import OutputSchema
 
 
-class ClaudeSdkRuntime(_CliRuntimeBase):
+class ClaudeSdkRuntime(CliRuntimeBase):
     """Drive a Claude Code member through Claude Agent SDK."""
 
     def __init__(
