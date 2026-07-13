@@ -86,8 +86,8 @@ class VisionPerceptionRail(AgentRail):
     def _capture_frame(self, step_executor: Any) -> tuple[Image.Image | None, Image.Image | None, str]:
         try:
             frame = step_executor.capture()
-        except Exception as e:
-            logger.warning("[VisionPerceptionRail] capture failed: %s", e)
+        except Exception:
+            logger.exception("[VisionPerceptionRail] capture failed")
             return None, None, ""
 
         if frame.mode != "RGB":

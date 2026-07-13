@@ -40,6 +40,7 @@ pinned as a dependency; install the version matching your rig separately.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
@@ -47,6 +48,7 @@ from PIL import Image
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import ToolError
+from openjiuwen.core.common.logging import tool_logger
 from openjiuwen.harness.tools.robotic_arm.registry import SubTaskExecutorRegistry
 from openjiuwen.harness.tools.robotic_arm.vendors.so101._kinematics import (
     IKSolver,
@@ -103,6 +105,8 @@ class So101RekepExecutor:
         color_width: int = 1280,
         color_height: int = 720,
         fps: int = 6,
+        frame_timeout_ms: int = 5000,
+        capture_max_wait_s: float = 60.0,
         pre_capture_hook: Optional[Callable[[], None]] = None,
         sam_checkpoint_path: Optional[str] = None,
         dino_model: str = "facebook/dinov2-with-registers-small",
@@ -140,6 +144,8 @@ class So101RekepExecutor:
         self._color_width = color_width
         self._color_height = color_height
         self._fps = fps
+        self._frame_timeout_ms = frame_timeout_ms
+        self._capture_max_wait_s = capture_max_wait_s
         self._pre_capture_hook = pre_capture_hook
 
         self._pipeline: Any = None
@@ -288,7 +294,20 @@ class So101RekepExecutor:
         import pyrealsense2 as rs
 
         align = rs.align(rs.stream.color)
-        frames = align.process(self._pipeline.wait_for_frames(5000))
+        deadline = time.monotonic() + self._capture_max_wait_s
+        while True:
+            try:
+                frames = align.process(self._pipeline.wait_for_frames(self._frame_timeout_ms))
+                break
+            except RuntimeError as e:
+                if time.monotonic() >= deadline:
+                    raise
+                tool_logger.warning(
+                    "[So101RekepExecutor] camera frame not ready yet (%s), retrying within %ss budget",
+                    e,
+                    self._capture_max_wait_s,
+                )
+
         depth = np.asarray(frames.get_depth_frame().get_data())
         color_bgra = np.asarray(frames.get_color_frame().get_data())
         rgb = color_bgra[..., [2, 1, 0]]  # BGRA -> RGB, no opencv dependency needed
