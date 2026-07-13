@@ -41,8 +41,8 @@ class StepExecutorRail(AgentRail):
     def _verify_health(self) -> None:
         try:
             self._step_executor.capture()
-        except Exception as e:
-            logger.warning("[StepExecutorRail] step_executor health check failed: %s (continuing)", e)
+        except Exception:
+            logger.exception("[StepExecutorRail] step_executor health check failed (continuing)")
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         if not isinstance(ctx.inputs, ToolCallInputs):
@@ -64,7 +64,7 @@ class StepExecutorRail(AgentRail):
             result_text = self._step_executor.execute(frame, current)
         except Exception as e:
             result_text = f"Error: StepExecutionFailed: {type(e).__name__}: {e}"
-            logger.warning("[StepExecutorRail] step_executor.execute failed: %s", e)
+            logger.exception("[StepExecutorRail] step_executor.execute failed")
 
         ctx.push_steering(f"[Execution Result] {result_text}")
 
