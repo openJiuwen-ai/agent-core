@@ -471,6 +471,32 @@ class ConnectorPoolManager(metaclass=Singleton):
 
         logger.info("All connector pools closed")
 
+    def atexit_close(self) -> None:
+        """Best-effort synchronous close of all pools at interpreter shutdown.
+
+        Connections are also reclaimed by GC and the manager evicts idle pools
+        by TTL/max-idle; this gives short-lived processes a clean shutdown.
+        Safe with or without a running event loop. ``close_all`` gathers
+        per-pool errors internally (``return_exceptions=True``) and does not
+        raise. At interpreter shutdown the project logger's handlers may be
+        closed or lack a running event loop, so ``logging.raiseExceptions`` is
+        cleared for the duration of teardown to keep their errors from printing
+        "Logging error" tracebacks. This is not ``logging.disable``: records
+        are still emitted wherever handlers still work.
+        """
+        if self._closed or not self._connector_pools:
+            return
+        logging.raiseExceptions = False
+        try:
+            asyncio.get_running_loop()
+            # A loop is still running at exit (unusual); cannot safely schedule
+            # async close here, so defer to GC/eviction.
+            return
+        except RuntimeError:
+            asyncio.run(self.close_all())
+        finally:
+            logging.raiseExceptions = True
+
     def get_stats(self) -> Dict:
         """Get statistics for all connector pools.
 
@@ -500,30 +526,10 @@ _connector_pool_manager = get_connector_pool_manager()
 def _atexit_close_connector_pools() -> None:
     """Best-effort cleanup of all connector pools at interpreter shutdown.
 
-    Connections are also reclaimed by GC and the manager evicts idle pools by
-    TTL/max-idle, but this gives short-lived CLIs and test processes a clean
-    shutdown. Safe with or without a running event loop; never raises since we
-    are already exiting.
+    Delegates to :meth:`ConnectorPoolManager.atexit_close`, which is safe with
+    or without a running event loop.
     """
-    manager = get_connector_pool_manager()
-    if manager._closed or not manager._connector_pools:
-        return
-    # close_all() logs at INFO; during interpreter shutdown the logging
-    # handlers' streams may already be closed, which would emit noisy
-    # tracebacks. Silence all logging for the duration of teardown.
-    logging.disable(logging.CRITICAL)
-    try:
-        try:
-            asyncio.get_running_loop()
-            # A loop is still running at exit (unusual); cannot safely schedule
-            # async close here, so fall back to GC/eviction.
-            return
-        except RuntimeError:
-            asyncio.run(manager.close_all())
-    except Exception:
-        pass
-    finally:
-        logging.disable(logging.NOTSET)
+    get_connector_pool_manager().atexit_close()
 
 
 atexit.register(_atexit_close_connector_pools)
