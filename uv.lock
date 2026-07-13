@@ -799,6 +799,24 @@ wheels = [
 ]
 
 [[package]]
+name = "claude-agent-sdk"
+version = "0.2.115"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "mcp" },
+    { name = "sniffio" },
+]
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/ba/b8/c1898153ffb0c75cfc5504c18d892d3c57a080073c9ede3df7addb8fc4a0/claude_agent_sdk-0.2.115.tar.gz", hash = "sha256:230017fbba74fb3aa1a1d86b2986277c7fe26dd2e33eea865c90553d93f4e26d" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/a4/43/609755e7ec7c8031c05f89442154d86f55856a64d234f90845b8035c7ffb/claude_agent_sdk-0.2.115-py3-none-macosx_11_0_arm64.whl", hash = "sha256:8ca9eea21ed6b1b7d6b35c5bac368210214b36028c68046231ca4ea545854e80" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/f9/e7/8a3b68f30fdebb0fa59dd96be142443a5fffbed2f2a16a6fbd7259b49b9b/claude_agent_sdk-0.2.115-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:23fc46eadafbf9315c63a6959a7677c4e2325339e09f6caf820e81ef905b51da" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/ba/92/0cb1e45004a2f3738c77bb33281ad919beb203e1f49353c120ae75f79e55/claude_agent_sdk-0.2.115-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:c662fe2f618aa19e9ea1c161b490b2f67ec0c8e15a75d96b5b14cbb8a7301e86" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/b8/2c/63c9545875abb4ed1563fcf7bd52277b3556fc894816d42bb2e723f17b6b/claude_agent_sdk-0.2.115-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:946f8b3240e9c0e79a7f87bab14eb079d283ab564a0503923aa81648351b8c6f" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/c0/64/efe0f2ad2e1ae39690c7345d6da651be6af1350ef25bc20209171896a4bf/claude_agent_sdk-0.2.115-py3-none-win_amd64.whl", hash = "sha256:9bff5ef9932747ce41982a7c955fb144220ada80e6931bd5f5ee5da74f454990" },
+]
+
+[[package]]
 name = "click"
 version = "8.3.1"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
@@ -2884,6 +2902,9 @@ chromadb = [
     { name = "opentelemetry-proto" },
     { name = "protobuf" },
 ]
+claude = [
+    { name = "claude-agent-sdk" },
+]
 cli = [
     { name = "click" },
     { name = "prompt-toolkit" },
@@ -3023,6 +3044,7 @@ requires-dist = [
     { name = "cacheout", specifier = ">=0.16.0" },
     { name = "charset-normalizer", specifier = ">=3.4.4" },
     { name = "chromadb", marker = "extra == 'chromadb'", specifier = ">=1.5.4" },
+    { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = ">=0.2.115" },
     { name = "click", marker = "extra == 'cli'", specifier = ">=8.0" },
     { name = "dashscope", specifier = ">=1.25.6" },
     { name = "docx2txt", specifier = ">=0.8" },
@@ -3084,7 +3106,7 @@ requires-dist = [
     { name = "uiautomator2", marker = "extra == 'mobile-gui'", specifier = ">=3.2.0" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'online-rl'" },
 ]
-provides-extras = ["all-a2a", "pulsar", "elasticsearch", "redis", "sqlite", "postgres", "mysql", "gaussdb", "pgvector", "gaussvector", "chromadb", "obs", "zmq", "sandbox", "mem0", "jiuwen-memory", "agentarts", "ssh", "observability", "mobile-gui", "online-rl", "all-mq", "all-storage", "all-vector", "cli", "default", "all"]
+provides-extras = ["all-a2a", "pulsar", "elasticsearch", "redis", "sqlite", "postgres", "mysql", "gaussdb", "pgvector", "gaussvector", "chromadb", "obs", "zmq", "sandbox", "mem0", "jiuwen-memory", "agentarts", "claude", "ssh", "observability", "mobile-gui", "online-rl", "all-mq", "all-storage", "all-vector", "cli", "default", "all"]
 
 [package.metadata.requires-dev]
 dev = [
