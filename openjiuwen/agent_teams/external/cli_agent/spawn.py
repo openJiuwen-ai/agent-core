@@ -22,10 +22,11 @@ from typing import AsyncIterator
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.external.cli_agent.adapters import CliAgentAdapter, build_adapter
+from openjiuwen.agent_teams.external.cli_agent.claude import build_claude_runtime
+from openjiuwen.agent_teams.external.cli_agent.claude.options import strip_parent_claude_env
 from openjiuwen.agent_teams.external.cli_agent.injector import StdinPipeInjector
 from openjiuwen.agent_teams.external.cli_agent.transport.base import StreamReaderLike
 from openjiuwen.agent_teams.external.cli_agent.transport.local import LocalTransport
-from openjiuwen.agent_teams.external.cli_agent.transport.ssh import SshTransport
 from openjiuwen.agent_teams.external.descriptor import TeamJoinDescriptor
 from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
@@ -188,37 +189,52 @@ async def build_cli_runtime(
             StatusCode.AGENT_TEAM_CONFIG_INVALID,
             reason="build_cli_runtime called without ctx.cli_agent set",
         )
-    adapter: CliAgentAdapter = build_adapter(ctx.cli_agent, command_override=command_override)
     descriptor = descriptor_from_context(ctx)
+    if ctx.cli_agent == "claude":
+        if command_override is not None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason="Claude SDK members do not support command_override; configure Claude on the local/remote PATH",
+            )
+        if ssh_transport is None:
+            base_env = strip_parent_claude_env(dict(os.environ))
+        else:
+            base_env = {}
+        env = {**base_env, **(extra_env or {}), **descriptor.to_env()}
+        return build_claude_runtime(
+            member_name=ctx.member_name or "",
+            cwd=cwd,
+            env=env,
+            inject_mcp=inject_mcp,
+            mcp_server_name=mcp_server_name,
+            mcp_server_command=mcp_server_command,
+            system_prompt=system_prompt,
+            ssh_transport=ssh_transport,
+        )
+    if ssh_transport is not None:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="ssh transport is only supported for claude SDK external CLI members",
+        )
+
+    adapter: CliAgentAdapter = build_adapter(ctx.cli_agent, command_override=command_override)
     # Start from the inherited environment minus any parent agent-session
     # markers (e.g. CLAUDECODE / CLAUDE_CODE_* when the team itself runs inside
     # a Claude Code session) so the spawned CLI is a fresh, independent
     # instance rather than a nested one. The descriptor env is authoritative
     # for team identity, so it is applied last — a misconfigured extra_env
     # cannot shadow the join.
-    if ssh_transport is None:
-        base_env = {
-            key: value
-            for key, value in os.environ.items()
-            if not any(key.startswith(prefix) for prefix in adapter.env_strip_prefixes)
-        }
-    else:
-        base_env = {}
+    base_env = {
+        key: value
+        for key, value in os.environ.items()
+        if not any(key.startswith(prefix) for prefix in adapter.env_strip_prefixes)
+    }
     env = {**base_env, **(extra_env or {}), **descriptor.to_env()}
 
     # System prompt as a launch arg (claude --append-system-prompt). CLIs
     # without a flag return [] here and get the prompt prepended to their first
     # user message by the caller instead.
     sp_args = tuple(adapter.system_prompt_args(system_prompt or ""))
-
-    if ssh_transport is not None and not adapter.supports_stdin_injection:
-        raise_error(
-            StatusCode.AGENT_TEAM_CONFIG_INVALID,
-            reason=(
-                "ssh transport requires a streaming CLI "
-                "(supports_stdin_injection=True); one-shot CLIs are not supported in ssh mode"
-            ),
-        )
 
     mcp_args: tuple[str, ...] = ()
     if inject_mcp:
@@ -236,12 +252,6 @@ async def build_cli_runtime(
                 env=env,
                 cwd=cwd,
                 member_name=ctx.member_name or "",
-            )
-        elif not mcp_args:
-            team_logger.warning(
-                "[external-cli] {} has no launch MCP injection args in ssh mode; "
-                "remote MCP must be configured out of band",
-                adapter.name,
             )
 
     launch_extra_args = mcp_args + sp_args
@@ -262,9 +272,7 @@ async def build_cli_runtime(
 
     command = adapter.build_command(extra_args=launch_extra_args)
     team_logger.info("[external-cli] launching {} for member {}", command, ctx.member_name)
-    if ssh_transport is not None:
-        team_logger.info("[external-cli] using ssh transport for member {}", ctx.member_name)
-    transport = SshTransport(ssh_transport) if ssh_transport is not None else LocalTransport()
+    transport = LocalTransport()
     process = await transport.run(tuple(command), env=env, cwd=cwd)
     if process.stdin is None or process.stdout is None:
         raise_error(
