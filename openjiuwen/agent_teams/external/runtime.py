@@ -24,7 +24,7 @@ no-ops (the configurator skips those features for external CLI members).
 Both flavours implement the :class:`MemberRuntime` interaction surface
 (``start`` / ``stop`` / ``outputs`` / ``send`` / ``abort`` / ``pause`` /
 ``subscribe`` / ``state`` / ``session_id``) through the
-shared :class:`_CliRuntimeBase` adapter, which wraps each flavour's single-turn
+shared :class:`CliRuntimeBase` adapter, which wraps each flavour's single-turn
 ``_drive`` async generator: ``send`` starts a turn when IDLE (or steers /
 buffers a follow-up when RUNNING), ``outputs`` exposes the turn's narration
 chunks via a queue-backed iterator, and phase/round events are mapped onto the
@@ -122,7 +122,7 @@ async def _terminate(process: ProcessLike | None) -> None:
         await process.wait()
 
 
-class _CliRuntimeBase(ABC):
+class CliRuntimeBase(ABC):
     """Shared :class:`MemberRuntime` surface for CLI-backed members.
 
     Adapts each flavour's single-turn ``_drive`` async generator into the
@@ -413,7 +413,7 @@ class _CliRuntimeBase(ABC):
         return None
 
 
-class ExternalCliRuntime(_CliRuntimeBase):
+class ExternalCliRuntime(CliRuntimeBase):
     """Streaming runtime: one long-lived CLI subprocess driven via stdin."""
 
     def __init__(
@@ -545,7 +545,7 @@ class ExternalCliRuntime(_CliRuntimeBase):
                 await self._transport.aclose()
 
 
-class ReinvokeCliRuntime(_CliRuntimeBase):
+class ReinvokeCliRuntime(CliRuntimeBase):
     """One-shot runtime: a fresh CLI subprocess per turn (prompt as argv).
 
     Messages that arrive mid-turn (via steer/follow_up) cannot interrupt a
@@ -816,4 +816,4 @@ class ReinvokeCliRuntime(_CliRuntimeBase):
         await _terminate(self._current)
 
 
-__all__ = ["ExternalCliRuntime", "ReinvokeCliRuntime"]
+__all__ = ["CliRuntimeBase", "ExternalCliRuntime", "ReinvokeCliRuntime"]
