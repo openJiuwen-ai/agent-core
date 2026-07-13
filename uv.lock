@@ -2954,7 +2954,7 @@ requires-dist = [
     { name = "elasticsearch", extras = ["async"], marker = "extra == 'elasticsearch'", specifier = ">=8.0.0" },
     { name = "fastapi", marker = "extra == 'online-rl'", specifier = ">=0.100" },
     { name = "fastmcp", specifier = ">=2.14.2,<3.0" },
-    { name = "filelock", specifier = ">=3.20.1" },
+    { name = "filelock", specifier = ">=3.25.0" },
     { name = "gitcode-api", specifier = ">=1.2.20" },
     { name = "httpx", marker = "extra == 'jiuwen-memory'", specifier = ">=0.24" },
     { name = "httpx", marker = "extra == 'online-rl'", specifier = ">=0.24" },
