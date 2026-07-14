@@ -74,7 +74,7 @@ def test_generate_constraints_parses_valid_vlm_response() -> None:
     assert fn(keypoints[0], keypoints) == pytest.approx(0.0, abs=1e-6)
 
 
-def test_generate_constraints_includes_task_and_hint_in_prompt() -> None:
+def test_generate_constraints_includes_task_in_prompt() -> None:
     vlm = _FakeVlm(_VALID_RESPONSE)
     keypoints = np.array([[0.1, 0.0, 0.05]])
 
@@ -85,31 +85,11 @@ def test_generate_constraints_includes_task_and_hint_in_prompt() -> None:
         keypoints_3d=keypoints,
         ik_solver=_FakeIKSolver(),
         vlm=vlm,
-        hint_pixel=(320, 240),
     )
 
     assert vlm.last_prompt is not None
     assert "grasp the tape" in vlm.last_prompt
-    assert "(320, 240)" in vlm.last_prompt
-
-
-def test_generate_constraints_includes_dest_keypoint_in_prompt() -> None:
-    vlm = _FakeVlm(_VALID_RESPONSE)
-    keypoints = np.array([[0.1, 0.0, 0.05], [0.2, 0.1, 0.05]])
-
-    generate_constraints(
-        overlay_rgb=np.zeros((10, 10, 3), dtype=np.uint8),
-        task="place the tape on the book",
-        num_keypoints=2,
-        keypoints_3d=keypoints,
-        ik_solver=_FakeIKSolver(),
-        vlm=vlm,
-        dest_keypoint_index=1,
-    )
-
-    assert vlm.last_prompt is not None
-    assert "Keypoint 1" in vlm.last_prompt
-    assert "keypoints[1]" in vlm.last_prompt
+    assert "Number of keypoints in image: 1" in vlm.last_prompt
 
 
 def test_generate_constraints_rejects_malicious_vlm_code() -> None:

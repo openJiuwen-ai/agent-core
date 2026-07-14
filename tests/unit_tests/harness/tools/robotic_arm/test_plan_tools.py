@@ -46,25 +46,17 @@ async def test_report_plan_rejects_missing_id_or_description() -> None:
 
 
 @pytest.mark.asyncio
-async def test_report_plan_success_summarizes_points() -> None:
+async def test_report_plan_success_summarizes_sub_tasks() -> None:
     sub_tasks = [
-        {
-            "id": "s1",
-            "description": "move cup to sink",
-            "status": "in_progress",
-            "start_x": 120,
-            "start_y": 340,
-            "end_x": 400,
-            "end_y": 200,
-        },
+        {"id": "s1", "description": "move cup to sink", "status": "in_progress"},
         {"id": "s2", "description": "pour water", "status": "pending"},
     ]
 
     result = await report_plan_action(sub_tasks, ctx=None)
 
     assert result.startswith("Success: plan updated.")
-    assert "[s1] in_progress: move cup to sink (start=(120, 340), end=(400, 200))" in result
-    assert "[s2] pending: pour water (start=-, end=-)" in result
+    assert "[s1] in_progress: move cup to sink" in result
+    assert "[s2] pending: pour water" in result
 
 
 @pytest.mark.asyncio

@@ -17,13 +17,11 @@ This treats each ``report_plan`` sub_task as one atomic, fully-blocking
 ReKep call: the outer agent-core model keeps sequencing/tracking sub_tasks
 exactly as it does today; only the physical execution of *one* in_progress
 sub_task is delegated wholesale to ReKep's own keypoint+VLM+solver stack.
-``start_x``/``start_y`` are passed through only as a disambiguation hint to
-the constraint-generation VLM, not used as a direct IK target. ``end_x``/
-``end_y``, if present, are backprojected to 3D and appended as one more
-numbered keypoint on the same overlay the VLM sees (see
-``dest_keypoint_index`` in ``constraint_generation.py``) -- a destination the
-outer planner pointed at, not one DINOv2/SAM detected, that the VLM can align
-a held keypoint to.
+``sub_task`` carries no coordinates -- the constraint-generation VLM (see
+``constraint_generation.py``) picks the grasp/placement location itself from
+the overlay image + ``description``, and (matching the reference
+implementation this was ported from) every location it needs must be one of
+the DINOv2/SAM-detected keypoints.
 
 Because "grasp" and "move the grasped object" are now separate sub_tasks
 (and therefore separate ``execute()`` calls), the rigid-body assumption for
@@ -34,12 +32,14 @@ a later sub_task opens it.
 
 Requires the ``robotic-arm-so101-rekep`` extra (``pip install
 'openjiuwen[robotic-arm-so101-rekep]'``): ``ikpy``, ``pyrealsense2``,
-``scipy``, plus the DINOv2/MobileSAM/VLM dependencies. ``lerobot`` is not
-pinned as a dependency; install the version matching your rig separately.
+``opencv-python``, ``scipy``, plus the DINOv2/MobileSAM/VLM dependencies.
+``lerobot`` is not pinned as a dependency; install the version matching your
+rig separately.
 """
 
 from __future__ import annotations
 
+import subprocess
 import time
 from typing import Any, Callable, Optional, Sequence
 
@@ -54,7 +54,6 @@ from openjiuwen.harness.tools.robotic_arm.vendors.so101._kinematics import (
     IKSolver,
     approach_from_elevation,
     backproject_frame,
-    pixel_from_normalized,
 )
 from openjiuwen.harness.tools.robotic_arm.vendors.so101.rekep.constraint_generation import generate_constraints
 from openjiuwen.harness.tools.robotic_arm.vendors.so101.rekep.keypoint_proposal import KeypointProposer
@@ -101,12 +100,10 @@ class So101RekepExecutor:
         gripper_open_value: float = 50.0,
         gripper_closed_value: float = 0.0,
         ik_tolerance_cm: float = 5.0,
-        coordinate_scale: int = 1000,
         color_width: int = 1280,
         color_height: int = 720,
         fps: int = 6,
         frame_timeout_ms: int = 5000,
-        capture_max_wait_s: float = 60.0,
         pre_capture_hook: Optional[Callable[[], None]] = None,
         sam_checkpoint_path: Optional[str] = None,
         dino_model: str = "facebook/dinov2-with-registers-small",
@@ -140,15 +137,11 @@ class So101RekepExecutor:
         self._gripper_open_value = gripper_open_value
         self._gripper_closed_value = gripper_closed_value
         self._ik_tolerance_cm = ik_tolerance_cm
-        self._coordinate_scale = coordinate_scale
         self._color_width = color_width
         self._color_height = color_height
         self._fps = fps
         self._frame_timeout_ms = frame_timeout_ms
-        self._capture_max_wait_s = capture_max_wait_s
         self._pre_capture_hook = pre_capture_hook
-
-        self._pipeline: Any = None
 
         if keypoint_proposer is not None:
             self._keypoint_proposer = keypoint_proposer
@@ -178,7 +171,7 @@ class So101RekepExecutor:
     # -- SubTaskExecutor protocol -------------------------------------------------
 
     def capture(self) -> Image.Image:
-        rgb, depth = self._read_frame()
+        rgb, depth = self._retry_capture()
         self._last_points = backproject_frame(depth, self._camera_matrix, self._depth_scale, self._extrinsics_cm)
         return Image.fromarray(rgb)
 
@@ -197,32 +190,12 @@ class So101RekepExecutor:
             return "Error: NoDepthFrame: capture() must run before execute()."
 
         rgb = np.asarray(frame)
-        hint_pixel = None
-        if sub_task.get("start_x") is not None and sub_task.get("start_y") is not None:
-            hint_pixel = pixel_from_normalized(
-                sub_task["start_x"], sub_task["start_y"], self._coordinate_scale, frame.width, frame.height
-            )
-        end_pixel = None
-        if sub_task.get("end_x") is not None and sub_task.get("end_y") is not None:
-            end_pixel = pixel_from_normalized(
-                sub_task["end_x"], sub_task["end_y"], self._coordinate_scale, frame.width, frame.height
-            )
-
         result = self._keypoint_proposer.get_keypoints(rgb, points=self._last_points, visualize=True)
         keypoints = result["keypoints_3d"]
         if keypoints is None or len(keypoints) == 0:
             return "Failed: no keypoints detected in the current frame."
 
         overlay = result["overlay"]
-        dest_keypoint_index: Optional[int] = None
-        if end_pixel is not None:
-            dest_point = self._last_points[end_pixel[1], end_pixel[0]]
-            if np.all(np.isfinite(dest_point)):
-                keypoints = np.vstack([keypoints, dest_point[None, :]])
-                pixels = np.vstack([result["pixels"], np.array([end_pixel])])
-                overlay = KeypointProposer._overlay(rgb, pixels)
-                dest_keypoint_index = len(keypoints) - 1
-
         description = sub_task.get("description", "")
         cg = generate_constraints(
             overlay,
@@ -231,8 +204,6 @@ class So101RekepExecutor:
             keypoints_3d=keypoints,
             ik_solver=self._ik,
             vlm=self._vlm,
-            hint_pixel=hint_pixel,
-            dest_keypoint_index=dest_keypoint_index,
         )
 
         mask = cg["movable_mask"] or [False] * len(keypoints)
@@ -285,47 +256,86 @@ class So101RekepExecutor:
 
     # -- SO-101 hardware I/O (RealSense capture + robot/gripper drive) ----------
 
-    def _read_frame(self) -> tuple[np.ndarray, np.ndarray]:
+    def _read_frame(self) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """One capture attempt: open a fresh pipeline, wait for a frame with enough
+        valid depth pixels, then tear the pipeline back down. Returns ``(None, None)``
+        on any failure instead of raising -- ``_retry_capture`` decides when to give up.
+        """
         if self._pre_capture_hook is not None:
             self._pre_capture_hook()
-        if self._pipeline is None:
-            self._pipeline = self._open_pipeline()
 
-        import pyrealsense2 as rs
-
-        align = rs.align(rs.stream.color)
-        deadline = time.monotonic() + self._capture_max_wait_s
-        while True:
-            try:
-                frames = align.process(self._pipeline.wait_for_frames(self._frame_timeout_ms))
-                break
-            except RuntimeError as e:
-                if time.monotonic() >= deadline:
-                    raise
-                tool_logger.warning(
-                    "[So101RekepExecutor] camera frame not ready yet (%s), retrying within %ss budget",
-                    e,
-                    self._capture_max_wait_s,
-                )
-
-        depth = np.asarray(frames.get_depth_frame().get_data())
-        color_bgra = np.asarray(frames.get_color_frame().get_data())
-        rgb = color_bgra[..., [2, 1, 0]]  # BGRA -> RGB, no opencv dependency needed
-        return rgb, depth
-
-    def _open_pipeline(self) -> Any:
         try:
             import pyrealsense2 as rs
         except ImportError as e:
             raise ImportError(
                 f"pyrealsense2 is not installed; run `pip install 'openjiuwen[robotic-arm-so101]'` ({e})"
             ) from e
+        try:
+            import cv2
+        except ImportError as e:
+            raise ImportError(
+                f"opencv-python is not installed; run `pip install 'openjiuwen[robotic-arm-so101-rekep]'` ({e})"
+            ) from e
+
         pipeline = rs.pipeline()
         config = rs.config()
         config.enable_stream(rs.stream.color, self._color_width, self._color_height, rs.format.bgra8, self._fps)
         config.enable_stream(rs.stream.depth, self._color_width, self._color_height, rs.format.z16, self._fps)
-        pipeline.start(config)
-        return pipeline
+        try:
+            pipeline.start(config)
+        except Exception as e:
+            tool_logger.warning("[So101RekepExecutor] pipeline start failed: %s", e)
+            return None, None
+
+        align = rs.align(rs.stream.color)
+        try:
+            for i in range(50):
+                frames = align.process(pipeline.wait_for_frames(self._frame_timeout_ms))
+                depth = np.asarray(frames.get_depth_frame().get_data())
+                valid = int(np.sum((depth > 0) & (depth < 65535)))
+                tool_logger.debug("[So101RekepExecutor] frame %s: %s valid pixels", i, valid)
+                if valid > 800000:
+                    rgb = cv2.cvtColor(np.asarray(frames.get_color_frame().get_data()), cv2.COLOR_BGRA2RGB)
+                    pipeline.stop()
+                    return rgb, depth
+            pipeline.stop()
+            return None, None
+        except Exception as e:
+            tool_logger.warning("[So101RekepExecutor] capture failed: %s", e)
+            try:
+                pipeline.stop()
+            except Exception:
+                pass
+            return None, None
+
+    def reset_camera(self) -> None:
+        """Kill macOS processes that can hold the RealSense camera open, then
+        hardware-reset the device -- run before each retry in ``_retry_capture``."""
+        subprocess.run(["killall", "VDCAssistant"], capture_output=True)
+        subprocess.run(["killall", "AppleCameraAssistant"], capture_output=True)
+        try:
+            import pyrealsense2 as rs
+
+            ctx = rs.context()
+            if len(ctx.devices) > 0:
+                ctx.devices[0].hardware_reset()
+                time.sleep(3)
+        except Exception:
+            tool_logger.warning("[So101RekepExecutor] camera hardware reset failed", exc_info=True)
+
+    def _retry_capture(self, max_retry_attempt: int = 10) -> tuple[np.ndarray, np.ndarray]:
+        for attempt in range(1, max_retry_attempt + 1):
+            tool_logger.info("[So101RekepExecutor] capture attempt %s/%s", attempt, max_retry_attempt)
+            self.reset_camera()
+            rgb, depth = self._read_frame()
+            if rgb is not None:
+                return rgb, depth
+            tool_logger.warning("[So101RekepExecutor] capture attempt %s failed, retrying", attempt)
+            time.sleep(1)
+        raise ToolError(
+            StatusCode.TOOL_EXECUTION_ERROR,
+            reason=f"could not capture a valid RGB-D frame after {max_retry_attempt} attempts",
+        )
 
     def _ensure_robot(self) -> Any:
         if self._robot is not None:

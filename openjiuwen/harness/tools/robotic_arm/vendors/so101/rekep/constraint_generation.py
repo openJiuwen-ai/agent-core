@@ -14,11 +14,15 @@ Ported from a user-supplied ReKep-on-SO101 reference implementation
 2. The generated code is executed through
    :func:`~.rekep._code_sandbox.safe_exec_constraint_code` (AST-whitelisted,
    restricted builtins) instead of a bare ``exec()``.
+
+As in the reference implementation, every grasp/placement location the VLM
+needs must be one of the DINOv2/SAM-detected keypoints on ``overlay_rgb`` --
+there is no mechanism for pointing at an arbitrary pixel outside that set.
 """
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -122,17 +126,15 @@ def generate_constraints(
     ik_solver: IKSolver,
     vlm: VlmClient,
     *,
-    hint_pixel: Optional[tuple[int, int]] = None,
-    dest_keypoint_index: Optional[int] = None,
     max_tokens: int = 3000,
 ) -> dict[str, Any]:
     """Query the VLM to translate ``task`` (one sub_task's description) into
     a single subgoal's constraint functions, executed via the AST-sandboxed exec path.
 
-    ``dest_keypoint_index``, if given, is the index of a keypoint appended by the
-    caller from ``report_plan``'s ``end_x``/``end_y`` (a destination the outer
-    planner pointed at, backprojected to 3D and drawn on ``overlay_rgb`` like any
-    other keypoint) -- not something detected by DINOv2/SAM.
+    The VLM picks the grasp/placement location itself from ``overlay_rgb`` (the
+    numbered-keypoint image) and ``task`` -- there is no outer-planner hint pixel,
+    and every location it needs must be one of the ``num_keypoints`` detected
+    keypoints (matching the reference implementation's behavior).
     """
     kp_report = check_keypoint_reachability(keypoints_3d, ik_solver)
     report_str = reachability_report_str(kp_report)
@@ -140,28 +142,10 @@ def generate_constraints(
     def _check_reachability(point_m: np.ndarray, elevation_deg: float = 90, roll_deg: float = 0) -> dict:
         return check_reachability(point_m, ik_solver, elevation_deg, roll_deg)
 
-    hint_str = (
-        f"\nThe outer planner pointed near pixel {hint_pixel} on this image to hint which "
-        "object/location this action refers to.\n"
-        if hint_pixel is not None
-        else ""
-    )
-
-    dest_str = (
-        f"\nKeypoint {dest_keypoint_index} on this image is a destination location the outer "
-        "planner specified for this action, not a detected object -- if this action moves or "
-        f"places something there, write a constraint aligning the moved keypoint with "
-        f"keypoints[{dest_keypoint_index}].\n"
-        if dest_keypoint_index is not None
-        else ""
-    )
-
     prompt = (
         f"{_CONSTRAINT_PROMPT}\n\n"
         f'Action: "{task}"\n'
-        f"Number of keypoints in image: {num_keypoints}"
-        f"{hint_str}"
-        f"{dest_str}\n"
+        f"Number of keypoints in image: {num_keypoints}\n"
         f"REACHABILITY REPORT (IK error in cm, <3cm = reachable):\n{report_str}\n\n"
         "Choose approach_elevation_deg based on the grasp keypoint's reachability above.\n"
     )

@@ -169,7 +169,7 @@ async def test_no_in_progress_task_is_a_noop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_executes_in_progress_task_with_raw_model_coordinates() -> None:
+async def test_executes_in_progress_task() -> None:
     executor = MagicMock(execute=MagicMock(return_value="Success: picked up the cup"))
     rail = StepExecutorRail(RoboticArmRuntimeSettings(step_executor=executor, health_check=False))
     frame = object()
@@ -177,8 +177,6 @@ async def test_executes_in_progress_task_with_raw_model_coordinates() -> None:
         "id": "s1",
         "description": "pick up the cup",
         "status": "in_progress",
-        "start_x": 500,
-        "start_y": 500,
     }
     ctx = _make_tool_call_ctx(tool_args={"sub_tasks": [sub_task]}, extra={"vlm_raw_frame": frame})
 
@@ -190,8 +188,6 @@ async def test_executes_in_progress_task_with_raw_model_coordinates() -> None:
     # tool_args round-trips through JSON in production (ToolCall.arguments is a
     # raw string), so the dict identity is never preserved -- only equality.
     assert called_task == sub_task
-    assert called_task["start_x"] == 500
-    assert called_task["start_y"] == 500
 
     messages = ctx.drain_steering()
     assert any("Success: picked up the cup" in m for m in messages)
