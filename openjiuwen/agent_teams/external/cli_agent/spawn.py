@@ -238,7 +238,7 @@ async def build_cli_runtime(
         mcp_args = tuple(
             adapter.mcp_launch_args(server_name=mcp_server_name, server_command=mcp_server_command)
         )
-        if not mcp_args and ssh_transport is None:
+        if not mcp_args:
             # No launch-injection flag for this CLI: register the team MCP
             # server out of band (e.g. `gemini mcp add`) so the member still
             # gets team tools, or warn loudly when nothing can register it.
