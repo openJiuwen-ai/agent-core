@@ -218,13 +218,16 @@ STRINGS: dict[str, str] = {
     ),
     "update_task.add_blocked_by": "要添加为新依赖的任务 ID 列表（本任务将被阻塞直到这些任务完成）",
     "update_task.error_human_agent_locked_cancel": (
-        "任务 {task_id} 已由人类成员认领，该任务不允许被取消；如需变更，请通过 send_message 与对应的人类成员协商"
+        "任务 {task_id} 由仍在团队中的人类成员认领，不允许取消；请通过 send_message 与其协商。"
+        "若其确实无法继续，可先用 shutdown_member 让其退出团队，退出后该任务即可取消或改派"
     ),
     "update_task.error_human_agent_locked_reassign": (
-        "任务 {task_id} 已由人类成员认领，不能改派给 {new_assignee}；人类成员锁定的任务必须由对应人类本人完成"
+        "任务 {task_id} 由仍在团队中的人类成员认领，不能改派给 {new_assignee}；该任务须由这位人类本人完成。"
+        "若其确实无法继续，可先用 shutdown_member 让其退出团队，退出后该任务即可改派"
     ),
     "update_task.error_human_agent_locked_edit": (
-        "任务 {task_id} 已由人类成员认领，不允许修改其标题/内容；如需变更，请通过 send_message 与对应的人类成员协商"
+        "任务 {task_id} 由仍在团队中的人类成员认领，不允许修改其标题/内容；请通过 send_message 与其协商。"
+        "若其确实无法继续，可先用 shutdown_member 让其退出团队，退出后该任务即可取消或改派"
     ),
     # ===== claim_task =========================================================
     # claim_task._desc lives in descs/cn/claim_task.md

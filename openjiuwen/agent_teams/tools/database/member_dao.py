@@ -10,7 +10,9 @@ from sqlalchemy.exc import IntegrityError
 
 from openjiuwen.agent_teams.schema.status import (
     EXECUTION_TRANSITIONS,
+    MEMBER_DEPARTED_STATUSES,
     MEMBER_TRANSITIONS,
+    MEMBER_UNREACHABLE_STATUSES,
     ExecutionStatus,
     MemberMode,
     MemberStatus,
@@ -22,6 +24,10 @@ from openjiuwen.agent_teams.tools.member_options import (
 )
 from openjiuwen.agent_teams.tools.models import TeamMember
 from openjiuwen.core.common.logging import team_logger
+
+
+_DEPARTED_STATUS_VALUES: tuple[str, ...] = tuple(status.value for status in MEMBER_DEPARTED_STATUSES)
+_UNREACHABLE_STATUS_VALUES: tuple[str, ...] = tuple(status.value for status in MEMBER_UNREACHABLE_STATUSES)
 
 
 def _valid_predecessor_values(target, transitions) -> list[str]:
@@ -103,6 +109,10 @@ class MemberDao:
 
         Single-row probe (index-friendly) for the common case of
         checking one member's role without scanning the full roster.
+
+        Role only — a member that has already left the team still answers
+        True. Guards that must not fire for a departed member want
+        :meth:`is_live_human_agent` instead.
         """
         from openjiuwen.agent_teams.schema.team import TeamRole
 
@@ -114,11 +124,63 @@ class MemberDao:
             )
             return (await session.execute(stmt)).scalar_one_or_none() is not None
 
+    async def _is_human_agent_excluding(
+        self,
+        team_name: str,
+        member_name: str,
+        excluded: tuple[str, ...],
+    ) -> bool:
+        """Single-row human-agent probe with a status exclusion applied."""
+        from openjiuwen.agent_teams.schema.team import TeamRole
+
+        async with self._sessions.read() as session:
+            stmt = select(TeamMember.member_name).where(
+                TeamMember.team_name == team_name,
+                TeamMember.member_name == member_name,
+                TeamMember.role == TeamRole.HUMAN_AGENT.value,
+                TeamMember.status.notin_(excluded),
+            )
+            return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+    async def _list_human_agents_excluding(self, team_name: str, excluded: tuple[str, ...]) -> list[str]:
+        """Human-agent roster with a status exclusion applied."""
+        from openjiuwen.agent_teams.schema.team import TeamRole
+
+        async with self._sessions.read() as session:
+            stmt = select(TeamMember.member_name).where(
+                TeamMember.team_name == team_name,
+                TeamMember.role == TeamRole.HUMAN_AGENT.value,
+                TeamMember.status.notin_(excluded),
+            )
+            return list((await session.execute(stmt)).scalars().all())
+
+    async def is_live_human_agent(self, team_name: str, member_name: str) -> bool:
+        """Return True if ``member_name`` is a human-agent member still on the team.
+
+        Excludes ``MEMBER_DEPARTED_STATUSES``. The HITT task lock keys on this
+        rather than on the bare role: the lock exists to stop the leader from
+        stealing work out from under a live human, and a human the leader has
+        already released is no longer there to do it.
+        """
+        return await self._is_human_agent_excluding(team_name, member_name, _DEPARTED_STATUS_VALUES)
+
+    async def is_reachable_human_agent(self, team_name: str, member_name: str) -> bool:
+        """Return True if ``member_name`` is a human-agent member still reachable.
+
+        Excludes only ``MEMBER_UNREACHABLE_STATUSES`` — a member that merely has
+        shutdown *requested* is still reachable, and must be, or the notice that
+        it was removed would never reach its controller. Message delivery keys on
+        this; work guards key on the stricter :meth:`is_live_human_agent`.
+        """
+        return await self._is_human_agent_excluding(team_name, member_name, _UNREACHABLE_STATUS_VALUES)
+
     async def list_human_agent_names(self, team_name: str) -> list[str]:
         """Return member names whose ``role`` is ``human_agent``.
 
         Used by ``TeamBackend.human_agent_names()`` to enumerate all
-        human-agent members on the team.
+        human-agent members on the team. Role only — members on their way out
+        or already gone are included; see :meth:`list_live_human_agent_names`
+        and :meth:`list_reachable_human_agent_names`.
         """
         from openjiuwen.agent_teams.schema.team import TeamRole
 
@@ -128,6 +190,38 @@ class MemberDao:
                 TeamMember.role == TeamRole.HUMAN_AGENT.value,
             )
             return list((await session.execute(stmt)).scalars().all())
+
+    async def list_live_human_agent_names(self, team_name: str) -> list[str]:
+        """Return human-agent member names that have not left the team.
+
+        Batch counterpart of :meth:`is_live_human_agent`, used by the cancel-all
+        path to skip the tasks held by humans still on the team while cancelling
+        a departed human's leftovers like anyone else's.
+        """
+        return await self._list_human_agents_excluding(team_name, _DEPARTED_STATUS_VALUES)
+
+    async def list_reachable_human_agent_names(self, team_name: str) -> list[str]:
+        """Return human-agent member names that can still be delivered to.
+
+        Batch counterpart of :meth:`is_reachable_human_agent`, used to fan a
+        broadcast out to human controllers.
+        """
+        return await self._list_human_agents_excluding(team_name, _UNREACHABLE_STATUS_VALUES)
+
+    async def get_member_status(self, team_name: str, member_name: str) -> Optional[str]:
+        """Return one member's ``status``, or None when it does not exist.
+
+        Narrow projection: the coordination layer consults a member's status on
+        every mailbox drain to decide whether its harness may be fed, and pulling
+        the whole row (serialized card, private prompt, options JSON) for one
+        column would be pure waste on that path.
+        """
+        async with self._sessions.read() as session:
+            stmt = select(TeamMember.status).where(
+                TeamMember.team_name == team_name,
+                TeamMember.member_name == member_name,
+            )
+            return (await session.execute(stmt)).scalar_one_or_none()
 
     async def member_exists(self, member_name: str, team_name: str) -> bool:
         """Check whether a member row exists, without loading it.

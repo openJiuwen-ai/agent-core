@@ -8,6 +8,12 @@ on-shutdown mailbox drain. Drain registers a fan-out callback on
 processes the lifecycle state change first, then this handler drains
 its own mailbox in ``use_steer`` mode so any final messages reach the
 agent before tear-down.
+
+Every path here that feeds the local harness goes through
+``_harness_input_blocked`` first, which is where a departing member's graceful
+teardown actually happens: a member with shutdown requested and no round in
+flight settles straight to SHUTDOWN instead of being woken for a final round,
+and a member that is already SHUTDOWN is never fed at all.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from openjiuwen.agent_teams.inbound_render import (
 )
 from openjiuwen.agent_teams.message_template import ExpandedMessage, expand_message
 from openjiuwen.agent_teams.schema.events import EventMessage, MessageEvent, TeamEvent
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.timefmt import format_time_context
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
@@ -86,30 +93,87 @@ class MessageHandler(BaseCoordinationHandler):
             await self._process_unread_messages(member_name)
 
     async def on_member_shutdown_drain(self, event: EventMessage) -> None:
-        """Drain own mailbox when this teammate is the one shutting down.
+        """Drain own mailbox when this member is the one shutting down.
 
-        Teammate-only: the leader observes other members' shutdowns at
-        the lifecycle level, and a human agent has no autonomous round —
-        draining its mailbox would ``deliver_input`` and resurrect a
-        round just as the avatar is collapsing (its own teardown rides
-        ``MemberHandler`` → ``shutdown_self`` instead). Only the teammate
-        whose own ``member_name`` matches the event's payload drains.
-        Steer mode ensures the messages land even if the agent is in
-        the middle of a round.
+        Non-leader only, and only for the member the event names. Steer mode
+        ensures a final message lands even if the agent is mid-round.
+
+        Every role rides this same path, human agents included. The
+        harness-input gate in ``_process_unread_messages`` already refuses to
+        wake an idle harness for a departing member — it settles it straight to
+        SHUTDOWN instead — so draining can no longer resurrect a round on an
+        avatar that is collapsing. A member with a round in flight steers its
+        final messages into it and closes at round-end; an idle one settles.
+        That leaves nothing for a role branch to decide here.
         """
-        if self._blueprint.role != TeamRole.TEAMMATE:
+        if self._blueprint.role == TeamRole.LEADER:
             return
         member_name = self._blueprint.member_name
-        if not member_name or self._infra.message_manager is None:
+        if not member_name:
             return
         target_id = event.get_payload().member_name
         if target_id is None or target_id != member_name:
             return
+        # No ``message_manager`` guard here: the settle decision lives inside
+        # ``_process_unread_messages``' gate, and a member's teardown must not
+        # hinge on whether the mailbox subsystem happens to be wired.
         await self._process_unread_messages(member_name, use_steer=True)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _harness_input_blocked(self, member_name: str) -> bool:
+        """Whether this member's harness must not be fed — settling it if idle.
+
+        Every path in this handler that feeds the local harness passes through
+        here first. Three outcomes, keyed on the member's persisted status:
+
+        * ``SHUTDOWN`` — the member is gone. Never feed a dead harness; drop the
+          delivery.
+        * ``SHUTDOWN_REQUESTED`` with no round in flight — the member is on its
+          way out with nothing running to ride. Waking the harness for one last
+          round, only to hand it a "you are being shut down" notice, burns an
+          LLM round to say goodbye. Settle straight to SHUTDOWN instead.
+        * ``SHUTDOWN_REQUESTED`` with a round in flight — let the delivery
+          through. It steers into the running round, whose end closes the stream
+          (the teardown teammates have always ridden).
+
+        The status must come from the DB, not from the ``MEMBER_SHUTDOWN``
+        event: ``shutdown_member`` writes SHUTDOWN_REQUESTED, *then* sends the
+        shutdown notice, *then* publishes the event. The notice therefore lands
+        as an ordinary MESSAGE first, and a gate keyed on the event would let it
+        wake an idle harness before the event ever arrives.
+
+        The real human behind a human-agent avatar is unaffected either way: the
+        leader pushes team messages to the controller's inbound callback
+        (``_notify_human_agent_inbound``) independently of this avatar's harness,
+        so skipping the harness never costs the person a message.
+
+        The leader is exempt — it is never a ``shutdown_member`` target and has
+        to survive ``clean_team`` to serve the next interaction.
+        """
+        if self._blueprint.role == TeamRole.LEADER:
+            return False
+        backend = self._infra.team_backend
+        if backend is None:
+            return False
+
+        status = await backend.get_member_status(member_name)
+        if status == MemberStatus.SHUTDOWN.value:
+            team_logger.debug("[{}] harness input dropped: member is already SHUTDOWN", member_name)
+            return True
+        if status != MemberStatus.SHUTDOWN_REQUESTED.value:
+            return False
+        if self._round.has_in_flight_round():
+            return False
+
+        team_logger.info(
+            "[{}] shutdown requested with no round in flight; settling to SHUTDOWN without a final round",
+            member_name,
+        )
+        await self._lifecycle.shutdown_self()
+        return True
 
     async def _process_unread_messages(self, member_name: str, *, use_steer: bool = True) -> None:
         """Read unread messages, feed to agent one by one, loop until no new messages.
@@ -124,6 +188,11 @@ class MessageHandler(BaseCoordinationHandler):
             member_name: Current member ID.
             use_steer: When True, use steer instead of follow_up for running agent.
         """
+        if await self._harness_input_blocked(member_name):
+            return
+        if self._infra.message_manager is None:
+            return
+
         seen_ids: set[str] = set()
         backend = self._infra.team_backend
         is_human_agent = backend is not None and await backend.is_human_agent(member_name)
@@ -379,11 +448,17 @@ class MessageHandler(BaseCoordinationHandler):
         body = (await self._expand(row)).body
         ts = row.timestamp
 
+        # Recipients are the humans still reachable — a fully SHUTDOWN member has
+        # left the team and its controller has no business still being fed the
+        # team's traffic. A member with shutdown merely *requested* stays in:
+        # ``shutdown_member`` flips the status before it sends the notice, so
+        # excluding it here would drop the one message that tells its controller
+        # it was removed.
         if is_broadcast:
-            recipients = [name for name in await backend.human_agent_names() if name != sender]
+            recipients = [name for name in await backend.reachable_human_agent_names() if name != sender]
         else:
             target = payload.to_member_name
-            if not await backend.is_human_agent(target):
+            if not await backend.is_reachable_human_agent(target):
                 return
             recipients = [target]
 

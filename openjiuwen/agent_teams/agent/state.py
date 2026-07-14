@@ -49,7 +49,7 @@ class TeamAgentState:
 
     # One-shot latch raised on the ``clean_team`` success path, wired via
     # ``TeamBackend.on_team_cleaned`` -> ``TeamAgent._mark_team_cleaned``.
-    # ``StreamController._run_one_round``'s finally block reads it as the
+    # ``StreamController._on_idle_settled`` reads it as the
     # highest-priority terminal condition so a TEMPORARY-team leader closes
     # its stream after the round that cleaned the team instead of hanging on
     # the ``None`` sentinel forever. Cross-operator (written from the

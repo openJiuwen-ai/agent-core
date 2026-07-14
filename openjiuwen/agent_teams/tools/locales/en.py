@@ -315,19 +315,22 @@ STRINGS: dict[str, str] = {
         "Task IDs to add as new dependencies (this task will be blocked until those tasks complete)"
     ),
     "update_task.error_human_agent_locked_cancel": (
-        "Task {task_id} is claimed by a human member; this task cannot "
-        "be cancelled. Use send_message to coordinate with that human "
-        "member instead"
+        "Task {task_id} is claimed by a human member still on the team; it "
+        "cannot be cancelled. Use send_message to coordinate with that human. "
+        "If they truly cannot continue, shutdown_member removes them from the "
+        "team, after which the task can be cancelled or reassigned"
     ),
     "update_task.error_human_agent_locked_reassign": (
-        "Task {task_id} is claimed by a human member; it cannot be "
-        "reassigned to {new_assignee}. Tasks locked by a human member "
-        "must be completed by that human"
+        "Task {task_id} is claimed by a human member still on the team; it "
+        "cannot be reassigned to {new_assignee} and must be completed by that "
+        "human. If they truly cannot continue, shutdown_member removes them "
+        "from the team, after which the task can be reassigned"
     ),
     "update_task.error_human_agent_locked_edit": (
-        "Task {task_id} is claimed by a human member; its title/content "
-        "cannot be edited. Use send_message to coordinate with that human "
-        "member instead"
+        "Task {task_id} is claimed by a human member still on the team; its "
+        "title/content cannot be edited. Use send_message to coordinate with "
+        "that human. If they truly cannot continue, shutdown_member removes "
+        "them from the team, after which the task can be cancelled or reassigned"
     ),
     # ===== claim_task =========================================================
     # claim_task._desc lives in descs/en/claim_task.md

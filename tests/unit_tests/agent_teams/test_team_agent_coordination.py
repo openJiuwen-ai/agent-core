@@ -123,6 +123,31 @@ async def _prepare_backend_db(agent: TeamAgent) -> None:
     )
 
 
+async def _seed_shutdown_requested(agent: TeamAgent, member_name: str) -> None:
+    """Seed the member row exactly as ``shutdown_member`` leaves it.
+
+    ``TeamBackend.shutdown_member`` writes SHUTDOWN_REQUESTED *before* it sends
+    the shutdown notice and publishes MEMBER_SHUTDOWN, and the teardown gate
+    reads that status from the DB rather than from the event. Dispatching the
+    event without the status behind it would exercise nothing.
+    """
+    backend = agent.team_backend
+    await _prepare_backend_db(agent)
+    await backend.spawn_member(
+        member_name=member_name,
+        display_name=member_name,
+        agent_card=AgentCard(),
+        desc="user avatar",
+        status=MemberStatus.READY,
+        role=TeamRole.HUMAN_AGENT,
+    )
+    await backend.db.member.update_member_status(
+        member_name,
+        backend.team_name,
+        MemberStatus.SHUTDOWN_REQUESTED.value,
+    )
+
+
 def _make_human_agent(member_name: str = "human_alice") -> TeamAgent:
     """Build a configured ``role=HUMAN_AGENT`` avatar runtime.
 
@@ -273,6 +298,109 @@ def _make_teammate() -> TeamAgent:
     return agent
 
 
+async def _leader_with_human(agent: TeamAgent, member_name: str, status: MemberStatus) -> list:
+    """Seed a human member at ``status``, register its controller callback.
+
+    Returns the list the callback appends to.
+    """
+    await _prepare_backend_db(agent)
+    backend = agent.team_backend
+    await backend.spawn_member(
+        member_name=member_name,
+        display_name=member_name,
+        agent_card=AgentCard(),
+        desc="user avatar",
+        status=MemberStatus.READY,
+        role=TeamRole.HUMAN_AGENT,
+    )
+    if status is not MemberStatus.READY:
+        await backend.db.member.update_member_status(member_name, backend.team_name, status.value)
+
+    received: list = []
+
+    async def cb(evt):
+        received.append(evt)
+
+    await backend.register_human_agent_inbound(member_name, cb)
+
+    fake_row = MagicMock()
+    fake_row.content = "team traffic"
+    fake_row.timestamp = 12345
+    fake_row.meta = None
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.db.message.get_message = AsyncMock(return_value=fake_row)
+    return received
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_inbound_still_fires_while_shutdown_requested():
+    """A human on its way out must still be delivered to.
+
+    ``shutdown_member`` flips the status to SHUTDOWN_REQUESTED *before* it sends
+    the shutdown notice. Cutting delivery at the request would drop the one
+    message that tells this person's controller they were removed from the team.
+    """
+    agent = _make_leader()
+    received = await _leader_with_human(agent, "human_alice", MemberStatus.SHUTDOWN_REQUESTED)
+
+    await agent._coordination.dispatcher.message._notify_human_agent_inbound(
+        EventMessage.from_event(
+            MessageEvent(
+                team_name="test-team",
+                message_id="msg-1",
+                from_member_name="leader-1",
+                to_member_name="human_alice",
+            )
+        )
+    )
+
+    assert len(received) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_inbound_stops_once_member_is_shutdown():
+    """A human that has left the team stops receiving the team's traffic."""
+    agent = _make_leader()
+    received = await _leader_with_human(agent, "human_alice", MemberStatus.SHUTDOWN)
+
+    await agent._coordination.dispatcher.message._notify_human_agent_inbound(
+        EventMessage.from_event(
+            MessageEvent(
+                team_name="test-team",
+                message_id="msg-1",
+                from_member_name="leader-1",
+                to_member_name="human_alice",
+            )
+        )
+    )
+
+    assert received == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_broadcast_skips_departed_human_but_reaches_the_live_one():
+    """Broadcast fan-out is keyed on reachability, not on the human role."""
+    agent = _make_leader()
+    gone = await _leader_with_human(agent, "human_gone", MemberStatus.SHUTDOWN)
+    still_here = await _leader_with_human(agent, "human_here", MemberStatus.READY)
+
+    await agent._coordination.dispatcher.message._notify_human_agent_inbound(
+        EventMessage.from_event(
+            BroadcastEvent(
+                team_name="test-team",
+                message_id="msg-1",
+                from_member_name="leader-1",
+            )
+        )
+    )
+
+    assert gone == []
+    assert len(still_here) == 1
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_human_agent_inbound_callback_fires_on_message_event():
@@ -372,17 +500,16 @@ async def test_tool_approval_event_resumes_interrupt():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_idle_human_agent_tears_down_on_self_shutdown():
-    """An idle human agent must tear its avatar down on MEMBER_SHUTDOWN.
+    """An idle member on its way out settles without a final round.
 
-    Unlike a teammate, a human agent has no autonomous LLM round to
-    consume the shutdown message and reach the round-end
-    ``close_stream`` path. When idle there is no round to ride, so the
-    dispatcher must let MEMBER_SHUTDOWN through and the member handler
-    must call ``shutdown_self`` directly; otherwise the avatar's run
-    cycle never ends and the member is stuck in SHUTDOWN_REQUESTED
+    Its harness has nothing running to ride, and waking it just to hand it a
+    "you are being shut down" notice would burn an LLM round on a goodbye. The
+    harness-input gate must therefore settle it straight to SHUTDOWN; otherwise
+    the run cycle never ends and the member is stuck in SHUTDOWN_REQUESTED
     forever (notably blocking a temporary team's ``clean_team``).
     """
     agent = _make_human_agent("human_alice")
+    await _seed_shutdown_requested(agent, "human_alice")
     agent.shutdown_self = AsyncMock()
     assert not agent.has_in_flight_round()
 
@@ -403,12 +530,13 @@ async def test_idle_human_agent_tears_down_on_self_shutdown():
 async def test_busy_human_agent_not_interrupted_on_self_shutdown():
     """A controller-driven round in flight must not be interrupted.
 
-    ``shutdown_member`` already wrote SHUTDOWN_REQUESTED before this
-    event, so the in-flight round closes the stream at its own round-end
-    (the teammate path). The handler must therefore leave a non-forced
-    shutdown alone rather than collapsing the avatar mid-turn.
+    ``shutdown_member`` already wrote SHUTDOWN_REQUESTED before this event, so
+    the in-flight round closes the stream at its own round-end. The gate must
+    therefore let the delivery through rather than collapsing the avatar
+    mid-turn.
     """
     agent = _make_human_agent("human_alice")
+    await _seed_shutdown_requested(agent, "human_alice")
     agent.shutdown_self = AsyncMock()
     agent.has_in_flight_round = MagicMock(return_value=True)
 
@@ -422,6 +550,38 @@ async def test_busy_human_agent_not_interrupted_on_self_shutdown():
     await agent._coordination.dispatcher.dispatch(event)
 
     agent.shutdown_self.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_shutdown_member_never_wakes_an_already_shutdown_harness():
+    """A member that is already gone is never fed, and is not torn down twice.
+
+    The forced path tears the member down inside ``MemberHandler``, which the
+    framework fans out *before* ``MessageHandler``'s drain on the same event.
+    The drain must therefore find a SHUTDOWN member and drop the delivery
+    outright rather than pushing a final message into a dead harness.
+    """
+    agent = _make_human_agent("human_alice")
+    await _seed_shutdown_requested(agent, "human_alice")
+    backend = agent.team_backend
+    await backend.db.member.update_member_status(
+        "human_alice", backend.team_name, MemberStatus.SHUTDOWN.value
+    )
+    agent.shutdown_self = AsyncMock()
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        MemberShutdownEvent(
+            team_name="hitt-team",
+            member_name="human_alice",
+            force=False,
+        )
+    )
+    await agent._coordination.dispatcher.dispatch(event)
+
+    agent.shutdown_self.assert_not_awaited()
+    agent.deliver_input.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -584,11 +744,12 @@ async def test_human_agent_ignores_other_member_task_claim():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_teammate_does_not_self_shutdown_on_member_shutdown():
-    """Teammates keep the round-end teardown path on MEMBER_SHUTDOWN.
+    """A non-forced MEMBER_SHUTDOWN is not decided in ``MemberHandler``.
 
-    A teammate consumes its shutdown message through the mailbox drain
-    and final round, so the member handler must not short-circuit it
-    with a direct ``shutdown_self`` (that is the human-agent-only path).
+    Graceful teardown rides ``MessageHandler``'s drain and its harness-input
+    gate (settle if idle, steer the final messages into a running round
+    otherwise), so the member handler must not short-circuit it with a direct
+    ``shutdown_self``. Only ``force`` tears a member down from here.
     """
     team_spec = TeamSpec(
         team_name="test-team",
@@ -618,6 +779,68 @@ async def test_teammate_does_not_self_shutdown_on_member_shutdown():
     )
 
     agent.shutdown_self.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_idle_teammate_settles_on_shutdown_without_a_final_round():
+    """An idle teammate rides the same gate as a human avatar — no role branch.
+
+    This is the special case that used to exist: only a human agent settled when
+    idle, while a teammate was always woken for one more round just to be told it
+    was being shut down. Both now settle through the harness-input gate, and the
+    shutdown notice arriving as an ordinary message must not wake the harness
+    either — that message lands *before* MEMBER_SHUTDOWN does, so a gate keyed on
+    the event would be too late.
+    """
+    team_spec = TeamSpec(
+        team_name="test-team",
+        display_name="test-team",
+        leader_member_name="leader-1",
+    )
+    spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="test-team")
+    ctx = TeamRuntimeContext(
+        role=TeamRole.TEAMMATE,
+        member_name="dev-1",
+        desc="dev",
+        team_spec=team_spec,
+        db_config=DatabaseConfig(db_type="memory"),
+    )
+    agent = TeamAgent(AgentCard(id="dev-1", name="dev", description="test"))
+    agent.configure(spec, ctx)
+
+    backend = agent.team_backend
+    await backend.db.initialize()
+    await backend.db.team.create_team(
+        team_name="test-team",
+        display_name="test-team",
+        leader_member_name="leader-1",
+    )
+    await backend.spawn_member(
+        member_name="dev-1",
+        display_name="dev-1",
+        agent_card=AgentCard(),
+        desc="dev",
+        status=MemberStatus.READY,
+    )
+    await backend.db.member.update_member_status("dev-1", "test-team", MemberStatus.SHUTDOWN_REQUESTED.value)
+
+    agent.shutdown_self = AsyncMock()
+    agent.deliver_input = AsyncMock()
+    assert not agent.has_in_flight_round()
+
+    await agent._coordination.dispatcher.message.on_member_shutdown_drain(
+        EventMessage.from_event(
+            MemberShutdownEvent(
+                team_name="test-team",
+                member_name="dev-1",
+                force=False,
+            )
+        )
+    )
+
+    agent.shutdown_self.assert_awaited_once()
+    agent.deliver_input.assert_not_awaited()
 
 
 @pytest.mark.asyncio

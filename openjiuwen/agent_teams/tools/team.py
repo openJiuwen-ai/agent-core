@@ -1409,6 +1409,48 @@ class TeamBackend:
             return False
         return await member_dao.is_human_agent(self.team_name, member_name)
 
+    async def is_live_human_agent(self, member_name: str | None) -> bool:
+        """Whether ``member_name`` is a human-agent member still on the team.
+
+        Narrower than :meth:`is_human_agent`: a member whose status is in
+        ``MEMBER_DEPARTED_STATUSES`` (shutdown requested / shut down) answers
+        False. The HITT task lock in ``UpdateTaskTool`` keys on this, so
+        shutting a human down releases the tasks it still holds back to the
+        leader instead of stranding them.
+        """
+        if not member_name:
+            return False
+        member_dao = self.db.member
+        if member_dao is None:
+            return False
+        return await member_dao.is_live_human_agent(self.team_name, member_name)
+
+    async def is_reachable_human_agent(self, member_name: str | None) -> bool:
+        """Whether ``member_name`` is a human-agent member that can still be delivered to.
+
+        Looser than :meth:`is_live_human_agent`: only a fully SHUTDOWN member is
+        excluded. A member with shutdown merely *requested* is still reachable,
+        and has to be — ``shutdown_member`` flips the status before it sends the
+        notice, so cutting delivery at the request would drop the very message
+        telling that member's controller it was removed.
+        """
+        if not member_name:
+            return False
+        member_dao = self.db.member
+        if member_dao is None:
+            return False
+        return await member_dao.is_reachable_human_agent(self.team_name, member_name)
+
+    async def get_member_status(self, member_name: str) -> str | None:
+        """Current persisted status of ``member_name``, or None if unknown.
+
+        Narrow projection used by the coordination layer's harness-input gate.
+        """
+        member_dao = self.db.member
+        if member_dao is None:
+            return None
+        return await member_dao.get_member_status(self.team_name, member_name)
+
     async def register_human_agent_inbound(
         self,
         member_name: str,
@@ -1447,6 +1489,32 @@ class TeamBackend:
         if member_dao is None:
             return frozenset()
         names = await member_dao.list_human_agent_names(self.team_name)
+        return frozenset(names)
+
+    async def live_human_agent_names(self) -> frozenset[str]:
+        """Snapshot of human-agent members that have not left the team.
+
+        Batch counterpart of :meth:`is_live_human_agent`; members that have
+        been shut down are excluded. Used by the cancel-all path so the
+        leftovers of a departed human are cancelled like any other member's.
+        """
+        member_dao = self.db.member
+        if member_dao is None:
+            return frozenset()
+        names = await member_dao.list_live_human_agent_names(self.team_name)
+        return frozenset(names)
+
+    async def reachable_human_agent_names(self) -> frozenset[str]:
+        """Snapshot of human-agent members that can still be delivered to.
+
+        Batch counterpart of :meth:`is_reachable_human_agent`; only fully
+        SHUTDOWN members are excluded. Used to fan a broadcast out to human
+        controllers.
+        """
+        member_dao = self.db.member
+        if member_dao is None:
+            return frozenset()
+        names = await member_dao.list_reachable_human_agent_names(self.team_name)
         return frozenset(names)
 
     def hitt_enabled(self) -> bool:
