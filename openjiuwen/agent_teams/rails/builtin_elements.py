@@ -41,7 +41,11 @@ from openjiuwen.harness.rails import (
 from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
-from openjiuwen.harness.schema.config import AudioModelConfig, VisionModelConfig
+from openjiuwen.harness.schema.config import (
+    AudioModelConfig,
+    VisionModelConfig,
+    is_vision_model_config_complete,
+)
 from openjiuwen.harness.tools import (
     AudioMetadataTool,
     WebFetchWebpageTool,
@@ -124,6 +128,27 @@ class WorktreeInput(ConstructionInput):
     enabled: bool = param_field(
         default=False,
         description="Whether the worktree workflow (enter / exit tools) is enabled.",
+    )
+
+
+class SysOperationInput(ConstructionInput):
+    """Construction inputs for system-operation tools."""
+
+    with_code_tool: bool = param_field(
+        default=False,
+        description="Whether to include the code execution tool.",
+    )
+    read_only: bool = param_field(
+        default=False,
+        description="Whether to expose only read/search/list tools.",
+    )
+    enable_read_image_multimodal: bool | None = param_field(
+        default=None,
+        description="Override image multimodal reads for read_file.",
+    )
+    bash_deny_patterns: list[str] = param_field(
+        default_factory=list,
+        description="Regex patterns denied by BashTool before shell execution.",
     )
 
 
@@ -258,10 +283,13 @@ def _build_vision_tool_group(params: dict[str, Any], context: Any) -> list[Any]:
     inp = VisionToolsInput.resolve(params, context)
     if not inp.vision_model_config:
         return []
+    config = VisionModelConfig(**inp.vision_model_config)
+    if not is_vision_model_config_complete(config):
+        return []
     return list(
         create_vision_tools(
             language=inp.language,
-            vision_model_config=VisionModelConfig(**inp.vision_model_config),
+            vision_model_config=config,
             agent_id=inp.agent_id,
         )
     )
@@ -324,9 +352,10 @@ def _build_audio_tool_group(params: dict[str, Any], context: Any) -> list[Any]:
 def _build_observability_rail(params: dict[str, Any], context: Any) -> Any:
     """Build an ObservabilityRail when observability is initialized.
 
-    Returns ``None`` when observability is not initialized, making this a
-    safe unconditional addition to any spec's ``rails`` list — the provider
-    handles the on/off logic itself.
+    Delegates to ``maybe_observability_rail`` so the "is observability on"
+    guard lives in one place. Returns ``None`` when observability is not
+    initialized, making this a safe unconditional addition to any spec's
+    ``rails`` list — the provider handles the on/off logic itself.
 
     Args:
         params: Spec params (unused).
@@ -335,12 +364,8 @@ def _build_observability_rail(params: dict[str, Any], context: Any) -> Any:
     Returns:
         An ``ObservabilityRail``, or ``None`` when observability is disabled.
     """
-    from openjiuwen.agent_teams.observability.setup import is_initialized
-
-    if not is_initialized():
-        return None
-    from openjiuwen.agent_teams.observability import ObservabilityRail
-    return ObservabilityRail()
+    from openjiuwen.agent_teams.observability.rail import maybe_observability_rail
+    return maybe_observability_rail()
 
 
 harness_element(

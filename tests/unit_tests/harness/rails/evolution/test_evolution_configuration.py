@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -565,6 +566,8 @@ async def test_configure_skill_evolution_runtime_first_config_registers_new_rail
 
 @pytest.mark.asyncio
 async def test_configure_skill_evolution_runtime_team_config_registers_new_rails_in_runtime_order(tmp_path):
+    from openjiuwen.agent_evolving.tools.skill import EvolveSkillExperiencesTool
+
     agent = _RuntimeAgent()
     runtime = EvolutionReviewRuntime()
 
@@ -589,6 +592,20 @@ async def test_configure_skill_evolution_runtime_team_config_registers_new_rails
     assert interrupt_rail._review_runtime is runtime
     assert interrupt_rail._submission_service is team_rail.approval_submission_service
     assert agent._pending_rails == []
+
+    registered_tools = []
+    agent.card = SimpleNamespace(id="agent-1")
+    agent.ability_manager = SimpleNamespace(
+        add_ability=Mock(side_effect=lambda _card, tool: registered_tools.append(tool)),
+        remove_ability=Mock(),
+    )
+
+    team_rail.init(agent)
+
+    active_evolve_tool = next(tool for tool in registered_tools if isinstance(tool, EvolveSkillExperiencesTool))
+    assert interrupt_rail._review_runtime is team_rail.review_runtime
+    assert interrupt_rail._submission_service is team_rail.approval_submission_service
+    assert active_evolve_tool._review_runtime is team_rail.review_runtime
 
 
 @pytest.mark.asyncio

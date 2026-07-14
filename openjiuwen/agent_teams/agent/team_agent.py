@@ -38,6 +38,8 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.spawn.agent_config import SpawnAgentConfig
 from openjiuwen.core.runner.spawn.process_manager import SpawnConfig
@@ -50,6 +52,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
+    from openjiuwen.agent_teams.tiny_agent import TinyAgent
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
@@ -115,6 +118,71 @@ class TeamAgent(BaseAgent):
     def resources(self):
         """Return the per-instance runtime resources container."""
         return self._configurator.resources
+
+    @property
+    def tiny_agent_model_resolver(self):
+        """Return the team's model-name resolver used to build tiny agents.
+
+        Maps a ``model_name`` to a ``TeamModelConfig`` against the team model
+        pool (None when no pool is configured). Ephemeral callers pass this to
+        ``openjiuwen.agent_teams.tiny_agent.create_tiny_agent`` (or a preset) so a
+        model name resolves the same way as for team-scoped tiny agents.
+        """
+        return self.infra.tiny_agent_model_resolver
+
+    def get_tiny_agent(self, name: str) -> Optional["TinyAgent"]:
+        """Get-or-create the team-scoped tiny agent declared under ``name``.
+
+        Lazily builds it from ``TeamAgentSpec.tiny_agents[name]`` on first access,
+        caches it on infra (one per name, per process), and reuses it afterwards.
+        Returns None when no tiny agent is declared under ``name``. The cached
+        instance is disposed when the team stops.
+
+        Args:
+            name: Logical key of the tiny agent in ``TeamAgentSpec.tiny_agents``.
+
+        Returns:
+            The cached or newly built :class:`TinyAgent`, or None if undeclared.
+        """
+        infra = self.infra
+        existing = infra.tiny_agents.get(name)
+        if existing is not None:
+            return existing
+        spec = self.spec
+        tiny_spec = spec.tiny_agents.get(name) if spec is not None else None
+        if tiny_spec is None:
+            return None
+        if infra.tiny_agent_model_resolver is None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason=f"tiny agent '{name}' needs a team model pool to resolve model '{tiny_spec.model_name}'",
+            )
+        from openjiuwen.agent_teams.tiny_agent import create_tiny_agent
+
+        language = self.blueprint.language if self.blueprint is not None else "cn"
+        agent = create_tiny_agent(
+            system_prompt=tiny_spec.system_prompt,
+            model_name=tiny_spec.model_name,
+            model_resolver=infra.tiny_agent_model_resolver,
+            default_schema=tiny_spec.default_schema,
+            name=tiny_spec.name,
+            language=language,
+            max_iterations=tiny_spec.max_iterations,
+        )
+        infra.tiny_agents[name] = agent
+        return agent
+
+    async def _dispose_tiny_agents(self) -> None:
+        """Dispose every cached team-scoped tiny agent (best-effort, idempotent)."""
+        infra = self.infra
+        for agent in list(infra.tiny_agents.values()):
+            try:
+                await agent.aclose()
+            except Exception:
+                team_logger.debug(
+                    "[{}] tiny agent dispose failed", self._member_name() or "?", exc_info=True
+                )
+        infra.tiny_agents.clear()
 
     @property
     def harness(self) -> Optional["MemberRuntime"]:
@@ -313,6 +381,17 @@ class TeamAgent(BaseAgent):
             return
         await harness.send(content, immediate=use_steer)
 
+    def set_background_task_controller(self, controller: Any) -> None:
+        """Attach the embedder's background task controller to this member's brain.
+
+        Forwarded to the runtime (TeamHarness), which keeps it across native
+        rebuilds; the leader's SwarmflowTool reads it to register run handles for
+        external pause/resume. No-op when no runtime is built yet.
+        """
+        harness = self.harness
+        if harness is not None:
+            harness.set_background_task_controller(controller)
+
     def has_pending_interrupt(self) -> bool:
         return self._stream_controller.has_pending_interrupt()
 
@@ -431,6 +510,7 @@ class TeamAgent(BaseAgent):
             spec,
             ctx,
             on_teammate_created=self._on_teammate_created,
+            on_before_team_cleaned=self._finalize_team_worktrees_before_clean,
             on_team_cleaned=self._mark_team_cleaned,
             on_team_built=self._mark_team_built,
         )
@@ -667,6 +747,7 @@ class TeamAgent(BaseAgent):
     async def stop_coordination(self) -> None:
         """Stop coordination and shut down all spawned teammates."""
         await self._stop_coordination()
+        await self._dispose_tiny_agents()
 
     def _close_stream(self) -> None:
         self._coordination.close_stream()
@@ -697,7 +778,20 @@ class TeamAgent(BaseAgent):
                     member_name,
                     e,
                 )
+        await self._dispose_tiny_agents()
         self._close_stream()
+
+    async def finalize_non_contributing_worktrees(self) -> None:
+        """Finalize current-session worktrees that did not contribute commits."""
+        if self.role != TeamRole.LEADER:
+            return
+        await self._spawn_manager.worktree_lifecycle.finalize_non_contributing_member_worktrees()
+
+    async def _finalize_team_worktrees_before_clean(self) -> None:
+        """Finalize current-session teammate worktrees before team DB deletion."""
+        if self.role != TeamRole.LEADER:
+            return
+        await self._spawn_manager.worktree_lifecycle.finalize_all_member_worktrees_for_team_clean()
 
     async def conclude_completed_round(self, member_count: int, task_count: int) -> None:
         """Emit a team-completed marker chunk, then close the leader stream.
@@ -896,6 +990,7 @@ class TeamAgent(BaseAgent):
         team_logger.info("[{}] build_team completed; latching team DB state", self._member_name() or "?")
         from openjiuwen.agent_teams.runtime.metadata import TEAM_DB_STATE_CREATED
 
+        self._state.team_cleaned = False
         await self._persist_team_db_state(TEAM_DB_STATE_CREATED)
 
     async def _persist_team_db_state(self, db_state: str) -> None:
@@ -1010,9 +1105,10 @@ class TeamAgent(BaseAgent):
             team_name: Identifies which team's bucket to load. A session can
                 hold state for multiple teams; the caller must specify which.
             runtime_spec: Optional live spec from the current process. Used to
-                reinject ``build_context``, which is ``Field(exclude=True)`` and
-                never survives the checkpoint round-trip. When omitted the
-                recovered spec is used as-is (rebuilding context from its seed).
+                reinject ``build_context`` and ``memory.embedding_config``, which
+                are ``Field(exclude=True)`` and never survive the checkpoint
+                round-trip. When omitted the recovered spec is used as-is
+                (rebuilding context from its seed).
 
         Raises:
             ValueError: When the session has no bucket for ``team_name`` or
@@ -1034,6 +1130,11 @@ class TeamAgent(BaseAgent):
         # members survive a cold restart. No-op for legacy.
         if runtime_spec is not None and runtime_spec.build_context is not None:
             spec.build_context = runtime_spec.build_context
+        # embedding_config is also Field(exclude=True) — reinject from the
+        # live spec so resolve_embedding_config can find it during configure.
+        if runtime_spec is not None and runtime_spec.memory and runtime_spec.memory.embedding_config:
+            if spec.memory:
+                spec.memory.embedding_config = runtime_spec.memory.embedding_config
         spec.materialize_build_context()
         context = TeamRuntimeContext.model_validate(bucket["context"])
 

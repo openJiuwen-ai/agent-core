@@ -479,6 +479,30 @@ class CIGateRunner:
                 for f in stdout_text.splitlines()
                 if f.strip() and (f.endswith(".py") or f.endswith(".pyi"))
             ]
+            if files:
+                return files
+
+            if commits_val > 0:
+                logger.info(
+                    "No committed changes for COMMITS=%s; "
+                    "falling back to worktree diff (git diff HEAD)",
+                    commits_val,
+                )
+                wm_result = subprocess.run(
+                    ["git", "diff", "HEAD", "--name-only", "--diff-filter=ACMR"],
+                    cwd=self._workspace,
+                    capture_output=True,
+                    check=False,
+                )
+                if wm_result.returncode == 0:
+                    wm_stdout = decode_stdout(wm_result.stdout)
+                    files = [
+                        f.strip()
+                        for f in wm_stdout.splitlines()
+                        if f.strip() and (f.endswith(".py") or f.endswith(".pyi"))
+                    ]
+                    return files
+
             return files
         except Exception as e:
             logger.warning("Error getting changed files: %s", e)
@@ -523,7 +547,27 @@ class CIGateRunner:
                 return {}
 
             diff_text = decode_stdout(result.stdout)
-            return _parse_unified_diff_hunks(diff_text)
+            line_ranges = _parse_unified_diff_hunks(diff_text)
+            if line_ranges:
+                return line_ranges
+
+            if commits_val > 0:
+                logger.info(
+                    "No diff line ranges for COMMITS=%s; "
+                    "falling back to worktree diff (git diff HEAD -U0)",
+                    commits_val,
+                )
+                wm_result = subprocess.run(
+                    ["git", "diff", "-U0", "HEAD", "--diff-filter=ACMR"],
+                    cwd=self._workspace,
+                    capture_output=True,
+                    check=False,
+                )
+                if wm_result.returncode == 0:
+                    wm_text = decode_stdout(wm_result.stdout)
+                    return _parse_unified_diff_hunks(wm_text)
+
+            return line_ranges
         except Exception as e:
             logger.warning("Error getting diff line ranges: %s", e)
             return {}

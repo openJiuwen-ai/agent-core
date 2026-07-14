@@ -11,6 +11,8 @@ from __future__ import annotations
 import sys
 import types
 
+import pytest
+
 
 def _install_dashscope_stub() -> None:
     if "dashscope" in sys.modules:
@@ -88,4 +90,14 @@ def _install_dashscope_stub() -> None:
 
 
 _install_dashscope_stub()
+
+
+@pytest.fixture(autouse=True)
+def _mock_image_modality_probe(monkeypatch):
+    """Prevent auto image-modality probe from consuming mock LLM responses."""
+    from unittest.mock import AsyncMock
+
+    probe = AsyncMock(return_value=True)
+    monkeypatch.setattr("openjiuwen.harness.deep_agent.probe_image_support", probe)
+    return probe
 

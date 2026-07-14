@@ -191,17 +191,31 @@ class TuneUtils:
 
     @staticmethod
     def parse_json_from_llm_response(json_like_string: str) -> Optional[Dict[str, Any]]:
-        """Extract and parse JSON from ```json ... ``` block.
+        """Extract and parse a JSON dict from fenced or raw LLM output.
 
         Args:
-            json_like_string: String containing JSON block
+            json_like_string: String containing a fenced ``json`` block or raw JSON text
 
         Returns:
             Parsed JSON dict, or None on failure
         """
+        json_text = (json_like_string or "").strip()
+        if not json_text:
+            return None
+
         pattern = r"```json(.*?)```"
-        json_data = TuneUtils._parse_llm_response(json_like_string, pattern)
-        return json_data
+        fenced_match = re.search(pattern, json_text, re.DOTALL)
+        parsed_data = None
+        if fenced_match:
+            parsed_data = TuneUtils._parse_llm_response(fenced_match.group(1).strip())
+        else:
+            parsed_data = TuneUtils._parse_llm_response(json_text)
+
+        if not isinstance(parsed_data, dict):
+            if parsed_data is not None:
+                logger.warning("Parsed JSON is not a dict")
+            return None
+        return parsed_data
 
     @staticmethod
     def parse_list_from_llm_response(list_like_string: str) -> Optional[List[Any]]:
@@ -216,7 +230,7 @@ class TuneUtils:
         pattern = r"```list(.*?)```"
         list_data = TuneUtils._parse_llm_response(list_like_string, pattern)
         if not isinstance(list_data, list):
-            logger.warning("Parsed data is not a list-type")
+            logger.warning("Parsed JSON is not a list")
             return None
         return list_data
 
@@ -251,7 +265,7 @@ class TuneUtils:
             String in format "k1:v1 | k2:v2"
         """
         return " | ".join(f"{key}:{value}" for key, value in data.items())
-    
+
     @staticmethod
     def _parse_llm_response(string: str, pattern: Optional[str] = None) -> Optional[Union[List[Any], Dict[str, Any]]]:
         matched_string = string
@@ -264,7 +278,7 @@ class TuneUtils:
 
         try:
             data = json.loads(matched_string)
-        except Exception:
-            logger.warning("Failed to convert list string to python list")
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse json-like string")
             return None
         return data

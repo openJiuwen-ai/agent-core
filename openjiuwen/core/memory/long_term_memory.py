@@ -31,7 +31,10 @@ from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
 from openjiuwen.core.foundation.store.base_vector_store import BaseVectorStore
 from openjiuwen.core.foundation.store.base_memory_index import BaseMemoryIndex, MemoryDoc
 from openjiuwen.core.foundation.store.index.simple_memory_index import SimpleMemoryIndex
-from openjiuwen.core.memory.manage.mem_model.scope_user_mapping_manager import ScopeUserMappingManager
+from openjiuwen.core.memory.manage.mem_model.scope_user_mapping_manager import (
+    ScopeUserMappingManager,
+    KvScopeUserMappingManager,
+)
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import memory_logger
@@ -278,11 +281,11 @@ class LongTermMemory(metaclass=Singleton):
         Args:
             config: memory engine configuration parameters
         """
-        if not self.kv_store or not self.db_store:
+        if not self.kv_store:
             raise build_error(
                 StatusCode.MEMORY_SET_CONFIG_EXECUTION_ERROR,
                 config_type="system",
-                error_msg="kv store and db store must be registered before setting config",
+                error_msg="kv store must be registered before setting config",
             )
         if not self.memory_index:
             raise build_error(
@@ -302,6 +305,12 @@ class LongTermMemory(metaclass=Singleton):
         sql_db_store = SqlDbStore(self.db_store) if self.db_store else None
         if sql_db_store:
             self.scope_user_mapping_manager = ScopeUserMappingManager(sql_db_store)
+        else:
+            self.scope_user_mapping_manager = KvScopeUserMappingManager(self.kv_store)
+            memory_logger.warning(
+                "scope_user_mapping will use kv_store backend (db_store not provided)",
+                event_type=LogEventType.MEMORY_INIT,
+            )
 
         if self.message_store:
             if isinstance(self.message_store, SqlMessageStore) and self.message_store.crypto_key is None:
@@ -341,6 +350,13 @@ class LongTermMemory(metaclass=Singleton):
             llm = LongTermMemory._get_llm_from_config(model_config=config.default_model_cfg,
                                                     model_client_config=config.default_model_client_cfg)
             self._base_llm = llm
+
+        if not self.message_manager:
+            memory_logger.warning(
+                "Message persistence not enabled: historical context and source tracing are unavailable. "
+                "Memory will operate in stateless single-turn mode.",
+                event_type=LogEventType.MEMORY_INIT,
+            )
 
     async def set_scope_config(self, scope_id: str, memory_scope_config: MemoryScopeConfig) -> bool:
         """
@@ -507,6 +523,13 @@ class LongTermMemory(metaclass=Singleton):
                 error_msg="invalid scope_id format",
             )
         scope_user_data = await self.scope_user_mapping_manager.get_by_scope_id(scope_id=scope_id) or []
+        if not scope_user_data:
+            memory_logger.debug(
+                "No scope user mapping found.",
+                event_type=LogEventType.MEMORY_DELETE,
+                scope_id=scope_id
+            )
+            return True
         user_ids = [scope_user["user_id"] for scope_user in scope_user_data]
         if self.write_manager:
             for user_id in user_ids:
@@ -537,6 +560,10 @@ class LongTermMemory(metaclass=Singleton):
             gen_mem: bool = True,
             gen_mem_with_history_msg_num: int = 2,
     ) -> AddMemResult:
+        if timestamp is None:
+            timestamp = datetime.now(timezone.utc)
+        else:
+            timestamp = timestamp.astimezone(timezone.utc)
         if not self._validate_id(event_type=LogEventType.MEMORY_STORE, scope_id=scope_id):
             memory_logger.error(
                 "Invalid scope_id format.",
@@ -577,8 +604,6 @@ class LongTermMemory(metaclass=Singleton):
             # add meta data
             await self.scope_user_mapping_manager.add(user_id=user_id, scope_id=scope_id)
             # if timestamp is None, take the current time
-            if not timestamp:
-                timestamp = datetime.now(timezone.utc).astimezone()
             timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
             # when multi messages, use last msg_id
             for i, msg in enumerate(messages):
@@ -591,7 +616,8 @@ class LongTermMemory(metaclass=Singleton):
                     session_id=session_id,
                     timestamp=msg_timestamp
                 )
-                msg_id = await self.message_manager.add(add_req)
+                if self.message_manager:
+                    msg_id = await self.message_manager.add(add_req)
 
             if not gen_mem:
                 return AddMemResult()
@@ -692,6 +718,13 @@ class LongTermMemory(metaclass=Singleton):
                 memory_type="message",
                 error_msg="invalid scope_id format",
             )
+        if not self.message_manager:
+            memory_logger.warning(
+                "Recent messages unavailable: message manager is not initialized.",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                memory_type="message",
+            )
+            return []
         recent_messages_tuple = await self.message_manager.get(
             user_id=user_id,
             scope_id=scope_id,
@@ -743,6 +776,13 @@ class LongTermMemory(metaclass=Singleton):
                 memory_type="message",
                 error_msg="invalid scope_id format",
             )
+        if not self.message_manager:
+            memory_logger.warning(
+                "Cannot delete messages: message manager is not initialized.",
+                event_type=LogEventType.MEMORY_DELETE,
+                memory_type="message",
+            )
+            return
         await self.message_manager.delete_by_user_and_scope(
             user_id=user_id,
             scope_id=scope_id

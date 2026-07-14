@@ -52,6 +52,26 @@ GENERATE_RECORDS_LLM_POLICY = LLMInvokePolicy(
 )
 _RETRY_PARSE_TIMEOUT_SECS = 20
 
+# When the model is deployed on Huawei Cloud ModelArts MaaS, bump max_tokens
+# explicitly to avoid JSON truncation.
+_HUAWEI_MODELARTS_KEYWORD = "modelarts"
+_HUAWEI_MODELARTS_MAX_TOKENS = 20000
+
+
+def _resolve_max_tokens(llm: Model) -> int | None:
+    """Return the max_tokens override for the current LLM, or None to use defaults.
+
+    The Huawei Cloud ModelArts MaaS gateway truncates long JSON outputs more
+    aggressively than other providers. We bump max_tokens explicitly when the
+    configured api_base targets ModelArts. For every other provider we return
+    None and let the client/model default apply.
+    """
+    client_config = getattr(llm, "model_client_config", None)
+    api_base = getattr(client_config, "api_base", "") or ""
+    if _HUAWEI_MODELARTS_KEYWORD in api_base.lower():
+        return _HUAWEI_MODELARTS_MAX_TOKENS
+    return None
+
 
 def _build_conversation_snippet(
     messages: List[dict],
@@ -638,11 +658,17 @@ class SkillExperienceOptimizer(BaseOptimizer):
             retry_prompt = JSON_FIX_PROMPT.format(parse_error=error_detail, broken_output=broken_raw)
 
         try:
+            max_tokens = _resolve_max_tokens(self._llm)
+            invoke_kwargs: dict[str, Any] = {
+                "temperature": 0.1,
+                "timeout": _RETRY_PARSE_TIMEOUT_SECS,
+            }
+            if max_tokens is not None:
+                invoke_kwargs["max_tokens"] = max_tokens
             response = await self._llm.invoke(
                 model=self._model,
                 messages=[{"role": "user", "content": retry_prompt}],
-                temperature=0.1,
-                timeout=_RETRY_PARSE_TIMEOUT_SECS,
+                **invoke_kwargs,
             )
             retry_raw = response.content if hasattr(response, "content") else str(response)
         except Exception as exc:
@@ -663,12 +689,17 @@ class SkillExperienceOptimizer(BaseOptimizer):
         prompt: str,
         retry_prompt: str,
     ) -> List[ParsedExperienceDraft]:
+        extra_kwargs: dict[str, Any] = {}
+        max_tokens = _resolve_max_tokens(self._llm)
+        if max_tokens is not None:
+            extra_kwargs["max_tokens"] = max_tokens
         raw, prompt_used = await invoke_text_with_retry_and_prompt(
             llm=self._llm,
             model=self._model,
             prompt=prompt,
             retry_prompt=retry_prompt,
             policy=self._generate_records_llm_policy,
+            **extra_kwargs,
         )
 
         drafts, last_error = parse_experience_drafts_with_error(raw, _extract_json_with_error)

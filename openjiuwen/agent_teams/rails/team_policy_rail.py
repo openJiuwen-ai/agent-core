@@ -30,7 +30,9 @@ from typing import TYPE_CHECKING, Any, Optional
 from openjiuwen.agent_teams.prompts import (
     MtimeSectionCache,
     TeamSectionName,
+    build_team_attachment_notice_section,
     build_team_hitt_section,
+    build_team_inbound_tags_section,
     build_team_info_section,
     build_team_members_section,
     build_team_static_sections,
@@ -45,11 +47,10 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.team import TeamBackend
 
 
-_DYNAMIC_SECTION_NAMES: tuple[str, ...] = (
-    TeamSectionName.HITT,
-    TeamSectionName.INFO,
-    TeamSectionName.MEMBERS,
-)
+# Source tag stamped on every dynamic attachment this rail writes, so the
+# attachment manager attributes them to one owner and ``clear_source`` could
+# wipe them in one shot if ever needed.
+_ATTACHMENT_SOURCE = "agent_teams.team_policy_rail"
 
 
 class TeamPolicyRail(DeepAgentRail):
@@ -63,13 +64,18 @@ class TeamPolicyRail(DeepAgentRail):
       * **Dynamic** -- ``team_hitt``, ``team_info`` and
         ``team_members``. Backed by :class:`MtimeSectionCache` instances
         that probe the team database for an ``updated_at`` change before
-        re-running the full fetch. This lets the rail pick up newly
-        spawned human agents or members on the next LLM call without
-        paying for a full table read on every call.
+        re-running the full fetch. These are **not** added to the system
+        prompt builder; they are pushed to the DeepAgent's
+        :class:`PromptAttachmentManager` as per-round attachments (kind =
+        the section name) so member/team-state churn only invalidates the
+        tail attachment block, leaving the system-prompt prefix
+        cache-stable. The mtime cache still avoids a full table read on
+        every call.
 
     When ``team_backend`` is ``None`` (e.g. unit tests that only care
     about static content) the dynamic caches are skipped entirely and
-    the rail behaves like the previous static-only implementation.
+    the rail behaves like the previous static-only implementation. When
+    no attachment manager is available the dynamic sections are skipped.
     """
 
     priority = 12
@@ -101,6 +107,10 @@ class TeamPolicyRail(DeepAgentRail):
         self._expose_human_agents_to_teammates = expose_human_agents_to_teammates
         self._enable_swarmflow = enable_swarmflow
         self.system_prompt_builder = None
+        # The DeepAgent's prompt attachment manager, resolved at ``init``.
+        # Dynamic team-state sections are pushed here instead of into the
+        # system prompt builder so the prompt prefix stays cache-stable.
+        self.attachment_manager: Any = None
 
         # Static sections built once and reused on every call. HITT is
         # dynamic and refreshes from DB before model calls; bridge
@@ -131,38 +141,98 @@ class TeamPolicyRail(DeepAgentRail):
             )
 
     def init(self, agent: Any) -> None:
-        """Cache the agent's shared prompt builder."""
+        """Cache the agent's shared prompt builder and attachment manager."""
         super().init(agent)
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
+        self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
 
     def uninit(self, agent: Any) -> None:
-        """Remove all team sections from the shared builder."""
+        """Remove team static sections from the shared builder.
+
+        Dynamic sections now live in the prompt attachment manager (session
+        scoped, refreshed per round), so there is nothing to strip from the
+        builder for them — a fresh rail instance upserts them by the same
+        section name, and the manager is torn down with the DeepAgent.
+        """
         if self.system_prompt_builder is not None:
             for section in self._static_sections:
                 self.system_prompt_builder.remove_section(section.name)
-            for name in _DYNAMIC_SECTION_NAMES:
-                self.system_prompt_builder.remove_section(name)
         self.system_prompt_builder = None
+        self.attachment_manager = None
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Inject static sections and refresh dynamic sections before each call."""
+        """Inject static sections into the builder; push dynamic ones to attachments.
+
+        Static sections stay in the system prompt so it remains a stable,
+        cacheable prefix. The three dynamic sections (hitt / info / members)
+        go to the prompt attachment manager instead, so roster / team-state
+        churn only touches the tail attachment block and never invalidates
+        the system-prompt KV cache.
+        """
         if self.system_prompt_builder is None:
             return
 
         for section in self._static_sections:
             self.system_prompt_builder.add_section(section)
 
+        await self._sync_dynamic_attachments(ctx)
+
+    async def _sync_dynamic_attachments(self, ctx: AgentCallbackContext) -> None:
+        """Upsert the dynamic team-state sections as prompt attachments.
+
+        Each section is refreshed from its mtime-backed cache; a non-None
+        section is upserted (same section name overwrites in place) and a
+        None section is cleared, so stale team state never lingers across
+        rounds. When no attachment manager is available (e.g. a minimal
+        unit-test agent) the dynamic sections are skipped — a real DeepAgent
+        always provides one.
+        """
+        if self.attachment_manager is None:
+            return
+
+        hitt_section: Optional[PromptSection] = None
+        members_section: Optional[PromptSection] = None
         if self._team_backend is not None:
             hitt_section, members_section = await self._refresh_member_sections()
-            if hitt_section is not None:
-                self.system_prompt_builder.add_section(hitt_section)
-            if members_section is not None:
-                self.system_prompt_builder.add_section(members_section)
+        info_section = await self._info_cache.refresh() if self._info_cache is not None else None
 
-        if self._info_cache is not None:
-            info_section = await self._info_cache.refresh()
-            if info_section is not None:
-                self.system_prompt_builder.add_section(info_section)
+        writer = self.attachment_manager.bind_context(ctx)
+        await self._upsert_or_clear(writer, TeamSectionName.HITT, hitt_section)
+        await self._upsert_or_clear(writer, TeamSectionName.MEMBERS, members_section)
+        await self._upsert_or_clear(writer, TeamSectionName.INFO, info_section)
+
+    async def _upsert_or_clear(
+        self,
+        writer: Any,
+        section_name: str,
+        section: Optional[PromptSection],
+    ) -> None:
+        """Upsert one dynamic section as an attachment, or clear it when empty.
+
+        The attachment ``kind`` is the section name itself (``team_hitt`` /
+        ``team_info`` / ``team_members``), which becomes the rendered
+        ``type="..."`` attribute the LLM reads (see the attachment-notice
+        section). A missing ``session_id`` raises ``ValueError`` from the
+        writer; that is swallowed with a warning so a transient context
+        glitch never breaks the model call.
+        """
+        try:
+            if section is not None:
+                await writer.add_from_prompt_section(
+                    prompt_section=section,
+                    kind=section_name,
+                    source=_ATTACHMENT_SOURCE,
+                    language=self._language,
+                )
+            else:
+                await writer.clear_section(section_name)
+        except ValueError as exc:
+            team_logger.warning(
+                "[{}] TeamPolicyRail skip dynamic attachment section={}: {}",
+                self._member_name or "?",
+                section_name,
+                exc,
+            )
 
     def _build_static_sections(
         self,
@@ -189,6 +259,13 @@ class TeamPolicyRail(DeepAgentRail):
             bridge_agent_names=bridge_agent_names,
             enable_swarmflow=self._enable_swarmflow,
         )
+        # In-process DeepAgent members read team state via prompt attachments
+        # and receive inbound messages as XML; append the two static notices
+        # that explain those tag systems. External CLI members call
+        # build_team_static_sections directly and use neither mechanism, so
+        # the notices live here on the rail rather than in that shared builder.
+        sections.append(build_team_attachment_notice_section(language=self._language))
+        sections.append(build_team_inbound_tags_section(language=self._language))
         team_logger.info(
             "[{}] TeamPolicyRail static sections: section_names={}",
             member_name or "?",

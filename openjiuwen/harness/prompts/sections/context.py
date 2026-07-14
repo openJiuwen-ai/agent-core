@@ -27,6 +27,11 @@ CONTEXT_SECTION_BY_FILE = {
     "IDENTITY.md": "context.identity",
 }
 
+_IDENTITY_FILLED_NAME_RE = re.compile(
+    r"^\s*[-*]?\s*(?:\*\*)?(?:名字|Name)[：:](?:\*\*)?\s*(?P<name>\S.*?)\s*$",
+    re.MULTILINE,
+)
+
 
 # ---------------------------------------------------------------------------
 # Template detection
@@ -62,6 +67,20 @@ def _is_unfilled_template(content: str, max_template_len: int = 500) -> bool:
             return True
     no_headings = re.sub(r'^#{1,6}\s+.*$', '', text, flags=re.MULTILINE).strip()
     return not no_headings
+
+
+def _clean_agent_name(raw_name: str) -> str:
+    name = raw_name.strip()
+    name = re.sub(r"\s*[（(].*?(权威|见\s*IDENTITY\.md).*?[）)]\s*$", "", name).strip()
+    return name.strip("`\"'“”‘’。；;,，")
+
+
+def _identity_has_filled_name(content: str) -> bool:
+    for match in _IDENTITY_FILLED_NAME_RE.finditer(content):
+        name = _clean_agent_name(match.group("name"))
+        if name and not name.startswith("_("):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +133,8 @@ async def _read_context_file(
     result = await sys_operation.fs().read_file(str(full_path))
     if result.code == 0 and result.data:
         content = result.data.content
+        if file_key == WorkspaceNode.IDENTITY_MD.value and _identity_has_filled_name(content):
+            return content
         if content and not _is_unfilled_template(content):
             return content
 
@@ -431,6 +452,35 @@ def build_tools_content(
     if "task_tool" in tool_descriptions and "task_tool" not in rendered_names:
         lines.append(f"- task_tool: {_tool_summary('task_tool')}")
         rendered_names.add("task_tool")
+
+    if language == "cn":
+        lines.extend(
+            [
+                "",
+                "## 工具调用去重规则",
+                "",
+                "- 调用工具前先检查本轮对话中是否已经用相同参数调用过同一工具；如果已有结果，优先基于已有结果继续推理，不要重复调用",
+                "- 如果上一次工具结果为空、无匹配或没有提供新信息，不要用完全相同的参数再次调用；应调整查询条件、换用更合适的工具，或直接说明当前结果不足",
+                "- 只有当任务确实需要分步执行、状态已经变化、参数不同，或前一次结果明确要求继续获取下一部分信息时，才可以再次调用同一工具",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "## Tool Call Deduplication Rules",
+                "",
+                "- Before calling a tool, check whether the same tool has already been called with the same "
+                "arguments in this turn; if a result already exists, reason from that result instead of "
+                "repeating the call",
+                "- If the previous tool result was empty, had no matches, or added no new information, do not "
+                "call again with identical arguments; adjust the query, use a better-suited tool, or explain "
+                "that the current result is insufficient",
+                "- Call the same tool again only when the task genuinely requires multiple steps, state has "
+                "changed, arguments differ, or the previous result clearly asks you to fetch the next part of "
+                "the information",
+            ]
+        )
 
     if "bash" in rendered_names:
         if language == "cn":

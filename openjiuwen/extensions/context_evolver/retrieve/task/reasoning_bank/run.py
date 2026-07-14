@@ -62,7 +62,7 @@ class RecallMemoryOp(BaseOp):
         vector_nodes = await self.vector_store.async_search(
             embedding=query_embedding,
             top_k=self.top_k,
-            metadata_filter={"workspace_id": user_id, "type": "reasoning_bank_memory"}
+            metadata_filter={"workspace_id": user_id, "type": "exp_memory"}
         )
 
         # Convert to ReasoningBankRetrievedMemory objects

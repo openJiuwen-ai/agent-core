@@ -29,6 +29,12 @@ from openjiuwen.agent_teams.observability import (
     shutdown_observability,
 )
 from openjiuwen.agent_teams.observability.monitor_handler import OtelTeamMonitorHandler
+from openjiuwen.agent_teams.observability.semconv import (
+    AT_PLAN_APPROVED,
+    AT_TASK_STATUS,
+    LANGFUSE_OBSERVATION_INPUT,
+    LANGFUSE_OBSERVATION_OUTPUT,
+)
 from openjiuwen.agent_teams.schema.events import (
     BroadcastEvent,
     EventMessage,
@@ -37,9 +43,12 @@ from openjiuwen.agent_teams.schema.events import (
     MessageEvent,
     TaskCompletedEvent,
     TaskCreatedEvent,
+    TaskPlanRequestEvent,
+    TaskPlanResponseEvent,
     TeamCleanedEvent,
     TeamCreatedEvent,
 )
+from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.callback.events import (
     AgentEvents,
@@ -144,6 +153,10 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
 ) -> None:
     """Streaming LLM produces one llm.call span with TTFT and a reasoning child."""
     fw = Runner.callback_framework
+
+    # Team span is required as parent for LLM spans.
+    _create_team_span("test_team")
+
     messages = [
         {"role": "system", "content": "You are a friendly helper."},
         {"role": "user", "content": "Compute 6 * 7."},
@@ -199,7 +212,8 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
     reasoning_spans = _spans_by_name(in_memory_exporter, "llm.reasoning")
     assert reasoning_spans, "no llm.reasoning child span emitted"
     rs = reasoning_spans[0]
-    assert "forty-two" in _attr(rs, "gen_ai.reasoning.content", "")
+    assert "forty-two" in _attr(rs, "gen_ai.completion.0.content", "")
+    assert _attr(rs, "langfuse.observation.input") == "llm reasoning"
     assert rs.parent is not None and rs.parent.span_id == span.context.span_id
 
 
@@ -313,6 +327,10 @@ async def test_llm_response_with_content_and_tool_calls(
 ) -> None:
     """When LLM returns both content and tool_calls, both should be recorded."""
     fw = Runner.callback_framework
+
+    # Team span is required as parent for LLM spans.
+    _create_team_span("test_team")
+
     messages = [{"role": "user", "content": "What is the weather?"}]
 
     # Simulate LLM response with both content and tool_calls
@@ -358,6 +376,9 @@ async def test_llm_call_error_marks_span_error(
 ) -> None:
     """LLM_CALL_ERROR closes the open span with ERROR status and exception."""
     fw = Runner.callback_framework
+
+    # Team span is required as parent for LLM spans.
+    _create_team_span("test_team")
 
     await fw.trigger(
         LLMCallEvents.LLM_INVOKE_INPUT,
@@ -450,6 +471,13 @@ async def test_team_monitor_handler_emits_team_and_task_spans(
         )
         await handler(EventMessage.from_event(TeamCleanedEvent(team_name="alpha")))
 
+        # Team span is owned by Runner's finally block, not by monitor_handler.
+        # Close it manually here so it appears in the exporter.
+        if team_span.is_recording():
+            from opentelemetry.trace import Status, StatusCode
+            team_span.set_status(Status(StatusCode.OK))
+            team_span.end()
+
         team_spans = _spans_by_name(in_memory_exporter, "team.alpha")
         assert team_spans, "team root span missing"
         team_span_result = team_spans[0]
@@ -474,6 +502,155 @@ async def test_team_monitor_handler_emits_team_and_task_spans(
             team_span.set_status(Status(StatusCode.OK))
             team_span.end()
         remove_team_span("alpha")
+
+
+def _new_plan_handler(team_name: str) -> tuple[OtelTeamMonitorHandler, Any]:
+    """Create a monitor handler + an open team span for plan-mode tests.
+
+    Mirrors the team-span setup in ``test_team_monitor_handler_emits_team_and_task_spans``:
+    the handler uses the shared tracer registered by ``init_observability`` so
+    child spans land in the per-test ``InMemorySpanExporter``.
+    """
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+    from openjiuwen.agent_teams.observability.span_context import set_team_span
+    config = ObservabilityConfig(enabled=True, sample_rate=1.0)
+    handler = OtelTeamMonitorHandler(config)
+    team_span = get_tracer("test").start_span(name=f"team.{team_name}", kind=SpanKind.SERVER)
+    team_span.set_attribute("agentteam.team.name", team_name)
+    set_team_span(team_span, team_name)
+    return handler, team_span
+
+
+def _close_team_span(team_span: Any) -> None:
+    if team_span.is_recording():
+        from opentelemetry.trace import Status, StatusCode
+        team_span.set_status(Status(StatusCode.OK))
+        team_span.end()
+
+
+@pytest.mark.asyncio
+async def test_plan_request_advances_task_status_to_claimed(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Plan-mode: TaskCreated -> TaskPlanRequest advances AT_TASK_STATUS to 'claimed'.
+
+    Plan mode never publishes TaskClaimedEvent; the request event itself carries
+    status=claimed and must be routed through _record_task_status_span.
+    """
+    from openjiuwen.agent_teams.observability.monitor_handler import _TASK_EVENT_TYPES
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
+    from openjiuwen.agent_teams.schema.events import TeamEvent
+
+    assert TeamEvent.TASK_PLAN_REQUEST in _TASK_EVENT_TYPES
+    assert TeamEvent.TASK_PLAN_RESPONSE in _TASK_EVENT_TYPES
+
+    team = "plan_team"
+    task_id = "plan-task-1"
+    handler, team_span = _new_plan_handler(team)
+    try:
+        await handler(EventMessage.from_event(TaskCreatedEvent(
+            team_name=team, task_id=task_id, status=TaskStatus.PENDING.value,
+        )))
+        await handler(EventMessage.from_event(TaskPlanRequestEvent(
+            team_name=team, task_id=task_id, member_name="member-1",
+            status=TaskStatus.CLAIMED.value, plan_id="plan-1",
+            member_plan_md="/tmp/plan.md", tool_call_id="tc-1",
+        )))
+
+        task_span = handler._task_spans.get(task_id)
+        assert task_span is not None, "task span missing after create + plan_request"
+        assert _attr(task_span, AT_TASK_STATUS) == "claimed"
+        assert _attr(task_span, "agentteam.task.plan_id") == "plan-1"
+    finally:
+        _close_team_span(team_span)
+        remove_team_span(team)
+
+
+@pytest.mark.asyncio
+async def test_plan_response_approved_and_rejected_paths(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Plan response: approved -> plan_approved + AT_PLAN_APPROVED=True;
+    rejected -> status reverts to claimed + AT_PLAN_APPROVED=False."""
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
+
+    team = "plan_team"
+    task_id = "plan-task-2"
+    feedback = "计划正确，请按计划执行"
+    handler, team_span = _new_plan_handler(team)
+    try:
+        await handler(EventMessage.from_event(TaskCreatedEvent(
+            team_name=team, task_id=task_id, status=TaskStatus.PENDING.value)))
+        await handler(EventMessage.from_event(TaskPlanRequestEvent(
+            team_name=team, task_id=task_id, member_name="member-1",
+            status=TaskStatus.CLAIMED.value, plan_id="plan-1",
+            member_plan_md="/tmp/plan.md")))
+
+        # approved
+        await handler(EventMessage.from_event(TaskPlanResponseEvent(
+            team_name=team, task_id=task_id, approved=True,
+            status=TaskStatus.PLAN_APPROVED.value, plan_id="plan-1",
+            member_name="member-1", feedback=feedback, tool_call_id="tc-1")))
+        task_span = handler._task_spans.get(task_id)
+        assert _attr(task_span, AT_TASK_STATUS) == "plan_approved"
+        assert _attr(task_span, AT_PLAN_APPROVED) is True
+
+        # rejected: status reverts to claimed
+        await handler(EventMessage.from_event(TaskPlanResponseEvent(
+            team_name=team, task_id=task_id, approved=False,
+            status=TaskStatus.CLAIMED.value, plan_id="plan-1",
+            member_name="member-1", feedback="需要修改")))
+        assert _attr(task_span, AT_TASK_STATUS) == "claimed"
+        assert _attr(task_span, AT_PLAN_APPROVED) is False
+    finally:
+        _close_team_span(team_span)
+        remove_team_span(team)
+
+
+@pytest.mark.asyncio
+async def test_plan_event_span_io_split_on_semantic_boundary(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Plan event child spans split input/output on semantic boundaries:
+    plan_request: input=full payload, output={plan_id, status};
+    plan_response: input={plan_id}, output={approved, feedback}."""
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
+
+    team = "plan_team"
+    task_id = "plan-task-3"
+    feedback = "计划正确，请按计划执行"
+    handler, team_span = _new_plan_handler(team)
+    try:
+        await handler(EventMessage.from_event(TaskCreatedEvent(
+            team_name=team, task_id=task_id, status=TaskStatus.PENDING.value)))
+        await handler(EventMessage.from_event(TaskPlanRequestEvent(
+            team_name=team, task_id=task_id, member_name="member-1",
+            status=TaskStatus.CLAIMED.value, plan_id="plan-1",
+            member_plan_md="/tmp/plan.md")))
+        await handler(EventMessage.from_event(TaskPlanResponseEvent(
+            team_name=team, task_id=task_id, approved=True,
+            status=TaskStatus.PLAN_APPROVED.value, plan_id="plan-1",
+            member_name="member-1", feedback=feedback)))
+
+        finished = in_memory_exporter.get_finished_spans()
+        plan_req_span = next(s for s in finished if s.name == f"task.{task_id}.plan_request")
+        plan_resp_span = next(s for s in finished if s.name == f"task.{task_id}.plan_response")
+
+        req_in = json.loads(_attr(plan_req_span, LANGFUSE_OBSERVATION_INPUT))
+        req_out = json.loads(_attr(plan_req_span, LANGFUSE_OBSERVATION_OUTPUT))
+        assert req_in["task_id"] == task_id
+        assert req_in["member_plan_md"] == "/tmp/plan.md"
+        assert req_out == {"plan_id": "plan-1", "status": "claimed"}
+        assert _attr(plan_req_span, AT_TASK_STATUS) == "claimed"
+
+        resp_in = json.loads(_attr(plan_resp_span, LANGFUSE_OBSERVATION_INPUT))
+        resp_out = json.loads(_attr(plan_resp_span, LANGFUSE_OBSERVATION_OUTPUT))
+        assert resp_in == {"plan_id": "plan-1"}
+        assert resp_out == {"approved": True, "feedback": feedback}
+        assert _attr(plan_resp_span, AT_TASK_STATUS) == "plan_approved"
+    finally:
+        _close_team_span(team_span)
+        remove_team_span(team)
 
 
 # ---------------------------------------------------------------------------
@@ -629,6 +806,9 @@ async def test_redaction_replaces_prompt_and_completion_text() -> None:
         span_exporter_override=exporter,
     )
     try:
+        # Team span is required as parent for LLM spans.
+        _create_team_span("test_team")
+
         fw = Runner.callback_framework
         await fw.trigger(
             LLMCallEvents.LLM_INVOKE_INPUT,

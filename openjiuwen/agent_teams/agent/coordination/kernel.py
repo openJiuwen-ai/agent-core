@@ -127,6 +127,9 @@ class CoordinationKernel:
             await infra.team_backend.db.initialize()
         if session is not None:
             await sess_mgr.bind_session(session)
+            memory_manager = resources.memory_manager
+            if memory_manager is not None:
+                memory_manager.bind_session_id(session.get_session_id())
             # Start the member runtime (native supervisor + child session) for
             # this run cycle, then attach the StreamController's output forwarder
             # + status mappers. Order matters: the controller consumes the
@@ -136,6 +139,9 @@ class CoordinationKernel:
                 await host.stream_controller.start()
         else:
             sess_mgr.release_session()
+            memory_manager = resources.memory_manager
+            if memory_manager is not None:
+                memory_manager.bind_session_id(None)
 
         if host.role == TeamRole.LEADER and infra.team_backend:
             existing = await infra.team_backend.db.team.get_team(infra.team_backend.team_name)
@@ -200,6 +206,12 @@ class CoordinationKernel:
         team_logger.info("[{}] coordination pausing (persistent)", host.member_name or "?")
         await self.drain_agent_task()
         host.persist_allocator_state()
+        # Extract team memories while the session is still bound and the DB
+        # is accessible. Moved from finalize_round so extraction runs once
+        # per run cycle instead of on every streaming round.
+        memory_manager = host.resources.memory_manager
+        if memory_manager:
+            await memory_manager.extract_after_round()
         if host.role == TeamRole.LEADER:
             await self._mark_live_teammates(MemberStatus.PAUSED)
             await host.spawn_manager.cancel_recovery_tasks()
@@ -310,6 +322,13 @@ class CoordinationKernel:
         team_logger.info("[{}] coordination stopping", host.member_name or "?")
         await self.drain_agent_task()
         host.persist_allocator_state()
+        # Final memory extraction before permanent teardown. Only extract
+        # when transitioning directly from running (session still bound).
+        # When coming from paused, extraction already happened in pause()
+        # and the session is already released — the DB query would fail.
+        memory_manager = host.resources.memory_manager
+        if memory_manager and self._lifecycle_state == "running":
+            await memory_manager.extract_after_round()
         if host.role == TeamRole.LEADER:
             # Mirror of the pause path: mark every spawned teammate so the
             # persistence layer captures why the runtime went away. STOPPED
@@ -320,7 +339,6 @@ class CoordinationKernel:
         await self.unsubscribe_transport()
         await host.spawn_manager.cancel_recovery_tasks()
         await host.spawn_manager.shutdown_all_handles()
-        memory_manager = host.resources.memory_manager
         if memory_manager:
             await memory_manager.close()
         if self._event_bus is not None:
@@ -438,16 +456,12 @@ class CoordinationKernel:
     async def finalize_round(self) -> None:
         """Run round-end cleanup; lifecycle decisions live at the Runner layer.
 
-        Limited to memory extraction and stream queue release. Whether to
-        pause (persistent) or stop (temporary / shutdown_requested) is now
-        decided by the run entry point in ``core/runner/team_runner.py`` so
-        external ``stop_coordination`` calls cannot be silently overridden
-        by the stream finally path.
+        Purely tears down this cycle's runtime resources (stream controller
+        and native harness). Memory extraction has moved to
+        :meth:`pause` / :meth:`stop` so it runs once per run cycle
+        rather than on every round.
         """
         host = self._host
-        memory_manager = host.resources.memory_manager
-        if memory_manager:
-            await memory_manager.extract_after_round()
         # Tear down this cycle's runtime: stop the controller's forwarder/status
         # mappers, then the member runtime (native supervisor). start() rebuilds
         # a fresh native next cycle.

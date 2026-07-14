@@ -12,6 +12,7 @@ import json
 import mimetypes
 import os
 import shutil
+import socket
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,11 +24,12 @@ from openjiuwen.core.foundation.store.kv.in_memory_kv_store import InMemoryKVSto
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
-from .agents import build_browser_worker_agent
-from .config import BrowserRunGuardrails, parse_command_args, resolve_playwright_mcp_cwd
-from .profiles import BrowserProfile, BrowserProfileStore
+
 from ..drivers.managed_browser import ManagedBrowserDriver, _default_chrome_user_data_dir
 from ..utils.parsing import extract_json_object
+from .agents import build_browser_worker_agent
+from .config import BrowserInstanceConfig, BrowserRunGuardrails, parse_command_args, resolve_playwright_mcp_cwd
+from .profiles import BrowserProfile, BrowserProfileStore
 
 MAX_ITERATION_MESSAGE = "Max iterations reached without completion"
 _ctx_observer_session_id: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -72,9 +74,7 @@ class BrowserTaskProgressState:
             missing_requirements=[
                 str(item).strip() for item in data.get("missing_requirements") or [] if str(item).strip()
             ],
-            recent_tool_steps=[
-                str(item).strip() for item in data.get("recent_tool_steps") or [] if str(item).strip()
-            ],
+            recent_tool_steps=[str(item).strip() for item in data.get("recent_tool_steps") or [] if str(item).strip()],
             last_page_url=str(last_page.get("url") or "").strip(),
             last_page_title=str(last_page.get("title") or "").strip(),
             last_screenshot=data.get("last_screenshot"),
@@ -127,6 +127,7 @@ class BrowserService:
         mcp_cfg: McpServerConfig,
         guardrails: BrowserRunGuardrails,
         cancel_store: Optional[BaseKVStore] = None,
+        instance: Optional[BrowserInstanceConfig] = None,
     ) -> None:
         self.provider = provider
         self.api_key = api_key
@@ -134,6 +135,7 @@ class BrowserService:
         self.model_name = model_name
         self.mcp_cfg = mcp_cfg
         self.guardrails = guardrails
+        self._instance = instance or BrowserInstanceConfig()
         self._cancel_store: BaseKVStore = cancel_store or InMemoryKVStore()
 
         self.started = False
@@ -147,7 +149,7 @@ class BrowserService:
         self._screenshots_dir = self._mcp_cwd / self._screenshot_subdir
         self._artifacts_dir = self._mcp_cwd / self._artifacts_subdir
         self._profile_store = BrowserProfileStore(self._resolve_profile_store_path())
-        self._profile_name = (os.getenv("BROWSER_PROFILE_NAME") or "jiuwenclaw").strip() or "jiuwenclaw"
+        self._profile_name = self._resolve_profile_name()
         self._driver_mode = self._resolve_driver_mode()
         self._active_profile: Optional[BrowserProfile] = None
         self._managed_driver: Optional[ManagedBrowserDriver] = None
@@ -199,14 +201,42 @@ class BrowserService:
                 paths.append(legacy)
         return paths
 
-    @staticmethod
-    def _resolve_driver_mode() -> str:
-        explicit = (os.getenv("BROWSER_DRIVER") or "").strip().lower()
+    def _resolve_profile_name(self) -> str:
+        """Resolve the active profile name (per-instance key wins over env).
+
+        Distinct browser keys map to distinct profile names so the managed
+        user-data-dir and persisted port never collide across agents.
+        """
+        instance = self._instance
+        name = ""
+        if instance:
+            name = (instance.profile_name or instance.sanitized_key() or "").strip()
+        if not name:
+            name = (os.getenv("BROWSER_PROFILE_NAME") or "").strip()
+        return name or "jiuwenclaw"
+
+    def _resolve_driver_mode(self) -> str:
+        explicit = (self._instance.driver_mode or "").strip().lower() if self._instance else ""
+        if not explicit:
+            explicit = (os.getenv("BROWSER_DRIVER") or "").strip().lower()
         if explicit:
             if explicit not in {"remote", "managed", "extension"}:
                 raise ValueError("BROWSER_DRIVER must be one of: remote, managed, extension")
             return explicit
         return "remote"
+
+    @staticmethod
+    def _allocate_free_port() -> int:
+        """Reserve an OS-assigned free TCP port for a managed Chrome launch.
+
+        Uses bind-to-0 so concurrent BrowserService instances never pick the
+        same port. The socket is closed immediately and the port handed to the
+        managed driver, which launches Chrome on it right away; the driver's
+        endpoint-ready check absorbs the small TOCTOU window.
+        """
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
 
     @staticmethod
     def _cancel_key(session_id: str, request_id: Optional[str] = None) -> str:
@@ -255,24 +285,36 @@ class BrowserService:
         return False
 
     def _resolve_existing_cdp_profile(self) -> Optional[BrowserProfile]:
+        # A keyed instance must only ever reuse a browser whose profile name
+        # matches its own key. The shared store tracks a single global
+        # selected_profile; adopting it would let whoever starts second attach
+        # to another key's live Chrome, collapsing the per-key isolation.
+        keyed = bool(self._instance and self._instance.key)
         candidates: list[BrowserProfile] = []
         for store_path in self._iter_profile_store_paths():
             store = BrowserProfileStore(store_path)
-            selected = store.selected_profile()
-            if selected is not None:
-                candidates.append(selected)
+            if not keyed:
+                selected = store.selected_profile()
+                if selected is not None:
+                    candidates.append(selected)
             named = store.get_profile(self._profile_name)
             if named is not None and all(named.name != item.name for item in candidates):
                 candidates.append(named)
 
+        _expected_extra_args = parse_command_args(os.getenv("BROWSER_MANAGED_ARGS") or "")
         for profile in candidates:
             endpoint = str(profile.cdp_url or "").strip()
-            if endpoint and self._is_cdp_endpoint_ready(endpoint):
-                try:
-                    self._profile_store.upsert_profile(profile, select=True)
-                except Exception:
-                    pass
-                return profile
+            if not endpoint or not self._is_cdp_endpoint_ready(endpoint):
+                continue
+            # Don't reuse a live Chrome whose launch args differ from the current
+            # BROWSER_MANAGED_ARGS — e.g. a headed Chrome when headless is now on.
+            if profile.extra_args != _expected_extra_args:
+                continue
+            try:
+                self._profile_store.upsert_profile(profile, select=True)
+            except Exception:
+                pass
+            return profile
         return None
 
     def _should_replace_managed_driver(self, profile: BrowserProfile) -> bool:
@@ -291,8 +333,19 @@ class BrowserService:
         env_map = dict(params.get("env", {}) or {})
         return str(env_map.get("PLAYWRIGHT_MCP_CDP_ENDPOINT") or "").strip()
 
-    def _build_managed_profile(self) -> BrowserProfile:
-        host = (os.getenv("BROWSER_MANAGED_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+    def _resolve_managed_port(self) -> int:
+        """Resolve the managed Chrome debug port.
+
+        Precedence: explicit per-instance port > (keyed: auto-allocate a free
+        port; legacy/unkeyed: env BROWSER_MANAGED_PORT, else 9333). A global env
+        port cannot serve multiple keys, so keyed instances ignore it in favor of
+        auto-allocation to avoid silently colliding on one browser.
+        """
+        instance = self._instance
+        if instance and instance.managed_port > 0:
+            return instance.managed_port
+        if instance and instance.key:
+            return self._allocate_free_port()
         port_raw = (os.getenv("BROWSER_MANAGED_PORT") or "9333").strip()
         try:
             port = int(port_raw)
@@ -300,17 +353,27 @@ class BrowserService:
                 raise ValueError
         except ValueError as exc:
             raise ValueError(f"Invalid BROWSER_MANAGED_PORT: {port_raw}") from exc
+        return port
+
+    def _build_managed_profile(self) -> BrowserProfile:
+        instance = self._instance
+        host = (os.getenv("BROWSER_MANAGED_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+        port = self._resolve_managed_port()
 
         kill_existing_raw = (os.getenv("BROWSER_MANAGED_KILL_EXISTING") or "").strip().lower()
         kill_existing = kill_existing_raw in {"1", "true", "yes", "on"}
-        explicit_user_data_dir = (os.getenv("BROWSER_MANAGED_USER_DATA_DIR") or "").strip()
+        explicit_user_data_dir = (
+            (instance.user_data_dir if instance else "") or (os.getenv("BROWSER_MANAGED_USER_DATA_DIR") or "")
+        ).strip()
         if explicit_user_data_dir:
             user_data_dir = explicit_user_data_dir
         elif kill_existing:
             user_data_dir = _default_chrome_user_data_dir()
         else:
             user_data_dir = str(self._mcp_cwd / ".browser-profiles" / self._profile_name)
-        browser_binary = (os.getenv("BROWSER_MANAGED_BINARY") or "").strip()
+        browser_binary = (
+            (instance.browser_binary if instance else "") or (os.getenv("BROWSER_MANAGED_BINARY") or "")
+        ).strip()
         extra_args = parse_command_args(os.getenv("BROWSER_MANAGED_ARGS") or "")
         cdp_url = f"http://{host}:{port}"
         return BrowserProfile(
@@ -355,11 +418,13 @@ class BrowserService:
             await self._stop_managed_driver()
 
         profile = self._profile_store.get_profile(self._profile_name)
+        _expected_extra_args = parse_command_args(os.getenv("BROWSER_MANAGED_ARGS") or "")
         if (
             profile is None
             or profile.driver_type != "managed"
             or profile.debug_port <= 0
             or not str(profile.user_data_dir).strip()
+            or profile.extra_args != _expected_extra_args
         ):
             profile = self._build_managed_profile()
         configured_binary = (os.getenv("BROWSER_MANAGED_BINARY") or "").strip()
@@ -497,10 +562,7 @@ class BrowserService:
     def _is_retryable_runtime_result(parsed: Dict[str, Any]) -> bool:
         if not isinstance(parsed, dict) or bool(parsed.get("ok", False)):
             return False
-        text = (
-            f"{parsed.get('error', '')}\n"
-            f"{parsed.get('final', '')}"
-        ).lower()
+        text = (f"{parsed.get('error', '')}\n{parsed.get('final', '')}").lower()
         markers = (
             "frame has been detached",
             "execution context was destroyed",
@@ -518,10 +580,7 @@ class BrowserService:
     def _should_restart_after_runtime_result(parsed: Dict[str, Any]) -> bool:
         if not isinstance(parsed, dict):
             return False
-        text = (
-            f"{parsed.get('error', '')}\n"
-            f"{parsed.get('final', '')}"
-        ).lower()
+        text = (f"{parsed.get('error', '')}\n{parsed.get('final', '')}").lower()
         restart_markers = (
             "frame has been detached",
             "target page, context or browser has been closed",
@@ -588,6 +647,7 @@ class BrowserService:
             raise RuntimeError("npx not found in PATH. Install Node.js first.")
 
         from .browser_tools import ensure_browser_runtime_client_patch
+
         ensure_browser_runtime_client_patch()
 
         await self._ensure_managed_driver_started()
@@ -628,12 +688,11 @@ class BrowserService:
 
     def _start_heartbeat(self) -> None:
         if self._heartbeat_task is None or self._heartbeat_task.done():
-            self._heartbeat_task = asyncio.create_task(
-                self._heartbeat_loop(), name="browser-heartbeat"
-            )
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="browser-heartbeat")
 
     async def _check_connection(self) -> None:
         from .browser_tools import get_registered_client
+
         if self._managed_driver is not None:
             driver_dict = getattr(self._managed_driver, "__dict__", {})
             endpoint_ready_fn = driver_dict.get("is_endpoint_ready")
@@ -655,6 +714,7 @@ class BrowserService:
 
     async def _heartbeat_loop(self) -> None:
         from openjiuwen.core.common.logging import logger as _logger
+
         while True:
             await asyncio.sleep(self._heartbeat_interval)
             try:
@@ -865,9 +925,7 @@ class BrowserService:
 
     @classmethod
     def _should_treat_as_completed(cls, parsed: Dict[str, Any]) -> bool:
-        status = cls._normalize_progress_status(
-            parsed.get("status") or parsed.get("task_status")
-        )
+        status = cls._normalize_progress_status(parsed.get("status") or parsed.get("task_status"))
         if status != "completed":
             return False
         progress = parsed.get("progress") if isinstance(parsed.get("progress"), dict) else {}
@@ -897,9 +955,7 @@ class BrowserService:
             progress_state.request_id = request_id
 
         progress_payload = parsed.get("progress") if isinstance(parsed.get("progress"), dict) else {}
-        status = self._normalize_progress_status(
-            parsed.get("status") or parsed.get("task_status")
-        )
+        status = self._normalize_progress_status(parsed.get("status") or parsed.get("task_status"))
         if not status:
             if bool(parsed.get("ok", False)):
                 status = "completed"
@@ -972,13 +1028,9 @@ class BrowserService:
         if progress_state.next_step:
             lines.append(f"- Next step to try: {progress_state.next_step}")
         if progress_state.completion_evidence:
-            lines.append(
-                f"- Completion evidence observed: {' | '.join(progress_state.completion_evidence)}"
-            )
+            lines.append(f"- Completion evidence observed: {' | '.join(progress_state.completion_evidence)}")
         if progress_state.missing_requirements:
-            lines.append(
-                f"- Missing requirements / blockers: {' | '.join(progress_state.missing_requirements)}"
-            )
+            lines.append(f"- Missing requirements / blockers: {' | '.join(progress_state.missing_requirements)}")
         if progress_state.recent_tool_steps:
             lines.append("- Recent browser tool activity:")
             lines.extend(f"  - {step}" for step in progress_state.recent_tool_steps[-6:])
@@ -1334,25 +1386,17 @@ class BrowserService:
                             last_failure_page = parsed.get("page") if isinstance(parsed.get("page"), dict) else {}
                             last_failure_screenshot = parsed.get("screenshot")
 
-                        if (
-                            should_resume_max_iter
-                        ):
+                        if should_resume_max_iter:
                             used_max_iteration_resume = True
                             next_task = self._build_resume_task(
                                 next_task,
                                 str(parsed.get("final", "")),
-                                progress_context=self._build_progress_context(
-                                    self._progress_by_session.get(sid)
-                                ),
+                                progress_context=self._build_progress_context(self._progress_by_session.get(sid)),
                             )
                             last_error = str(parsed.get("error") or MAX_ITERATION_MESSAGE)
                             continue
 
-                        if (
-                            not parsed_ok
-                            and attempt_idx < attempts
-                            and self._is_retryable_runtime_result(parsed)
-                        ):
+                        if not parsed_ok and attempt_idx < attempts and self._is_retryable_runtime_result(parsed):
                             page = parsed.get("page") if isinstance(parsed.get("page"), dict) else {}
                             failure_summary = self._build_failure_summary(
                                 task=base_task,
@@ -1364,10 +1408,9 @@ class BrowserService:
                                 attempt=attempt_idx,
                                 progress_state=self._progress_by_session.get(sid),
                             )
-                            should_restart = (
-                                self._is_retryable_transport_message(failure_summary)
-                                or self._should_restart_after_runtime_result(parsed)
-                            )
+                            should_restart = self._is_retryable_transport_message(
+                                failure_summary
+                            ) or self._should_restart_after_runtime_result(parsed)
                             if should_restart:
                                 try:
                                     await self._restart()

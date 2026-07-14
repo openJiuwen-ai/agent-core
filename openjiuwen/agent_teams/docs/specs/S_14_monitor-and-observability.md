@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/monitor/`、`openjiuwen/agent_teams/observability/` |
-| 最近一次修订日期 | 2026-06-09 |
+| 最近一次修订日期 | 2026-06-27 |
 | 关联 feature | F_09_team-stream-logging.md |
 
 ## 范围 / 边界
@@ -19,10 +19,12 @@
 2. **`observability/` 子模块**——OpenTelemetry trace 数据采集点。已上线，提供：
    - `setup.py`：`init_observability/shutdown_observability` 管理 OTel 生命周期
    - `config.py`：`ObservabilityConfig` 配置类
-   - `span_context.py`：ContextVar 管理 span 上下文
-   - `callback_handler.py` / `rail.py`：LLM/Tool/Agent span 生命周期
-   - `monitor_handler.py`：Team/Task/Member/Message span 生命周期
+   - `span_context.py`：ContextVar 管理 span 上下文 + `cascade_close_children`（唯一级联排空来源）
+   - `rail.py`：`AgentSpanScope`（agent span 完整生命周期）+ `before_task_iteration`/`after_task_iteration`（多轮 member）+ `before_invoke`/`after_invoke`（单轮 subagent 兜底）
+   - `callback_handler.py`：LLM/Tool span 生命周期，tool span input 自动剥离 session
+   - `monitor_handler.py`：Team/Task/Member/Message span 生命周期，`_event_span_io` 按事件语义拆分 input/output
    - `semconv.py` / `redaction.py`：属性常量 + 脱敏
+   - `subagent_elements.py`：在 team 侧 subagent 工厂注入 ObservabilityRail（idempotent）
 
   Span 树结构、生命周期、ActiveSpanTracker 详细设计见 [F_37_observability-otel-trace.md](../features/F_37_observability-otel-trace.md)。
 
@@ -312,7 +314,7 @@ class MonitorEvent(BaseModel):
 | `TeamInfo` | `Team` SQLModel | `team_name`, `display_name`, `leader_member_name`, `desc`, `created` (ms) |
 | `MemberInfo` | `TeamMember` SQLModel | `member_name`, `team_name`, `display_name`, `desc`, `status`, `execution_status`, `mode` |
 | `TaskInfo` | `TeamTaskBase` SQLModel | `task_id`, `team_name`, `title`, `content`, `status`, `assignee`, `updated_at` (ms, 与当前 `status` 绑定) |
-| `MessageInfo` | `TeamMessageBase` SQLModel | `message_id`, `team_name`, `from_member_name`, `to_member_name`, `content`, `timestamp` (ms), `broadcast`, `is_read` |
+| `MessageInfo` | `TeamMessageBase` SQLModel | `message_id`, `team_name`, `from_member_name`, `to_member_name`, `content`, `protocol` (`"plain"` 普通文本 / `"json"` 结构化 payload 如审批请求和结果), `timestamp` (ms), `broadcast`, `is_read` |
 
 适配层的存在意义：让监控 API 与内部 db schema 解耦。新增 db 字段不会自动暴露给 monitor 消费方；要暴露需要**显式**在对应 `Info` 上加字段并改 `from_internal`。
 

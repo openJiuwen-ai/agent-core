@@ -35,12 +35,15 @@ agent_teams/
 ├── context.py           # session_id 跨成员/跨模式共享 contextvars
 ├── i18n.py              # 运行时中/英文字符串（仅装运行时 hard-coded 串）
 ├── timefmt.py           # 毫秒 epoch → "绝对本地时间 + 相对差" 渲染（喂 LLM/观测，文案走 i18n）
+├── inbound_render.py    # 入站消息/框架事件 → <team-inbound>/<team-event>/<team-note> XML 渲染（纯函数，喂 LLM；文案由 handler 从 i18n 取）。见 F_46
+├── tiny_agent.py        # Tiny Agent：随时唤起的极简 NativeHarness（system_prompt + model + 仅结构化输出工具）；run 单轮 / chat 多轮；ephemeral（含 title/summary 预定义）+ team-scoped（TeamAgentSpec.tiny_agents 多实例，TeamInfra 持有）。见 F_45
 ├── paths.py             # 文件系统布局单一真相源
 ├── schema/              # 全部数据模型（Spec / Context / Event / Status / Task）
 ├── models/              # 多模型部署原语（ModelPoolEntry / 池继承 / Allocator）
 ├── agent/               # 核心运行时（TeamAgent 本体 + 装配链）
 ├── prompts/             # 系统提示词模板、加载器、PromptSection 构造与缓存
-├── rails/               # 团队 Rail + manifest 元素声明（team rail / 内置 rail·tool / context handle）
+├── rails/               # 团队 Rail + manifest 元素声明（team rail / 内置 rail·tool / context handle / team confirm payload）
+├── security/            # Team 权限安全辅助（permission narrowing 等）
 ├── runtime/             # Runner 进程内 TeamAgent 对象池 + 派发决策 + Run/Interact 并发门禁
 ├── interaction/         # 外部交互入口（UserInbox / HumanAgentInbox / @ 路由）
 ├── tools/               # 团队工具（Leader / Teammate / Human Agent 可调用的原子操作）
@@ -86,10 +89,12 @@ customizer 后处理）。
 
 | 文件 | 职责 |
 |---|---|
-| `team_policy_rail.py` | `TeamPolicyRail`：把 prompts/sections 的 `PromptSection` 注入 `SystemPromptBuilder`；含 `MtimeSectionCache` 驱动的 dynamic section 刷新 |
-| `tool_approval_rail.py` | `TeamToolApprovalRail`：teammate 调工具时通过消息向 leader 申请审批的中断 rail |
+| `team_policy_rail.py` | `TeamPolicyRail`：静态 `PromptSection` 注入 `SystemPromptBuilder`；3 个 dynamic section（hitt/info/members）经 `MtimeSectionCache` 刷新后改挂 `prompt_attachment_manager`（移出 system prompt → 前缀 KV cache 稳定），不再进 builder；另含 attachment / 入站标签两个静态说明 section。见 F_46 |
+| `confirm_payload.py` | `TeamConfirmPayload` + `TeamPermissionConfirmResponse`：team-specific confirmation payload/response models（extend harness base classes with `decided_by` tracking） |
+| `team_permission_rail.py` | `TeamPermissionRail` + `TeamApprovalOrchestrator`：team-mode permission guardrail；继承 `PermissionInterruptRail`，leader-mediated ASK resolution + session-scoped auto-confirm（`_persist_allow_always=False`）。`enable_permissions=True` 时替代 `TeamToolApprovalRail` |
+| `tool_approval_rail.py` | `TeamToolApprovalRail`：teammate 调工具时通过消息向 leader 申请审批的中断 rail（`enable_permissions=False` 时使用） |
 | `team_tool_rail.py` / `team_plan_mode_rail.py` | `TeamToolRail`（协同工具注册）/ `TeamPlanModeRail`（plan mode 提示叠加） |
-| `elements.py` | 6 个 team rail 的 `@harness_element` 工厂 + `ConstructionInput`（`team.tool`/`team.policy`/`team.workspace`/`team.tool_approval`/`team.plan_mode`/`team.reliability`） |
+| `elements.py` | 7 个 team rail 的 `@harness_element` 工厂 + `ConstructionInput`（`team.tool`/`team.policy`/`team.workspace`/`team.tool_approval`/`team.permission`/`team.plan_mode`/`team.reliability`） |
 | `team_context.py` | `TeamHandleKey` + accessor + `inject_team_handles`：team live handle 经 `BuildContext.extras` 的 key 常量 + 类型化读取。rail 不缓存——需跨重建存活的状态（如 `reliability_components`）作为复用对象注入，由每轮新建的 rail 包装 |
 | `builtin_elements.py` | openjiuwen 内置 rail/tool（`task_planning`/`skill_use`/`web_search` 等）的 `@harness_element` 声明——取代已删的 class registry |
 | `registration.py` | `ensure_harness_elements_registered()`：import elements → `register_from_catalog()`，spec build 路径的统一注册入口 |
@@ -258,8 +263,9 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 
 通用实现已下沉到 `openjiuwen.harness.tools.worktree`，由 deepagent 与 team 共用。team 侧只保留三件事：
 
-- 通过 `TeamAgentSpec.worktree`（`WorktreeConfig`）描述配置，`agent_configurator.create_worktree_manager` 在非 LEADER 角色上构造 `WorktreeManager`。
-- **workspace 视图软链由 team 侧自管**：`create_worktree_manager` 给 `WorktreeManager` 注入一个翻译适配器，把 `WorktreeCreatedEvent` / `WorktreeRemovedEvent` 路由到 `TeamWorkspaceManager.mount_worktree` / `unmount_worktree`，在共享 team workspace 下维护 `.worktree/{slug}` 软链。这一层是"本 team 当前活跃 worktree 一览"的导航视图，**单 agent 不订阅事件，软链物理上不存在**——`WorktreeManager` 本身不知道软链。
+- 通过 `TeamAgentSpec.worktree`（`WorktreeConfig`）描述配置；team 下 worktree 隔离只由 leader / 宿主在 `SpawnManager.build_context_from_db` 里按 `TeamMember.options.worktree.isolation == "worktree"` 调用 `create_owner_worktree(slug)` 创建，不向 leader 或 teammate 暴露 `enter_worktree` / `exit_worktree` 作为手动兜底。
+- **workspace 视图软链由 team 侧自管**：`create_worktree_manager` 给 `WorktreeManager` 注入一个翻译适配器，把 `WorktreeCreatedEvent` / `WorktreeRemovedEvent` 路由到 `TeamWorkspaceManager.mount_worktree` / `unmount_worktree`，在共享 team workspace 下维护 `.worktree/{slug}` 软链。这一层是"本 team 当前活跃 worktree 一览"的导航视图，**单 agent 不订阅事件，软链物理上不存在**——`WorktreeManager` 本身不知道软链。team 侧同时把这些事件桥到 `TeamEvent.WORKTREE_*` 总线。
+- Team teammate 隔离 worktree 命名固定为 `agent-{team_name}-{member_name}-{hash8}`。`TeamMember.options.worktree` 持久化 `isolation/path`；旧库迁移会把 `model_ref_json` 回填到 `options.model_ref` 后删除旧列，不匹配 `isolation/worktree_path` 物理列。`worktree_name/worktree_branch/head_commit` 留在 leader 宿主内存。`cleanup_teammate` 停掉成员后检查变更：干净则 `git worktree remove` 并清空路径字段；有变更、宿主 metadata 丢失或无法确认状态则保留 `worktree_path` 给 leader 合并与解冲突。
 - `worktree_remote.py`：`RemoteWorktreeBackend` / `WorktreeRemoteHandler` 跨机器 worktree 后端，依赖 `paths.get_agent_teams_home`。需要时由调用方直接 `WorktreeManager(backend=RemoteWorktreeBackend(...))` 注入，不走 backend registry（构造参数不止 config）。
 
 `harness/tools/worktree` 暴露的 `WorktreeManager` 接受可选 `event_handler: Callable[[WorktreeEvent], Awaitable[None]]`；team 端如需进一步把生命周期事件桥接到 `TeamEvent.WORKTREE_*` 总线，让上面的 mount/unmount 适配器和总线发布共享同一个 handler 即可（当前总线投递未启用）。

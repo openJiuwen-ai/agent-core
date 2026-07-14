@@ -95,15 +95,16 @@ def parse_all_relations(
     # Convert entity declaration into proper entities
     entities = declare_entities(entities, entity_types, **kwargs)
 
-    # De-duplicate relations in case LLM starts repeating
-    existing_contents = set()
+    # De-duplicate relations (by "fact", the field dict2relation reads) in case LLM starts repeating
+    seen_facts: set[str] = set()
+    deduped_relations: list[dict] = []
     for relation in relations:
-        new_content = relation.get("content", "").strip()
-        if any(new_content in old_content for old_content in existing_contents):
-            relation["content"] = ""
-        else:
-            relation["content"] = new_content
-        existing_contents.add(new_content)
+        new_fact = str(relation.get("fact", "")).strip()
+        if not new_fact or any(new_fact in seen_fact for seen_fact in seen_facts):
+            continue
+        seen_facts.add(new_fact)
+        deduped_relations.append(relation)
+    relations = deduped_relations
 
     # Parse relation extraction results
     relations = [rel for rel in (dict2relation(rel, entities, **kwargs) for rel in relations) if rel]

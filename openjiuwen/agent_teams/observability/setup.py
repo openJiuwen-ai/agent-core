@@ -33,6 +33,7 @@ from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 
 from openjiuwen.agent_teams.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.agent_teams.observability.config import ObservabilityConfig
+from openjiuwen.agent_teams.observability.file_exporter import TraceFileExporter
 from openjiuwen.agent_teams.observability.monitor_handler import OtelTeamMonitorHandler
 from openjiuwen.agent_teams.observability.span_context import (
     ActiveSpanTracker,
@@ -48,7 +49,6 @@ from openjiuwen.core.runner.callback.events import (
     LLMCallEvents,
     ToolCallEvents,
 )
-
 
 _NAMESPACE = "agent_teams.observability"
 _CALLBACK_TRACER_NAME = "openjiuwen.agent_teams.observability"
@@ -94,6 +94,12 @@ def init_observability(
     set_active_span_tracker(tracker)
 
     exporter = span_exporter_override or _build_exporter(config)
+    # console writes synchronously per-span, so keep it on the Simple
+    # processor for immediate output. The file exporter appends straight
+    # to disk with no buffering of its own — put it on BatchSpanProcessor
+    # so span-end does not block the business thread (it batches ended
+    # spans and calls export() asynchronously, default every 5s / 512
+    # spans). Anything else (otlp_*) also batches.
     if span_exporter_override is not None or isinstance(exporter, ConsoleSpanExporter):
         _provider.add_span_processor(SimpleSpanProcessor(exporter))
     else:
@@ -126,6 +132,7 @@ def finalize_team_trace(team_name: str) -> None:
         _monitor_handler.close_team_spans(team_name)
 
     from openjiuwen.agent_teams.observability.span_context import finalize_trace
+
     finalize_trace(team_name)
 
     force_flush_provider()
@@ -215,6 +222,11 @@ def _build_exporter(config: ObservabilityConfig) -> SpanExporter:
     """Construct the exporter selected by the configuration."""
     if config.exporter == "console":
         return ConsoleSpanExporter()
+    if config.exporter == "file":
+        return TraceFileExporter(
+            root_dir=config.traces_dir,
+            retention_days=config.file_retention_days,
+        )
     if config.exporter == "otlp_grpc":
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
@@ -239,9 +251,7 @@ def _build_auth_headers(config: ObservabilityConfig) -> dict[str, str]:
 
     headers: dict[str, str] = {}
     if config.langfuse_public_key and config.langfuse_secret_key:
-        credentials = base64.b64encode(
-            f"{config.langfuse_public_key}:{config.langfuse_secret_key}".encode()
-        ).decode()
+        credentials = base64.b64encode(f"{config.langfuse_public_key}:{config.langfuse_secret_key}".encode()).decode()
         headers["authorization"] = f"Basic {credentials}"
     return headers
 

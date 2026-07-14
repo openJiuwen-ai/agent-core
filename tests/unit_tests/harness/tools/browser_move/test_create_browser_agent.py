@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.tool import McpServerConfig
+from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents.browser_agent import (
     BROWSER_AGENT_FACTORY_NAME,
@@ -68,9 +70,7 @@ def _capture_create_deep_agent():
 
 def _patch_all(fake_create, *, runtime_mock=None, fake_tools=None):
     stack = ExitStack()
-    mock_runtime_cls = stack.enter_context(
-        patch("openjiuwen.harness.subagents.browser_agent.BrowserAgentRuntime")
-    )
+    mock_runtime_cls = stack.enter_context(patch("openjiuwen.harness.subagents.browser_agent.BrowserAgentRuntime"))
     if runtime_mock is not None:
         mock_runtime_cls.return_value = runtime_mock
     tools = fake_tools if fake_tools is not None else _make_fake_tools()
@@ -139,6 +139,41 @@ def test_default_wiring_main_agent_has_browser_runtime_rail() -> None:
     assert any(isinstance(rail, BrowserRuntimeRail) for rail in rails)
 
 
+def test_default_wiring_windows_browser_probe_and_snapshot_results() -> None:
+    calls, fake = _capture_create_deep_agent()
+    with _patch_all(fake)[0]:
+        create_browser_agent(_fake_model(), settings=_fake_settings())
+
+    rails = calls[0].get("rails", [])
+    context_rails = [rail for rail in rails if isinstance(rail, ContextProcessorRail)]
+    assert len(context_rails) == 1
+
+    processors = context_rails[0]._user_processors
+    assert len(processors) == 1
+    key, config = processors[0]
+    assert key == "ToolResultWindowProcessor"
+    # Pin the intended contract literally (not against the source constant) so a
+    # regression like the plain "browser_snapshot" name is actually caught.
+    assert config.tool_names == [
+        "browser_probe_interactives",
+        "browser_probe_cards",
+        "browser_snapshot",
+    ]
+    assert config.keep_last_k == 1
+
+
+def test_caller_context_processor_rail_suppresses_injection() -> None:
+    calls, fake = _capture_create_deep_agent()
+    caller_rail = ContextProcessorRail(preset=False)
+    with _patch_all(fake)[0]:
+        create_browser_agent(_fake_model(), settings=_fake_settings(), rails=[caller_rail])
+
+    rails = calls[0].get("rails", [])
+    context_rails = [rail for rail in rails if isinstance(rail, ContextProcessorRail)]
+    # Only the caller's rail is present; the browser agent does not add its own.
+    assert context_rails == [caller_rail]
+
+
 def test_default_wiring_does_not_add_sys_operation_rail() -> None:
     calls, fake = _capture_create_deep_agent()
     with _patch_all(fake)[0]:
@@ -183,7 +218,46 @@ def test_settings_forwarded_to_runtime_constructor() -> None:
         model_name=settings.model_name,
         mcp_cfg=settings.mcp_cfg,
         guardrails=settings.guardrails,
+        instance=settings.instance,
     )
+
+
+def _model_without_client_config() -> SimpleNamespace:
+    # model_client_config=None routes _resolve_runtime_settings through
+    # build_runtime_settings(instance), exercising the keyed-instance path.
+    return SimpleNamespace(model_client_config=None, model_config=None)
+
+
+def test_browser_key_threads_keyed_instance_to_runtime() -> None:
+    """A bare browser_key becomes a keyed BrowserInstanceConfig on the runtime."""
+    calls, fake = _capture_create_deep_agent()
+    ctx, mock_runtime_cls, _mock_build, _tools = _patch_all(fake)
+    with ctx:
+        create_browser_agent(_model_without_client_config(), browser_key="teammate-A")
+
+    del calls
+    instance = mock_runtime_cls.call_args.kwargs["instance"]
+    assert instance is not None
+    assert instance.key == "teammate-A"
+    # The MCP server_id carried into the runtime must be isolated by the key.
+    assert mock_runtime_cls.call_args.kwargs["mcp_cfg"].server_id.endswith("__teammate-A")
+
+
+def test_browser_instance_dict_threads_port_to_runtime() -> None:
+    """A serializable instance dict (teams-wire form) rebuilds into the runtime."""
+    calls, fake = _capture_create_deep_agent()
+    ctx, mock_runtime_cls, _mock_build, _tools = _patch_all(fake)
+    with ctx:
+        create_browser_agent(
+            _model_without_client_config(),
+            browser_instance={"key": "B", "managed_port": 9502, "driver_mode": "managed"},
+        )
+
+    del calls
+    instance = mock_runtime_cls.call_args.kwargs["instance"]
+    assert instance.key == "B"
+    assert instance.managed_port == 9502
+    assert instance.driver_mode == "managed"
 
 
 def test_language_en_uses_english_prompt() -> None:

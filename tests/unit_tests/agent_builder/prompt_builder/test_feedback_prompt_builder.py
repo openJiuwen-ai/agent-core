@@ -120,7 +120,8 @@ class MockModelClient(BaseModelClient):
 @pytest.mark.asyncio
 async def test_feedback_prompt_builder_general():
     builder = FeedbackPromptBuilder(
-        ModelRequestConfig(model=""), ModelClientConfig(client_provider="MocKFeedbackLLM", api_base="", api_key="")
+        ModelRequestConfig(model=""),
+        ModelClientConfig(client_provider="MocKFeedbackLLM", api_base="", api_key="test-key")
     )
     prompt = "你是一个旅行助手"
     feedback = "丰富一下"
@@ -136,7 +137,8 @@ async def test_feedback_prompt_builder_general():
 @pytest.mark.asyncio
 async def test_feedback_prompt_builder_insert():
     builder = FeedbackPromptBuilder(
-        ModelRequestConfig(model=""), ModelClientConfig(client_provider="MocKFeedbackLLM", api_base="", api_key="")
+        ModelRequestConfig(model=""),
+        ModelClientConfig(client_provider="MocKFeedbackLLM", api_base="", api_key="test-key")
     )
     insert_tag = "[用户要插入的位置]"
     prompt = "你是一个旅行助手"
@@ -155,7 +157,8 @@ async def test_feedback_prompt_builder_insert():
 @pytest.mark.asyncio
 async def test_feedback_prompt_builder_select():
     builder = FeedbackPromptBuilder(
-        ModelRequestConfig(model=""), ModelClientConfig(client_provider="MocKFeedbackLLM", api_base="", api_key="")
+        ModelRequestConfig(model=""),
+        ModelClientConfig(client_provider="MocKFeedbackLLM", api_base="", api_key="test-key")
     )
 
     prompt = "你是一个旅行助手"

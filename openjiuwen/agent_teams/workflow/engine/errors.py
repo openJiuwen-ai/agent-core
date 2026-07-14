@@ -28,3 +28,13 @@ class SchemaError(WorkflowError):
 
 class BackendError(WorkflowError):
     """The agent backend raised while producing a result."""
+
+
+class WorkflowAborted(BaseException):
+    """Cooperative pause signal raised at an ``agent()`` abort checkpoint.
+
+    A ``BaseException`` (not ``WorkflowError`` / ``Exception``) so it propagates
+    through ``parallel()`` / ``pipeline()`` branch bodies' ``except Exception``
+    exactly like ``CancelledError`` — the in-flight call neither journals its
+    result nor maps to ``None``; the run unwinds so a later resume reruns it.
+    """

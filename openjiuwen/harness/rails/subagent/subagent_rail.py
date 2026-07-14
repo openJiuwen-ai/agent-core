@@ -7,6 +7,8 @@ from __future__ import annotations
 from typing import List, TYPE_CHECKING
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.tools import get_tool_description
@@ -162,6 +164,11 @@ class SubagentRail(DeepAgentRail):
     _KNOWN_AGENT_TOOLS: dict[str, str] = {
         "explore_agent": "bash, glob, grep, list_files, read_file",
         "plan_agent": "bash, glob, grep, list_files, read_file",
+        "browser_agent": (
+            "Playwright browser MCP tools, browser_probe_cards, "
+            "browser_probe_interactives, browser_custom_action, "
+            "browser_list_custom_actions, browser_runtime_health"
+        ),
     }
 
     def _build_available_agents_description(self, subagents: List[SubAgentConfig | "DeepAgent"]) -> str:
@@ -217,10 +224,16 @@ class SubagentRail(DeepAgentRail):
             if ability_mgr is not None:
                 try:
                     tool_names: list[str] = []
-                    for c in getattr(ability_mgr, "cards", []):
-                        n = getattr(c, "name", None)
-                        if isinstance(n, str):
-                            tool_names.append(n)
+                    list_abilities = getattr(ability_mgr, "list", None)
+                    cards = list_abilities() if callable(list_abilities) else []
+                    if not isinstance(cards, list):
+                        cards = []
+                    for card in cards:
+                        if not isinstance(card, ToolCard):
+                            continue
+                        name = getattr(card, "name", None)
+                        if isinstance(name, str):
+                            tool_names.append(name)
                     if tool_names:
                         return ", ".join(tool_names)
                 except (AttributeError, TypeError) as e:

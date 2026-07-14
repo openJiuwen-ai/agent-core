@@ -156,6 +156,27 @@ class PregelGraph(Graph):
                     queue.append(tgt)
         return visited
 
+    def _build_branch_parent(self) -> dict[str, str]:
+        """Map nested branch nodes to their parent branch node.
+
+        When a branch exit target is itself a branch node, terminals reachable
+        under the inner branch belong to the outer branch path that enters it.
+        """
+        parent: dict[str, str] = {}
+        nested_branch_nodes = set(self.branch_targets) | set(self.branches)
+        for branch_node_id, targets in self.branch_targets.items():
+            for target in targets:
+                if target in nested_branch_nodes:
+                    parent[target] = branch_node_id
+        return parent
+
+    @staticmethod
+    def _branch_root(branch_node_id: str, branch_parent: dict[str, str]) -> str:
+        root = branch_node_id
+        while root in branch_parent:
+            root = branch_parent[root]
+        return root
+
     def _resolve_barrier_groups(
         self, target_id: str, source_list: list[set[str]]
     ) -> list[set[str]]:
@@ -164,6 +185,10 @@ class PregelGraph(Graph):
         Uses a consumer perspective: for each branch target, perform BFS to find
         forward-reachable nodes, then determine which predecessors are exclusive
         to a single branch (OR-group candidates) vs shared/standalone.
+
+        Nested branch nodes are hoisted to their root branch ancestor so that
+        terminals from inner OR-groups merge with sibling exits of the outer
+        branch instead of being AND-ed across hierarchy levels.
         """
         if not self.branch_targets or not source_list:
             return source_list
@@ -188,8 +213,7 @@ class PregelGraph(Graph):
                     pred_info[p].add((bid, tgt))
 
         # Step 4: group predecessors by branch_id
-        from collections import defaultdict as _defaultdict
-        branch_groups: dict[str, set[str]] = _defaultdict(set)
+        branch_groups: dict[str, set[str]] = defaultdict(set)
         standalone: list[set[str]] = []
 
         for p in all_predecessors:
@@ -200,10 +224,13 @@ class PregelGraph(Graph):
             else:
                 standalone.append({p})
 
-        # Step 5: assemble result
-        result: list[set[str]] = []
-        for group in branch_groups.values():
-            result.append(group)
+        # Step 5: hoist nested branch groups to root branch ancestors
+        branch_parent = self._build_branch_parent()
+        root_merged: dict[str, set[str]] = defaultdict(set)
+        for bid, preds in branch_groups.items():
+            root_merged[self._branch_root(bid, branch_parent)] |= preds
+
+        result: list[set[str]] = [group for group in root_merged.values() if group]
         for s in standalone:
             result.append(s)
 

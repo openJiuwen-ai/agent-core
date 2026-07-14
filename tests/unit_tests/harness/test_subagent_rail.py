@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.rails.subagent.subagent_rail import SubagentRail
 from openjiuwen.harness.rails.subagent.session_rail import SessionRail
@@ -221,6 +222,36 @@ class TestSubagentRail:
         mock_create.return_value = [mock_tool]
 
         spec = SubAgentConfig(
+            agent_card=AgentCard(
+                name="browser_agent",
+                description="Browser specialist",
+            ),
+            system_prompt="Browser prompt",
+        )
+
+        mock_agent = Mock()
+        mock_agent.system_prompt_builder = Mock()
+        mock_agent.system_prompt_builder.language = "cn"
+        mock_agent.deep_config.subagents = [spec]
+        mock_agent.ability_manager = Mock()
+
+        rail = SubagentRail()
+        rail.init(mock_agent)
+
+        available_agents = mock_create.call_args.kwargs["available_agents"]
+        assert "- browser_agent: Browser specialist" in available_agents
+        assert "browser_probe_cards" in available_agents
+        assert "browser_probe_interactives" in available_agents
+        assert "Tools: All tools" not in available_agents
+
+    @staticmethod
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
+    def test_extract_agent_meta_with_subagentspec(mock_create):
+        """SubAgentConfig card name/description appear in available_agents passed to create_task_tool."""
+        mock_tool = _make_tool_mock()
+        mock_create.return_value = [mock_tool]
+
+        spec = SubAgentConfig(
             agent_card=AgentCard(name="test_agent", description="Test description"),
             system_prompt="Test prompt",
         )
@@ -266,6 +297,36 @@ class TestSubagentRail:
         assert "available_agents" in call_args.kwargs
         available_agents = call_args.kwargs["available_agents"]
         assert "- agent_name: agent description (Tools: All tools)" in available_agents
+
+    @staticmethod
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
+    def test_extract_agent_meta_with_deepagent_fallback(mock_create):
+        """DeepAgent-like mock without card uses fallback meta in available_agents."""
+        mock_tool = _make_tool_mock()
+        mock_create.return_value = [mock_tool]
+
+        sub = Mock()
+        sub.card = Mock()
+        sub.card.name = "agent_name"
+        sub.card.description = "agent description"
+        sub.ability_manager = Mock()
+        sub.ability_manager.list.return_value = [
+            ToolCard(id="tool_1", name="read_file"),
+            ToolCard(id="tool_2", name="browser_probe_cards"),
+            AgentCard(name="nested_agent"),
+        ]
+
+        mock_parent_agent = Mock()
+        mock_parent_agent.system_prompt_builder = Mock()
+        mock_parent_agent.system_prompt_builder.language = "cn"
+        mock_parent_agent.deep_config.subagents = [sub]
+        mock_parent_agent.ability_manager = Mock()
+
+        rail = SubagentRail()
+        rail.init(mock_parent_agent)
+
+        available_agents = mock_create.call_args.kwargs["available_agents"]
+        assert "- agent_name: agent description (Tools: read_file, browser_probe_cards)" in available_agents
 
     @staticmethod
     @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")

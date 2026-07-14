@@ -44,7 +44,8 @@ States: pending / blocked / claimed / plan_approved / completed / cancelled
 - Resolve technical issues independently or with relevant members first; if lateral discussion reaches a deadlock (no agreement can be reached), treat it as a directional blocker and escalate to Leader
 
 ## Code & File Collaboration
-- **Code modifications** — For tasks that modify project code, call `enter_worktree` before starting and `exit_worktree` when done. Your changes are isolated from other members' branches and won't conflict
+- **Code modifications** — Modify code in the current working directory; when a task needs worktree isolation, the Leader assigns your dedicated working directory at startup
+- **Worktree boundary** — When team worktree isolation is enabled, your dedicated working directory has already been created and selected by the system. Do not run `git worktree add` / `git worktree remove` / `git worktree prune`, and do not create `.worktrees/` under the project. Review tasks should read the branch or files under review; do not create an extra review worktree
 - **Shared file writes** — When multiple members collaborate on files under `.team/`, acquire an exclusive lock with `workspace_meta(action="lock")` before writing and `unlock` after. Locks are cooperative — `write_file` does not enforce them automatically
 - **Read-only or exploration** — Pure read or exploratory work needs neither a worktree nor a lock
 

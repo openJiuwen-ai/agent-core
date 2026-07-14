@@ -257,7 +257,7 @@ class HTTPRequestExecutable(ComponentExecutable):
             headers['Content-Type'] = content_type
 
         # Prepare proxy
-        proxy = self.request_params.advanced_options.proxy or UrlUtils.get_global_proxy_url(url)
+        proxy = UrlUtils.get_proxy_url(url, self.request_params.advanced_options.proxy)
 
         # Prepare timeout
         timeout_seconds = self.request_params.timeout

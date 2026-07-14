@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/spawn/`、`openjiuwen/agent_teams/agent/spawn_manager.py`、`openjiuwen/agent_teams/agent/stream_controller.py`、`openjiuwen/agent_teams/agent/payload.py`、`openjiuwen/agent_teams/agent/agent_configurator.py`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-06-03 |
-| 关联 feature | — |
+| 最近一次修订日期 | 2026-06-17 |
+| 关联 feature | F_38_team-teammate-worktree-isolation-agenttool.md |
 
 ## 范围 / 边界
 
@@ -26,7 +26,8 @@ DeepAgent round 的 stream 队列、cooperative cancel、observer fan-out 行为
   cooperative cancel 两阶段流程、observer fan-out 与失败自分离。
 - `SpawnManager` 与 `StreamController` 之间的 chunk forward 钩子（仅 inprocess
   适用）。
-- worktree 注入时机：仅非 LEADER 角色才构造 `WorktreeManager`。
+- team worktree 隔离：leader 侧创建 owner-scoped worktree、context 透传、
+  teammate workspace 覆盖、teardown 时 clean/keep 判定。
 
 **不管：**
 
@@ -65,37 +66,54 @@ DeepAgent round 的 stream 队列、cooperative cancel、observer fan-out 行为
      bootstrap 读取，并通过 `Runner.run_agent_team(..., session=...)`
      最终走到 `SessionManager.bind_session` 里 `set_session_id`。
    两条路径的目的都是让 `get_session_id()` 在子运行体内返回同一个值。
-6. **LEADER 不开 worktree**：`AgentConfigurator` 仅在 `ctx.role !=
-   LEADER` 且 `spec.worktree.enabled` 时才构造 `WorktreeManager`。LEADER
-   角色拿到的 `worktree_manager` 永远是 `None`。这与团队工具 rail 的
-   `qualify_ids=spec.spawn_mode == "inprocess"` 是两个独立维度，不要混。
-7. **Inprocess chunk forwarder 与 handle 同生命周期**：`SpawnManager` 在
+6. **Worktree 隔离由 leader 侧 spawn 托管**：`SpawnManager.build_context_from_db`
+   只在 `TeamMember.options.worktree.isolation == "worktree"` 时调用
+   `create_owner_worktree(slug)` 给 teammate 建隔离工作树；team rail 不再向
+   teammate 暴露 `enter_worktree` / `exit_worktree` 作为手动兜底。
+   `SpawnManager.build_context_from_db` 负责延迟创建或复用 DB 中已有 worktree
+   path，命名固定为 `agent-{team_name}-{member_name}-{hash8}`。
+   `TeamMember.options.worktree` 持久化 `isolation/path`；旧库 migration 会把
+   `model_ref_json` backfill 到 `options.model_ref` 后删除旧列。完整
+   worktreeInfo（`worktree_name/worktree_branch/head_commit`）留在 leader 侧
+   宿主内存；`TeamRuntimeContext` 只携带 `worktree_path` 作为 teammate 的
+   cwd override。
+7. **Worktree workspace 不走 cleanup_path**：`AgentConfigurator.setup_agent`
+   看到 `ctx.worktree_path` 时把成员 `WorkspaceSpec.root_path` 覆盖为该路径，
+   并关闭 stable_base；该路径不能注册到 `TeamBackend.cleanup_path`，否则
+   `clean_team` 会绕过 `git worktree remove` 直接删除工作树。
+8. **Worktree finalize fail-closed**：`cleanup_teammate` 停掉 handle 后用
+   leader 宿主内存中的 worktreeInfo 检查变更。无变更且可解析 repo root
+   时调用 `WorktreeManager.remove_worktree` 并清空 `options.worktree.path`；
+   存在 uncommitted files / commits，或宿主 worktreeInfo 缺失、无法验证状态时
+   必须保留 worktree，让 leader 后续依据 `worktree_path` 和可用的 branch
+   信息处理冲突。
+9. **Inprocess chunk forwarder 与 handle 同生命周期**：`SpawnManager` 在
    inprocess 路径上立即 `_wire_inprocess_chunk_forward` 把 teammate
    `StreamController` 的 chunk 转发到 leader `stream_queue`；
    `cleanup_teammate` 必须先 `remove_chunk_observer` 再 `force_kill`，
    否则会有迟到 chunk 落进已废弃的 leader 队列。子进程模式没有这个钩子，
    teammate chunk 只能走 messager（当前 unimplemented，列为 future work）。
-8. **Cooperative cancel 两阶段强制顺序**：`StreamController.cooperative_cancel`
+10. **Cooperative cancel 两阶段强制顺序**：`StreamController.cooperative_cancel`
    先置 `_cancel_requested=True` + 调 `harness.abort()` 让 task loop 在下一个
    安全检查点退出，再 `wait_for(timeout=2.0)`；超时才 fallback 到
    `task.cancel()`。两阶段不可交换、不可省。
-9. **Drain 路径必须吞 `CancelledError + Exception`**：
+11. **Drain 路径必须吞 `CancelledError + Exception`**：
    `cooperative_cancel`、`cancel_recovery_tasks`、`shutdown_all_handles`
    清理路径里的 `contextlib.suppress(asyncio.CancelledError, Exception)`
    是 invariant——caller 已经表态要拆掉 round，再把异常往外抛会污染上层
    shutdown。重构清理路径时必须保留这个 suppress。
-10. **`_cancel_requested` 是当前 round 私有标志**：`_run_one_round` 入口
+12. **`_cancel_requested` 是当前 round 私有标志**：`_run_one_round` 入口
     处必须重置为 `False`，否则一次 cooperative abort 之后下一个 round
     会被错误地当成"已取消"，restart 路径被吞掉。
-11. **Observer 例外自隔离**：`_stream_one_round` fan-out 时单个 observer 抛
+13. **Observer 例外自隔离**：`_stream_one_round` fan-out 时单个 observer 抛
     异常**只**会被自动 `remove_chunk_observer`，绝不能让本地 stream 被
     consumer 阻塞或拖垮。新增 observer 实现要做到 idempotent detach。
-12. **Round 完成路径的状态机闭合**：cooperative abort 不抛 `CancelledError`，
+14. **Round 完成路径的状态机闭合**：cooperative abort 不抛 `CancelledError`，
     所以 `_execute_round` 在 `_cancel_requested=True` 时显式发布
     `ExecutionStatus.CANCELLED`，与 hard-cancel 抛 `CancelledError` 走的
     `except` 分支殊途同归。状态机不允许"流跑完了但既不是 COMPLETED 也不是
     CANCELLED"的中间态。
-13. **Spawn 子进程命令固定**：`spawn_process` 用 `sys.executable -m
+15. **Spawn 子进程命令固定**：`spawn_process` 用 `sys.executable -m
     openjiuwen.core.runner.spawn.child_process` 启动，不是 `os.fork`。
     Windows / macOS / Linux 全平台使用相同的 `asyncio.create_subprocess_exec`
     路径，依赖 stdin/stdout pipe 通信。**禁止**为了"在 Linux 上更快"切到

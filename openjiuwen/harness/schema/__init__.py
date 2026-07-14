@@ -8,6 +8,7 @@ from openjiuwen.harness.schema.config import (
     DeepAgentConfig,
     SubAgentConfig,
     VisionModelConfig,
+    is_vision_model_config_complete,
 )
 from openjiuwen.harness.schema.loop_event import (
     DeepLoopEvent,
@@ -32,6 +33,7 @@ __all__ = [
     "DeepAgentConfig",
     "AudioModelConfig",
     "VisionModelConfig",
+    "is_vision_model_config_complete",
     "SubAgentConfig",
     "DeepLoopEvent",
     "DeepLoopEventType",

@@ -17,12 +17,21 @@ EVOLUTION_PROTOCOL_PROMPT_CN = """## 演进协议
   Skill 指令缺口的证据。
 - user_intent 仅表示审查方向，不是证据。若没有可用任务记录且没有 user_intent，
   应提交 no_evolution。
-- 一次性任务事实、个人偏好、临时环境/权限/网络问题、已有经验覆盖或低置信度候选，
+- 判断演进机会时必须结合近期任务中实际使用或可明确推断的 Skill 内容；
+  表面纠正措辞不是充分条件。
+- 可复用的执行规则、确认门禁、工具使用方式、质量标准、长期偏好或交付习惯，
+  可以作为演进候选；当前任务的一次性事实、临时参数或孤立约束通常不应演进。
+- 一次性任务事实、一次性偏好、临时环境/权限/网络问题、已有经验覆盖或低置信度候选，
   应不演进。
 
 ### 用户确认询问
 - 询问用户时必须明确说“Skill 演进”，推荐句式：
   “这条反馈可以沉淀为以后处理同类任务时的流程经验，是否需要我发起 Skill 演进？”
+- 如果上一条 assistant 消息刚询问是否发起 Skill 演进，且当前用户回复表示同意
+  （如“发起演进”“可以”“确认”“是的”），且演进目标和意图足够明确，
+  当前轮必须立即进入工具流程，不要只回复确认收到。
+- 如果用户已确认但演进目标、关联 Skill 或意图仍不明确，只做最小必要澄清；
+  澄清完成后必须进入工具流程，不要停留在确认或闲聊回复。
 
 ### 工具流程
 - 所有演进工具都必须使用顶层 subject 参数对象，例如 {"kind":"skill","name":"..."}。
@@ -33,24 +42,45 @@ EVOLUTION_PROTOCOL_PROMPT_CN = """## 演进协议
 - 不要直接编辑 SKILL.md、evolutions.json 或 evolution/*.md；提交演进变更时可能需要用户审批。
 """
 
-EVOLUTION_FUZZY_REVIEW_PROMPT_CN = """
-### 模糊演进自检
-- 检查近期上下文是否有可复用 Skill 经验线索；这不是处理本次错误的请求。
-- 当用户纠正上一轮 agent 的执行步骤、顺序、确认条件或交付流程时，
-  先判定为高优先级可复用流程线索。
-  该反馈可作为演进候选，但不表示必然演进。
-- 只有问题可归入已使用或可从近期任务上下文推断的相关 Skill，且可归因到 Skill
-  指令、改法可复用且非重复时，才算可演进机会。
-- 当用户用“你应该/应该先/先...再.../确认后再.../不要直接...”等规则化表达，
-  且内容是可复用工作流或可复用执行规则，要先确认该建议是否要沉淀为可复用
-  Skill 经验。
+EVOLUTION_FUZZY_REVIEW_RULES_CN = """
+- 判断用户反馈是否构成 Skill 演进机会时，不要只根据表面措辞触发，
+  必须结合近期任务中实际使用或可明确推断的 Skill 内容判断。
+- 可作为演进候选的反馈通常满足：
+  1. 归属于相关 Skill 的职责范围；
+  2. 指向可复用的执行规则、确认门禁、工具使用方式、质量标准、长期偏好或交付习惯；
+  3. 现有 Skill 说明或经验没有清晰覆盖。
+- 不要询问演进的情况：
+  1. 只是当前任务的一次性事实、临时参数或孤立约束；
+  2. 无法归因到相关 Skill；
+  3. 已被现有 Skill 规则清晰覆盖，只是本次执行没有遵守。
+- 对于页数、字数、格式、风格、数量、阈值等具体要求，默认视为当前任务参数；
+  但如果用户明确表示这是以后同类任务的默认偏好，或该要求能抽象成相关 Skill
+  的通用质量标准，可以作为演进候选。
+- 对于“先做 X，确认后再做 Y”这类反馈，不要机械触发；只有当 X/Y 属于
+  相关 Skill 在同类任务中反复需要处理的结构确认、风险确认、范围确认、
+  输入校验或交付门禁时，才考虑询问演进。
 - 弱信号、没有可演进机会或只是具体执行失败时，不要因为出现失败就询问用户演进。
-- 一次性偏好、不可复用、已有经验覆盖或无法归入相关 Skill 场景时，不要询问演进。
 - 如果你需要回复本次自检，只能说本次技能演进自检未发现可演进的 Skill，
   不要使用“候选”等内部术语。
 - 有可演进机会时，用一句话确认这条反馈可以沉淀为以后处理同类任务时的流程经验，
   是否需要我发起 Skill 演进？
 - 用户确认后才进入工具流程；未确认时不要提交演进变更。
+
+示例：
+- “先给我目录/大纲，我确认后你再继续制作。”
+  判断：可能是演进候选。理由：调整的是确认门禁和交付流程；仍需检查相关 Skill 是否负责此类交付流程且未覆盖该规则。
+- “以后生成周报都控制在 800 字以内。”
+  判断：可能是演进候选。理由：用户表达了同类任务的长期偏好；仍需检查是否归属于相关 Skill。
+- “这次报告控制在 800 字以内。”
+  判断：通常不演进。理由：这是当前任务参数。
+- “你刚才没按 Skill 里已有步骤先校验数据。”
+  判断：通常不新增经验。理由：已有规则覆盖时应纠正执行；除非现有规则表达不清。
+"""
+
+EVOLUTION_FUZZY_REVIEW_PROMPT_CN = f"""
+### 模糊演进自检
+- 检查近期上下文是否有可复用 Skill 经验线索；这不是处理本次错误的请求。
+{EVOLUTION_FUZZY_REVIEW_RULES_CN}
 """
 
 EVOLUTION_PROTOCOL_PROMPT_EN = """## Evolution Protocol
@@ -64,13 +94,24 @@ EVOLUTION_PROTOCOL_PROMPT_EN = """## Evolution Protocol
   suggest missing reusable Skill precheck, fallback, verification, parameter, or troubleshooting guidance.
 - user_intent is review direction, not evidence. If no task record is available and user_intent
   is empty, submit no_evolution.
-- Do not evolve for one-off task facts, personal preferences, temporary environment/permission/network issues,
+- When judging evolution opportunities, combine the feedback with Skill content actually used or clearly inferable
+  from recent tasks; surface correction wording is not sufficient.
+- Reusable execution rules, confirmation gates, tool-use methods, quality standards, long-term preferences, or
+  delivery habits can be evolution candidates; current-task one-off facts, temporary parameters, or isolated
+  constraints usually should not be evolved.
+- Do not evolve for one-off task facts, one-off preferences, temporary environment/permission/network issues,
   duplicate coverage by existing experiences, or low-confidence signals.
 
 ### User Confirmation Prompt
 - When asking the user, explicitly mention Skill evolution. Recommended wording:
   "This feedback can be distilled into a workflow lesson for similar future tasks.
   Should I start Skill evolution?"
+- If the previous assistant message just asked whether to start Skill evolution and the current user message
+  confirms it (for example "start evolution", "yes", "confirmed", or "go ahead"), and the target and intent are
+  clear enough, immediately enter the tool flow in this turn; do not only acknowledge the confirmation.
+- If the user has confirmed but the evolution target, related Skill, or intent is still unclear, ask only the
+  minimum necessary clarification; after that clarification is answered, enter the tool flow instead of stopping
+  at another acknowledgement or casual reply.
 
 ### Tool Flow
 - Use top-level subject objects for all evolution tools, for example {"kind":"skill","name":"..."}.
@@ -82,25 +123,51 @@ EVOLUTION_PROTOCOL_PROMPT_EN = """## Evolution Protocol
   require user approval.
 """
 
-EVOLUTION_FUZZY_REVIEW_PROMPT_EN = """
+EVOLUTION_FUZZY_REVIEW_RULES_EN = """
+- When judging whether user feedback is a Skill evolution opportunity, do not trigger only from surface wording;
+  combine it with Skill content actually used or clearly inferable from recent tasks.
+- Evolution candidates usually satisfy all of these:
+  1. The feedback belongs to a related Skill's responsibility scope;
+  2. It points to a reusable execution rule, confirmation gate, tool-use method, quality standard, long-term
+     preference, or delivery habit;
+  3. Existing Skill instructions or experiences do not clearly cover it.
+- Do not ask about evolution when:
+  1. The feedback is only a current-task fact, temporary parameter, or isolated constraint;
+  2. It cannot be attributed to a related Skill;
+  3. It is already clearly covered by existing Skill rules and this run simply failed to follow them.
+- For concrete requirements such as page count, word count, format, style, quantity, or thresholds, default to
+  treating them as current-task parameters. If the user explicitly says this is a future default for similar tasks,
+  or the requirement can be abstracted into a general quality standard for the related Skill, it can be an
+  evolution candidate.
+- For feedback like "do X first, then do Y after confirmation", do not trigger mechanically. Consider asking about
+  evolution only when X/Y is a structure confirmation, risk confirmation, scope confirmation, input validation,
+  or delivery gate that the related Skill repeatedly needs in similar tasks.
+- For weak clues, no evolution opportunity, or concrete failures alone, do not ask the user to evolve just because
+  something failed.
+- If you need to respond to this self-check, only say this skill evolution self-check did not find any evolvable
+  Skill. Do not use internal terms such as "candidate".
+- If there is an evolution opportunity, ask in one sentence: This feedback can be distilled into a workflow lesson
+  for similar future tasks. Should I start Skill evolution?
+- Enter the tool flow only after user confirmation; do not submit evolution changes before confirmation.
+
+Examples:
+- "Give me the table of contents / outline first, and continue only after I confirm."
+  Judgment: possible evolution candidate. Reason: it changes a confirmation gate and delivery flow; still check
+  whether the related Skill owns this delivery flow and does not already cover the rule.
+- "For future weekly reports, keep them within 800 words."
+  Judgment: possible evolution candidate. Reason: the user expressed a long-term preference for similar tasks;
+  still check whether it belongs to a related Skill.
+- "Keep this report within 800 words."
+  Judgment: usually do not evolve. Reason: this is a current-task parameter.
+- "You just failed to follow the existing Skill step that says to validate data first."
+  Judgment: usually do not add a new experience. Reason: when an existing rule covers it, correct execution
+  instead, unless the existing rule is unclear.
+"""
+
+EVOLUTION_FUZZY_REVIEW_PROMPT_EN = f"""
 ### Fuzzy Review Check
 - Check recent context for reusable Skill lessons; this is not a request to handle the current error.
-- When the user corrects prior-agent execution steps, order, confirmation gates, or delivery flow,
-  treat it as a high-priority reusable workflow clue, not a mandatory evolution signal.
-- Treat something as an evolution opportunity only when it is linked to a used or inferable Skill context
-  from recent task context, attribution to Skill instructions, reusable guidance, and no duplicate existing
-  coverage.
-- If the user gives rule-style guidance such as “you should”, “should first”, “first...then...”,
-  “confirm before...”, or “do not directly...”, and this guidance describes a reusable workflow
-  or execution rule, first ask whether to distill it into a reusable Skill experience.
-- For weak clues, no evolution opportunity, or failures that do not point to a reusable Skill instruction gap, do not
-  ask the user to evolve. If you need to respond to this self-check, only say this skill evolution self-check
-  did not find any Skill that needs updating.
-- Do not ask to evolve for one-off preferences, non-reusable feedback, duplicate coverage, or feedback that cannot
-  fit any related Skill context.
-- If there is an evolution opportunity, ask in one sentence: This feedback can be distilled into a workflow lesson for
-  similar future tasks. Should I start Skill evolution?
-- Enter the tool flow only after user confirmation; do not submit evolution changes before confirmation.
+{EVOLUTION_FUZZY_REVIEW_RULES_EN}
 """
 
 EVOLUTION_PROTOCOL_PROMPT = {
@@ -129,6 +196,13 @@ TEAM_EVOLUTION_PROTOCOL_PROMPT_CN = """## 团队 Skill 演进关注点
 - 询问用户时必须明确说“Swarm Skill 演进”，推荐句式：
   “这条反馈可以沉淀为以后处理同类团队任务时的团队协作/交付流程经验，
   是否需要我发起 Swarm Skill 演进？”
+- 如果上一条 assistant 消息刚询问是否发起 Swarm Skill 演进，且当前用户回复表示同意
+  （如“发起演进”“可以”“确认”“是的”），且演进目标和团队经验意图足够明确，
+  当前轮必须立即进入 prepare_skill_evolution → evolve_review_task → evolve_skill_experiences
+  工具流程；不要只回复确认收到。
+- 如果用户已确认但关联 Swarm Skill、团队经验范围或意图仍不明确，只做最小必要澄清；
+  澄清完成后必须进入 prepare_skill_evolution → evolve_review_task → evolve_skill_experiences
+  工具流程，不要停留在确认或闲聊回复。
 """
 
 TEAM_EVOLUTION_PROTOCOL_PROMPT_EN = """## Team Skill Evolution Focus
@@ -156,6 +230,13 @@ TEAM_EVOLUTION_PROTOCOL_PROMPT_EN = """## Team Skill Evolution Focus
 - When asking the user, explicitly mention Swarm Skill evolution. Recommended wording:
   "This feedback can be distilled into a team collaboration or delivery workflow lesson for similar future tasks.
   Should I start Swarm Skill evolution?"
+- If the previous assistant message just asked whether to start Swarm Skill evolution and the current user message
+  confirms it (for example "start evolution", "yes", "confirmed", or "go ahead"), and the target and team lesson
+  intent are clear enough, immediately run prepare_skill_evolution -> evolve_review_task ->
+  evolve_skill_experiences in this turn; do not only acknowledge the confirmation.
+- If the user has confirmed but the related Swarm Skill, team lesson scope, or intent is still unclear, ask only
+  the minimum necessary clarification; after that clarification is answered, run prepare_skill_evolution ->
+  evolve_review_task -> evolve_skill_experiences instead of stopping at another acknowledgement or casual reply.
 """
 
 TEAM_EVOLUTION_PROTOCOL_PROMPT = {

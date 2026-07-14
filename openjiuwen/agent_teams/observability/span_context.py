@@ -6,10 +6,9 @@
 from __future__ import annotations
 
 import threading
-import weakref
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from opentelemetry import context as otel_context
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
@@ -21,13 +20,37 @@ from openjiuwen.core.common.logging import team_logger
 class ActiveSpanTracker(SpanProcessor):
     """SpanProcessor that tracks all active spans for reliable cleanup.
 
-    Uses WeakSet to avoid memory leaks - spans are automatically removed
-    when they are garbage collected.
+    Uses strong references (regular ``set``) to ensure spans survive
+    asyncio task cancellation.  Properly ended spans are removed in
+    ``on_end`` so they don't accumulate; only spans that were never
+    explicitly ended (e.g. the owning task was cancelled) remain in
+    the set and are closed by ``flush_all_spans``.
     """
 
     def __init__(self):
-        self._spans_by_trace: dict[int, weakref.WeakSet[Span]] = {}
+        self._spans_by_trace: dict[int, set[Span]] = {}
         self._lock = threading.Lock()
+        self._on_start_count = 0
+        self._on_end_count = 0
+
+    def _dump_state(self, *, force: bool = False) -> None:
+        """Log current tracking state.  Only dumps every 50 starts or when forced."""
+        if not force and self._on_start_count % 50 != 0:
+            return
+        with self._lock:
+            total_spans = 0
+            team_spans = 0
+            for s_set in self._spans_by_trace.values():
+                total_spans += len(s_set)
+                for s in s_set:
+                    if hasattr(s, 'name') and s.name.startswith("team."):
+                        team_spans += 1
+            team_logger.info(
+                "ActiveSpanTracker state: traces={} total_spans={} team_spans={} "
+                "start_calls={} end_calls={}",
+                len(self._spans_by_trace), total_spans, team_spans,
+                self._on_start_count, self._on_end_count,
+            )
 
     def on_start(self, span: Span, parent_context: Any = None) -> None:
         try:
@@ -35,13 +58,25 @@ class ActiveSpanTracker(SpanProcessor):
                 trace_id = span.context.trace_id
                 with self._lock:
                     if trace_id not in self._spans_by_trace:
-                        self._spans_by_trace[trace_id] = weakref.WeakSet()
+                        self._spans_by_trace[trace_id] = set()
                     self._spans_by_trace[trace_id].add(span)
+                self._on_start_count += 1
+                self._dump_state()
         except Exception as exc:
             team_logger.warning("ActiveSpanTracker.on_start failed: {}", exc)
 
     def on_end(self, span: ReadableSpan) -> None:
-        pass
+        """Remove properly ended spans so they don't accumulate."""
+        try:
+            if hasattr(span, 'context') and span.context:
+                trace_id = span.context.trace_id
+                with self._lock:
+                    trace_set = self._spans_by_trace.get(trace_id)
+                    if trace_set is not None:
+                        trace_set.discard(cast(Span, span))
+                self._on_end_count += 1
+        except Exception as exc:
+            team_logger.warning("ActiveSpanTracker.on_end failed: {}", exc)
 
     def _on_ending(self, span: Span) -> None:
         pass
@@ -50,7 +85,10 @@ class ActiveSpanTracker(SpanProcessor):
         self.flush_all_spans()
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
-        self.flush_all_spans()
+        # Do NOT call flush_all_spans here — force_flush is called by
+        # TracerProvider.force_flush which is triggered after every
+        # close_team_spans / close_all_spans.  Closing spans prematurely
+        # would steal them from their owning trace's finalize_trace.
         return True
 
     def flush_spans_for_trace(self, trace_id: int, exclude_team_span: bool = True) -> int:
@@ -58,13 +96,9 @@ class ActiveSpanTracker(SpanProcessor):
         from opentelemetry.trace import Status, StatusCode
 
         closed_count = 0
-        spans_to_close: list[Span] = []
 
         with self._lock:
-            weak_set = self._spans_by_trace.pop(trace_id, None)
-            if weak_set is None:
-                return 0
-            spans_to_close = list(weak_set)
+            spans_to_close = list(self._spans_by_trace.pop(trace_id, set()))
 
         for span in spans_to_close:
             try:
@@ -81,12 +115,12 @@ class ActiveSpanTracker(SpanProcessor):
                 team_logger.warning("ActiveSpanTracker: failed to close span for trace {}: {}", trace_id, exc)
 
         if closed_count > 0:
-            team_logger.info("ActiveSpanTracker: closed {} spans for trace {:016x}", closed_count, trace_id)
+            team_logger.info("ActiveSpanTracker: closed {} spans for trace {:032x}", closed_count, trace_id)
 
         return closed_count
 
     def flush_all_spans(self, exclude_team_span: bool = True) -> int:
-        """Close all active spans (shutdown only)."""
+        """Close all remaining active spans (finalize / shutdown)."""
         from opentelemetry.trace import Status, StatusCode
 
         closed_count = 0
@@ -94,9 +128,15 @@ class ActiveSpanTracker(SpanProcessor):
         with self._lock:
             all_traces = list(self._spans_by_trace.items())
             self._spans_by_trace.clear()
+            team_logger.info(
+                "ActiveSpanTracker.flush_all_spans BEFORE: traces={} "
+                "trace_ids=[{}]",
+                len(all_traces),
+                ", ".join("{:032x}".format(tid) for tid, _ in all_traces),
+            )
 
-        for trace_id, weak_set in all_traces:
-            for span in list(weak_set):
+        for trace_id, span_set in all_traces:
+            for span in list(span_set):
                 try:
                     if not span.is_recording():
                         continue
@@ -111,7 +151,8 @@ class ActiveSpanTracker(SpanProcessor):
                     team_logger.warning("ActiveSpanTracker: failed to close span: {}", exc)
 
         if closed_count > 0:
-            team_logger.info("ActiveSpanTracker: closed {} active spans", closed_count)
+            team_logger.info("ActiveSpanTracker.flush_all_spans: closed {} spans across {} traces",
+                           closed_count, len(all_traces))
 
         return closed_count
 
@@ -180,6 +221,12 @@ def get_or_create_team_span(team_name: str, tracer) -> Span | None:
 
     span = _team_span_ctx.get()
     if span is not None:
+        team_logger.info(
+            "otel: get_or_create_team_span REUSE existing span={} is_recording={} "
+            "trace_id={:032x} span_id={:016x}",
+            span.name, span.is_recording(),
+            span.context.trace_id, span.context.span_id,
+        )
         return span
 
     from opentelemetry.trace import SpanKind
@@ -195,8 +242,11 @@ def get_or_create_team_span(team_name: str, tracer) -> Span | None:
     span.set_attribute(LANGFUSE_TRACE_TAGS, [team_name])
 
     _team_span_ctx.set(span)
-    team_logger.info("otel: get_or_create_team_span created team span for team_name={}, span_id={}",
-                     team_name, span.context.span_id)
+    team_logger.info(
+        "otel: get_or_create_team_span CREATE new team span team_name={} "
+        "trace_id={:032x} span_id={:016x}",
+        team_name, span.context.trace_id, span.context.span_id,
+    )
     return span
 
 
@@ -218,8 +268,47 @@ def set_current_agent_span(span: Span | None) -> None:
     _current_agent_span.set(span)
 
 
+def _stamp_cancelled_if_empty(span: Span) -> None:
+    """Set a cancelled marker on a span that was never given proper output.
+
+    Spans reaching the cascade-close paths had their normal close callback
+    interrupted (e.g. task cancelled mid-LLM-call).
+    """
+    from openjiuwen.agent_teams.observability.semconv import LANGFUSE_OBSERVATION_OUTPUT
+
+    if not span.attributes.get(LANGFUSE_OBSERVATION_OUTPUT):
+        span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, "cancelled")
+
+
+def cascade_close_children() -> None:
+    """End all open child llm/tool spans on the current context.
+
+    The single source of truth for cascade-close — called from
+    ``AgentSpanScope.close`` (rail) and ``close_team_agent_spans`` below.
+    Replaces the triplicated loop that used to live in after_task_iteration
+    / after_invoke / close_team_agent_spans. Do NOT set Status(OK) here:
+    these spans only reach this path when their normal close callback did
+    not fire, so leaving status UNSET makes them stand out.
+    """
+    for bucket in _tool_span_map.get().values():
+        for ts in bucket:
+            if ts.is_recording():
+                _stamp_cancelled_if_empty(ts)
+                ts.end()
+    _tool_span_map.set({})
+
+    for state in _llm_span_stack.get():
+        if state.span.is_recording():
+            _stamp_cancelled_if_empty(state.span)
+            state.span.end()
+    _llm_span_stack.set([])
+
+
 def close_team_agent_spans(team_name: str) -> None:
     from opentelemetry.trace import Status, StatusCode
+
+    # Drain child LLM / tool spans before closing the parent agent span.
+    cascade_close_children()
 
     current = _current_agent_span.get()
     if current is not None and current.is_recording():
@@ -333,16 +422,29 @@ def finalize_trace(team_name: str) -> None:
     # Step 1: Close the team span first (clears ContextVar)
     team_span = _team_span_ctx.get()
     if team_span is not None and team_span.is_recording():
-        team_logger.info("otel: finalize_trace - closing team span for team={}", team_name)
+        team_logger.info(
+            "otel: finalize_trace - closing team span team={} name={} "
+            "is_recording={} trace_id={:032x} span_id={:016x}",
+            team_name, team_span.name, team_span.is_recording(),
+            team_span.context.trace_id, team_span.context.span_id,
+        )
         team_span.set_status(Status(StatusCode.OK))
         team_span.end()
         _team_span_ctx.set(None)
+    elif team_span is not None:
+        team_logger.warning(
+            "otel: finalize_trace - team span EXISTS but NOT recording team={} "
+            "name={} is_recording={} trace_id={:032x} span_id={:016x}",
+            team_name, team_span.name, team_span.is_recording(),
+            team_span.context.trace_id, team_span.context.span_id,
+        )
+    else:
+        team_logger.warning(
+            "otel: finalize_trace - NO team span in ContextVar for team={}",
+            team_name,
+        )
 
     # Step 2: Flush all remaining child spans.
-    # Because _team_span_ctx is now None, flush_child_spans will
-    # call flush_all_spans which catches spans from every trace —
-    # including any late spans that arrived after the team span
-    # was started (e.g. from shutdown callbacks).
     flush_child_spans()
 
     team_logger.info("otel: finalize_trace completed for team={}", team_name)
@@ -368,10 +470,10 @@ def flush_child_spans() -> None:
             trace_id = team_span.context.trace_id
             closed = tracker.flush_spans_for_trace(trace_id, exclude_team_span=True)
             if closed > 0:
-                team_logger.info("flush_child_spans: closed {} spans for trace {:016x}", closed, trace_id)
+                team_logger.info("flush_child_spans: closed {} spans for trace {:032x}", closed, trace_id)
         else:
             closed = tracker.flush_all_spans(exclude_team_span=True)
             if closed > 0:
-                team_logger.info("flush_child_spans: closed {} spans via ActiveSpanTracker", closed)
+                team_logger.info("flush_child_spans: closed {} spans via flush_all_spans", closed)
     except Exception as exc:
         team_logger.warning("flush_child_spans: ActiveSpanTracker failed: {}", exc)

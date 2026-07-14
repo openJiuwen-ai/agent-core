@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -11,6 +12,9 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import urlparse
+
+
+logger = logging.getLogger(__name__)
 
 
 BUILTIN_SITE_PROFILES: List[Dict[str, Any]] = [
@@ -66,6 +70,22 @@ _CHROME_SELECTOR_FRAGMENTS = [
     "footer",
     "menu",
     "sidebar",
+    "toolbar",
+    "container-right",
+    "main-rt",
+    "main-right",
+    "right-sidebar",
+    "right-side",
+    "side-bar",
+    "csdn-toolbar",
+    "csdn-profile",
+    "onlyuser",
+    "passport",
+    "login",
+    "vip",
+    "write",
+    "remind",
+    "message",
 ]
 
 _CHROME_TITLES = {
@@ -78,6 +98,10 @@ _CHROME_TITLES = {
     "help",
     "login",
     "sign in",
+    "会员中心",
+    "消息",
+    "创作中心",
+    "个人中心",
 }
 
 
@@ -142,12 +166,62 @@ def _selector_is_too_broad(selector: str) -> bool:
     return False
 
 
+_AUTHOR_SELECTOR_FRAGMENTS = [
+    "a.user",
+    ".user",
+    "span.name-text",
+    "name-text",
+    "nickname",
+    "nick",
+    "avatar",
+    "author",
+    "byline",
+    "profile",
+    "btm-rt",
+]
+
+_ARTICLE_LINK_SELECTOR_FRAGMENTS = [
+    "block-title",
+    "so-item-report",
+    "article/details",
+    "/article/",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "title",
+    "headline",
+    "subject",
+]
+
+
+def _selector_looks_like_author_profile(selector: str) -> bool:
+    value = str(selector or "").strip().lower()
+    if not value:
+        return False
+    if _selector_looks_like_article_link(value):
+        return False
+    return any(fragment in value for fragment in _AUTHOR_SELECTOR_FRAGMENTS)
+
+
+def _selector_looks_like_article_link(selector: str) -> bool:
+    value = str(selector or "").strip().lower()
+    if not value:
+        return False
+    return any(fragment in value for fragment in _ARTICLE_LINK_SELECTOR_FRAGMENTS)
+
+
 def _looks_like_page_chrome(card: Dict[str, Any]) -> bool:
     selector = str(card.get("selector_hint") or "").lower()
     title = str(card.get("title") or "").strip().lower()
     preview = str(card.get("text_preview") or "").strip().lower()
 
+    link = str(card.get("primary_link") or "").strip().lower()
+
     if any(fragment in selector for fragment in _CHROME_SELECTOR_FRAGMENTS):
+        return True
+
+    if any(fragment in link for fragment in ["mp.csdn.net", "passport.csdn.net"]):
         return True
 
     if title in _CHROME_TITLES or preview in _CHROME_TITLES:
@@ -180,6 +254,12 @@ def _card_quality_score(card: Dict[str, Any]) -> int:
         score += 10
     if card.get("availability"):
         score += 8
+    if card.get("author"):
+        score += 10
+    if card.get("source"):
+        score += 6
+    if len(str(card.get("summary") or "").strip()) >= 40:
+        score += 14
     if card.get("has_image"):
         score += 12
     if isinstance(buttons, list) and buttons:
@@ -245,9 +325,14 @@ class BrowserSelectorCache:
             return {"version": 1, "records": []}
 
         try:
-            with self.path.open("r", encoding="utf-8") as handle:
+            with self.path.open("r", encoding="utf-8-sig") as handle:
                 data = json.load(handle)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "Failed to load browser selector cache from %s: %s",
+                self.path,
+                exc,
+            )
             return {"version": 1, "records": []}
 
         if not isinstance(data, dict):
@@ -310,7 +395,16 @@ class BrowserSelectorCache:
             if isinstance(card, dict) and _is_cacheable_card(card)
         ]
 
-        if len(cacheable_cards) < 2:
+        selector_source = str(result.get("selector_source") or "").strip().lower()
+        min_cacheable_cards = 3 if selector_source == "generic" else 2
+
+        if len(cacheable_cards) < min_cacheable_cards:
+            logger.debug(
+                "Skipping browser selector cache write for %s: only %s cacheable cards from %s source",
+                url,
+                len(cacheable_cards),
+                selector_source or "unknown",
+            )
             return
 
         cards = cacheable_cards
@@ -321,6 +415,9 @@ class BrowserSelectorCache:
             "price_selectors": [],
             "rating_selectors": [],
             "availability_selectors": [],
+            "author_selectors": [],
+            "source_selectors": [],
+            "summary_selectors": [],
             "primary_link_selectors": [],
             "button_selectors": [],
         }
@@ -332,9 +429,11 @@ class BrowserSelectorCache:
             selectors["card_container_selectors"].extend(
                 _generalize_selector(str(card.get("selector_hint") or ""))
             )
-            selectors["title_selectors"].extend(
-                _generalize_selector(str(card.get("title_selector_hint") or ""))
-            )
+            title_selector_hint = str(card.get("title_selector_hint") or "")
+            if not _selector_looks_like_author_profile(title_selector_hint):
+                selectors["title_selectors"].extend(
+                    _generalize_selector(title_selector_hint)
+                )
             selectors["price_selectors"].extend(
                 _generalize_selector(str(card.get("price_selector_hint") or ""))
             )
@@ -344,16 +443,36 @@ class BrowserSelectorCache:
             selectors["availability_selectors"].extend(
                 _generalize_selector(str(card.get("availability_selector_hint") or ""))
             )
-            selectors["primary_link_selectors"].extend(
-                _generalize_selector(str(card.get("primary_link_selector_hint") or ""))
+            selectors["author_selectors"].extend(
+                _generalize_selector(str(card.get("author_selector_hint") or ""))
             )
+            selectors["source_selectors"].extend(
+                _generalize_selector(str(card.get("source_selector_hint") or ""))
+            )
+            selectors["summary_selectors"].extend(
+                _generalize_selector(str(card.get("summary_selector_hint") or ""))
+            )
+            primary_link_selector_hint = str(card.get("primary_link_selector_hint") or "")
+            if not _selector_looks_like_author_profile(primary_link_selector_hint):
+                selectors["primary_link_selectors"].extend(
+                    _generalize_selector(primary_link_selector_hint)
+                )
 
             buttons = card.get("buttons") or []
             if isinstance(buttons, list):
                 for button in buttons[:4]:
                     if isinstance(button, dict):
+                        button_selector_hint = str(button.get("selector_hint") or "")
+                        generalized_button_selectors = _generalize_selector(button_selector_hint)
+                        if _selector_looks_like_article_link(button_selector_hint):
+                            selectors["primary_link_selectors"].extend(
+                                generalized_button_selectors
+                            )
+                            selectors["title_selectors"].extend(
+                                generalized_button_selectors
+                            )
                         selectors["button_selectors"].extend(
-                            _generalize_selector(str(button.get("selector_hint") or ""))
+                            generalized_button_selectors
                         )
 
         selectors = {
@@ -433,6 +552,63 @@ class BrowserSelectorCache:
         # Keep file small.
         data["records"] = records[-200:]
         self._save(data)
+
+    def record_card_probe_cache_rejection(self, result: Dict[str, Any]) -> None:
+        """Record that cached card-probe selectors were tried but rejected.
+
+        A card probe can still succeed through a site profile or generic discovery
+        after cached selectors failed validation. Track that separately so stale
+        cache records are deprioritized on later exports instead of being retried
+        indefinitely.
+        """
+        if not isinstance(result, dict):
+            return
+
+        try:
+            cache_records_used = int(result.get("cache_records_used", 0) or 0)
+        except (TypeError, ValueError):
+            cache_records_used = 0
+
+        if cache_records_used <= 0 or result.get("cache_accepted") is True:
+            return
+
+        url = str(result.get("url") or "").strip()
+        domain = domain_from_url(url)
+        if not domain:
+            return
+
+        route_signature = normalize_route_signature(url)
+
+        data = self._load()
+        records = data.get("records", [])
+        if not isinstance(records, list):
+            return
+
+        now = time.time()
+        rejection_reason = str(
+            result.get("cache_rejection_reason")
+            or result.get("selector_source")
+            or "cache_validation_failed"
+        ).strip()
+
+        updated = False
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+
+            if (
+                record.get("domain") == domain
+                and record.get("route_signature") == route_signature
+                and record.get("kind") == "card_probe"
+            ):
+                record["failure_count"] = int(record.get("failure_count", 0) or 0) + 1
+                record["last_failure_at"] = now
+                record["last_failure_reason"] = rejection_reason
+                updated = True
+
+        if updated:
+            self._save(data)
+
 
 
 _SELECTOR_CACHE: BrowserSelectorCache | None = None

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 from unittest.mock import (
     AsyncMock,
     MagicMock,
@@ -16,6 +17,8 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventMessage,
     InnerEventType,
 )
+from openjiuwen.agent_teams.agent.coordination.handlers.member import MemberHandler
+from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.agent.team_agent import (
     TeamAgent,
 )
@@ -39,6 +42,7 @@ from openjiuwen.agent_teams.schema.events import (
     TeamEvent,
     ToolApprovalResultEvent,
 )
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import (
     TeamCompletionSnapshot,
     TeamMemberSpec,
@@ -618,6 +622,71 @@ async def test_mailbox_messages_deferred_while_interrupt_pending():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_process_unread_collects_only_newest_broadcast_for_watermark():
+    """A batch of broadcasts marks only the newest id; directs all pass through.
+
+    Broadcast read state is a per-member watermark (one row per ``(member,
+    team)``). Collecting more than one broadcast id in one batch would make
+    ``mark_messages_read`` insert duplicate primary keys in the same
+    transaction and the commit would raise ``UNIQUE constraint failed``,
+    rolling back the whole batch and stalling the watermark — the mailbox
+    reprocessing loop. The handler delivers every broadcast to the agent but
+    only collects the newest (the unread list is newest-first) for the
+    read-state write; the watermark then covers the older broadcasts too.
+    """
+    agent = _make_leader()
+    agent._configurator.message_manager = MagicMock()
+    mark_messages_read = AsyncMock(return_value=3)
+    agent._configurator.message_manager.mark_messages_read = mark_messages_read
+    # deliver_input is a no-op so delivered_ids collection is exercised
+    # without a live harness.
+    agent.deliver_input = AsyncMock()
+    agent._start_agent = AsyncMock()
+    agent.has_pending_interrupt = lambda: False
+
+    def _bc(msg_id: str, ts: int):
+        msg = MagicMock()
+        msg.message_id = msg_id
+        msg.from_member_name = "dev-2"
+        msg.broadcast = True
+        msg.timestamp = ts
+        msg.content = f"broadcast {msg_id}"
+        return msg
+
+    def _dm(msg_id: str, ts: int):
+        msg = MagicMock()
+        msg.message_id = msg_id
+        msg.from_member_name = "dev-2"
+        msg.broadcast = False
+        msg.timestamp = ts
+        msg.content = f"direct {msg_id}"
+        return msg
+
+    # Newest-first ordering (as _read_all_unread returns). Two directs both
+    # pass through; three broadcasts collapse to the newest one.
+    agent._coordination.dispatcher.message._read_all_unread = AsyncMock(
+        side_effect=[
+            [_bc("b3", 3000), _dm("dm-2", 2500), _bc("b2", 2000), _dm("dm-1", 1500), _bc("b1", 1000)],
+            [],
+        ]
+    )
+
+    await agent._coordination.dispatcher.message._process_unread_messages("leader-1")
+
+    # mark_messages_read called once. Both directs are collected (each flips
+    # its own is_read row); only the newest broadcast is collected (the
+    # watermark then covers the older broadcasts).
+    mark_messages_read.assert_called_once()
+    marked_ids = mark_messages_read.call_args.args[0]
+    assert "dm-1" in marked_ids
+    assert "dm-2" in marked_ids
+    assert "b3" in marked_ids
+    assert "b1" not in marked_ids
+    assert "b2" not in marked_ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_resume_interrupt_forwards_to_runtime_send():
     """A valid interrupt resume is forwarded to the runtime via send.
 
@@ -921,8 +990,9 @@ async def test_task_claimed_for_self_uses_human_template_when_human_agent():
     agent._configurator.task_manager.get.assert_awaited_once_with("task-7")
     agent.deliver_input.assert_awaited_once()
     content = agent.deliver_input.await_args.args[0]
-    # Controller-facing HITT prefix and inlined title.
-    assert "[任务指派给控制者]" in content
+    # Controller-facing HITT event tag and inlined title.
+    assert 'kind="task-assigned"' in content
+    assert 'for="controller"' in content
     assert "task-7" in content
     assert "Write design doc" in content
     # Must not show the teammate guidance to autonomously call view_task.
@@ -971,7 +1041,8 @@ async def test_task_claimed_for_human_self_swallows_title_lookup_error():
 
     agent.deliver_input.assert_awaited_once()
     content = agent.deliver_input.await_args.args[0]
-    assert "[任务指派给控制者]" in content
+    assert 'kind="task-assigned"' in content
+    assert 'for="controller"' in content
     assert "task-9" in content
 
 
@@ -1017,7 +1088,8 @@ def test_format_message_uses_human_template_when_human_agent():
     direct.timestamp = 1_700_000_000_000
 
     direct_text = handler._format_message(direct, is_human_agent=True, now_ms=1_700_000_000_000)
-    assert "[转发给控制者的单播消息]" in direct_text
+    assert 'type="direct"' in direct_text
+    assert 'for="controller"' in direct_text
     assert "msg-direct" in direct_text
     assert "are you around?" in direct_text
     # Strict prohibition keywords — the body must explicitly forbid
@@ -1036,7 +1108,8 @@ def test_format_message_uses_human_template_when_human_agent():
     bcast.timestamp = 1_700_000_000_000
 
     bcast_text = handler._format_message(bcast, is_human_agent=True, now_ms=1_700_000_000_000)
-    assert "[转发给控制者的广播消息]" in bcast_text
+    assert 'type="broadcast"' in bcast_text
+    assert 'for="controller"' in bcast_text
     assert "严格禁止" in bcast_text
     assert "保持静默" in bcast_text
 
@@ -1328,6 +1401,106 @@ async def test_team_cleaned_event_ignored_by_leader():
     agent.shutdown_self.assert_not_called()
 
 
+def _make_member_status_handler(
+    lifecycle: str,
+    members: list[SimpleNamespace],
+) -> tuple[MagicMock, MemberHandler]:
+    backend = MagicMock()
+    backend.list_members = AsyncMock(return_value=members)
+    backend.clean_team = AsyncMock(return_value=True)
+    handler = MemberHandler(
+        host=SimpleNamespace(),
+        blueprint=SimpleNamespace(
+            role=TeamRole.LEADER,
+            lifecycle=lifecycle,
+            member_name="leader-1",
+        ),
+        infra=TeamInfra(team_backend=backend),
+        poll_ctrl=SimpleNamespace(),
+        stale_claim_throttle={},
+    )
+    return backend, handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_leader_auto_cleans_after_all_teammates_shutdown():
+    """Teams should clean once every non-leader member is SHUTDOWN."""
+    backend, handler = _make_member_status_handler(
+        "temporary",
+        [
+            SimpleNamespace(member_name="leader-1", status=MemberStatus.READY.value),
+            SimpleNamespace(member_name="dev-code", status=MemberStatus.SHUTDOWN.value),
+            SimpleNamespace(member_name="code-reviewer", status=MemberStatus.SHUTDOWN.value),
+        ],
+    )
+
+    event = EventMessage.from_event(
+        MemberStatusChangedEvent(
+            team_name="test-team",
+            member_name="dev-code",
+            old_status=MemberStatus.SHUTDOWN_REQUESTED.value,
+            new_status=MemberStatus.SHUTDOWN.value,
+        )
+    )
+    await handler.on_member_event(event)
+
+    backend.clean_team.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_persistent_leader_does_not_auto_clean_after_teammate_shutdown():
+    """A partially shut down persistent team must not clean early."""
+    backend, handler = _make_member_status_handler(
+        "persistent",
+        [
+            SimpleNamespace(member_name="leader-1", status=MemberStatus.READY.value),
+            SimpleNamespace(member_name="dev-code", status=MemberStatus.SHUTDOWN.value),
+            SimpleNamespace(member_name="code-reviewer", status=MemberStatus.READY.value),
+        ],
+    )
+
+    event = EventMessage.from_event(
+        MemberStatusChangedEvent(
+            team_name="test-team",
+            member_name="dev-code",
+            old_status=MemberStatus.SHUTDOWN_REQUESTED.value,
+            new_status=MemberStatus.SHUTDOWN.value,
+        )
+    )
+    await handler.on_member_event(event)
+
+    backend.list_members.assert_awaited_once_with()
+    backend.clean_team.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_persistent_leader_auto_cleans_after_all_teammates_shutdown():
+    """A persistent team disband request should still clean once all members shut down."""
+    backend, handler = _make_member_status_handler(
+        "persistent",
+        [
+            SimpleNamespace(member_name="leader-1", status=MemberStatus.READY.value),
+            SimpleNamespace(member_name="dev-code", status=MemberStatus.SHUTDOWN.value),
+            SimpleNamespace(member_name="code-reviewer", status=MemberStatus.SHUTDOWN.value),
+        ],
+    )
+
+    event = EventMessage.from_event(
+        MemberStatusChangedEvent(
+            team_name="test-team",
+            member_name="code-reviewer",
+            old_status=MemberStatus.SHUTDOWN_REQUESTED.value,
+            new_status=MemberStatus.SHUTDOWN.value,
+        )
+    )
+    await handler.on_member_event(event)
+
+    backend.clean_team.assert_awaited_once_with()
+
+
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_shutdown_self_cancels_running_round_and_closes_stream():
@@ -1501,6 +1674,7 @@ def _wire_completion_handler(agent: TeamAgent, snapshot_result):
     messager = AsyncMock()
     handler._infra.team_backend = backend
     handler._infra.messager = messager
+    agent.finalize_non_contributing_worktrees = AsyncMock()
     agent._is_agent_running = lambda: False
     return messager
 
@@ -1533,6 +1707,7 @@ async def test_team_completion_emits_on_idle_leader_when_complete():
     assert published.event_type == TeamEvent.TEAM_COMPLETED
     assert published.payload["member_count"] == 2
     assert published.payload["task_count"] == 3
+    agent.finalize_non_contributing_worktrees.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -1598,6 +1773,36 @@ async def test_team_completion_skipped_when_round_in_flight():
 
     messager.publish.assert_not_awaited()
     agent._coordination.dispatcher.team_completion._infra.team_backend.is_team_completed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_team_completion_skipped_when_interrupt_pending():
+    """A pending interrupt is idle at the harness layer but must keep the stream open."""
+    from openjiuwen.agent_teams.agent.coordination.handlers.team_completion import TeamCompletionHandler
+
+    host = MagicMock()
+    host.has_in_flight_round.return_value = False
+    host.is_agent_running.return_value = False
+    host.has_pending_interrupt.return_value = True
+    host.conclude_completed_round = AsyncMock()
+    blueprint = MagicMock()
+    blueprint.role = TeamRole.LEADER
+    blueprint.lifecycle = "persistent"
+    backend = MagicMock()
+    backend.team_name = "test-team"
+    backend.is_team_completed = AsyncMock(return_value=TeamCompletionSnapshot(member_count=1, task_count=1))
+    infra = MagicMock()
+    infra.team_backend = backend
+    infra.messager = AsyncMock()
+    handler = TeamCompletionHandler(host, blueprint, infra, MagicMock())
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await handler.on_poll_task(event)
+
+    infra.messager.publish.assert_not_awaited()
+    backend.is_team_completed.assert_not_awaited()
+    host.conclude_completed_round.assert_not_awaited()
 
 
 @pytest.mark.asyncio

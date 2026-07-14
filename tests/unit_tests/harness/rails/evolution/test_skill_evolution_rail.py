@@ -23,18 +23,25 @@ from openjiuwen.agent_evolving.experience import (
 )
 from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
+from openjiuwen.agent_evolving.prompts.sections import (
+    EVOLUTION_FUZZY_REVIEW_PROMPT_CN,
+    EVOLUTION_FUZZY_REVIEW_PROMPT_EN,
+    EVOLUTION_FUZZY_REVIEW_RULES_CN,
+    EVOLUTION_FUZZY_REVIEW_RULES_EN,
+)
 from openjiuwen.agent_evolving.signal import (
     EvolutionSignal,
     SignalDetector,
     make_evolution_signal,
 )
-from openjiuwen.agent_evolving.trajectory.types import LLMCallDetail, ToolCallDetail, Trajectory, TrajectoryStep
+from openjiuwen.agent_evolving.trajectory.types import LLMCallDetail, ToolCallDetail, LegacyTrajectory, TrajectoryStep
 from openjiuwen.agent_evolving.types import ApplyResult
 from openjiuwen.core.foundation.llm import SystemMessage
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     InvokeInputs,
     ModelCallInputs,
+    RunKind,
     TaskIterationInputs,
     ToolCallInputs,
 )
@@ -48,6 +55,8 @@ from openjiuwen.harness.rails.evolution.contracts import (
 from openjiuwen.harness.rails.evolution.review.materials import build_review_scoped_materials
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import (
+    _FUZZY_REVIEW_PROMPT_CN,
+    _FUZZY_REVIEW_PROMPT_EN,
     _MAX_PROCESSED_SIGNAL_KEYS,
     SkillEvolutionRail,
 )
@@ -178,8 +187,8 @@ def _staged_result(request: Any, skill_name: str = "skill-a") -> OnlineEvolution
     )
 
 
-def _trajectory_with_messages(messages: list[dict]) -> Trajectory:
-    return Trajectory(
+def _trajectory_with_messages(messages: list[dict]) -> LegacyTrajectory:
+    return LegacyTrajectory(
         execution_id="exec-1",
         steps=[TrajectoryStep(kind="llm", detail=LLMCallDetail(model="test-model", messages=messages))],
         source="online",
@@ -191,7 +200,7 @@ def _bind_active_request_evidence(
     messages: list[dict],
     *,
     skill_names: list[str] | None = None,
-) -> Trajectory:
+) -> LegacyTrajectory:
     trajectory = _trajectory_with_messages(messages)
     rail._builder = Mock()
     rail._builder.build.return_value = trajectory
@@ -257,6 +266,34 @@ class _MsgContext:
 class _DummyToolMsg:
     def __init__(self, content: Any):
         self.content = content
+
+
+class _RuntimeAbilityManager:
+    def __init__(self, existing_cards: list[Any] | None = None):
+        self.cards = {card.name: card for card in existing_cards or []}
+        self.resources: dict[str, Any] = {}
+        self.add = Mock(side_effect=self._add)
+        self.remove = Mock(side_effect=self._remove)
+        self.add_ability = Mock(side_effect=self._add_ability)
+        self.remove_ability = Mock(side_effect=self._remove_ability)
+
+    def _add(self, card):
+        if card.name in self.cards:
+            return SimpleNamespace(added=False, reason="duplicate")
+        self.cards[card.name] = card
+        return SimpleNamespace(added=True)
+
+    def _remove(self, name):
+        self.cards.pop(name, None)
+
+    def _add_ability(self, card, tool):
+        self.cards[card.name] = card
+        self.resources[card.name] = tool
+        return SimpleNamespace(added=True)
+
+    def _remove_ability(self, name):
+        self.cards.pop(name, None)
+        self.resources.pop(name, None)
 
 
 # =============================================================================
@@ -368,10 +405,7 @@ def test_auto_save_setter_updates_only_local_state(tmp_path):
 
 def test_skill_rail_init_registers_canonical_evolution_tools(tmp_path):
     rail = _make_rail(tmp_path)
-    ability_manager = SimpleNamespace(
-        add=Mock(return_value=SimpleNamespace(added=True)),
-        remove=Mock(),
-    )
+    ability_manager = _RuntimeAbilityManager()
     agent = SimpleNamespace(
         card=SimpleNamespace(id="agent-1"),
         ability_manager=ability_manager,
@@ -390,8 +424,46 @@ def test_skill_rail_init_registers_canonical_evolution_tools(tmp_path):
         "evolve_skill_experiences",
         "simplify_skill_experiences",
     }
-    assert add_tool.called
-    assert {call.args[0].name for call in ability_manager.add.call_args_list} == tool_names
+    add_tool.assert_not_called()
+    registered = {call.args[0].name: call.args[1] for call in ability_manager.add_ability.call_args_list}
+    assert set(registered) == tool_names
+    assert set(registered.values()) == set(rail._evolution_tools)
+
+    rail.uninit(agent)
+
+    assert [call.args[0] for call in ability_manager.remove_ability.call_args_list] == [
+        "prepare_skill_evolution",
+        "evolve_review_task",
+        "list_skill_experiences",
+        "read_skill_experiences",
+        "evolve_skill_experiences",
+        "simplify_skill_experiences",
+    ]
+
+
+def test_skill_rail_init_refreshes_duplicate_runtime_tool_instances(tmp_path):
+    from openjiuwen.agent_evolving.tools.skill import MAIN_EVOLUTION_TOOL_NAMES
+
+    stale_cards = [SimpleNamespace(name=name) for name in MAIN_EVOLUTION_TOOL_NAMES]
+    ability_manager = _RuntimeAbilityManager(existing_cards=stale_cards)
+    rail = _make_rail(tmp_path)
+    agent = SimpleNamespace(
+        card=SimpleNamespace(id="agent-1"),
+        ability_manager=ability_manager,
+        find_rails_by_type=_find_rails_by_type(),
+    )
+
+    with patch("openjiuwen.core.runner.Runner.resource_mgr.add_tool") as add_tool:
+        rail.init(agent)
+
+    add_tool.assert_not_called()
+    ability_manager.add.assert_not_called()
+    assert {call.args[0].name for call in ability_manager.add_ability.call_args_list} == set(MAIN_EVOLUTION_TOOL_NAMES)
+    prepare_tool = ability_manager.resources["prepare_skill_evolution"]
+    evolve_tool = ability_manager.resources["evolve_skill_experiences"]
+    assert prepare_tool._prepare_scope == rail._prepare_evolution_review_scope
+    assert evolve_tool._review_runtime is rail._review_runtime
+    assert evolve_tool._submission_service is rail.experience_manager.experience_submission_service
 
 
 def test_skill_rail_active_review_plumbing_still_uses_skill_subject_kind(tmp_path):
@@ -438,7 +510,7 @@ def test_skill_rail_init_does_not_require_subagent_rail_when_deep_config_present
 
 def test_skill_rail_init_without_evolution_interrupt_rail_still_registers_tools(tmp_path):
     rail = _make_rail(tmp_path)
-    ability_manager = SimpleNamespace(add=Mock(return_value=SimpleNamespace(added=True)), remove=Mock())
+    ability_manager = _RuntimeAbilityManager()
     agent = SimpleNamespace(
         card=SimpleNamespace(id="agent-1"),
         ability_manager=ability_manager,
@@ -457,8 +529,8 @@ def test_skill_rail_init_without_evolution_interrupt_rail_still_registers_tools(
         "evolve_skill_experiences",
         "simplify_skill_experiences",
     }
-    assert add_tool.called
-    assert {call.args[0].name for call in ability_manager.add.call_args_list} == tool_names
+    add_tool.assert_not_called()
+    assert {call.args[0].name for call in ability_manager.add_ability.call_args_list} == tool_names
 
 
 def test_skill_rail_init_refreshes_existing_subagent_rail_after_review_agent_registration(tmp_path):
@@ -503,11 +575,7 @@ def test_skill_rail_init_does_not_refresh_pending_subagent_rail(tmp_path):
 
 def test_skill_rail_init_registers_evolve_review_task_without_subagent_rail(tmp_path):
     rail = _make_rail(tmp_path)
-    registered_cards = []
-    ability_manager = SimpleNamespace(
-        add=Mock(side_effect=lambda card: registered_cards.append(card) or SimpleNamespace(added=True)),
-        remove=Mock(),
-    )
+    ability_manager = _RuntimeAbilityManager()
     agent = SimpleNamespace(
         card=SimpleNamespace(id="agent-1"),
         deep_config=SimpleNamespace(subagents=[]),
@@ -519,7 +587,7 @@ def test_skill_rail_init_registers_evolve_review_task_without_subagent_rail(tmp_
     with patch("openjiuwen.core.runner.Runner.resource_mgr.add_tool"):
         rail.init(agent)
 
-    assert [card.name for card in registered_cards] == [
+    assert [call.args[0].name for call in ability_manager.add_ability.call_args_list] == [
         "prepare_skill_evolution",
         "evolve_review_task",
         "list_skill_experiences",
@@ -580,6 +648,7 @@ def test_skill_rail_invalid_review_agent_max_iterations_rejected(tmp_path):
             review_agent_max_iterations=0,
         )
 
+
 @pytest.mark.asyncio
 async def test_build_user_evolution_request_requires_registered_evolve_review_task_after_init(tmp_path):
     rail = _make_rail(tmp_path)
@@ -603,8 +672,8 @@ async def test_build_user_evolution_request_requires_registered_evolve_review_ta
 
 @pytest.mark.asyncio
 async def test_evolve_review_task_uses_fixed_evolution_reviewer_subagent(monkeypatch):
-    from openjiuwen.harness.rails.evolution.review.subagent import EVOLUTION_REVIEW_AGENT_NAME
     from openjiuwen.agent_evolving.tools.skill import EvolveReviewTaskTool
+    from openjiuwen.harness.rails.evolution.review.subagent import EVOLUTION_REVIEW_AGENT_NAME
 
     captured = {}
 
@@ -714,7 +783,7 @@ async def test_prepare_tool_uses_rail_owned_trajectory_evidence(tmp_path):
         ability_manager=ability_manager,
         find_rails_by_type=_find_rails_by_type(),
     )
-    trajectory = Trajectory(
+    trajectory = LegacyTrajectory(
         execution_id="exec-prepare-review",
         steps=[
             TrajectoryStep(
@@ -760,7 +829,7 @@ def test_build_review_scoped_materials_keeps_full_trajectory_index():
         )
         for index in range(25)
     ]
-    trajectory = Trajectory(execution_id="exec-1", session_id="session-1", steps=steps)
+    trajectory = LegacyTrajectory(execution_id="exec-1", session_id="session-1", steps=steps)
 
     materials = build_review_scoped_materials(trajectory)
 
@@ -774,7 +843,7 @@ def test_build_review_scoped_materials_keeps_full_trajectory_index():
 
 def test_build_review_scoped_materials_tool_detail_is_bounded():
     long_result = "x" * 5000
-    trajectory = Trajectory(
+    trajectory = LegacyTrajectory(
         execution_id="exec-tool",
         session_id="session-1",
         steps=[
@@ -810,7 +879,7 @@ def test_build_review_scoped_materials_tool_detail_is_bounded():
 async def test_build_user_evolution_request_defers_scope_creation_to_prepare_tool(tmp_path):
     rail = _make_rail(tmp_path)
     rail._ensure_evolve_review_task_available = Mock()
-    trajectory = Trajectory(
+    trajectory = LegacyTrajectory(
         execution_id="exec-request-review",
         steps=[
             TrajectoryStep(
@@ -889,12 +958,14 @@ async def test_evolution_protocol_section_is_injected_without_command_parsing(tm
     section = builder.get_section(SectionName.EVOLUTION_PROTOCOL)
     assert section is not None
     assert section.name == SectionName.EVOLUTION_PROTOCOL
+    assert "当前轮必须立即进入工具流程" in section.content["cn"]
+    assert "最小必要澄清" in section.content["cn"]
     assert ctx.inputs.messages == original_messages
 
 
 @pytest.mark.asyncio
 async def test_evolution_protocol_section_supports_english(tmp_path):
-    rail = _make_rail(tmp_path)
+    rail = _make_rail(tmp_path, language="en")
     builder = SystemPromptBuilder(language="en")
     agent = SimpleNamespace(system_prompt_builder=builder)
     ctx = AgentCallbackContext(agent=agent, inputs=ModelCallInputs(messages=[]))
@@ -904,20 +975,61 @@ async def test_evolution_protocol_section_supports_english(tmp_path):
     section = builder.get_section(SectionName.EVOLUTION_PROTOCOL)
     assert section is not None
     assert section.name == SectionName.EVOLUTION_PROTOCOL
+    assert "immediately enter the tool" in section.content["en"]
+    assert "minimum necessary clarification" in section.content["en"]
 
 
-def _make_task_iteration_ctx(*, agent=None, is_follow_up: bool = False) -> AgentCallbackContext:
-    return AgentCallbackContext(
+def _make_task_iteration_ctx(
+    *,
+    agent=None,
+    is_follow_up: bool = False,
+    conversation_id: str = "conv-1",
+    run_kind=None,
+) -> AgentCallbackContext:
+    ctx = AgentCallbackContext(
         agent=agent,
         inputs=TaskIterationInputs(
             iteration=1,
             loop_event=SimpleNamespace(),
-            conversation_id="conv-1",
+            conversation_id=conversation_id,
             query="run",
             is_follow_up=is_follow_up,
         ),
         session=None,
     )
+    if run_kind is not None:
+        ctx.extra["run_kind"] = run_kind
+    return ctx
+
+
+def _make_controller_agent():
+    controller = Mock()
+    controller.enqueue_follow_up = Mock()
+    return SimpleNamespace(_loop_controller=controller), controller
+
+
+def test_allow_evolution_trigger_rejects_heartbeat_and_cron_invokes(tmp_path):
+    rail = _make_rail(tmp_path, auto_scan=True)
+
+    for run_kind in (RunKind.HEARTBEAT, RunKind.CRON):
+        ctx = AgentCallbackContext(
+            agent=None,
+            inputs=InvokeInputs(query="run", conversation_id="conv-1", run_kind=run_kind),
+            session=None,
+        )
+
+        assert not rail._allow_evolution_trigger(None, ctx)
+
+
+def test_allow_evolution_trigger_allows_normal_invoke(tmp_path):
+    rail = _make_rail(tmp_path, auto_scan=True)
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=InvokeInputs(query="run", conversation_id="conv-1", run_kind=RunKind.NORMAL),
+        session=None,
+    )
+
+    assert rail._allow_evolution_trigger(None, ctx)
 
 
 @pytest.mark.asyncio
@@ -944,6 +1056,39 @@ async def test_fuzzy_review_enqueues_every_interval_for_non_followup_iterations(
 
     await rail._on_after_task_iteration(ctx)
     assert controller.enqueue_follow_up.call_count == 2
+    assert rail._fuzzy_review_non_followup_count == 0
+
+
+@pytest.mark.asyncio
+async def test_fuzzy_review_skips_heartbeat_task_iterations(tmp_path):
+    rail = _make_rail(tmp_path, fuzzy_review_interval=1)
+    agent, controller = _make_controller_agent()
+
+    await rail._on_after_task_iteration(
+        _make_task_iteration_ctx(
+            agent=agent,
+            conversation_id="heartbeat_19ed9a89354_a8c29c",
+        )
+    )
+
+    controller.enqueue_follow_up.assert_not_called()
+    assert rail._fuzzy_review_non_followup_count == 0
+
+
+@pytest.mark.asyncio
+async def test_fuzzy_review_skips_cron_task_iterations(tmp_path):
+    rail = _make_rail(tmp_path, fuzzy_review_interval=1)
+    agent, controller = _make_controller_agent()
+
+    await rail._on_after_task_iteration(
+        _make_task_iteration_ctx(
+            agent=agent,
+            conversation_id="cron_19ed9a89354_a8c29c",
+            run_kind=RunKind.CRON,
+        )
+    )
+
+    controller.enqueue_follow_up.assert_not_called()
     assert rail._fuzzy_review_non_followup_count == 0
 
 
@@ -985,6 +1130,16 @@ async def test_fuzzy_review_without_task_loop_controller_drops_followup(tmp_path
 def test_fuzzy_review_interval_must_be_positive(tmp_path):
     with pytest.raises(ValueError, match="fuzzy_review_interval"):
         _make_rail(tmp_path, fuzzy_review_interval=0)
+
+
+def test_cn_fuzzy_review_prompts_share_rule_text():
+    assert EVOLUTION_FUZZY_REVIEW_RULES_CN in EVOLUTION_FUZZY_REVIEW_PROMPT_CN
+    assert EVOLUTION_FUZZY_REVIEW_RULES_CN in _FUZZY_REVIEW_PROMPT_CN
+
+
+def test_en_fuzzy_review_prompts_share_rule_text():
+    assert EVOLUTION_FUZZY_REVIEW_RULES_EN in EVOLUTION_FUZZY_REVIEW_PROMPT_EN
+    assert EVOLUTION_FUZZY_REVIEW_RULES_EN in _FUZZY_REVIEW_PROMPT_EN
 
 
 @pytest.mark.asyncio
@@ -1594,7 +1749,7 @@ async def test_stage_evolution_from_signals_passes_trajectory_to_orchestrator(tm
             message="none",
         )
     )
-    trajectory = Trajectory(execution_id="exec-1", session_id="session-1", steps=[])
+    trajectory = LegacyTrajectory(execution_id="exec-1", session_id="session-1", steps=[])
 
     await rail._stage_evolution_from_signals(
         "skill-a",
@@ -1955,7 +2110,7 @@ async def test_run_evolution_uses_normalized_messages_for_signal_detection(tmp_p
     detector.bind_llm.return_value = detector
     detector.detect_trajectory_signals.return_value = []
     detector.detect_user_intent = AsyncMock(return_value=[])
-    trajectory = Trajectory(
+    trajectory = LegacyTrajectory(
         execution_id="exec-message-object",
         steps=[
             TrajectoryStep(
@@ -2072,10 +2227,9 @@ async def test_run_evolution_auto_scan_consumes_script_artifact_rule_signal(tmp_
 @pytest.mark.asyncio
 async def test_run_evolution_auto_scan_ignores_team_collaboration_activity(tmp_path):
     rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
-    trajectory = Trajectory(
+    trajectory = LegacyTrajectory(
         execution_id="team-collab",
         session_id="session-team",
-        source="online",
         steps=[
             TrajectoryStep(
                 kind="llm",
@@ -2106,6 +2260,7 @@ async def test_run_evolution_auto_scan_ignores_team_collaboration_activity(tmp_p
                 ),
             ),
         ],
+        source="online",
         meta={"member_id": "researcher", "team_id": "team-1"},
     )
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
@@ -3011,7 +3166,6 @@ def test_skill_rewriter_exports_removed():
 
     assert not hasattr(skill_call, "SkillRewriter")
     assert not hasattr(skill_call, "SkillRewriteResult")
-
 
 
 # =============================================================================

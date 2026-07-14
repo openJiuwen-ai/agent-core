@@ -3,6 +3,7 @@
 """Unit tests for DeepAgent workspace integration - directory creation"""
 from __future__ import annotations
 
+import errno
 import time
 from pathlib import Path
 from typing import Any, Dict, List
@@ -247,6 +248,55 @@ def test_workspace_get_directory_nonexistent_with_enum():
 
     assert workspace.get_directory(WorkspaceNode.USER_MD) is not None
     assert workspace.get_directory("nonexistent_dir") is None
+
+
+# =============================================================================
+# Workspace Managed Link Tests
+# =============================================================================
+
+
+def test_workspace_link_team_falls_back_to_copy_and_unlink_removes_it(monkeypatch, tmp_path: Path):
+    workspace = Workspace(root_path=str(tmp_path))
+    target = tmp_path / "shared-team"
+    target.mkdir()
+    (target / "artifact.txt").write_text("team-data", encoding="utf-8")
+
+    def fake_symlink(*args, **kwargs):
+        error = OSError("permission denied")
+        error.errno = errno.EPERM
+        raise error
+
+    monkeypatch.setattr("openjiuwen.harness.workspace.workspace.os.symlink", fake_symlink)
+
+    link = workspace.link_team("alpha", str(target))
+
+    assert link.is_dir()
+    assert not link.is_symlink()
+    assert (link / "artifact.txt").read_text(encoding="utf-8") == "team-data"
+    assert workspace.unlink_team("alpha") is True
+    assert not link.exists()
+
+
+def test_workspace_link_worktree_falls_back_to_copy_and_unlink_removes_it(monkeypatch, tmp_path: Path):
+    workspace = Workspace(root_path=str(tmp_path))
+    target = tmp_path / "worktree-src"
+    target.mkdir()
+    (target / "scratch.py").write_text("print('ok')", encoding="utf-8")
+
+    def fake_symlink(*args, **kwargs):
+        error = OSError("operation not permitted")
+        error.errno = errno.EACCES
+        raise error
+
+    monkeypatch.setattr("openjiuwen.harness.workspace.workspace.os.symlink", fake_symlink)
+
+    link = workspace.link_worktree("wt-alpha", str(target))
+
+    assert link.is_dir()
+    assert not link.is_symlink()
+    assert (link / "scratch.py").read_text(encoding="utf-8") == "print('ok')"
+    assert workspace.unlink_worktree("wt-alpha") is True
+    assert not link.exists()
 
 
 # =============================================================================

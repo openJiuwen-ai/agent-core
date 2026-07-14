@@ -29,11 +29,11 @@
 # experience_dir: "/home/user/.openjiuwen/auto_harness/experience"
 
 git:
-  remote: ""                    # fork remote name（如 "k00591264"）
+  remote: ""                    # fork remote name
   base_branch: "develop-auto-harness"        # PR 目标分支
   user_name: ""                 # git commit 用户名
   user_email: ""                # git commit 邮箱
-  fork_owner: ""                # fork 所有者（如 "SnapeK"）
+  fork_owner: ""                # fork 所有者
   upstream_owner: "openJiuwen"  # 上游仓库所有者
   upstream_repo: "agent-core"   # 上游仓库名称
 
@@ -60,11 +60,11 @@ fix_loop:
 agent:
   implement: 60                 # implement agent max_iterations
   assess: 60                    # assess agent max_iterations
-  plan: 30                      # plan agent max_iterations
+  plan: 60                      # plan agent max_iterations
   select_pipeline: 20           # pipeline selector max_iterations
   eval: 20                      # evaluator max_iterations
-  pr_draft: 10                   # PR draft agent max_iterations
-  learnings: 10                  # learnings agent max_iterations
+  pr_draft: 20                   # PR draft agent max_iterations
+  learnings: 20                  # learnings agent max_iterations
 
 extensions:
   stage_registrars: []          # module:callable，签名 (StageRegistry) -> None

@@ -6,6 +6,8 @@ from openjiuwen.core.memory.external.agentarts_memory_provider import AgentArtsM
 from openjiuwen.core.memory.external.mem0_provider import Mem0MemoryProvider
 from openjiuwen.core.memory.external.openjiuwen_memory_provider import OpenJiuwenMemoryProvider
 from openjiuwen.core.memory.external.openviking_memory_provider import OpenVikingMemoryProvider
+from openjiuwen.core.memory.external.lakebase_memory_provider import LakeBaseMemoryProvider
+from openjiuwen.core.memory.external.jiuwen_memory_provider import JiuwenMemoryProvider
 from openjiuwen.core.memory.external.provider import MemoryProvider
 
 __all__ = [
@@ -13,5 +15,7 @@ __all__ = [
     "AgentArtsMemoryProvider",
     "OpenJiuwenMemoryProvider",
     "OpenVikingMemoryProvider",
+    "LakeBaseMemoryProvider",
     "Mem0MemoryProvider",
+    "JiuwenMemoryProvider",
 ]

@@ -30,6 +30,10 @@ def create_tool_call_list(ids: list[str]) -> list[ToolCall]:
     return [ToolCall(id=tool_call_id, name="test-tool", type="function", arguments="") for tool_call_id in ids]
 
 
+def create_tool_call(tool_call_id: str, name: str, arguments: str = "") -> ToolCall:
+    return ToolCall(id=tool_call_id, name=name, type="function", arguments=arguments)
+
+
 def DialogueCompressorConfig(**kwargs):
     return _DialogueCompressorConfig(
         model=ModelRequestConfig(model="test-model"),
@@ -146,6 +150,52 @@ class TestDialogueCompressor:
             assert isinstance(updated_messages[1], UserMessage)
             assert updated_messages[1].content.startswith(_DIALOGUE_MEMORY_BLOCK_MARKER)
             assert "Final Result" in updated_messages[1].content
+
+    @pytest.mark.asyncio
+    async def test_build_json_replacements_reinjects_team_collaboration_after_memory_block(self):
+        with patch(
+            "openjiuwen.core.context_engine.processor.compressor.dialogue_compressor.Model"
+        ) as mock_model_cls:
+            mock_model_cls.return_value = MagicMock()
+            compressor = _TestableDialogueCompressor(DialogueCompressorConfig())
+
+        target_messages = [
+            AssistantMessage(
+                content="",
+                tool_calls=[
+                    create_tool_call(
+                        "tc-team",
+                        "send_message",
+                        '{"to": "writer", "content": "please draft the report", "summary": "请起草报告"}',
+                    )
+                ],
+            ),
+            ToolMessage(content="Message sent from leader to writer", tool_call_id="tc-team"),
+        ]
+        from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import _CompressTarget
+
+        replacements, modified_indices = await compressor._build_json_replacements(
+            MagicMock(),
+            [
+                _CompressTarget(
+                    block_id="react_1",
+                    user_idx=0,
+                    start_idx=1,
+                    end_idx=2,
+                    messages=target_messages,
+                )
+            ],
+            {"blocks": [{"block_id": "react_1", "summary": "Final Result: delegated."}]},
+        )
+
+        assert modified_indices == [1, 2]
+        assert len(replacements) == 1
+        replacement_messages = replacements[0][2]
+        assert len(replacement_messages) == 2
+        assert replacement_messages[0].content.startswith(_DIALOGUE_MEMORY_BLOCK_MARKER)
+        assert replacement_messages[1].content.startswith("[STATE_REINJECTION]\n[TEAM_MESSAGES]")
+        assert "向 writer 发送消息：请起草报告 [send_message]" in replacement_messages[1].content
+        assert "-> Message sent from leader to writer" in replacement_messages[1].content
 
     @pytest.mark.asyncio
     async def test_streams_state_when_dialogue_compressor_triggers(self):

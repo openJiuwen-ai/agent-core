@@ -34,6 +34,10 @@ class TestIsEphemeralSlug:
         logger.info("agent-1234567 recognized as ephemeral")
 
     @pytest.mark.level0
+    def test_agent_team_member_hex8(self):
+        assert is_ephemeral_slug("agent-code-team-dev-one-a1b2c3d4") is True
+
+    @pytest.mark.level0
     def test_feature_branch_not_ephemeral(self):
         assert is_ephemeral_slug("feature-auth") is False
 
@@ -53,6 +57,10 @@ class TestIsEphemeralSlug:
     def test_agent_too_long(self):
         assert is_ephemeral_slug("agent-12345678") is False
         logger.info("Non-ephemeral slugs correctly rejected")
+
+    @pytest.mark.level1
+    def test_agent_team_member_bad_hash_not_matched(self):
+        assert is_ephemeral_slug("agent-code-team-dev-one-nothex!!") is False
 
 
 class TestCleanupStaleWorktrees:

@@ -14,9 +14,12 @@ class ToolCall(BaseModel):
         name: Tool name
         arguments: Tool arguments
         index: Tool call index, used to distinguish multiple tool calls
+        response_item_id: Optional provider response item ID for protocols
+            that distinguish response item IDs from tool call IDs.
     """
     id: Optional[str]
     type: str
     name: str
     arguments: str
     index: Optional[int] = None
+    response_item_id: Optional[str] = None

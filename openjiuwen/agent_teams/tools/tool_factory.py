@@ -8,10 +8,14 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import MappedToolOutput, TeamTool
+from openjiuwen.agent_teams.tools.tool_async import (
+    AsyncTaskCancelTool,
+    AsyncTaskOutputTool,
+    AsyncTasksListTool,
+)
 from openjiuwen.agent_teams.tools.tool_member import (
     ApprovePlanTool,
     ApproveToolCallTool,
-    ListMembersTool,
     ShutdownMemberTool,
     SpawnBridgeAgentTool,
     SpawnExternalCliTool,
@@ -58,6 +62,9 @@ def create_team_tools(
     team_name: str = "default",
     swarmflow_model_resolver: Callable[[str], Any] | None = None,
     swarmflow_worker_base_spec: Any = None,
+    swarmflow_human_base_spec: Any = None,
+    concurrency_governor: Any = None,
+    team_permissions_enabled: bool = False,
 ) -> list[Tool]:
     """Create role-appropriate tool instances filtered by permission sets.
 
@@ -112,7 +119,6 @@ def create_team_tools(
         "shutdown_member": ShutdownMemberTool(agent_team, t),
         "approve_plan": ApprovePlanTool(agent_team, t),
         "approve_tool": ApproveToolCallTool(agent_team, t),
-        "list_members": ListMembersTool(agent_team, t),
         # Task management
         "create_task": TaskCreateTool(agent_team, t),
         "update_task": UpdateTaskTool(agent_team, t),
@@ -131,13 +137,21 @@ def create_team_tools(
         "swarmflow": SwarmflowTool(
             parent_agent=parent_agent,
             messager=messager,
-            team_backend=agent_team,
             team_name=team_name,
             model_resolver=swarmflow_model_resolver,
             worker_base_spec=swarmflow_worker_base_spec,
+            human_base_spec=swarmflow_human_base_spec,
+            concurrency_governor=concurrency_governor,
             t=t,
             language=lang,
         ),
+        # Async-tool control tools (list / output / cancel background tasks).
+        # Leader-only (in LEADER_ONLY_TOOLS); always wired — harmless when the
+        # registry is empty. ``parent_agent`` is the harness whose runtime they
+        # query; None for harness-less callers (filtered out by role anyway).
+        "async_tasks_list": AsyncTasksListTool(parent_agent, t, language=lang),
+        "async_task_output": AsyncTaskOutputTool(parent_agent, t, language=lang),
+        "async_task_cancel": AsyncTaskCancelTool(parent_agent, t, language=lang),
     }
 
     if role == "human_agent":
@@ -148,11 +162,12 @@ def create_team_tools(
         allowed = MEMBER_TOOLS
     # Plan tools only make sense in plan_mode.
     if teammate_mode != "plan_mode":
-        allowed = allowed - {
-            "approve_plan",
-            "approve_tool",
-            "submit_plan",
-        }
+        excluded = {"approve_plan", "submit_plan"}
+        # Leader must keep approve_tool when team permissions are on,
+        # so it can resolve teammate ASK interrupts.
+        if not team_permissions_enabled:
+            excluded.add("approve_tool")
+        allowed = allowed - excluded
     # clean_team is a temporary-team primitive only. Persistent teams are
     # torn down by the operator through SDK facades (delete_agent_team etc.);
     # letting the leader LLM call clean_team mid-round would race the runtime

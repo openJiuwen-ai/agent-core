@@ -16,6 +16,7 @@ from typing import ClassVar
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
 from openjiuwen.agent_teams.external.format import render_task_line
 from openjiuwen.agent_teams.i18n import t
+from openjiuwen.agent_teams.inbound_render import render_event
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
@@ -95,13 +96,20 @@ class TaskBoardHandler(BaseCoordinationHandler):
                     payload.task_id,
                     exc,
                 )
-            content = t(
-                "hitt.task_assigned_to_self_human",
+            content = render_event(
+                kind="task-assigned",
+                body=t("hitt.assigned_event", task_id=payload.task_id, title=title),
                 task_id=payload.task_id,
-                title=title,
+                for_controller=True,
+                note_kind="hitt-silence",
+                note_text=t("hitt.silence_note"),
             )
         else:
-            content = t("dispatcher.task_assigned_to_self", task_id=payload.task_id)
+            content = render_event(
+                kind="task-assigned",
+                body=t("dispatcher.task_assigned_to_self", task_id=payload.task_id),
+                task_id=payload.task_id,
+            )
 
         team_logger.info(
             "[{}] received TASK_CLAIMED for self, task_id={}, human_agent={}",
@@ -128,10 +136,15 @@ class TaskBoardHandler(BaseCoordinationHandler):
             )
             return
         key = "dispatcher.task_plan_approved_to_self" if payload.approved else "dispatcher.task_plan_rejected_to_self"
-        content = t(
-            key,
+        kind = "plan-approved" if payload.approved else "plan-rejected"
+        content = render_event(
+            kind=kind,
+            body=t(
+                key,
+                task_id=payload.task_id,
+                feedback=getattr(payload, "feedback", "") or "",
+            ),
             task_id=payload.task_id,
-            feedback=getattr(payload, "feedback", "") or "",
         )
         await self._round.deliver_input(content)
 
@@ -180,7 +193,7 @@ class TaskBoardHandler(BaseCoordinationHandler):
                     prompt = t("dispatcher.all_done_persistent")
                 else:
                     prompt = t("dispatcher.all_done_temporary")
-                await self._round.deliver_input(prompt)
+                await self._round.deliver_input(render_event(kind="all-done", body=prompt))
                 return
             lines = [t("dispatcher.leader_task_board")]
         else:
@@ -193,4 +206,4 @@ class TaskBoardHandler(BaseCoordinationHandler):
         for task in incomplete:
             lines.append(render_task_line(task, now_ms=now_ms))
 
-        await self._round.deliver_input("\n".join(lines))
+        await self._round.deliver_input(render_event(kind="task-board", body="\n".join(lines)))

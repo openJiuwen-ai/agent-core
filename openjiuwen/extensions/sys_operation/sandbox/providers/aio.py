@@ -963,6 +963,11 @@ class AIOCodeProvider(BaseCodeProvider):
         super().__init__(endpoint, config)
         self._client = None
         self._timeout_seconds = 30  # Default
+        # Reuse a single shell provider so its cached Sandbox/httpx.Client (and
+        # the TLS context + connection pool) persists across code executions.
+        # Constructing a fresh AIOShellProvider per call previously forced a new
+        # httpx.Client + SSL handshake on every execute_code(_stream) call.
+        self._shell_provider = AIOShellProvider(self.endpoint, self.config)
 
     def _get_client(self):
         if self._client is None:
@@ -1031,7 +1036,7 @@ class AIOCodeProvider(BaseCodeProvider):
                 data=data,
             )
 
-        shell_provider = AIOShellProvider(self.endpoint, self.config)
+        shell_provider = self._shell_provider
         shell_result = await shell_provider.execute_cmd(
             command=command,
             cwd=".",
@@ -1098,7 +1103,7 @@ class AIOCodeProvider(BaseCodeProvider):
             )
             return
 
-        shell_provider = AIOShellProvider(self.endpoint, self.config)
+        shell_provider = self._shell_provider
         async for shell_chunk in shell_provider.execute_cmd_stream(
                 command=command,
                 cwd=".",

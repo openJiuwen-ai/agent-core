@@ -6,7 +6,9 @@
 This is the seam where the business-agnostic swarmflow engine meets agent_teams.
 For every ``agent(prompt, schema=...)`` the engine issues, the backend:
 
-1. mints a unique ``WORKER`` member identity and (best-effort) opens a roster row;
+1. mints a unique ``WORKER`` member identity (used only as the worker's card /
+   owner id / workspace name — swarmflow workers are ephemeral, single-shot
+   executors, NOT teammates, so they get no team-DB roster row);
 2. derives a worker ``DeepAgentSpec`` from the team's *teammate* spec (or the
    leader spec when no teammate is configured) — so a worker is "a teammate
    without team tools": it keeps teammate capabilities (model / tools / skills /
@@ -18,7 +20,7 @@ For every ``agent(prompt, schema=...)`` the engine issues, the backend:
    supervisor, no steer); the worker ends by calling ``structured_output``, whose
    captured arguments ARE the structured result (the harness has no native
    structured output, so the tool call is how the schema is enforced);
-4. tears the worker down (status → SHUTDOWN) and returns an :class:`AgentResult`.
+4. disposes the worker harness and returns an :class:`AgentResult`.
 
 When the engine requested no schema, the worker runs without ``structured_output``
 and its final free-text answer is returned. A worker that fails to submit a
@@ -32,17 +34,20 @@ override it without standing up a real LLM.
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Any, Callable, Sequence
 
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
-from openjiuwen.agent_teams.paths import team_home, independent_member_workspace
 from openjiuwen.agent_teams.tools.locales import make_translator
-from openjiuwen.agent_teams.workflow.backends.structured_output_tool import StructuredOutputTool
+from openjiuwen.agent_teams.workspace_layout import ensure_team_member_workspace_link
+from openjiuwen.agent_teams.tools.structured_output_tool import (
+    StructuredOutputFinishRail,
+    StructuredOutputTool,
+)
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
+from openjiuwen.agent_teams.workflow.worktree import SwarmflowWorkerWorktrees
 from openjiuwen.core.common.logging import team_logger
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -55,9 +60,6 @@ class TeamWorkerBackend(AgentBackend):
         model: Legacy default ``Model`` (kept for construction compatibility;
             the harness path resolves a worker's model from its spec / the
             per-call config resolver instead).
-        team_backend: Optional ``TeamBackend`` used to open/close the worker's
-            roster row. ``None`` runs workers without a DB identity (used in
-            tests and headless dry-runs).
         team_name: Team name used to namespace worker member ids.
         language: Prompt language hint (drives the structured-output tool i18n).
         max_iterations: Reserved hard cap on a worker's turns.
@@ -79,30 +81,49 @@ class TeamWorkerBackend(AgentBackend):
         self,
         *,
         model: Any,
-        team_backend: Any = None,
         team_name: str = "swarmflow",
         language: str = "cn",
         max_iterations: int = 6,
         model_resolver: Callable[[str], Any] | None = None,
         worker_base_spec: Any = None,
+        human_base_spec: Any = None,
         build_context: Any = None,
+        messager: Any = None,
+        session_id: str | None = None,
+        on_human_prompt: Callable[[str, str, str], None] | None = None,
+        on_human_replied: Callable[[str, str], None] | None = None,
+        run_id: str | None = None,
     ) -> None:
         self._model = model
-        self._team_backend = team_backend
         self._team_name = team_name
         self._language = language
         self._max_iterations = max_iterations
         self._model_resolver = model_resolver
         self._worker_base_spec = worker_base_spec
+        self._human_base_spec = human_base_spec
         self._build_context = build_context
+        self._messager = messager
+        self._session_id = session_id
+        self._on_human_prompt = on_human_prompt
+        self._on_human_replied = on_human_replied
+        self._run_id = run_id
+        self._run_prefix = self._run_id_prefix(run_id)
+        self._worktrees = SwarmflowWorkerWorktrees(
+            team_name=team_name,
+            build_context=build_context,
+            session_id=session_id,
+        )
         self._t = make_translator(language if language in ("cn", "en") else "cn")
         self._counter = 0
+        # Stateful agent_session / human_session manager, built on first use so a
+        # workflow that only uses single-shot agent() never pays for it.
+        self._session_mgr: Any = None
 
     async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
         member_name = self._next_member_name(opts)
         model = self._resolve_model(opts.get("model"))
-        await self._open_worker_row(member_name, opts)
         try:
+            await self._worktrees.ensure(member_name, opts)
             if schema_json is not None:
                 # The harness's ability manager re-qualifies the tool id per owner
                 # (``structured_output_{worker_owner_id}``), so concurrent workers
@@ -133,7 +154,73 @@ class TeamWorkerBackend(AgentBackend):
             )
             return AgentResult(text=text, tokens=self._estimate_tokens(prompt, text))
         finally:
-            await self._close_worker_row(member_name)
+            await self._worktrees.finalize(member_name)
+
+    # ------------------------------------------------------------------
+    # Stateful sessions (agent_session / human_session) — delegated
+    # ------------------------------------------------------------------
+
+    def _sessions(self) -> Any:
+        """Lazily build the avatar-session manager (only when a session is opened)."""
+        if self._session_mgr is None:
+            from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import (
+                AvatarSessionManager,
+            )
+
+            self._session_mgr = AvatarSessionManager(
+                worker_base_spec=self._worker_base_spec,
+                human_base_spec=self._human_base_spec,
+                team_name=self._team_name,
+                language=self._language,
+                model_resolver=self._model_resolver,
+                build_context=self._build_context,
+                t=self._t,
+                messager=self._messager,
+                session_id=self._session_id,
+                on_human_prompt=self._on_human_prompt,
+                on_human_replied=self._on_human_replied,
+            )
+        return self._session_mgr
+
+    async def open_session(self, *, kind: str, instructions: str | None, opts: dict) -> str:
+        """Open a stateful session (see :class:`AvatarSessionManager`)."""
+        return await self._sessions().open_session(kind=kind, instructions=instructions, opts=opts)
+
+    async def send_turn(
+        self,
+        session_id: str,
+        prompt: str,
+        opts: dict,
+        schema_json: dict | None,
+        *,
+        history: Sequence[dict] = (),
+        correlation_id: str | None = None,
+    ) -> AgentResult:
+        """Advance one turn on an open session."""
+        return await self._sessions().send_turn(
+            session_id, prompt, opts, schema_json, history=history, correlation_id=correlation_id
+        )
+
+    async def close_session(self, session_id: str) -> None:
+        """Close one open session (no-op when no session was ever opened)."""
+        if self._session_mgr is not None:
+            await self._session_mgr.close_session(session_id)
+
+    async def aclose(self) -> None:
+        """Dispose every session opened during the run (run-end teardown)."""
+        if self._session_mgr is not None:
+            await self._session_mgr.aclose()
+
+    async def abort_sessions(self) -> None:
+        """Abort every live avatar session's in-flight turn (pause path).
+
+        Delegates to the session manager when one exists; a workflow that used
+        only single-shot ``agent()`` has none, so this is a no-op there. The
+        single-shot ``run_once`` workers are NOT touched here — they have no
+        supervisor and are stopped by the top-level task cancel instead.
+        """
+        if self._session_mgr is not None:
+            await self._session_mgr.abort_all()
 
     def _resolve_model(self, model_name: str | None) -> Any:
         """Resolve a per-call ``model`` hint to a worker ``TeamModelConfig``.
@@ -181,7 +268,10 @@ class TeamWorkerBackend(AgentBackend):
             ``StructuredOutputTool`` instance by :meth:`run`, not from this value.
         """
         from openjiuwen.agent_teams.harness.team_harness import TeamHarness
-        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+        from openjiuwen.agent_teams.workflow.backends._member_spec import (
+            derive_member_build_context,
+            derive_member_spec,
+        )
 
         if self._worker_base_spec is None:
             raise BackendError(
@@ -189,45 +279,42 @@ class TeamWorkerBackend(AgentBackend):
             )
 
         try:
-            worker_workspace = self._setup_worker_workspace(member_name)
-
-            worker_spec = self._worker_base_spec.model_copy(
-                update={
-                    "card": AgentCard(
-                        id=f"{self._team_name}_{member_name}",
-                        name=member_name,
-                        description="swarmflow worker",
-                    ),
-                    # Per-call model config when resolved, else inherit teammate's.
-                    "model": model or self._worker_base_spec.model,
-                    "system_prompt": (
-                        self._t("swarmflow_worker", key="schema")
-                        if has_schema
-                        else self._t("swarmflow_worker", key="free")
-                    ),
-                    # Append the per-call structured_output instance; the base spec
-                    # already carries teammate tools/skills. enable_task_loop /
-                    # enable_task_planning are inherited (DeepAgent todo planning kept).
-                    "tools": list(self._worker_base_spec.tools or []) + list(tools),
-                    # Worker gets its own workspace, not the teammate's.
-                    "workspace": worker_workspace,
-                }
+            # Worker = teammate without team tools: per-call model (else inherit),
+            # single-shot prompt, base tools + the per-call structured_output
+            # instance. enable_task_loop / enable_task_planning ride along from
+            # the base spec, so DeepAgent todo planning is preserved.
+            worker_spec = derive_member_spec(
+                self._worker_base_spec,
+                team_name=self._team_name,
+                member_name=member_name,
+                system_prompt=(
+                    self._t("swarmflow_worker", key="schema")
+                    if has_schema
+                    else self._t("swarmflow_worker", key="free")
+                ),
+                model=model,
+                extra_tools=tools,
+                description="swarmflow worker",
             )
-            worker_build_context = None
-            if self._build_context is not None:
-                worker_build_context = self._build_context.derive(
-                    member_name=member_name,
-                    role=TeamRole.WORKER.value,
-                    member_card_id=f"{self._team_name}_{member_name}",
-                    language=self._language,
-                )
-                worker_build_context.extras = dict(worker_build_context.extras)
+            # Worker gets its own workspace, not the teammate's.
+            worker_workspace = self._setup_worker_workspace(member_name)
+            worker_spec = worker_spec.model_copy(update={"workspace": worker_workspace})
+            worker_build_context = derive_member_build_context(
+                self._build_context,
+                team_name=self._team_name,
+                member_name=member_name,
+                language=self._language,
+            )
             harness = TeamHarness.build(
                 agent_spec=worker_spec,
                 role=TeamRole.WORKER,
                 member_name=member_name,
                 build_context=worker_build_context,
             )
+            if has_schema:
+                # End the round as soon as structured_output is captured, so the
+                # model can't loop re-calling it (the ack carries no stop signal).
+                harness.add_rail(StructuredOutputFinishRail())
         except Exception as e:
             team_logger.exception("worker harness build failed for %s", member_name)
             raise BackendError(f"worker harness build failed for {member_name}: {e}") from e
@@ -261,48 +348,41 @@ class TeamWorkerBackend(AgentBackend):
     # ------------------------------------------------------------------
 
     def _setup_worker_workspace(self, member_name: str) -> WorkspaceSpec:
-        """Compute, link, register, and mount the worker's independent workspace.
+        """Compute, link, and mount the worker's independent workspace.
 
         Mirrors the layout used by ``agent_configurator`` for stable_base
         members: each worker gets its own workspace at
         ``{agent_teams_home}/{team_name}/workspaces/{member}_workspace/``.
-        Also registers the path for team cleanup and mounts the team shared
-        workspace into the worker's workspace tree (``.team/{team_name}/``).
+        It lives under the team home, which ``agent_configurator`` already
+        registers for team cleanup — so the worker workspace is removed with
+        the team and needs no per-worker cleanup registration. Also mounts the
+        team shared workspace into the worker's tree (``.team/{team_name}/``).
 
         Returns:
             A ``WorkspaceSpec`` with the worker's resolved root_path.
         """
-        # Compute worker's independent workspace path.
-        ws_root = str(team_home(self._team_name) / "workspaces" / f"{member_name}_workspace")
+        worktree = self._worktrees.get(member_name)
+        workspace_is_worktree = worktree is not None
+        # Compute worker's workspace path. With ``agent(options={"isolation": "worktree"})``,
+        # the worker starts directly inside the owner-scoped worktree.
+        ws_root = (
+            worktree.worktree_path
+            if worktree is not None
+            else ensure_team_member_workspace_link(self._team_name, member_name)
+        )
 
         if self._worker_base_spec.workspace is not None:
             # Inherit language / stable_base from the base spec, only override root_path.
             worker_workspace = self._worker_base_spec.workspace.model_copy(
-                update={"root_path": ws_root, "stable_base": True}
+                update={"root_path": ws_root, "stable_base": not workspace_is_worktree}
             )
         else:
             # Base spec has no workspace — create a fresh one for this worker.
             worker_workspace = WorkspaceSpec(
                 root_path=ws_root,
                 language=self._language,
-                stable_base=True,
+                stable_base=not workspace_is_worktree,
             )
-
-        # Symlink the independent member workspace (if it exists) into the
-        # team workspaces tree — same logic as agent_configurator.
-        base_dir = team_home(self._team_name) / "workspaces"
-        independent_ws = independent_member_workspace(member_name)
-        if independent_ws.is_dir() and not (base_dir / f"{member_name}_workspace").exists():
-            base_dir.mkdir(parents=True, exist_ok=True)
-            os.symlink(
-                str(independent_ws),
-                str(base_dir / f"{member_name}_workspace"),
-                target_is_directory=True,
-            )
-
-        # Register workspace for team cleanup — mirrors agent_configurator.
-        if self._team_backend is not None:
-            self._team_backend.register_cleanup_path(ws_root)
 
         # Mount team workspace into worker workspace so it can access shared
         # files via .team/{team_name}/ — mirrors agent_configurator.
@@ -314,61 +394,16 @@ class TeamWorkerBackend(AgentBackend):
         return worker_workspace
 
     # ------------------------------------------------------------------
-    # Worker roster identity (best-effort)
-    # ------------------------------------------------------------------
-
-    async def _open_worker_row(self, member_name: str, opts: dict) -> None:
-        """Open a WORKER roster row for visibility. Best-effort; never fatal."""
-        if self._team_backend is None:
-            return
-        from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberMode, MemberStatus
-        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-
-        desc = str(opts.get("label") or "swarmflow worker")
-        try:
-            card = AgentCard(
-                id=f"{self._team_backend.team_name}_{member_name}",
-                name=member_name,
-                description=desc,
-            )
-            await self._team_backend.spawn_member(
-                member_name=member_name,
-                display_name=member_name,
-                agent_card=card,
-                desc=desc,
-                status=MemberStatus.BUSY,
-                execution_status=ExecutionStatus.RUNNING,
-                mode=MemberMode.BUILD_MODE,
-                role=TeamRole.WORKER,
-            )
-        except Exception as exc:
-            team_logger.debug("worker row open failed for %s: %s", member_name, exc)
-
-    async def _close_worker_row(self, member_name: str) -> None:
-        """Mark the worker row SHUTDOWN once its single turn is done. Best-effort."""
-        if self._team_backend is None:
-            return
-        from openjiuwen.agent_teams.schema.status import MemberStatus
-
-        try:
-            await self._team_backend.db.member.update_member_status(
-                member_name,
-                self._team_backend.team_name,
-                MemberStatus.SHUTDOWN.value,
-            )
-        except Exception as exc:
-            team_logger.debug("worker row close failed for %s: %s", member_name, exc)
-
-    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     def _next_member_name(self, opts: dict) -> str:
-        """Mint a unique, pattern-valid worker member name from the call label.
+        """Mint a unique worker member name from the call label and run prefix.
 
-        ``wf-<label-slug>-<n>`` — lowercase ASCII, leading letter (the ``wf-``
-        prefix guarantees it), so it satisfies the member-name routing/path
-        constraints. ``n`` is a per-backend counter; the synchronous
+        ``{run_prefix}-{label-slug}-{n}`` (or ``wf-{label-slug}-{n}`` when no
+        run id is set) — lowercase ASCII, the leading run/``wf-`` prefix
+        guarantees it starts with a letter (satisfies member-name routing/path
+        constraints). ``n`` is a per-backend counter; the synchronous
         read-increment between awaits keeps it collision-free under the
         engine's concurrent fan-out.
         """
@@ -376,6 +411,8 @@ class TeamWorkerBackend(AgentBackend):
         self._counter += 1
         label = str(opts.get("label") or "worker")
         slug = _SLUG_RE.sub("-", label.lower()).strip("-") or "worker"
+        if self._run_prefix:
+            return f"{self._run_prefix}-{slug}-{n}"
         return f"wf-{slug}-{n}"
 
     @staticmethod
@@ -385,6 +422,14 @@ class TeamWorkerBackend(AgentBackend):
         except Exception:
             payload = str(result)
         return len(prompt) // 4 + len(payload) // 4
+
+    @staticmethod
+    def _run_id_prefix(run_id: str | None) -> str | None:
+        """Slug the full run id for worker member-name prefixing."""
+        if not run_id:
+            return None
+        slug = _SLUG_RE.sub("-", run_id.lower()).strip("-")
+        return slug or None
 
 
 __all__ = ["TeamWorkerBackend"]

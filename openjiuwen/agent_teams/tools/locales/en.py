@@ -72,6 +72,11 @@ STRINGS: dict[str, str] = {
         "(e.g. gpt-4, claude-sonnet-4); "
         "the system picks an appropriate model when omitted"
     ),
+    "spawn_teammate.permissions": (
+        "Narrow the teammate's tool permissions (only tightening, never loosening). "
+        "Keys are tool names, values are permission levels: 'allow', 'ask', or 'deny'. "
+        "Example: {\"bash\": \"deny\", \"write_file\": \"ask\"}"
+    ),
     # ===== spawn_human_agent ===================================================
     # spawn_human_agent._desc lives in descs/en/spawn_human_agent.md
     "spawn_human_agent.member_name": (
@@ -306,8 +311,34 @@ STRINGS: dict[str, str] = {
     # ===== swarmflow / structured_output ======================================
     # swarmflow._desc lives in descs/en/swarmflow.md
     # structured_output._desc lives in descs/en/structured_output.md (dynamic schema, no fixed params)
-    "swarmflow.script_path": "Path to the swarmflow script file (a Python module with META and async def run(args)).",
-    "swarmflow.args": "Optional argument value passed to the script's run(args) (e.g. a question, a target path).",
+    "swarmflow.script_path": (
+        "Path to a swarmflow script file on disk — a Python module with a top-level META (pure literal) "
+        "and async def run(args), whose body uses primitives imported via from swarmflow import "
+        "agent()/parallel()/pipeline()/... Wired to execution alongside inline script; best for scripts "
+        "already on disk or ones you iterate / resume repeatedly."
+    ),
+    "swarmflow.script": (
+        "Self-contained inline swarmflow script source (avoids writing to disk first). Must begin with a "
+        "top-level META (pure literal, no variables / calls / f-strings), then async def run(args), with the "
+        "body using agent()/parallel()/pipeline()/phase() primitives. Wired to execution — prefer it for "
+        "simple cases; the framework materialises the source under the workflow's journal directory before "
+        "running."
+    ),
+    "swarmflow.name": (
+        "Name of a saved / named swarmflow workflow, resolved to a self-contained script to run. "
+        "Interface is in place; execution is coming — use script_path for now."
+    ),
+    "swarmflow.resume_id": (
+        "The run_id of a prior run to resume. Unchanged agent() calls (same prompt + opts + schema) return "
+        "their cached results instantly; only edited / new calls re-run (an upstream change cascades to "
+        "invalidate downstream); same script + same args → full cache hit. Interface is in place; execution "
+        "is coming — use script_path for now."
+    ),
+    "swarmflow.args": (
+        "Optional argument passed to the script's async def run(args), as a **string** verbatim (e.g. a "
+        "research question, a target path). The script parses it itself (json.loads inside run for "
+        "structured input)."
+    ),
     "swarmflow_worker.schema": (
         "You are a single-shot swarmflow worker. Read the task in the user message, "
         "do the work, then call the `structured_output` tool EXACTLY ONCE with the "
@@ -326,4 +357,14 @@ STRINGS: dict[str, str] = {
         "Do NOT write the result in your text. This is the ONLY way to submit — "
         "not calling the tool = task failure."
     ),
+    # ===== async control tools (list / output / cancel) =======================
+    # async_tasks_list._desc / async_task_output._desc / async_task_cancel._desc
+    # live in descs/en/*.md
+    "async_task_output.task_id": "Id of the background task to query (the task_id returned by the launching tool).",
+    "async_task_output.block": (
+        "Whether to block until the task reaches a terminal state: when true, poll until "
+        "completed/failed or timeout; default false returns the current status immediately."
+    ),
+    "async_task_output.timeout": "Maximum wait in milliseconds when block=true (default 30000, capped at 600000).",
+    "async_task_cancel.task_id": "Id of the background task to cancel.",
 }

@@ -42,7 +42,7 @@ def merge_parser_content(left: Any, right: Any) -> Any:
     
     # Handle custom objects: check if __add__ method is implemented
     if (hasattr(left, '__add__') and 
-        type(left) == type(right) and
+        type(left) is type(right) and
         not isinstance(left, (int, float, bool))):  # Exclude basic numeric types
         try:
             return left + right
@@ -104,7 +104,7 @@ def merge_pydantic_models(left: Any, right: Any) -> Any:
     - For nested Pydantic Models, recursively merge them
     - For other fields, use the non-empty value from the right side
     """
-    if type(left) != type(right):
+    if type(left) is not type(right):
         return right
     
     # Get all fields of the model
@@ -170,7 +170,8 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
                     type=tc.type,
                     name=tc.name,
                     arguments=tc.arguments,
-                    index=tc.index
+                    index=tc.index,
+                    response_item_id=tc.response_item_id,
                 ))
 
         if other.tool_calls:
@@ -185,7 +186,8 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
                             type=last.type or incoming.type,
                             name=(last.name if last.name else incoming.name) or "",
                             arguments=(last.arguments or "") + (incoming.arguments or ""),
-                            index=last.index
+                            index=last.index,
+                            response_item_id=last.response_item_id or incoming.response_item_id,
                         )
                         continue
                 # otherwise, push as a new tool_call
@@ -194,7 +196,8 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
                     type=incoming.type,
                     name=incoming.name,
                     arguments=incoming.arguments,
-                    index=incoming.index
+                    index=len(merged_tool_calls),
+                    response_item_id=incoming.response_item_id,
                 ))
 
         merged_finish_reason = other.finish_reason if other.finish_reason != "null" else self.finish_reason

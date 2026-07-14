@@ -117,7 +117,8 @@ class MockModelClient(BaseModelClient):
 @pytest.mark.asyncio
 async def test_register_custom_template():
     builder = MetaTemplateBuilder(
-        ModelRequestConfig(model=""), ModelClientConfig(client_provider="MocKMetaTemplateLLM", api_base="", api_key="")
+        ModelRequestConfig(model=""),
+        ModelClientConfig(client_provider="MocKMetaTemplateLLM", api_base="", api_key="test-key")
     )
 
     template = "this is a string meta template"
@@ -143,7 +144,8 @@ async def test_register_custom_template():
 @pytest.mark.asyncio
 async def test_build_with_default_meta_template():
     builder = MetaTemplateBuilder(
-        ModelRequestConfig(model=""), ModelClientConfig(client_provider="MocKMetaTemplateLLM", api_base="", api_key="")
+        ModelRequestConfig(model=""),
+        ModelClientConfig(client_provider="MocKMetaTemplateLLM", api_base="", api_key="test-key")
     )
     response = await builder.build(prompt="你是一个旅行助手")
     assert response == (
@@ -170,7 +172,8 @@ async def test_build_with_default_meta_template():
 @pytest.mark.asyncio
 async def test_build_with_custom_meta_template():
     builder = MetaTemplateBuilder(
-        ModelRequestConfig(model=""), ModelClientConfig(client_provider="MocKMetaTemplateLLM", api_base="", api_key="")
+        ModelRequestConfig(model=""),
+        ModelClientConfig(client_provider="MocKMetaTemplateLLM", api_base="", api_key="test-key")
     )
     template = "you are a custom meta template"
     with pytest.raises(BaseError) as context:

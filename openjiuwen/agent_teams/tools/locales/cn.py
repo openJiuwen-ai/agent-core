@@ -55,6 +55,11 @@ STRINGS: dict[str, str] = {
         "可选。建议该成员使用的模型名称（如 gpt-4、claude-sonnet-4 等）；"
         "未指定时由系统自动选择合适的模型"
     ),
+    "spawn_teammate.permissions": (
+        "收窄该 teammate 的工具权限（只能收紧，不能放宽）。"
+        "键为工具名，值为权限级别：'allow'、'ask' 或 'deny'。"
+        "示例：{\"bash\": \"deny\", \"write_file\": \"ask\"}"
+    ),
     # ===== spawn_human_agent ===================================================
     # spawn_human_agent._desc lives in descs/cn/spawn_human_agent.md
     "spawn_human_agent.member_name": (
@@ -207,8 +212,29 @@ STRINGS: dict[str, str] = {
     # ===== swarmflow / structured_output ======================================
     # swarmflow._desc lives in descs/cn/swarmflow.md
     # structured_output._desc lives in descs/cn/structured_output.md (无固定参数，schema 动态)
-    "swarmflow.script_path": "swarmflow 脚本文件路径（一个含 META 与 async def run(args) 的 Python 模块）。",
-    "swarmflow.args": "传给脚本 run(args) 的可选参数值（如研究问题、目标路径）。",
+    "swarmflow.script_path": (
+        "磁盘上的 swarmflow 脚本文件路径——一个 Python 模块，含顶层 META（纯字面量）与 "
+        "async def run(args)，脚本体用 from swarmflow import 引入 agent()/parallel()/pipeline() "
+        "等原语。与内联 script 同为当前已接通执行的来源，适合已落盘 / 需反复迭代或 resume 的脚本。"
+    ),
+    "swarmflow.script": (
+        "自包含的内联 swarmflow 脚本源码（免去先写盘）。必须以顶层 META（纯字面量，无变量 / 函数调用 / "
+        "f-string）开头，后跟 async def run(args)，脚本体用 agent()/parallel()/pipeline()/phase() 等原语。"
+        "已接通执行——简单场景优先用它，框架会自动把源码落到该工作流的 journal 目录再运行。"
+    ),
+    "swarmflow.name": (
+        "已保存 / 具名 swarmflow 工作流的名称，解析为一个自包含脚本来运行。"
+        "接口已就位、执行推进中——当前请改用 script_path。"
+    ),
+    "swarmflow.resume_id": (
+        "要续跑的上次运行 run_id。内容未变的 agent() 调用（prompt + opts + schema 一致）瞬时返回缓存结果，"
+        "只有改动 / 新增的调用重跑（上游变更级联失效下游）；同脚本 + 同 args → 全缓存命中。"
+        "接口已就位、执行推进中——当前请改用 script_path。"
+    ),
+    "swarmflow.args": (
+        "传给脚本 async def run(args) 的可选参数，作为**字符串**原样传入（如研究问题、目标路径）。"
+        "脚本内自行解析（需结构化输入可在 run 里 json.loads）。"
+    ),
     "swarmflow_worker.schema": (
         "你是一名单次执行的 swarmflow 工作节点。阅读用户消息中的任务，完成工作，"
         "然后**必须**调用 `structured_output` 工具**恰好一次**，传入符合其输入 schema "
@@ -224,4 +250,13 @@ STRINGS: dict[str, str] = {
         "【重要提醒】你必须通过调用 `structured_output` 工具来提交结果，不要把结果"
         "写在文本中。这是唯一的结果提交方式，不调用该工具=任务失败。"
     ),
+    # ===== async control tools (list / output / cancel) =======================
+    # async_tasks_list._desc / async_task_output._desc / async_task_cancel._desc
+    # live in descs/cn/*.md
+    "async_task_output.task_id": "要查询的后台任务 id（来自启动工具返回的 task_id）。",
+    "async_task_output.block": (
+        "是否阻塞等待任务进入终态：true 时轮询至完成/失败或超时，默认 false 立即返回当前状态。"
+    ),
+    "async_task_output.timeout": "block=true 时的最大等待毫秒数（默认 30000，上限 600000）。",
+    "async_task_cancel.task_id": "要取消的后台任务 id。",
 }

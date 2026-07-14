@@ -92,3 +92,69 @@ def test_react_agent_batches_multiple_multimodal_tool_results_into_one_user_mess
         "type": "image_url",
         "image_url": {"url": "data:image/jpeg;base64,bbb"},
     }
+
+
+def test_react_agent_detects_image_input_in_messages() -> None:
+    result = ToolOutput(
+        success=True,
+        data={
+            "content": "Image file read: /tmp/a.png",
+            "multimodal": [
+                {
+                    "type": "image",
+                    "source_path": "/tmp/a.png",
+                    "data_url": "data:image/png;base64,abc",
+                }
+            ],
+        },
+    )
+    messages = ReActAgent._build_multimodal_tool_result_messages(result)
+
+    assert ReActAgent._messages_contain_image_input(messages) is True
+
+
+def test_react_agent_detects_nested_image_input_in_messages() -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,abc"},
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+
+    assert ReActAgent._messages_contain_image_input(messages) is True
+
+
+def test_react_agent_detects_image_input_unsupported_errors() -> None:
+    exc = RuntimeError(
+        "NotFoundError: Error code: 404 - No endpoints found that support image input"
+    )
+
+    assert ReActAgent._is_image_input_unsupported_error(exc) is True
+
+
+def test_react_agent_detects_structured_image_input_unsupported_errors() -> None:
+    class ProviderError(Exception):
+        body = {
+            "error": {
+                "code": "image_input_unsupported",
+                "message": "The selected model cannot consume the supplied media.",
+            }
+        }
+
+    assert ReActAgent._is_image_input_unsupported_error(ProviderError()) is True
+
+
+def test_react_agent_does_not_treat_audio_error_as_image_unsupported() -> None:
+    exc = RuntimeError("Error code: 400 - Only text and image_url are supported.")
+
+    assert ReActAgent._is_image_input_unsupported_error(exc) is False

@@ -7,7 +7,8 @@ mounting) lives in ``openjiuwen.agent_teams``; the cross-machine remote
 backend lives in ``openjiuwen.agent_teams.worktree_remote`` and registers
 itself via ``register_worktree_backend`` at import time.
 """
-
+from importlib import import_module
+from typing import Any
 from openjiuwen.harness.tools.worktree.backend import (
     GitBackend,
     WorktreeBackend,
@@ -99,3 +100,16 @@ __all__ = [
     "WorktreeEvent",
     "WorktreeEventHandler",
 ]
+
+
+_LAZY_SUBMODULES = {
+    "git": "openjiuwen.harness.tools.worktree.git",
+}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _LAZY_SUBMODULES:
+        module = import_module(_LAZY_SUBMODULES[name])
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

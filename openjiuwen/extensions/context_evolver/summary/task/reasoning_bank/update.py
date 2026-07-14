@@ -591,7 +591,7 @@ class PersistMemoryOp(BaseOp):
 
         # Collect every node that belongs to this user
         all_nodes = self.vector_store.get_all(
-            metadata_filter={"workspace_id": user_id, "type": "reasoning_bank_memory"}
+            metadata_filter={"workspace_id": user_id, "type": "exp_memory"}
         )
 
         if not all_nodes:

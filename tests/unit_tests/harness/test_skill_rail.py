@@ -24,6 +24,7 @@ from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts.builder import PromptSection, SystemPromptBuilder
 from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
 from openjiuwen.harness.tools import ListSkillTool
+from openjiuwen.harness.tools.skills.skill_tool import SKILL_TOOL_MARKDOWN_IMAGES_HINT
 
 
 class _DummyResponse:
@@ -57,6 +58,7 @@ def _write_skill(
     root: Path,
     name: str,
     description: str,
+    body: str = "",
 ) -> Path:
     """Create a minimal skill directory with SKILL.md."""
     skill_dir = root / name
@@ -66,7 +68,7 @@ def _write_skill(
         "---\n"
         f"description: {description}\n"
         "---\n\n"
-        f"# {name}\n",
+        f"# {name}\n{body}",
         encoding="utf-8",
     )
     return skill_dir
@@ -302,6 +304,59 @@ async def test_skill_rail_filters_enabled_and_disabled_skills(tmp_path: Path):
         "invoice-parser",
         "xlsx-writer",
     ]
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_skill_tool_reads_multimodal_skill_in_hint_mode(tmp_path: Path):
+    """Registered skill_tool should read SKILL.md from disk and inject media hints."""
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(
+        skills_root,
+        "media-skill",
+        "Skill with reference screenshots",
+        "See ![landing](images/landing.png) for the layout.\n",
+    )
+
+    sys_operation = _make_sys_operation(tmp_path)
+    agent = create_deep_agent(
+        model=init_model(
+            provider="OpenAI",
+            model_name="dummy-model",
+            api_key="dummy-key",
+            api_base="https://example.com/v1",
+            verify_ssl=False,
+        ),
+        card=AgentCard(name="test_skill_agent", description="test skill agent"),
+        system_prompt="You are a test assistant.",
+        max_iterations=3,
+        enable_task_loop=False,
+        workspace=skills_root,
+        sys_operation=sys_operation,
+        enable_read_image_multimodal=True,
+    )
+    skill_rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        multimodal_skill_mode="hint",
+        include_tools=False,
+    )
+    await agent.register_rail(skill_rail)
+
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    await skill_rail.before_invoke(ctx)
+
+    skill_tool_card = next(
+        item for item in agent.ability_manager.list()
+        if getattr(item, "name", None) == "skill_tool"
+    )
+    skill_tool = Runner.resource_mgr.get_tool(skill_tool_card.id)
+
+    result = await skill_tool.invoke({"skill_name": "media-skill"})
+
+    assert result.success is True
+    assert SKILL_TOOL_MARKDOWN_IMAGES_HINT in result.data["content"]
+    assert "images/landing.png" in result.data["content"]
 
 
 @pytest.mark.asyncio

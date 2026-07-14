@@ -48,9 +48,13 @@ async (page) => {{
       '[role="button"]',
       '[role="link"]',
       '[role="textbox"]',
+      '[role="searchbox"]',
       '[role="checkbox"]',
       '[role="radio"]',
+      '[contenteditable="true"]',
       '[aria-label]',
+      '[placeholder]',
+      '[name]',
       '[data-testid]',
       '[data-test]',
       '[data-cy]'
@@ -84,6 +88,7 @@ async (page) => {{
 
       if (tag === 'button') return 'button';
       if (tag === 'a') return 'link';
+      if (el.getAttribute('contenteditable') === 'true') return 'textbox';
       if (tag === 'select') return 'combobox';
       if (tag === 'textarea') return 'textbox';
       if (tag === 'input') {{
@@ -174,11 +179,76 @@ async (page) => {{
         el.getAttribute('title') ||
         el.getAttribute('placeholder') ||
         el.getAttribute('alt') ||
+        el.getAttribute('name') ||
         ''
       );
     }};
 
-    const scoreElement = (el, rect, text, name) => {{
+    const queryAliases = (value) => {{
+      const raw = String(value || '').trim().toLowerCase();
+      if (!raw) return [];
+
+      const aliases = new Set([raw]);
+      const add = (items) => items.forEach((item) => aliases.add(item));
+
+      if (['search', 'find', 'query', 'keyword', 'keywords'].includes(raw)) {{
+        add(['search', 'find', 'query', 'keyword', 'keywords', 'searchbox', 'search-box',
+          'search_input', 'search-input',
+          '搜索', '搜', '搜尋', '查询', '查找', '关键词', '关键字', '搜寻', '検索']);
+      }}
+
+      if (['input', 'textbox', 'text box', 'field'].includes(raw)) {{
+        add(['input', 'textbox', 'text box', 'field', 'textarea', 'keyword',
+          'search', 'query', '输入', '輸入', '搜索', '搜尋', '关键词', '关键字']);
+      }}
+
+      if (['next', 'pagination', 'page'].includes(raw)) {{
+        add(['next', 'pagination', 'page', '下一页', '下一頁', '下页', '下頁',
+          '更多', '加载更多', '載入更多', 'load more']);
+      }}
+
+      if (['login', 'sign in', 'signin'].includes(raw)) {{
+        add(['login', 'sign in', 'signin', 'log in', '登录', '登入', '登陆']);
+      }}
+
+      return Array.from(aliases).filter(Boolean);
+    }};
+
+    const queryTerms = queryAliases(query);
+
+    const classifyActionLikelihood = (el, searchable) => {{
+      const tag = el.tagName.toLowerCase();
+      const type = String(el.getAttribute('type') || '').toLowerCase();
+      const role = roleFromTag(el);
+      const text = String(searchable || '').toLowerCase();
+
+      if (
+        type === 'search' ||
+        role === 'searchbox' ||
+        /\b(search|query|keyword|kw|wd)\b/i.test(text) ||
+        /(搜索|搜尋|查询|查找|关键词|关键字|検索)/.test(text)
+      ) {{
+        return 'search';
+      }}
+
+      if (['input', 'textarea'].includes(tag) || role === 'textbox') return 'input';
+      if (/\b(next|pagination|page)\b/i.test(text) || /(下一页|下一頁|下页|下頁|更多|加载更多|載入更多)/.test(text)) return 'pagination';
+      if (/\b(login|sign in|signin|log in)\b/i.test(text) || /(登录|登入|登陆)/.test(text)) return 'login';
+      if (/\b(filter|sort|category)\b/i.test(text) || /(筛选|篩選|排序|分类|分類)/.test(text)) return 'filter';
+      if (/\b(cart|basket|buy|checkout)\b/i.test(text) || /(购物车|購物車|加入购物车|加入購物車|购买|購買)/.test(text)) return 'commerce';
+
+      if (tag === 'button') return 'button';
+      if (tag === 'a') return 'link';
+      return role || tag;
+    }};
+
+    const queryMatches = (searchable) => {{
+      if (!queryTerms.length) return true;
+      const haystack = String(searchable || '').toLowerCase();
+      return queryTerms.some((term) => haystack.includes(term));
+    }};
+
+    const scoreElement = (el, rect, text, name, actionLikelihood) => {{
       let score = 0;
       const tag = el.tagName.toLowerCase();
       const role = roleFromTag(el);
@@ -188,8 +258,11 @@ async (page) => {{
       if (el.getAttribute('aria-label')) score += 25;
       if (tag === 'button') score += 25;
       if (tag === 'input' || tag === 'select' || tag === 'textarea') score += 22;
+      if (el.getAttribute('contenteditable') === 'true') score += 18;
       if (tag === 'a') score += 18;
       if (role) score += 15;
+      if (actionLikelihood === 'search') score += 35;
+      if (query && queryMatches(`${{actionLikelihood}} ${{tag}} ${{role}}`)) score += 20;
       if (text) score += Math.min(20, text.length / 4);
       if (name) score += Math.min(15, name.length / 5);
 
@@ -221,18 +294,29 @@ async (page) => {{
         el.getAttribute('data-test') ||
         el.getAttribute('data-cy') ||
         '';
+      const type = el.getAttribute('type') || '';
+      const id = el.getAttribute('id') || '';
+      const nameAttr = el.getAttribute('name') || '';
+      const placeholder = el.getAttribute('placeholder') || '';
+      const className = el.getAttribute('class') || '';
+      const title = el.getAttribute('title') || '';
 
-      const searchable = `${{tag}} ${{role}} ${{text}} ${{name}} ${{testid}}`.toLowerCase();
-      if (query && !searchable.includes(query)) continue;
+      const searchable = `${{tag}} ${{role}} ${{type}} ${{id}} ${{nameAttr}} ${{className}} ${{text}} ${{name}} ${{placeholder}} ${{title}} ${{testid}}`.toLowerCase();
+      if (!queryMatches(searchable)) continue;
+
+      const actionLikelihood = classifyActionLikelihood(el, searchable);
 
       candidates.push({{
         tag,
         role,
+        action_likelihood: actionLikelihood,
         text,
         accessible_name: name,
         aria_label: normalize(el.getAttribute('aria-label') || ''),
         testid: normalize(testid),
-        placeholder: normalize(el.getAttribute('placeholder') || ''),
+        input_type: normalize(type),
+        name: normalize(nameAttr),
+        placeholder: normalize(placeholder),
         href: normalize(el.getAttribute('href') || '', 180),
         disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
         bbox: [
@@ -242,7 +326,7 @@ async (page) => {{
           Math.round(rect.height)
         ],
         selector_hint: buildSelectorHint(el),
-        score: scoreElement(el, rect, text, name)
+        score: scoreElement(el, rect, text, name, actionLikelihood)
       }});
     }}
 
@@ -367,6 +451,9 @@ async (page) => {
 
     const activeCacheRecords = Array.isArray(params.selector_cache_records)
       ? params.selector_cache_records.filter((record) => {
+          const kind = String(record.kind || 'card_probe').toLowerCase();
+          if (kind !== 'card_probe') return false;
+
           const domain = String(record.domain || '').toLowerCase();
           if (!domain) return false;
           const domainOk = host === domain || host.endsWith(`.${domain}`);
@@ -568,11 +655,13 @@ async (page) => {
       return normalize(clone.innerText || clone.textContent || '', 600);
     };
 
-    const findFirst = (root, selectors) => {
+    const findFirst = (root, selectors, predicate = null) => {
       for (const selector of selectors) {
         try {
-          const found = root.querySelector(selector);
-          if (found) return found;
+          const nodes = Array.from(root.querySelectorAll(selector));
+          for (const found of nodes) {
+            if (found && (!predicate || predicate(found))) return found;
+          }
         } catch (_) {
           // Ignore invalid browser-specific selector handling.
         }
@@ -593,24 +682,127 @@ async (page) => {
       );
     };
 
+    const elementHref = (el) => {
+      if (!el) return '';
+      const target = el.matches && el.matches('a[href]') ? el : el.querySelector && el.querySelector('a[href]');
+      if (!target) return '';
+      return normalize(target.href || target.getAttribute('href') || '', 260).toLowerCase();
+    };
+
+    const elementDescriptor = (el) => {
+      if (!el) return '';
+      return normalize([
+        el.tagName || '',
+        el.getAttribute('id') || '',
+        el.getAttribute('class') || '',
+        el.getAttribute('role') || '',
+        el.getAttribute('aria-label') || '',
+        el.getAttribute('title') || '',
+        el.getAttribute('data-testid') || '',
+        el.getAttribute('data-test') || ''
+      ].join(' '), 360).toLowerCase();
+    };
+
+    const isArticleHref = (href) => {
+      const value = String(href || '').toLowerCase();
+      return Boolean(
+        value.includes('/article/details/') ||
+        value.includes('/articles/') ||
+        value.includes('/post/') ||
+        value.includes('/posts/') ||
+        value.includes('/blog/') ||
+        (value.includes('blog.csdn.net') && value.includes('/article/'))
+      );
+    };
+
+    const isAuthorProfileHref = (href) => {
+      const value = String(href || '').toLowerCase();
+      if (!value) return false;
+      if (isArticleHref(value)) return false;
+      return Boolean(
+        value.includes('/user/') ||
+        value.includes('/users/') ||
+        value.includes('/profile') ||
+        value.includes('/people/') ||
+        value.includes('/u/') ||
+        value.includes('passport.') ||
+        value.includes('mp.csdn.net') ||
+        /https?:\/\/blog\.csdn\.net\/[^/?#]+\/?(?:[?#].*)?$/.test(value)
+      );
+    };
+
+    const isAuthorProfileElement = (el) => {
+      if (!el) return false;
+      const desc = elementDescriptor(el);
+      const href = elementHref(el);
+      if (isAuthorProfileHref(href)) return true;
+      if (/\\b(author|byline|user|profile|avatar|nickname|nick|name-text|btm-rt)\\b/i.test(desc)) {
+        if (!isArticleHref(href)) return true;
+      }
+      return false;
+    };
+
+    const isArticleLinkElement = (el) => {
+      if (!el) return false;
+      const desc = elementDescriptor(el);
+      const href = elementHref(el);
+      if (isAuthorProfileElement(el)) return false;
+      return Boolean(
+        isArticleHref(href) ||
+        desc.includes('block-title') ||
+        desc.includes('so-item-report') ||
+        desc.includes('result-title') ||
+        desc.includes('article-title') ||
+        desc.includes('post-title') ||
+        desc.includes('headline') ||
+        desc.includes('subject') ||
+        (el.closest && el.closest('h1,h2,h3,h4,[role="heading"]'))
+      );
+    };
+
+    const titleCandidateOk = (el) => {
+      return Boolean(el && !isAuthorProfileElement(el) && textOf(el, 220).length >= 2);
+    };
+
+    const articleTitleSelectors = [
+      'a.block-title.so-item-report[href]',
+      'h1 a[href]', 'h2 a[href]', 'h3 a[href]', 'h4 a[href]',
+      '[role="heading"] a[href]',
+      'a[href*="/article/details/"]',
+      'a[href*="/article/"]',
+      'a[href*="blog.csdn.net"][href*="/article/"]',
+      '[class*="title" i] a[href]',
+      '[class*="headline" i] a[href]',
+      '[class*="subject" i] a[href]',
+      '[data-testid*="title" i] a[href]',
+      '[data-test*="title" i] a[href]'
+    ];
+
     const extractTitle = (root) => {
-      const titleEl = findFirst(root, mergeSelectors(
+      const articleLink = findFirst(root, articleTitleSelectors, isArticleLinkElement);
+      const titleEl = articleLink || findFirst(root, mergeSelectors(
         profileSelectors('title_selectors'),
         [
           'h1', 'h2', 'h3', 'h4',
+          '[role="heading"]',
           '[class*="title" i]',
-          '[class*="name" i]',
+          '[class*="headline" i]',
+          '[class*="subject" i]',
+          '[class*="article" i][class*="name" i]',
           '[data-testid*="title" i]',
+          '[data-testid*="headline" i]',
           '[data-test*="title" i]',
+          '[data-test*="headline" i]',
           'a[title]',
           'img[alt]',
+          '[class*="name" i]',
           'a'
         ]
-      ));
+      ), titleCandidateOk);
 
       let title = textOf(titleEl, 220);
       if (!title) {
-        const link = findFirst(root, ['a']);
+        const link = findFirst(root, ['a'], titleCandidateOk);
         title = textOf(link, 220);
       }
 
@@ -621,14 +813,17 @@ async (page) => {
     };
 
     const extractPrimaryLink = (root) => {
-      const link = findFirst(root, mergeSelectors(
+      const articleLink = findFirst(root, articleTitleSelectors, isArticleLinkElement);
+      const link = articleLink || findFirst(root, mergeSelectors(
         profileSelectors('primary_link_selectors'),
         [
           'a[href][title]',
           'h1 a[href]', 'h2 a[href]', 'h3 a[href]', 'h4 a[href]',
+          'a[href*="/article/details/"]',
+          'a[href*="/article/"]',
           'a[href]'
         ]
-      ));
+      ), (candidate) => !isAuthorProfileElement(candidate));
 
       if (!link) {
         return {
@@ -642,6 +837,129 @@ async (page) => {
         text: textOf(link, 180),
         href: normalize(link.href || link.getAttribute('href') || '', 260),
         selector_hint: buildSelectorHint(link)
+      };
+    };
+
+    const labeledText = (rootText, labels, limit = 120) => {
+      const escaped = labels
+        .map((label) => String(label || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .filter(Boolean)
+        .join('|');
+      if (!escaped) return '';
+
+      const match = String(rootText || '').match(
+        new RegExp(`(?:${escaped})\\s*[:：-]?\\s*([^\\n|·•,，;；]{2,${Math.min(limit, 80)}})`, 'i')
+      );
+      return match ? normalize(match[1], limit) : '';
+    };
+
+    const extractAuthor = (rootText, root) => {
+      const authorEl = findFirst(root, mergeSelectors(
+        profileSelectors('author_selectors'),
+        [
+          '[rel="author"]',
+          '[itemprop="author"]',
+          '[class*="author" i]',
+          '[class*="byline" i]',
+          '[class*="writer" i]',
+          '[class*="user" i]',
+          '[class*="nick" i]',
+          '[class*="avatar" i] + *',
+          '[data-testid*="author" i]',
+          '[data-testid*="user" i]',
+          '[data-test*="author" i]',
+          '[data-test*="user" i]',
+          'a[href*="/user"]',
+          'a[href*="/profile"]',
+          'a[href*="/people"]',
+          'a[href*="/u/"]'
+        ]
+      ));
+
+      const fromElement = textOf(authorEl, 120);
+      const fromLabel = labeledText(rootText, ['author', 'by', 'writer', 'posted by', '作者', '博主', '发布者', '發布者'], 120);
+
+      return {
+        value: fromElement || fromLabel,
+        selector_hint: authorEl ? buildSelectorHint(authorEl) : ''
+      };
+    };
+
+    const extractSource = (rootText, root, primaryLink) => {
+      const sourceEl = findFirst(root, mergeSelectors(
+        profileSelectors('source_selectors'),
+        [
+          '[class*="source" i]',
+          '[class*="origin" i]',
+          '[class*="from" i]',
+          '[class*="site" i]',
+          '[class*="platform" i]',
+          '[class*="channel" i]',
+          '[data-testid*="source" i]',
+          '[data-testid*="origin" i]',
+          '[data-test*="source" i]',
+          '[data-test*="origin" i]'
+        ]
+      ));
+
+      const fromElement = textOf(sourceEl, 120);
+      const fromLabel = labeledText(rootText, ['source', 'from', 'origin', 'site', '来源', '來自', '出处', '出處'], 120);
+
+      let fromLink = '';
+      try {
+        if (primaryLink && primaryLink.href) {
+          const parsed = new URL(primaryLink.href, window.location.href);
+          fromLink = parsed.hostname || '';
+        }
+      } catch (_) {
+        fromLink = '';
+      }
+
+      return {
+        value: fromElement || fromLabel || fromLink,
+        selector_hint: sourceEl ? buildSelectorHint(sourceEl) : ''
+      };
+    };
+
+    const compactSummary = (value, titleValue) => {
+      let summary = normalize(value, 320);
+      const title = normalize(titleValue, 220);
+      if (title && summary.toLowerCase().startsWith(title.toLowerCase())) {
+        summary = normalize(summary.slice(title.length), 320);
+      }
+      summary = summary.replace(/^[-–—:：|·•\s]+/, '').trim();
+      if (summary && title && summary.toLowerCase() === title.toLowerCase()) return '';
+      return summary;
+    };
+
+    const extractSummary = (rootText, root, titleValue) => {
+      const summaryEl = findFirst(root, mergeSelectors(
+        profileSelectors('summary_selectors'),
+        [
+          '[class*="summary" i]',
+          '[class*="desc" i]',
+          '[class*="description" i]',
+          '[class*="abstract" i]',
+          '[class*="snippet" i]',
+          '[class*="intro" i]',
+          '[class*="excerpt" i]',
+          '[class*="content" i]',
+          '[data-testid*="summary" i]',
+          '[data-testid*="desc" i]',
+          '[data-testid*="snippet" i]',
+          '[data-test*="summary" i]',
+          '[data-test*="desc" i]',
+          '[data-test*="snippet" i]',
+          'p'
+        ]
+      ));
+
+      const fromElement = compactSummary(textOf(summaryEl, 360), titleValue);
+      const fromText = compactSummary(rootText, titleValue);
+
+      return {
+        value: fromElement || fromText,
+        selector_hint: summaryEl ? buildSelectorHint(summaryEl) : ''
       };
     };
 
@@ -795,6 +1113,7 @@ async (page) => {
             text,
             tag: el.tagName.toLowerCase(),
             role: el.getAttribute('role') || '',
+            href: normalize(el.href || el.getAttribute('href') || '', 260),
             selector_hint: buildSelectorHint(el),
             bbox: [
               Math.round(rect.x),
@@ -808,23 +1127,117 @@ async (page) => {
         .slice(0, 8);
     };
 
+    const PAGE_CHROME_FRAGMENTS = [
+      '#nav',
+      'nav-',
+      'navbar',
+      'breadcrumb',
+      'header',
+      'footer',
+      'menu',
+      'sidebar',
+      'toolbar',
+      'container-right',
+      'main-rt',
+      'main-right',
+      'right-sidebar',
+      'right-side',
+      'side-bar',
+      'csdn-toolbar',
+      'csdn-profile',
+      'onlyuser',
+      'passport',
+      'login',
+      'vip',
+      'write',
+      'remind',
+      'message'
+    ];
+
+    const hasChromeFragment = (value) => {
+      const text = String(value || '').toLowerCase();
+      return PAGE_CHROME_FRAGMENTS.some((fragment) => text.includes(fragment));
+    };
+
+    const elementChromeText = (el) => {
+      if (!el) return '';
+      return normalize([
+        el.tagName || '',
+        el.getAttribute('id') || '',
+        el.getAttribute('class') || '',
+        el.getAttribute('role') || '',
+        el.getAttribute('aria-label') || '',
+        el.getAttribute('data-testid') || '',
+        el.getAttribute('data-test') || ''
+      ].join(' '), 360).toLowerCase();
+    };
+
+    const elementLooksLikeChrome = (el) => {
+      if (!el || !el.tagName) return false;
+      const tag = el.tagName.toLowerCase();
+      if (['nav', 'header', 'footer'].includes(tag)) return true;
+      return hasChromeFragment(elementChromeText(el));
+    };
+
+    const promoteCandidateRoot = (el) => {
+      if (!el || !el.tagName) return null;
+      if (elementLooksLikeChrome(el)) return null;
+
+      const startTag = el.tagName.toLowerCase();
+      const startRect = el.getBoundingClientRect();
+      const shouldPromote = (
+        ['a', 'span', 'h1', 'h2', 'h3', 'h4'].includes(startTag) ||
+        startRect.height < 80 ||
+        startRect.width < Math.max(160, window.innerWidth * 0.35)
+      );
+
+      if (!shouldPromote) return el;
+
+      let best = el;
+      let node = el.parentElement;
+      let depth = 0;
+
+      while (node && node.nodeType === Node.ELEMENT_NODE && depth < 5) {
+        const tag = node.tagName.toLowerCase();
+        if (['html', 'body', 'main', 'nav', 'header', 'footer'].includes(tag)) break;
+        if (elementLooksLikeChrome(node)) return null;
+
+        const rect = node.getBoundingClientRect();
+        const area = rect.width * rect.height;
+        const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
+        if (area > viewportArea * 0.70) break;
+
+        const nodeText = directText(node);
+        const hasLink = Boolean(node.querySelector('a[href]'));
+        const hasHeading = Boolean(node.querySelector('h1,h2,h3,h4,[role="heading"]'));
+        const hasSummaryLike = Boolean(node.querySelector(
+          'p,[class*="summary" i],[class*="desc" i],[class*="abstract" i],' +
+          '[class*="snippet" i],[class*="content" i],[class*="intro" i]'
+        ));
+
+        if (hasLink && (hasHeading || startTag === 'a') && nodeText.length >= 40) {
+          best = node;
+          if (nodeText.length >= 90 || hasSummaryLike) break;
+        }
+
+        node = node.parentElement;
+        depth += 1;
+      }
+
+      return best;
+    };
+
     const looksLikePageChrome = (data) => {
       const selector = String(data.selector_hint || '').toLowerCase();
       const title = String(data.title || '').trim().toLowerCase();
       const preview = String(data.text_preview || '').trim().toLowerCase();
+      const link = String(data.primary_link || '').trim().toLowerCase();
 
-      const chromeFragments = [
-        '#nav',
-        'nav-',
-        'navbar',
-        'breadcrumb',
-        'header',
-        'footer',
-        'menu',
-        'sidebar'
-      ];
+      if (hasChromeFragment(selector) || hasChromeFragment(link)) {
+        return true;
+      }
 
-      if (chromeFragments.some((fragment) => selector.includes(fragment))) {
+      if (link.includes('mp.csdn.net') || link.includes('passport.csdn.net')) {
         return true;
       }
 
@@ -837,14 +1250,26 @@ async (page) => {
         'new releases',
         'help',
         'login',
-        'sign in'
+        'sign in',
+        '会员中心',
+        '消息',
+        '创作中心',
+        '个人中心'
       ]);
 
       if (chromeTitles.has(title) || chromeTitles.has(preview)) {
         return true;
       }
 
-      if (preview.length < 4 && !data.price && !data.rating && !data.has_image) {
+      if (
+        preview.length < 4 &&
+        !data.price &&
+        !data.rating &&
+        !data.author &&
+        !data.source &&
+        !data.summary &&
+        !data.has_image
+      ) {
         return true;
       }
 
@@ -867,6 +1292,9 @@ async (page) => {
       if (data.rating) score += 14;
       if (data.review_count) score += 10;
       if (data.availability) score += 8;
+      if (data.author) score += 10;
+      if (data.source) score += 6;
+      if (data.summary && String(data.summary).length >= 40) score += 14;
       if (data.has_image) score += 12;
       if (buttons.length > 0) score += 8;
 
@@ -923,6 +1351,9 @@ async (page) => {
         fields.title ? 'title' : '',
         fields.price ? 'price' : '',
         fields.rating ? 'rating' : '',
+        fields.author ? 'author' : '',
+        fields.source ? 'source' : '',
+        fields.summary ? 'summary' : '',
         fields.buttons && fields.buttons.length ? 'button' : '',
         fields.has_image ? 'image' : ''
       ].filter(Boolean).join('|');
@@ -954,9 +1385,14 @@ async (page) => {
       const seen = new Set();
       const localCandidates = [];
 
-      for (const el of containers || []) {
+      for (const rawEl of containers || []) {
+        if (!rawEl) continue;
+
+        const el = promoteCandidateRoot(rawEl);
         if (!el || seen.has(el)) continue;
         seen.add(el);
+
+        if (elementLooksLikeChrome(el)) continue;
 
         const tag = el.tagName.toLowerCase();
         if (
@@ -984,8 +1420,23 @@ async (page) => {
         const title = extractTitle(el);
         const price = extractPrice(rootText, el);
         const rating = extractRating(rootText, el);
-        const primaryLink = extractPrimaryLink(el);
+        let primaryLink = extractPrimaryLink(el);
         const buttons = extractButtons(el);
+        if (!primaryLink.href || isAuthorProfileHref(primaryLink.href)) {
+          const buttonArticleLink = buttons.find((button) => {
+            return button && button.href && isArticleHref(button.href);
+          });
+          if (buttonArticleLink) {
+            primaryLink = {
+              text: buttonArticleLink.text || '',
+              href: buttonArticleLink.href,
+              selector_hint: buttonArticleLink.selector_hint || ''
+            };
+          }
+        }
+        const author = extractAuthor(rootText, el);
+        const source = extractSource(rootText, el, primaryLink);
+        const summary = extractSummary(rootText, el, title.value);
         const reviewCount = extractReviewCount(rootText);
         const availability = extractAvailability(rootText);
         const imagePresent = hasImage(el);
@@ -996,6 +1447,9 @@ async (page) => {
           rating: rating.value,
           review_count: reviewCount,
           availability,
+          author: author.value,
+          source: source.value,
+          summary: summary.value,
           primary_link: primaryLink.href,
           buttons,
           has_image: imagePresent
@@ -1007,6 +1461,9 @@ async (page) => {
           fields.rating,
           fields.review_count,
           fields.availability,
+          fields.author,
+          fields.source,
+          fields.summary,
           fields.primary_link,
           fields.has_image,
           fields.buttons && fields.buttons.length
@@ -1025,6 +1482,12 @@ async (page) => {
           rating_selector_hint: rating.selector_hint,
           review_count: reviewCount,
           availability,
+          author: author.value,
+          author_selector_hint: author.selector_hint,
+          source: source.value,
+          source_selector_hint: source.selector_hint,
+          summary: summary.value,
+          summary_selector_hint: summary.selector_hint,
           primary_link: primaryLink.href,
           primary_link_text: primaryLink.text,
           primary_link_selector_hint: primaryLink.selector_hint,
@@ -1066,21 +1529,59 @@ async (page) => {
     const genericContainerSelectors = [
       'article',
       'li',
+      'tr',
+      'tbody > tr',
+      '[role="article"]',
+      '[role="row"]',
+      'h1:has(a[href])',
+      'h2:has(a[href])',
+      'h3:has(a[href])',
+      'h4:has(a[href])',
+      'a[href*="blog.csdn.net"]',
+      'a[href*="/article/details/"]',
+      '[class*="search-list" i] > *',
+      '[class*="result-list" i] > *',
+      '[class*="list-container" i] > *',
       'section',
       '[data-testid*="card" i]',
       '[data-testid*="item" i]',
       '[data-testid*="product" i]',
+      '[data-testid*="article" i]',
+      '[data-testid*="post" i]',
+      '[data-testid*="result" i]',
+      '[data-testid*="row" i]',
       '[data-test*="card" i]',
       '[data-test*="item" i]',
       '[data-test*="product" i]',
+      '[data-test*="article" i]',
+      '[data-test*="post" i]',
+      '[data-test*="result" i]',
+      '[data-test*="row" i]',
       '[class*="card" i]',
       '[class*="item" i]',
       '[class*="product" i]',
+      '[class*="article" i]',
+      '[class*="post" i]',
+      '[class*="entry" i]',
+      '[class*="blog" i]',
+      '[class*="search-result" i]',
+      '[class*="search-item" i]',
+      '[class*="search-list" i]',
+      '[class*="so-item" i]',
+      '[class*="result-item" i]',
+      '[class*="result-list" i]',
+      '[class*="result" i]',
+      '[class*="list" i]',
+      '[class*="row" i]',
       'div'
     ];
 
     const cachedContainers = queryAllSafe(cachedContainerSelectors);
     const cachedCandidates = buildCandidatesFromContainers(cachedContainers, 'cache');
+    const cacheCandidateCount = cachedCandidates.length;
+    const cacheGoodCandidateCount = cachedCandidates.filter(isHighQualityCard).length;
+    let profileCandidateCount = 0;
+    let genericCandidateCount = 0;
 
     let selectorSource = 'generic';
     let candidates = [];
@@ -1091,6 +1592,7 @@ async (page) => {
     } else {
       const profileContainers = queryAllSafe(profileContainerSelectors);
       const profileCandidates = buildCandidatesFromContainers(profileContainers, 'profile');
+      profileCandidateCount = profileCandidates.length;
 
       if (hasEnoughGoodCards(profileCandidates)) {
         selectorSource = 'profile';
@@ -1099,6 +1601,7 @@ async (page) => {
         const genericContainers = queryAllSafe(genericContainerSelectors);
         selectorSource = 'generic';
         candidates = buildCandidatesFromContainers(genericContainers, 'generic');
+        genericCandidateCount = candidates.length;
       }
     }
 
@@ -1120,6 +1623,9 @@ async (page) => {
           group.some((x) => x.data.rating) ? 'rating' : '',
           group.some((x) => x.data.review_count) ? 'review_count' : '',
           group.some((x) => x.data.availability) ? 'availability' : '',
+          group.some((x) => x.data.author) ? 'author' : '',
+          group.some((x) => x.data.source) ? 'source' : '',
+          group.some((x) => x.data.summary) ? 'summary' : '',
           group.some((x) => x.data.buttons && x.data.buttons.length) ? 'buttons' : '',
           group.some((x) => x.data.has_image) ? 'image' : ''
         ].filter(Boolean)
@@ -1137,6 +1643,9 @@ async (page) => {
       if (groupCount >= 2) score += 50 + Math.min(groupCount, 20) * 4;
       if (item.data.price) score += 20;
       if (item.data.title) score += 15;
+      if (item.data.author) score += 8;
+      if (item.data.source) score += 4;
+      if (item.data.summary) score += 10;
       if (item.data.buttons && item.data.buttons.length) score += 12;
       if (item.data.has_image) score += 8;
       if (item.top >= 0 && item.top <= window.innerHeight) score += 8;
@@ -1165,6 +1674,9 @@ async (page) => {
         candidate.data.rating ||
         candidate.data.review_count ||
         candidate.data.availability ||
+        candidate.data.author ||
+        candidate.data.source ||
+        candidate.data.summary ||
         candidate.data.has_image
       );
     });
@@ -1180,6 +1692,9 @@ async (page) => {
         item.data.rating ||
         item.data.review_count ||
         item.data.availability ||
+        item.data.author ||
+        item.data.source ||
+        item.data.summary ||
         item.data.has_image ||
         item.quality_score >= 45
       );
@@ -1236,6 +1751,14 @@ async (page) => {
       cache_records_used: activeCacheRecords.length,
       selector_source: selectorSource,
       cache_accepted: selectorSource === 'cache',
+      cache_rejection_reason:
+        activeCacheRecords.length > 0 && selectorSource !== 'cache'
+          ? 'cache_validation_failed'
+          : null,
+      cache_candidate_count: cacheCandidateCount,
+      cache_good_candidate_count: cacheGoodCandidateCount,
+      profile_candidate_count: profileCandidateCount,
+      generic_candidate_count: genericCandidateCount,
       cached_container_selectors: cachedContainerSelectors.length,
       profile_container_selectors: profileContainerSelectors.length,
       total_candidates: candidates.length,

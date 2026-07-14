@@ -91,6 +91,19 @@ class VisionModelConfig:
         )
 
 
+def is_vision_model_config_complete(
+    config: Optional[VisionModelConfig],
+) -> bool:
+    """Return whether a vision model config can be used for model calls."""
+    if config is None:
+        return False
+    return bool(
+        str(config.api_key or "").strip()
+        and str(config.base_url or "").strip()
+        and str(config.model or "").strip()
+    )
+
+
 @dataclass
 class AudioModelConfig:
     """Shared runtime configuration for all DeepAgent audio tools."""
@@ -211,7 +224,7 @@ class DeepAgentConfig:
     prompt_mode: Optional[str] = None
     vision_model_config: Optional[VisionModelConfig] = None
     audio_model_config: Optional[AudioModelConfig] = None
-    enable_read_image_multimodal: bool = True
+    enable_read_image_multimodal: Optional[bool] = None
     rails: Optional[List[AgentRail]] = None
     enable_plan_mode: bool = False
     model_selection: Optional[Dict[Model, str]] = None
