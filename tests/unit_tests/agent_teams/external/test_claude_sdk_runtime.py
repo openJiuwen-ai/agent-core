@@ -14,6 +14,7 @@ import pytest
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.external.cli_agent import spawn as spawn_mod
+from openjiuwen.agent_teams.external.cli_agent.claude.options import derive_claude_session_id
 from openjiuwen.agent_teams.external.cli_agent.claude.runtime import ClaudeSdkRuntime
 from openjiuwen.agent_teams.external.cli_agent.claude.ssh_transport import build_claude_sdk_ssh_transport
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
@@ -290,6 +291,27 @@ async def test_build_cli_runtime_uses_claude_sdk_backend(fake_claude_sdk):
     assert options.env["EXTRA"] == "1"
     assert "OPENJIUWEN_TEAM_JOIN" in options.env
     assert options.mcp_servers["openjiuwen-team"]["command"] == "openjiuwen-team-mcp"
+    assert options.session_id == derive_claude_session_id(team_session_id="sess-1", member_name="claude-1")
+    assert options.resume is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_resumes_claude_sdk_session(fake_claude_sdk):
+    token = set_session_id("session:with:colon")
+    try:
+        runtime = await spawn_mod.build_cli_runtime(
+            _ctx(),
+            mcp_server_command=("openjiuwen-team-mcp",),
+            resume_external_backend=True,
+        )
+    finally:
+        reset_session_id(token)
+
+    options = runtime._options
+    expected = derive_claude_session_id(team_session_id="session:with:colon", member_name="claude-1")
+    assert options.session_id is None
+    assert options.resume == expected
 
 
 @pytest.mark.asyncio
@@ -338,6 +360,13 @@ async def test_build_cli_runtime_claude_rejects_command_override(fake_claude_sdk
         await spawn_mod.build_cli_runtime(_ctx(), command_override=("claude", "--version"))
 
 
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_requires_session_context(fake_claude_sdk):
+    with pytest.raises(BaseError):
+        await spawn_mod.build_cli_runtime(_ctx())
+
+
 @pytest.mark.level0
 def test_claude_sdk_missing_dependency_reports_clear_error(monkeypatch):
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
@@ -352,6 +381,8 @@ def test_claude_sdk_missing_dependency_reports_clear_error(monkeypatch):
             mcp_server_command=("openjiuwen-team-mcp",),
             system_prompt=None,
             ssh_transport=None,
+            team_session_id="sess-1",
+            resume_external_backend=False,
         )
 
 

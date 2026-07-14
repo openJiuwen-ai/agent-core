@@ -75,6 +75,7 @@ class SpawnManager:
         initial_message: Optional[str] = None,
         session: Optional[Any] = None,
         spawn_config: Optional[SpawnConfig] = None,
+        resume_external_backend: bool = False,
     ) -> Optional[SpawnedProcessHandle]:
         member_name = ctx.member_name
         # Idempotency: skip a duplicate spawn of an already-spawned or
@@ -104,6 +105,7 @@ class SpawnManager:
                 initial_message=initial_message,
                 session=session,
                 spawn_config=spawn_config,
+                resume_external_backend=resume_external_backend,
             )
         finally:
             self._spawning.discard(member_name)
@@ -115,6 +117,7 @@ class SpawnManager:
         initial_message: Optional[str] = None,
         session: Optional[Any] = None,
         spawn_config: Optional[SpawnConfig] = None,
+        resume_external_backend: bool = False,
     ) -> SpawnedProcessHandle:
         member_name = ctx.member_name
         team_logger.info("[{}] spawning teammate: {}", self._configurator.member_name or "?", member_name)
@@ -130,6 +133,7 @@ class SpawnManager:
                 ctx=ctx,
                 initial_message=initial_message,
                 session_id=get_session_id() or session,
+                resume_external_backend=resume_external_backend,
             )
             self._wire_inprocess_chunk_forward(handle)
         elif spec and spec.spawn_mode == "inprocess":
@@ -265,6 +269,7 @@ class SpawnManager:
                     initial_message=initial_message,
                     session=get_session_id() or None,
                     spawn_config=spawn_config,
+                    resume_external_backend=True,
                 )
                 await self.publish_restart_event(member_name, attempt)
                 team_logger.info("Teammate {} restarted successfully", member_name)

@@ -95,6 +95,8 @@ def build_claude_runtime(
     mcp_server_command: tuple[str, ...],
     system_prompt: str | None,
     ssh_transport: SshTransportConfig | None,
+    team_session_id: str | None,
+    resume_external_backend: bool,
 ) -> ClaudeSdkRuntime:
     """Build a Claude SDK runtime, using an SSH SDK transport when configured."""
     options = build_claude_options(
@@ -104,6 +106,9 @@ def build_claude_runtime(
         mcp_server_name=mcp_server_name,
         mcp_server_command=mcp_server_command,
         system_prompt=system_prompt,
+        team_session_id=team_session_id,
+        member_name=member_name,
+        resume_external_backend=resume_external_backend,
     )
     transport = None
     if ssh_transport is not None:

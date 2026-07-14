@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import json
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.agent_teams.external.descriptor import TEAM_JOIN_ENV
@@ -40,9 +42,18 @@ def build_claude_options(
     mcp_server_name: str,
     mcp_server_command: tuple[str, ...],
     system_prompt: str | None,
+    team_session_id: str | None,
+    member_name: str,
+    resume_external_backend: bool,
 ) -> "ClaudeAgentOptions":
     """Build SDK options matching the previous Claude CLI member behavior."""
     sdk = load_claude_sdk()
+    claude_session_id = derive_claude_session_id(
+        team_session_id=team_session_id,
+        member_name=member_name,
+    )
+    session_id = None if resume_external_backend else claude_session_id
+    resume = claude_session_id if resume_external_backend else None
     mcp_servers = None
     if inject_mcp:
         if not mcp_server_command:
@@ -64,8 +75,18 @@ def build_claude_options(
         env=env,
         mcp_servers=mcp_servers,
         permission_mode="bypassPermissions",
+        resume=resume,
+        session_id=session_id,
         system_prompt={"type": "preset", "append": system_prompt or ""},
     )
+
+
+def derive_claude_session_id(*, team_session_id: str | None, member_name: str) -> str | None:
+    """Derive a stable Claude UUID from the team session and member identity."""
+    if not team_session_id:
+        return None
+    seed = json.dumps([team_session_id, member_name], ensure_ascii=False, separators=(",", ":"))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
 
 
 def strip_parent_claude_env(environ: dict[str, str]) -> dict[str, str]:
@@ -77,4 +98,4 @@ def strip_parent_claude_env(environ: dict[str, str]) -> dict[str, str]:
     }
 
 
-__all__ = ["build_claude_options", "load_claude_sdk", "strip_parent_claude_env"]
+__all__ = ["build_claude_options", "derive_claude_session_id", "load_claude_sdk", "strip_parent_claude_env"]
