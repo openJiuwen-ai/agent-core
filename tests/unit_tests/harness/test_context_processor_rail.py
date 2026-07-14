@@ -129,14 +129,40 @@ async def test_init_processors_merge(tmp_path: Path):
         (
             True,
             None,
-            ["MessageSummaryOffloader", "DialogueCompressor", "CurrentRoundCompressor", "RoundLevelCompressor"],
+            [
+                "MessageSummaryOffloader",
+                "ReasoningToolLoopCompactProcessor",
+                "DialogueCompressor",
+                "CurrentRoundCompressor",
+                "RoundLevelCompressor",
+            ],
         ),
         (True, [("d", DialogueCompressorConfig(messages_threshold=99))],
-         ["MessageSummaryOffloader", "DialogueCompressor", "CurrentRoundCompressor", "RoundLevelCompressor", "d"]),
+         [
+             "MessageSummaryOffloader",
+             "ReasoningToolLoopCompactProcessor",
+             "DialogueCompressor",
+             "CurrentRoundCompressor",
+             "RoundLevelCompressor",
+             "d",
+         ]),
         (True, [("c", DialogueCompressorConfig(messages_to_keep=5))],
-         ["MessageSummaryOffloader", "DialogueCompressor", "CurrentRoundCompressor", "RoundLevelCompressor", "c"]),
+         [
+             "MessageSummaryOffloader",
+             "ReasoningToolLoopCompactProcessor",
+             "DialogueCompressor",
+             "CurrentRoundCompressor",
+             "RoundLevelCompressor",
+             "c",
+         ]),
         (True, [("DialogueCompressor", DialogueCompressorConfig(messages_threshold=99))],
-         ["MessageSummaryOffloader", "DialogueCompressor", "CurrentRoundCompressor", "RoundLevelCompressor"]),
+         [
+             "MessageSummaryOffloader",
+             "ReasoningToolLoopCompactProcessor",
+             "DialogueCompressor",
+             "CurrentRoundCompressor",
+             "RoundLevelCompressor",
+         ]),
     ]
     for preset, processors, expected_keys in cases:
         sys_operation = _make_sys_operation(tmp_path)
