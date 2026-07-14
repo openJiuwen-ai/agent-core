@@ -51,6 +51,7 @@ from openjiuwen.agent_teams.schema.events import (
     ToolApprovalResultEvent,
 )
 from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.message_template import ExpandedMessage
 from openjiuwen.agent_teams.schema.team import (
     TeamCompletionSnapshot,
     TeamMemberSpec,
@@ -1204,7 +1205,8 @@ def test_format_message_uses_teammate_template_when_not_human():
     msg.broadcast = False
     msg.timestamp = 1_700_000_000_000
 
-    text = handler._format_message(msg, is_human_agent=False, now_ms=1_700_000_000_000)
+    expanded = ExpandedMessage(body=msg.content, is_template=False)
+    text = handler._format_message(msg, expanded=expanded, is_human_agent=False, now_ms=1_700_000_000_000)
     assert "msg-1" in text
     assert "dev-1" in text
     assert "ping" in text
@@ -1232,7 +1234,10 @@ def test_format_message_uses_human_template_when_human_agent():
     direct.broadcast = False
     direct.timestamp = 1_700_000_000_000
 
-    direct_text = handler._format_message(direct, is_human_agent=True, now_ms=1_700_000_000_000)
+    direct_expanded = ExpandedMessage(body=direct.content, is_template=False)
+    direct_text = handler._format_message(
+        direct, expanded=direct_expanded, is_human_agent=True, now_ms=1_700_000_000_000
+    )
     assert 'type="direct"' in direct_text
     assert 'for="controller"' in direct_text
     assert "msg-direct" in direct_text
@@ -1252,7 +1257,10 @@ def test_format_message_uses_human_template_when_human_agent():
     bcast.broadcast = True
     bcast.timestamp = 1_700_000_000_000
 
-    bcast_text = handler._format_message(bcast, is_human_agent=True, now_ms=1_700_000_000_000)
+    bcast_expanded = ExpandedMessage(body=bcast.content, is_template=False)
+    bcast_text = handler._format_message(
+        bcast, expanded=bcast_expanded, is_human_agent=True, now_ms=1_700_000_000_000
+    )
     assert 'type="broadcast"' in bcast_text
     assert 'for="controller"' in bcast_text
     assert "严格禁止" in bcast_text
