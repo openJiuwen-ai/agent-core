@@ -510,6 +510,13 @@ class SessionModelContext(ModelContext):
 
     @staticmethod
     def _validate_and_fix_context_window(context_window: ContextWindow):
+        # Check: all messages (system + context) must contain at least one
+        # non-SystemMessage to comply with LLM API requirements.
+        all_messages = context_window.system_messages + context_window.context_messages
+        has_non_system = any(not isinstance(m, SystemMessage) for m in all_messages)
+        if not has_non_system:
+            logger.warning("Context window contains only system messages; most LLM APIs require at least one "
+                           "user/assistant message. This may cause API call failures.")
         messages: List[BaseMessage] = context_window.context_messages
         if not messages:  # empty window, nothing to do
             return
