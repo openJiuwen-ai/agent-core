@@ -202,13 +202,16 @@ insert_before：在指定任务之前插入新任务（目标任务状态须为 
 - insert_after：目标任务状态必须为 in_progress 或 pending
 - insert_before：目标任务状态必须为 pending
 
-## 顺序（强制，update 时由工具校验）
+## 顺序（强制，所有新增任务或状态变更操作均由工具校验）
 
 任务列表有固定顺序（与 todo_create 创建顺序一致）。
 
 1. **按序更新**：不得跳过仍为 pending 的前序任务将后项标为 in_progress/completed；in_progress 只能落在第一个非终态任务上；若当前项为 in_progress，须在同批先标 completed 再开下一项；跳过步骤须同批将前序标为 cancelled。
 2. **批量更新前**：跨多个 Stage/步骤变更状态时，或不确定 UUID 时，先 todo_list 再 modify。
 3. **仅改当前 in_progress 的 content/activeForm**（不改 status）时，可直接 update；其余跨任务状态变更适用上述规则。
+4. **新增任务前**：append、insert_after、insert_before 前先调用 todo_list；仅当插入点之后没有 in_progress 或 completed 任务时才可使用插入操作。
+5. **计划选择**：用户要求继续/重试时，使用 todo_list 后 todo_modify，勿 todo_create。独立新请求在无活跃任务后使用 todo_create 建立完整新计划；用户明确要求重来/重规划时才使用 todo_create(force=true)。
+6. **错误重试**：顺序校验失败后，重新调用 todo_list 并按顺序重试。严禁取消同义任务后用新 ID append/insert 作为绕过方式。
 
 ID 精确性要求（极其重要）：
 - 任务 ID 是 UUID 格式，必须从 todo_create 返回值或 todo_list 结果中原样复制
@@ -290,13 +293,16 @@ Core rules:
 - insert_after: target task status must be in_progress or pending
 - insert_before: target task status must be pending
 
-## Sequential order (enforced on update)
+## Sequential order (enforced for every task addition or status change)
 
 The todo list has a fixed order (same as todo_create).
 
 1. **Update in order**: Do not skip pending earlier tasks when setting later tasks to in_progress/completed; in_progress may only be on the first non-terminal task; if the current task is in_progress, complete it in the same batch before starting the next; to skip a step, cancel the earlier task in the same batch.
 2. **Before batch status changes** across stages or when UUIDs are uncertain, call todo_list first.
 3. **Content-only updates** to the current in_progress task (no status change) may use update directly; cross-task status changes follow the rules above.
+4. **Before adding tasks**: Call todo_list before append, insert_after, or insert_before. Use an insert operation only when no later task is in_progress or completed.
+5. **Choose the plan operation**: For continue/retry, call todo_list then todo_modify; do not call todo_create. For an independent request with no active tasks, use todo_create to create a complete plan. Use todo_create(force=true) only when the user explicitly asks to restart or replan.
+6. **Retry after an order error**: Call todo_list again and retry in order. Never cancel equivalent tasks and append/insert the same work with new IDs to bypass validation.
 
 ID Accuracy Requirement (Critical):
 - Task IDs are UUID format and MUST be copied exactly from todo_create results or todo_list output
