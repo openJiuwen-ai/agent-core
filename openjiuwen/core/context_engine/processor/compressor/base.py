@@ -10,9 +10,13 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
-from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
-from openjiuwen.core.context_engine.processor.compressor.support.util import build_compressor_reinjected_state_message
+from openjiuwen.core.context_engine.processor.compressor.support.util import (
+    build_compressor_reinjected_state_message,
+    count_messages_tokens,
+    resolve_context_max,
+    resolve_ratio_token_threshold,
+)
 from openjiuwen.core.context_engine.processor.compressor.support.compression_executor import (
     CompressionError,
     CompressionErrorKind,
@@ -473,7 +477,7 @@ class PrefixCompactProcessor(ContextProcessor):
         return trace_context
 
     def _resolve_trigger_token_limit(self, context_max: int) -> int:
-        return int(context_max * self.config.trigger_context_ratio)
+        return resolve_ratio_token_threshold(context_max, self.config.trigger_context_ratio)
 
     def _build_prompt(self, span: PrefixCompactSpan, *, preserve_instruction: str | None = None) -> str:
         _ = span
@@ -542,13 +546,7 @@ class PrefixCompactProcessor(ContextProcessor):
         return sum(self._estimate_text_tokens(_serialize_tool(tool)) for tool in tools)
 
     def _count_messages_tokens(self, messages: list[BaseMessage], context: ModelContext) -> int:
-        token_counter = context.token_counter()
-        if token_counter is not None:
-            try:
-                return token_counter.count_messages(messages)
-            except Exception as exc:  # pragma: no cover - defensive fallback
-                logger.warning("[%s] message token counter failed: %s", self.processor_type(), exc)
-        return sum(self._estimate_text_tokens(_message_content_to_text(message)) for message in messages)
+        return count_messages_tokens(messages, context.token_counter(), self.processor_type())
 
     def count_messages_tokens(self, messages: list[BaseMessage], context: ModelContext) -> int:
         """Count message tokens for diagnostics and extension points."""
@@ -556,11 +554,7 @@ class PrefixCompactProcessor(ContextProcessor):
 
     @staticmethod
     def _resolve_context_max(context: ModelContext, kwargs: dict[str, Any]) -> int:
-        return ContextUtils.resolve_context_max(
-            model_name=kwargs.get("model_name") or getattr(context, "_model_name", None),
-            fallback_context_window_tokens=getattr(context, "_context_window_tokens", None),
-            model_context_window_tokens=getattr(context, "_model_context_window_tokens", None),
-        )
+        return resolve_context_max(context, kwargs.get("model_name"))
 
     @staticmethod
     def resolve_context_max(context: ModelContext, kwargs: dict[str, Any]) -> int:
@@ -595,16 +589,6 @@ def _tool_result_ids(messages: list[BaseMessage]) -> set[str]:
         for message in messages
         if isinstance(message, ToolMessage) and getattr(message, "tool_call_id", None)
     }
-
-
-def _message_content_to_text(message: BaseMessage) -> str:
-    content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
-    try:
-        return json.dumps(content, ensure_ascii=False)
-    except TypeError:
-        return str(content)
 
 
 def _serialize_tool(tool: ToolInfo) -> str:

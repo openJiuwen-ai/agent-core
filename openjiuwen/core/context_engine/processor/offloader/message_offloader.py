@@ -13,6 +13,11 @@ from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
+from openjiuwen.core.context_engine.processor.compressor.support.util import (
+    count_messages_tokens,
+    resolve_context_max,
+    resolve_ratio_token_threshold,
+)
 from openjiuwen.core.context_engine.processor.offloader.rule_compression import RuleCompressionPipeline
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
@@ -32,7 +37,7 @@ class MessageOffloaderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     add_message_threshold_ratio: float = Field(default=0.1, gt=0)
-    """Context-capacity ratio above which a newly added tool message is processed."""
+    """Context-token-capacity ratio above which a newly added tool message is processed."""
 
     ttl_seconds: int = Field(default=300, ge=0)
     """Idle time between LLM context-window requests before TTL processing is eligible."""
@@ -41,13 +46,13 @@ class MessageOffloaderConfig(BaseModel):
         default=0.5,
         gt=0,
     )
-    """Context-capacity ratio above which TTL processing is eligible."""
+    """Context-token-capacity ratio above which TTL processing is eligible."""
 
     ttl_message_threshold_ratio: float = Field(
         default=0.05,
         gt=0,
     )
-    """Context-capacity ratio above which one TTL tool message is processed."""
+    """Context-token-capacity ratio above which one TTL tool message is processed."""
 
     protected_tool_names: list[str] = Field(
         default_factory=lambda: ["read_file"]
@@ -77,14 +82,13 @@ class MessageOffloader(ContextProcessor):
         **kwargs: Any,
     ) -> bool:
         _ = kwargs
-        threshold = self._add_message_threshold(context)
+        threshold_tokens = self._add_message_token_threshold(context)
         triggered = False
         for index, message in enumerate(messages_to_add):
-            if (
-                isinstance(message, ToolMessage)
-                and isinstance(getattr(message, "content", None), str)
-                and len(message.content) > threshold
-            ):
+            if not isinstance(message, ToolMessage) or not isinstance(getattr(message, "content", None), str):
+                continue
+            content_tokens = self._count_messages_tokens(context, [message])
+            if content_tokens > threshold_tokens:
                 triggered = True
                 self._write_debug_log(
                     context,
@@ -92,7 +96,8 @@ class MessageOffloader(ContextProcessor):
                     pass_name="add",
                     message=message,
                     message_index=index,
-                    threshold=threshold,
+                    threshold_tokens=threshold_tokens,
+                    content_tokens=content_tokens,
                     content_chars=len(message.content),
                     original_content=message.content,
                 )
@@ -105,7 +110,8 @@ class MessageOffloader(ContextProcessor):
         **kwargs: Any,
     ) -> tuple[Optional[ContextEvent], list[BaseMessage]]:
         all_messages = context.get_messages() + messages_to_add
-        threshold = self._add_message_threshold(context)
+        threshold_tokens = self._add_message_token_threshold(context)
+        max_chars = self._add_message_max_chars(context)
         processed = list(messages_to_add)
         event = ContextEvent(event_type=self.processor_type())
         context_size = len(context)
@@ -115,7 +121,8 @@ class MessageOffloader(ContextProcessor):
                 message,
                 context,
                 all_messages,
-                threshold,
+                threshold_tokens,
+                max_chars,
                 **kwargs,
             )
             if replacement is message:
@@ -132,12 +139,13 @@ class MessageOffloader(ContextProcessor):
         message: BaseMessage,
         context: ModelContext,
         context_messages: list[BaseMessage],
-        threshold: int,
+        threshold_tokens: int,
+        max_chars: int,
         **kwargs: Any,
     ) -> BaseMessage:
         if not self._is_processable_tool_message(message, context_messages):
             return message
-        if len(message.content) <= threshold:
+        if self._count_messages_tokens(context, [message]) <= threshold_tokens:
             return message
 
         if self._should_try_rule_compression():
@@ -146,14 +154,15 @@ class MessageOffloader(ContextProcessor):
                 event="rule_compression_triggered",
                 pass_name="add",
                 message=message,
-                threshold=threshold,
+                threshold_tokens=threshold_tokens,
+                max_chars=max_chars,
                 original_content=message.content,
             )
             compressed = self._rule_pipeline.compress(
                 message,
                 context,
                 pass_name="add",
-                max_chars=threshold,
+                max_chars=max_chars,
                 context_messages=context_messages,
             )
             if self._is_rule_compressed_message(compressed):
@@ -162,7 +171,8 @@ class MessageOffloader(ContextProcessor):
                     event="rule_compression_completed",
                     pass_name="add",
                     message=compressed,
-                    threshold=threshold,
+                    threshold_tokens=threshold_tokens,
+                    max_chars=max_chars,
                     original_content=message.content,
                     compressed_content=compressed.content,
                     compressed_metadata=getattr(compressed, "metadata", None) or {},
@@ -171,7 +181,7 @@ class MessageOffloader(ContextProcessor):
                     compressed,
                     context,
                     original_message=message,
-                    max_chars=threshold,
+                    max_chars=max_chars,
                     offload_original=True,
                     truncate_offloaded_preview=self._should_truncate_rule_preview(),
                     **kwargs,
@@ -237,7 +247,7 @@ class MessageOffloader(ContextProcessor):
             return False
         if now - previous_access < self.config.ttl_seconds:
             return False
-        return self._context_occupancy_chars(context) >= self._ttl_occupancy_threshold(context)
+        return self._context_occupancy_tokens(context) >= self._ttl_occupancy_token_threshold(context)
 
     async def on_get_context_window(
         self,
@@ -248,17 +258,19 @@ class MessageOffloader(ContextProcessor):
         messages = context.get_messages()
         processed = list(messages)
         event = ContextEvent(event_type=self.processor_type())
-        ttl_message_threshold = self._ttl_message_threshold(context)
+        ttl_message_threshold_tokens = self._ttl_message_token_threshold(context)
+        ttl_max_chars = self._ttl_message_max_chars(context)
 
         for index, message in enumerate(processed):
             if not self._is_processable_tool_message(message, processed):
                 continue
-            if len(message.content) <= ttl_message_threshold:
+            if self._count_messages_tokens(context, [message]) <= ttl_message_threshold_tokens:
                 continue
             replacement = await self._process_ttl_message(
                 message,
                 context,
-                ttl_message_threshold,
+                ttl_message_threshold_tokens,
+                ttl_max_chars,
                 **kwargs,
             )
             if replacement is message:
@@ -276,7 +288,8 @@ class MessageOffloader(ContextProcessor):
         self,
         message: ToolMessage,
         context: ModelContext,
-        ttl_budget: int,
+        ttl_message_threshold_tokens: int,
+        max_chars: int,
         **kwargs: Any,
     ) -> BaseMessage:
         self._write_debug_log(
@@ -284,7 +297,9 @@ class MessageOffloader(ContextProcessor):
             event="ttl_message_triggered_offload",
             pass_name="ttl",
             message=message,
-            threshold=ttl_budget,
+            threshold_tokens=ttl_message_threshold_tokens,
+            max_chars=max_chars,
+            content_tokens=self._count_messages_tokens(context, [message]),
             content_chars=len(message.content),
             original_content=message.content,
         )
@@ -304,14 +319,15 @@ class MessageOffloader(ContextProcessor):
             event="rule_compression_triggered",
             pass_name="ttl",
             message=message,
-            threshold=ttl_budget,
+            threshold_tokens=ttl_message_threshold_tokens,
+            max_chars=max_chars,
             original_content=message.content,
         )
         processed = self._rule_pipeline.compress(
             message,
             context,
             pass_name="ttl",
-            max_chars=ttl_budget,
+            max_chars=max_chars,
             force=True,
             context_messages=context.get_messages(),
         )
@@ -321,7 +337,8 @@ class MessageOffloader(ContextProcessor):
                 event="rule_compression_completed",
                 pass_name="ttl",
                 message=processed,
-                threshold=ttl_budget,
+                threshold_tokens=ttl_message_threshold_tokens,
+                max_chars=max_chars,
                 original_content=message.content,
                 compressed_content=processed.content,
                 compressed_metadata=getattr(processed, "metadata", None) or {},
@@ -330,12 +347,12 @@ class MessageOffloader(ContextProcessor):
                 processed,
                 context,
                 original_message=message,
-                max_chars=ttl_budget,
+                max_chars=max_chars,
                 offload_original=True,
                 truncate_offloaded_preview=self._should_truncate_rule_preview(),
                 **kwargs,
             )
-        if len(processed.content) <= ttl_budget:
+        if len(processed.content) <= max_chars:
             return processed
         if not self._should_fallback_to_plain_offload():
             return message
@@ -446,24 +463,32 @@ class MessageOffloader(ContextProcessor):
     def _should_keep_full_rule_compressed_preview(self, message: BaseMessage) -> bool:
         return self._rule_compression_requests_original_offload(message)
 
-    def _context_occupancy_chars(self, context: ModelContext) -> int:
-        return sum(
-            len(message.content)
-            for message in context.get_messages()
-            if isinstance(getattr(message, "content", None), str)
-        )
+    def _context_occupancy_tokens(self, context: ModelContext) -> int:
+        return self._count_messages_tokens(context, context.get_messages())
 
-    def _ttl_occupancy_threshold(self, context: ModelContext) -> int:
-        capacity = self._rule_pipeline.context_character_capacity(context)
-        return max(int(capacity * self._ttl_context_occupancy_ratio()), 1)
+    def _ttl_occupancy_token_threshold(self, context: ModelContext) -> int:
+        return resolve_ratio_token_threshold(self._context_max(context), self._ttl_context_occupancy_ratio())
 
-    def _add_message_threshold(self, context: ModelContext) -> int:
-        capacity = self._rule_pipeline.context_character_capacity(context)
-        return max(int(capacity * self._add_message_threshold_ratio()), 1)
+    def _add_message_token_threshold(self, context: ModelContext) -> int:
+        return resolve_ratio_token_threshold(self._context_max(context), self._add_message_threshold_ratio())
 
-    def _ttl_message_threshold(self, context: ModelContext) -> int:
-        capacity = self._rule_pipeline.context_character_capacity(context)
-        return max(int(capacity * self._ttl_message_threshold_ratio()), 1)
+    def _ttl_message_token_threshold(self, context: ModelContext) -> int:
+        return resolve_ratio_token_threshold(self._context_max(context), self._ttl_message_threshold_ratio())
+
+    def _add_message_max_chars(self, context: ModelContext) -> int:
+        return self._character_budget(context, self._add_message_threshold_ratio())
+
+    def _ttl_message_max_chars(self, context: ModelContext) -> int:
+        return self._character_budget(context, self._ttl_message_threshold_ratio())
+
+    def _character_budget(self, context: ModelContext, ratio: float) -> int:
+        return max(int(self._context_max(context) * 3 * ratio), 1)
+
+    def _context_max(self, context: ModelContext) -> int:
+        return resolve_context_max(context)
+
+    def _count_messages_tokens(self, context: ModelContext, messages: list[BaseMessage]) -> int:
+        return count_messages_tokens(messages, context.token_counter(), self.processor_type())
 
     def _head_tail_preview(self, content: str, *, description: str) -> str:
         keep_chars = self._offload_preview_head_tail_chars()

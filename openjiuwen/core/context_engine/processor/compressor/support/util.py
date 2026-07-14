@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.processor.compressor.reinjection import (
     ReinjectContext,
     StateReinjector as FullCompactStateReinjector,
@@ -264,6 +266,20 @@ def count_messages_tokens(messages: List[BaseMessage], token_counter, processor_
             prefix = f"[{processor_type}] " if processor_type else ""
             logger.warning(f"{prefix}token_counter failed, fallback to char-based estimate: {exc}")
     return sum(estimate_content_tokens(getattr(message, "content", "")) for message in messages)
+
+
+def resolve_context_max(context: ModelContext, model_name: str | None = None) -> int:
+    """Resolve the token capacity used by context processor ratio thresholds."""
+    return ContextUtils.resolve_context_max(
+        model_name=model_name or getattr(context, "_model_name", None),
+        fallback_context_window_tokens=getattr(context, "_context_window_tokens", None),
+        model_context_window_tokens=getattr(context, "_model_context_window_tokens", None),
+    )
+
+
+def resolve_ratio_token_threshold(context_max: int, ratio: float) -> int:
+    """Convert a context-capacity ratio to a positive token threshold."""
+    return max(int(context_max * ratio), 1)
 
 
 def build_compressor_reinjected_state_message(

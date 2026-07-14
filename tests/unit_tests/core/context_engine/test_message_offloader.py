@@ -23,6 +23,7 @@ async def create_context(
     context_window_tokens: int = 100,
     default_window_message_num: int = 100,
     workspace=None,
+    token_counter=None,
 ):
     engine = ContextEngine(
         ContextEngineConfig(
@@ -34,6 +35,7 @@ async def create_context(
     return await engine.create_context(
         "test_ctx",
         processors=[("MessageOffloader", config or MessageOffloaderConfig())],
+        token_counter=token_counter,
     )
 
 
@@ -49,6 +51,14 @@ def _tool_call(call_id: str, name: str, arguments: str = "{}") -> AssistantMessa
             )
         ],
     )
+
+
+def _metadata_token_counter():
+    counter = MagicMock()
+    counter.count_messages.side_effect = lambda messages: sum(
+        message.metadata.get("test_token_count", 0) for message in messages
+    )
+    return counter
 
 
 class _Workspace:
@@ -127,10 +137,64 @@ class TestMessageOffloaderConfig:
 
 class TestMessageOffloaderAddTrigger:
     @pytest.mark.asyncio
-    async def test_does_not_trigger_below_default_character_capacity(self):
-        context = await create_context(context_window_tokens=100)
+    async def test_add_trigger_uses_message_tokens_above_ratio_threshold(self):
+        counter = _metadata_token_counter()
+        context = await create_context(context_window_tokens=100, token_counter=counter)
 
-        await context.add_messages(ToolMessage(content="x" * 20, tool_call_id="tc-boundary"))
+        await context.add_messages(
+            ToolMessage(
+                content="x",
+                tool_call_id="tc-token-large",
+                metadata={"test_token_count": 11},
+            )
+        )
+
+        assert isinstance(context.get_messages()[0], OffloadMixin)
+
+    @pytest.mark.asyncio
+    async def test_add_trigger_skips_message_equal_to_token_threshold(self):
+        counter = _metadata_token_counter()
+        context = await create_context(context_window_tokens=100, token_counter=counter)
+
+        await context.add_messages(
+            ToolMessage(
+                content="x" * 100,
+                tool_call_id="tc-token-boundary",
+                metadata={"test_token_count": 10},
+            )
+        )
+
+        assert not isinstance(context.get_messages()[0], OffloadMixin)
+
+    @pytest.mark.asyncio
+    async def test_add_trigger_keeps_character_budget_for_rule_compression(self):
+        counter = _metadata_token_counter()
+        context = await create_context(context_window_tokens=100, token_counter=counter)
+        processor = context._processors[0]
+        processor._rule_pipeline.compress = MagicMock(side_effect=lambda message, *_args, **_kwargs: message)
+
+        await context.add_messages(
+            ToolMessage(
+                content="x",
+                tool_call_id="tc-char-budget",
+                metadata={"test_token_count": 11},
+            )
+        )
+
+        assert processor._rule_pipeline.compress.call_args.kwargs["max_chars"] == 30
+
+    @pytest.mark.asyncio
+    async def test_does_not_trigger_below_default_token_capacity(self):
+        counter = _metadata_token_counter()
+        context = await create_context(context_window_tokens=100, token_counter=counter)
+
+        await context.add_messages(
+            ToolMessage(
+                content="x" * 20,
+                tool_call_id="tc-boundary",
+                metadata={"test_token_count": 9},
+            )
+        )
 
         message = context.get_messages()[0]
         assert message.content == "x" * 20
@@ -288,15 +352,53 @@ class TestMessageOffloaderAddTrigger:
 
 class TestMessageOffloaderTtl:
     @pytest.mark.asyncio
-    async def test_ttl_requires_idle_timeout_and_half_context_occupancy(self):
+    async def test_ttl_uses_token_thresholds_for_context_and_each_message(self):
+        counter = _metadata_token_counter()
         context = await create_context(
-            MessageOffloaderConfig(ttl_seconds=10),
+            MessageOffloaderConfig(
+                ttl_seconds=10,
+                add_message_threshold_ratio=10,
+                ttl_context_occupancy_ratio=0.5,
+                ttl_message_threshold_ratio=0.1,
+            ),
+            context_window_tokens=100,
+            token_counter=counter,
+        )
+        processor = context._processors[0]
+        processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
+        await context.add_messages(
+            [
+                ToolMessage(
+                    content=character * 31,
+                    tool_call_id=f"tc-{character}",
+                    metadata={"test_token_count": 25},
+                )
+                for character in ("a", "b")
+            ]
+        )
+        await context.get_context_window()
+
+        processor._rule_pipeline._time_func = MagicMock(return_value=120.0)
+        await context.get_context_window()
+
+        assert all(isinstance(message, OffloadMixin) for message in context.get_messages())
+
+    @pytest.mark.asyncio
+    async def test_ttl_requires_idle_timeout_and_half_context_occupancy(self):
+        counter = _metadata_token_counter()
+        context = await create_context(
+            MessageOffloaderConfig(ttl_seconds=10, add_message_threshold_ratio=1.0),
             context_window_tokens=50002,
+            token_counter=counter,
         )
         processor = context._processors[0]
         processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         messages = [
-            ToolMessage(content=character * 30001, tool_call_id=f"tc-{character}")
+            ToolMessage(
+                content=character * 30001,
+                tool_call_id=f"tc-{character}",
+                metadata={"test_token_count": 10000},
+            )
             for character in ("a", "b", "c")
         ]
         await context.add_messages(messages)
@@ -313,15 +415,21 @@ class TestMessageOffloaderTtl:
 
     @pytest.mark.asyncio
     async def test_ttl_falls_back_to_offload_when_rule_compression_has_no_savings(self):
+        counter = _metadata_token_counter()
         context = await create_context(
             MessageOffloaderConfig(ttl_seconds=10),
             context_window_tokens=50002,
+            token_counter=counter,
         )
         processor = context._processors[0]
         processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         await context.add_messages(
             [
-                ToolMessage(content=character * 15000, tool_call_id=f"tc-{character}")
+                ToolMessage(
+                    content=character * 15000,
+                    tool_call_id=f"tc-{character}",
+                    metadata={"test_token_count": 5000},
+                )
                 for character in ("a", "b", "c", "d", "e", "f")
             ]
         )
@@ -514,16 +622,22 @@ class TestMessageOffloaderTtl:
 
     @pytest.mark.asyncio
     async def test_ttl_traverses_full_model_context_not_only_returned_window(self):
+        counter = _metadata_token_counter()
         context = await create_context(
-            MessageOffloaderConfig(ttl_seconds=10),
+            MessageOffloaderConfig(ttl_seconds=10, add_message_threshold_ratio=1.0),
             context_window_tokens=50002,
             default_window_message_num=1,
+            token_counter=counter,
         )
         processor = context._processors[0]
         processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         await context.add_messages(
             [
-                ToolMessage(content=character * 30001, tool_call_id=f"tc-{character}")
+                ToolMessage(
+                    content=character * 30001,
+                    tool_call_id=f"tc-{character}",
+                    metadata={"test_token_count": 10000},
+                )
                 for character in ("a", "b", "c")
             ]
         )
@@ -597,17 +711,26 @@ class TestMessageOffloaderTtl:
 
     @pytest.mark.asyncio
     async def test_ttl_offloads_message_when_rule_compression_still_exceeds_budget(self):
+        counter = _metadata_token_counter()
         context = await create_context(
-            MessageOffloaderConfig(ttl_seconds=10),
+            MessageOffloaderConfig(ttl_seconds=10, add_message_threshold_ratio=1.0),
             context_window_tokens=50002,
+            token_counter=counter,
         )
         processor = context._processors[0]
         processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         content = "x" * 30001
         await context.add_messages(
             [
-                UserMessage(content="context filler " * 3001),
-                ToolMessage(content=content, tool_call_id="tc-large"),
+                UserMessage(
+                    content="context filler " * 3001,
+                    metadata={"test_token_count": 20000},
+                ),
+                ToolMessage(
+                    content=content,
+                    tool_call_id="tc-large",
+                    metadata={"test_token_count": 10000},
+                ),
             ]
         )
         await context.get_context_window()
