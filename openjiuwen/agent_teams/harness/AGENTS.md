@@ -30,7 +30,7 @@ user turn）。
 的 hard-cancel 只是及时性优化，且 gated 到 `model_call_in_flight`（只能落在 parked 的 LLM
 `await`）。tool 阶段的 pause 经 `PAUSING` 过渡态等待边界，ack 延迟到 `_on_round_done` resolve。
 
-该 rail 用 **harness back-ref**（`harness._st.active`）定位活跃 round —— inner loop 跑在
+该 rail 用 **harness back-ref**（公共只读属性 `harness.active_round`）定位活跃 round —— inner loop 跑在
 TaskScheduler 的 exec task 里，ContextVar 读不到。详见 [`S_18`](../docs/specs/S_18_harness-interaction-contract.md)
 与 [`F_60`](../docs/features/F_60_native-harness-pause-abort-resume.md)。
 

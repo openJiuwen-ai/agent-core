@@ -230,6 +230,16 @@ class NativeHarness(DeepAgent):
         """
         return self._st.paused_query
 
+    @property
+    def active_round(self) -> ActiveRound | None:
+        """Round currently in flight, or None when no round is running.
+
+        Rails read the live round through this accessor: the inner loop runs
+        inside the TaskScheduler exec task, so a ContextVar lookup comes back
+        empty there and only a harness back-reference is valid from any task.
+        """
+        return self._st.active
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

@@ -17,7 +17,7 @@ semantics:
   iteration boundary, never mid-tool.
 
 The active round is reached through a direct back-reference to the harness
-(``harness._st.active``). A ContextVar cannot be used here: the inner loop runs
+(``harness.active_round``). A ContextVar cannot be used here: the inner loop runs
 in the TaskScheduler's exec task, not in the round task that would set it.
 
 ``add_rail`` / ``register_rail`` route each hook by event — the model / tool /
@@ -109,7 +109,7 @@ class PhaseSnapshotRail(AgentRail):
     Unlike the legacy ``SnapshotRail`` (which reads the active round via the
     ``_ACTIVE_ROUND`` ContextVar — dead inside the TaskScheduler exec task where
     the loop actually runs), this rail holds a direct back-reference to the
-    harness and reads ``harness._st.active``, valid from any task.
+    harness and reads ``harness.active_round``, valid from any task.
 
     Registered on the harness's DeepAgent via ``add_rail``: the model/tool/
     react-iteration hooks bridge onto the inner ReActAgent (BRIDGE events); the
@@ -134,9 +134,12 @@ class PhaseSnapshotRail(AgentRail):
         self._harness = harness
 
     def _active(self) -> ActiveRound | None:
-        """Return the harness's live round (valid from any task, unlike the
-        ContextVar the legacy rail used)."""
-        return self._harness._st.active
+        """Return the harness's live round, valid from any task.
+
+        Reads the public ``active_round`` accessor rather than the ContextVar
+        the legacy rail used, which is dead inside the TaskScheduler exec task.
+        """
+        return self._harness.active_round
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Enter MODEL phase; cooperative-stop before the LLM body if armed.
@@ -157,8 +160,11 @@ class PhaseSnapshotRail(AgentRail):
             ctx.request_force_finish(COOPERATIVE_STOP_RESULT)
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Leave MODEL phase. Only *pause* stops here; graceful abort must let a
-        started iteration run its tools to completion."""
+        """Leave MODEL phase; cooperative-stop for *pause* only.
+
+        Graceful abort must let a started iteration run its tools to completion,
+        so it deliberately does not stop here.
+        """
         active = self._active()
         if active is None:
             return
@@ -178,8 +184,11 @@ class PhaseSnapshotRail(AgentRail):
             ctx.request_force_finish(COOPERATIVE_STOP_RESULT)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Enter TOOL phase. Never force-finish here: a started iteration's
-        tools must run to completion (side effects are irreversible)."""
+        """Enter TOOL phase.
+
+        Never force-finish here: a started iteration's tools must run to
+        completion, because their side effects are irreversible.
+        """
         active = self._active()
         if active is None:
             return
@@ -214,8 +223,10 @@ class PhaseSnapshotRail(AgentRail):
         )
 
     async def after_task_iteration(self, ctx: AgentCallbackContext) -> None:
-        """Outer round boundary: capture last_safe_snapshot (revives the
-        previously-dead ContextVar-based capture)."""
+        """Capture ``last_safe_snapshot`` at the outer round boundary.
+
+        Revives the capture the legacy ContextVar-based rail could never reach.
+        """
         active = self._active()
         if active is None:
             return

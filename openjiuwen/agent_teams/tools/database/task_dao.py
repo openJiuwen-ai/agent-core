@@ -67,6 +67,15 @@ class _MutationFailure(Exception):
         self.reason = reason
 
 
+# The three owned non-terminal conditions a task can be reset from — the plan
+# gate, execution, and the verify gate. All are valid predecessors of PENDING.
+_RESETTABLE_STATUSES = (
+    TaskStatus.PLANNING.value,
+    TaskStatus.IN_PROGRESS.value,
+    TaskStatus.IN_REVIEW.value,
+)
+
+
 # ---------------------------------------------------------------------------
 # Pure SQL helpers (no instance state).
 # ---------------------------------------------------------------------------
@@ -623,11 +632,6 @@ class TaskDao:
         all are valid predecessors of PENDING.
         """
         team_task_model = _get_task_model()
-        _RESETTABLE = (
-            TaskStatus.PLANNING.value,
-            TaskStatus.IN_PROGRESS.value,
-            TaskStatus.IN_REVIEW.value,
-        )
         async with self._sessions.write() as session:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
@@ -635,7 +639,7 @@ class TaskDao:
                 team_logger.error("Task %s not found", task_id)
                 return None
 
-            if task.status not in _RESETTABLE:
+            if task.status not in _RESETTABLE_STATUSES:
                 team_logger.error(
                     "Cannot reset task %s with status %s, only planning / in-progress / in-review tasks can be reset",
                     task_id,
@@ -783,6 +787,7 @@ class TaskDao:
 
     async def insert_review_vote(
         self,
+        *,
         team_name: str,
         task_id: str,
         review_round: int,
@@ -798,6 +803,9 @@ class TaskDao:
         voting history stays auditable. No state validation here — the caller
         (``TeamTaskManager.verify_task``) guards status / reviewer membership
         outside the write lock.
+
+        Keyword-only: four of the columns are strings, so naming them at the
+        call site is what keeps a vote from being filed against the wrong task.
         """
         vote_model = _get_review_vote_model()
         async with self._sessions.write() as session:

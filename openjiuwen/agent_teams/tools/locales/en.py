@@ -259,8 +259,15 @@ STRINGS: dict[str, str] = {
         "is started by the scheduling runtime, and a blocked one transfers automatically "
         "once its dependencies complete"
     ),
-    "create_task.task.depends_on": "Prerequisite task IDs; may reference tasks created in this same call or existing tasks",
-    "create_task.task.depended_by": "Existing task IDs that should wait for this task (reverse dependency); must not reference tasks created in this same call — express in-batch edges with depends_on on the dependent task",
+    "create_task.task.depends_on": (
+        "Prerequisite task IDs; may reference tasks created in this same call "
+        "or existing tasks"
+    ),
+    "create_task.task.depended_by": (
+        "Existing task IDs that should wait for this task (reverse dependency); must not "
+        "reference tasks created in this same call — express in-batch edges with depends_on "
+        "on the dependent task"
+    ),
     "create_task.task.reviewer": (
         "Reviewer member names for this task (optional, may be several); they must already exist "
         "and none may be the assignee. A task with reviewers enters in_review when the assignee "
