@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from types import ModuleType
 from typing import Any
@@ -166,6 +167,46 @@ class _FakeClaudeSdk:
 
         async def disconnect(self) -> None:
             self.disconnected = True
+
+
+class _FakeStdin:
+    def __init__(self) -> None:
+        self.eof_written = False
+
+    def write_eof(self) -> None:
+        self.eof_written = True
+
+
+class _BlockingStdout:
+    def __init__(self) -> None:
+        self._ready = asyncio.Event()
+
+    async def readline(self) -> bytes:
+        await self._ready.wait()
+        return b""
+
+    def unblock(self) -> None:
+        self._ready.set()
+
+
+class _FakeRemoteProcess:
+    def __init__(self, stdout: _BlockingStdout) -> None:
+        self.stdin = _FakeStdin()
+        self.stdout = stdout
+        self.exit_status = None
+        self.terminated = False
+        self.wait_count = 0
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.exit_status = 0
+
+    def kill(self) -> None:
+        self.terminated = True
+        self.exit_status = 0
+
+    async def wait(self) -> None:
+        self.wait_count += 1
 
 
 def _ctx(member: str = "claude-1") -> TeamRuntimeContext:
@@ -345,3 +386,37 @@ def test_claude_sdk_ssh_transport_uses_options_cli_path(fake_claude_sdk):
     command = transport._build_command()
 
     assert command[0] == "/remote/bin/claude"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_claude_sdk_ssh_read_messages_survives_concurrent_close(fake_claude_sdk):
+    config = SshTransportConfig(host="127.0.0.1", username="u", password="pw")
+    options = _FakeOptions(env={"OPENJIUWEN_TEAM_JOIN": "{}"})
+    transport = build_claude_sdk_ssh_transport(prompt=[], options=options, config=config)
+    stdout = _BlockingStdout()
+    process = _FakeRemoteProcess(stdout)
+    transport._process = process
+    transport._ready = True
+
+    reader = transport.read_messages()
+    read_task = asyncio.create_task(_collect_messages(reader))
+    await asyncio.sleep(0)
+
+    await transport.close()
+    stdout.unblock()
+    messages = await read_task
+
+    assert messages == []
+    assert transport._process is None
+    assert process.stdin.eof_written
+    assert process.terminated
+    assert process.wait_count >= 1
+
+
+async def _collect_messages(reader: Any) -> list[dict[str, Any]]:
+    """Collect all messages from an SDK transport reader."""
+    messages: list[dict[str, Any]] = []
+    async for message in reader:
+        messages.append(message)
+    return messages

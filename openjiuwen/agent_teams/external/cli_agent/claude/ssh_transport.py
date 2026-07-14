@@ -118,12 +118,13 @@ def build_claude_sdk_ssh_transport(
 
         async def _read_messages_impl(self) -> AsyncIterator[dict[str, Any]]:
             """Yield parsed JSON messages until remote stdout closes."""
-            if self._process is None:
+            process = self._process
+            if process is None:
                 sdk = load_claude_sdk()
                 raise sdk.CLIConnectionError("Claude SDK SSH transport is not connected")
             json_buffer = ""
             while True:
-                raw = await self._process.stdout.readline()
+                raw = await process.stdout.readline()
                 if not raw:
                     break
                 line = raw.decode("utf-8", errors="replace").strip()
@@ -139,7 +140,7 @@ def build_claude_sdk_ssh_transport(
                 json_buffer = ""
                 if isinstance(message, dict):
                     yield message
-            returncode = await self._wait_process()
+            returncode = await self._wait_process(process)
             if returncode not in (0, None):
                 sdk = load_claude_sdk()
                 raise sdk.ProcessError(
@@ -151,18 +152,19 @@ def build_claude_sdk_ssh_transport(
         async def close(self) -> None:
             """Close remote Claude and the SSH connection."""
             self._ready = False
-            if self._process is not None:
+            process = self._process
+            self._process = None
+            if process is not None:
                 try:
-                    self._process.stdin.write_eof()
+                    process.stdin.write_eof()
                 except Exception:
                     pass
-                if self._process.exit_status is None:
+                if process.exit_status is None:
                     try:
-                        self._process.terminate()
+                        process.terminate()
                     except Exception:
-                        self._process.kill()
-                await self._wait_process()
-                self._process = None
+                        process.kill()
+                await self._wait_process(process)
             if self._conn is not None:
                 conn = self._conn
                 self._conn = None
@@ -209,15 +211,16 @@ def build_claude_sdk_ssh_transport(
                 raise AssertionError  # pragma: no cover - raise_error always raises
             return self._conn
 
-        async def _wait_process(self) -> int:
+        async def _wait_process(self, process: Any | None = None) -> int:
             """Wait for the remote process and map missing status to a failure code."""
-            if self._process is None:
+            target = process if process is not None else self._process
+            if target is None:
                 return 0
             try:
-                await self._process.wait()
+                await target.wait()
             except Exception:
                 return _REMOTE_CONNECTION_LOST
-            exit_status = getattr(self._process, "exit_status", None)
+            exit_status = getattr(target, "exit_status", None)
             if exit_status is None:
                 return _REMOTE_CONNECTION_LOST
             return int(exit_status)
