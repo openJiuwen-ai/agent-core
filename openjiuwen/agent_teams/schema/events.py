@@ -447,4 +447,3 @@ class EventMessage(BaseModel):
             data: UTF-8 encoded JSON bytes.
         """
         return cls.model_validate_json(data.decode("utf-8"))
-

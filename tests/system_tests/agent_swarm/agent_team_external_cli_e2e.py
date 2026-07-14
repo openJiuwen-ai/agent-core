@@ -77,7 +77,7 @@ os.environ.setdefault("IS_SENSITIVE", "false")
 # credentials (claude / codex are authenticated locally), so only the leader
 # needs an endpoint here. The leader key is read from LEADER_API_KEY, falling
 # back to API_KEY (the convention used by the sibling main.py entry).
-_REQUIRED_ENV = ("API_BASE", "MODEL_NAME")
+_REQUIRED_ENV = ("API_BASE", "MODEL_NAME", "TEAM_EVENT_GATEWAY_WS_URL")
 
 
 def _leader_api_key() -> str | None:
@@ -144,12 +144,9 @@ def _leader_model() -> dict[str, Any]:
 def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
     """Assemble the team spec for the external-CLI scenario.
 
-    External CLI members run in separate processes, so the team uses a
-    cross-process ``pyzmq`` messager (the leader binds the pub/sub broker;
-    each member's MCP server connects with its own node id) and a
-    file-backed sqlite db. ``external_cli_agents`` statically declares the
-    launch config for each CLI kind — the leader's ``spawn_member`` call
-    only references it by name.
+    External CLI members run in separate processes and publish standard team
+    events through the configured Gateway relay. The Team itself keeps its
+    standard PyZMQ messenger and file-backed sqlite database.
     """
     claude_cli_config: dict[str, Any] = {
         "cli_agent": "claude",
@@ -194,6 +191,13 @@ def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
                 "pubsub_publish_addr": "tcp://127.0.0.1:15556",
                 "pubsub_subscribe_addr": "tcp://127.0.0.1:15557",
                 "metadata": {"pubsub_bind": True},
+            },
+        },
+        "external_transport": {
+            "type": "hybrid",
+            "params": {
+                "team_name": team_name,
+                "external_publish_url": os.environ["TEAM_EVENT_GATEWAY_WS_URL"],
             },
         },
         "storage": {"type": "sqlite"},

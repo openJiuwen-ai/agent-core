@@ -3,6 +3,7 @@
 
 """Unit tests for TeamRuntimeManager.finalize_member."""
 
+from types import SimpleNamespace
 from unittest.mock import (
     AsyncMock,
     MagicMock,
@@ -11,7 +12,11 @@ from unittest.mock import (
 import pytest
 
 from openjiuwen.agent_teams.agent.member import TeamMember
+from openjiuwen.agent_teams.interaction import ExternalTeamEvent
+from openjiuwen.agent_teams.messager.inprocess import InProcessMessager, cleanup_inprocess_bus
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
+from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
 from openjiuwen.agent_teams.schema.status import MemberStatus
 
 
@@ -214,3 +219,88 @@ class TestFinalizeMember:
         assert agent.stop_coordination_calls == 0
         assert agent.pause_coordination_calls == 1
         assert fake_member.update_status_calls == [MemberStatus.READY]
+
+
+class TestExternalEventIngress:
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_routes_external_event_through_interact_to_local_bus(self):
+        cleanup_inprocess_bus()
+        manager = TeamRuntimeManager()
+        agent = MagicMock()
+        publisher = InProcessMessager()
+        agent.team_backend = SimpleNamespace(messager=publisher)
+        await manager.pool.add(
+            ActiveTeam(
+                team_name="alpha",
+                agent=agent,
+                current_session_id="session-1",
+                state=RuntimeState.RUNNING,
+            )
+        )
+        entry = await manager.pool.get("alpha")
+        assert entry is not None
+        await entry.interact_gate.close_and_drain()
+        received: list[EventMessage] = []
+
+        async def handler(message: EventMessage) -> None:
+            received.append(message)
+
+        topic = TeamTopic.MESSAGE.build("session-1", "alpha")
+        subscriber = InProcessMessager()
+        await subscriber.subscribe(topic, handler)
+        message = EventMessage(
+            event_type="message",
+            payload={
+                "team_name": "alpha",
+                "message_id": "message-1",
+                "from_member_name": "external-cli",
+                "to_member_name": "leader",
+            },
+            sender_id="external-cli",
+        )
+        external_event = ExternalTeamEvent(topic=TeamTopic.MESSAGE, event=message)
+
+        delivered = await manager.interact(
+            external_event.to_wire(),
+            team_name="alpha",
+            session_id="session-1",
+        )
+
+        assert delivered.ok is True
+        assert received == [message]
+        cleanup_inprocess_bus()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_rejects_external_event_for_a_different_team(self):
+        manager = TeamRuntimeManager()
+        agent = MagicMock()
+        agent.team_backend = SimpleNamespace(messager=InProcessMessager())
+        await manager.pool.add(
+            ActiveTeam(
+                team_name="alpha",
+                agent=agent,
+                current_session_id="session-1",
+                state=RuntimeState.RUNNING,
+            )
+        )
+        result = await manager.interact(
+            ExternalTeamEvent(
+                topic=TeamTopic.MESSAGE,
+                event=EventMessage(
+                    event_type="message",
+                    payload={
+                        "team_name": "other",
+                        "message_id": "message-1",
+                        "from_member_name": "external-cli",
+                        "to_member_name": "leader",
+                    },
+                ),
+            ).to_wire(),
+            team_name="alpha",
+            session_id="session-1",
+        )
+
+        assert result.ok is False
+        assert result.reason == "external_event_team_mismatch"

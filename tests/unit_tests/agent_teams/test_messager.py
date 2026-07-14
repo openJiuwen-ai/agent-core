@@ -2,6 +2,10 @@
 """Tests for messager transports."""
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
+import aiohttp
 import pytest
 
 from openjiuwen.agent_teams.messager import (
@@ -12,13 +16,30 @@ from openjiuwen.agent_teams.messager import (
     PyZmqMessager,
     SubscriptionHandle,
 )
+from openjiuwen.agent_teams.messager.hybrid import HybridMessager, WebSocketEventPublisher
 from openjiuwen.agent_teams.messager.inprocess import cleanup_inprocess_bus
-from openjiuwen.agent_teams.schema.events import BaseEventMessage, EventMessage
+from openjiuwen.agent_teams.schema.events import BaseEventMessage, EventMessage, TeamTopic
 
 
 class _SampleEvent(BaseEventMessage):
     team_name: str = "team-1"
     detail: str = "test"
+
+
+class _FakeEventPublisher:
+    def __init__(self) -> None:
+        self.started = False
+        self.stopped = False
+        self.published: list[tuple[str, EventMessage]] = []
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+    async def publish(self, topic_id: str, message: EventMessage) -> None:
+        self.published.append((topic_id, message))
 
 
 @pytest.fixture(autouse=True)
@@ -85,6 +106,161 @@ async def test_inprocess_publish_stamps_sender_id() -> None:
 
     assert len(received) == 1
     assert received[0].sender_id == "leader"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_external_publisher_publishes_without_local_messager() -> None:
+    publisher = _FakeEventPublisher()
+    hybrid = HybridMessager(
+        publisher=publisher,
+        sender_id="external-cli",
+    )
+
+    await hybrid.start()
+    message = EventMessage(event_type="message", payload={"team_name": "team-1"})
+    await hybrid.publish("topic:message", message)
+
+    assert publisher.started is True
+    assert publisher.published[0][0] == "topic:message"
+    assert publisher.published[0][1].sender_id == "external-cli"
+
+    await hybrid.stop()
+    assert publisher.stopped is True
+
+
+@pytest.mark.level0
+def test_websocket_publisher_uses_standard_interact_payload() -> None:
+    publisher = WebSocketEventPublisher(
+        url="ws://gateway:19000/ws",
+        session_id="session-1",
+        team_name="team-1",
+        request_timeout=1.0,
+    )
+    topic = TeamTopic.MESSAGE.build("session-1", "team-1")
+    request = publisher._build_request(
+        topic,
+        EventMessage(event_type="message", payload={"team_name": "team-1"}),
+        "request-1",
+    )
+
+    assert request["session_id"] == "session-1"
+    assert request["channel"] == "web"
+    assert request["method"] == "chat.send"
+    assert request["is_stream"] is True
+    assert request["params"]["mode"] == "team"
+    assert request["params"]["team"] is True
+    assert request["params"]["query"] == {
+        "type": "team.external_event",
+        "topic": TeamTopic.MESSAGE.value,
+        "event": {
+            "event_type": "message",
+            "payload": {"team_name": "team-1"},
+            "sender_id": "",
+        },
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_websocket_publisher_connects_once_when_started() -> None:
+    publisher = WebSocketEventPublisher(
+        url="ws://gateway:19000/ws",
+        session_id="session-1",
+        team_name="team-1",
+        request_timeout=1.0,
+    )
+
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.closed = False
+            self.responses = []
+
+        async def send_str(self, data: str) -> None:
+            request = json.loads(data)
+            self.responses.append(
+                SimpleNamespace(
+                    type=aiohttp.WSMsgType.TEXT,
+                    data=json.dumps(
+                        {
+                            "request_id": request["request_id"],
+                            "response_kind": "e2a.complete",
+                            "status": "succeeded",
+                        }
+                    ),
+                )
+            )
+
+        async def receive(self):
+            return self.responses.pop(0)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.closed = False
+            self.ws = FakeWebSocket()
+            self.connect_count = 0
+
+        async def ws_connect(self, _url: str, *, heartbeat: float):
+            self.connect_count += 1
+            return self.ws
+
+        async def close(self) -> None:
+            self.closed = True
+
+    session = FakeSession()
+    publisher._session = session
+    await publisher.start()
+
+    topic = TeamTopic.MESSAGE.build("session-1", "team-1")
+    message = EventMessage(event_type="message", payload={"team_name": "team-1"})
+    await publisher.publish(topic, message)
+    await publisher.publish(topic, message)
+
+    assert session.connect_count == 1
+    await publisher.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_websocket_publisher_requires_start_before_publish() -> None:
+    publisher = WebSocketEventPublisher(
+        url="ws://gateway:19000/ws",
+        session_id="session-1",
+        team_name="team-1",
+        request_timeout=1.0,
+    )
+    topic = TeamTopic.MESSAGE.build("session-1", "team-1")
+    message = EventMessage(event_type="message", payload={"team_name": "team-1"})
+
+    with pytest.raises(RuntimeError, match="is not started"):
+        await publisher.publish(topic, message)
+
+
+@pytest.mark.level0
+def test_websocket_publisher_waits_for_e2a_complete() -> None:
+    assert WebSocketEventPublisher._is_successful_response(
+        {
+            "response_kind": "e2a.chunk",
+            "status": "in_progress",
+        }
+    ) is False
+    assert WebSocketEventPublisher._is_successful_response(
+        {
+            "response_kind": "e2a.complete",
+            "status": "succeeded",
+        }
+    ) is True
+    with pytest.raises(RuntimeError, match="event rejected"):
+        WebSocketEventPublisher._is_successful_response(
+            {
+                "response_kind": "e2a.error",
+                "status": "failed",
+                "body": {"message": "event rejected"},
+            }
+        )
 
 
 @pytest.mark.asyncio

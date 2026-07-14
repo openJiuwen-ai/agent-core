@@ -100,7 +100,10 @@ def _ctx(member: str = "dev-1", cli_agent: str = "claude") -> TeamRuntimeContext
         cli_agent=cli_agent,
         team_spec=TeamSpec(team_name="ext_team", display_name="Ext", language="en"),
         db_config=MemoryDatabaseConfig(),
-        messager_config=MessagerTransportConfig(backend="inprocess", team_name="ext_team"),
+        messager_config=MessagerTransportConfig(
+            backend="inprocess",
+            team_name="ext_team",
+        ),
     )
 
 

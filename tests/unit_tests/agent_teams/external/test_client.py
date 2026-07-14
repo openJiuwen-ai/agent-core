@@ -8,7 +8,27 @@ import asyncio
 import pytest
 
 from openjiuwen.agent_teams.external import ExternalTeamClient
+from openjiuwen.agent_teams.external import client as client_module
+from openjiuwen.agent_teams.messager import hybrid as hybrid_module
 from openjiuwen.agent_teams.schema.status import TaskStatus
+
+
+class _FakeWebSocketPublisher:
+    instances: list["_FakeWebSocketPublisher"] = []
+
+    def __init__(self, **_kwargs) -> None:
+        self.started = False
+        self.stopped = False
+        self.instances.append(self)
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+    async def publish(self, _topic_id, _message) -> None:
+        return None
 
 
 @pytest.mark.asyncio
@@ -111,6 +131,57 @@ async def test_operations_before_connect_raise(make_descriptor):
     client = ExternalTeamClient(make_descriptor(member="dev-1"))
     with pytest.raises(Exception):
         await client.list_members()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_websocket_connect_does_not_create_local_messager(team_db, make_descriptor, monkeypatch):
+    descriptor = make_descriptor(member="dev-1")
+    transport = descriptor.transport_config.model_copy(
+        update={
+            "backend": "hybrid",
+            "external_publish_url": "ws://gateway:19000/ws",
+        }
+    )
+    descriptor = descriptor.model_copy(update={"transport_config": transport})
+
+    def fail_create_messager(_config):
+        raise AssertionError("WebSocket mode must not initialize a local messager")
+
+    _FakeWebSocketPublisher.instances.clear()
+    monkeypatch.setattr(client_module, "create_messager", fail_create_messager)
+    monkeypatch.setattr(hybrid_module, "WebSocketEventPublisher", _FakeWebSocketPublisher)
+
+    client = ExternalTeamClient(descriptor)
+    await client.connect()
+    try:
+        assert len(_FakeWebSocketPublisher.instances) == 1
+        assert _FakeWebSocketPublisher.instances[0].started is True
+    finally:
+        await client.close()
+    assert _FakeWebSocketPublisher.instances[0].stopped is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_backend_selects_local_messager_when_external_publish_url_exists(
+    team_db,
+    make_descriptor,
+    monkeypatch,
+):
+    descriptor = make_descriptor(member="dev-1")
+    transport = descriptor.transport_config.model_copy(
+        update={"external_publish_url": "ws://gateway:19000/ws"}
+    )
+    descriptor = descriptor.model_copy(update={"transport_config": transport})
+
+    def fail_websocket_publisher(**_kwargs):
+        raise AssertionError("external_publish_url must not override the configured backend")
+
+    monkeypatch.setattr(hybrid_module, "WebSocketEventPublisher", fail_websocket_publisher)
+
+    async with ExternalTeamClient(descriptor):
+        pass
 
 
 @pytest.mark.asyncio

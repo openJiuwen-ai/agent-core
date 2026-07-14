@@ -278,6 +278,8 @@ class TeamSpec(BaseModel):
       flat expansion of that router. Lookup-by-name semantics; no hint
       yields the first declared name as the default.
     """
+    external_messager_config: Optional[MessagerTransportConfig] = None
+    """Transport used by an external CLI member's MCP client."""
 
 
 class TeamRuntimeContext(BaseModel):

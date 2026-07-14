@@ -131,6 +131,44 @@ def test_spawn_payload_contains_member_identity() -> None:
     assert payload["query"] == "Review the design system impact."
 
 
+@pytest.mark.level0
+def test_external_transport_is_separate_from_team_transport(monkeypatch) -> None:
+    captured_contexts: list[TeamRuntimeContext] = []
+
+    def capture_context(self, _spec, context):
+        captured_contexts.append(context)
+        return self
+
+    monkeypatch.setattr(TeamAgent, "configure", capture_context)
+
+    TeamAgentSpec(
+        agents=_dummy_agents(),
+        team_name="delivery",
+        transport=TransportSpec(
+            type="pyzmq",
+            params={
+                "team_id": "delivery-team",
+                "node_id": "leader",
+                "direct_addr": "tcp://127.0.0.1:19001",
+                "pubsub_publish_addr": "tcp://127.0.0.1:19100",
+                "pubsub_subscribe_addr": "tcp://127.0.0.1:19101",
+            },
+        ),
+        external_transport=TransportSpec(
+            type="hybrid",
+            params={"external_publish_url": "ws://gateway:19000/ws"},
+        ),
+    ).build()
+
+    context = captured_contexts[0]
+    assert context.messager_config is not None
+    assert context.messager_config.backend == "pyzmq"
+    external_config = context.team_spec.external_messager_config
+    assert external_config is not None
+    assert external_config.backend == "hybrid"
+    assert external_config.external_publish_url == "ws://gateway:19000/ws"
+
+
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_spawn_config_contains_serializable_team_agent_payload() -> None:

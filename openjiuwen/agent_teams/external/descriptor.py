@@ -61,9 +61,9 @@ class TeamJoinDescriptor(BaseModel):
             be a file-backed sqlite ``connection_string``; the in-memory
             backend (``MemoryDatabaseConfig``) is single-process only and is
             intended for tests.
-        transport_config: Messager transport config. For cross-process use
-            this must be the ``pyzmq`` backend with concrete socket
-            addresses; ``inprocess`` is single-process only.
+        transport_config: Messager transport config used by the external
+            client. ``external_publish_url`` is the Gateway relay WebSocket
+            endpoint for standard team events.
     """
 
     session_id: str

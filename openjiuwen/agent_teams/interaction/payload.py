@@ -21,9 +21,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import (
+    Any,
     Optional,
     Union,
 )
+
+from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
+
+
+_EXTERNAL_TEAM_EVENT_TYPE = "team.external_event"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +67,34 @@ class HumanAgentMessage:
     target: Optional[str] = None
 
 
-InteractPayload = Union[GodViewMessage, OperatorMessage, HumanAgentMessage]
+@dataclass(frozen=True, slots=True)
+class ExternalTeamEvent:
+    """A standard team event received through the external interact channel."""
+
+    topic: TeamTopic
+    event: EventMessage
+
+    def to_wire(self) -> dict[str, Any]:
+        """Return the JSON-safe payload carried by a normal ``chat.send`` request."""
+        return {
+            "type": _EXTERNAL_TEAM_EVENT_TYPE,
+            "topic": self.topic.value,
+            "event": self.event.model_dump(mode="json"),
+        }
+
+    @classmethod
+    def from_wire(cls, payload: object) -> "ExternalTeamEvent | None":
+        """Parse this payload shape, or return ``None`` for other interact inputs."""
+        if not isinstance(payload, dict) or payload.get("type") != _EXTERNAL_TEAM_EVENT_TYPE:
+            return None
+        topic = payload.get("topic")
+        event = payload.get("event")
+        if not isinstance(topic, str) or not isinstance(event, dict):
+            raise ValueError("malformed external team event")
+        return cls(topic=TeamTopic(topic), event=EventMessage.model_validate(event))
+
+
+InteractPayload = Union[GodViewMessage, OperatorMessage, HumanAgentMessage, ExternalTeamEvent]
 """Discriminated union of supported interact payload shapes."""
 
 
@@ -128,6 +161,7 @@ class DeliverResult:
 
 __all__ = [
     "DeliverResult",
+    "ExternalTeamEvent",
     "GodViewMessage",
     "HumanAgentInboundEvent",
     "HumanAgentMessage",

@@ -8,10 +8,9 @@ the CLI with that descriptor in its environment (so a team-member MCP server
 the CLI spawns inherits it), and returns an :class:`ExternalCliRuntime`
 bound to the subprocess via stdin (input) and a stdout line iterator.
 
-Note: an external CLI member runs in a separate process, so the team must
-use a cross-process transport (``pyzmq`` messager + file-backed sqlite) for
-the CLI's tool calls to reach the team. The in-process backends are
-single-process only.
+An external CLI member runs in a separate process. Its MCP server writes the
+shared file-backed sqlite database directly and publishes runtime events via
+either the configured team messenger or a Gateway WebSocket relay.
 """
 
 from __future__ import annotations
@@ -39,26 +38,35 @@ from openjiuwen.core.common.logging import team_logger
 
 def descriptor_from_context(ctx: TeamRuntimeContext) -> TeamJoinDescriptor:
     """Build a join descriptor an external CLI member uses to reach the team."""
-    if not ctx.member_name:
+    member_name = ctx.member_name
+    if not member_name:
         raise_error(
             StatusCode.AGENT_TEAM_CONFIG_INVALID,
             reason="external CLI member requires a member_name in its runtime context",
         )
-    team_name = ctx.team_spec.team_name if ctx.team_spec else ""
-    language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
-    transport = ctx.messager_config or MessagerTransportConfig()
-    # The in-process member shell already binds this member's ``direct_addr``
-    # ROUTER. The external client (the CLI's MCP server, a separate process)
-    # only publishes events to the pub/sub bus and reads the shared db — it
-    # never receives direct ROUTER messages — so hand it an ephemeral
-    # ``direct_addr`` to avoid colliding with the shell's bind on the same
-    # port. Pub/sub publish/subscribe still target the leader's broker.
-    if transport.direct_addr:
-        transport = transport.model_copy(update={"direct_addr": "tcp://127.0.0.1:*"})
+    team_spec = ctx.team_spec
+    if team_spec is None or not team_spec.team_name:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="external CLI member requires a team spec with team_name",
+        )
+    team_name = team_spec.team_name
+    language = team_spec.language or "cn"
+    session_id = get_session_id()
+    if not session_id:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="external CLI member requires an active team session_id",
+        )
+    transport = team_spec.external_messager_config or ctx.messager_config or MessagerTransportConfig()
+    transport_updates = {"team_name": team_name, "node_id": member_name}
+    if transport.backend == "pyzmq" and transport.direct_addr:
+        transport_updates["direct_addr"] = "tcp://127.0.0.1:*"
+    transport = transport.model_copy(update=transport_updates)
     return TeamJoinDescriptor(
-        session_id=get_session_id() or "",
+        session_id=session_id,
         team_name=team_name,
-        member_name=ctx.member_name or "",
+        member_name=member_name,
         role=ctx.role.value,
         # A spawned third-party CLI is a first-class team member, not an
         # external operator: it gets the native teammate tool set and its
