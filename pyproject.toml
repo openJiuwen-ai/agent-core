@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openjiuwen"
-version = "0.1.15"
+version = "0.1.16"
 description = "openJiuwen agent-core is a feature-rich AI agent SDK for developing, running, tuning, and improving your AI agents."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
