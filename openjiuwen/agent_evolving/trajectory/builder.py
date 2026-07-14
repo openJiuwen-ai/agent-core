@@ -17,11 +17,11 @@ Explicitly NOT responsible for:
 from __future__ import annotations
 
 import uuid
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from openjiuwen.agent_evolving.trajectory.types import (
+    LegacyTrajectory,
     LLMCallDetail,
-    Trajectory,
     TrajectoryStep,
 )
 
@@ -49,6 +49,9 @@ class TrajectoryBuilder:
         session_id: str,
         source: str,  # "online" | "offline"
         case_id: Optional[str] = None,
+        member_id: Optional[str] = None,
+        meta: Optional[Dict[str, Any]] = None,
+        max_steps: Optional[int] = None,
     ) -> None:
         """Initialize builder.
 
@@ -57,10 +60,20 @@ class TrajectoryBuilder:
                 case_id for offline)
             source: Source type - "online" or "offline"
             case_id: Optional case ID (for offline scenarios)
+            member_id: Optional team member identifier for trajectory aggregation.
+            meta: Optional extension metadata.
+            max_steps: Optional maximum number of recent steps to retain.
         """
+        if max_steps is not None and max_steps < 1:
+            raise ValueError("max_steps must be >= 1")
         self.session_id = session_id
         self.source = source
         self.case_id = case_id
+        self.member_id = member_id
+        self.max_steps = max_steps
+        self.meta: Dict[str, Any] = dict(meta or {})
+        if member_id:
+            self.meta.setdefault("member_id", member_id)
         self.steps: List[TrajectoryStep] = []
         self.cost: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
         self._start_time_ms: Optional[int] = None
@@ -72,32 +85,36 @@ class TrajectoryBuilder:
             step: Step to record
         """
         self.steps.append(step)
+        if self.max_steps is not None and len(self.steps) > self.max_steps:
+            start = len(self.steps) - self.max_steps
+            self.steps = self.steps[start:]
 
         # Accumulate token usage from LLM steps
         if step.kind == "llm" and step.detail:
             if isinstance(step.detail, LLMCallDetail) and step.detail.usage:
-                self.cost["input_tokens"] += step.detail.usage.get(
-                    "prompt_tokens", 0
-                )
-                self.cost["output_tokens"] += step.detail.usage.get(
-                    "completion_tokens", 0
-                )
+                self.cost["input_tokens"] += step.detail.usage.get("prompt_tokens", 0)
+                self.cost["output_tokens"] += step.detail.usage.get("completion_tokens", 0)
 
         # Record start time
         if self._start_time_ms is None and step.start_time_ms:
             self._start_time_ms = step.start_time_ms
 
-    def build(self) -> Trajectory:
-        """Assemble Trajectory.
+    def build(self) -> LegacyTrajectory:
+        """Assemble a legacy step-based trajectory view.
 
         Returns:
-            Assembled Trajectory with all steps and metadata
+            Assembled trajectory with all steps and metadata.
         """
-        return Trajectory(
+        meta = dict(self.meta)
+        meta.pop("source", None)
+        if self.member_id:
+            meta.setdefault("member_id", self.member_id)
+        return LegacyTrajectory(
             execution_id=_generate_uuid(),
             session_id=self.session_id,
-            source=self.source,
             case_id=self.case_id,
             steps=self.steps,
+            source=self.source,
             cost=self.cost if self.cost["input_tokens"] > 0 else None,
+            meta=meta,
         )

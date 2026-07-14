@@ -37,7 +37,11 @@ from openjiuwen.agent_evolving.signal import (
     EvolutionCategory,
     make_signal_fingerprint,
 )
-from openjiuwen.agent_evolving.trajectory import Trajectory, TrajectoryStore
+from openjiuwen.agent_evolving.trajectory import (
+    LegacyTrajectory,
+    Trajectory,
+    TrajectoryStore,
+)
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.active_skill_bodies import normalize_skill_relative_file_path
 from openjiuwen.core.context_engine.qa_block.registry import load_registry
@@ -332,7 +336,11 @@ class SkillEvolutionRail(EvolutionRail):
             # after_invoke from the full conversation (see _build_evaluation_snippet).
             await self._track_presented_records(ctx, skill_name, "")
 
-    async def run_evolution(self, trajectory: Trajectory, ctx: AgentCallbackContext) -> None:
+    async def run_evolution(
+        self,
+        trajectory: Union[Trajectory, LegacyTrajectory],
+        ctx: AgentCallbackContext,
+    ) -> None:
         """Run skill evolution based on the collected trajectory.
 
         This is called by EvolutionRail.after_invoke after the trajectory is saved.
@@ -341,6 +349,7 @@ class SkillEvolutionRail(EvolutionRail):
 
         Args:
             trajectory: Complete trajectory for this conversation
+                (LegacyTrajectory preferred; OTLP Trajectory also accepted)
             ctx: Callback context
         """
         logger.info("[SkillEvolutionRail] run_evolution called, auto_scan=%s", self._auto_scan)

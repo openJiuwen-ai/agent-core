@@ -12,7 +12,7 @@ from openjiuwen.agent_evolving.signal.from_conv import ConversationSignalDetecto
 from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
     ToolCallDetail,
-    Trajectory,
+    LegacyTrajectory,
     TrajectoryStep,
 )
 
@@ -46,7 +46,7 @@ class _FakeLLM:
         return _FakeLLMResponse(self._content)
 
 
-def _build_trajectory_from_messages(messages: List[dict]) -> Trajectory:
+def _build_trajectory_from_messages(messages: List[dict]) -> LegacyTrajectory:
     """Convert message list to Trajectory for testing.
 
     Creates Trajectory with LLM steps containing messages and tool steps
@@ -94,7 +94,7 @@ def _build_trajectory_from_messages(messages: List[dict]) -> Trajectory:
             ),
         )
 
-    return Trajectory(execution_id="test-exec", steps=steps)
+    return LegacyTrajectory(execution_id="test-exec", steps=steps)
 
 
 class TestConversationSignalDetector(IsolatedAsyncioTestCase):
@@ -103,7 +103,7 @@ class TestConversationSignalDetector(IsolatedAsyncioTestCase):
     async def test_empty_trajectory_returns_empty_signals(self) -> None:
         """Empty trajectory should return empty signal list."""
         detector = ConversationSignalDetector()
-        trajectory = Trajectory(execution_id="test", steps=[])
+        trajectory = LegacyTrajectory(execution_id="test", steps=[])
         signals = await detector.detect(trajectory)
         self.assertEqual(signals, [])
 

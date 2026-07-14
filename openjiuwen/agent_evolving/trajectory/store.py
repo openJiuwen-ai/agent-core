@@ -10,10 +10,27 @@ trajectory data with optional version isolation.
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol, Union
 
-from openjiuwen.agent_evolving.trajectory.types import Trajectory
+from openjiuwen.agent_evolving.trajectory.types import (
+    LegacyTrajectory,
+    LLMCallDetail,
+    StepDetail,
+    ToolCallDetail,
+    Trajectory,
+    TrajectoryStep,
+    to_legacy_trajectory,
+    trajectory_from_legacy,
+)
+from openjiuwen.core.common.logging import logger
+
+_OJ_SESSION_ID = "openjiuwen.session_id"
+_OLD_OJ_SESSION_ID = "openjiuwen.session.id"
+_TRAJECTORY_ID = "openjiuwen.trajectory_id"
+_OLD_TRAJECTORY_ID = "openjiuwen.trajectory.id"
+TrajectoryRecord = Union[Trajectory, LegacyTrajectory]
 
 
 class TrajectoryStore(Protocol):
@@ -21,7 +38,7 @@ class TrajectoryStore(Protocol):
 
     def save(
         self,
-        trajectory: Trajectory,
+        trajectory: TrajectoryRecord,
         version: Optional[str] = None,
     ) -> None:
         """Save trajectory. Version is used for experiment isolation.
@@ -36,7 +53,7 @@ class TrajectoryStore(Protocol):
         self,
         execution_id: str,
         version: Optional[str] = None,
-    ) -> Optional[Trajectory]:
+    ) -> Optional[TrajectoryRecord]:
         """Load a specific trajectory.
 
         Args:
@@ -52,7 +69,7 @@ class TrajectoryStore(Protocol):
         self,
         version: Optional[str] = None,
         **filters,
-    ) -> List[Trajectory]:
+    ) -> List[TrajectoryRecord]:
         """Query trajectory list.
 
         Args:
@@ -70,24 +87,24 @@ class InMemoryTrajectoryStore:
 
     def __init__(self) -> None:
         """Initialize empty store."""
-        self._data: Dict[str, Dict[str, Trajectory]] = {}
+        self._data: Dict[str, Dict[str, TrajectoryRecord]] = {}
 
     def save(
         self,
-        trajectory: Trajectory,
+        trajectory: TrajectoryRecord,
         version: Optional[str] = None,
     ) -> None:
         """Save trajectory to memory."""
         ver = version or "default"
         if ver not in self._data:
             self._data[ver] = {}
-        self._data[ver][trajectory.execution_id] = trajectory
+        self._data[ver][to_legacy_trajectory(trajectory).execution_id] = trajectory
 
     def load(
         self,
         execution_id: str,
         version: Optional[str] = None,
-    ) -> Optional[Trajectory]:
+    ) -> Optional[TrajectoryRecord]:
         """Load trajectory from memory."""
         ver = version or "default"
         return self._data.get(ver, {}).get(execution_id)
@@ -96,19 +113,31 @@ class InMemoryTrajectoryStore:
         self,
         version: Optional[str] = None,
         **filters,
-    ) -> List[Trajectory]:
+    ) -> List[TrajectoryRecord]:
         """Query trajectories from memory."""
         ver = version or "default"
         trajectories = list(self._data.get(ver, {}).values())
 
         # Apply filters
         for key, value in filters.items():
-            trajectories = [
-                t for t in trajectories
-                if getattr(t, key, None) == value
-            ]
+            trajectories = [t for t in trajectories if self._filter_trajectory_value(t, key) == value]
 
         return trajectories
+
+    @staticmethod
+    def _filter_trajectory_value(trajectory: TrajectoryRecord, key: str) -> Any:
+        legacy = to_legacy_trajectory(trajectory)
+        if key == "execution_id":
+            return legacy.execution_id
+        if key == "session_id":
+            return legacy.session_id
+        if key == "case_id":
+            return legacy.case_id
+        if key == "member_id":
+            return legacy.meta.get("member_id")
+        if key == "source":
+            return legacy.source
+        return getattr(legacy, key, None)
 
 
 class FileTrajectoryStore:
@@ -130,7 +159,7 @@ class FileTrajectoryStore:
 
     def save(
         self,
-        trajectory: Trajectory,
+        trajectory: TrajectoryRecord,
         version: Optional[str] = None,
     ) -> None:
         """Append trajectory to JSONL file."""
@@ -154,15 +183,21 @@ class FileTrajectoryStore:
             return None
 
         with open(file_path, "r", encoding="utf-8") as f:
-            for line in f:
+            for line_no, line in enumerate(f, start=1):
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     data = json.loads(line)
-                    if data.get("execution_id") == execution_id:
+                    if self._execution_id_from_record(data) == execution_id:
                         return self._dict_to_trajectory(data)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as exc:
+                    logger.warning(
+                        "Skipping corrupt JSONL line %s in %s: %s",
+                        line_no,
+                        file_path,
+                        exc,
+                    )
                     continue
 
         return None
@@ -180,87 +215,147 @@ class FileTrajectoryStore:
             return results
 
         with open(file_path, "r", encoding="utf-8") as f:
-            for line in f:
+            for line_no, line in enumerate(f, start=1):
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     data = json.loads(line)
                     # Apply filters
-                    if all(
-                        data.get(key) == value
-                        for key, value in filters.items()
-                    ):
+                    if all(self._filter_value(data, key) == value for key, value in filters.items()):
                         traj = self._dict_to_trajectory(data)
                         if traj:
                             results.append(traj)
-                except (json.JSONDecodeError, KeyError):
+                except json.JSONDecodeError as exc:
+                    logger.warning(
+                        "Skipping corrupt JSONL line %s in %s: %s",
+                        line_no,
+                        file_path,
+                        exc,
+                    )
+                    continue
+                except KeyError as exc:
+                    logger.warning(
+                        "Skipping unreadable trajectory record at line %s in %s: missing key %s",
+                        line_no,
+                        file_path,
+                        exc,
+                    )
                     continue
 
         return results
 
     @staticmethod
-    def _trajectory_to_dict(trajectory: Trajectory) -> dict:
-        """Convert Trajectory to dict with safe serialization."""
-        from dataclasses import asdict
-
-        data = asdict(trajectory)
-        return FileTrajectoryStore._sanitize_for_json(data)
+    def _trajectory_to_dict(trajectory: TrajectoryRecord) -> dict:
+        """Convert Trajectory to dict."""
+        if isinstance(trajectory, LegacyTrajectory):
+            trajectory = trajectory_from_legacy(trajectory)
+        if trajectory.otlp_trace and isinstance(trajectory.otlp_trace, dict):
+            return FileTrajectoryStore._to_json_compatible(trajectory.otlp_trace)
+        return FileTrajectoryStore._to_json_compatible(trajectory)
 
     @staticmethod
-    def _sanitize_for_json(obj: Any) -> Any:
-        """Recursively convert non-JSON-serializable objects to JSON-safe values."""
+    def _to_json_compatible(obj: Any) -> Any:
+        """Recursively convert values to JSON-compatible data."""
+        if hasattr(obj, "model_dump") and callable(obj.model_dump):
+            return FileTrajectoryStore._to_json_compatible(obj.model_dump())
+
+        if hasattr(obj, "__dataclass_fields__"):
+            return FileTrajectoryStore._to_json_compatible(asdict(obj))
+
+        if isinstance(obj, (list, tuple)):
+            return [FileTrajectoryStore._to_json_compatible(item) for item in obj]
+
         if isinstance(obj, dict):
-            return {k: FileTrajectoryStore._sanitize_for_json(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [FileTrajectoryStore._sanitize_for_json(item) for item in obj]
-        elif isinstance(obj, (str, int, float, bool, type(None))):
+            return {str(key): FileTrajectoryStore._to_json_compatible(value) for key, value in obj.items()}
+
+        if isinstance(obj, (str, int, float, bool)) or obj is None:
             return obj
-        elif hasattr(obj, "model_dump"):
-            # Pydantic models
-            return FileTrajectoryStore._sanitize_for_json(obj.model_dump())
-        elif hasattr(obj, "__dict__"):
-            # Custom objects - convert to dict
-            return FileTrajectoryStore._sanitize_for_json(obj.__dict__)
-        elif hasattr(obj, "isoformat"):
-            # datetime-like objects
-            return obj.isoformat()
-        else:
-            # Fallback: convert to string
-            return str(obj)
+
+        return str(obj)
 
     @staticmethod
     def _dict_to_trajectory(data: dict) -> Optional[Trajectory]:
         """Convert dict to Trajectory."""
-        from openjiuwen.agent_evolving.trajectory.types import (
-            LLMCallDetail,
-            StepDetail,
-            ToolCallDetail,
-            TrajectoryStep,
-        )
-
         try:
-            # Convert steps
-            steps_data = data.get("steps", [])
+            if FileTrajectoryStore._is_otlp_trace_data(data):
+                return FileTrajectoryStore._otlp_to_trajectory(data)
+
+            legacy_data = dict(data)
+            steps_data = legacy_data.get("steps", [])
             steps = []
             for step_data in steps_data:
-                # Extract and convert detail
-                detail_data = step_data.pop("detail", None)
+                step_data = dict(step_data)
+                detail_data = step_data.get("detail")
                 detail: Optional[StepDetail] = None
 
-                if detail_data:
-                    # Determine detail type by presence of key fields
+                if isinstance(detail_data, dict):
                     if "messages" in detail_data:
                         detail = LLMCallDetail(**detail_data)
                     elif "tool_name" in detail_data:
                         detail = ToolCallDetail(**detail_data)
 
-                # Build step with converted detail
                 step_data["detail"] = detail
                 steps.append(TrajectoryStep(**step_data))
 
-            data["steps"] = steps
-            return Trajectory(**data)
+            legacy_meta = dict(legacy_data.get("meta") or {})
+            legacy_source = legacy_data.get("source") or legacy_meta.pop("source", None) or "offline"
+            legacy = LegacyTrajectory(
+                execution_id=str(legacy_data["execution_id"]),
+                steps=steps,
+                source=str(legacy_source),
+                case_id=legacy_data.get("case_id"),
+                session_id=legacy_data.get("session_id"),
+                cost=legacy_data.get("cost"),
+                meta=legacy_meta,
+            )
+            otlp_trace = legacy_data.get("otlp_trace")
+            return trajectory_from_legacy(
+                legacy,
+                otlp_trace=otlp_trace if isinstance(otlp_trace, dict) else None,
+            )
 
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError) as exc:
+            execution_id = data.get("execution_id") if isinstance(data, dict) else None
+            logger.warning(
+                "Failed to deserialize trajectory record (execution_id=%s): %s",
+                execution_id,
+                exc,
+                exc_info=True,
+            )
             return None
+
+    @staticmethod
+    def _is_otlp_trace_data(data: dict) -> bool:
+        return isinstance(data, dict) and isinstance(data.get("resourceSpans"), list)
+
+    @staticmethod
+    def _execution_id_from_record(data: dict) -> Optional[str]:
+        if FileTrajectoryStore._is_otlp_trace_data(data):
+            return to_legacy_trajectory(Trajectory(otlp_trace=data)).execution_id
+        value = data.get("execution_id")
+        return str(value) if value is not None else None
+
+    @staticmethod
+    def _filter_value(data: dict, key: str) -> Any:
+        if not FileTrajectoryStore._is_otlp_trace_data(data):
+            if key == "source":
+                meta = data.get("meta") or {}
+                return data.get("source") or meta.get("source")
+            return data.get(key)
+        legacy = to_legacy_trajectory(Trajectory(otlp_trace=data))
+        if key == "execution_id":
+            return legacy.execution_id
+        if key == "session_id":
+            return legacy.session_id
+        if key == "case_id":
+            return legacy.case_id
+        if key == "member_id":
+            return legacy.meta.get("member_id")
+        if key == "source":
+            return legacy.source
+        return legacy.meta.get(key)
+
+    @staticmethod
+    def _otlp_to_trajectory(data: dict) -> Optional[Trajectory]:
+        return Trajectory(otlp_trace=data)

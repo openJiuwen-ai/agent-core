@@ -16,8 +16,10 @@ from openjiuwen.agent_evolving.signal.base import (
 )
 from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
+    LegacyTrajectory,
     Trajectory,
     ToolCallDetail,
+    to_legacy_trajectory,
 )
 
 
@@ -221,11 +223,14 @@ class ConversationSignalDetector:
         # 不在每次重试时输出，避免抖动场景刷屏。
         self._last_llm_error: Optional[str] = None
 
-    async def detect(self, trajectory_or_messages: Union[Trajectory, List[dict]]) -> List[EvolutionSignal]:
+    async def detect(
+        self,
+        trajectory_or_messages: Union[Trajectory, LegacyTrajectory, List[dict]],
+    ) -> List[EvolutionSignal]:
         """Detect evolution signals from Trajectory or messages.
 
-        Main entry: accepts Trajectory or List[dict], returns deduplicated
-        EvolutionSignal list.
+        Main entry: accepts Trajectory / LegacyTrajectory or List[dict],
+        returns deduplicated EvolutionSignal list.
 
         When ``llm`` and ``model`` were provided at construction time, all user
         messages are sent to the LLM for correction judgment inside
@@ -238,15 +243,20 @@ class ConversationSignalDetector:
         Returns:
             Deduplicated list of EvolutionSignal.
         """
-        if isinstance(trajectory_or_messages, Trajectory):
+        if isinstance(trajectory_or_messages, (Trajectory, LegacyTrajectory)):
             messages = self._convert_trajectory_to_messages(trajectory_or_messages)
         else:
             messages = trajectory_or_messages
         return await self._detect_from_messages(messages)
 
     @staticmethod
-    def _convert_trajectory_to_messages(trajectory: Trajectory) -> List[dict]:
-        """Convert Trajectory.steps to message list format.
+    def _convert_trajectory_to_messages(
+        trajectory: Union[Trajectory, LegacyTrajectory],
+    ) -> List[dict]:
+        """Convert trajectory steps to message list format.
+
+        Accepts OTLP-first ``Trajectory`` (converted via ``to_legacy_trajectory``)
+        or a step-based ``LegacyTrajectory``.
 
         The message format matches what SignalDetector.detect() expects:
         - LLM steps: messages from LLMCallDetail (prefers new compressed
@@ -259,10 +269,11 @@ class ConversationSignalDetector:
         Returns:
             List of message dicts compatible with signal detection logic.
         """
+        legacy = to_legacy_trajectory(trajectory)
         messages: List[dict] = []
         tool_call_id_to_name: Dict[str, str] = {}
 
-        for step in trajectory.steps:
+        for step in legacy.steps:
             if step.kind == "llm" and isinstance(step.detail, LLMCallDetail):
                 for msg in step.detail.messages:
                     messages.append(msg)
