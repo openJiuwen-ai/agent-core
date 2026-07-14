@@ -1640,7 +1640,16 @@ class ReActAgent(BaseAgent):
                     is_tool_interruption = isinstance(interruption_state, ToolInterruptionState)
                     
                     if is_tool_interruption:
-                        # Tool Interrupt: not write UserMessage, recovery input is passed to Rail via ctx.extra
+                        # Tool Interrupt: recovery input (authorization) is passed to Rail via ctx.extra,
+                        # not as a UserMessage. But a UserMessage must still be added to context
+                        # using the original query to ensure the LLM request contains at least
+                        # one non-system message.
+                        await context.add_messages(
+                            UserMessage(content=interruption_state.original_query or
+                                                self._extract_user_text(user_input)),
+                            system_messages=ctx.extra.get("_active_system_messages") or [],
+                            tools=ctx.extra.get("_active_tools") or [],
+                        )
                         await self._handle_resume(
                             interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
                         )

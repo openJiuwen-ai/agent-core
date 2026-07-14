@@ -24,6 +24,7 @@ from openjiuwen.core.foundation.llm import (
     ModelClientConfig,
     ModelRequestConfig,
     SystemMessage,
+    UserMessage,
 )
 from openjiuwen.core.foundation.llm.schema.mode_info import ModelConfig
 from openjiuwen.core.foundation.llm.output_parsers.json_output_parser import JsonOutputParser
@@ -368,7 +369,10 @@ class QueryRewriter:
         try:
             compressed = await self.llm.invoke(
                 model=self.model_config.model_info.model_name,
-                messages=[SystemMessage(content=compression_prompt)],
+                messages=[
+                    SystemMessage(content=compression_prompt),
+                    UserMessage(content="Please compress the dialogue history above into a summary."),
+                ],
                 temperature=self.llm.model_config.temperature,
             )
         except Exception as e:
@@ -478,7 +482,10 @@ class QueryRewriter:
             history=history_text,
             query=query,
         )
-        messages: List[BaseMessage] = [SystemMessage(content=completion_prompt)]
+        messages: List[BaseMessage] = [
+            SystemMessage(content=completion_prompt),
+            UserMessage(content=query),
+        ]
 
         try:
             rewrote = await self.llm.invoke(

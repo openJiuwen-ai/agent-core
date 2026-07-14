@@ -519,7 +519,7 @@ class TestQueryRewriterRewriteCompressFallback:
 
         async def mock_invoke(*args, **kwargs):
             msgs = kwargs.get("messages") or []
-            last_content = (msgs[-1].content if msgs else "") or ""
+            last_content = (msgs[-2].content if msgs else "") or ""
             if "当前用户输入" in last_content:
                 rewrite_called.append(1)
                 return AssistantMessage(content=_make_full_rewrite_response(current_query))
@@ -607,7 +607,7 @@ class TestFullConversationWithCompressAndRewrite:
 
         async def mock_invoke(*args, **kwargs):
             msgs = kwargs.get("messages") or []
-            last_content = (msgs[-1].content if msgs else "") or ""
+            last_content = (msgs[-2].content if msgs else "") or ""
             is_compress = (
                 "user:" in last_content
                 and "assistant:" in last_content
