@@ -27,6 +27,11 @@ CONTEXT_SECTION_BY_FILE = {
     "IDENTITY.md": "context.identity",
 }
 
+_IDENTITY_FILLED_NAME_RE = re.compile(
+    r"^\s*[-*]?\s*(?:\*\*)?(?:名字|Name)[：:](?:\*\*)?\s*(?P<name>\S.*?)\s*$",
+    re.MULTILINE,
+)
+
 
 # ---------------------------------------------------------------------------
 # Template detection
@@ -62,6 +67,20 @@ def _is_unfilled_template(content: str, max_template_len: int = 500) -> bool:
             return True
     no_headings = re.sub(r'^#{1,6}\s+.*$', '', text, flags=re.MULTILINE).strip()
     return not no_headings
+
+
+def _clean_agent_name(raw_name: str) -> str:
+    name = raw_name.strip()
+    name = re.sub(r"\s*[（(].*?(权威|见\s*IDENTITY\.md).*?[）)]\s*$", "", name).strip()
+    return name.strip("`\"'“”‘’。；;,，")
+
+
+def _identity_has_filled_name(content: str) -> bool:
+    for match in _IDENTITY_FILLED_NAME_RE.finditer(content):
+        name = _clean_agent_name(match.group("name"))
+        if name and not name.startswith("_("):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +133,8 @@ async def _read_context_file(
     result = await sys_operation.fs().read_file(str(full_path))
     if result.code == 0 and result.data:
         content = result.data.content
+        if file_key == WorkspaceNode.IDENTITY_MD.value and _identity_has_filled_name(content):
+            return content
         if content and not _is_unfilled_template(content):
             return content
 

@@ -36,14 +36,16 @@ swarmflow 全部能力,新建了一个真实 LLM 的系统测试,跑覆盖全部
    `AgentSession(_human=True, label=, phase=)`,使一次性 human turn 也带确定性
    correlation id `{phase}:{label}:{turn}`、进度事件可读。**恢复 API 一致性,非新增表面。**
 
-2. **`StructuredOutputFinishRail`:捕获即终止本轮**(`structured_output_tool.py`)。
-   `after_tool_call` hook 检测到 `tool_name == "structured_output"` 即
-   `ctx.request_force_finish(...)`,经 ability_manager 冒泡到 ReAct 主 ctx → 本轮 `break`、
-   不再发起下一次 LLM 调用。worker(`has_schema` 时)与 avatar session(`_start_avatar`
-   建后 `start` 前)各挂一份;新增 `TeamHarness.add_rail` 委派给 `self._native.add_rail`
-   (对称于既有 `add_tool`)。force-finish 的 payload(`{"accepted": True}`)无关紧要——
-   backend 仍从 `StructuredOutputTool.captured` 读结果。**从机制上根治循环,不靠提示词
-   说服小模型停止。**(实测 222→17 次。)
+2. **`StructuredOutputFinishRail`:成功捕获即终止本轮**(`structured_output_tool.py`)。
+   `after_tool_call` hook 检测到 `tool_name == "structured_output"` 且
+   `ctx.exception is None` 时才 `ctx.request_force_finish(...)`,经 ability_manager 冒泡到
+   ReAct 主 ctx → 本轮 `break`、不再发起下一次 LLM 调用。worker(`has_schema` 时)与
+   avatar session(`_start_avatar` 建后 `start` 前)各挂一份;新增 `TeamHarness.add_rail`
+   委派给 `self._native.add_rail`(对称于既有 `add_tool`)。force-finish 的
+   payload(`{"accepted": True}`)无关紧要——backend 仍从 `StructuredOutputTool.captured`
+   读结果。工具调用失败时不 force-finish,错误 `ToolMessage` 会进入下一轮模型请求,
+   让模型有机会自我修正并重新提交合法的 `structured_output`。**从机制上根治成功调用后的
+   循环,不靠提示词说服小模型停止。**(实测 222→17 次。)
 
 3. **`workflow()` 嵌套深度改 per-task contextvar**(`primitives._wf_depth` 取代
    `runtime.wf_depth`)。共享 int 把两个概念混为一谈——"当前执行路径的嵌套层数"(应 per-path)

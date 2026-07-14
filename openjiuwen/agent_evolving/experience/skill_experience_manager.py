@@ -42,6 +42,7 @@ from openjiuwen.agent_evolving.protocols import (
 )
 from openjiuwen.agent_evolving.types import ApplyResult, UpdateValue
 from openjiuwen.agent_evolving.update_execution import execute_updates
+from openjiuwen.agent_evolving.trajectory.types import Trajectory
 from openjiuwen.core.common.logging import logger
 
 if TYPE_CHECKING:
@@ -215,7 +216,7 @@ class ExperienceManager:
         signal_source: Optional[str] = None,
         change_type: str = SKILL_EXPERIENCE_ENTRY,
         request_id_prefix: Optional[str] = None,
-        trajectory: Any | None = None,
+        trajectory: Trajectory | None = None,
         messages: Optional[List[dict]] = None,
         is_shared_records: bool = False,
     ) -> ExperienceApprovalRequest:
@@ -278,7 +279,7 @@ class ExperienceManager:
         records: list[EvolutionRecord],
         change_type: str,
         request_id_prefix: Optional[str] = None,
-        trajectory: Any | None = None,
+        trajectory: Trajectory | None = None,
         messages: Optional[List[dict]] = None,
         is_shared_records: bool = False,
     ) -> ExperienceApprovalRequest:
@@ -314,7 +315,7 @@ class ExperienceManager:
         proposal: ExperienceProposal,
         preview: LocalApplyPreview,
         request_id_prefix: Optional[str] = None,
-        trajectory: Any | None = None,
+        trajectory: Trajectory | None = None,
         messages: Optional[List[dict]] = None,
         is_shared_records: bool = False,
     ) -> ExperienceApprovalRequest:
@@ -438,7 +439,7 @@ class ExperienceManager:
         preview: LocalApplyPreview,
         *,
         request_id_prefix: Optional[str] = None,
-        trajectory: Any | None = None,
+        trajectory: Trajectory | None = None,
         messages: Optional[List[dict]] = None,
         is_shared_records: bool = False,
     ) -> PendingChange:

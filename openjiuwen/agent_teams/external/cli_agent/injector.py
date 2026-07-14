@@ -12,9 +12,9 @@ Protocol later without touching the runtime.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Protocol, runtime_checkable
 
+from openjiuwen.agent_teams.external.cli_agent.transport.base import StdinLike
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -39,7 +39,7 @@ class StdinPipeInjector:
     will not observe later writes — those degrade to turn-boundary delivery.
     """
 
-    def __init__(self, stdin: asyncio.StreamWriter):
+    def __init__(self, stdin: StdinLike):
         """Bind to an open subprocess stdin stream."""
         self._stdin = stdin
         self._closed = False

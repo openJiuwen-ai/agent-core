@@ -242,14 +242,16 @@ messager，不经本地 avatar 代理。与 F_07 bridge（本地完整 DeepAgent
 
 **team 拉起外部 CLI 成员（F_22）**：CLI 启动知识静态预置在
 `TeamAgentSpec.external_cli_agents`（`ExternalCliAgentSpec` 列表：`cli_agent` 种类标识 +
-`command`/`cwd`/`inject_mcp`/`mcp_server_command`/`env`），非空集即外部 CLI 成员的能力上限。
+`command`/`cwd`/`inject_mcp`/`mcp_server_command`/`env`/`ssh_transport`），非空集即外部 CLI 成员的能力上限。
 leader 用 `spawn_external_cli(cli_agent=<name>)` 按名引用，不在 spawn
 调用里传启动细节。当前内置 adapter：claude / codex / gemini / openclaw / hermes / generic。
 spawn 路径（`external_cli_spawn` → `build_cli_runtime`）按 adapter 注入团队 MCP server——
 有 launch flag 的 claude `--mcp-config <inline-json>`、codex `-c mcp_servers...`；无 flag 的
 gemini / hermes 由 spawn 路径跑一次 `<cli> mcp add ...` 带外注册（`mcp_register_command`），
 openclaw 无已知注册方式则 `mcp_inject=none` + 大声告警。MCP server 是 CLI 子进程，继承
-`OPENJIUWEN_TEAM_JOIN` env，自动绑定成员身份。外部 CLI 成员的**系统提示词**复用 team-rail 的
+`OPENJIUWEN_TEAM_JOIN` env，自动绑定成员身份。`ssh_transport` 配置后 CLI 进程在远程 SSH 端点
+启动，`command` / `cwd` / `mcp_server_command` 均按远程主机解释；DB / messager 可达性由部署保证。
+外部 CLI 成员的**系统提示词**复用 team-rail 的
 `build_team_static_sections`（role/workflow/lifecycle/persona，排除其它 DeepAgent rail），经
 claude `--append-system-prompt` / codex `-c developer_instructions` / 其余 prepend 下发；其
 stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内成员同路 fan-out。

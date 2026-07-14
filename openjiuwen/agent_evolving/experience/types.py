@@ -13,6 +13,7 @@ from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
 from openjiuwen.agent_evolving.experience.lifecycle import HostFacingExperienceResult
 from openjiuwen.agent_evolving.protocols import SKILL_EXPERIENCE_ENTRY
 from openjiuwen.agent_evolving.signal.base import EvolutionSignal
+from openjiuwen.agent_evolving.trajectory.types import Trajectory
 from openjiuwen.agent_evolving.types import ApplyResult
 
 
@@ -27,7 +28,7 @@ class EvolutionContext:
     existing_desc_records: List[EvolutionRecord]
     existing_body_records: List[EvolutionRecord]
     user_query: str = ""
-    trajectory: Any | None = None
+    trajectory: Trajectory | None = None
     existing_script_records: List[EvolutionRecord] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -47,7 +48,7 @@ class PendingChange:
     change_id: str = field(default_factory=lambda: f"skill_evolve_{uuid.uuid4().hex[:8]}")
     subject_kind: Optional[str] = None
     is_shared_records: bool = False
-    trajectory: Any | None = None
+    trajectory: Trajectory | None = None
     messages: List[dict] | None = None
 
     @classmethod
@@ -57,7 +58,7 @@ class PendingChange:
         records: List[EvolutionRecord],
         *,
         subject_kind: Optional[str] = None,
-        trajectory: Any | None = None,
+        trajectory: Trajectory | None = None,
         messages: List[dict] | None = None,
     ) -> "PendingChange":
         return cls(
@@ -78,7 +79,7 @@ class PendingChange:
         records: List[EvolutionRecord],
         *,
         subject_kind: Optional[str] = None,
-        trajectory: Any | None = None,
+        trajectory: Trajectory | None = None,
         messages: List[dict] | None = None,
     ) -> "PendingChange":
         pending = cls.make(

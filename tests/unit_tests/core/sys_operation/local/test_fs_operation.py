@@ -5,15 +5,22 @@ import asyncio
 import os
 import random
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from filelock import Timeout as FileLockTimeout
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
+from openjiuwen.core.sys_operation.local.fs_operation import FsOperation
+from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
 
 
 @pytest.fixture
@@ -25,6 +32,16 @@ def work_dir():
     yield temp_dir
     # Cleanup after tests
     shutil.rmtree(temp_dir)
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def rw_lock_dir(monkeypatch):
+    await ReadWriteLockManager.stop()
+    lock_dir = Path(tempfile.mkdtemp())
+    monkeypatch.setattr(ReadWriteLockManager, "_lock_dir", lock_dir)
+    yield lock_dir
+    await ReadWriteLockManager.stop()
+    shutil.rmtree(lock_dir)
 
 
 @pytest_asyncio.fixture(name="sys_op")
@@ -840,8 +857,176 @@ async def test_concurrent_read_file(sys_op, work_dir):
 
 
 @pytest.mark.asyncio
+async def test_same_path_reuses_process_shared_lock(work_dir):
+    """Equivalent paths share one coordinator and one singleton lock object."""
+    file_path = Path(work_dir) / "shared_lock_target.txt"
+
+    first = ReadWriteLockManager.get_lock(file_path)
+    second = ReadWriteLockManager.get_lock(file_path.parent / "." / file_path.name)
+
+    assert first is second
+    assert first.file_lock is second.file_lock
+
+
+@pytest.mark.asyncio
+async def test_lock_is_reused_after_last_local_lease(work_dir):
+    """An idle lock remains usable until the process-wide manager stops."""
+    file_path = Path(work_dir) / "recreated_lock_target.txt"
+    lock = ReadWriteLockManager.get_lock(file_path)
+
+    async with FsOperation._file_lock(file_path, "write", timeout=1.0):
+        pass
+    async with FsOperation._file_lock(file_path, "write", timeout=1.0):
+        pass
+
+    assert ReadWriteLockManager.get_lock(file_path) is lock
+
+
+@pytest.mark.asyncio
+async def test_process_shared_lock_allows_readers_then_writer(work_dir):
+    """Local readers share the singleton while a writer waits for all readers."""
+    file_path = Path(work_dir) / "reader_writer_target.txt"
+    readers_entered = 0
+    both_readers_entered = asyncio.Event()
+    release_readers = asyncio.Event()
+    writer_entered = asyncio.Event()
+
+    async def reader():
+        nonlocal readers_entered
+        async with FsOperation._file_lock(file_path, "read", timeout=1.0):
+            readers_entered += 1
+            if readers_entered == 2:
+                both_readers_entered.set()
+            await release_readers.wait()
+
+    async def writer():
+        async with FsOperation._file_lock(file_path, "write", timeout=1.0):
+            writer_entered.set()
+
+    reader_tasks = [asyncio.create_task(reader()) for _ in range(2)]
+    await asyncio.wait_for(both_readers_entered.wait(), timeout=1.0)
+    writer_task = asyncio.create_task(writer())
+    await asyncio.sleep(0.05)
+    assert not writer_entered.is_set()
+
+    release_readers.set()
+    await asyncio.gather(*reader_tasks, writer_task)
+    assert writer_entered.is_set()
+
+
+@pytest.mark.asyncio
+async def test_timed_out_writer_does_not_block_later_readers(work_dir):
+    """A timed-out writer waiter must be removed from the RW lock queue."""
+    file_path = Path(work_dir) / "test_cancelled_writer_lock.txt"
+
+    async def wait_for_writer():
+        async with FsOperation._file_lock(file_path, "write", timeout=0.05):
+            pytest.fail("Writer unexpectedly acquired a lock held by a reader")
+
+    async def acquire_reader():
+        async with FsOperation._file_lock(file_path, "read", timeout=0.5):
+            return True
+
+    async with FsOperation._file_lock(file_path, "read", timeout=1.0):
+        writer_task = asyncio.create_task(wait_for_writer())
+        with pytest.raises(FileLockTimeout):
+            await writer_task
+
+        reader_task = asyncio.create_task(acquire_reader())
+        assert await asyncio.wait_for(reader_task, timeout=0.5)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_lock_waiter_is_released_after_acquiring(work_dir):
+    """Cancellation must not leak a lock acquired later by the executor thread."""
+    file_path = Path(work_dir) / "test_cancelled_lock_waiter.txt"
+
+    async def wait_for_reader():
+        async with FsOperation._file_lock(file_path, "read", timeout=1.0):
+            pytest.fail("Cancelled reader unexpectedly entered the protected section")
+
+    async with FsOperation._file_lock(file_path, "write", timeout=1.0):
+        waiter = asyncio.create_task(wait_for_reader())
+        await asyncio.sleep(0.05)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+    async with FsOperation._file_lock(file_path, "write", timeout=0.5):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_file_lock_blocks_another_process(work_dir):
+    """The SQLite-backed lock must coordinate with a separate process."""
+    file_path = Path(work_dir) / "test_cross_process_lock.txt"
+    lock_file = ReadWriteLockManager.get_lock_file(file_path)
+    child_code = """
+import sys
+from filelock import ReadWriteLock, Timeout
+
+lock = ReadWriteLock(sys.argv[1], is_singleton=False)
+try:
+    lock.acquire_read(timeout=0.1)
+except Timeout:
+    print("timeout")
+else:
+    lock.release()
+    print("acquired")
+finally:
+    lock.close()
+"""
+
+    async with FsOperation._file_lock(file_path, "write", timeout=1.0):
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, "-c", child_code, str(lock_file)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    assert result.stdout.strip() == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_idle_lock_cleanup_deletes_database(work_dir, monkeypatch):
+    """The last local lease schedules its database for deletion without closing the shared lock."""
+    monkeypatch.setattr(ReadWriteLockManager, "_idle_ttl", 0.0)
+    file_path = Path(work_dir) / "idle_lock_target.txt"
+    lock_file = ReadWriteLockManager.get_lock_file(file_path)
+
+    async with FsOperation._file_lock(file_path, "write", timeout=1.0):
+        pass
+
+    assert lock_file.exists()
+    assert ReadWriteLockManager._locks[lock_file].lease_count == 0
+
+    await ReadWriteLockManager.cleanup_expired_locks()
+
+    assert not lock_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_stopping_cleanup_performs_final_expired_lock_scan(work_dir, monkeypatch):
+    """Stopping the cleanup task performs one final scan of expired databases."""
+    monkeypatch.setattr(ReadWriteLockManager, "_idle_ttl", 0.0)
+    file_path = Path(work_dir) / "final_cleanup_lock_target.txt"
+    lock_file = ReadWriteLockManager.get_lock_file(file_path)
+
+    async with FsOperation._file_lock(file_path, "write", timeout=1.0):
+        pass
+
+    assert lock_file.exists()
+    await ReadWriteLockManager.stop()
+
+    assert not lock_file.exists()
+
+
+@pytest.mark.asyncio
 async def test_concurrent_write_file(sys_op, work_dir):
     """Test concurrent file writing (verify that the locking mechanism prevents data overwriting)"""
+    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=6))
     # Define test file path and write parameters
     file_path = "test_concurrent_write.txt"
     write_count = 10

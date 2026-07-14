@@ -364,12 +364,14 @@ class MemoryIndexManager:
         """Initialize embedding provider."""
         try:
             self.provider = await create_embedding_provider(
-                provider=self.settings.provider,
                 model=self.settings.model,
-                fallback=self.settings.fallback,
                 embedding_config=self.embedding_config,
             )
-            self.provider_key = f"{self.provider.id}:{self.provider.model}"
+            # provider_key now incorporates base_url + api_key hash (via
+            # config_fingerprint), so changing endpoint/key produces a different
+            # key: this both drives _should_full_reindex detection and isolates
+            # embedding_cache entries per config.
+            self.provider_key = self.provider.config_fingerprint
             logger.info(f"Embedding provider: {self.provider.id} / {self.provider.model}")
         except Exception as e:
             logger.error(f"Failed to initialize embedding provider: {e}")
@@ -605,6 +607,14 @@ class MemoryIndexManager:
                 return True
 
             if meta.get("chunkTokens") != self.settings.chunking.get("tokens"):
+                return True
+
+            # providerKey embeds base_url + api_key hash (via config_fingerprint).
+            # A change in endpoint or key flips it -> reindex. Old meta written
+            # before this field existed (or with the old id:model form) will not
+            # match the new fingerprint -> reindex once, then a fresh meta is
+            # written. This is the backward-compatible migration path.
+            if meta.get("providerKey") != self.provider_key:
                 return True
 
             return False
@@ -1275,8 +1285,29 @@ class MemoryIndexManager:
 
 
 def clear_memory_manager_cache() -> None:
-    """清除 memory manager 缓存，使下次 get_memory_manager 使用最新配置（如 embed_api_base 等）创建新实例。"""
+    """清除 memory manager 缓存，使下次 get_memory_manager 使用最新配置（如 embed_api_base 等）创建新实例。
+
+    同步版本：仅清空 INDEX_CACHE，不关闭旧实例的 db 连接 / 文件监听器。
+    旧实例随后会被 GC，但 watchdog observer 线程与 sqlite 连接可能延迟释放。
+    如需彻底释放，改用 aclose_memory_manager_cache()。
+    """
     INDEX_CACHE.clear()
+
+
+async def aclose_memory_manager_cache() -> None:
+    """异步清除 memory manager 缓存并关闭旧实例（db 连接 / watchdog observer / 定时任务）。
+
+    用于 embedding 配置热变更场景：close 旧 manager 后，下次
+    init_memory_manager_async 会用新 embedding_config 创建新实例与新 provider，
+    从而让新 base_url / api_key / model 真正生效。
+    """
+    managers = list(INDEX_CACHE.values())
+    INDEX_CACHE.clear()
+    for mgr in managers:
+        try:
+            await mgr.close()
+        except Exception as e:
+            logger.warning(f"close memory manager on cache clear failed: {e}")
 
 
 async def get_memory_manager(

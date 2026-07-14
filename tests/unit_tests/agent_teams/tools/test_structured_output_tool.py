@@ -81,3 +81,20 @@ def test_finish_rail_ignores_non_tool_inputs():
     ctx = _ctx({"unexpected": "shape"})
     asyncio.run(rail.after_tool_call(ctx))
     assert ctx.has_force_finish_request is False
+
+
+def test_finish_rail_skips_force_finish_on_tool_exception():
+    """A failed structured_output call must not force-finish.
+
+    When the call fails (e.g. malformed JSON arguments), the error
+    tool_message needs to flow back to the model so it can self-correct.
+    Force-finishing here would swallow the error and end the round with
+    no structured result captured.
+    """
+    rail = StructuredOutputFinishRail()
+    ctx = _ctx(
+        ToolCallInputs(tool_name="structured_output", tool_args={"bad": "json"})
+    )
+    ctx.exception = ValueError("Invalid tool arguments JSON")
+    asyncio.run(rail.after_tool_call(ctx))
+    assert ctx.has_force_finish_request is False

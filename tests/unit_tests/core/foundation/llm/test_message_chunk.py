@@ -201,6 +201,26 @@ def test_assistant_add_appends_different_tool_calls():
     assert len(result.tool_calls) == 2
     assert result.tool_calls[0].id == "call_1"
     assert result.tool_calls[1].id == "call_2"
+    assert [tool_call.index for tool_call in result.tool_calls] == [0, 1]
+
+
+def test_assistant_add_renumbers_appended_stream_tool_calls():
+    """Streaming chunks may each arrive with index 0; appended calls are renumbered."""
+    chunk1 = AssistantMessageChunk(
+        role="assistant",
+        content="",
+        tool_calls=[ToolCall(id="call_1", type="function", name="func1", arguments="{}", index=0)],
+    )
+    chunk2 = AssistantMessageChunk(
+        role="assistant",
+        content="",
+        tool_calls=[ToolCall(id="call_2", type="function", name="func2", arguments="{}", index=0)],
+    )
+
+    result = chunk1 + chunk2
+
+    assert [tool_call.id for tool_call in result.tool_calls] == ["call_1", "call_2"]
+    assert [tool_call.index for tool_call in result.tool_calls] == [0, 1]
 
 
 def test_assistant_add_merges_tool_calls_without_id():
