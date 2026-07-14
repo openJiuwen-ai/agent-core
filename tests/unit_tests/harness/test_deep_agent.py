@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -55,10 +55,12 @@ from openjiuwen.harness.subagents.research_agent import (
     DEFAULT_RESEARCH_AGENT_SYSTEM_PROMPT,
     RESEARCH_AGENT_FACTORY_NAME,
 )
+from openjiuwen.harness.subagents.robotic_arm_agent import build_robotic_arm_agent_config
 from openjiuwen.harness.task_loop.loop_coordinator import LoopCoordinator
 from openjiuwen.harness.task_loop.task_loop_event_executor import DEEP_TASK_TYPE
 from openjiuwen.harness.task_loop.task_loop_event_handler import TaskLoopEventHandler
 from openjiuwen.harness.tools import WebFreeSearchTool
+from openjiuwen.harness.tools.robotic_arm.config import RoboticArmRuntimeSettings
 from openjiuwen.harness.tools.subagent.session_tools import SessionToolkit
 
 
@@ -1365,6 +1367,39 @@ def test_create_subagent_uses_research_agent_factory(tmp_path) -> None:
     assert call_kwargs["card"].name == "research_agent"
     assert call_kwargs["tools"] is None
     assert call_kwargs["rails"] is None
+    assert Path(call_kwargs["workspace"].root_path).name == "sub_session_id"
+
+
+def test_create_subagent_uses_robotic_arm_agent_factory(tmp_path) -> None:
+    """Regression test: build_robotic_arm_agent_config sets factory_name="robotic_arm_agent",
+    which create_subagent's dispatch if-chain must actually recognize -- otherwise every
+    real dispatch through TaskTool/create_subagent hits the final "Unsupported subagent
+    factory" raise despite the docstring in robotic_arm_agent.py claiming it works."""
+    workspace_root = tmp_path / "parent_workspace"
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path=str(workspace_root)),
+        subagents=[
+            build_robotic_arm_agent_config(
+                _create_dummy_model(),
+                settings=RoboticArmRuntimeSettings(step_executor=MagicMock()),
+            )
+        ],
+    )
+    factory_result = object()
+
+    with patch(
+        "openjiuwen.harness.subagents.robotic_arm_agent.create_robotic_arm_agent",
+        return_value=factory_result,
+    ) as mock_create_robotic_arm_agent:
+        sub = parent.create_subagent("robotic_arm_agent", "sub_session_id")
+
+    assert sub is factory_result
+    mock_create_robotic_arm_agent.assert_called_once()
+    call_kwargs = mock_create_robotic_arm_agent.call_args.kwargs
+    assert call_kwargs["card"].name == "robotic_arm_agent"
     assert Path(call_kwargs["workspace"].root_path).name == "sub_session_id"
 
 

@@ -1197,6 +1197,15 @@ class DeepAgent(BaseAgent):
                         **dict(spec.factory_kwargs or {}),
                     )
                 )
+            if normalized_factory == "robotic_arm_agent":
+                from openjiuwen.harness.subagents.robotic_arm_agent import (
+                    create_robotic_arm_agent,
+                )
+
+                return create_robotic_arm_agent(
+                    **create_kwargs,
+                    **dict(spec.factory_kwargs or {}),
+                )
 
             raise build_error(
                 StatusCode.DEEPAGENT_CREATE_SUBAGENT_NOT_FOUND,
