@@ -201,7 +201,7 @@ class BaseModelClient(ABC):
                               error_msg=f"model client config api_key is required for {client_name}.")
         if not self.model_client_config.api_base:
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
-                              rror_msg=f"model client config api_base is required for {client_name}.")
+                              error_msg=f"model client config api_base is required for {client_name}.")
 
         if self.model_client_config.verify_ssl is not None and not isinstance(self.model_client_config.verify_ssl,
                                                                               bool):

@@ -23,6 +23,8 @@ from openjiuwen.core.memory.external.jiuwen_memory_provider import (
     JiuwenMemoryProvider,
     LTM_SEARCH_SCHEMA,
     LTM_SEARCH_SUMMARY_SCHEMA,
+    _SERVER_READ_TIMEOUT,
+    _SERVER_WRITE_TIMEOUT,
 )
 from jiuwen_memory.memory_core.long_term_memory import MemInfo, MemResult
 from jiuwen_memory.memory_core.manage.mem_model.memory_unit import MemoryType
@@ -122,6 +124,12 @@ class TestConstruction:
     def test_server_mode_is_available_with_base_url(self):
         assert JiuwenMemoryProvider(mode="server", base_url="http://localhost:8000").is_available() is True
 
+    def test_server_mode_not_available_with_empty_base_url(self):
+        assert JiuwenMemoryProvider(mode="server", base_url="").is_available() is False
+
+    def test_server_mode_not_available_with_none_base_url(self):
+        assert JiuwenMemoryProvider(mode="server", base_url=None).is_available() is False
+
     def test_server_mode_not_initialized_by_default(self):
         assert JiuwenMemoryProvider(mode="server").is_initialized is False
 
@@ -184,7 +192,7 @@ class TestSDKLifecycle:
     async def test_initialize_marks_initialized_and_registers_store(self, sdk_stores, mock_ltm):
         provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
         with patch(LTM_SOURCE, return_value=mock_ltm):
-            await provider.initialize(user_id="u1", scope_id="s1", session_id="sess1")
+            await provider.initialize(user_id="u1", scope_id="s1")
         assert provider.is_initialized is True
         mock_ltm.register_store.assert_awaited_once()
 
@@ -296,14 +304,14 @@ class TestSDKSyncTurn:
         provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
         with patch(LTM_SOURCE, return_value=mock_ltm):
             await provider.initialize()
-            await provider.sync_turn("hello", "hi there", user_id="u1", scope_id="s1", session_id="sess1")
+            await provider.sync_turn("hello", "hi there", user_id="u1", scope_id="s1")
         mock_ltm.add_messages.assert_awaited_once()
         call_args = mock_ltm.add_messages.call_args
         messages = call_args[0][0]
         assert len(messages) == 2
         assert call_args.kwargs["user_id"] == "u1"
         assert call_args.kwargs["scope_id"] == "s1"
-        assert call_args.kwargs["session_id"] == "sess1"
+        assert "session_id" not in call_args.kwargs
 
     @pytest.mark.asyncio
     async def test_sync_turn_empty_messages_does_nothing(self, sdk_stores, mock_ltm):
@@ -352,7 +360,7 @@ class TestSDKHandleToolCall:
             await provider.initialize()
             parsed = json.loads(await provider.handle_tool_call("ltm_search", {"query": "likes what"}))
         assert parsed["count"] == 1
-        assert parsed["results"][0]["id"] == "m1"
+        assert parsed["results"][0]["mem_id"] == "m1"
         assert parsed["results"][0]["content"] == "likes Python"
         assert parsed["results"][0]["type"] == "user_profile"
 
@@ -517,6 +525,9 @@ class TestServerSyncTurn:
         ]
         assert payload["user_id"] == "u1"
         assert payload["scope_id"] == "s1"
+        # add_messages triggers LLM extraction → write path uses a larger timeout
+        assert kwargs["timeout"] == _SERVER_WRITE_TIMEOUT
+        assert kwargs["timeout"] > _SERVER_READ_TIMEOUT
 
     @pytest.mark.asyncio
     async def test_sync_turn_empty_messages_does_nothing(self):

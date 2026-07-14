@@ -1119,6 +1119,14 @@ class DeepAgent(BaseAgent):
                 context_data = run.get("context")
                 if context_data:
                     run_context = RunContext(**context_data)
+            # Merge raw_query into RunContext.extra
+            # (without affecting run_kind for normal queries)
+            raw_query = inputs.get("raw_query", "")
+            if raw_query:
+                if run_context is None:
+                    run_context = RunContext(extra={"raw_query": raw_query})
+                else:
+                    run_context.extra["raw_query"] = raw_query
         elif isinstance(inputs, str):
             query = inputs
             conversation_id = None
@@ -1142,6 +1150,42 @@ class DeepAgent(BaseAgent):
             run_context=run_context
         )
         return invoke_inputs
+
+    @staticmethod
+    def _copy_run_context_with_raw_query(
+        run_context: RunContext,
+        raw_query: str,
+    ) -> RunContext:
+        """Return a per-round RunContext with refreshed raw_query."""
+        extra = dict(run_context.extra)
+        extra["raw_query"] = raw_query
+        return RunContext(
+            reason=run_context.reason,
+            session_id=run_context.session_id,
+            context_mode=run_context.context_mode,
+            extra=extra,
+        )
+
+    @classmethod
+    def _run_context_for_task_loop_round(
+        cls,
+        run_context: Optional[RunContext],
+        current_query: Any,
+        is_follow_up: bool,
+    ) -> Optional[RunContext]:
+        """Return the RunContext that should be passed to one task-loop round."""
+        if run_context is None:
+            return None
+        if not is_follow_up:
+            return run_context
+        if not isinstance(current_query, str):
+            return run_context
+        if not current_query.strip():
+            return run_context
+        return cls._copy_run_context_with_raw_query(
+            run_context,
+            current_query,
+        )
 
     @staticmethod
     def _to_effective_inputs(invoke_inputs: InvokeInputs) -> Dict[str, Any]:
@@ -2108,6 +2152,11 @@ class DeepAgent(BaseAgent):
                         _state.pending_follow_ups.pop(0)
                     )
                     self.save_state(session, _state)
+                round_run_context = self._run_context_for_task_loop_round(
+                    modified.run_context,
+                    current_query,
+                    is_follow_up,
+                )
 
                 query_preview = str(current_query)[:120]
                 self._log_loop(
@@ -2119,7 +2168,7 @@ class DeepAgent(BaseAgent):
                     session, current_query,
                     is_follow_up=is_follow_up,
                     run_kind=modified.run_kind,
-                    run_context=modified.run_context,
+                    run_context=round_run_context,
                 )
                 result = await controller.wait_round_completion(timeout=timeout)
 

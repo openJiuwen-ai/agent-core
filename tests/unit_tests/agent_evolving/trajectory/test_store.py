@@ -32,6 +32,7 @@ from openjiuwen.agent_evolving.trajectory.types import (
     Trajectory,
     TrajectoryStep,
     to_legacy_trajectory,
+    trajectory_from_steps,
 )
 
 
@@ -71,8 +72,8 @@ def make_trajectory(
     case_id=None,
     steps=None,
 ):
-    """Factory for creating legacy step-view trajectories."""
-    return LegacyTrajectory(
+    """Factory for creating OTLP-first trajectories."""
+    return trajectory_from_steps(
         execution_id=exec_id,
         session_id=session_id,
         case_id=case_id,
@@ -272,7 +273,7 @@ class TestFileTrajectoryStore:
         assert legacy.case_id == "case-old"
         assert legacy.session_id == "session-old"
         assert legacy.cost == {"input_tokens": 3, "output_tokens": 5}
-        assert legacy.meta == {"member_id": "member-old"}
+        assert legacy.meta["member_id"] == "member-old"
         assert len(queried) == 1
         assert to_legacy_trajectory(queried[0]).execution_id == "legacy-exec"
         assert isinstance(legacy.steps[0].detail, LLMCallDetail)
@@ -508,7 +509,7 @@ class TestFileTrajectoryStore:
             ),
             meta={"operator_id": "op1", "span_name": "test_span"},
         )
-        traj = LegacyTrajectory(
+        traj = trajectory_from_steps(
             execution_id="exec1",
             session_id="session1",
             steps=[step],
@@ -542,7 +543,7 @@ class TestFileTrajectoryStore:
             completion_token_ids=[3, 4],
             logprobs=[-0.1, -0.2],
         )
-        traj = LegacyTrajectory(
+        traj = trajectory_from_steps(
             execution_id="exec-rl",
             session_id="session-rl",
             steps=[step],
@@ -572,7 +573,7 @@ class TestFileTrajectoryStore:
             ),
             meta={"operator_id": "test_tool"},
         )
-        traj = LegacyTrajectory(
+        traj = trajectory_from_steps(
             execution_id="exec1",
             session_id="session1",
             steps=[step],
@@ -605,7 +606,7 @@ class TestFileTrajectoryStore:
             reward=0.5,
             meta={"operator_id": "test_tool"},
         )
-        traj = LegacyTrajectory(
+        traj = trajectory_from_steps(
             execution_id="exec-tool-rl",
             session_id="session1",
             steps=[step],
@@ -636,7 +637,7 @@ class TestFileTrajectoryStore:
             ),
             meta={"operator_id": "test_tool", "payload": Payload(value="meta")},
         )
-        traj = LegacyTrajectory(
+        traj = trajectory_from_steps(
             execution_id="exec-pydantic",
             session_id="session1",
             steps=[step],

@@ -128,6 +128,7 @@ async def external_cli_spawn(
             mcp_server_command=tuple(cli_cfg.mcp_server_command),
             system_prompt=system_prompt,
             extra_env=cli_cfg.env or None,
+            ssh_transport=cli_cfg.ssh_transport,
         )
     else:
         runtime = await build_cli_runtime(ctx, system_prompt=system_prompt)

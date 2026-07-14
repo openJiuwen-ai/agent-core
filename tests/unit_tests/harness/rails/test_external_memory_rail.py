@@ -6,7 +6,14 @@ from __future__ import annotations
 
 import pytest
 
-from openjiuwen.core.single_agent.rail.base import RunKind
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    InvokeInputs,
+    ModelCallInputs,
+    RunContext,
+    RunKind,
+)
+from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails.memory.external_memory_rail import ExternalMemoryRail
 from openjiuwen.core.memory.external.provider import MemoryProvider
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
@@ -168,6 +175,237 @@ class TestResolveUserTextForMemory:
 
         result = ExternalMemoryRail._resolve_user_text_for_memory(ctx)
         assert result == "last"
+
+
+class TestResolveUserTextWithRunContext:
+    """Test _resolve_user_text_for_memory with RunContext.extra["raw_query"]."""
+
+    def test_after_invoke_path_ctx_inputs_run_context(self):
+        """ctx.inputs.run_context.extra["raw_query"] is returned (after_invoke callback).
+
+        At after_invoke, ctx.inputs is InvokeInputs which has a run_context field,
+        so getattr(ctx.inputs, "run_context") returns it directly.
+        """
+        run_ctx = RunContext(extra={"raw_query": "question"})
+        inputs = MockInputs(run_context=run_ctx)
+        ctx = MockCallbackContext(inputs)
+
+        result = ExternalMemoryRail._resolve_user_text_for_memory(ctx)
+        assert result == "question"
+
+    def test_before_model_call_path_ctx_extra(self):
+        """ctx.extra["run_context"].extra["raw_query"] is returned (before_model_call callback).
+
+        At before_model_call, ReActAgent replaces ctx.inputs with ModelCallInputs
+        (which has no run_context attr). ReActAgent._inner_invoke bridges run_context
+        into ctx.extra["run_context"] instead. Without this fallback, prefetch()
+        would lose access to raw_query.
+        """
+        run_ctx = RunContext(extra={"raw_query": "hello from extra"})
+        inputs = MockInputs()
+        ctx = MockCallbackContext(inputs)
+        ctx.extra = {"run_context": run_ctx}
+
+        result = ExternalMemoryRail._resolve_user_text_for_memory(ctx)
+        assert result == "hello from extra"
+
+    def test_raw_query_priority_over_query_and_messages(self):
+        """raw_query wins when BOTH query and messages are also present.
+
+        This is the single priority test: raw_query > query > messages.
+        No need for separate "over query" and "over messages" tests.
+        """
+        run_ctx = RunContext(extra={"raw_query": "clean query"})
+        inputs = MockInputs(
+            query='你收到一条消息：\n{"content": "wrapped"}',
+            messages=[{"role": "user", "content": "message content"}],
+            run_context=run_ctx,
+        )
+        ctx = MockCallbackContext(inputs)
+
+        result = ExternalMemoryRail._resolve_user_text_for_memory(ctx)
+        assert result == "clean query"
+
+    def test_ctx_inputs_preferred_over_ctx_extra(self):
+        """When both ctx.inputs.run_context and ctx.extra["run_context"] exist,
+        ctx.inputs.run_context takes priority (after_invoke over before_model_call)."""
+        run_ctx_inputs = RunContext(extra={"raw_query": "from inputs"})
+        run_ctx_extra = RunContext(extra={"raw_query": "from extra"})
+        inputs = MockInputs(run_context=run_ctx_inputs)
+        ctx = MockCallbackContext(inputs)
+        ctx.extra = {"run_context": run_ctx_extra}
+
+        result = ExternalMemoryRail._resolve_user_text_for_memory(ctx)
+        assert result == "from inputs"
+
+    @pytest.mark.parametrize(
+        ("raw_query_value", "extra_without_key", "description"),
+        [
+            # Sub-case A: raw_query is empty string → stripped to "" → skipped
+            ("", False, "empty_string"),
+            # Sub-case B: raw_query key absent from extra → .get returns "" → skipped
+            ("__missing__", True, "missing_key"),
+        ],
+        ids=["empty_string", "missing_key"],
+    )
+    def test_absent_raw_query_falls_back_to_query(self, raw_query_value, extra_without_key, description):
+        """When raw_query is absent or empty, resolution falls back to query field."""
+        if extra_without_key:
+            run_ctx = RunContext(extra={"unrelated": "data"})
+        else:
+            run_ctx = RunContext(extra={"raw_query": raw_query_value})
+
+        inputs = MockInputs(
+            query="wrapped query",
+            run_context=run_ctx,
+        )
+        ctx = MockCallbackContext(inputs)
+
+        result = ExternalMemoryRail._resolve_user_text_for_memory(ctx)
+        assert result == "wrapped query"
+
+
+class TestRunContextTransformationChain:
+    """Integration test: verify RunContext survives the REAL ReActAgent pipeline.
+
+    Unlike the unit tests above which mock ctx state directly, these tests
+    create a real ReActAgent, pass inputs through the actual _inner_invoke
+    code path, and verify that run_context lands in ctx.extra at
+    before_model_call time.
+
+    Chain exercised:
+        inputs dict with "run_context"
+          → ReActAgent._inner_invoke()   → ctx.extra["run_context"]
+            → ReActAgent._call_model()   → ctx.inputs = ModelCallInputs
+              → before_model_call rail captures ctx state
+    """
+
+    @staticmethod
+    def _make_agent():
+        """Create a minimal ReActAgent with mock model config."""
+        import os
+        from openjiuwen.core.single_agent import AgentCard, ReActAgent, ReActAgentConfig
+        from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig
+
+        os.environ.setdefault("LLM_SSL_VERIFY", "false")
+        card = AgentCard(description="test agent")
+        config = ReActAgentConfig(
+            model_config_obj=ModelRequestConfig(model="gpt-3.5-turbo"),
+            model_client_config=ModelClientConfig(
+                client_provider="OpenAI",
+                api_key="test-key",
+                api_base="http://test-base",
+                verify_ssl=False,
+            ),
+            prompt_template=[{"role": "system", "content": "You are a test assistant."}],
+        )
+        return ReActAgent(card=card).configure(config)
+
+    @pytest.mark.asyncio
+    async def test_run_context_lands_in_ctx_extra_at_before_model_call(self):
+        """run_context passed via invoke dict arrives in ctx.extra at before_model_call.
+
+        This exercises the REAL code path in ReActAgent._inner_invoke (line 1292):
+            ctx.extra["run_context"] = inputs.get("run_context", "")
+        """
+        from unittest.mock import patch
+        from openjiuwen.core.single_agent.rail.base import AgentRail
+        from tests.unit_tests.fixtures.mock_llm import MockLLMModel, create_text_response
+
+        agent = self._make_agent()
+
+        captured = []
+
+        class CaptureRail(AgentRail):
+            async def before_model_call(self, ctx):
+                captured.append({
+                    "inputs_type": type(ctx.inputs).__name__,
+                    "has_run_context_attr": hasattr(ctx.inputs, "run_context"),
+                    "extra_run_context": ctx.extra.get("run_context"),
+                })
+
+        await agent.register_rail(CaptureRail())
+
+        run_ctx = RunContext(extra={"raw_query": "question"})
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([create_text_response("done")])
+
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
+            await agent.invoke({"query": "test query", "run_context": run_ctx})
+
+        assert len(captured) == 1
+        state = captured[0]
+        # ctx.inputs is ModelCallInputs at before_model_call (no run_context attr)
+        assert state["inputs_type"] == "ModelCallInputs"
+        assert state["has_run_context_attr"] is False
+        # run_context arrived in ctx.extra through the real _inner_invoke path
+        assert state["extra_run_context"] is run_ctx
+        assert state["extra_run_context"].extra["raw_query"] == "question"
+
+    @pytest.mark.asyncio
+    async def test_resolve_user_text_reads_run_context_from_ctx_extra(self):
+        """_resolve_user_text_for_memory reads raw_query from ctx.extra after real pipeline.
+
+        End-to-end: invoke dict → _inner_invoke → ctx.extra → _resolve_user_text_for_memory.
+        """
+        from unittest.mock import patch
+        from openjiuwen.core.single_agent.rail.base import AgentRail
+        from tests.unit_tests.fixtures.mock_llm import MockLLMModel, create_text_response
+
+        agent = self._make_agent()
+
+        resolved = []
+
+        class ResolveRail(AgentRail):
+            async def before_model_call(self, ctx):
+                resolved.append(
+                    ExternalMemoryRail._resolve_user_text_for_memory(ctx)
+                )
+
+        await agent.register_rail(ResolveRail())
+
+        run_ctx = RunContext(extra={"raw_query": "raw query"})
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([create_text_response("done")])
+
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
+            await agent.invoke({"query": "test", "run_context": run_ctx})
+
+        assert len(resolved) == 1
+        assert resolved[0] == "raw query"
+
+    @pytest.mark.asyncio
+    async def test_no_run_context_falls_back_to_messages(self):
+        """Without run_context, _resolve_user_text_for_memory falls back to messages.
+
+        At before_model_call, ctx.inputs is ModelCallInputs which has messages
+        (containing the user query) but no query attr. The method falls through
+        to the messages path and returns the user message content.
+        """
+        from unittest.mock import patch
+        from openjiuwen.core.single_agent.rail.base import AgentRail
+        from tests.unit_tests.fixtures.mock_llm import MockLLMModel, create_text_response
+
+        agent = self._make_agent()
+
+        resolved = []
+
+        class ResolveRail(AgentRail):
+            async def before_model_call(self, ctx):
+                resolved.append(
+                    ExternalMemoryRail._resolve_user_text_for_memory(ctx)
+                )
+
+        await agent.register_rail(ResolveRail())
+
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([create_text_response("done")])
+
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
+            await agent.invoke({"query": "test"})
+
+        # No run_context → falls through to messages in ModelCallInputs → "test"
+        assert resolved == ["test"]
 
 
 class TestExtractAssistantOutput:
