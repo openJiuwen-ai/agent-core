@@ -21,7 +21,8 @@ IDENTITY: Dict[str, str] = {
         "Stay focused on the goal during execution and try different strategies when encountering problems.\n"
         "Important: if a tool returns no results, empty output, or an error,\n"
         "do NOT call the same tool with identical arguments again.\n"
-        "Refer to the tool-call history already visible in the conversation context and try a different tool or approach."
+        "Refer to the tool-call history already visible in the conversation context and try a different tool or "
+        "approach."
     ),
 }
 
