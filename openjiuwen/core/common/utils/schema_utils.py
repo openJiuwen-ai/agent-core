@@ -4,7 +4,7 @@ import typing
 from typing import Any, Optional, Type, Union, Dict, List, get_type_hints
 from copy import deepcopy
 from jsonschema import validate as jsonschema_validate, ValidationError as JsonSchemaValidationError
-from pydantic import BaseModel, create_model, Field, ConfigDict
+from pydantic import BaseModel, create_model, Field, ConfigDict, ValidationError as PydanticValidationError
 from pydantic.fields import FieldInfo
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -122,7 +122,11 @@ class SchemaUtils:
             schema: Either a JSON Schema dictionary or a Pydantic BaseModel class
 
         Raises:
-            ValidationError: If data fails pydantic validation or jsonschema validation
+            ValidationError: If data fails Pydantic ``model_validate`` after jsonschema
+                fallback (dict schema) or direct Pydantic validation (model schema).
+            Other exceptions: Propagate when jsonschema raises outside
+                ``JsonSchemaValidationError``, or when building/validating the schema
+                fails for non-data reasons (for example an invalid schema dict).
         """
         try:
             if isinstance(schema, dict):
@@ -136,9 +140,13 @@ class SchemaUtils:
             else:
                 # Use pydantic validation directly
                 schema.model_validate(data)
-        except Exception as e:
-            # Wrap the exception in a custom business exception
-            raise build_error(StatusCode.SCHEMA_VALIDATE_INVALID, cause=e, reason=str(e), data=data)
+        except PydanticValidationError as e:
+            raise build_error(
+                StatusCode.SCHEMA_VALIDATE_INVALID,
+                cause=e,
+                reason=str(e),
+                data=data,
+            ) from e
 
     @staticmethod
     def get_schema_dict(schema: Type[BaseModel]) -> Optional[Dict[str, Any]]:
