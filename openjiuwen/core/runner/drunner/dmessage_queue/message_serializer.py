@@ -9,7 +9,6 @@ from typing import Any, Union
 from openjiuwen.core.runner.drunner.dmessage_queue.message import (
     DmqRequestMessage, DmqResponseMessage
 )
-from openjiuwen.core.runner.message_queue_base import QueueMessage
 from openjiuwen.core.session import InteractionOutput
 from openjiuwen.core.session.stream import OutputSchema, CustomSchema, TraceSchema
 from openjiuwen.core.workflow import WorkflowOutput
@@ -25,7 +24,6 @@ TYPE_REGISTRY = {
     "WorkflowOutput": WorkflowOutput,
     "DmqRequestMessage": DmqRequestMessage,
     "DmqResponseMessage": DmqResponseMessage,
-    "QueueMessage": QueueMessage,
 }
 
 

@@ -26,7 +26,8 @@ class A2ARemoteClient(RemoteClient):
             card = self._resolve_a2a_card()
             if card is None:
                 raise ValueError("card is required when protocol is A2A")
-            self.client = A2AClient(card=card)
+            polling = bool(self.config.kwargs.get("polling", False))
+            self.client = A2AClient(card=card, polling=polling)
             logger.info(f"[A2ARemoteClient] Initialized client for {config.id}, url={config.url}")
         except Exception as exc:
             logger.error(f"[A2ARemoteClient] Failed to initialize client for {config.id}: {exc}")

@@ -78,12 +78,12 @@ async def test_build_cli_runtime_streaming_drives_a_turn():
     assert isinstance(runtime, ExternalCliRuntime)
 
     async def _drain() -> list:
-        return [chunk async for chunk in runtime._drive({"query": "hello"})]
+        return [chunk async for chunk in runtime.run_streaming({"query": "hello"}, session_id="sess-1")]
 
     try:
-        # _drive writes the input and consumes stdout until the generic adapter
-        # sees the end-of-turn marker; it must not hang. The echoed line is
-        # surfaced as an output chunk.
+        # run_streaming writes the input and consumes stdout until the
+        # generic adapter sees the end-of-turn marker; it must not hang. The
+        # echoed line is surfaced as an output chunk.
         chunks = await asyncio.wait_for(_drain(), timeout=5.0)
         assert "echo: hello" in [c.payload["content"] for c in chunks]
     finally:
@@ -101,7 +101,7 @@ async def test_build_cli_runtime_oneshot_reinvokes_per_turn():
     assert isinstance(runtime, ReinvokeCliRuntime)
 
     async def _drain(query: str) -> list:
-        return [chunk async for chunk in runtime._drive({"query": query})]
+        return [chunk async for chunk in runtime.run_streaming({"query": query}, session_id="sess-1")]
 
     try:
         # Each turn launches a fresh subprocess that prints the argv prompt
@@ -133,7 +133,7 @@ async def test_reinvoke_surfaces_chunks_live_during_turn():
     start = loop.time()
     arrivals: list = []
     try:
-        async for chunk in runtime._drive({"query": "go"}):
+        async for chunk in runtime.run_streaming({"query": "go"}, session_id="sess-1"):
             arrivals.append((chunk.payload["content"], loop.time() - start))
     finally:
         await runtime.aclose()

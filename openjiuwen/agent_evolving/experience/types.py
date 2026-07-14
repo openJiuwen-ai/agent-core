@@ -45,7 +45,6 @@ class PendingChange:
     payload: List[EvolutionRecord]
     created_at: str
     change_id: str = field(default_factory=lambda: f"skill_evolve_{uuid.uuid4().hex[:8]}")
-    subject_kind: Optional[str] = None
     is_shared_records: bool = False
     trajectory: Any | None = None
     messages: List[dict] | None = None
@@ -56,7 +55,6 @@ class PendingChange:
         skill_name: str,
         records: List[EvolutionRecord],
         *,
-        subject_kind: Optional[str] = None,
         trajectory: Any | None = None,
         messages: List[dict] | None = None,
     ) -> "PendingChange":
@@ -66,7 +64,6 @@ class PendingChange:
             change_type=SKILL_EXPERIENCE_ENTRY,
             payload=list(records),
             created_at=datetime.now(tz=timezone.utc).isoformat(),
-            subject_kind=subject_kind,
             trajectory=trajectory,
             messages=list(messages) if messages is not None else None,
         )
@@ -77,17 +74,10 @@ class PendingChange:
         skill_name: str,
         records: List[EvolutionRecord],
         *,
-        subject_kind: Optional[str] = None,
         trajectory: Any | None = None,
         messages: List[dict] | None = None,
     ) -> "PendingChange":
-        pending = cls.make(
-            skill_name,
-            records,
-            subject_kind=subject_kind,
-            trajectory=trajectory,
-            messages=messages,
-        )
+        pending = cls.make(skill_name, records, trajectory=trajectory, messages=messages)
         pending.is_shared_records = True
         return pending
 

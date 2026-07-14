@@ -152,13 +152,19 @@ Rail first uses the current rail trajectory, or the aggregated team trajectory f
 ### Record Approval Flow
 
 1. Rail generates experience records and stages them
-2. The returned `approval_event` can be shown by the host UI
+2. Staged records are sent to TUI via `OutputSchema`
 3. User selects "Accept" or "Reject"
-4. On approval, call `approve_record(result.request_id)` to write to `evolutions.json`
+4. On approval, calls `approve_record(request_id)` to write to `evolutions.json`
 
 ```python
-if result.approval_event:
-    await team_rail.approve_record(result.request_id)
+# Get pending approval events
+events = await team_rail.drain_pending_approval_events(wait=True)
+
+for event in events:
+    if event.type == "chat.ask_user_question":
+        request_id = event.payload["request_id"]
+        # User approval
+        await team_rail.approve_record(request_id)
 ```
 
 ---
@@ -180,15 +186,12 @@ ExperienceScorer uses three-dimension weighted scoring:
 ### Simplify Operations
 
 ```python
-simplify_result = await team_rail.request_simplify(
+result = await team_rail.request_simplify(
     skill_name="research-team",
     user_intent="Clean up outdated experiences",
 )
 
-if simplify_result.approval_event:
-    await team_rail.on_approve_simplify(simplify_result.request_id)
-
-# The scorer-generated cleanup actions are applied after approval.
+# Returns: {"deleted": N, "merged": N, "refined": N, "kept": N, "errors": N}
 ```
 
 | Operation | Description |
@@ -238,7 +241,7 @@ Rebuild process:
 
 ### Regular Maintenance
 
-1. Execute `request_simplify()` weekly and approve the generated cleanup actions to clean low-quality experiences
+1. Execute `request_simplify()` weekly to clean low-quality experiences
 2. Evaluate monthly whether `request_rebuild()` is needed
 3. Set `auto_save=False` before important evolution to ensure user approval
 

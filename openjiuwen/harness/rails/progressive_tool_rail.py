@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.sections.progressive_tool_rail import (
@@ -45,6 +46,7 @@ class ProgressiveToolRail(DeepAgentRail):
 
         self._meta_tool_names: Set[str] = set()
         self._owned_tool_names: Set[str] = set()
+        self._owned_tool_ids: Set[str] = set()
         self._cached_all_tool_infos: List[ToolInfo] = []
 
     def init(self, agent) -> None:
@@ -68,15 +70,28 @@ class ProgressiveToolRail(DeepAgentRail):
 
         self._meta_tool_names = {tool.card.name for tool in tools}
 
+        for tool in tools:
+            try:
+                existing_tool = Runner.resource_mgr.get_tool(tool.card.id)
+                if existing_tool is None:
+                    Runner.resource_mgr.add_tool(tool)
+                    self._owned_tool_ids.add(tool.card.id)
+            except Exception as exc:
+                logger.warning(
+                    f"[ProgressiveToolRail] failed to add tool resource '{tool.card.id}' "
+                    f"to resource_mgr: {exc}"
+                )
+
         if hasattr(agent, "ability_manager"):
             for tool in tools:
                 try:
-                    result = agent.ability_manager.add_ability(tool.card, tool)
+                    result = agent.ability_manager.add(tool.card)
                     if result.added:
                         self._owned_tool_names.add(tool.card.name)
                 except Exception as exc:
                     logger.warning(
-                        f"[ProgressiveToolRail] failed to register tool '{tool.card.name}': {exc}"
+                        f"[ProgressiveToolRail] failed to add tool card '{tool.card.name}' "
+                        f"to ability_manager: {exc}"
                     )
 
     def uninit(self, agent) -> None:
@@ -84,7 +99,7 @@ class ProgressiveToolRail(DeepAgentRail):
         if hasattr(agent, "ability_manager"):
             for tool_name in list(self._owned_tool_names):
                 try:
-                    agent.ability_manager.remove_ability(tool_name)
+                    agent.ability_manager.remove(tool_name)
                 except Exception as exc:
                     logger.warning(
                         f"[ProgressiveToolRail] failed to remove tool '{tool_name}' "
@@ -92,6 +107,7 @@ class ProgressiveToolRail(DeepAgentRail):
                     )
 
         self._owned_tool_names.clear()
+        self._owned_tool_ids.clear()
         self._meta_tool_names.clear()
         self._cached_all_tool_infos = []
 

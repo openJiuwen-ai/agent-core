@@ -5,11 +5,10 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from openjiuwen.agent_evolving.checkpointing.store_records import MergeRecordsRequest
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
-from openjiuwen.agent_evolving.experience.lifecycle import PendingCommitResult
+from openjiuwen.agent_evolving.experience.lifecycle import PendingCommitResult, RebuildRequest
 from openjiuwen.agent_evolving.experience.types import ExperienceApplyResult, PendingChange
 from openjiuwen.agent_evolving.protocols import EXPERIENCE_ENTRY, SKILL_EXPERIENCE_ENTRY
 from openjiuwen.core.common.logging import logger
@@ -20,19 +19,12 @@ def make_pending_change(
     records: List[EvolutionRecord],
     *,
     request_id_prefix: Optional[str] = None,
-    subject_kind: Optional[str] = None,
     trajectory: Any | None = None,
     messages: Optional[List[dict]] = None,
     is_shared_records: bool = False,
 ) -> PendingChange:
     """Build a checkpointing snapshot for staged experience approval."""
-    pending = PendingChange.make(
-        skill_name,
-        records,
-        subject_kind=subject_kind,
-        trajectory=trajectory,
-        messages=messages,
-    )
+    pending = PendingChange.make(skill_name, records, trajectory=trajectory, messages=messages)
     pending.is_shared_records = is_shared_records
     if request_id_prefix:
         pending.change_id = f"{request_id_prefix}_{uuid.uuid4().hex[:8]}"
@@ -75,7 +67,6 @@ async def commit_pending_change(
         approved_ids = set(approved_record_ids)
         records = [record for record in all_records if record.id in approved_ids]
         rejected_records = [record for record in all_records if record.id not in approved_ids]
-    errors: List[str] = []
 
     if not records:
         pending.payload[:] = []
@@ -91,16 +82,15 @@ async def commit_pending_change(
 
     for index, record in enumerate(records):
         try:
-            await store.append_record(pending.skill_name, record, subject_kind=pending.subject_kind)
+            await store.append_record(pending.skill_name, record)
         except Exception as exc:
-            errors.append(str(exc))
             remaining_records = list(records[index:])
             pending.payload[:] = remaining_records
             return PendingCommitResult(
                 applied_count=applied_count,
                 pending_count=len(remaining_records),
                 rejected_count=len(rejected_records),
-                errors=errors,
+                errors=[str(exc)],
             )
         applied_count += 1
     else:
@@ -114,7 +104,6 @@ async def commit_pending_change(
         applied_count=applied_count,
         pending_count=len(remaining_records),
         rejected_count=len(rejected_records),
-        errors=errors,
     )
 
 
@@ -122,8 +111,6 @@ async def execute_simplify_actions(
     store: Any,
     skill_name: str,
     actions: List[Dict[str, Any]],
-    *,
-    subject_kind: Optional[str] = None,
 ) -> Dict[str, int]:
     """Execute simplify actions against the evolution store."""
     counts = {"deleted": 0, "merged": 0, "refined": 0, "kept": 0, "errors": 0}
@@ -134,7 +121,7 @@ async def execute_simplify_actions(
 
         try:
             if action_type == "DELETE":
-                deleted = await store.delete_records(skill_name, [record_id], subject_kind=subject_kind)
+                deleted = await store.delete_records(skill_name, [record_id])
                 if deleted > 0:
                     counts["deleted"] += 1
                 else:
@@ -142,13 +129,10 @@ async def execute_simplify_actions(
 
             elif action_type == "MERGE":
                 result = await store.merge_records(
-                    MergeRecordsRequest(
-                        name=skill_name,
-                        primary_id=record_id,
-                        remove_ids=action.get("merge_remove_ids", []),
-                        new_content=action.get("new_content", ""),
-                        subject_kind=subject_kind,
-                    )
+                    skill_name,
+                    record_id,
+                    action.get("merge_remove_ids", []),
+                    action.get("new_content", ""),
                 )
                 if result:
                     counts["merged"] += 1
@@ -160,7 +144,6 @@ async def execute_simplify_actions(
                     skill_name,
                     record_id,
                     action.get("new_content", ""),
-                    subject_kind=subject_kind,
                 )
                 if result:
                     counts["refined"] += 1
@@ -189,3 +172,59 @@ async def execute_simplify_actions(
         counts,
     )
     return counts
+
+
+async def request_rebuild_context(
+    store: Any,
+    request: RebuildRequest,
+    *,
+    format_records: Callable[[List[EvolutionRecord]], str],
+    default_intent: str,
+    template: str,
+    archive_evolutions_on_success: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """Archive current state, filter rebuild inputs, and build rebuild prompt text."""
+    if not store.skill_exists(request.skill_name):
+        return None
+
+    evo_archive: Optional[str] = None
+    archive_error: Optional[Exception] = None
+
+    try:
+        await store.archive_skill_body(request.skill_name)
+    except Exception as exc:  # pragma: no cover - logging only
+        logger.warning("[experience.common] skill body archive failed for '%s': %s", request.skill_name, exc)
+
+    try:
+        evo_archive = await store.archive_evolutions(request.skill_name)
+    except Exception as exc:
+        archive_error = exc
+        logger.warning("[experience.common] evolutions archive failed for '%s': %s", request.skill_name, exc)
+
+    records_log = await store.load_full_evolution_log(request.skill_name)
+    filtered_records: List[EvolutionRecord] = []
+    for record in records_log.entries:
+        if getattr(record, "score", 0.0) < request.min_score:
+            continue
+        change = getattr(record, "change", None)
+        if getattr(change, "skip_reason", None):
+            continue
+        filtered_records.append(record)
+
+    prompt = template.format(
+        evolution_records=format_records(filtered_records),
+        user_intent=request.user_intent or default_intent,
+        min_score=request.min_score,
+    )
+
+    if archive_evolutions_on_success and evo_archive:
+        await store.clear_evolutions(request.skill_name)
+
+    return {
+        "skill_name": request.skill_name,
+        "records_log": records_log,
+        "filtered_records": filtered_records,
+        "prompt": prompt,
+        "archive_path": evo_archive,
+        "archive_error": archive_error,
+    }

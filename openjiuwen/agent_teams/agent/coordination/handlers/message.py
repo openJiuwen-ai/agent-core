@@ -131,38 +131,23 @@ class MessageHandler(BaseCoordinationHandler):
                 break
 
             team_logger.info("[{}] processing {} unread messages (steer={})", member_name, len(new_messages), use_steer)
-            # Collect delivered ids and batch their read-state write into a
-            # single transaction after the loop — one commit (one fsync)
-            # instead of one per message. The finally guarantees already
-            # delivered messages are marked even if delivery raises or an
-            # interrupt cuts the drain short; undelivered ones stay unread
-            # for the next poll.
-            delivered_ids: list[str] = []
-            interrupted = False
-            try:
-                for msg in new_messages:
-                    seen_ids.add(msg.message_id)
-                    if self._round.has_pending_interrupt():
-                        team_logger.info(
-                            "[{}] deferring mailbox message {} until pending interrupt is resolved",
-                            member_name,
-                            msg.message_id,
-                        )
-                        interrupted = True
-                        break
-                    if is_bridge:
-                        text = await self._bridge_deliverable_for(member_name, msg)
-                    else:
-                        text = self._format_message(msg, is_human_agent=is_human_agent, now_ms=get_current_time())
-                    team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
+            for msg in new_messages:
+                seen_ids.add(msg.message_id)
+                if self._round.has_pending_interrupt():
+                    team_logger.info(
+                        "[{}] deferring mailbox message {} until pending interrupt is resolved",
+                        member_name,
+                        msg.message_id,
+                    )
+                    return
+                if is_bridge:
+                    text = await self._bridge_deliverable_for(member_name, msg)
+                else:
+                    text = self._format_message(msg, is_human_agent=is_human_agent, now_ms=get_current_time())
+                team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
-                    await self._round.deliver_input(text, use_steer=use_steer)
-                    delivered_ids.append(msg.message_id)
-            finally:
-                if delivered_ids:
-                    await self._infra.message_manager.mark_messages_read(delivered_ids, member_name)
-            if interrupted:
-                return
+                await self._round.deliver_input(text, use_steer=use_steer)
+                await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
 
     async def _bridge_deliverable_for(self, member_name: str, msg: Any) -> str:
         """Build the text delivered to a bridge avatar's DeepAgent.

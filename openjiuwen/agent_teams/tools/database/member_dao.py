@@ -7,6 +7,7 @@ from typing import List, Optional
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from openjiuwen.agent_teams.schema.status import (
     EXECUTION_TRANSITIONS,
@@ -16,7 +17,7 @@ from openjiuwen.agent_teams.schema.status import (
     MemberStatus,
     is_valid_transition,
 )
-from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.agent_teams.tools.models import TeamMember
 from openjiuwen.core.common.logging import team_logger
 
@@ -24,9 +25,9 @@ from openjiuwen.core.common.logging import team_logger
 class MemberDao:
     """Data access object for the team_member table."""
 
-    def __init__(self, sessions: DbSessions) -> None:
-        """Initialize member DAO with the shared read/write session provider."""
-        self._sessions = sessions
+    def __init__(self, session_local: async_sessionmaker) -> None:
+        """Initialize member DAO with the shared session factory."""
+        self._session_local = session_local
 
     async def create_member(
         self,
@@ -57,7 +58,7 @@ class MemberDao:
                 path. HITT callers must pass
                 ``role=TeamRole.HUMAN_AGENT.value`` explicitly.
         """
-        async with self._sessions.write() as session:
+        async with self._session_local() as session:
             try:
                 member = TeamMember(
                     member_name=member_name,
@@ -90,7 +91,7 @@ class MemberDao:
         """
         from openjiuwen.agent_teams.schema.team import TeamRole
 
-        async with self._sessions.read() as session:
+        async with self._session_local() as session:
             stmt = select(TeamMember.member_name).where(
                 TeamMember.team_name == team_name,
                 TeamMember.member_name == member_name,
@@ -106,7 +107,7 @@ class MemberDao:
         """
         from openjiuwen.agent_teams.schema.team import TeamRole
 
-        async with self._sessions.read() as session:
+        async with self._session_local() as session:
             stmt = select(TeamMember.member_name).where(
                 TeamMember.team_name == team_name,
                 TeamMember.role == TeamRole.HUMAN_AGENT.value,
@@ -115,7 +116,7 @@ class MemberDao:
 
     async def get_member(self, member_name: str, team_name: str) -> Optional[TeamMember]:
         """Get member information by ID."""
-        async with self._sessions.read() as session:
+        async with self._session_local() as session:
             result = await session.execute(
                 select(TeamMember).where(
                     TeamMember.member_name == member_name,
@@ -131,7 +132,7 @@ class MemberDao:
             team_name: Team identifier.
             status: If provided, only return members with this status.
         """
-        async with self._sessions.read() as session:
+        async with self._session_local() as session:
             stmt = select(TeamMember).where(TeamMember.team_name == team_name)
             if status is not None:
                 stmt = stmt.where(TeamMember.status == status)
@@ -147,7 +148,7 @@ class MemberDao:
             Largest member update timestamp (ms), or ``0`` when no
             members exist or all rows have null ``updated_at``.
         """
-        async with self._sessions.read() as session:
+        async with self._session_local() as session:
             result = await session.execute(
                 select(func.max(TeamMember.updated_at)).where(TeamMember.team_name == team_name)
             )
@@ -161,7 +162,7 @@ class MemberDao:
         status: str,
     ) -> bool:
         """Update member status."""
-        async with self._sessions.write() as session:
+        async with self._session_local() as session:
             result = await session.execute(
                 select(TeamMember).where(
                     TeamMember.member_name == member_name,
@@ -214,7 +215,7 @@ class MemberDao:
         Returns:
             True if the transition succeeded, False otherwise.
         """
-        async with self._sessions.write() as session:
+        async with self._session_local() as session:
             result = await session.execute(
                 update(TeamMember)
                 .where(
@@ -243,7 +244,7 @@ class MemberDao:
         execution_status: str,
     ) -> bool:
         """Update member execution status."""
-        async with self._sessions.write() as session:
+        async with self._session_local() as session:
             result = await session.execute(
                 select(TeamMember).where(
                     TeamMember.member_name == member_name,

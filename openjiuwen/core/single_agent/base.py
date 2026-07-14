@@ -14,13 +14,17 @@ Main classes included:
 Created on: 2025-11-25
 Author: huenrui1@huawei.com
 """
-
 from __future__ import annotations
 
-import uuid
-
 from abc import ABCMeta, abstractmethod
-from typing import Dict, List, Any, AsyncIterator, Union, Optional
+from typing import (
+    Dict,
+    List,
+    Any,
+    AsyncIterator,
+    Union,
+    Optional
+)
 from pydantic import BaseModel
 
 from openjiuwen.core.context_engine import ContextEngine, ModelContext
@@ -33,10 +37,7 @@ from openjiuwen.core.session.session import Session
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.agent_callback_manager import AgentCallbackManager
 from openjiuwen.core.single_agent.rail.base import (
-    AgentCallbackEvent,
-    AgentCallbackContext,
-    AgentRail,
-    AnyAgentCallback,
+    AgentCallbackEvent, AgentCallbackContext, AgentRail, AnyAgentCallback,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.controller.schema.controller_output import ControllerOutputChunk, ControllerOutput
@@ -51,13 +52,11 @@ from openjiuwen.core.single_agent.skills import GitHubTree
 # BaseAgent
 # =============================================================================
 
-
 class _AgentMeta(ABCMeta):
     def __call__(cls, *args, **kwargs):
         instance = super().__call__(*args, **kwargs)
         from openjiuwen.core.runner import Runner
         from openjiuwen.core.runner.callback.events import AgentEvents
-
         _fw = Runner.callback_framework
 
         fn = instance.invoke
@@ -93,12 +92,11 @@ class BaseAgent(metaclass=_AgentMeta):
         card: Agent card (required)
         _ability_manager: Ability manager
     """
-
     _config = None
 
     def __init__(
-        self,
-        card: AgentCard,
+            self,
+            card: AgentCard,
     ):
         """Initialize Agent
 
@@ -106,12 +104,8 @@ class BaseAgent(metaclass=_AgentMeta):
             card: Agent card (required)
         """
         self.card = card
-        self._ability_manager = AbilityManager(owner_id=card.id)
-        self._instance_id = uuid.uuid4().hex
-        self._agent_callback_manager = AgentCallbackManager(
-            card.id,
-            event_namespace=self._instance_id,
-        )
+        self._ability_manager = AbilityManager()
+        self._agent_callback_manager = AgentCallbackManager(card.id)
         self._skill_util = None
         self.lazy_init_skill()
 
@@ -138,7 +132,7 @@ class BaseAgent(metaclass=_AgentMeta):
 
     # ========== Configuration Interface ==========
     @abstractmethod
-    def configure(self, config) -> "BaseAgent":
+    def configure(self, config) -> 'BaseAgent':
         """Set configuration"""
         pass
 
@@ -152,7 +146,9 @@ class BaseAgent(metaclass=_AgentMeta):
         return self._ability_manager
 
     @ability_manager.setter
-    def ability_manager(self, value: AbilityManager) -> None:
+    def ability_manager(
+        self, value: AbilityManager
+    ) -> None:
         self._ability_manager = value
 
     @property
@@ -171,8 +167,11 @@ class BaseAgent(metaclass=_AgentMeta):
         await self._skill_util.register_remote_skills(skills_dir, github_tree, token=token)
 
     async def register_callback(
-        self, event: AgentCallbackEvent, callback: AnyAgentCallback, priority: int = 100
-    ) -> "BaseAgent":
+            self,
+            event: AgentCallbackEvent,
+            callback: AnyAgentCallback,
+            priority: int = 100
+    ) -> 'BaseAgent':
         """Register an agent callback.
 
         Args:
@@ -186,7 +185,7 @@ class BaseAgent(metaclass=_AgentMeta):
         await self._agent_callback_manager.register_callback(event, callback, priority)
         return self
 
-    async def register_rail(self, rail: AgentRail) -> "BaseAgent":
+    async def register_rail(self, rail: AgentRail) -> 'BaseAgent':
         """Register a rail instance.
 
         Args:
@@ -199,7 +198,7 @@ class BaseAgent(metaclass=_AgentMeta):
         await self._agent_callback_manager.register_rail(rail, self)
         return self
 
-    async def unregister_rail(self, rail: AgentRail) -> "BaseAgent":
+    async def unregister_rail(self, rail: AgentRail) -> 'BaseAgent':
         """Unregister a rail instance.
 
         Args:
@@ -213,12 +212,12 @@ class BaseAgent(metaclass=_AgentMeta):
         return self
 
     async def _execute_callbacks(
-        self,
-        event: AgentCallbackEvent,
-        inputs: Dict[str, Any],
-        session: Optional[Any] = None,
-        context: Optional[ModelContext] = None,
-        **kwargs,
+            self,
+            event: AgentCallbackEvent,
+            inputs: Dict[str, Any],
+            session: Optional[Any] = None,
+            context: Optional[ModelContext] = None,
+            **kwargs,
     ) -> None:
         """Execute callbacks for a given event.
 
@@ -248,9 +247,9 @@ class BaseAgent(metaclass=_AgentMeta):
 
     @abstractmethod
     async def invoke(
-        self,
-        inputs: Any,
-        session: Optional[Session] = None,
+            self,
+            inputs: Any,
+            session: Optional[Session] = None,
     ) -> Any:
         """Batch execution (can pass config at runtime to override)
 
@@ -268,7 +267,10 @@ class BaseAgent(metaclass=_AgentMeta):
 
     @abstractmethod
     async def stream(
-        self, inputs: Any, session: Optional[Session] = None, stream_modes: Optional[List[StreamMode]] = None
+            self,
+            inputs: Any,
+            session: Optional[Session] = None,
+            stream_modes: Optional[List[StreamMode]] = None
     ) -> AsyncIterator[Any]:
         """Stream execution (can pass config at runtime to override)
 
@@ -304,7 +306,9 @@ class ControllerAgent(BaseAgent):
         """
         super().__init__(card=card)
         self._config = self._create_default_config() if config is None else config
-        self.context_engine = ContextEngine(ContextEngineConfig())
+        self.context_engine = ContextEngine(
+            ContextEngineConfig()
+        )
         self._controller = controller
         self._initialize_controller()
 
@@ -319,14 +323,14 @@ class ControllerAgent(BaseAgent):
             card=self.card,
             config=self._config,
             ability_manager=self._ability_manager,
-            context_engine=self.context_engine,
+            context_engine=self.context_engine
         )
 
     def _create_default_config(self) -> ControllerConfig:
         """Create default configuration"""
         return ControllerConfig()
 
-    def configure(self, config: Union[dict, BaseModel]) -> "BaseAgent":
+    def configure(self, config: Union[dict, BaseModel]) -> 'BaseAgent':
         """Set uconfiguration
 
         Args:
@@ -354,13 +358,18 @@ class ControllerAgent(BaseAgent):
             session_id: session ID
         """
         if self.controller.event_queue:
-            await self.controller.event_queue.unsubscribe(agent_id=self.card.id, session_id=session_id)
+            await self.controller.event_queue.unsubscribe(
+                agent_id=self.card.id,
+                session_id=session_id
+            )
         from openjiuwen.core.runner import Runner
-
         await Runner().release(session_id=session_id)
 
     async def invoke(
-        self, inputs: Union[str, dict, "InputEvent"], session: Optional[Session] = None, **kwargs
+            self,
+            inputs: Union[str, dict, 'InputEvent'],
+            session: Optional[Session] = None,
+            **kwargs
     ) -> ControllerOutput:
         """Batch execution using controller
 
@@ -385,7 +394,8 @@ class ControllerAgent(BaseAgent):
         try:
             if not self.controller:
                 raise RuntimeError(
-                    f"{self.__class__.__name__} has no controller, subclass should create controller before invocation"
+                    f"{self.__class__.__name__} has no controller, "
+                    "subclass should create controller before invocation"
                 )
 
             if session is None:
@@ -398,21 +408,29 @@ class ControllerAgent(BaseAgent):
             input_event = InputEvent.from_user_input(user_input=inputs)
 
             # Call controller.invoke
-            return await self.controller.invoke(inputs=input_event, session=session, **kwargs)
+            return await self.controller.invoke(
+                inputs=input_event,
+                session=session,
+                **kwargs
+            )
 
         except BaseError:
             raise
 
         except Exception as e:
             logger.error(f"ControllerAgent invoke error: {e}", exc_info=True)
-            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR, error_msg=str(e), cause=e) from e
+            raise build_error(
+                StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                error_msg=str(e),
+                cause=e
+            ) from e
 
     async def stream(
-        self,
-        inputs: Union[str, dict, "InputEvent"],
-        session: Optional[Session] = None,
-        stream_modes: Optional[List[StreamMode]] = None,
-        **kwargs,
+            self,
+            inputs: Union[str, dict, 'InputEvent'],
+            session: Optional[Session] = None,
+            stream_modes: Optional[List[StreamMode]] = None,
+            **kwargs
     ) -> AsyncIterator[ControllerOutputChunk]:
         """Stream execution using controller
 
@@ -434,7 +452,8 @@ class ControllerAgent(BaseAgent):
         try:
             if not self.controller:
                 raise RuntimeError(
-                    f"{self.__class__.__name__} has no controller, subclass should create controller before invocation"
+                    f"{self.__class__.__name__} has no controller, "
+                    "subclass should create controller before invocation"
                 )
 
             if session is None:
@@ -447,7 +466,10 @@ class ControllerAgent(BaseAgent):
 
             # Forward directly to Controller.stream()
             async for chunk in self.controller.stream(
-                inputs=input_event, session=session, stream_modes=stream_modes, **kwargs
+                    inputs=input_event,
+                    session=session,
+                    stream_modes=stream_modes,
+                    **kwargs
             ):
                 yield chunk
 
@@ -456,4 +478,8 @@ class ControllerAgent(BaseAgent):
 
         except Exception as e:
             logger.error(f"ControllerAgent stream error: {e}", exc_info=True)
-            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR, error_msg=str(e), cause=e) from e
+            raise build_error(
+                StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                error_msg=str(e),
+                cause=e
+            ) from e

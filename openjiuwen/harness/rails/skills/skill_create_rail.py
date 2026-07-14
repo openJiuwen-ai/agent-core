@@ -20,7 +20,7 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
 
 _FOLLOW_UP_PROMPT_CN = (
-    "**重要：你必须先向用户确认，不可跳过此步骤。**\n"
+    "**重要：你必须先向用户确认，，不可跳过此步骤。**\n"
     "系统检测到对话中存在可复用模式，可能值得创建新技能。请按以下步骤执行：\n"
     "1. 直接询问或调用 ask_user 工具向用户确认：\n"
     "   - 问题：\"我检测到您可能值得创建一个新技能。是否创建？\"\n"

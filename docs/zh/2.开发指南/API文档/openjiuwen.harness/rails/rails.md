@@ -27,7 +27,7 @@ class DeepAgentRail(AgentRail): ...
 | `MemoryRail` | 记忆护栏，管理工作区内的记忆读写和日常记忆归档 |
 | `SubagentRail` | 子智能体护栏，通过 `enable_async_subagent` 参数区分同步/异步模式；同步模式注册 `TaskTool`，异步模式注册 `session` 工具|
 | `SkillUseRail` | 技能使用护栏，在模型调用前注入可用技能列表到提示词；不生成、不审批、不持久化演进记录 |
-| `SkillEvolutionRail` | 普通技能演进护栏，从轨迹或用户请求中生成已有普通 skill 的经验记录，并可在审批后通过 `EvolutionStore` 持久化；主动 review 流程需要配合 `SubagentRail` 使用 |
+| `SkillEvolutionRail` | 普通技能演进护栏，从轨迹或用户请求中生成已有普通 skill 的经验记录，并可在审批后通过 `EvolutionStore` 持久化 |
 | `AskUserRail` | 用户交互护栏，拦截 `ask_user` 工具调用并生成 HITL 中断 |
 | `ConfirmInterruptRail` | 确认中断护栏，在危险操作前请求用户确认 |
 | `BaseInterruptRail` | 中断基类护栏，`AskUserRail` 和 `ConfirmInterruptRail` 的公共基类 |
@@ -58,11 +58,6 @@ Rails 的回调根据事件类型自动路由：
 ```text
 signals -> local apply preview -> pending approval 或 auto-approved -> EvolutionStore persistence -> projection
 ```
-
-建议优先使用配置函数，确保 review 依赖共享：
-
-- `configure_skill_evolution(...)`：普通 skill 演进。
-- `configure_skill_evolution(..., team=True)`：team/swarm 演进。
 
 - 普通 `SkillEvolutionRail` 见 [`skill_evolution_rail`](./evolution/skill_evolution_rail.md)。
 - `TeamSkillCreateRail`、`TeamSkillEvolutionRail` 和 `TeamSkillRail` 兼容 alias 见 [`team_skill_evolution_rail`](./evolution/team_skill_evolution_rail.md)。

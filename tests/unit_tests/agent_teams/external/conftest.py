@@ -57,13 +57,12 @@ async def team_db():
 def make_descriptor() -> Callable[..., TeamJoinDescriptor]:
     """Return a factory for in-memory / in-process join descriptors."""
 
-    def _factory(member: str = "dev-1", role: str = "teammate", scope: str = "operator") -> TeamJoinDescriptor:
+    def _factory(member: str = "dev-1", role: str = "teammate") -> TeamJoinDescriptor:
         return TeamJoinDescriptor(
             session_id=SESSION,
             team_name=TEAM,
             member_name=member,
             role=role,
-            scope=scope,
             db_config=MemoryDatabaseConfig(),
             transport_config=MessagerTransportConfig(backend="inprocess", team_name=TEAM),
         )

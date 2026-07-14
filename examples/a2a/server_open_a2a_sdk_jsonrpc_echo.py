@@ -13,10 +13,6 @@ Uses ``create_agent_card_routes`` + ``create_jsonrpc_routes`` (no legacy ``a2a.s
     PYTHONPATH=. uv run --extra all-a2a python examples/a2a/client_jiuwen_to_open_a2a_sdk_server.py
 
 Keep ``LISTEN_HOST`` / ``LISTEN_PORT`` / ``AGENT_CARD_NAME`` aligned with the client module constants.
-
-The echo executor emits a full A2A SSE sequence (``SUBMITTED`` → ``WORKING`` → artifact →
-``COMPLETED``). openjiuwen ``RemoteAgent.invoke`` consumes that stream and returns the final
-aggregated result.
 """
 
 from __future__ import annotations

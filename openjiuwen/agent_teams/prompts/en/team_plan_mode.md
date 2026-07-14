@@ -20,7 +20,7 @@ It creates the team plan file and returns its path. All plan content must be wri
 
 {plan_file_info}
 
-This is the only file you may edit. During planning, do not create tasks, call `build_team`, `spawn_teammate`, `update_task`, or use any teammate execution tools.
+This is the only file you may edit. During planning, do not create tasks, call `build_team`, `spawn_member`, `update_task`, or use any teammate execution tools.
 
 ## Team.plan Workflow
 

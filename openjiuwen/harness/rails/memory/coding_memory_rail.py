@@ -16,6 +16,7 @@ from typing import Optional, Set
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.lite.coding_memory_tool_context import CodingMemoryToolContext
 from openjiuwen.core.memory.lite.config import create_memory_settings
+from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     InvokeInputs,
@@ -24,10 +25,6 @@ from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.prompts.sections.coding_memory import (
     build_coding_memory_section,
-)
-from openjiuwen.harness.prompts.prompt_attachment_manager import (
-    PromptAttachmentManager,
-    PromptAttachmentKind,
 )
 from openjiuwen.core.memory.lite.coding_memory_tools import (
     init_memory_manager_async,
@@ -81,10 +78,10 @@ class CodingMemoryRail(DeepAgentRail):
         
         # 工具管理
         self._owned_tool_names: Set[str] = set()
+        self._owned_tool_ids: Set[str] = set()
         
         # SystemPromptBuilder 引用
         self.system_prompt_builder = None
-        self.attachment_manager = None
         self._tool_ctx: CodingMemoryToolContext | None = None
     
     def init(self, agent) -> None:
@@ -97,12 +94,6 @@ class CodingMemoryRail(DeepAgentRail):
         
         # 获取 system_prompt_builder
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
-        attachment_manager = getattr(agent, "prompt_attachment_manager", None)
-        self.attachment_manager = (
-            attachment_manager
-            if isinstance(attachment_manager, PromptAttachmentManager)
-            else None
-        )
         
         # 保存 agent_id
         agent_id = getattr(getattr(agent, "card", None), "id", None)
@@ -121,13 +112,23 @@ class CodingMemoryRail(DeepAgentRail):
         if hasattr(agent, "ability_manager"):
             for tool_name in list(self._owned_tool_names):
                 try:
-                    agent.ability_manager.remove_ability(tool_name)
+                    agent.ability_manager.remove(tool_name)
                 except Exception as exc:
                     logger.warning(
                         f"[CodingMemoryRail] Failed to remove tool '{tool_name}' "
                         f"from ability_manager: {exc}"
                     )
-
+        
+        for tool_id in list(self._owned_tool_ids):
+            try:
+                Runner.resource_mgr.remove_tool(tool_id)
+            except Exception as exc:
+                logger.warning(
+                    f"[CodingMemoryRail] Failed to remove tool '{tool_id}' "
+                    f"from resource_mgr: {exc}"
+                )
+        
+        self._owned_tool_ids.clear()
         self._owned_tool_names.clear()
         self._manager_initialized = False
         self._tool_ctx = None
@@ -136,7 +137,6 @@ class CodingMemoryRail(DeepAgentRail):
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("memory")
             self.system_prompt_builder = None
-        self.attachment_manager = None
     
     def _register_coding_memory_tools(self, agent) -> None:
         """注册 Coding Memory 工具到 agent.
@@ -184,9 +184,14 @@ class CodingMemoryRail(DeepAgentRail):
                         logger.warning(f"[CodingMemoryRail] Tool {tool.__name__} has no card")
                         continue
                     
-                    # 经 ability_manager 统一注册工具能力（card + 资源），
-                    # 按 stateless 决定 id 是否限定 agent。
-                    result = agent.ability_manager.add_ability(tool_card, tool)
+                    # 使用 Runner.resource_mgr 注册工具
+                    existing_tool = Runner.resource_mgr.get_tool(tool_card.id)
+                    if existing_tool is None:
+                        Runner.resource_mgr.add_tool(tool)
+                        self._owned_tool_ids.add(tool_card.id)
+                    
+                    # 使用 ability_manager 添加工具能力
+                    result = agent.ability_manager.add(tool_card)
                     if result.added:
                         self._owned_tool_names.add(tool_card.name)
                         logger.info(f"[CodingMemoryRail] Registered tool: {tool_card.name}")
@@ -311,9 +316,7 @@ class CodingMemoryRail(DeepAgentRail):
             index = await self._read_memory_index()
             if index:
                 header = "## 当前记忆索引\n\n" if lang == "cn" else "## Current memory index\n\n"
-                await self._upsert_dynamic_memory_attachment(ctx, header + index)
-            else:
-                await self._clear_dynamic_memory_attachment(ctx)
+                section.content[lang] += "\n\n" + header + index
             self.system_prompt_builder.add_section(section)
             return
         
@@ -336,50 +339,16 @@ class CodingMemoryRail(DeepAgentRail):
                 if lang == "cn" else
                 f"\n\n({self._total_memories} total. Use coding_memory_read for others.)"
             )
-            await self._upsert_dynamic_memory_attachment(
-                ctx,
-                header + self._recalled_content + footer,
-            )
+            section.content[lang] += "\n\n" + header + self._recalled_content + footer
         else:
             # 无召回结果 → 降级注入索引
             index = await self._read_memory_index()
             if index:
                 header = "## 当前记忆索引\n\n" if lang == "cn" else "## Current memory index\n\n"
-                await self._upsert_dynamic_memory_attachment(ctx, header + index)
-            else:
-                await self._clear_dynamic_memory_attachment(ctx)
+                section.content[lang] += "\n\n" + header + index
         
         self.system_prompt_builder.add_section(section)
-
-    async def _upsert_dynamic_memory_attachment(
-        self,
-        ctx: AgentCallbackContext,
-        content: str,
-    ) -> None:
-        if self.attachment_manager is None:
-            return
-        writer = self.attachment_manager.bind_context(ctx)
-        try:
-            await writer.add_section(
-                section="coding_memory_context",
-                content=content,
-                kind=PromptAttachmentKind.MEMORY,
-                source="agent_core.coding_memory_rail",
-                priority=85,
-                content_kind="text/markdown",
-            )
-        except ValueError as exc:
-            logger.warning("[CodingMemoryRail] skip memory attachment: %s", exc)
-
-    async def _clear_dynamic_memory_attachment(self, ctx: AgentCallbackContext) -> None:
-        if self.attachment_manager is None:
-            return
-        writer = self.attachment_manager.bind_context(ctx)
-        try:
-            await writer.clear_section("coding_memory_context")
-        except ValueError:
-            return
-
+    
     async def _auto_recall(self, query: str) -> tuple[Optional[str], int]:
         """自动召回相关记忆.
 

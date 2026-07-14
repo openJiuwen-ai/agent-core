@@ -72,7 +72,7 @@ class TestNewReActAgentConfig(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.prompt_template_name, "")
         self.assertEqual(config.prompt_template, [])
         self.assertEqual(config.context_engine_config, ContextEngineConfig(
-            max_context_message_num=None, default_window_round_num=None
+            max_context_message_num=200, default_window_round_num=10
         ))
         self.assertEqual(config.max_iterations, 5)
 

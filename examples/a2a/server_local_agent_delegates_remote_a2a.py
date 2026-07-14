@@ -12,9 +12,6 @@
 
 ``LISTEN_PORT`` / ``AGENT_ID`` must stay aligned with the client module constants
 ``REMOTE_BASE_URL`` and ``REMOTE_AGENT_ID``.
-
-The ``invoke_handler`` returns a completed ``AgentResult`` directly; clients see ``COMPLETED`` with
-artifacts after the A2A layer aggregates the event stream.
 """
 
 from __future__ import annotations

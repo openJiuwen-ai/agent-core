@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord, EvolutionTarget
 from openjiuwen.core.common.logging import logger
@@ -25,12 +25,12 @@ class StoreProjectionHelper:
     def __init__(self, store: Any) -> None:
         self._store = store
 
-    async def render_evolution_markdown(self, name: str, *, subject_kind: Optional[str] = None) -> None:
-        skill_dir = self._store.resolve_skill_dir(name, subject_kind=subject_kind)
+    async def render_evolution_markdown(self, name: str) -> None:
+        skill_dir = self._store.resolve_skill_dir(name)
         if skill_dir is None:
             return
 
-        evo_log = await self._store.load_full_evolution_log(name, subject_kind=subject_kind)
+        evo_log = await self._store.load_full_evolution_log(name)
         active_entries = [r for r in evo_log.entries if not r.change.skip_reason]
         if not active_entries:
             await self.clear_rendered_outputs(skill_dir)

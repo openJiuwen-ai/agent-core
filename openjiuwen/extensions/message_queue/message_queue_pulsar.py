@@ -3,14 +3,13 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Dict, OrderedDict, Tuple
+from typing import Optional, Dict, OrderedDict
 
 import pulsar
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.runner.drunner.dmessage_queue.message_queue_fake import FakeMQ
 from openjiuwen.core.runner.drunner.dmessage_queue.message_serializer import serialize_message, deserialize_message
 from openjiuwen.core.runner.message_queue_base import (
     MessageQueueBase,
@@ -29,8 +28,6 @@ class PulsarSubscription(SubscriptionBase):
         self._handler: Optional[AsyncMessageHandler] = None
         self._task: Optional[asyncio.Task] = None
         self._active = False
-        self._draining = False
-        self._drain_event = asyncio.Event()
 
     def set_message_handler(self, handler: AsyncMessageHandler):
         self._handler = handler
@@ -41,21 +38,9 @@ class PulsarSubscription(SubscriptionBase):
             self._task = asyncio.create_task(self._consume_loop())
             logger.info(f"[PulsarSubscription] activated topic={self._topic}")
 
-    async def deactivate(self, drain_timeout: Optional[float] = None):
+    async def deactivate(self):
         if not self._active:
             return
-
-        if drain_timeout is not None and self._handler is not None:
-            self._draining = True
-            self._drain_event.clear()
-            try:
-                await asyncio.wait_for(self._drain_event.wait(), timeout=drain_timeout)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    f"[PulsarSubscription] drain timed out for topic={self._topic}"
-                )
-            self._draining = False
-
         self._active = False
 
         if self._task:
@@ -92,12 +77,7 @@ class PulsarSubscription(SubscriptionBase):
                 if self._handler:
                     await self._handler(payload)
                 await loop.run_in_executor(self._executor, lambda: self._consumer.acknowledge(msg))
-
-                if self._draining:
-                    self._drain_event.set()
             except pulsar.Timeout:
-                if self._draining:
-                    self._drain_event.set()
                 continue
             except Exception as e:
                 logger.exception(f"[PulsarSubscription] receive error: {e}")
@@ -107,8 +87,6 @@ class MessageQueuePulsar(MessageQueueBase):
     """Pulsar MQ Wrapper"""
     MAX_PRODUCERS = 10000
     DEFAULT_SUBSCRIPTION_NAME = "default"
-    DEFAULT_MAX_RETRIES = 3
-    DEFAULT_RETRY_DELAY = 1.0
 
     def __init__(self, pulsar_config: PulsarConfig):
         self._url = pulsar_config.url
@@ -120,60 +98,6 @@ class MessageQueuePulsar(MessageQueueBase):
         self._is_running = False
         self._lock = asyncio.Lock()
 
-    @classmethod
-    async def start_with_retry(
-        cls,
-        pulsar_config: PulsarConfig,
-        *,
-        max_retries: int = DEFAULT_MAX_RETRIES,
-        retry_delay: float = DEFAULT_RETRY_DELAY,
-        fallback_to_fake: bool = True,
-    ) -> Tuple["MessageQueueBase", bool]:
-        last_error: Optional[Exception] = None
-        for attempt in range(1, max_retries + 1):
-            try:
-                mq = cls(pulsar_config)
-                mq.start()
-                logger.info(
-                    f"[MessageQueuePulsar] initialized (attempt {attempt})"
-                )
-                return mq, False
-            except Exception as e:
-                last_error = e
-                logger.warning(
-                    f"[MessageQueuePulsar] init failed (attempt {attempt}/{max_retries}): {e}"
-                )
-                if attempt < max_retries:
-                    await asyncio.sleep(retry_delay * attempt)
-
-        if not fallback_to_fake:
-            raise last_error
-
-        logger.error(
-            f"[MessageQueuePulsar] All {max_retries} attempts failed, "
-            f"falling back to FakeMQ. Last error: {last_error}"
-        )
-
-        fake_mq = FakeMQ()
-        fake_mq.start()
-
-        fallback_msg = QueueMessage(
-            message_id="__mq_fallback__",
-            payload={
-                "event": "mq_fallback_to_local",
-                "reason": str(last_error),
-                "original_config": str(pulsar_config),
-            },
-            error_code=1,
-            error_msg=f"Pulsar unavailable, fell back to local mode: {last_error}",
-        )
-        try:
-            await fake_mq.produce_message("interrupt", fallback_msg)
-        except Exception as e:
-            logger.warning(f"[MessageQueuePulsar] failed to publish fallback interrupt: {e}")
-
-        return fake_mq, True
-
     def start(self):
         if self._is_running:
             return
@@ -182,14 +106,13 @@ class MessageQueuePulsar(MessageQueueBase):
         self._is_running = True
         logger.info(f"[MessageQueuePulsar] started with url={self._url}")
 
-    async def stop(self, drain_timeout: float = 0.0):
+    async def stop(self):
         if not self._is_running:
             return
         self._is_running = False
         logger.info(f"[MessageQueuePulsar] closing {len(self._subs)} subscriptions")
-        for topic, sub in list(self._subs.items()):
-            await sub.deactivate(drain_timeout=drain_timeout or None)
-        self._subs.clear()
+        for topic in list(self._subs.keys()):
+            await self.unsubscribe(topic)
 
         logger.info(f"[MessageQueuePulsar] closing {len(self._producers)} producers")
         for pd in self._producers.values():
@@ -220,9 +143,6 @@ class MessageQueuePulsar(MessageQueueBase):
         if sub:
             await sub.deactivate()
             logger.info(f"[MessageQueuePulsar] unsubscribed {topic}")
-
-    def _get_subscribed_topics(self):
-        return list(self._subs.keys())
 
     def _validate_running(self):
         if not self._is_running:

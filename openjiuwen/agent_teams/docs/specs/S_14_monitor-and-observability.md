@@ -5,8 +5,8 @@
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/agent_teams/monitor/`、`openjiuwen/agent_teams/observability/` |
-| 最近一次修订日期 | 2026-06-09 |
+| 关联模块 | `openjiuwen/agent_teams/monitor/`、`openjiuwen/agent_teams/observability/`（预留） |
+| 最近一次修订日期 | 2026-05-17 |
 | 关联 feature | F_09_team-stream-logging.md |
 
 ## 范围 / 边界
@@ -16,15 +16,7 @@
 1. **`monitor/` 子模块**——团队运行态的**只读观察面**：
    - `TeamMonitor` 暴露给 SDK / CLI / 上层 UI 的查询 API（团队/成员/任务/邮箱）+ 实时事件流（`MonitorEvent` 异步迭代器），以及 `Runner.get_agent_team_monitor` 这个公共 facade。
    - `TeamStreamLogger`——`Runner.run_agent_team_streaming` 流式输出的**聚合诊断日志**处理对象：调用方用目标文件路径构造（`TeamStreamLogger(file_path=...)`）后经 `stream_logger` 入参注入，runner 把每个 chunk 喂给它，它**按 `(成员, 角色)` source 独立聚合** token 流再写入该文件。它是 `monitor/` 里唯一会主动写文件的设施，**不走 `team_logger`**（自管 open/write/flush/close），但仍是只读观察者——不碰 team 运行时状态。
-2. **`observability/` 子模块**——OpenTelemetry trace 数据采集点。已上线，提供：
-   - `setup.py`：`init_observability/shutdown_observability` 管理 OTel 生命周期
-   - `config.py`：`ObservabilityConfig` 配置类
-   - `span_context.py`：ContextVar 管理 span 上下文
-   - `callback_handler.py` / `rail.py`：LLM/Tool/Agent span 生命周期
-   - `monitor_handler.py`：Team/Task/Member/Message span 生命周期
-   - `semconv.py` / `redaction.py`：属性常量 + 脱敏
-
-  Span 树结构、生命周期、ActiveSpanTracker 详细设计见 [F_37_observability-otel-trace.md](../features/F_37_observability-otel-trace.md)。
+2. **`observability/` 子模块**——OpenTelemetry / 结构化日志 / metrics 的可观测性接入点。**当前仅 `__init__.py` 占位、源文件为空**（git 历史里有 `f151dad0` / `dd634e54` / `69a9354d` 三次 OTel 接入提交，目前实现已被回退/重构中），本规约把它当作"已规划但未上线"的扩展点处理。
 
 **不管**的事情：
 
@@ -243,9 +235,15 @@ flush / close**，**不走 `team_logger`**。
 - `feed` / `flush` 内部出错时，best-effort 写一行 `[WARN] ... error: ...` 标记到同一文件；
   写不进去就静默吞。绝不让异常逃逸到 runner。
 
-### `observability/` 边界
+### `observability/` 占位
 
-`observability/` 数据通路与 monitor 队列是**两条独立通路**（不变量 11）。Redaction 规则两路共享。
+当前 `openjiuwen/agent_teams/observability/` **不导出任何符号**（目录里仅 `__pycache__/`，没有提交的 `.py`）。git 历史保留了 OTel callback handler / span context / semconv / redaction / monitor handler / rail 的模块骨架（commits `f151dad0` / `69a9354d` / `dd634e54`），未来扩展点：
+
+- **OTel span 包裹** team / member / task / message lifecycle，与 `MonitorEventType` 同一份白名单（避免两条出口语义漂移）。
+- **Redaction**：sensitive payload 字段在 attribute 层与 `MonitorEvent` 都需要做敏感值脱敏，**两边共享一份规则**——不要让 monitor 输出明文、observability 输出脱敏，反之亦然。
+- **Rail / callback handler** 接入 DeepAgent 的 prompt / tool 链路，把 LLM 调用作为 child span 挂到 team-level root span 下。
+
+回填实现时遵循本规约不变量 11：observability 数据通路与 monitor 队列**不互相替代**。
 
 ## 数据结构
 

@@ -20,10 +20,6 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import yaml
-try:
-    import tomllib
-except ImportError:  # pragma: no cover
-    tomllib = None
 
 logger = logging.getLogger(__name__)
 
@@ -375,74 +371,6 @@ class CIGateRunner:
         # Unknown target, return original command (will likely fail but preserves behavior)
         return cmd
 
-    def _available_optional_extras(self) -> set[str]:
-        """Read optional dependency extras from workspace pyproject."""
-        if tomllib is None:
-            return set()
-        pyproject = Path(self._workspace) / "pyproject.toml"
-        if not pyproject.is_file():
-            return set()
-        try:
-            data = tomllib.loads(
-                pyproject.read_text(encoding="utf-8")
-            )
-        except Exception as exc:
-            logger.debug(
-                "[CIGateRunner] failed to read pyproject extras: %s",
-                exc,
-            )
-            return set()
-        optional = (
-            data.get("project", {})
-            .get("optional-dependencies", {})
-        )
-        if isinstance(optional, dict):
-            return {str(name) for name in optional}
-        return set()
-
-    def _normalize_install_command(self, command: str) -> str:
-        """Make configured install commands compatible with this repo."""
-        stripped = command.strip()
-        if not stripped:
-            return ""
-        available_extras = self._available_optional_extras()
-        if not available_extras:
-            return stripped
-        try:
-            parts = shlex.split(stripped)
-        except ValueError:
-            return stripped
-
-        normalized: list[str] = []
-        removed: list[str] = []
-        idx = 0
-        while idx < len(parts):
-            part = parts[idx]
-            if part in {"--extra", "-E"} and idx + 1 < len(parts):
-                extra = parts[idx + 1]
-                if extra not in available_extras:
-                    removed.append(extra)
-                    idx += 2
-                    continue
-                normalized.extend([part, extra])
-                idx += 2
-                continue
-            if part.startswith("--extra="):
-                extra = part.split("=", 1)[1]
-                if extra not in available_extras:
-                    removed.append(extra)
-                    idx += 1
-                    continue
-            normalized.append(part)
-            idx += 1
-
-        if removed:
-            logger.warning(
-                "[CIGateRunner] removed unsupported install extras: %s",
-                ", ".join(removed),
-            )
-        return " ".join(shlex.quote(part) for part in normalized)
-
     def _get_changed_files(self, commits: str) -> list[str]:
         """Get list of changed Python files for CI checks.
 
@@ -543,23 +471,6 @@ class CIGateRunner:
         output = decode_stdout(stdout)
         return proc.returncode, output
 
-    @staticmethod
-    def _is_missing_optional_tool(
-        output: str,
-        *tool_names: str,
-    ) -> bool:
-        """Return True when output means an optional lint tool is absent."""
-        lowered = output.lower()
-        for tool_name in tool_names:
-            tool = tool_name.lower()
-            if f"no module named {tool}" in lowered:
-                return True
-            if f"{tool}: command not found" in lowered:
-                return True
-            if f"{tool}: not found" in lowered:
-                return True
-        return False
-
     def _make_repo_relative(self, filepath: str) -> str:
         """Convert tool-reported file path to repo-relative POSIX.
 
@@ -619,7 +530,7 @@ class CIGateRunner:
         for v in in_range:
             code = v.get("code", "")
             msg = v.get("message", "")
-            filepath = str(v.get("filename", "")).replace("\\", "/")
+            filepath = v.get("filename", "")
             line_num = v.get("location", {}).get("row", "")
             col = v.get("location", {}).get("column", "")
             lines.append(
@@ -660,7 +571,7 @@ class CIGateRunner:
         for v in in_range:
             symbol = v.get("symbol", "")
             msg = v.get("message", "")
-            filepath = str(v.get("path", "")).replace("\\", "/")
+            filepath = v.get("path", "")
             line_num = v.get("line", "")
             msg_id = v.get("message-id", "")
             lines.append(
@@ -685,18 +596,14 @@ class CIGateRunner:
             m = pattern.match(line)
             if not m:
                 continue
-            raw_path, line_num_str = m.group(1), m.group(2)
+            filepath, line_num_str = m.group(1), m.group(2)
             line_num = int(line_num_str)
-            filepath = raw_path
             if repo_relative_fn:
                 filepath = repo_relative_fn(filepath)
             allowed = line_ranges.get(filepath)
             if allowed is None or line_num not in allowed:
                 continue
-            normalized_path = raw_path.replace("\\", "/")
-            in_range.append(
-                line.replace(raw_path, normalized_path, 1)
-            )
+            in_range.append(line)
 
         if not in_range:
             return False, ""
@@ -722,18 +629,14 @@ class CIGateRunner:
             if not m:
                 # Skip summary lines like "Found N errors"
                 continue
-            raw_path, line_num_str = m.group(1), m.group(2)
+            filepath, line_num_str = m.group(1), m.group(2)
             line_num = int(line_num_str)
-            filepath = raw_path
             if repo_relative_fn:
                 filepath = repo_relative_fn(filepath)
             allowed = line_ranges.get(filepath)
             if allowed is None or line_num not in allowed:
                 continue
-            normalized_path = raw_path.replace("\\", "/")
-            in_range.append(
-                line.replace(raw_path, normalized_path, 1)
-            )
+            in_range.append(line)
 
         if not in_range:
             return False, ""
@@ -764,11 +667,9 @@ class CIGateRunner:
                 continue
             overlap = allowed.intersection(fmt_lines)
             if overlap:
-                norm_filepath = filepath.replace("\\", "/")
                 # Some format changes hit changed lines — report it
                 in_range_lines.append(
-                    f"{norm_filepath}: "
-                    f"formatting differs on changed lines "
+                    f"{filepath}: formatting differs on changed lines "
                     f"{sorted(overlap)}"
                 )
 
@@ -851,15 +752,12 @@ class CIGateRunner:
         # (it's installed as a CLI tool, available via PATH)
         cs_cmd = f"codespell {quoted_files}"
         code, cs_output = await self._run_tool_command(cs_cmd)
-        if self._is_missing_optional_tool(cs_output, "codespell"):
-            logger.info("[CIGateRunner] codespell not installed; skipped")
-        else:
-            has_cs, cs_text = self._filter_codespell_by_line_ranges(
-                cs_output, line_ranges, repo_rel_fn,
-            )
-            if has_cs:
-                any_failed = True
-                all_violations.append(f"[codespell] {cs_text}")
+        has_cs, cs_text = self._filter_codespell_by_line_ranges(
+            cs_output, line_ranges, repo_rel_fn,
+        )
+        if has_cs:
+            any_failed = True
+            all_violations.append(f"[codespell] {cs_text}")
 
         # Step 4: pylint (violations on changed lines)
         pylint_cmd = (
@@ -867,15 +765,12 @@ class CIGateRunner:
             f"--output-format=json {quoted_files}"
         )
         code, pylint_output = await self._run_tool_command(pylint_cmd)
-        if self._is_missing_optional_tool(pylint_output, "pylint"):
-            logger.info("[CIGateRunner] pylint not installed; skipped")
-        else:
-            has_pylint, pylint_text = self._filter_pylint_json_by_line_ranges(
-                pylint_output, line_ranges, repo_rel_fn,
-            )
-            if has_pylint:
-                any_failed = True
-                all_violations.append(f"[pylint] {pylint_text}")
+        has_pylint, pylint_text = self._filter_pylint_json_by_line_ranges(
+            pylint_output, line_ranges, repo_rel_fn,
+        )
+        if has_pylint:
+            any_failed = True
+            all_violations.append(f"[pylint] {pylint_text}")
 
         combined = "\n\n".join(all_violations)
         return {
@@ -941,39 +836,21 @@ class CIGateRunner:
             self._prepared = True
             return
 
-        install_command = self._normalize_install_command(
-            self._install_command
-        )
-        if not install_command:
-            self._prepared = True
-            return
-
         # Pre-install uv if command requires it but uv is not available
-        if re.search(r"(^|\s)uv(\s|$)", install_command):
-            uv_ready, uv_error = await self._ensure_uv_available()
-            if not uv_ready:
-                logger.warning(
-                    "[CIGateRunner] skip uv install command; "
-                    "uv unavailable: %s",
-                    uv_error,
-                )
-                self._prepared = True
-                return
+        if "uv" in self._install_command:
+            await self._ensure_uv_available()
 
-        proc = await self._run_shell_command(install_command)
+        proc = await self._run_shell_command(self._install_command)
         stdout, _ = await proc.communicate()
         output = decode_stdout(stdout)
         if proc.returncode != 0:
-            logger.warning(
-                "[CIGateRunner] install command failed; "
-                "continue with existing environment: %s",
-                output.strip()[-1000:],
+            raise RuntimeError(
+                "CI gate install command failed: "
+                f"{output.strip()[-1000:]}"
             )
-            self._prepared = True
-            return
         self._prepared = True
 
-    async def _ensure_uv_available(self) -> tuple[bool, str]:
+    async def _ensure_uv_available(self) -> None:
         """Ensure uv is installed before running uv-based commands."""
         env = self._command_env()
 
@@ -988,7 +865,7 @@ class CIGateRunner:
             )
             await proc.communicate()
             if proc.returncode == 0:
-                return True, ""  # uv is available
+                return  # uv is available
         except FileNotFoundError:
             pass  # uv not found, need to install
 
@@ -1006,13 +883,11 @@ class CIGateRunner:
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
-            error = (
-                stderr.decode("utf-8", errors="replace").strip()
-                or stdout.decode("utf-8", errors="replace").strip()
+            error = stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"Failed to install uv: {error[:500]}"
             )
-            return False, f"Failed to install uv: {error[:500]}"
         logger.info("[CIGateRunner] uv installed successfully")
-        return True, ""
 
     @staticmethod
     def _sanitize_failure_output(output: str) -> str:

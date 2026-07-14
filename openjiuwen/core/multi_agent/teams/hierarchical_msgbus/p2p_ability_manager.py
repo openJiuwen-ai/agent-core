@@ -55,7 +55,6 @@ class P2PAbilityManager(AbilityManager):
         tool_call: Union[ToolCall, List[ToolCall]],
         session: Session,
         tag=None,
-        parallel_tool_calls: bool = True
     ) -> List[Tuple[Any, ToolMessage]]:
         """Execute tool calls, dispatching AgentCard calls via P2P and others via super().
 
@@ -68,9 +67,6 @@ class P2PAbilityManager(AbilityManager):
         Returns:
             List of ``(result, ToolMessage)`` tuples in the original call order.
         """
-        if not parallel_tool_calls:
-            raise ValueError("P2PAbilityManager's execute() must have parallel_tool_calls enabled")
-
         tool_calls = self._normalize_tool_calls(tool_call)
         if not tool_calls:
             return []
@@ -85,13 +81,7 @@ class P2PAbilityManager(AbilityManager):
 
         # Fast path: no agent calls -- delegate entirely to base class.
         if not agent_indices:
-            return await super().execute(
-                ctx, 
-                tool_calls, 
-                session,
-                parallel_tool_calls=parallel_tool_calls, 
-                tag=tag,
-            )
+            return await super().execute(ctx, tool_calls, session, tag)
 
         semaphore = self._get_semaphore()
 
@@ -101,13 +91,7 @@ class P2PAbilityManager(AbilityManager):
 
         agent_coros = [_dispatch_one(tool_calls[i]) for i in agent_indices]
         other_coro = (
-            super().execute(
-                ctx, 
-                [tool_calls[i] for i in other_indices], 
-                session, 
-                parallel_tool_calls=parallel_tool_calls,
-                tag=tag
-            )
+            super().execute(ctx, [tool_calls[i] for i in other_indices], session, tag)
             if other_indices
             else None
         )

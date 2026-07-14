@@ -8,7 +8,6 @@ import copy
 import json
 import uuid
 from contextlib import suppress
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -31,18 +30,6 @@ _LANG_TO_EXT = {
     "shell": "sh",
     "bash": "sh",
 }
-
-
-@dataclass(frozen=True)
-class MergeRecordsRequest:
-    """Parameters for merging multiple evolution records into one primary record."""
-
-    name: str
-    primary_id: str
-    remove_ids: list[str]
-    new_content: str
-    new_score: Optional[float] = None
-    subject_kind: Optional[str] = None
 
 
 class StoreRecordsHelper:
@@ -71,8 +58,8 @@ class StoreRecordsHelper:
             f"Purpose: {record.change.script_purpose or ''}"
         )
 
-    async def load_full_evolution_log(self, name: str, *, subject_kind: Optional[str] = None) -> EvolutionLog:
-        skill_dir = self._store.resolve_skill_dir(name, subject_kind=subject_kind)
+    async def load_full_evolution_log(self, name: str) -> EvolutionLog:
+        skill_dir = self._store.resolve_skill_dir(name)
         if skill_dir is None:
             return EvolutionLog.empty(skill_id=name)
         evo_path = skill_dir / _EVOLUTION_FILENAME
@@ -94,9 +81,8 @@ class StoreRecordsHelper:
         evo_log: EvolutionLog,
         *,
         skill_dir: Optional[Path] = None,
-        subject_kind: Optional[str] = None,
     ) -> None:
-        target_dir = skill_dir or self._store.resolve_skill_dir(name, create=True, subject_kind=subject_kind)
+        target_dir = skill_dir or self._store.resolve_skill_dir(name, create=True)
         if target_dir is None:
             return
 
@@ -141,10 +127,9 @@ class StoreRecordsHelper:
         record: EvolutionRecord,
         *,
         skill_dir: Optional[Path] = None,
-        subject_kind: Optional[str] = None,
     ) -> Optional[EvolutionLog]:
         """Append or merge one record and roll back all related files on failure."""
-        target_dir = skill_dir or self._store.resolve_skill_dir(name, create=True, subject_kind=subject_kind)
+        target_dir = skill_dir or self._store.resolve_skill_dir(name, create=True)
         if target_dir is None:
             return None
 
@@ -159,12 +144,12 @@ class StoreRecordsHelper:
             if prepared_record.change.target == EvolutionTarget.SCRIPT:
                 await self.persist_script(target_dir, prepared_record)
 
-            evo_log = await self.load_full_evolution_log(name, subject_kind=subject_kind)
+            evo_log = await self.load_full_evolution_log(name)
             self._append_or_merge_record(evo_log, prepared_record)
             evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
 
             await self.save_evolution_log(name, evo_log, skill_dir=target_dir)
-            await self._store.render_evolution_markdown(name, subject_kind=subject_kind)
+            await self._store.render_evolution_markdown(name)
         except Exception:
             await self._restore_projection_files(target_dir, projection_backups)
             await self._restore_text_file(evo_path, old_log_content if had_log else None)
@@ -200,31 +185,31 @@ class StoreRecordsHelper:
         evo_log.entries.append(record)
 
     @staticmethod
-    def _snapshot_projection_files(skill_dir: Path) -> Dict[Path, bytes]:
-        backups: Dict[Path, bytes] = {}
+    def _snapshot_projection_files(skill_dir: Path) -> Dict[Path, str]:
+        backups: Dict[Path, str] = {}
         evo_dir = skill_dir / "evolution"
         if evo_dir.exists():
             for path in evo_dir.rglob("*"):
                 if path.is_file():
-                    backups[path] = path.read_bytes()
+                    backups[path] = path.read_text(encoding="utf-8")
 
         skill_md = skill_dir / "SKILL.md"
         if skill_md.is_file():
-            backups[skill_md] = skill_md.read_bytes()
+            backups[skill_md] = skill_md.read_text(encoding="utf-8")
         return backups
 
     @classmethod
-    async def _restore_projection_files(cls, skill_dir: Path, backups: Dict[Path, bytes]) -> None:
+    async def _restore_projection_files(cls, skill_dir: Path, backups: Dict[Path, str]) -> None:
         evo_dir = skill_dir / "evolution"
         cls._remove_unbacked_files(evo_dir, backups)
 
         for path, content in backups.items():
-            cls._restore_file_bytes(path, content)
+            await cls._restore_text_file(path, content)
 
         cls._remove_empty_dirs(evo_dir)
 
     @staticmethod
-    def _remove_unbacked_files(evo_dir: Path, backups: Dict[Path, bytes]) -> None:
+    def _remove_unbacked_files(evo_dir: Path, backups: Dict[Path, str]) -> None:
         if not evo_dir.exists():
             return
         for path in evo_dir.rglob("*"):
@@ -251,22 +236,15 @@ class StoreRecordsHelper:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
-    @staticmethod
-    def _restore_file_bytes(path: Path, content: bytes) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
-
     async def update_record_scores(
         self,
         name: str,
         updates: Dict[str, Dict[str, Any]],
-        *,
-        subject_kind: Optional[str] = None,
     ) -> int:
         if not updates:
             return 0
 
-        evo_log = await self.load_full_evolution_log(name, subject_kind=subject_kind)
+        evo_log = await self.load_full_evolution_log(name)
         updated_count = 0
 
         for record in evo_log.entries:
@@ -284,7 +262,7 @@ class StoreRecordsHelper:
 
         if updated_count > 0:
             evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
-            await self.save_evolution_log(name, evo_log, subject_kind=subject_kind)
+            await self.save_evolution_log(name, evo_log)
             logger.info(
                 "[EvolutionStore] updated %d record score(s) for skill=%s",
                 updated_count,
@@ -297,40 +275,18 @@ class StoreRecordsHelper:
         self,
         name: str,
         min_score: Optional[float] = None,
-        *,
-        subject_kind: Optional[str] = None,
     ) -> list[EvolutionRecord]:
-        evo_log = await self.load_full_evolution_log(name, subject_kind=subject_kind)
+        evo_log = await self.load_full_evolution_log(name)
         records = evo_log.entries
         if min_score is not None:
             records = [r for r in records if r.score >= min_score]
         return sorted(records, key=lambda r: r.score, reverse=True)
 
-    async def load_records_by_ids(
-        self,
-        name: str,
-        record_ids: list[str],
-        *,
-        subject_kind: Optional[str] = None,
-    ) -> list[EvolutionRecord]:
-        """Load selected records by id while preserving caller order."""
-        if not record_ids:
-            return []
-        evo_log = await self.load_full_evolution_log(name, subject_kind=subject_kind)
-        records_by_id = {record.id: record for record in evo_log.entries}
-        return [records_by_id[record_id] for record_id in record_ids if record_id in records_by_id]
-
-    async def delete_records(
-        self,
-        name: str,
-        record_ids: list[str],
-        *,
-        subject_kind: Optional[str] = None,
-    ) -> int:
+    async def delete_records(self, name: str, record_ids: list[str]) -> int:
         if not record_ids:
             return 0
 
-        evo_log = await self.load_full_evolution_log(name, subject_kind=subject_kind)
+        evo_log = await self.load_full_evolution_log(name)
         ids_set = set(record_ids)
         original_count = len(evo_log.entries)
         evo_log.entries = [r for r in evo_log.entries if r.id not in ids_set]
@@ -338,8 +294,8 @@ class StoreRecordsHelper:
 
         if deleted_count > 0:
             evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
-            await self.save_evolution_log(name, evo_log, subject_kind=subject_kind)
-            await self._store.render_evolution_markdown(name, subject_kind=subject_kind)
+            await self.save_evolution_log(name, evo_log)
+            await self._store.render_evolution_markdown(name)
             logger.info(
                 "[EvolutionStore] deleted %d record(s) for skill=%s",
                 deleted_count,
@@ -348,17 +304,11 @@ class StoreRecordsHelper:
 
         return deleted_count
 
-    async def mark_records_applied(
-        self,
-        name: str,
-        record_ids: list[str],
-        *,
-        subject_kind: Optional[str] = None,
-    ) -> int:
+    async def mark_records_applied(self, name: str, record_ids: list[str]) -> int:
         if not record_ids:
             return 0
 
-        evo_log = await self.load_full_evolution_log(name, subject_kind=subject_kind)
+        evo_log = await self.load_full_evolution_log(name)
         ids_set = set(record_ids)
         updated_count = 0
 
@@ -369,8 +319,8 @@ class StoreRecordsHelper:
 
         if updated_count > 0:
             evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
-            await self.save_evolution_log(name, evo_log, subject_kind=subject_kind)
-            await self._store.render_evolution_markdown(name, subject_kind=subject_kind)
+            await self.save_evolution_log(name, evo_log)
+            await self._store.render_evolution_markdown(name)
             logger.info(
                 "[EvolutionStore] marked %d record(s) as applied for skill=%s",
                 updated_count,
@@ -379,30 +329,37 @@ class StoreRecordsHelper:
 
         return updated_count
 
-    async def merge_records(self, request: MergeRecordsRequest) -> Optional[EvolutionRecord]:
-        evo_log = await self.load_full_evolution_log(request.name, subject_kind=request.subject_kind)
+    async def merge_records(
+        self,
+        name: str,
+        primary_id: str,
+        remove_ids: list[str],
+        new_content: str,
+        new_score: Optional[float] = None,
+    ) -> Optional[EvolutionRecord]:
+        evo_log = await self.load_full_evolution_log(name)
         primary_record = None
         records_to_remove = []
         all_scores = []
 
         for record in evo_log.entries:
-            if record.id == request.primary_id:
+            if record.id == primary_id:
                 primary_record = record
-            elif record.id in request.remove_ids:
+            elif record.id in remove_ids:
                 records_to_remove.append(record)
                 all_scores.append(record.score)
 
         if primary_record is None:
             logger.warning(
                 "[EvolutionStore] merge_records: primary record %s not found",
-                request.primary_id,
+                primary_id,
             )
             return None
 
         all_scores.append(primary_record.score)
-        final_score = request.new_score if request.new_score is not None else max(all_scores)
+        final_score = new_score if new_score is not None else max(all_scores)
 
-        primary_record.change.content = request.new_content
+        primary_record.change.content = new_content
         primary_record.summary = None
         primary_record.score = final_score
         primary_record.timestamp = datetime.now(tz=timezone.utc).isoformat()
@@ -411,14 +368,14 @@ class StoreRecordsHelper:
             evo_log.entries.remove(record)
 
         evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
-        await self.save_evolution_log(request.name, evo_log, subject_kind=request.subject_kind)
-        await self._store.render_evolution_markdown(request.name, subject_kind=request.subject_kind)
+        await self.save_evolution_log(name, evo_log)
+        await self._store.render_evolution_markdown(name)
 
         logger.info(
             "[EvolutionStore] merged %d record(s) into %s for skill=%s",
             len(records_to_remove),
-            request.primary_id,
-            request.name,
+            primary_id,
+            name,
         )
         return primary_record
 
@@ -428,9 +385,8 @@ class StoreRecordsHelper:
         record_id: str,
         new_content: str,
         new_score: Optional[float] = None,
-        subject_kind: Optional[str] = None,
     ) -> Optional[EvolutionRecord]:
-        evo_log = await self.load_full_evolution_log(name, subject_kind=subject_kind)
+        evo_log = await self.load_full_evolution_log(name)
         target_record = None
 
         for record in evo_log.entries:
@@ -452,8 +408,8 @@ class StoreRecordsHelper:
         target_record.timestamp = datetime.now(tz=timezone.utc).isoformat()
 
         evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
-        await self.save_evolution_log(name, evo_log, subject_kind=subject_kind)
-        await self._store.render_evolution_markdown(name, subject_kind=subject_kind)
+        await self.save_evolution_log(name, evo_log)
+        await self._store.render_evolution_markdown(name)
 
         logger.info(
             "[EvolutionStore] updated record %s for skill=%s",

@@ -127,13 +127,6 @@ class CoordinationKernel:
             await infra.team_backend.db.initialize()
         if session is not None:
             await sess_mgr.bind_session(session)
-            # Start the member runtime (native supervisor + child session) for
-            # this run cycle, then attach the StreamController's output forwarder
-            # + status mappers. Order matters: the controller consumes the
-            # runtime's outputs, so the runtime must be started first.
-            if resources.harness is not None:
-                await resources.harness.start(team_session=session)
-                await host.stream_controller.start()
         else:
             sess_mgr.release_session()
 
@@ -326,15 +319,6 @@ class CoordinationKernel:
         if self._event_bus is not None:
             await self._event_bus.stop()
         self.close_stream()
-        # Permanent teardown (not round-end): stop the native and drop its
-        # process-global sys_operation so a stopped/discarded member does not
-        # leak it. The round-end ``finalize_round`` path only calls
-        # ``harness.stop`` (kept for reuse on the same session); this stop is
-        # where the runtime goes away. Done before ``release_session`` because
-        # ``dispose`` tears the native down over its bound session, and it does
-        # not always follow a ``finalize_round`` (e.g. external stop_team).
-        if host.resources.harness is not None:
-            await host.resources.harness.dispose()
         host.session_manager.release_session()
         # See pause(): team_member status update for the agent's own
         # ``team_member`` handle is owned by
@@ -404,15 +388,14 @@ class CoordinationKernel:
             )
         )
 
-    async def enqueue_initial_mailbox_poll(self) -> None:
+    async def enqueue_mailbox_after_first_iteration(self) -> None:
         host = self._host
         if host.role == TeamRole.LEADER:
             return
-        if self._event_bus is None:
+        gate = host.resources.first_iter_gate
+        if gate is None or self._event_bus is None:
             return
-        # The member runtime is already started by ``start`` before coordination
-        # runs, so the first mailbox poll is enqueued directly — the old
-        # FirstIterationGate wait is gone with the single-supervisor model.
+        await gate.wait()
         await self._event_bus.enqueue(
             InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX),
         )
@@ -448,10 +431,4 @@ class CoordinationKernel:
         memory_manager = host.resources.memory_manager
         if memory_manager:
             await memory_manager.extract_after_round()
-        # Tear down this cycle's runtime: stop the controller's forwarder/status
-        # mappers, then the member runtime (native supervisor). start() rebuilds
-        # a fresh native next cycle.
-        await host.stream_controller.stop()
-        if host.resources.harness is not None:
-            await host.resources.harness.stop()
         host.stream_controller.stream_queue = None

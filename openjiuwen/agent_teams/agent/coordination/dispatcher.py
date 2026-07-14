@@ -38,7 +38,6 @@ from openjiuwen.agent_teams.agent.coordination.handlers import (
     StaleTaskHandler,
     TaskBoardHandler,
     TeamCompletionHandler,
-    WorkflowHandler,
 )
 from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.schema.events import TeamEvent
@@ -150,10 +149,9 @@ class EventDispatcher:
     dispatcher so coordination events never enter the global
     ``Runner.callback_framework``.
 
-    The seven scenario handlers are exposed as public attributes
+    The six scenario handlers are exposed as public attributes
     (``lifecycle`` / ``member`` / ``message`` / ``task_board`` /
-    ``stale_task`` / ``team_completion`` / ``workflow``) for direct
-    access in tests.
+    ``stale_task`` / ``team_completion``) for direct access in tests.
     """
 
     def __init__(
@@ -181,10 +179,6 @@ class EventDispatcher:
         self.task_board = TaskBoardHandler(host, blueprint, infra, poll_ctrl)
         self.stale_task = StaleTaskHandler(host, blueprint, infra, poll_ctrl, stale_claim_throttle)
         self.team_completion = TeamCompletionHandler(host, blueprint, infra, poll_ctrl)
-        # Swarmflow spectator narration. Listens only for WORKFLOW_PROGRESS
-        # (a dedicated event_key, no fan-out overlap), so its registration
-        # position is not load-bearing.
-        self.workflow = WorkflowHandler(host, blueprint, infra, poll_ctrl)
 
         self._framework = AsyncCallbackFramework(
             enable_metrics=False,
@@ -200,40 +194,14 @@ class EventDispatcher:
         # fans out after StaleTaskHandler's: a stale sweep may deliver
         # input and make the leader non-idle, and the completion check
         # must see that before deciding the team is done.
-        handlers = [
+        for handler in (
             self.lifecycle,
             self.member,
             self.message,
             self.task_board,
             self.stale_task,
             self.team_completion,
-            self.workflow,
-        ]
-        # The reliability handler (leader-side remediation + team-level
-        # ping-pong) mounts only when the team opts into the reliability
-        # framework. It is appended after team_completion but does not listen
-        # on POLL_TASK, so the completion ordering above is unaffected; on
-        # MESSAGE / BROADCAST it fans out after MessageHandler.
-        self.reliability = None
-        reliability_cfg = getattr(blueprint.spec, "reliability", None)
-        if reliability_cfg is not None and reliability_cfg.enabled:
-            from openjiuwen.agent_teams.reliability.factory import (
-                build_pingpong_detector,
-                build_remediation_policy,
-            )
-            from openjiuwen.agent_teams.reliability.handler import ReliabilityHandler
-
-            self.reliability = ReliabilityHandler(
-                host,
-                blueprint,
-                infra,
-                poll_ctrl,
-                policy=build_remediation_policy(reliability_cfg),
-                pingpong=build_pingpong_detector(reliability_cfg),
-            )
-            handlers.append(self.reliability)
-
-        for handler in handlers:
+        ):
             for event_key, callback in handler.get_callbacks().items():
                 self._framework.register_sync(event_key, callback)
 
@@ -246,13 +214,11 @@ class EventDispatcher:
         role = self._blueprint.role
 
         if isinstance(event, InnerEventMessage):
-            # Human agents must never autonomously poll, but USER_INPUT is
-            # legitimate: it is the avatar's controller driving its LLM,
-            # enqueued by ``HumanAgentInbox`` (``$<name>`` drive →
-            # ``TeamAgent.interact`` → USER_INPUT) so the avatar consumes
-            # it inside its own loop after the harness has started — never
-            # a reach-in to a not-yet-started harness. Only the autonomous
-            # POLL_* branches stay muted for a human agent.
+            # Human agents must never autonomously poll. USER_INPUT
+            # through this path comes from coordination bootstrap (the
+            # leader's god-view input); a human agent never reaches
+            # that path because the leader is the one whose invoke()
+            # carries it. Defensively short-circuit polling branches.
             if role == TeamRole.HUMAN_AGENT and event.event_type in (
                 InnerEventType.POLL_TASK,
                 InnerEventType.POLL_MAILBOX,
@@ -268,13 +234,11 @@ class EventDispatcher:
             return
 
         # Human agents are user avatars. Their LLM is driven by two
-        # input sources: (1) their controller's instructions via
-        # HumanAgentInbox, enqueued as a USER_INPUT inner event (handled
-        # in the InnerEventMessage branch above), and (2) team events
-        # that concern the avatar, delivered into the harness and
-        # rendered as "notification for the controller" (see F_14). The
-        # avatar prompt strictly forbids autonomous action on the
-        # latter. The transport-event whitelist below has two groups:
+        # input sources: (1) their controller's direct instructions via
+        # HumanAgentInbox, and (2) team events that concern the avatar,
+        # delivered into the harness and rendered as "notification for
+        # the controller" (see F_14). The avatar prompt strictly forbids
+        # autonomous action on the latter. The whitelist has two groups:
         #
         # Lifecycle (drive the avatar's own teardown / standby, no
         # autonomous round involved): CLEANED tears the agent down with

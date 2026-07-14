@@ -76,7 +76,7 @@ class TestTeamWorkflowSection:
         assert section.priority == 13
         content = section.render("cn")
         assert "# 工作流程" in content
-        assert "spawn_teammate" in content
+        assert "spawn_member" in content
 
     @pytest.mark.level0
     def test_leader_workflow_predefined(self):
@@ -98,7 +98,7 @@ class TestTeamWorkflowSection:
         assert section is not None
         content = section.render("cn")
         assert "混合团队模式" in content
-        assert "spawn_teammate" in content
+        assert "spawn_member" in content
 
     @pytest.mark.level0
     def test_teammate_returns_none(self):

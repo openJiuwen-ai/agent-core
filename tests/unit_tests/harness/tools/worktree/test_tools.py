@@ -11,8 +11,6 @@ import os
 import subprocess
 
 import pytest
-from jsonschema import ValidationError as JsonSchemaValidationError
-from jsonschema import validate as validate_json_schema
 
 from tests.test_logger import logger
 from openjiuwen.core.sys_operation.cwd import (
@@ -32,7 +30,6 @@ from openjiuwen.harness.tools.worktree import (
     set_current_session,
     set_default_worktree_name,
 )
-from openjiuwen.harness.prompts.tools.enter_worktree import get_enter_worktree_input_params
 from openjiuwen.harness.tools.worktree.tools import (
     _generate_random_slug,
     _resolve_owner,
@@ -110,45 +107,12 @@ def test_resolve_owner_returns_none_when_missing():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad_name", ["../escape", r"..\escape", r"C:\escape"])
-async def test_enter_rejects_invalid_slug(bad_name):
+async def test_enter_rejects_invalid_slug():
     mgr = WorktreeManager(WorktreeConfig(enabled=True))
     tool = EnterWorktreeTool(mgr)
-    result = await tool.invoke({"name": bad_name})
+    result = await tool.invoke({"name": "../escape"})
     assert result.success is False
     assert "Invalid worktree name" in (result.error or "")
-
-
-@pytest.mark.parametrize("bad_name", ["../escape", r"..\escape", r"C:\escape"])
-def test_enter_schema_rejects_invalid_slug(bad_name):
-    schema = get_enter_worktree_input_params("en")
-    with pytest.raises(JsonSchemaValidationError):
-        validate_json_schema({"name": bad_name}, schema)
-
-
-def test_enter_schema_rejects_unknown_fields():
-    schema = get_enter_worktree_input_params("en")
-    with pytest.raises(JsonSchemaValidationError):
-        validate_json_schema({"name": "valid", "path": "../escape"}, schema)
-
-
-@pytest.mark.asyncio
-async def test_enter_rejects_invalid_slug_before_active_session():
-    set_current_session(
-        WorktreeSession(
-            original_cwd="/tmp",
-            worktree_path="/tmp/wt",
-            worktree_name="existing",
-        )
-    )
-    mgr = WorktreeManager(WorktreeConfig(enabled=True))
-    tool = EnterWorktreeTool(mgr)
-
-    result = await tool.invoke({"name": "../../escape"})
-
-    assert result.success is False
-    assert "Invalid worktree name" in (result.error or "")
-    assert "Already in worktree" not in (result.error or "")
 
 
 @pytest.mark.asyncio

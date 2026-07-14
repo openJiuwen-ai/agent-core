@@ -56,10 +56,6 @@ def descriptor_from_context(ctx: TeamRuntimeContext) -> TeamJoinDescriptor:
         team_name=team_name,
         member_name=ctx.member_name or "",
         role=ctx.role.value,
-        # A spawned third-party CLI is a first-class team member, not an
-        # external operator: it gets the native teammate tool set and its
-        # team system prompt is injected here at spawn time.
-        scope="member",
         language=language,
         db_config=ctx.db_config,
         transport_config=transport,

@@ -9,9 +9,9 @@ Scenario (one autonomous leader round):
   ``spawn_member(role_type='external_cli', cli_agent=...)``.
 * Each member is a real third-party CLI subprocess. The spawn path
   auto-injects the team MCP server (``openjiuwen-team-mcp``) so the CLI
-  gets the real teammate team tools (read_inbox / view_task / claim_task —
-  status claimed/completed — / send_message), and launches it with ``cwd``
-  set to the shared team workspace.
+  gets the team collaboration tools (read_inbox / claim_task /
+  complete_task / send_message), and launches it with ``cwd`` set to the
+  shared team workspace.
 * The leader creates one task per member: write a file
   ``<member>.md`` into the team workspace, then complete the task and
   report. Members do the file write with their native filesystem ability.
@@ -146,7 +146,7 @@ def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
         "agents": {
             "leader": {
                 "model": _leader_model(),
-                "rails": [{"type": "core.sys_operation"}],
+                "rails": [{"type": "filesystem"}],
                 "language": "cn",
                 "max_iterations": 200,
                 "enable_task_planning": False,
@@ -201,15 +201,15 @@ def _god_view_query(workspace_path: Path) -> str:
         "尽量减少往返）。每个任务的 content 必须写成"
         "成员要严格按顺序执行的强制清单（逐字照抄下面五步，把 <member>/<file> 换成实际值）：\n"
         f"   - 共享工作目录绝对路径：{workspace_path}\n"
-        "     『(1) claim_task 认领本任务（status=\"claimed\"）；"
+        "     『(1) claim_task 认领本任务；"
         "(2) 在共享工作目录写文件 <abs_path>/<file>.md，内容写一行：<member> reporting in.；"
-        "(3) 【强制】再次调用 claim_task(task_id, status=\"completed\") 把任务标记完成——只写文件不算完成，不标记 completed 任务会一直挂着；"
+        "(3) 【强制】调用 complete_task(task_id) 把任务标记完成——只写文件不算完成，不调 complete_task 任务会一直挂着；"
         "(4) 【强制】用 send_message 向 team_leader 汇报已完成；"
-        "(5) claim_task(status=\"completed\") 和 send_message 都调用过，本任务才算结束。』\n\n"
+        "(5) complete_task 和 send_message 都调用过，本任务才算结束。』\n\n"
         "3. 把任务分派给对应成员（send_message 会自动启动未启动的成员）。\n\n"
         "4. 持续用 view_task 跟踪任务状态。**只有状态变成 completed 才算成员完成**——"
         "如果某成员只认领（claimed）却迟迟不 completed，用 send_message 明确催它："
-        "『立即调用 claim_task(<task_id>, status=\"completed\") 标记完成，并 send_message 汇报』，直到四个任务全部 completed。\n\n"
+        "『立即调用 complete_task(<task_id>) 标记完成，并 send_message 汇报』，直到四个任务全部 completed。\n\n"
         "5. 四个任务都 completed 后，逐一确认这 4 个文件都已真实存在"
         "（通过本地文件系统读取共享工作目录）。\n\n"
         "6. 全部确认存在后，调用 clean_team 解散这个临时团队，并简要汇报结果。\n"

@@ -8,6 +8,7 @@ can discover and read resources from already-registered MCP servers.
 """
 from __future__ import annotations
 
+from openjiuwen.core.runner import Runner
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools.mcp_tools import ListMcpResourcesTool, ReadMcpResourceTool
 
@@ -29,8 +30,9 @@ class McpRail(DeepAgentRail):
         read_tool = ReadMcpResourceTool(lang, agent_id)
         self.tools = [list_tool, read_tool]
 
+        Runner.resource_mgr.add_tool(self.tools)
         for tool in self.tools:
-            agent.ability_manager.add_ability(tool.card, tool)
+            agent.ability_manager.add(tool.card)
 
     def uninit(self, agent) -> None:
         if not self.tools:
@@ -38,7 +40,10 @@ class McpRail(DeepAgentRail):
         for tool in self.tools:
             name = getattr(tool.card, "name", None)
             if name and hasattr(agent, "ability_manager"):
-                agent.ability_manager.remove_ability(name)
+                agent.ability_manager.remove(name)
+            tool_id = tool.card.id
+            if tool_id:
+                Runner.resource_mgr.remove_tool(tool_id)
 
 
 __all__ = ["McpRail"]

@@ -9,6 +9,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.prompts.sections import SectionName
+from openjiuwen.core.foundation.llm.schema.message import UserMessage
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -124,7 +125,8 @@ class TaskPlanningRail(DeepAgentRail):
             for tool_class, found in tool_configs:
                 if not found:
                     new_tool = tool_class(self.sys_operation, workspace_dir, language, agent_id)
-                    agent.ability_manager.add_ability(new_tool.card, new_tool)
+                    Runner.resource_mgr.add_tool(new_tool)
+                    agent.ability_manager.add(new_tool.card)
                     tools.append(new_tool)
             self.tools = tools
         except Exception as exc:
@@ -139,7 +141,10 @@ class TaskPlanningRail(DeepAgentRail):
                 for tool in self.tools:
                     name = getattr(tool.card, "name", None)
                     if name:
-                        agent.ability_manager.remove_ability(name)
+                        agent.ability_manager.remove(name)
+                    tool_id = tool.card.id
+                    if tool_id:
+                        Runner.resource_mgr.remove_tool(tool_id)
         except Exception as exc:
             logger.warning("TaskPlanningRail: failed to remove tool, error: %s", exc)
 
@@ -182,9 +187,9 @@ class TaskPlanningRail(DeepAgentRail):
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Add progress reminder prompt after tool call.
 
-        Every N tool calls (configurable via tool_call_interval), pushes a
-        steering message prompting the model to review current task progress
-        using todo_list tool.
+        Every N tool calls (configurable via tool_call_interval), adds a user
+        message prompting the model to review current task progress using
+        todo_list tool.
 
         Also refreshes todos cache when todo tools are called.
 
@@ -232,8 +237,9 @@ class TaskPlanningRail(DeepAgentRail):
             tasks=tasks,
             in_progress_task=in_progress_task,
         )
-        # Use steering queue to defer injection until ToolMessages are written.
-        ctx.push_steering(prompt)
+        messages = ctx.context.get_messages()
+        messages.append(UserMessage(content=prompt))
+        ctx.context.set_messages(messages)
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         """Accumulate token usage per model_id after each LLM call."""

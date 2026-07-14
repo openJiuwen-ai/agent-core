@@ -39,17 +39,6 @@ def validate_slug(slug: str) -> None:
             )
 
 
-def _flatten_slug(slug: str) -> str:
-    """Flatten a validated slug for filesystem paths and branch names.
-
-    Nested slugs such as ``user/feature`` are user-friendly, but mapping
-    them to nested worktree directories is risky: deleting a parent
-    worktree directory can also delete nested children.
-    """
-    validate_slug(slug)
-    return slug.replace("/", "+")
-
-
 def worktree_branch_name(slug: str) -> str:
     """Convert slug to git branch name.
 
@@ -66,13 +55,13 @@ def worktree_branch_name(slug: str) -> str:
         "feature-auth"       -> "worktree-feature-auth"
         "user/feature-login" -> "worktree-user+feature-login"
     """
-    return f"worktree-{_flatten_slug(slug)}"
+    return f"worktree-{slug.replace('/', '+')}"
 
 
 def worktree_path_for(base_dir: str, slug: str) -> str:
     """Compute worktree directory path under a base directory.
 
-    Worktrees live in ``{base_dir}/.worktrees/{flattened-slug}``.  ``base_dir``
+    Worktrees live in ``{base_dir}/.worktrees/{slug}``.  ``base_dir``
     is normally the owning DeepAgent's workspace root, so each agent's
     worktrees are isolated under its own workspace rather than the
     source git repository.
@@ -85,7 +74,7 @@ def worktree_path_for(base_dir: str, slug: str) -> str:
     Returns:
         Absolute path to the worktree directory.
     """
-    return os.path.join(worktrees_dir(base_dir), _flatten_slug(slug))
+    return os.path.join(base_dir, ".worktrees", slug)
 
 
 def worktrees_dir(base_dir: str) -> str:

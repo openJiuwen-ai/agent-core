@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -39,7 +38,6 @@ def _make_pending(
     *,
     skill_name: str = "skill-a",
     change_type: str = "skill_experience_entry",
-    subject_kind: str | None = None,
 ) -> PendingChange:
     return PendingChange(
         operator_id=f"skill_experience_{skill_name}",
@@ -48,7 +46,6 @@ def _make_pending(
         payload=[_make_record(f"{change_id}-record")],
         created_at="2026-01-01T00:00:00+00:00",
         change_id=change_id,
-        subject_kind=subject_kind,
     )
 
 
@@ -99,15 +96,10 @@ async def test_commit_pending_change_retains_unwritten_tail_on_record_failure(tm
 
     original_append = store.append_record
 
-    async def append_then_fail(
-        skill_name: str,
-        record: EvolutionRecord,
-        *,
-        subject_kind: str | None = None,
-    ) -> None:
+    async def append_then_fail(skill_name: str, record: EvolutionRecord) -> None:
         if record.id == "ev_2":
             raise OSError("disk full")
-        await original_append(skill_name, record, subject_kind=subject_kind)
+        await original_append(skill_name, record)
 
     store.append_record = append_then_fail
 
@@ -129,41 +121,6 @@ async def test_commit_pending_change_retains_unwritten_tail_on_record_failure(tm
     assert pending.change_id not in pending_by_id
     log = await store.load_evolution_log("skill-a")
     assert [record.id for record in log.entries] == ["ev_1", "ev_2"]
-
-
-@pytest.mark.asyncio
-async def test_commit_pending_change_preserves_subject_kind_on_partial_retry() -> None:
-    second_record = _make_record("ev_2")
-    records = [_make_record("ev_1"), second_record]
-    pending = PendingChange(
-        operator_id="skill_experience_team-a",
-        skill_name="team-a",
-        change_type="skill_experience_entry",
-        payload=records,
-        created_at="2026-01-01T00:00:00+00:00",
-        change_id="pending-swarm",
-        subject_kind="swarm-skill",
-    )
-    pending_by_id = {pending.change_id: pending}
-    store = Mock()
-    store.append_record = AsyncMock(side_effect=[None, OSError("disk full")])
-
-    result = await commit_pending_change(pending_by_id, pending.change_id, store=store)
-
-    assert result.applied_count == 1
-    assert result.pending_count == 1
-    assert pending_by_id[pending.change_id].subject_kind == "swarm-skill"
-    assert [record.id for record in pending_by_id[pending.change_id].payload] == ["ev_2"]
-    assert store.append_record.await_args_list[0].kwargs == {"subject_kind": "swarm-skill"}
-    assert store.append_record.await_args_list[1].kwargs == {"subject_kind": "swarm-skill"}
-
-    store.append_record = AsyncMock()
-    retry = await commit_pending_change(pending_by_id, pending.change_id, store=store)
-
-    assert retry.applied_count == 1
-    assert retry.pending_count == 0
-    assert pending.change_id not in pending_by_id
-    store.append_record.assert_awaited_once_with("team-a", second_record, subject_kind="swarm-skill")
 
 
 @pytest.mark.asyncio

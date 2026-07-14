@@ -10,13 +10,9 @@ from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, Mod
 def _builtin_model_client(provider, client_config: ModelClientConfig, model_config: ModelRequestConfig):
     if client_config is None:
         return None
-    if provider == ProviderType.OpenAI.value:
+    if provider == ProviderType.OpenAI.value or provider == ProviderType.OpenRouter.value:
         from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
         return OpenAIModelClient(model_config=model_config, model_client_config=client_config)
-
-    if provider == ProviderType.OpenRouter.value:
-        from openjiuwen.core.foundation.llm.model_clients.openrouter_model_client import OpenRouterModelClient
-        return OpenRouterModelClient(model_config=model_config, model_client_config=client_config)
 
     if provider == ProviderType.SiliconFlow.value:
         from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import \

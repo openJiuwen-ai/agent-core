@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 import uuid
-from typing import Awaitable, Callable, List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -54,9 +54,6 @@ class SessionModelContext(ModelContext):
             session_ref=None,
             workspace=None,
             sys_operation=None,
-            window_mutators: List[
-                Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]
-            ] = None,
     ):
         self._message_id = 0
         ContextUtils.validate_messages(history_messages)
@@ -75,7 +72,6 @@ class SessionModelContext(ModelContext):
         )
         self._workspace = workspace
         self._sys_operation = sys_operation
-        self._window_mutators = window_mutators if window_mutators is not None else []
         self._session_ref = session_ref
         self._default_dialogue_round = config.default_window_round_num
         self._token_counter = token_counter
@@ -344,7 +340,6 @@ class SessionModelContext(ModelContext):
                 tools=tools or []
             )
 
-            call_window_mutators = kwargs.pop("window_mutators", None) or []
             kwargs.update({"window_size": window_size})
             kwargs.setdefault("sys_operation", self._sys_operation)
             for processor in self._processors:
@@ -431,15 +426,6 @@ class SessionModelContext(ModelContext):
                     )
 
             ContextUtils.validate_and_fix_context_window(window)
-            window_mutators = [*self._window_mutators, *call_window_mutators]
-            for mutator in window_mutators:
-                try:
-                    window = await mutator(self, window)
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to mutate context window before KV release by using {mutator}, reason: {str(e)}"
-                    )
-            ContextUtils.validate_and_fix_context_window(window)
             if self._kv_cache_manager:
                 await self._kv_cache_manager.release(window, **kwargs)
             window.statistic = self._stat_context_window(window)
@@ -459,8 +445,7 @@ class SessionModelContext(ModelContext):
             )
             context_messages = self._message_buffer.get_back()
             round_index = ContextUtils.find_last_n_dialogue_round(context_messages, dialogue_round)
-            if round_index >= 0: 
-                context_messages = context_messages[round_index:]
+            context_messages = context_messages[round_index:]
         else:
             context_messages = self._message_buffer.get_back()
 

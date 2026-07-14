@@ -101,14 +101,6 @@ def _validate_skill_frontmatter(skill_md_path: Path) -> list[str]:
     return errors
 
 
-def _decode_subprocess_output(stdout: bytes, stderr: bytes) -> str:
-    """Decode subprocess output, falling back from stdout to stderr."""
-    output = stdout.decode("utf-8", errors="replace").strip()
-    if not output:
-        output = stderr.decode("utf-8", errors="replace").strip()
-    return output
-
-
 async def check_ruff(
     extension_root: Path,
 ) -> list[str]:
@@ -157,40 +149,9 @@ async def check_ruff(
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
-            output = _decode_subprocess_output(stdout, stderr)
+            output = stdout.decode("utf-8", errors="replace").strip()
             if not output:
-                logger.warning(
-                    "[check_ruff] rc=%s no output with CI=1, "
-                    "retrying without CI",
-                    proc.returncode,
-                )
-                try:
-                    diag_env = dict(env)
-                    diag_env.pop("CI", None)
-                    diag_proc = await asyncio.create_subprocess_exec(
-                        python_executable,
-                        "-m",
-                        "ruff",
-                        "check",
-                        root_str,
-                        "--output-format=concise",
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        env=diag_env,
-                    )
-                    diag_stdout, diag_stderr = await diag_proc.communicate()
-                    output = _decode_subprocess_output(
-                        diag_stdout, diag_stderr
-                    )
-                except Exception as exc:
-                    logger.debug(
-                        "[check_ruff] diagnostic re-run failed: %s", exc
-                    )
-            if not output:
-                output = (
-                    f"ruff returned exit code "
-                    f"{proc.returncode} with no output"
-                )
+                output = stderr.decode("utf-8", errors="replace").strip()
             errors.append(f"ruff check failed: {output[:500]}")
     except FileNotFoundError:
         logger.debug("ruff not available, skipping lint")

@@ -18,7 +18,7 @@ from typing import Dict, Iterable, List, Optional
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openjiuwen.agent_teams.schema.status import (
     TASK_TRANSITIONS,
@@ -29,7 +29,7 @@ from openjiuwen.agent_teams.schema.task import (
     GraphMutationResult,
     NewTaskSpec,
 )
-from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.agent_teams.tools.database.graph import (
     TASK_DEPENDENCY_REJECT_STATUSES,
     TASK_TERMINAL_STATUSES,
@@ -319,9 +319,9 @@ async def _apply_new_edges(
 class TaskDao:
     """Data access object for task and task-dependency tables."""
 
-    def __init__(self, sessions: DbSessions) -> None:
-        """Initialize task DAO with the shared read/write session provider."""
-        self._sessions = sessions
+    def __init__(self, session_local: async_sessionmaker) -> None:
+        """Initialize task DAO with the shared session factory."""
+        self._session_local = session_local
 
     async def create_task(
         self,
@@ -333,7 +333,7 @@ class TaskDao:
     ) -> bool:
         """Create a new team task."""
         team_task_model = _get_task_model()
-        async with self._sessions.write() as session:
+        async with self._session_local() as session:
             try:
                 task = team_task_model(
                     task_id=task_id,
@@ -355,14 +355,14 @@ class TaskDao:
     async def get_task(self, task_id: str) -> Optional[TeamTaskBase]:
         """Get task information by ID."""
         team_task_model = _get_task_model()
-        async with self._sessions.read() as session:
+        async with self._session_local() as session:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             return result.scalar_one_or_none()
 
     async def get_team_tasks(self, team_name: str, status: Optional[str] = None) -> List[TeamTaskBase]:
         """Get all tasks for a team, optionally filtered by status."""
         team_task_model = _get_task_model()
-        async with self._sessions.read() as session:
+        async with self._session_local() as session:
             query = select(team_task_model).where(team_task_model.team_name == team_name)
             if status:
                 query = query.where(team_task_model.status == status)
@@ -374,7 +374,7 @@ class TaskDao:
     ) -> List[TeamTaskBase]:
         """Get tasks assigned to a specific member, optionally filtered by status."""
         team_task_model = _get_task_model()
-        async with self._sessions.read() as session:
+        async with self._session_local() as session:
             query = select(team_task_model).where(
                 team_task_model.team_name == team_name,
                 team_task_model.assignee == assignee_id,
@@ -393,7 +393,7 @@ class TaskDao:
         the caller.
         """
         team_task_model = _get_task_model()
-        async with self._sessions.write() as session:
+        async with self._session_local() as session:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
@@ -427,7 +427,7 @@ class TaskDao:
     async def reset_task(self, task_id: str) -> Optional[TeamTaskBase]:
         """Reset a claimed or plan_approved task back to pending status and clear assignee."""
         team_task_model = _get_task_model()
-        async with self._sessions.write() as session:
+        async with self._session_local() as session:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
@@ -467,7 +467,7 @@ class TaskDao:
     async def approve_plan_task(self, task_id: str) -> Optional[TeamTaskBase]:
         """Approve a task plan for PLAN_MODE members."""
         team_task_model = _get_task_model()
-        async with self._sessions.write() as session:
+        async with self._session_local() as session:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
@@ -498,7 +498,7 @@ class TaskDao:
         """Update task status."""
         team_task_model = _get_task_model()
         task_dependency_model = _get_task_dependency_model()
-        async with self._sessions.write() as session:
+        async with self._session_local() as session:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
@@ -549,7 +549,7 @@ class TaskDao:
     ) -> bool:
         """Update task content (title, content, etc.)."""
         team_task_model = _get_task_model()
-        async with self._sessions.write() as session:
+        async with self._session_local() as session:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
@@ -599,7 +599,7 @@ class TaskDao:
         if not new_tasks and not add_edges:
             return GraphMutationResult.success()
 
-        async with self._sessions.write() as session:
+        async with self._session_local() as session:
             try:
                 now = get_current_time()
                 await _stage_new_tasks(session, team_name, new_tasks, now)
@@ -677,7 +677,7 @@ class TaskDao:
     async def get_task_dependencies(self, task_id: str) -> List[TeamTaskDependencyBase]:
         """Get all dependencies for a task."""
         task_dependency_model = _get_task_dependency_model()
-        async with self._sessions.read() as session:
+        async with self._session_local() as session:
             result = await session.execute(
                 select(task_dependency_model).where(task_dependency_model.task_id == task_id)
             )
@@ -687,7 +687,7 @@ class TaskDao:
     async def get_unresolved_dependencies_count(self, task_id: str) -> int:
         """Get count of unresolved dependencies for a task."""
         task_dependency_model = _get_task_dependency_model()
-        async with self._sessions.read() as session:
+        async with self._session_local() as session:
             result = await session.execute(
                 select(task_dependency_model).where(
                     task_dependency_model.task_id == task_id,
@@ -700,7 +700,7 @@ class TaskDao:
         """Get all tasks that depend on a specific task."""
         task_dependency_model = _get_task_dependency_model()
         team_task_model = _get_task_model()
-        async with self._sessions.read() as session:
+        async with self._session_local() as session:
             result = await session.execute(
                 select(task_dependency_model).where(task_dependency_model.depends_on_task_id == depends_on_task_id)
             )
@@ -720,7 +720,7 @@ class TaskDao:
     async def delete_task(self, task_id: str) -> bool:
         """Delete a task."""
         team_task_model = _get_task_model()
-        async with self._sessions.write() as session:
+        async with self._session_local() as session:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
@@ -734,7 +734,7 @@ class TaskDao:
 
     async def cancel_task(self, task_id: str) -> Optional[Dict]:
         """Cancel a task atomically and unblock dependent tasks."""
-        async with self._sessions.write() as session:
+        async with self._session_local() as session:
             now = get_current_time()
             outcome = await _terminate_task_in_session(
                 session,
@@ -756,7 +756,7 @@ class TaskDao:
         """Cancel every active task for a team atomically."""
         team_task_model = _get_task_model()
         skip_assignees = skip_assignees or set()
-        async with self._sessions.write() as session:
+        async with self._session_local() as session:
             skip_statuses = [
                 TaskStatus.CANCELLED.value,
                 TaskStatus.COMPLETED.value,
@@ -812,7 +812,7 @@ class TaskDao:
 
     async def complete_task(self, task_id: str) -> Optional[Dict]:
         """Complete a task atomically and unblock dependent tasks."""
-        async with self._sessions.write() as session:
+        async with self._session_local() as session:
             now = get_current_time()
             outcome = await _terminate_task_in_session(
                 session,
@@ -829,7 +829,7 @@ class TaskDao:
     async def _verify_and_fix_blocked_tasks(self, team_name: str) -> List[TeamTaskBase]:
         """Recovery sweep: re-evaluate every BLOCKED task in the team."""
         team_task_model = _get_task_model()
-        async with self._sessions.write() as session:
+        async with self._session_local() as session:
             result = await session.execute(
                 select(team_task_model.task_id).where(
                     team_task_model.team_name == team_name,

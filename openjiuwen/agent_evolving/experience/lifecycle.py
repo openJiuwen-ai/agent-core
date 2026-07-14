@@ -117,8 +117,19 @@ class HostFacingExperienceResult:
         )
 
 
+@dataclass
+class RebuildRequest:
+    """Parameters required to prepare a skill rebuild request."""
+
+    skill_name: str
+    user_intent: Optional[str] = None
+    min_score: float = 0.5
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
 __all__ = [
     "LocalApplyPreview",
     "HostFacingExperienceResult",
     "PendingCommitResult",
+    "RebuildRequest",
 ]

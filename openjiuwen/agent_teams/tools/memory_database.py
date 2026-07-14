@@ -295,15 +295,6 @@ class InMemoryTeamDatabase:
     async def get_team(self, team_name: str) -> Optional[Team]:
         return self._teams.get(team_name)
 
-    async def team_exists(self, team_name: str) -> bool:
-        """Check whether a team row exists in the in-memory store.
-
-        Mirrors ``TeamDao.team_exists`` for drop-in API parity so callers
-        like ``_inspect_session`` can use ``db.team.team_exists`` without
-        branching on the storage backend.
-        """
-        return team_name in self._teams
-
     async def delete_team(self, team_name: str) -> bool:
         """Delete a team and cascade-purge its members, tasks, and messages."""
         async with self._lock:
@@ -1070,40 +1061,3 @@ class InMemoryTeamDatabase:
                 msg.is_read = True
             team_logger.debug("Message %s marked as read by %s", message_id, member_name)
             return True
-
-    async def mark_messages_read(self, message_ids: list[str], member_name: str) -> int:
-        """Mark several messages read for one member (in-memory batch).
-
-        Mirrors the SQL backend's batch API so callers share one code
-        path. Missing ids are skipped; returns the count actually marked.
-        """
-        if not message_ids:
-            return 0
-        async with self._lock:
-            if member_name not in self._members:
-                team_logger.error("Member %s not found", member_name)
-                return 0
-            by_id = {m.message_id: m for m in self._messages}
-            marked = 0
-            for message_id in message_ids:
-                msg = by_id.get(message_id)
-                if not msg:
-                    team_logger.error("Message %s not found", message_id)
-                    continue
-                if msg.broadcast:
-                    key = (member_name, msg.team_name)
-                    rs = self._read_status.get(key)
-                    if rs is None:
-                        self._read_status[key] = _MemReadStatus(
-                            member_name=member_name,
-                            team_name=msg.team_name,
-                            read_at=msg.timestamp,
-                        )
-                    else:
-                        rs.read_at = msg.timestamp
-                else:
-                    msg.is_read = True
-                marked += 1
-            if marked:
-                team_logger.debug("Marked %d messages read by %s", marked, member_name)
-            return marked

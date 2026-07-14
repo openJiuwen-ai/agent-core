@@ -3,173 +3,240 @@
 """Memory prompt section for DeepAgent."""
 from __future__ import annotations
 
+from datetime import datetime, timezone, timedelta
 from typing import Optional
-
 from openjiuwen.harness.prompts.builder import PromptSection
 from openjiuwen.harness.prompts.sections import SectionName
 
 
-MEMORY_PROMPT_CN = """# 记忆使用策略（主动模式）
+def _get_beijing_date() -> str:
+    """Get current date in Beijing timezone (UTC+8)."""
+    beijing_tz = timezone(timedelta(hours=8))
+    return datetime.now(tz=beijing_tz).strftime("%Y-%m-%d")
 
-每轮对话默认不包含历史记忆正文。跨会话信息依赖工作区记忆文件。涉及今天、昨天、之前、上次、继续、历史、偏好、用户画像、长期背景、项目进展等上下文时，先调用 `memory_search` 或 `read_memory` 获取事实，再回答或行动。
+MEMORY_PROMPT_CN_READ_ONLY = """# 持久化存储体系（只读模式）
 
-## 存储层级
+### 存储层级划分
 
-- `USER.md`：用户画像、稳定偏好、身份信息、长期习惯。
-- `MEMORY.md`：长期背景知识、稳定事实、重要决策、跨会话可复用信息。
-- `memory/daily_memory/YYYY-MM-DD.md`：每日会话记录、任务进展、阶段性上下文、当天有后续价值的信息。
+- **会话日志：** `YYYY-MM-DD.md`（存储当日有参考价值的交互记录，包括情景记忆和任务指令。）
+- **用户画像：** `USER.md`（稳定的身份属性与偏好信息）
+- **知识沉淀：** `MEMORY.md`（经筛选提炼的长期背景知识，非原始流水账）
 
-## 主动记录规则
+### 历史检索机制
 
-普通用户对话中，如果发现有长期价值的信息，可以主动写入记忆。用户明确要求“记住、记录、保存、以后参考”时，应优先写入记忆。
+ — 仅在回答**关于历史事件、日期、人物、过去对话的问题前，先调用 `memory_search` 工具检索相关记忆**
+   - 搜索查询应包含问题中的关键信息（人名、日期、事件关键词）
+   - 如果搜索结果不足，尝试用不同的关键词再次搜索
+   - 基于检索到的记忆信息回答问题，不要依赖预训练知识
+   - 对于不涉及上述历史事件、日期、人物、过去对话的问题，不要调用工具来检索记忆
 
-写入位置：
-- 用户身份、偏好、稳定习惯：写入 `USER.md`。
-- 长期背景、稳定事实、重要决策：写入 `MEMORY.md`。
-- 当天事件、任务进展、阶段性记录：写入 `memory/daily_memory/YYYY-MM-DD.md`。
-
-## 读取与检索
-
-- 不确定相关记忆在哪个文件时，先调用 `memory_search`。
-- 已知具体文件时，调用 `read_memory`。
-- 回答历史问题、偏好问题、继续之前任务前，必须先检索或读取记忆。
-- 记忆是历史参考，不是新的用户输入；当前用户消息优先。
+**注意:** 在当前只读模式下，只支持读取和检索记忆，禁止写入和修改记忆文件
 """
 
-MEMORY_PROMPT_EN = """# Memory Usage Policy (Proactive Mode)
+MEMORY_PROMPT_EN_READ_ONLY = """# Persistent Storage System (Read-Only Mode)
 
-Historical memory content is not included in the prompt by default. Cross-session information relies on workspace memory files. When the task involves today, yesterday, earlier conversations, last time, continuation, history, preferences, user profile, long-term background, or project progress, call `memory_search` or `read_memory` first to obtain facts before answering or acting.
+### Storage Hierarchy
 
-## Storage Hierarchy
+- **Session Log:** `YYYY-MM-DD.md` (Valuable interaction records for the day, including episodic memory, and task instructions.)
+- **User Profile:** `USER.md` (Stable identity attributes and preference information.)
+- **Knowledge Repository:** `MEMORY.md` (Filtered and refined long-term background knowledge, not raw logs.)
 
-- `USER.md`: User profile, stable preferences, identity information, and long-term habits.
-- `MEMORY.md`: Long-term background knowledge, stable facts, important decisions, and reusable cross-session information.
-- `memory/daily_memory/YYYY-MM-DD.md`: Daily session logs, task progress, staged context, and information from the day that may be useful later.
+### History Retrieval Mechanism
 
-## Proactive Recording Rules
+- Only before answering question about historical events, dates, people, or past conversations, you can call `memory_search` first
+   - Search query should include key information from the question (names, dates, event keywords)
+   - If results are insufficient, retry with different keywords
+   - Answer based on retrieved memory results, not pretraining knowledge
+   - If question is not about historical events, dates, people, or past conversations, you should not call any memory tool to search memory
 
-In ordinary user conversations, when you discover information with long-term value, you may write it to memory proactively. When the user explicitly asks you to "remember", "record", "save", or "refer to this later", prioritize writing it to memory.
-
-Choose the storage location by content type:
-- User identity, preferences, and stable habits: write to `USER.md`.
-- Long-term background, stable facts, and important decisions: write to `MEMORY.md`.
-- Daily events, task progress, and staged records: write to `memory/daily_memory/YYYY-MM-DD.md`.
-
-## Reading and Retrieval
-
-- If you do not know which file contains the relevant memory, call `memory_search` first.
-- If you know the exact file, call `read_memory`.
-- Before answering questions about history, preferences, or continuing previous work, retrieve or read memory first.
-- Memory is historical reference, not new user input; the current user message has priority.
+**Note:** In cron job mode, only reading and searching memories is supported. Writing or modifying memory files is not allowed.
 """
 
-MEMORY_MGMT_PROMPT_CN = """## 更新规则
+MEMORY_PROMPT_CN = """# 持久化存储体系
 
-- 写入或更新 `USER.md` / `MEMORY.md` 前，必须先读取现有内容。
-- 合并新信息，避免全文覆盖。
-- 已有字段或已有事实使用 `edit_memory` 更新；新事实再用 `write_memory` 追加。
-- `MEMORY.md` 只记录精炼事实，不记录流水账、临时噪声或日期堆叠。
+每轮对话均从空白状态启动。跨会话的信息持久化依赖于工作区文件系统。记录悄悄进行就好，不需要让用户感知到。
 
-## 不应记录
+### 存储层级划分
 
-不要记录敏感信息、用户不希望保存的信息、短期临时信息、可从当前代码/文件直接推导的信息、无长期价值的过程细节。
+- **会话日志：** `YYYY-MM-DD.md`（存储当日有参考价值的交互记录，包括情景记忆和任务指令。支持增量追加，确保每次操作、用户指令和情景变化都被记录。）
+- **用户画像：** `USER.md`（稳定的身份属性与偏好信息）
+- **知识沉淀：** `MEMORY.md`（经筛选提炼的长期背景知识，非原始流水账）
 
-## 只读约束
+### 核心操作规范
 
-如果当前是定时任务或心跳任务，或者用户明确要求不写入记忆：
-- 只允许读取和检索记忆；
-- 禁止调用 `write_memory` / `edit_memory`；
-- 禁止写入或修改任何记忆文件。
+- 会话本身不具备记忆能力，文件系统是唯一的信息载体。需持久化的内容务必写入文件
+- **路径限制：** 记忆工具（write_memory/edit_memory/read_memory）操作文件时，直接给出文件名
+- 更新 USER.md 或 MEMORY.md 时，必须先读取现有内容再执行修改
+- **字段唯一性约束：** 每个字段仅允许出现一次。已存在字段通过 `edit_memory` 更新，新字段通过 `write_memory` 追加
+
+### 信息采集、存储操作与记录
+
+对话过程中，发现有价值的信息时，应该立即进行分类、存储，并及时记录，确保不拖延记录过程：
+
+**⚠️ 敏感信息冲突处理原则**
+
+如果待记录的内容与敏感信息过滤规则存在冲突，**以敏感信息过滤规则为准，不记录该内容**。敏感信息过滤规则具有最高优先级。
+
+1. **用户画像信息（user_profile）**：记录用户的身份信息、偏好、习惯等稳定属性，比如用户的职业、兴趣、工作模式、喜好、不满等。
+   - **存储**：写入 `USER.md`。
+   - **注意**：USER.md中只允许写入用户相关的记忆内容。当用户提出对Agent的身份、偏好、回答习惯等属性的定义时，记忆工具不做记录
+
+2. **情景记忆信息（episodic_memory）**：记录用户经历的具体事件或重要决策，比如用户要求完成的任务、描述的项目进展、某次事件等。
+   - **存储**：写入 `YYYY-MM-DD.md`。
+
+3. **语义记忆信息（semantic_memory）**：存储背景知识、技术细节、工具相关的本地配置（SSH、摄像头等）等长期有效信息，比如项目技术栈、工具的配置等。
+   - **存储**：写入 `MEMORY.md`。
+
+4. **摘要记忆（summary_memory）**：提炼对话中的关键信息，帮助后续快速回顾，比如对话中形成的重要决策、核心结论、讨论的要点等。
+   - **存储**：写入 `YYYY-MM-DD.md`。
+
+5. **用户请求记录（request_memory）**：记录用户明确请求的信息，帮助后续服务，比如用户要求记住某个信息、用户要求某个动作等。
+   - **存储**：写入 `YYYY-MM-DD.md`。
+
+6. **其他信息（others）**：当用户提到有价值的细节或信息时，或每次文件操作后，需要调用 write_memory 使用 append=true 参数追加记录至 YYYY-MM-DD.md。
+   - 注意：进行信息筛选，仅需要记录有价值的信息。有价值的信息包括但不限于：用户提供的联系人信息、项目细节、任务指令、偏好、文件路径、存储位置、任何可提高效率的信息等。发现的项目背景、技术细节、工作流程等也要写入相关文件。
+
+#### 历史检索机制
+
+ — 仅在回答**关于历史事件、日期、人物、过去对话的问题前，先调用 `memory_search` 工具检索相关记忆**
+   - 搜索查询应包含问题中的关键信息（人名、日期、事件关键词）
+   - 如果搜索结果不足，尝试用不同的关键词再次搜索
+   - 基于检索到的记忆信息回答问题，不要依赖预训练知识
+   - 对于不涉及上述历史事件、日期、人物、过去对话的问题，不要调用工具来检索记忆
 """
 
-MEMORY_MGMT_PROMPT_EN = """## Update Rules
+MEMORY_PROMPT_EN = """# Persistent Storage System
 
-- Before writing or updating `USER.md` / `MEMORY.md`, read the existing content first.
-- Merge new information and avoid full overwrites.
-- Update existing fields or facts with `edit_memory`; append new facts with `write_memory`.
-- `MEMORY.md` should contain refined facts only, not raw logs, temporary noise, or date-heavy entries.
+Each conversation session starts from a blank state. Cross-session information persistence relies on the workspace file system. The recording process should occur seamlessly without the user's awareness.
 
-## What Not To Record
+### Storage Hierarchy
 
-Do not record sensitive information, information the user does not want saved, short-lived temporary details, information directly derivable from current code/files, or process details with no long-term value.
+- **Session Log:** `YYYY-MM-DD.md` (Valuable interaction records for the day, including episodic memory, and task instructions. Supports incremental appending to ensure every operation, user instruction, and contextual change is recorded.)
+- **User Profile:** `USER.md` (Stable identity attributes and preference information.)
+- **Knowledge Repository:** `MEMORY.md` (Filtered and refined long-term background knowledge, not raw logs.)
 
-## Read-Only Constraint
+### Core Operation Guidelines
 
-If the current run is a scheduled task or heartbeat task, or the user explicitly asks not to write memory:
-- Only read and retrieve memories.
-- Do not call `write_memory` or `edit_memory`.
-- Do not write or modify any memory file.
+ - The session itself has no memory; the file system is the only carrier. Content requiring persistence must be written to files.	 
+ - **Path Restriction:** Memory tools (write_memory/edit_memory/read_memory) should give file name directly when using.
+ - When updating USER.md or MEMORY.md, existing content must be read first before making modifications.	 
+ - **Field Uniqueness Constraint:** Each field can appear only once. Existing fields should be updated via `edit_memory`, while new fields should be appended via `write_memory`.
+
+### Information Collection, Storage Operations, and Recording
+
+When valuable information appears during the conversation, classify it and store it immediately. Do not delay recording:
+
+**⚠️ Sensitive Information Conflict Resolution**
+
+If the content to be recorded conflicts with sensitive information filtering rules, **sensitive information filtering rules take precedence — do not record that content**. Sensitive information filtering rules have the highest priority.
+
+1. **User Profile Information (`user_profile`)**: Stable user attributes such as identity, preferences, habits, work style, likes/dislikes.
+   - **Storage**: Write to `USER.md`.
+   - **Notice**: Only user-related memory content is allowed to be written into USER.md. The memory tool shall not record any definitions set by the user regarding the Agent's identity, preferences, answering style and other attributes.
+
+2. **Episodic Memory (`episodic_memory`)**: Specific events or important decisions, such as assigned tasks, project progress, or notable incidents.
+   - **Storage**: Write to `YYYY-MM-DD.md`.
+
+3. **Semantic Memory (`semantic_memory`)**: Long-term background knowledge, technical details, and tool-related local configs (SSH, camera, etc.).
+   - **Storage**: Write to `MEMORY.md`.
+
+4. **Summary Memory (`summary_memory`)**: Distilled key points from the conversation (important decisions, core conclusions, discussion highlights).
+   - **Storage**: Write to `YYYY-MM-DD.md`.
+
+5. **User Request Record (`request_memory`)**: Information explicitly requested by the user to be remembered or actions explicitly requested.
+   - **Storage**: Write to `YYYY-MM-DD.md`.
+
+6. **Other Information (`others`)**: Whenever the user mentions any valuable detail, or after each file operation, you need to call `write_memory` with `append=true` to append to `YYYY-MM-DD.md` immediately
+   - Attention: You need to filter the information. Only Valuable information needs to be recorded. Valuable information include but not limited to project details, task instructions, preferences, file paths, storage locations, and any efficiency-improving details. Discovered project background, technical details, and workflows should also be written to relevant files.
+
+#### History Retrieval Mechanism
+
+- Only before answering question about historical events, dates, people, or past conversations, you can call `memory_search` first
+   - Search query should include key information from the question (names, dates, event keywords)
+   - If results are insufficient, retry with different keywords
+   - Answer based on retrieved memory results, not pretraining knowledge
+   - If question is not about historical events, dates, people, or past conversations, you should not call any memory tool to search memory
 """
 
-MEMORY_DATE_PROMPT_CN = """## 每日记忆路径
+MEMORY_MGMT_PROMPT_CN = """### 存储管理规范
 
-操作每日会话记录时，使用 `memory/daily_memory/YYYY-MM-DD.md` 路径格式。只有在实际调用记忆工具时，才根据当前任务上下文确定具体日期。
+### 更新规则
+1. 更新前必须先读取现有内容
+2. 合并新信息，避免全量覆盖
+3. MEMORY.md 条目仅记录精炼事实，不含日期/时间戳
+4. **USER.md 字段去重：** 已存在字段通过 `edit_memory` 更新，不存在字段通过 `write_memory` 追加
 """
 
-MEMORY_DATE_PROMPT_EN = """## Daily Memory Path
+MEMORY_MGMT_PROMPT_EN = """### Storage Management Guidelines
 
-When operating a daily session log, use the `memory/daily_memory/YYYY-MM-DD.md` path format. Resolve the actual date from the current task context only when you call the memory tool.
+#### Update Rules
+1. Must read existing content before updating
+2. Merge new information, avoid full overwrites
+3. MEMORY.md entries should only record refined facts, without dates/timestamps
+4. **USER.md Field Deduplication:** Existing fields should be updated via `edit_memory`, non-existing fields should be appended via `write_memory`
 """
 
-MEMORY_INACTIVE_PROMPT_CN = """# 记忆使用策略（被动模式）
+MEMORY_DATE_PROMPT_CN = """
+在操作当天的会话日志时，请使用 `{today_date}.md` 作为文件名。
+"""
 
-每轮对话默认不包含历史记忆正文。只有在用户明确需要历史上下文，或明确要求保存信息时，才使用记忆工具。
+MEMORY_DATE_PROMPT_EN = """
+When operating today's session logs file, please use `{today_date}.md` as the filename.
+"""
 
-## 存储层级
+MEMORY_INACTIVE_PROMPT_CN = """## 持久化存储体系（被动模式）
 
-- `USER.md`：用户画像、稳定偏好、身份信息、长期习惯。
-- `MEMORY.md`：长期背景知识、稳定事实、重要决策。
-- `memory/daily_memory/YYYY-MM-DD.md`：每日会话记录、任务进展、阶段性上下文。
+### 存储层级划分
 
-## 被动使用规则
+- **会话日志：** `YYYY-MM-DD.md`
+- **用户画像：** `USER.md`
+- **知识沉淀：** `MEMORY.md`
 
-- 只有当用户明确说“记住、记录、保存、以后参考”等含义时，才写入或修改记忆。
-- 只有当用户询问“之前、上次、继续、历史、回忆、偏好”等内容，或回答确实依赖历史信息时，才调用 `memory_search` / `read_memory`。
-- 普通闲聊、一次性任务、当前上下文足够回答的问题，不要调用记忆工具。
-- 当前用户消息优先于历史记忆。
+### 核心操作规范
 
-## 写入规则
+- 使用记忆工具（write_memory/edit_memory/read_memory）操作文件时，直接给出文件名
+- 更新 USER.md 或 MEMORY.md 时，必须先读取现有内容再执行修改
+- 已存在字段通过 `edit_memory` 更新，新字段通过 `write_memory` 追加
 
-- 用户身份、偏好、稳定习惯：写入 `USER.md`。
-- 长期背景、稳定事实、重要决策：写入 `MEMORY.md`。
-- 当天事件、任务进展、阶段性记录：写入 `memory/daily_memory/YYYY-MM-DD.md`。
-- 更新前先读取现有内容，避免重复、冲突或覆盖。
-- 已有字段或已有事实使用 `edit_memory` 更新；新事实再用 `write_memory` 追加。
+### 使用原则
 
-## 不应记录
-
-不要记录敏感信息、用户不希望保存的信息、短期临时信息、可从当前代码/文件直接推导的信息、无长期价值的过程细节。
+- **仅在用户明确要求时记录**：当用户说"记住"、"记录"、"保存"或其他相同含义的关键词时，调用 write_memory 或 edit_memory 完成存储
+- **仅在用户询问历史时搜索**：当用户要求"回忆"、"查找"以前的内容，或明确询问历史信息时，调用 memory_search 检索
+- **仅在需要时读取记忆文件**：当回答确实依赖历史上下文时才读取 USER.md、MEMORY.md 等文件
+- 当用户的对话信息中不包括上述关键词和场景时，不要调用任何相关的记忆工具
+- 记录信息时，根据内容类型选择存储位置：
+  - 用户身份/偏好 → `USER.md`
+  - 长期知识/配置 → `MEMORY.md`
+  - 事件/日常记录 → `YYYY-MM-DD.md`
+  - 注意：USER.md中只允许写入用户相关的记忆内容。当用户提出对Agent的身份、偏好、回答习惯等属性的定义时，记忆工具不做记录
 
 """
 
-MEMORY_INACTIVE_PROMPT_EN = """# Memory Usage Policy (Passive Mode)
+MEMORY_INACTIVE_PROMPT_EN = """## Persistent Storage System (Passive Mode)
 
-Historical memory content is not included in the prompt by default. Use memory tools only when the user explicitly needs historical context or explicitly asks you to save information.
+### Storage Hierarchy
 
-## Storage Hierarchy
+- **Session Log:** `memory/YYYY-MM-DD.md`
+- **User Profile:** `USER.md`
+- **Knowledge Repository:** `MEMORY.md`
 
-- `USER.md`: User profile, stable preferences, identity information, and long-term habits.
-- `MEMORY.md`: Long-term background knowledge, stable facts, and important decisions.
-- `memory/daily_memory/YYYY-MM-DD.md`: Daily session logs, task progress, and staged context.
+### Core Operation Guidelines
 
-## Passive Usage Rules
+- Provide the file name directly when using tools (write_memory/edit_memory/read_memory) to operate memory files
+- When updating USER.md or MEMORY.md, existing content must be read first before making modifications
+- Existing fields should be updated via `edit_memory`, new fields via `write_memory`
 
-- Write or modify memory only when the user explicitly says "remember", "record", "save", "refer to this later", or similar.
-- Call `memory_search` / `read_memory` only when the user asks about previous context, last time, continuation, history, recall, preferences, or when the answer genuinely depends on historical information.
-- Do not call memory tools for casual conversation, one-off tasks, or questions that can be answered from the current context.
-- The current user message has priority over historical memory.
+### Usage Principles
 
-## Write Rules
-
-- User identity, preferences, and stable habits: write to `USER.md`.
-- Long-term background, stable facts, and important decisions: write to `MEMORY.md`.
-- Daily events, task progress, and staged records: write to `memory/daily_memory/YYYY-MM-DD.md`.
-- Read existing content before updating to avoid duplication, conflicts, or overwrites.
-- Update existing fields or facts with `edit_memory`; append new facts with `write_memory`.
-
-## What Not To Record
-
-Do not record sensitive information, information the user does not want saved, short-lived temporary details, information directly derivable from current code/files, or process details with no long-term value.
+- **Record only when the user explicitly asks**: When the user says "remember", "record", or "save", or other similar keywords, call write_memory or edit_memory to persist the information
+- **Search only when the user asks about history**: When the user requests to "recall" or "find" past content, or explicitly asks about historical information, call memory_search to retrieve it
+- **Read memory files only when needed**: Read USER.md, MEMORY.md, etc. only when the answer genuinely depends on historical context
+- Do not call any relevant memory tool, if user's conversation content does not contain any keywords or situation mentioned above. 
+- When recording information, choose storage by content type:
+  - User identity/preferences → `USER.md`
+  - Long-term knowledge/config → `MEMORY.md`
+  - Events/daily records → `YYYY-MM-DD.md`
+  - Notice: Only user-related memory content is allowed to be written into USER.md. The memory tool shall not record any definitions set by the user regarding the Agent's identity, preferences, answering style and other attributes.
 
 """
 
@@ -183,23 +250,38 @@ def build_memory_section(
 
     Args:
         language: 'cn' or 'en'.
-        read_only: Kept for API compatibility; the stable prompt contains read-only rules.
-        is_proactive: Whether to use proactive or passive memory policy.
+        workspace_dir: Workspace directory path for reading memory files.
 
     Returns:
-        A PromptSection instance containing stable memory rules.
+        A PromptSection instance containing memory rules and existing memory content.
     """
+    today_date = _get_beijing_date()
+
     sections = []
-    if not is_proactive:
-        sections.append(MEMORY_INACTIVE_PROMPT_CN if language == "cn" else MEMORY_INACTIVE_PROMPT_EN)
-    elif language == "cn":
-        sections.extend([MEMORY_PROMPT_CN, MEMORY_MGMT_PROMPT_CN, MEMORY_DATE_PROMPT_CN])
+    if read_only:
+        if language == "cn":
+            sections.append(MEMORY_PROMPT_CN_READ_ONLY)
+        else:
+            sections.append(MEMORY_PROMPT_EN_READ_ONLY)
+    elif not is_proactive:
+        if language == "cn":
+            sections.append(MEMORY_INACTIVE_PROMPT_CN)
+        else:
+            sections.append(MEMORY_INACTIVE_PROMPT_EN)
     else:
-        sections.extend([MEMORY_PROMPT_EN, MEMORY_MGMT_PROMPT_EN, MEMORY_DATE_PROMPT_EN])
+        if language == "cn":
+            sections.append(MEMORY_PROMPT_CN)
+            sections.append(MEMORY_MGMT_PROMPT_CN)
+            sections.append(MEMORY_DATE_PROMPT_CN.format(today_date=today_date))
+        else:
+            sections.append(MEMORY_PROMPT_EN)
+            sections.append(MEMORY_MGMT_PROMPT_EN)
+            sections.append(MEMORY_DATE_PROMPT_EN.format(today_date=today_date))
+    content = "\n".join(sections)
 
     return PromptSection(
         name=SectionName.MEMORY,
-        content={language: "\n".join(sections)},
+        content={language: content},
         priority=50,
     )
 

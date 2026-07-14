@@ -10,6 +10,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.memory.lite.config import create_memory_settings
 from openjiuwen.core.memory.lite.memory_tool_context import MemoryToolContext
+from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 from openjiuwen.core.memory.lite.memory_tools import (
     init_memory_manager_async,
@@ -54,6 +55,7 @@ class MemoryRail(DeepAgentRail):
         super().__init__()
         self._initialized = False
         self._owned_tool_names: Set[str] = set()
+        self._owned_tool_ids: Set[str] = set()
         self._manager_initialized = False
         self._embedding_config = embedding_config
         self._is_proactive = is_proactive
@@ -76,12 +78,20 @@ class MemoryRail(DeepAgentRail):
         if hasattr(agent, "ability_manager"):
             for tool_name in list(self._owned_tool_names):
                 try:
-                    agent.ability_manager.remove_ability(tool_name)
+                    agent.ability_manager.remove(tool_name)
                 except Exception as exc:
                     logger.warning(
                         f"[MemoryRail] Failed to remove tool '{tool_name}' "
                         f"from ability_manager: {exc}"
                     )
+        for tool_id in list(self._owned_tool_ids):
+            try:
+                Runner.resource_mgr.remove_tool(tool_id)
+            except Exception as exc:
+                f"[MemoryRail] Failed to remove tool '{tool_id}' "
+                f"from resource_mgr: {exc}"
+        self._owned_tool_ids.clear()
+
         self._owned_tool_names.clear()
         self._initialized = False
         self._manager_initialized = False
@@ -188,7 +198,12 @@ class MemoryRail(DeepAgentRail):
                         logger.warning("[MemoryRail] Tool has no card")
                         continue
 
-                    result = agent.ability_manager.add_ability(tool_card, tool)
+                    existing_tool = Runner.resource_mgr.get_tool(tool_card.id)
+                    if existing_tool is None:
+                        Runner.resource_mgr.add_tool(tool)
+                        self._owned_tool_ids.add(tool_card.id)
+
+                    result = agent.ability_manager.add(tool_card)
                     if result.added:
                         self._owned_tool_names.add(tool_card.name)
                         logger.info(f"[MemoryRail] Registered tool: {tool_card.name}")

@@ -42,22 +42,23 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 
 ## 经验来源
 
-经验来自三个渠道，都要处理：
+经验来自两个渠道，都要处理：
 
-**渠道 A — 预检测信号**：上方「预检测信号」中列出的条目，由规则引擎自动从对话中提取，可能包含误报。进入本 optimizer 的预检测信号通常已经是 execution_failure 或 script_artifact，并且已经归因到当前 Skill；对于这类已归因信号，默认应产出至少一条 append，或在已有经验相关但本轮仍出错时，用 merge_target 产出改写后的完整经验。
+**渠道 A — 预检测信号**：上方「预检测信号」中列出的条目，由规则引擎自动从对话中提取，可能包含误报。
 
-**渠道 B — 执行轨迹直接分析**：仅从「对话历史」中补充与预检测 execution_failure / script_artifact 同一问题链相关、但规则引擎未完整捕获的具体执行经验，包括但不限于：
+**渠道 B — 对话历史直接分析**：直接审视「对话历史」，发现规则引擎未捕获的有价值经验，包括但不限于：
 - Agent 经过多次尝试/重试才成功的 workaround（说明 Skill 缺少相关指导）
-- 导致错误的具体工具调用顺序、参数选择、前置检查缺失或恢复步骤
-- 脚本从失败到成功的关键修改、可复用防错检查或可泛化处理流程
-不要从模糊用户反馈、一次性偏好、一般性流程偏差或无法连接到执行错误/脚本工件的内容中生成渠道 B 经验。
+- 用户含蓄的纠正或补充说明（未使用"错了""不对"等显式关键词）
+- 低效的工具调用模式（如多余步骤、错误的调用顺序）
+- Agent 遗漏的关键步骤（用户不得不手动补充）
+- 需要特殊处理的边界情况（Skill 中未覆盖的场景）
 
 **渠道 C — 脚本工件提取**：检查「预检测信号」中 type 为 "script_artifact" 的条目。这些是 Agent 在对话中生成并成功执行的脚本代码。评估其复用价值：
 - 高复用价值：图表生成（matplotlib/plotly）、图标/配图生成（PIL）、数据处理（JSON/CSV/Excel 转换）、自动化脚本（批量操作、格式化等）
 - 排除标准：仅包含硬编码特定数据的一次性脚本（纯硬编码特定内容才排除）
 - 脚本类经验使用 target="script"，section="Scripts"
 
-如果对话历史中没有额外发现，不需要为渠道 B 强制生成；但对已归因的预检测信号，除非明确是误报、外部因素或不可复用的一次性情况，否则应生成经验或改写已有经验。
+如果对话历史中没有额外发现，不需要强制生成；如果有发现，与预检测信号的经验一起输出。
 
 ## 数量限制
 
@@ -72,17 +73,16 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 ### 第一步：相关性判断
 判断该经验是否与 Skill 本身相关：
 - 相关：问题由 Skill 的指令、脚本、示例或排查逻辑导致 -> 继续第二步
-- 不相关：问题由明确误报、外部环境、权限、网络、第三方服务或不可复用的一次性因素导致 -> 输出 {{"action": "skip", "skip_reason": "irrelevant"}}
+- 不相关：问题由外部因素导致（网络、环境、权限、第三方服务等）-> 输出 {{"action": "skip", "skip_reason": "irrelevant"}}
 
 ### 第二步：去重判断
 对比已有演进经验（description 和 body 两个列表）：
-- 实质相同且本轮没有暴露未召回、没读到或读了仍误解的问题：与某条已有记录内容重复 -> 输出 {{"action": "skip", "skip_reason": "duplicate"}}
+- 实质相同：与某条已有记录内容重复 -> 输出 {{"action": "skip", "skip_reason": "duplicate"}}
 - 高度相似但有增量：与某条已有记录相关但有新信息 -> 输出合并后的完整内容，并设置 "merge_target" 为目标记录 id
-- 高度相似但本轮仍然出错：说明旧经验的摘要、关键词或正文没有被有效召回或表达不够清楚；优先输出带 "merge_target" 的完整改写经验，不要用 duplicate 跳过
 - 全新：与已有记录无关 -> 继续第三步
 
 ### 第三步：优先级筛选与生成
-将所有通过前两步的候选经验按优先级排序，仅为排名前 2 的文本候选和排名第 1 的脚本候选生成内容，其余输出 {{"action": "skip", "skip_reason": "low_priority"}}。不要用 low_priority 跳过唯一可归因 signal。
+将所有通过前两步的候选经验按优先级排序，仅为排名前 2 的候选生成内容，其余输出 {{"action": "skip", "skip_reason": "low_priority"}}。
 确定经验归属层（target）和章节（section），然后生成内容。
 
 **target 判断（三选一）：**
@@ -92,9 +92,9 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 
 **section 选择参考：**
 - execution_failure / workaround 类：通常归入 Troubleshooting
-- user_intent / 流程偏差类：通常归入 Instructions 或 Examples
+- user_correction / 流程偏差类：通常归入 Instructions 或 Examples
 - script_artifact 类：归入 Scripts
-- collaboration 类：归入 Collaboration（记录 AgentSkill 作为 TeamSkill 成员时的协作经验，如发送消息、认领任务、接收上下文等）
+- collaboration_send / collaboration_claim / collaboration_view / collaboration_receive / collaboration_failure 类：归入 Collaboration（记录 AgentSkill 作为 TeamSkill 成员时的协作经验，如发送消息、认领任务、接收上下文等）
 
 ## 内容生成规范
 1. 语言一致：输出语言必须与 Skill 完全一致（中文 Skill 输出中文，英文 Skill 输出英文）
@@ -107,7 +107,7 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 8. 文本经验（action 为 append，target 为 description/body）最多 2 条；脚本经验（target 为 script）最多 1 条
 9. 脚本经验的 content 字段直接放完整脚本源码，同时填写 script_filename、script_language、script_purpose
 10. 每条 append 经验必须填写 summary：一句话说明“何时适用 + 应做什么/避免什么”，不要换行、表格或代码块
-11. 每条 append 经验必须填写 keywords：6-12 个检索关键词，优先代码标识符/英文报错关键字，可附带中文术语以提升跨用户召回
+11. 每条 append 经验必须填写 keywords：10-20 个检索关键词，优先代码标识符/英文报错关键字，可附带中文术语以提升跨用户召回
 
 ## 输出格式
 只输出以下 JSON 数组，不要其他内容（即使只有一条，也必须用数组包裹）：
@@ -118,7 +118,7 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
     "target": "description | body | script",
     "section": "Instructions | Examples | Troubleshooting | Scripts | Collaboration",
     "summary": "一句话经验摘要（仅 action 为 append 时填写，否则为 null）",
-    "keywords": ["6-12 个关键词（仅 action 为 append 时填写）"],
+    "keywords": ["10-20 个关键词（仅 action 为 append 时填写）"],
     "content": "Markdown 内容或脚本源码（仅 action 为 append 时填写）",
     "merge_target": "ev_xxxxxxxx 或 null",
     "script_filename": "文件名（仅 target 为 script 时填写，如 generate_chart.py）",
@@ -165,22 +165,23 @@ Evolution experiences must respect the Agent's role capabilities and primary obj
 
 ## Experience Sources
 
-Experiences come from three channels, all must be processed:
+Experiences come from two channels, both must be processed:
 
-**Channel A — Pre-detected Signals**: The entries listed in the "Pre-detected Signals" section above, automatically extracted from the conversation by the rule engine. May contain false positives. Pre-detected signals entering this optimizer are usually execution_failure or script_artifact signals and are already attributed to the current Skill; for these attributed signals, default to producing at least one append, or when an existing experience is relevant but the current run still failed, produce a complete refined experience with merge_target.
+**Channel A — Pre-detected Signals**: The entries listed in the "Pre-detected Signals" section above, automatically extracted from the conversation by the rule engine. May contain false positives.
 
-**Channel B — Direct Execution Trace Analysis**: Use the "Conversation History" only to supplement concrete execution experiences tied to the same problem chain as a pre-detected execution_failure / script_artifact signal and not fully captured by the rule engine, including but not limited to:
+**Channel B — Direct Conversation History Analysis**: Directly examine the "Conversation History" to discover valuable experiences not captured by the rule engine, including but not limited to:
 - Workarounds where the Agent succeeded only after multiple attempts/retries (indicating the Skill lacks relevant guidance)
-- Specific tool-call order, parameter choice, missing prerequisite check, or recovery step that caused or fixed the failure
-- Key script changes, reusable guard checks, or generalizable handling flow from failed execution to successful execution
-Do not generate Channel B experiences from ambiguous user feedback, one-off preferences, general process deviations, or content that cannot be tied to an execution failure or script artifact.
+- Implicit corrections or supplementary explanations from the user (without using explicit keywords like "wrong" or "incorrect")
+- Inefficient tool invocation patterns (e.g., redundant steps, incorrect invocation order)
+- Critical steps missed by the Agent (where the user had to manually fill in)
+- Edge cases requiring special handling (scenarios not covered by the Skill)
 
 **Channel C — Script Artifact Extraction**: Check the "Pre-detected Signals" for entries with type "script_artifact". These are scripts that the Agent generated and successfully executed during the conversation. Evaluate their reuse value:
 - High reuse value: chart generation (matplotlib/plotly), icon/image generation (PIL), data processing (JSON/CSV/Excel conversion), automation scripts (batch operations, formatting, etc.)
 - Exclusion criteria: one-off scripts that only contain hardcoded specific data
 - Script experiences use target="script", section="Scripts"
 
-If no additional findings exist in the conversation history, do not force generation for Channel B; for attributed pre-detected signals, generate or refine an experience unless the signal is clearly a false positive, external-factor issue, or one-off non-reusable case.
+If no additional findings exist in the conversation history, do not force generation; if findings exist, output them together with the pre-detected signal experiences.
 
 ## Quantity Limit
 
@@ -195,17 +196,16 @@ If candidate experiences exceed the limit, retain the most important ones by the
 ### Step 1: Relevance Check
 Determine whether the experience is related to the Skill itself:
 - Relevant: The issue is caused by the Skill's instructions, scripts, examples, or troubleshooting logic -> proceed to Step 2
-- Irrelevant: The issue is caused by a clear false positive, external environment, permissions, network, third-party service, or one-off non-reusable factor -> output {{"action": "skip", "skip_reason": "irrelevant"}}
+- Irrelevant: The issue is caused by external factors (network, environment, permissions, third-party services, etc.) -> output {{"action": "skip", "skip_reason": "irrelevant"}}
 
 ### Step 2: Deduplication Check
 Compare against existing evolution experiences (both description and body lists):
-- Essentially identical and the current run did not expose a failure to recall, read, or understand the record: Duplicates an existing record -> output {{"action": "skip", "skip_reason": "duplicate"}}
+- Essentially identical: Duplicates an existing record -> output {{"action": "skip", "skip_reason": "duplicate"}}
 - Highly similar but with incremental value: Related to an existing record but contains new information -> output the merged complete content and set "merge_target" to the target record id
-- Highly similar but the current run still failed: The existing summary, keywords, or body were not recalled or were not clear enough; prefer a complete refined experience with "merge_target" and do not use duplicate to skip it
 - Entirely new: Unrelated to existing records -> proceed to Step 3
 
 ### Step 3: Priority Filtering and Generation
-Sort all candidates that passed the first two steps by priority, generate content only for the top 2 text candidates and top 1 script candidate, and output {{"action": "skip", "skip_reason": "low_priority"}} for the rest. Do not use low_priority to skip the only attributed signal.
+Sort all candidates that passed the first two steps by priority, generate content only for the top 2, and output {{"action": "skip", "skip_reason": "low_priority"}} for the rest.
 Determine the experience's target layer (target) and section (section), then generate the content.
 
 **target selection (choose one):**
@@ -215,9 +215,9 @@ Determine the experience's target layer (target) and section (section), then gen
 
 **section selection reference:**
 - execution_failure / workaround types: Usually belong to Troubleshooting
-- user_intent / process deviation types: Usually belong to Instructions or Examples
+- user_correction / process deviation types: Usually belong to Instructions or Examples
 - script_artifact types: Belong to Scripts
-- collaboration types:
+- collaboration_send / collaboration_claim / collaboration_view / collaboration_receive / collaboration_failure types:
   Belong to Collaboration (records AgentSkill collaboration experiences when acting as TeamSkill member,
   e.g., sending messages, claiming tasks, receiving context, etc.)
 
@@ -232,7 +232,7 @@ Determine the experience's target layer (target) and section (section), then gen
 8. Text experiences (action "append", target description/body): at most 2; script experiences (target script): at most 1
 9. For script experiences, put the full script source code in the content field, and fill in script_filename, script_language, script_purpose
 10. Every append experience must include summary: one sentence describing when it applies and what to do or avoid; no newlines, tables, or code blocks
-11. Every append experience must include keywords: 6-12 retrieval keywords; prefer code identifiers / English error keywords; you may add matching Chinese terms for cross-user recall
+11. Every append experience must include keywords: 10-20 retrieval keywords; prefer code identifiers / English error keywords; you may add matching Chinese terms for cross-user recall
 
 ## Output Format
 Output only the following JSON array, nothing else (even if there is only one entry, it must be wrapped in an array):
@@ -243,7 +243,7 @@ Output only the following JSON array, nothing else (even if there is only one en
     "target": "description | body | script",
     "section": "Instructions | Examples | Troubleshooting | Scripts | Collaboration",
     "summary": "one-sentence experience summary (only when action is append, otherwise null)",
-    "keywords": ["6-12 keywords (only when action is append)"],
+    "keywords": ["10-20 keywords (only when action is append)"],
     "content": "Markdown content or script source code (fill only when action is append)",
     "merge_target": "ev_xxxxxxxx or null",
     "script_filename": "filename (only when target is script, e.g. generate_chart.py)",
@@ -594,7 +594,7 @@ Output JSON only."""
 TRAJECTORY_PATCH_PROMPT = {"cn": TRAJECTORY_PATCH_PROMPT_CN, "en": TRAJECTORY_PATCH_PROMPT_EN}
 
 TEAM_EXPERIENCE_GENERATE_PROMPT_CN = """\
-你是 Team Skill 优化专家。请根据规则信号、团队技能内容、相关执行轨迹和已有经验，生成可复用的 team evolution records。
+你是 Team Skill 优化专家。请根据团队技能内容、执行轨迹、显式用户改进意图和已有经验，生成可复用的 team evolution records。
 
 ## 输出格式（最重要）
 你的回复必须是一个合法的 JSON 数组，不要任何其他内容。
@@ -621,12 +621,10 @@ TEAM_EXPERIENCE_GENERATE_PROMPT_CN = """\
 ## 已有 script 经验
 {existing_script_summary}
 
-## 用户优化方向（仅主动 review 时可能存在）
+## 用户优化方向
 {user_query}
 
 ## 决策原则
-- 只基于「信号」中暴露的确定性 execution_failure 或 script_artifact 生成经验
-- 「轨迹摘要」只能用于补充同一失败链路或脚本资产的直接上下文，不要从模糊协作质量、角色表现或一般流程偏差中推断新问题
 - 只沉淀 team skill 本身可复用的协作、角色、约束、工作流、排障或脚本经验
 - 环境、权限、网络、模型偶发现象通常应 skip 为 irrelevant
 - 不要重复已有经验；若有增量，可输出 merge_target
@@ -666,7 +664,7 @@ TEAM_EXPERIENCE_GENERATE_PROMPT_CN = """\
 """
 
 TEAM_EXPERIENCE_GENERATE_PROMPT_EN = """\
-You are a Team Skill optimization expert. Based on rule signals, the current team skill, relevant execution trajectory, and accumulated experience, generate reusable team evolution records.
+You are a Team Skill optimization expert. Based on the current team skill, execution trajectory, explicit user intent, and accumulated experience, generate reusable team evolution records.
 
 ## Output Format (MOST IMPORTANT)
 Your response must be a valid JSON array and nothing else.
@@ -693,12 +691,10 @@ Your response must be a valid JSON array and nothing else.
 ## Existing script experiences
 {existing_script_summary}
 
-## User optimization direction (only present for active review)
+## User optimization direction
 {user_query}
 
 ## Decision Rules
-- Generate experiences only from deterministic `execution_failure` or `script_artifact` entries exposed in "Signals"
-- Use "Trajectory Summary" only to add direct context for the same failure chain or script asset; do not infer new problems from ambiguous collaboration quality, role performance, or general workflow drift
 - Only capture reusable collaboration, role, constraint, workflow, troubleshooting, or script knowledge that belongs to the team skill itself
 - Environment, permission, network, and random model issues should usually be skipped as irrelevant
 - Do not duplicate existing records; use merge_target when there is clear incremental value

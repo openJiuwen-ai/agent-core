@@ -18,8 +18,6 @@ from typing import (
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan
-
 
 class TeamTopic(str, Enum):
     """Topic categories for team event routing."""
@@ -67,9 +65,6 @@ class TeamEvent:
     PLAN_APPROVAL = "plan_approval"
     TOOL_APPROVAL_RESULT = "tool_approval_result"
 
-    # Reliability events
-    ANOMALY_DETECTED = "anomaly_detected"
-
     # Messaging events
     MESSAGE = "message"
     BROADCAST = "broadcast"
@@ -84,9 +79,6 @@ class TeamEvent:
     TASK_CANCELLED = "task_cancelled"
     TASK_UNBLOCKED = "task_unblocked"
     TASK_LIST_DRAINED = "task_list_drained"
-
-    # Swarmflow orchestration progress (a swarmflow run feeding the spectator leader)
-    WORKFLOW_PROGRESS = "workflow_progress"
 
     # Worktree events
     WORKTREE_CREATED = "worktree_created"
@@ -258,36 +250,6 @@ class TaskListDrainedEvent(BaseEventMessage):
     task_count: int = Field(..., description="Total number of tasks in the all-terminal task list")
 
 
-class WorkflowProgressTeamEvent(BaseEventMessage):
-    """Published as a swarmflow run emits progress; consumed by the leader.
-
-    A single event type carries every progress kind (discriminated by ``kind``,
-    the engine's ``ProgressKind`` string value) so one handler method renders
-    all of them. The spectator leader narrates these to the user — it does not
-    drive the workflow. ``team_name`` routes the event on the team topic;
-    ``member_name`` stays None (the run is team-scoped, not member-scoped).
-    """
-
-    kind: str = Field(..., description="Progress kind: workflow_started / phase / "
-                                       "agent_started / agent_completed / agent_failed / "
-                                       "workflow_completed / workflow_failed / "
-                                       "log / ...")
-    run_id: Optional[str] = Field(
-        default=None, description="Unique run identifier, set by SwarmflowTool for all events of one run"
-    )
-    workflow_name: Optional[str] = Field(default=None, description="The swarmflow script's META name")
-    description: Optional[str] = Field(default=None, description="The swarmflow script's META description")
-    phase: Optional[str] = Field(default=None, description="Current phase title, when applicable")
-    label: Optional[str] = Field(default=None, description="Agent call label, on agent_* kinds")
-    prompt: Optional[str] = Field(default=None, description="Rendered agent prompt, on agent_started")
-    model: Optional[str] = Field(default=None, description="Model hint for the agent call, on agent_started")
-    outcome: Optional[str] = Field(default=None, description="Short result preview, on agent_completed")
-    text: Optional[str] = Field(default=None, description="Free narration text, on all kinds")
-    phases: Optional[list[PhasePlan]] = Field(
-        default=None, description="Static phase plan from META, on workflow_started"
-    )
-
-
 class WorktreeCreatedEvent(BaseEventMessage):
     """Published when a worktree is created or recovered."""
     worktree_name: str = Field(..., description="Worktree slug name")
@@ -328,23 +290,6 @@ class WorkspaceLockResponseEvent(BaseEventMessage):
     holder: dict | None = Field(default=None, description="Current lock holder info if not granted")
 
 
-class AnomalyDetectedEvent(BaseEventMessage):
-    """Published when a reliability detector flags an unhealthy member state.
-
-    Member-scoped: ``member_name`` (from BaseEventMessage) is the affected
-    member. Carried across processes so the leader's reliability handler can
-    route it through the remediation policy. ``kind`` and ``severity`` are the
-    string values of ``AnomalyKind`` / ``Severity`` so this schema stays
-    independent of the reliability package.
-    """
-    detector: str = Field(..., description="Detector identifier")
-    kind: str = Field(..., description="AnomalyKind value")
-    severity: str = Field(..., description="Severity value")
-    summary: str = Field(..., description="One-line description for human/LLM")
-    evidence: Dict[str, Any] = Field(default_factory=dict, description="Supporting evidence snapshot")
-    peer_member: Optional[str] = Field(default=None, description="Peer member for team-level anomalies")
-
-
 _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model class
     TeamEvent.CREATED: TeamCreatedEvent,
     TeamEvent.CLEANED: TeamCleanedEvent,
@@ -369,14 +314,12 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.TASK_CANCELLED: TaskCancelledEvent,
     TeamEvent.TASK_UNBLOCKED: TaskUnblockedEvent,
     TeamEvent.TASK_LIST_DRAINED: TaskListDrainedEvent,
-    TeamEvent.WORKFLOW_PROGRESS: WorkflowProgressTeamEvent,
     TeamEvent.WORKTREE_CREATED: WorktreeCreatedEvent,
     TeamEvent.WORKTREE_REMOVED: WorktreeRemovedEvent,
     TeamEvent.WORKSPACE_ARTIFACT_UPDATED: WorkspaceArtifactEvent,
     TeamEvent.WORKSPACE_CONFLICT: WorkspaceConflictEvent,
     TeamEvent.WORKSPACE_LOCK_REQUEST: WorkspaceLockRequestEvent,
     TeamEvent.WORKSPACE_LOCK_RESPONSE: WorkspaceLockResponseEvent,
-    TeamEvent.ANOMALY_DETECTED: AnomalyDetectedEvent,
 }
 
 _EVENT_CLASS_MAP: Dict[Type[BaseEventMessage], str] = {  # model class -> event_type

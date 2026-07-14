@@ -32,15 +32,6 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
-OPENAI_TRANSCRIPTION_ENDPOINT_MODELS = {
-    "gpt-4o-transcribe",
-    "gpt-4o-mini-transcribe",
-    "whisper-1",
-}
-DEFAULT_TRANSCRIPTION_QUESTION = (
-    "Transcribe all speech in this audio. Return only the transcript. "
-    "If the audio contains multiple speakers, preserve the spoken order."
-)
 
 
 def _is_http_url(value: str) -> bool:
@@ -97,14 +88,6 @@ def _require_audio_model_config(
 def _build_openai_client(config: AudioModelConfig) -> OpenAI:
     if not config.api_key:
         raise ValueError("Audio model config missing api_key.")
-    try:
-        config.api_key.encode("ascii")
-    except UnicodeEncodeError as exc:
-        raise ValueError(
-            "Audio model config api_key contains non-ASCII characters. "
-            "Check AUDIO_API_KEY or the configured API key; it must be the raw API key "
-            "without Chinese text, labels, quotes, or comments."
-        ) from exc
     return OpenAI(
         api_key=config.api_key,
         base_url=config.base_url,
@@ -228,27 +211,10 @@ def _extract_message_text(response: Any) -> str:
     return str(content).strip()
 
 
-def _normalize_audio_model_name(model_name: str) -> str:
-    return (model_name or "").strip().lower()
-
-
-def _uses_openai_transcription_endpoint(config: AudioModelConfig) -> bool:
-    return _normalize_audio_model_name(config.transcription_model) in OPENAI_TRANSCRIPTION_ENDPOINT_MODELS
-
-
 def _invoke_audio_transcription(
     config: AudioModelConfig,
     audio_path: str,
 ) -> str:
-    if not _uses_openai_transcription_endpoint(config):
-        text, _ = _invoke_audio_chat_completion(
-            config=config,
-            audio_path=audio_path,
-            question=DEFAULT_TRANSCRIPTION_QUESTION,
-            model=config.transcription_model,
-        )
-        return text
-
     client = _build_openai_client(config)
     with open(audio_path, "rb") as audio_file:
         transcription = client.audio.transcriptions.create(
@@ -261,18 +227,17 @@ def _invoke_audio_transcription(
     return text
 
 
-def _invoke_audio_chat_completion(
+def _invoke_audio_question_answering(
     config: AudioModelConfig,
     audio_path: str,
     question: str,
-    model: str,
 ) -> tuple[str, float]:
     client = _build_openai_client(config)
     encoded_string, file_format = _encode_audio_file(audio_path)
     duration = _get_audio_duration(audio_path)
 
     response = client.chat.completions.create(
-        model=model,
+        model=config.question_answering_model,
         messages=[
             {
                 "role": "system",
@@ -306,19 +271,6 @@ def _invoke_audio_chat_completion(
     if not answer:
         raise ValueError("Audio question answering returned empty content.")
     return answer, duration
-
-
-def _invoke_audio_question_answering(
-    config: AudioModelConfig,
-    audio_path: str,
-    question: str,
-) -> tuple[str, float]:
-    return _invoke_audio_chat_completion(
-        config=config,
-        audio_path=audio_path,
-        question=question,
-        model=config.question_answering_model,
-    )
 
 
 def _invoke_audio_metadata(

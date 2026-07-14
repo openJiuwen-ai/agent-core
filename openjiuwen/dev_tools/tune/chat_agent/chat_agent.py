@@ -40,10 +40,7 @@ class ChatAgent(BaseAgent):
     def __init__(self, agent_config: ChatAgentConfig):
         # Initialize BaseAgent
         super().__init__(agent_config)
-
-        # Initialize _session attribute for backward compatibility
-        self._session = None
-
+        
         # Initialize LLM Call
         llm_config = agent_config.model
         self._llm_call = LLMCall(
@@ -74,16 +71,8 @@ class ChatAgent(BaseAgent):
         session_id = inputs.pop("conversation_id", "default_session")
 
         if session is None:
-            if self._session is not None:
-                # Compatible with old usage without session
-                agent_session = self._session
-            else:
-                # Auto-create session if none provided
-                agent_session = create_agent_session(
-                    session_id=session_id,
-                    card=AgentCard(id=self.agent_config.id),
-                )
-                await agent_session.pre_run(inputs=inputs)
+            # Compatible with old usage without session
+            agent_session = self._session
         else:
             agent_session = session
 

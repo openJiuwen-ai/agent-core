@@ -12,7 +12,6 @@ from __future__ import annotations
 import copy
 import asyncio
 import time
-import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 
@@ -198,8 +197,8 @@ class ReActAgentConfig(BaseModel):
 
     context_engine_config: ContextEngineConfig = Field(
         default=ContextEngineConfig(
-            max_context_message_num=None,
-            default_window_round_num=None
+            max_context_message_num=200,
+            default_window_round_num=10
         ),
         description="Context engine configuration"
     )
@@ -210,11 +209,6 @@ class ReActAgentConfig(BaseModel):
     )
 
     workspace: Optional[Any] = Field(default=None, description="Workspace instance for filesystem operations")
-
-    parallel_tool_calls: bool = Field(
-        default=True,
-        description="Whether to execute tool calls in parallel (as opposed to in sequence)",
-    )
 
     def configure_model(self, model_name: str) -> 'ReActAgentConfig':
         """Configure model name
@@ -279,8 +273,8 @@ class ReActAgentConfig(BaseModel):
 
     def configure_context_engine(
             self,
-            max_context_message_num: Optional[int] = None,
-            default_window_round_num: Optional[int] = None,
+            max_context_message_num: Optional[int] = 200,
+            default_window_round_num: Optional[int] = 10,
             enable_reload: bool = False,
             enable_kv_cache_release: bool = False,
     ) -> 'ReActAgentConfig':
@@ -406,13 +400,6 @@ class ReActAgentConfig(BaseModel):
             processors: List[Tuple[str, BaseModel]]
     ) -> 'ReActAgentConfig':
         self.context_processors = processors
-        return self
-
-    def configure_parallel_tool_calls(
-            self,
-            parallel_tool_calls: bool
-    ) -> 'ReActAgentConfig':
-        self.parallel_tool_calls = parallel_tool_calls
         return self
 
 
@@ -729,17 +716,6 @@ class ReActAgent(BaseAgent):
             "system_messages": final_system,
             "tools": ctx.inputs.tools if ctx.inputs.tools else None,
         }
-        prompt_attachment_manager = getattr(self, "prompt_attachment_manager", None)
-        make_window_mutator = getattr(prompt_attachment_manager, "make_window_mutator", None)
-        if callable(make_window_mutator):
-            session_id = (
-                ctx.session.get_session_id()
-                if ctx.session is not None
-                else ctx.context.session_id()
-            )
-            context_window_kwargs["window_mutators"] = [
-                make_window_mutator(session_id)
-            ]
         if enable_kv_release and supports_kv_release:
             context_window_kwargs["model"] = llm
 
@@ -906,12 +882,7 @@ class ReActAgent(BaseAgent):
         for tool_call in tool_calls:
             logger.info(f"Executing tool: {tool_call.name} with args: {tool_call.arguments}")
 
-        results = await self.ability_manager.execute(
-            ctx=ctx, 
-            tool_call=tool_calls, 
-            session=session,
-            parallel_tool_calls=self._config.parallel_tool_calls,
-        )
+        results = await self.ability_manager.execute(ctx=ctx, tool_call=tool_calls, session=session)
 
         for tool_result, tool_message in results:
             if tool_message is not None:
@@ -1408,16 +1379,6 @@ class ReActAgent(BaseAgent):
                     for iteration in range(start_iteration, self._config.max_iterations):
                         logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
 
-                        # Honor force_finish requests set at iteration boundary
-                        # (e.g. by rails on AFTER_REACT_ITERATION). This lets a
-                        # graceful abort take effect at the top of the next
-                        # iteration, after the previous one fully completes.
-                        boundary_finish = ctx.consume_force_finish()
-                        if boundary_finish:
-                            await self.context_engine.save_contexts(session)
-                            invoke_inputs.result = boundary_finish.result
-                            break
-
                         # Inject pending steering messages
                         # before the next model call.
                         steering = ctx.drain_steering()
@@ -1493,23 +1454,10 @@ class ReActAgent(BaseAgent):
                         if workflow_interrupt:
                             await self._commit_interrupt(workflow_interrupt, context, session, invoke_inputs)
                             break
-
-                        # Iteration fully succeeded (LLM + all tools + ToolMessages
-                        # all written). Fire AFTER_REACT_ITERATION so rails (e.g.
-                        # SnapshotRail) can capture a safe-state snapshot.
-                        await ctx.fire(AgentCallbackEvent.AFTER_REACT_ITERATION)
                     else:
-                        # The loop exhausted its iteration budget. Honor a
-                        # force_finish requested by the final iteration's
-                        # AFTER_REACT_ITERATION hook (e.g. graceful abort),
-                        # which has no next iteration-top to consume it.
-                        boundary_finish = ctx.consume_force_finish()
                         await self.context_engine.save_contexts(session)
-                        if boundary_finish is not None:
-                            invoke_inputs.result = boundary_finish.result
-                        else:
-                            result = {"output": "Max iterations reached without completion", "result_type": "error"}
-                            invoke_inputs.result = result
+                        result = {"output": "Max iterations reached without completion", "result_type": "error"}
+                        invoke_inputs.result = result
 
             # after_invoke rails have fired; return result (possibly adapted by rails via ctx.extra)
             return ctx.extra.get("invoke_result", invoke_inputs.result)

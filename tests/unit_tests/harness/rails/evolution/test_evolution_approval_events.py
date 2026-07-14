@@ -78,8 +78,6 @@ def test_build_skill_approval_event_matches_existing_contract():
     assert len(event.payload["questions"]) == 2
     assert event.payload["questions"][0]["record_id"] == pending[0].id
     assert event.payload["questions"][1]["record_id"] == pending[1].id
-    for question in event.payload["questions"]:
-        assert "approval_detail" not in question
     assert "Skill 'skill-a'" in event.payload["questions"][0]["question"]
 
 
@@ -104,7 +102,6 @@ def test_build_simplify_approval_event_matches_existing_contract():
         "request_id": "evolve_simplify_1234",
     }
     assert event.payload["questions"][0]["header"] == "Skill 精简审批"
-    assert "approval_detail" not in event.payload["questions"][0]
     assert "共 2 项操作" in event.payload["questions"][0]["question"]
 
 
@@ -183,8 +180,6 @@ def test_build_team_skill_approval_event_from_records_matches_record_payloads():
         "request_id": "skill_evolve_team_records",
     }
     assert len(event.payload["questions"]) == 2
-    for question in event.payload["questions"]:
-        assert "approval_detail" not in question
     assert "Team Skill 'team-skill-a' evolution" in event.payload["questions"][0]["question"]
     assert "improve handoff" in event.payload["questions"][0]["question"]
     assert "add retry note" in event.payload["questions"][1]["question"]

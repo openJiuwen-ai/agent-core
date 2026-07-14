@@ -50,7 +50,6 @@ class TeamSectionName:
     HITT = "team_hitt"
     BRIDGE = "team_bridge"
     WORKFLOW = "team_workflow"
-    SWARMFLOW = "team_swarmflow"
     LIFECYCLE = "team_lifecycle"
     PERSONA = "team_persona"
     EXTRA = "team_extra"
@@ -221,35 +220,6 @@ def build_team_workflow_section(
     )
 
 
-def build_team_swarmflow_section(
-    *,
-    role: TeamRole,
-    enable_swarmflow: bool = False,
-    language: str = "cn",
-) -> Optional[PromptSection]:
-    """Build the swarmflow orchestration section (LEADER + enable_swarmflow).
-
-    Tells the leader it can drive a multi-agent workflow via the
-    ``swarmflow(script_path, args)`` tool when the user asks for swarmflow /
-    workflow orchestration, and that it then acts as a spectator — narrating
-    phase progress rather than coordinating members itself.
-
-    Returns:
-        PromptSection wrapping ``leader_swarmflow.md``; ``None`` for non-leader
-        roles or when ``enable_swarmflow`` is False.
-    """
-    if role != TeamRole.LEADER or not enable_swarmflow:
-        return None
-    heading = "# Swarmflow 编排模式" if language == "cn" else "# Swarmflow Orchestration Mode"
-    swarmflow_text = load_template("leader_swarmflow", language).content.strip()
-    body = f"{heading}\n\n{swarmflow_text}\n"
-    return PromptSection(
-        name=TeamSectionName.SWARMFLOW,
-        content={language: body},
-        priority=13,
-    )
-
-
 def build_team_lifecycle_section(
     *,
     role: TeamRole,
@@ -403,7 +373,7 @@ def _hitt_section_leader_cn(names: list[str]) -> str:
         "assignee=<他人>），即使团队因人类没及时响应而停滞也必须保持停滞，"
         "只能用 `send_message` 催促对应人类成员。\n"
         "4. 每个人类成员始终是 ready 状态，不会进入 busy 或 shutdown，"
-        "所以不要对它们调用 `shutdown_member` / `spawn_human_agent`。\n"
+        "所以不要对它们调用 `shutdown_member` / `spawn_member`。\n"
         "5. 如果 user 表达了“我也要加入团队”之类的加入意图，且团队尚未"
         "创建，请在 `build_team` 时把 `enable_hitt=true`；若需要多个不同"
         "人类成员，通过 `predefined_members` 传入 role=human_agent 的 spec。\n"
@@ -502,6 +472,8 @@ def _hitt_section_human_agent_cn(names: list[str], self_name: str | None) -> str
         "**只有**控制者在 Inbox 里下达明确指令时才能行动。\n"
         "- 如果控制者的指令需要文件读写、查看任务、提交结果，立即调用对应工具完成；"
         "完成后简洁地把结果回给控制者即可（你的回应只对控制者可见）。\n"
+        "- 第一次启动时如果只收到「Join the team and wait...」之类的占位消息，"
+        "**直接静默等待**，不要调用任何工具，不要广播任何文字。\n"
     )
 
 
@@ -525,7 +497,7 @@ def _hitt_section_leader_en(names: list[str]) -> str:
         "if the team stalls waiting for that human, it must stall — only "
         "`send_message` nudges to the specific human are allowed.\n"
         "4. Every human member stays READY forever; never call "
-        "`shutdown_member` or `spawn_human_agent` on them.\n"
+        "`shutdown_member` or `spawn_member` on them.\n"
         '5. If the user signals intent to join the team (e.g. "I want '
         'to join") and the team has not been created yet, call '
         "`build_team` with `enable_hitt=true`. If multiple distinct "
@@ -661,6 +633,10 @@ def _hitt_section_human_agent_en(names: list[str], self_name: str | None) -> str
         "lookup, or completion, call the right tool immediately, then "
         "reply to the controller with a concise result. Your reply is "
         "visible to the controller only.\n"
+        "- If the only input you ever received is a placeholder like "
+        '"Join the team and wait for your first assignment.", '
+        "**stay silent** — make no tool calls and emit no broadcast "
+        "text.\n"
     )
 
 
@@ -977,7 +953,6 @@ def build_team_static_sections(
     human_agent_names: list[str] | None = None,
     expose_human_agents_to_teammates: bool = False,
     bridge_agent_names: list[str] | None = None,
-    enable_swarmflow: bool = False,
 ) -> list[PromptSection]:
     """Build the never-changing team sections for one member.
 
@@ -1029,11 +1004,6 @@ def build_team_static_sections(
         build_team_workflow_section(
             role=role,
             team_mode=team_mode,
-            language=language,
-        ),
-        build_team_swarmflow_section(
-            role=role,
-            enable_swarmflow=enable_swarmflow,
             language=language,
         ),
         build_team_lifecycle_section(
@@ -1111,6 +1081,5 @@ __all__ = [
     "build_team_persona_section",
     "build_team_role_section",
     "build_team_static_sections",
-    "build_team_swarmflow_section",
     "build_team_workflow_section",
 ]

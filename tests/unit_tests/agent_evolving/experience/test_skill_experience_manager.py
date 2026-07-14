@@ -13,9 +13,6 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionTarget,
 )
 from openjiuwen.agent_evolving.experience import ExperienceProposal
-from openjiuwen.agent_evolving.experience.query import ExperienceQueryService
-from openjiuwen.agent_evolving.experience.rebuild import ExperienceRebuildService
-from openjiuwen.agent_evolving.experience.submission import ExperienceSubmissionService
 from openjiuwen.agent_evolving.experience.types import PendingChange
 from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
 from openjiuwen.agent_evolving.types import ApplyResult, UpdateValue
@@ -43,450 +40,10 @@ def _make_manager(*, language: str = "cn") -> ExperienceManager:
     manager = ExperienceManager(
         store=store,
         scorer=scorer,
+        kind="skill",
         language=language,
     )
     return manager
-
-
-def test_manager_accepts_shared_service_instances_for_injection():
-    store = Mock()
-    store.append_record = AsyncMock()
-    scorer = Mock()
-    query_service = ExperienceQueryService(store=store)
-    submission_service = ExperienceSubmissionService(store=store, pending_approval_snapshots={})
-    rebuild_service = ExperienceRebuildService(store=store)
-
-    manager = ExperienceManager(
-        store=store,
-        scorer=scorer,
-        language="cn",
-        query_service=query_service,
-        submission_service=submission_service,
-        rebuild_service=rebuild_service,
-    )
-
-    assert manager.experience_query_service is query_service
-    assert manager.experience_submission_service is submission_service
-    assert manager.rebuild_service is rebuild_service
-
-
-@pytest.mark.asyncio
-async def test_manager_list_skill_experiences_delegates_to_query_service(monkeypatch):
-    manager = _make_manager()
-    fake = AsyncMock(return_value={"operation": "list", "items": []})
-    monkeypatch.setattr(manager.experience_query_service, "list_experiences", fake)
-
-    result = await manager.list_skill_experiences({"kind": "skill", "name": "skill-a"}, limit=5)
-
-    assert result == {"operation": "list", "items": []}
-    fake.assert_awaited_once_with(
-        {"kind": "skill", "name": "skill-a"},
-        min_score=None,
-        limit=5,
-        cursor=None,
-        target=None,
-        section=None,
-        query=None,
-        sort="score_desc",
-    )
-
-
-@pytest.mark.asyncio
-async def test_manager_apply_experience_drafts_delegates_to_submission_service(monkeypatch):
-    manager = _make_manager()
-    fake = AsyncMock(return_value={"operation": "evolve", "success": True})
-    monkeypatch.setattr(manager.experience_submission_service, "apply_experience_drafts", fake)
-
-    result = await manager.apply_experience_drafts(
-        {"kind": "skill", "name": "skill-a"},
-        [{"summary": "Use parser fields", "content": "Prefer parser fields."}],
-        source="passive_agent",
-    )
-
-    assert result == {"operation": "evolve", "success": True}
-    fake.assert_awaited_once_with(
-        {"kind": "skill", "name": "skill-a"},
-        [{"summary": "Use parser fields", "content": "Prefer parser fields."}],
-        source="passive_agent",
-    )
-
-
-@pytest.mark.asyncio
-async def test_manager_request_rebuild_delegates_to_rebuild_service(monkeypatch):
-    manager = _make_manager(language="en")
-    fake = AsyncMock(
-        return_value={
-            "subject": {"kind": "skill", "name": "skill-a"},
-            "records": [],
-            "overflow_index": {"items": []},
-        }
-    )
-    monkeypatch.setattr(manager.rebuild_service, "prepare_rebuild_context", fake)
-
-    prompt = await manager.request_rebuild("skill-a", user_intent="optimize")
-
-    assert prompt is not None
-    assert "evolve_rebuild" in prompt
-    fake.assert_awaited_once_with(
-        {"kind": "skill", "name": "skill-a"},
-        user_intent="optimize",
-        min_score=0.5,
-        max_context_records=40,
-        max_context_chars=20000,
-    )
-
-
-@pytest.mark.asyncio
-async def test_manager_uses_shared_query_service_for_supported_subject_kinds():
-    store = Mock()
-    scorer = Mock()
-    query_service = ExperienceQueryService(store=store)
-    query_service.list_experiences = AsyncMock(
-        side_effect=[
-            {"operation": "list", "subject": {"kind": "skill", "name": "skill-a"}},
-            {"operation": "list", "subject": {"kind": "swarm-skill", "name": "team-a"}},
-        ]
-    )
-
-    manager = ExperienceManager(
-        store=store,
-        scorer=scorer,
-        query_service=query_service,
-    )
-
-    asyncio_result = await manager.list_skill_experiences(
-        {"kind": "skill", "name": "skill-a"},
-    )
-    assert asyncio_result["subject"]["kind"] == "skill"
-
-    asyncio_swarm_result = await manager.list_skill_experiences(
-        {"kind": "team-skill", "name": "team-a"},
-    )
-    assert asyncio_swarm_result["subject"]["kind"] == "swarm-skill"
-
-    assert query_service.list_experiences.await_count == 2
-    query_service.list_experiences.assert_any_await(
-        {"kind": "skill", "name": "skill-a"},
-        min_score=None,
-        limit=20,
-        cursor=None,
-        target=None,
-        section=None,
-        query=None,
-        sort="score_desc",
-    )
-    query_service.list_experiences.assert_any_await(
-        {"kind": "team-skill", "name": "team-a"},
-        min_score=None,
-        limit=20,
-        cursor=None,
-        target=None,
-        section=None,
-        query=None,
-        sort="score_desc",
-    )
-
-
-@pytest.mark.asyncio
-async def test_manager_uses_shared_submission_service_for_supported_subject_kinds():
-    store = Mock()
-    scorer = Mock()
-    store.skill_exists.return_value = True
-    store.append_record = AsyncMock()
-    submission_service = ExperienceSubmissionService(store=store, pending_approval_snapshots={})
-    submission_service.apply_experience_drafts = AsyncMock(
-        side_effect=[
-            {"subject": {"kind": "skill", "name": "skill-a"}, "operation": "evolve", "request_id": "skill"},
-            {"subject": {"kind": "swarm-skill", "name": "team-a"}, "operation": "evolve", "request_id": "swarm"},
-        ]
-    )
-
-    manager = ExperienceManager(
-        store=store,
-        scorer=scorer,
-        submission_service=submission_service,
-    )
-
-    await manager.apply_experience_drafts(
-        {"kind": "skill", "name": "skill-a"},
-        [{"summary": "For skill", "content": "skill record"}],
-    )
-    await manager.apply_experience_drafts(
-        {"kind": "team-skill", "name": "team-a"},
-        [{"summary": "For swarm", "content": "swarm record"}],
-    )
-
-    assert submission_service.apply_experience_drafts.await_count == 2
-    submission_service.apply_experience_drafts.assert_any_await(
-        {"kind": "skill", "name": "skill-a"},
-        [{"summary": "For skill", "content": "skill record"}],
-        source="agent_evolve_tool",
-    )
-    submission_service.apply_experience_drafts.assert_any_await(
-        {"kind": "team-skill", "name": "team-a"},
-        [{"summary": "For swarm", "content": "swarm record"}],
-        source="agent_evolve_tool",
-    )
-
-
-def test_manager_bind_pending_approval_snapshots_rebinds_shared_submission_service():
-    store = Mock()
-    scorer = Mock()
-    first_snapshots = {"seed": PendingChange.make("seed", [])}
-    submission_service = ExperienceSubmissionService(store=store, pending_approval_snapshots=first_snapshots)
-
-    manager = ExperienceManager(
-        store=store,
-        scorer=scorer,
-        submission_service=submission_service,
-    )
-
-    shared: dict[str, PendingChange] = {}
-    manager.bind_pending_approval_snapshots(shared)
-
-    assert manager.pending_approval_snapshots is shared
-    assert submission_service._pending_approval_snapshots is shared
-
-
-@pytest.mark.asyncio
-async def test_request_rebuild_uses_shared_service_with_subject_envelope():
-    store = Mock()
-    scorer = Mock()
-    store.skill_exists.return_value = True
-    rebuild_service = ExperienceRebuildService(store=store)
-    rebuild_service.prepare_rebuild_context = AsyncMock(
-        side_effect=[
-            {
-                "subject": {"kind": "skill", "name": "skill-a"},
-                "records": [],
-                "overflow_index": {"items": []},
-                "skill_name": "skill-a",
-                "min_score": 0.5,
-            },
-            {
-                "subject": {"kind": "swarm-skill", "name": "team-a"},
-                "records": [],
-                "overflow_index": {"items": []},
-                "skill_name": "team-a",
-                "min_score": 0.5,
-            },
-        ]
-    )
-    manager = ExperienceManager(
-        store=store,
-        scorer=scorer,
-        rebuild_service=rebuild_service,
-    )
-
-    await manager.request_rebuild(
-        "skill-a",
-        subject={"kind": "skill", "name": "skill-a"},
-        user_intent="optimize skill",
-    )
-    await manager.request_rebuild(
-        "team-a",
-        subject={"kind": "team-skill", "name": "team-a"},
-        user_intent="optimize team",
-    )
-
-    assert rebuild_service.prepare_rebuild_context.await_count == 2
-    rebuild_service.prepare_rebuild_context.assert_any_await(
-        {"kind": "skill", "name": "skill-a"},
-        user_intent="optimize skill",
-        min_score=0.5,
-        max_context_records=40,
-        max_context_chars=20000,
-    )
-    rebuild_service.prepare_rebuild_context.assert_any_await(
-        {"kind": "team-skill", "name": "team-a"},
-        user_intent="optimize team",
-        min_score=0.5,
-        max_context_records=40,
-        max_context_chars=20000,
-    )
-
-
-@pytest.mark.asyncio
-async def test_list_skill_experiences_uses_subject_envelope():
-    manager = _make_manager()
-    record = _make_record(content="Keep structured fields.")
-    record.id = "ev_1"
-    record.summary = "Use structured fields when parsing output."
-    manager._store.skill_exists.return_value = True
-    manager._store.get_records_by_score = AsyncMock(return_value=[record])
-
-    result = await manager.list_skill_experiences(
-        {"kind": "skill", "name": "skill-a"},
-        min_score=0.5,
-        limit=20,
-    )
-
-    assert result["subject"] == {"kind": "skill", "name": "skill-a"}
-    assert result["total_count"] == 1
-    assert result["items"][0]["record_id"] == "ev_1"
-    assert result["items"][0]["summary"] == "Use structured fields when parsing output."
-    assert "content" not in result["items"][0]
-
-
-@pytest.mark.asyncio
-async def test_list_skill_experiences_query_uses_pipe_separated_or_terms():
-    manager = _make_manager()
-    parser_record = _make_record(content="Prefer structured parser fields.")
-    parser_record.id = "ev_parser"
-    parser_record.summary = "Use parser fields when parsing output."
-    other_record = _make_record(content="Keep final reports concise.")
-    other_record.id = "ev_report"
-    other_record.summary = "Keep final reports concise."
-    manager._store.skill_exists.return_value = True
-    manager._store.get_records_by_score = AsyncMock(return_value=[other_record, parser_record])
-
-    result = await manager.list_skill_experiences(
-        {"kind": "skill", "name": "skill-a"},
-        query="capture|parser|lesson",
-    )
-
-    assert result["total_count"] == 1
-    assert [item["record_id"] for item in result["items"]] == ["ev_parser"]
-
-
-@pytest.mark.asyncio
-async def test_list_skill_experiences_query_supports_chinese_literal_terms():
-    manager = _make_manager()
-    parser_record = _make_record(content="解析器失败时记录原始输入。")
-    parser_record.id = "ev_parser_cn"
-    parser_record.summary = "解析器失败时避免重复记录。"
-    other_record = _make_record(content="生成报告时保持格式一致。")
-    other_record.id = "ev_report_cn"
-    other_record.summary = "生成报告时保持格式一致。"
-    manager._store.skill_exists.return_value = True
-    manager._store.get_records_by_score = AsyncMock(return_value=[other_record, parser_record])
-
-    result = await manager.list_skill_experiences(
-        {"kind": "skill", "name": "skill-a"},
-        query="解析器|重复|记录",
-    )
-
-    assert result["total_count"] == 1
-    assert [item["record_id"] for item in result["items"]] == ["ev_parser_cn"]
-
-
-@pytest.mark.asyncio
-async def test_list_skill_experiences_query_treats_spaces_as_literal_text():
-    manager = _make_manager()
-    parser_record = _make_record(content="Prefer structured parser fields.")
-    parser_record.id = "ev_parser"
-    parser_record.summary = "Use parser fields when parsing output."
-    manager._store.skill_exists.return_value = True
-    manager._store.get_records_by_score = AsyncMock(return_value=[parser_record])
-
-    result = await manager.list_skill_experiences(
-        {"kind": "skill", "name": "skill-a"},
-        query="capture parser lesson",
-    )
-
-    assert result["total_count"] == 0
-    assert result["items"] == []
-
-
-@pytest.mark.asyncio
-async def test_read_agent_experiences_requires_record_ids():
-    manager = _make_manager()
-    record = _make_record(content="Keep structured fields.")
-    record.id = "ev_1"
-    manager._store.skill_exists.return_value = True
-    manager._store.load_records_by_ids = AsyncMock(return_value=[record])
-
-    result = await manager.read_agent_experiences(
-        {"kind": "skill", "name": "skill-a"},
-        record_ids=["ev_1"],
-        max_content_chars=8,
-    )
-
-    assert result["operation"] == "read"
-    assert result["items"][0]["record_id"] == "ev_1"
-    assert result["items"][0]["content"] == "Keep str"
-
-
-@pytest.mark.asyncio
-async def test_apply_experience_drafts_persists_records():
-    manager = _make_manager()
-    manager._store.skill_exists.return_value = True
-    manager._store.append_record = AsyncMock()
-
-    result = await manager.apply_experience_drafts(
-        {"kind": "skill", "name": "skill-a"},
-        [{"summary": "Use parser fields", "content": "Prefer structured parser fields."}],
-    )
-
-    assert result["operation"] == "evolve"
-    assert result["success"] is True
-    assert result["applied_count"] == 1
-    assert result["pending_count"] == 0
-    assert len(result["record_ids"]) == 1
-    manager._store.append_record.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_apply_simplify_drafts_executes_actions():
-    manager = _make_manager()
-    record = _make_record(content="Old content")
-    record.id = "ev_1"
-    manager._store.skill_exists.return_value = True
-    manager._store.load_full_evolution_log = AsyncMock(return_value=Mock(entries=[record]))
-    manager._store.update_record_content = AsyncMock(return_value=record)
-
-    result = await manager.apply_simplify_drafts(
-        {"kind": "skill", "name": "skill-a"},
-        [{"action": "REFINE", "record_id": "ev_1", "new_content": "Better content"}],
-    )
-
-    assert result["operation"] == "simplify"
-    assert result["success"] is True
-    assert result["applied_count"] == 1
-    assert result["action_counts"]["refined"] == 1
-
-
-@pytest.mark.asyncio
-async def test_apply_experience_drafts_retains_unwritten_tail_on_partial_failure():
-    manager = _make_manager()
-    manager._store.skill_exists.return_value = True
-    manager._store.append_record = AsyncMock(side_effect=[None, RuntimeError("disk full")])
-
-    result = await manager.apply_experience_drafts(
-        {"kind": "skill", "name": "skill-a"},
-        [
-            {"summary": "First", "content": "First content."},
-            {"summary": "Second", "content": "Second content."},
-        ],
-    )
-
-    assert result["success"] is False
-    assert result["status"] == "partial"
-    assert result["applied_count"] == 1
-    assert result["pending_count"] == 1
-    assert result["retry_request_id"] == result["request_id"]
-    assert result["errors"] == ["disk full"]
-    assert result["request_id"] in manager.pending_approval_snapshots
-    assert len(manager.pending_approval_snapshots[result["request_id"]].payload) == 1
-
-
-@pytest.mark.asyncio
-async def test_apply_simplify_drafts_reports_partial_failure_when_action_errors():
-    manager = _make_manager()
-    record = _make_record(content="Old content")
-    record.id = "ev_1"
-    manager._store.skill_exists.return_value = True
-    manager._store.load_full_evolution_log = AsyncMock(return_value=Mock(entries=[record]))
-    manager._store.update_record_content = AsyncMock(return_value=None)
-
-    result = await manager.apply_simplify_drafts(
-        {"kind": "skill", "name": "skill-a"},
-        [{"action": "REFINE", "record_id": "ev_1", "new_content": "Better content"}],
-    )
-
-    assert result["success"] is False
-    assert result["applied_count"] == 0
-    assert result["action_counts"]["errors"] == 1
 
 
 @pytest.mark.asyncio
@@ -516,7 +73,7 @@ async def test_commit_proposal_uses_shared_lifecycle(monkeypatch):
     assert result.applied_count == 1
     assert captured["approved_request_id"] == captured["request_id"]
     assert manager.pending_approval_snapshots == {}
-    manager._store.append_record.assert_awaited_once_with("skill-a", record, subject_kind=None)
+    manager._store.append_record.assert_awaited_once_with("skill-a", record)
 
 
 def test_stage_records_registers_pending_change_in_snapshot_store():
@@ -725,7 +282,7 @@ async def test_approve_request_applies_pending_snapshot_and_clears_on_success():
     assert result.to_host_result(request_id=pending.request_id).status == "persisted"
     assert result.to_host_result(request_id=pending.request_id).applied_count == 1
     assert pending.request_id not in manager.pending_approval_snapshots
-    manager._store.append_record.assert_awaited_once_with("skill-a", record, subject_kind=None)
+    manager._store.append_record.assert_awaited_once_with("skill-a", record)
 
 
 @pytest.mark.asyncio
@@ -741,7 +298,7 @@ async def test_approve_request_applies_only_approved_record_ids():
     assert result.rejected_count == 1
     assert result.pending_count == 0
     assert pending.request_id not in manager.pending_approval_snapshots
-    manager._store.append_record.assert_awaited_once_with("skill-a", record_1, subject_kind=None)
+    manager._store.append_record.assert_awaited_once_with("skill-a", record_1)
 
 
 @pytest.mark.asyncio
@@ -766,7 +323,7 @@ async def test_approve_request_failure_retries_only_approved_record_ids():
     assert retry.applied_count == 1
     assert retry.rejected_count == 0
     assert retry.pending_count == 0
-    manager._store.append_record.assert_awaited_once_with("skill-a", record_1, subject_kind=None)
+    manager._store.append_record.assert_awaited_once_with("skill-a", record_1)
 
 
 @pytest.mark.asyncio
@@ -819,7 +376,7 @@ async def test_retry_request_reuses_unified_lifecycle_for_pending_batch():
 
     assert second.applied_count == 1
     assert second.pending_count == 0
-    manager._store.append_record.assert_awaited_once_with("skill-a", record_2, subject_kind=None)
+    manager._store.append_record.assert_awaited_once_with("skill-a", record_2)
 
 
 @pytest.mark.asyncio
@@ -889,30 +446,4 @@ async def test_request_rebuild_uses_shared_helper_and_template():
     assert prompt is not None
     assert "good experience" in prompt
     assert "skill-creator" in prompt.lower()
-    manager._store.clear_evolutions.assert_awaited_once_with("skill-a", subject_kind="skill")
-
-
-@pytest.mark.asyncio
-async def test_request_rebuild_inlines_deterministic_context_and_clears_archived_evolutions():
-    manager = _make_manager()
-    record = _make_record(content="Always validate inputs strictly.")
-    record.id = "ev_1"
-    record.summary = "Prefer strict validation."
-    record.score = 0.9
-    manager._store.skill_exists.return_value = True
-    manager._store.archive_skill_body = AsyncMock(return_value="SKILL.archive.md")
-    manager._store.archive_evolutions = AsyncMock(return_value="evolutions.archive.json")
-    manager._store.clear_evolutions = AsyncMock()
-    manager._store.load_full_evolution_log = AsyncMock(return_value=Mock(entries=[record]))
-
-    prompt = await manager.request_rebuild(
-        "skill-a",
-        user_intent="make it stricter",
-        min_score=0.5,
-        max_context_records=40,
-        max_context_chars=20000,
-    )
-
-    assert "Deterministic Rebuild Context" in prompt
-    assert "Always validate inputs strictly." in prompt
-    manager._store.clear_evolutions.assert_awaited_once_with("skill-a", subject_kind="skill")
+    manager._store.clear_evolutions.assert_awaited_once_with("skill-a")

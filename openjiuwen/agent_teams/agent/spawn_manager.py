@@ -202,16 +202,6 @@ class SpawnManager:
             return None
         return getattr(handle, "agent_ref", None)
 
-    def has_live_handle(self, member_name: str) -> bool:
-        """Return whether ``member_name`` already has a registered spawn handle.
-
-        A present handle means the member was spawned in this runtime and has
-        not been cleaned up; ``recover_team`` uses this to skip re-spawning a
-        teammate that is already running (unhealthy members are restarted via
-        the ``on_unhealthy`` callback, not by ``recover_team``).
-        """
-        return self.spawned_handles.get(member_name) is not None
-
     async def cleanup_teammate(self, member_name: str) -> None:
         handle = self.spawned_handles.pop(member_name, None)
         if handle is None:
@@ -244,12 +234,8 @@ class SpawnManager:
         if team_backend is None:
             return False
 
-        # Restart / recover must not replay the member's first-start
-        # instruction: ``initial_message`` stays None so no harness.send is
-        # triggered. The member re-subscribes and recovers via its mailbox;
-        # only real pending messages drive a round. The member's existence is
-        # already validated by ``build_context_from_db`` above.
-        initial_message = None
+        teammate = await team_backend.get_member(member_name)
+        initial_message = teammate.prompt if teammate else None
         spawn_config = SpawnConfig(health_check_timeout=30, health_check_interval=50)
 
         for attempt in range(1, max_retries + 1):

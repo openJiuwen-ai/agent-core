@@ -401,17 +401,11 @@ async def test_openjiuwen_agent_remote_interop_should_support_invoke_and_stream(
             remote_agent_id,
             {"query": invoke_query, "conversation_id": invoke_session_id},
         )
-        assert invoke_result.status == TaskStatus.COMPLETED
+        assert invoke_result.status == TaskStatus.SUBMITTED
         assert invoke_result.task_id
         assert invoke_result.sessionId == invoke_session_id
         assert invoke_result.task_id != invoke_result.sessionId
-        assert any(
-            artifact.parts
-            and artifact.parts[0].text
-            and server_id in artifact.parts[0].text
-            and invoke_query in artifact.parts[0].text
-            for artifact in invoke_result.artifacts
-        )
+        assert not invoke_result.artifacts
 
         stream_query = "stream a2a"
         stream_session_id = "conv-2"
@@ -450,17 +444,11 @@ async def test_openjiuwen_agent_client_should_access_third_party_a2a_server_for_
             remote_agent_id,
             {"query": invoke_query, "conversation_id": invoke_session_id},
         )
-        assert invoke_result.status == TaskStatus.COMPLETED
+        assert invoke_result.status == TaskStatus.SUBMITTED
         assert invoke_result.sessionId == invoke_session_id
         assert invoke_result.task_id
         assert invoke_result.task_id != invoke_result.sessionId
-        assert any(
-            artifact.parts
-            and artifact.parts[0].text
-            and server_id in artifact.parts[0].text
-            and invoke_query in artifact.parts[0].text
-            for artifact in invoke_result.artifacts
-        )
+        assert not invoke_result.artifacts
 
         stream_query = "stream third-party"
         stream_session_id = "conv-4"

@@ -54,7 +54,6 @@ from openjiuwen.agent_teams.schema.team import (
     TeamRuntimeContext,
     TeamSpec,
 )
-from openjiuwen.agent_teams.reliability import ReliabilityConfig
 from openjiuwen.agent_teams.spawn import InProcessSpawnHandle
 from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 
@@ -98,5 +97,4 @@ __all__ = [
     "create_messager",
     "InProcessSpawnHandle",
     "MemoryDatabaseConfig",
-    "ReliabilityConfig",
 ]

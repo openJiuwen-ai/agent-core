@@ -29,7 +29,7 @@ from openjiuwen.core.runner.resources_manager.resource_registry import ResourceR
 from openjiuwen.core.runner.resources_manager.tag_manager import TagMgr
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
-from openjiuwen.core.sys_operation import SysOperationCard, SysOperation
+from openjiuwen.core.sys_operation import SysOperationCard, SysOperation, OperationMode
 from openjiuwen.core.sys_operation.tool_adapter import SysOperationToolAdapter
 from openjiuwen.core.sys_operation.registry import OperationRegistry
 from openjiuwen.core.workflow.workflow import Workflow
@@ -405,7 +405,6 @@ class ResourceMgr:
                  *,
                  tag: Optional[Tag | list[Tag]] = None,
                  refresh: bool = False,
-                 skip_if_exists: bool = False,
                  ) -> Result[ToolCard, Exception] | list[Result[ToolCard, Exception]]:
         """
         Add tool(s) to the resource manager.
@@ -414,15 +413,11 @@ class ResourceMgr:
             tool: Single Tool instance or list of Tool instances to add.
             tag: Optional tag(s) for categorizing and filtering the tool(s).
             refresh: When True, an existing registration sharing the same tool id
-                is dropped (with a warning) before the new instance is registered.
-                Required for stateful tools bound to a specific agent/session
-                instance (e.g. team-scoped tools) so a restart can rebind to the
-                new instance instead of being rejected as a duplicate. Defaults to
-                False to preserve the strict "no duplicate registration" guarantee.
-            skip_if_exists: When True, an existing registration sharing the same
-                tool id is kept and the add becomes an idempotent no-op (returns
-                Ok). Suited for stateless tools (module-level singletons) shared
-                across agents under their bare id. Defaults to False.
+                is dropped before the new instance is registered. Required for
+                stateful tools bound to a specific agent/session instance (e.g.
+                team-scoped tools) so a restart can rebind to the new instance
+                instead of being rejected as a duplicate. Defaults to False to
+                preserve the strict "no duplicate registration" guarantee.
 
         Returns:
             Result[ToolCard, Exception] or list[Result[ToolCard, Exception]]:
@@ -432,9 +427,6 @@ class ResourceMgr:
         if tag is not None:
             self._inner_validate_tag(tag)
         if isinstance(tool, Tool):
-            skipped = self._skip_existing_tool_if_needed(tool, skip_if_exists=skip_if_exists)
-            if skipped is not None:
-                return skipped
             self._refresh_existing_tool_if_needed(tool, refresh=refresh)
             return self._inner_add_resource(resource_id=tool.card.id if tool.card else None,
                                             resource=tool,
@@ -443,10 +435,6 @@ class ResourceMgr:
                                             resource_type="tool")
         results = []
         for item in tool:
-            skipped = self._skip_existing_tool_if_needed(item, skip_if_exists=skip_if_exists)
-            if skipped is not None:
-                results.append(skipped)
-                continue
             self._refresh_existing_tool_if_needed(item, refresh=refresh)
             results.append(self._inner_add_resource(resource_id=item.card.id,
                                                     resource=item,
@@ -455,29 +443,12 @@ class ResourceMgr:
                                                     resource_type="tool"))
         return results
 
-    def _skip_existing_tool_if_needed(self, tool: Tool, *, skip_if_exists: bool) -> Optional[Result]:
-        """Return an Ok no-op when an existing same-id registration should be kept.
-
-        Returns the existing tool card wrapped in ``Ok`` (skip the add) when
-        ``skip_if_exists`` is True and the tool id is already registered;
-        otherwise returns ``None`` so the caller proceeds with the normal add.
-        """
-        if not skip_if_exists:
-            return None
-        if tool.card is None:
-            return None
-        tool_id = tool.card.id
-        if not self._tag_mgr.has_resource(tool_id):
-            return None
-        return Ok(self._id_to_card.get(tool_id, tool.card))
-
     def _refresh_existing_tool_if_needed(self, tool: Tool, *, refresh: bool) -> None:
         """Drop an existing tool registration so a fresh instance can replace it.
 
         No-op when ``refresh`` is False, the tool has no card, or the id is not
         currently registered. Otherwise reuses the standard remove path so the
-        registry, tag map and id-to-card cache stay in sync, logging a warning
-        because a different instance is replacing the previous registration.
+        registry, tag map and id-to-card cache stay in sync.
         """
         if not refresh:
             return
@@ -486,11 +457,6 @@ class ResourceMgr:
         tool_id = tool.card.id
         if not self._tag_mgr.has_resource(tool_id):
             return
-        logger.warning(
-            "Tool id already registered; refreshing to the new instance: tool_id=%s tool_name=%s",
-            tool_id,
-            tool.card.name,
-        )
         self._inner_remove_resources(resource_id=tool_id,
                                      tag=None,
                                      resource_type="tool")
@@ -1297,7 +1263,7 @@ class ResourceMgr:
                                                            skip_if_not_exists=skip_if_tag_not_exists)
             for resource_id in resource_to_removal:
                 self._resource_registry.remove_by_id(resource_id)
-            logger.info("remove tag succeed",
+            logger.info(f"remove tag succeed",
                         event_type=LogEventType.RESOURCE_MGR_REMOVE_TAG,
                         tag=single_tag,
                         metadata={"removal_resource_ids": resource_to_removal})
@@ -1433,13 +1399,13 @@ class ResourceMgr:
         try:
             if self._tag_mgr.has_resource(resource_id):
                 raise build_error(StatusCode.RESOURCE_ADD_ERROR, card=resource_card if resource_card else resource_id,
-                                  reason='resource already exist')
+                                  reason=f'resource already exist')
             self._dispatch_add(resource_type, resource_id, resource,
                                resource_card=resource_card, interface_url=interface_url)
             if resource_card:
                 self._id_to_card[resource_id] = resource_card
             self._tag_mgr.tag_resource(resource_id, tag if tag else GLOBAL)
-            logger.info("add resource succeed",
+            logger.info(f"add resource succeed",
                         event_type=LogEventType.RESOURCE_MGR_ADD_RESOURCE,
                         resource_id=resource_id,
                         resource_type=resource_type,
@@ -1447,7 +1413,7 @@ class ResourceMgr:
                         card=resource_card.to_str() if resource_card else None)
             return Ok(resource_card if resource_card else resource_id)
         except Exception as e:
-            logger.error("add resource failed",
+            logger.error(f"add resource failed",
                          event_type=LogEventType.RESOURCE_MGR_ADD_RESOURCE,
                          resource_id=resource_id,
                          resource_type=resource_type,
@@ -1497,7 +1463,7 @@ class ResourceMgr:
                     error = e
             removed_card = self._id_to_card.pop(remove_id, None)
             if error:
-                logger.error("remove resource failed",
+                logger.error(f"remove resource failed",
                              event_type=LogEventType.RESOURCE_MGR_REMOVE_RESOURCE,
                              resource_id=remove_id,
                              resource_type=resource_type,
@@ -1809,7 +1775,7 @@ class ResourceMgr:
             raise build_error(
                 StatusCode.RESOURCE_ID_VALUE_INVALID,
                 resource_type=resource_type,
-                reason="cannot be empty or None"
+                reason=f"cannot be empty or None"
             )
 
         if not isinstance(resource_id, str):
@@ -1826,7 +1792,7 @@ class ResourceMgr:
             raise build_error(
                 StatusCode.RESOURCE_ID_VALUE_INVALID,
                 resource_type=resource_type,
-                reason="string id cannot be empty or whitespace only"
+                reason=f"string id cannot be empty or whitespace only"
             )
 
     @staticmethod
@@ -1884,7 +1850,7 @@ class ResourceMgr:
             raise build_error(
                 StatusCode.RESOURCE_PROVIDER_INVALID,
                 resource_type=resource_type,
-                reason=" cannot be empty: expected a non-empty list of (card, callable) pairs"
+                reason=f" cannot be empty: expected a non-empty list of (card, callable) pairs"
             )
 
         for idx, item in enumerate(providers):
@@ -2060,7 +2026,7 @@ class ResourceMgr:
                 StatusCode.RESOURCE_PROVIDER_INVALID,
                 resource_type=resource_type,
                 reason=(
-                    "provider cannot be None, must be a callable function"
+                    f"provider cannot be None, must be a callable function"
                 )
             )
         if not (resource_type == "agent" and _is_remote_agent(provider)):

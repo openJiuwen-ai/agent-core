@@ -34,8 +34,6 @@ def _make_ability_manager():
     am = MagicMock()
     am.add = MagicMock(return_value=MagicMock(added=True))
     am.remove = MagicMock()
-    am.add_ability = MagicMock(return_value=MagicMock(added=True))
-    am.remove_ability = MagicMock()
     return am
 
 
@@ -130,26 +128,26 @@ class TestLspRailInitMethod:
     def test_registers_tool_instance_in_resource_manager(self):
         rail = LspRail()
         agent = _make_agent()
-        with _patch_init_deps(agent) as (_, _, mock_tool):
+        with _patch_init_deps(agent) as (_, MockRunner, mock_tool):
             rail.init(agent)
-        agent.ability_manager.add_ability.assert_called_once_with(mock_tool.card, mock_tool)
+        MockRunner.resource_mgr.add_tool.assert_called_once_with(mock_tool)
 
     def test_resource_mgr_receives_tool_not_card(self):
         """resource_mgr.add_tool 必须收到 Tool 实例，而非 ToolCard。"""
         rail = LspRail()
         agent = _make_agent()
-        with _patch_init_deps(agent) as (_, _, mock_tool):
+        with _patch_init_deps(agent) as (_, MockRunner, mock_tool):
             rail.init(agent)
-        card_arg, resource_arg = agent.ability_manager.add_ability.call_args[0]
-        assert resource_arg is mock_tool
-        assert card_arg is mock_tool.card
+        arg = MockRunner.resource_mgr.add_tool.call_args[0][0]
+        assert arg is mock_tool
+        assert arg is not mock_tool.card
 
     def test_registers_tool_card_in_ability_manager(self):
         rail = LspRail()
         agent = _make_agent()
         with _patch_init_deps(agent) as (_, _, mock_tool):
             rail.init(agent)
-        agent.ability_manager.add_ability.assert_called_once_with(mock_tool.card, mock_tool)
+        agent.ability_manager.add.assert_called_once_with(mock_tool.card)
 
     def test_initialized_flag_set_after_success(self):
         rail = LspRail()
@@ -274,7 +272,15 @@ class TestLspRailUninit:
         mock_tool = self._init_rail(rail, agent)
         with _patch_uninit_deps():
             rail.uninit(agent)
-        agent.ability_manager.remove_ability.assert_called_once_with(mock_tool.card.name)
+        agent.ability_manager.remove.assert_called_once_with(mock_tool.card.name)
+
+    def test_removes_tool_from_resource_manager(self):
+        rail = LspRail()
+        agent = _make_agent()
+        mock_tool = self._init_rail(rail, agent)
+        with _patch_uninit_deps() as MockRunner:
+            rail.uninit(agent)
+        MockRunner.resource_mgr.remove_tool.assert_called_once_with(mock_tool.card.id)
 
     def test_clears_lsp_tool_reference(self):
         rail = LspRail()

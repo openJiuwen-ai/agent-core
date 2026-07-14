@@ -99,13 +99,6 @@ class MyTool(Tool):
                 id="my_tool",
                 name="my_tool",
                 description="工具描述",
-                input_params={
-                    "type": "object",
-                    "properties": {
-                        "param1": {"type": "string", "description": "参数1描述"},
-                    },
-                    "required": ["param1"],
-                },
             )
         )
 
@@ -120,11 +113,6 @@ class MyTool(Tool):
 Tool 实现约束：
 - `ToolCard.id` 和 `ToolCard.name` 都必须显式设置；推荐二者一致
 - `ToolCard.description` 要写清楚触发场景，帮助模型在普通 query 中主动调用该工具
-- **`ToolCard.input_params`（参数 schema）必须符合 JSON Schema 规范**：
-  - 即使工具无参数，也必须显式设置 `input_params={"type": "object", "properties": {}}`
-  - 禁止省略 `input_params` 或设置为空字典 `{}`，否则会导致模型 API 报错 `schema must be a JSON Schema of 'type: "object"'`
-  - 禁止 `type` 字段缺失或为 `null`，`type` 必须是 `"object"` 字符串
-  - 有参数时，`properties` 中每个参数必须包含 `type` 和 `description`，`required` 列出必填参数名
 - 如果 Tool 需要读取 Rail 采集的数据，必须通过文件系统状态交互；不要通过 Tool 构造函数注入 Rail 实例
 - 如果无法获取真实运行时数据，Tool 必须返回明确的降级字段，例如 `estimated: true`、`source: "estimated"` 或错误说明
 - 文件/产物生成类 Tool 必须在返回 `success=true` 前完成自校验：输出路径存在、`size_bytes > 0`、format 与文件后缀一致，并返回 `path` 或 `absolute_path`、`exists`、`format`、`size_bytes` 等结构化字段

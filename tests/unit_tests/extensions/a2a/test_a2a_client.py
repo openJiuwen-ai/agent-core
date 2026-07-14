@@ -177,7 +177,8 @@ class TestA2AClient:
         assert captured["sdk_closed"] is True
 
     @pytest.mark.asyncio
-    async def test_invoke_should_return_aggregated_result_from_full_event_stream(self, monkeypatch):
+    async def test_invoke_should_return_first_event_when_polling_disabled(self, monkeypatch):
+        # The fake stream yields two events to prove invoke() stops after the first one.
         class FakeConnectedClient:
             def send_message(self, request):
                 async def stream():
@@ -221,12 +222,98 @@ class TestA2AClient:
                                             (),
                                             {"state": 3},
                                         )(),
+                                        "artifacts": [],
+                                        "metadata": {},
+                                    },
+                                )(),
+                                "HasField": lambda self, name: name == "task",
+                            },
+                        )(),
+                        None,
+                    )
+                return stream()
+
+            async def close(self):
+                return None
+
+        class FakeClientFactory:
+            def __init__(self, config):
+                return None
+
+            def create(self, card):
+                return FakeConnectedClient()
+
+        class FakeClientConfig:
+            def __init__(self):
+                return None
+
+        monkeypatch.setattr("openjiuwen.extensions.a2a.a2a_client.ClientConfig", FakeClientConfig)
+        monkeypatch.setattr("openjiuwen.extensions.a2a.a2a_client.ClientFactory", FakeClientFactory)
+
+        card = AgentCard(name="fake-agent", description="fake")
+        client = A2AClient(card=card)
+        try:
+            result = await client.invoke({"query": "hello invoke", "sessionId": "conv-invoke-1"})
+        finally:
+            await client.stop()
+
+        assert isinstance(result, AgentResult)
+        assert result.task_id == "sdk-task-2"
+        assert result.sessionId == "conv-invoke-1"
+        assert result.status == TaskStatus.WORKING
+        assert not result.artifacts
+
+    @pytest.mark.asyncio
+    async def test_invoke_should_return_first_event_when_polling_enabled(self, monkeypatch):
+        class FakeConnectedClient:
+            def send_message(self, request):
+                async def stream():
+                    yield (
+                        type(
+                            "FakeStreamResponse",
+                            (),
+                            {
+                                "status_update": type(
+                                    "FakeStatusUpdate",
+                                    (),
+                                    {
+                                        "task_id": "sdk-task-3",
+                                        "context_id": "sdk-context-3",
+                                        "status": type(
+                                            "FakeTaskStatus",
+                                            (),
+                                            {"state": 2},
+                                        )(),
+                                        "metadata": {},
+                                    },
+                                )(),
+                                "HasField": lambda self, name: name == "status_update",
+                            },
+                        )(),
+                        None,
+                    )
+                    yield (
+                        type(
+                            "FakeStreamResponse",
+                            (),
+                            {
+                                "task": type(
+                                    "FakeTask",
+                                    (),
+                                    {
+                                        "id": "sdk-task-3",
+                                        "context_id": "sdk-context-3",
+                                        "status": type(
+                                            "FakeTaskStatus",
+                                            (),
+                                            {"state": 3},
+                                        )(),
                                         "artifacts": [
                                             type(
                                                 "FakeArtifact",
                                                 (),
                                                 {
-                                                    "artifact_id": "artifact-2",
+                                                    "artifact_id": "artifact-3",
                                                     "name": "response",
                                                     "description": "",
                                                     "parts": [
@@ -276,14 +363,14 @@ class TestA2AClient:
         monkeypatch.setattr("openjiuwen.extensions.a2a.a2a_client.ClientFactory", FakeClientFactory)
 
         card = AgentCard(name="fake-agent", description="fake")
-        client = A2AClient(card=card)
+        client = A2AClient(card=card, polling=True)
         try:
-            result = await client.invoke({"query": "hello invoke", "sessionId": "conv-invoke-1"})
+            result = await client.invoke({"query": "hello invoke", "sessionId": "conv-invoke-2"})
         finally:
             await client.stop()
 
         assert isinstance(result, AgentResult)
-        assert result.task_id == "sdk-task-2"
-        assert result.sessionId == "conv-invoke-1"
-        assert result.status == TaskStatus.COMPLETED
-        assert result.artifacts[0].parts[0].text == "final result"
+        assert result.task_id == "sdk-task-3"
+        assert result.sessionId == "conv-invoke-2"
+        assert result.status == TaskStatus.WORKING
+        assert not result.artifacts

@@ -12,7 +12,6 @@ from openjiuwen.core.sys_operation.cwd import (
 )
 
 ALLOWED_SOURCE_EDIT_PREFIXES = (
-    "jiuwenswarm/",
     "openjiuwen/harness/",
     "openjiuwen/core/",
 )
@@ -65,10 +64,10 @@ def render_edit_scope(
     """Render a stable edit-scope block for prompts."""
     return (
         f"{header}:\n"
-        "- 源码路径允许 `jiuwenswarm/**`、`openjiuwen/harness/**`、`openjiuwen/core/**`\n"
-        "- `jiuwenswarm/**`、`openjiuwen/harness/**`、`openjiuwen/core/**` 下的模块内 "
+        "- 源码路径只允许 `openjiuwen/harness/**`、`openjiuwen/core/**`\n"
+        "- `openjiuwen/harness/**`、`openjiuwen/core/**` 下的模块内 "
         "README/Markdown 视为源码目录内容，可正常修改，例如 "
-        "`jiuwenswarm/agents/harness/README.md` 或 `openjiuwen/harness/cli/README.md`\n"
+        "`openjiuwen/harness/cli/README.md`\n"
         "- 配套文件允许新增或修改 `tests/**`、`examples/**`\n"
         "- 如果任务需要新增或更新仓库级文档，只能写入 `docs/en/` 和 `docs/zh/` 下的 Markdown 文件；不要在 `docs/` 根目录或其他子目录新增文档\n"
         "- 不要修改 `openjiuwen/auto_harness/**` 或其他源码目录\n"

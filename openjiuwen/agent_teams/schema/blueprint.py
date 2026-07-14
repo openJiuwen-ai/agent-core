@@ -33,7 +33,6 @@ from openjiuwen.agent_teams.constants import (
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.memory import TeamMemoryConfig
 from openjiuwen.agent_teams.models.pool import ModelPoolEntry, ModelRouterConfig
-from openjiuwen.agent_teams.reliability.config import ReliabilityConfig
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
     BridgeMemberSpec,
@@ -336,17 +335,6 @@ class TeamAgentSpec(BaseModel):
     - ``enable_bridge=True`` with no BRIDGE_AGENT predefined → allowed
       (dynamic spawn path).
     """
-    enable_swarmflow: bool = False
-    """Spec-level capability gate for swarmflow orchestration.
-
-    True wires the leader-only ``swarmflow(script_path, args)`` tool, which
-    runs a swarmflow script (a multi-agent workflow) in the background. The
-    script's ``agent()`` calls execute as single-shot ``WORKER`` members via
-    the team worker backend, and phase progress is streamed back to the leader
-    (a spectator) which narrates it to the user. False (default) hides the
-    tool. Workers reuse the leader's model; no separate worker spec is required
-    for the MVP. See ``openjiuwen/agent_teams/workflow``.
-    """
     language: Optional[str] = None
     """Preferred language for prompts and tool descriptions ("cn" or "en").
 
@@ -356,61 +344,21 @@ class TeamAgentSpec(BaseModel):
     at ``build()`` time via ``resolve_language()``.
     """
 
-    build_context: Optional[Any] = Field(
+    agent_customizer: Optional[Callable[..., None]] = Field(
         default=None,
         exclude=True,
     )
-    """Optional runtime carrier for provider-based capability assembly.
-
-    Holds a ``BuildContext`` subclass with live, non-serializable handles
-    (excluded from JSON). ``setup_agent`` derives a per-member view from it to
-    thread into ``DeepAgentSpec.build``.
-    Typed as ``Any`` so Pydantic does not attempt to build a schema for the
-    opaque carrier. Across a serialization boundary it is rebuilt from
-    ``build_context_seed`` via ``materialize_build_context`` rather than relying
-    on in-process survival.
-    """
-
-    build_context_seed: Optional[dict[str, Any]] = Field(default=None)
-    """Serializable seed used to rebuild ``build_context`` after deserialization.
-
-    Unlike ``build_context`` this travels with ``model_dump`` / ``model_validate``.
-    The platform fills it (a plain mapping of primitives) alongside
-    ``build_context``; the receiving side calls ``materialize_build_context`` to
-    turn it back into a live ``BuildContext`` through the registered factory
-    (``register_build_context_factory``).
-    """
+    """Optional callback invoked on each member's DeepAgent after creation."""
 
     memory: Optional[TeamMemoryConfig] = None
     """Optional team memory configuration. When enabled, TeamMemoryManager
     replaces default MemoryRail/CodingMemoryRail with per-member isolated instances."""
-
-    reliability: Optional[ReliabilityConfig] = None
-    """Optional team reliability framework configuration. Opt-in via
-    ``reliability.enabled``; attaches a monitoring rail to the configured roles
-    and a remediation handler on the leader."""
 
     """
     Signature: ``(deep_agent: DeepAgent) -> None``.
     Used by platform adapters to inject additional rails / tools.
     Not serializable — only usable with in-process spawn mode.
     """
-
-    def materialize_build_context(self) -> None:
-        """Rebuild ``build_context`` from ``build_context_seed`` when missing.
-
-        Idempotent: acts only when ``build_context`` is None and a seed is
-        present, so the in-process path (live context already set) and the
-        legacy path (no seed) are both untouched. Called on the
-        receiving side of a serialization boundary (``from_spawn_payload`` /
-        ``recover_from_session``) before ``configure`` so provider-based members
-        rebuild their capabilities declaratively from the registered factory.
-        """
-        if self.build_context is not None or not self.build_context_seed:
-            return
-        from openjiuwen.agent_teams.schema.build_context import build_context_from_seed
-
-        self.build_context = build_context_from_seed(self.build_context_seed)
 
     @model_validator(mode="after")
     def _validate_pool_router_exclusive(self) -> "TeamAgentSpec":

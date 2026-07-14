@@ -125,9 +125,7 @@ async def test_operator_message_broadcasts_when_target_none():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_human_agent_message_drives_avatar_when_no_target():
-    """HumanAgentMessage with no target/mention drives the avatar via its
-    own coordination (``interact`` → USER_INPUT), not a harness reach-in.
-    """
+    """HumanAgentMessage with no target/mention drives the avatar's DeepAgent."""
     agent = _make_agent()
     agent.team_backend.human_agent_names = AsyncMock(return_value={"human_alice"})
 
@@ -137,8 +135,7 @@ async def test_human_agent_message_drives_avatar_when_no_target():
     )
 
     assert result.ok
-    agent._avatar.interact.assert_awaited_once_with("please summarise design.md")
-    agent._avatar.deliver_input.assert_not_called()
+    agent._avatar.deliver_input.assert_awaited_once_with("please summarise design.md")
     agent.team_backend.message_manager.send_message.assert_not_called()
 
 
@@ -222,8 +219,7 @@ async def test_interact_str_dollar_prefix_drives_human_agent():
     result = await manager.interact("$alice please summarise", team_name="alpha", session_id="s1")
 
     assert result.ok
-    agent._avatar.interact.assert_awaited_once_with("please summarise")
-    agent._avatar.deliver_input.assert_not_called()
+    agent._avatar.deliver_input.assert_awaited_once_with("please summarise")
     agent.deliver_input.assert_not_called()
 
 
@@ -321,7 +317,7 @@ async def test_interact_str_unknown_member_dollar_drives_avatar():
     result = await manager.interact("$alice @ghost hi", team_name="alpha", session_id="s1")
 
     assert result.ok
-    agent._avatar.interact.assert_awaited_once_with("@ghost hi")
+    agent._avatar.deliver_input.assert_awaited_once_with("@ghost hi")
     agent.team_backend.message_manager.send_message.assert_not_called()
 
 

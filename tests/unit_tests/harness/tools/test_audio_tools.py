@@ -67,48 +67,6 @@ def test_audio_transcription_tool_transcribes_local_audio(
     assert result.data["model"] == "mock-transcribe"
 
 
-def test_audio_transcription_tool_uses_chat_audio_for_non_endpoint_model(
-    tmp_path: Path,
-    monkeypatch,
-):
-    audio_path = tmp_path / "sample.wav"
-    _write_test_wav(audio_path)
-    audio_model_config = AudioModelConfig(
-        api_key="test-key",
-        base_url="https://example.com/v1",
-        transcription_model="gemini-2.5-flash",
-    )
-    expected_audio_path = str(audio_path)
-
-    def fake_invoke_audio_chat_completion(config, audio_path, question, model):
-        assert config is audio_model_config
-        assert audio_path == expected_audio_path
-        assert "Transcribe all speech" in question
-        assert model == "gemini-2.5-flash"
-        return "chat audio transcript", 1.0
-
-    monkeypatch.setattr(
-        "openjiuwen.harness.tools.multimodal.audio._invoke_audio_chat_completion",
-        fake_invoke_audio_chat_completion,
-    )
-
-    async def _run():
-        await Runner.start()
-        try:
-            tool = AudioTranscriptionTool(
-                audio_model_config=audio_model_config,
-            )
-            return await tool.invoke({"audio_path_or_url": str(audio_path)})
-        finally:
-            await Runner.stop()
-
-    result = asyncio.run(_run())
-
-    assert result.success is True
-    assert result.data["text"] == "chat audio transcript"
-    assert result.data["model"] == "gemini-2.5-flash"
-
-
 def test_audio_question_answering_tool_returns_answer_and_duration(
     tmp_path: Path,
     monkeypatch,
@@ -154,36 +112,6 @@ def test_audio_question_answering_tool_returns_answer_and_duration(
     assert result.data["answer"] == "A person says hello."
     assert result.data["duration_seconds"] == 1.0
     assert result.data["model"] == "mock-audio-qa"
-
-
-def test_audio_question_answering_reports_non_ascii_api_key(tmp_path: Path):
-    audio_path = tmp_path / "sample.wav"
-    _write_test_wav(audio_path)
-    audio_model_config = AudioModelConfig(
-        api_key="sk-test中文",
-        base_url="https://example.com/v1",
-        question_answering_model="gemini-2.5-flash",
-    )
-
-    async def _run():
-        await Runner.start()
-        try:
-            tool = AudioQuestionAnsweringTool(
-                audio_model_config=audio_model_config,
-            )
-            return await tool.invoke(
-                {
-                    "audio_path_or_url": str(audio_path),
-                    "question": "请转写这段音频",
-                }
-            )
-        finally:
-            await Runner.stop()
-
-    result = asyncio.run(_run())
-
-    assert result.success is False
-    assert "api_key contains non-ASCII characters" in result.error
 
 
 def test_audio_metadata_tool_returns_duration_when_acr_missing(tmp_path: Path):
@@ -262,16 +190,3 @@ def test_audio_model_config_from_env(monkeypatch):
     assert config.max_retries == 5
     assert config.acr_access_key == "acr-key"
     assert config.acr_access_secret == "acr-secret"
-
-
-def test_audio_model_config_from_env_uses_shared_audio_model_name(monkeypatch):
-    monkeypatch.setenv("AUDIO_API_KEY", "audio-key")
-    monkeypatch.setenv("AUDIO_BASE_URL", "https://audio.example.com/v1")
-    monkeypatch.setenv("AUDIO_MODEL_NAME", "gemini-2.5-flash")
-    monkeypatch.delenv("AUDIO_TRANSCRIPTION_MODEL", raising=False)
-    monkeypatch.delenv("AUDIO_QUESTION_ANSWERING_MODEL", raising=False)
-
-    config = AudioModelConfig.from_env()
-
-    assert config.transcription_model == "gemini-2.5-flash"
-    assert config.question_answering_model == "gemini-2.5-flash"

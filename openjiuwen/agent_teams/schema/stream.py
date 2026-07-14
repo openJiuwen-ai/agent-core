@@ -41,13 +41,7 @@ class TeamOutputSchema(OutputSchema):
         Returns a new instance; the original ``base`` is not mutated so
         DeepAgent internals retain their object identity.
         """
-        return cls(
-            type=base.type,
-            index=base.index,
-            payload=base.payload,
-            source_member=source_member,
-            role=role,
-        )
+        return cls(**base.model_dump(), source_member=source_member, role=role)
 
 
 __all__ = ["TeamOutputSchema"]

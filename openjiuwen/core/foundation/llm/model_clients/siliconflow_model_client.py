@@ -522,6 +522,12 @@ class SiliconFlowModelClient(BaseModelClient):
             output_tokens = usage.get("completion_tokens", 0) or 0
             total_tokens = usage.get("total_tokens", 0) or 0
 
+            # Extract cached token information
+            cache_tokens = 0
+            prompt_tokens_details = usage.get("prompt_tokens_details")
+            if prompt_tokens_details:
+                cache_tokens = prompt_tokens_details.get("cached_tokens", 0) or 0
+
             # Extract cost information if available
             input_cost, output_cost, total_cost = self._extract_cost_info(usage)
 
@@ -530,7 +536,7 @@ class SiliconFlowModelClient(BaseModelClient):
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
-                cache_tokens=self._extract_cache_tokens(usage),
+                cache_tokens=cache_tokens,
                 input_cost=input_cost,
                 output_cost=output_cost,
                 total_cost=total_cost,
@@ -644,21 +650,13 @@ class SiliconFlowModelClient(BaseModelClient):
                     input_tokens=usage.get("prompt_tokens", 0) or 0,
                     output_tokens=usage.get("completion_tokens", 0) or 0,
                     total_tokens=usage.get("total_tokens", 0) or 0,
-                    cache_tokens=self._extract_cache_tokens(usage),
                     input_cost=input_cost,
                     output_cost=output_cost,
                     total_cost=total_cost,
                 )
 
             # Skip empty chunks
-            is_response_empty = (
-                    not content
-                    and not reasoning_content
-                    and not tool_calls
-                    and not usage_metadata
-            )
-
-            if is_response_empty:
+            if not content and not reasoning_content and not tool_calls:
                 return None
 
             return AssistantMessageChunk(

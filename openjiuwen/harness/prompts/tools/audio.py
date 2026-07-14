@@ -22,11 +22,7 @@ AUDIO_QUESTION_ANSWERING_DESCRIPTION: Dict[str, str] = {
 
 AUDIO_METADATA_DESCRIPTION: Dict[str, str] = {
     "cn": "识别音频时长，并在配置了 ACR 信息时尝试识别歌曲标题、歌手和发布时间。",
-    "en": (
-        "Inspect audio duration and optionally identify song metadata when ACR "
-        "credentials are configured. This tool cannot transcribe speech or "
-        "answer questions about spoken content."
-    ),
+    "en": "Inspect audio duration and optionally identify song metadata when ACR credentials are configured.",
 }
 
 AUDIO_TRANSCRIPTION_PARAMS: Dict[str, Dict[str, str]] = {

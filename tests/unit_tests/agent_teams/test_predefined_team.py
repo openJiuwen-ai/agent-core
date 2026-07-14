@@ -2,7 +2,7 @@
 
 """Unit tests for predefined team feature."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -193,25 +193,22 @@ class TestBuildTeamWithoutPredefinedMembers:
 
 
 class TestToolExclusion:
-    """Test spawn_teammate is excluded from leader tools in predefined mode."""
+    """Test spawn_member is excluded from leader tools in predefined mode."""
 
     @pytest.mark.level0
-    def test_exclude_spawn_teammate_when_predefined(self, predefined_members):
+    def test_exclude_spawn_member_when_predefined(self, predefined_members):
         agent_team = AsyncMock()
-        agent_team.hitt_enabled = MagicMock(return_value=False)
-        agent_team.bridge_enabled = MagicMock(return_value=False)
-        agent_team.external_cli_kinds = MagicMock(return_value=frozenset())
         agent_team.is_leader = True
 
         tools = create_team_tools(
             role="leader",
             agent_team=agent_team,
-            exclude_tools={"spawn_teammate"},
+            exclude_tools={"spawn_member"},
         )
         tool_names = {t.card.name for t in tools}
         logger.info("Leader tools with exclusion: {}", tool_names)
 
-        assert "spawn_teammate" not in tool_names
+        assert "spawn_member" not in tool_names
         assert "build_team" in tool_names
         assert "shutdown_member" in tool_names
         assert "create_task" in tool_names
@@ -219,9 +216,6 @@ class TestToolExclusion:
     @pytest.mark.level1
     def test_no_exclusion_without_predefined(self):
         agent_team = AsyncMock()
-        agent_team.hitt_enabled = MagicMock(return_value=False)
-        agent_team.bridge_enabled = MagicMock(return_value=False)
-        agent_team.external_cli_kinds = MagicMock(return_value=frozenset())
         agent_team.is_leader = True
 
         tools = create_team_tools(
@@ -231,20 +225,17 @@ class TestToolExclusion:
         tool_names = {t.card.name for t in tools}
         logger.info("Leader tools without exclusion: {}", tool_names)
 
-        assert "spawn_teammate" in tool_names
+        assert "spawn_member" in tool_names
 
     @pytest.mark.level1
     def test_exclude_does_not_affect_teammate_tools(self):
         agent_team = AsyncMock()
-        agent_team.hitt_enabled = MagicMock(return_value=False)
-        agent_team.bridge_enabled = MagicMock(return_value=False)
-        agent_team.external_cli_kinds = MagicMock(return_value=frozenset())
         agent_team.is_leader = False
 
         tools = create_team_tools(
             role="teammate",
             agent_team=agent_team,
-            exclude_tools={"spawn_teammate"},
+            exclude_tools={"spawn_member"},
         )
         tool_names = {t.card.name for t in tools}
 
@@ -254,9 +245,6 @@ class TestToolExclusion:
     def test_leader_has_approval_tools_in_plan_mode(self):
         """Leader must get approve_plan and approve_tool in plan_mode — required for plan review."""
         agent_team = AsyncMock()
-        agent_team.hitt_enabled = MagicMock(return_value=False)
-        agent_team.bridge_enabled = MagicMock(return_value=False)
-        agent_team.external_cli_kinds = MagicMock(return_value=frozenset())
         agent_team.is_leader = True
 
         tools = create_team_tools(
@@ -274,9 +262,6 @@ class TestToolExclusion:
     def test_leader_no_approval_tools_in_build_mode(self):
         """build_mode has no plan workflow — approval tools must be excluded from the leader."""
         agent_team = AsyncMock()
-        agent_team.hitt_enabled = MagicMock(return_value=False)
-        agent_team.bridge_enabled = MagicMock(return_value=False)
-        agent_team.external_cli_kinds = MagicMock(return_value=frozenset())
         agent_team.is_leader = True
 
         tools = create_team_tools(
@@ -294,9 +279,6 @@ class TestToolExclusion:
     def test_teammate_does_not_have_approval_tools(self):
         """approve_plan / approve_tool are leader-only, regardless of mode."""
         agent_team = AsyncMock()
-        agent_team.hitt_enabled = MagicMock(return_value=False)
-        agent_team.bridge_enabled = MagicMock(return_value=False)
-        agent_team.external_cli_kinds = MagicMock(return_value=frozenset())
         agent_team.is_leader = False
 
         for mode in ("build_mode", "plan_mode"):
@@ -341,7 +323,7 @@ class TestPredefinedTeamPrompt:
         logger.info("Predefined prompt length: {}", len(prompt))
 
         assert "预定义团队模式" in prompt
-        assert "spawn_teammate" in prompt
+        assert "spawn_member" in prompt
 
     @pytest.mark.level1
     def test_auto_team_prompt_no_override(self):
@@ -366,7 +348,7 @@ class TestPredefinedTeamPrompt:
         )
 
         assert "混合团队模式" in prompt
-        assert "spawn_teammate" in prompt
+        assert "spawn_member" in prompt
 
     @pytest.mark.level1
     def test_predefined_workflow_not_applied_to_teammate(self):

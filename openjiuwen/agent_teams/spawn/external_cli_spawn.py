@@ -142,10 +142,10 @@ async def external_cli_spawn(
     # the team will message it when a task is assigned.
     base_query = initial_message or (
         "You have joined the team. Call read_inbox once now. If you already have "
-        "an assigned task, complete it fully: claim_task to take it, do the work, "
-        "then claim_task again with status=\"completed\" and send_message to report. "
-        "If there is no task yet, just acknowledge briefly and END YOUR TURN now — "
-        "do NOT wait, poll, or loop; the team will message you when there is work."
+        "an assigned task, complete it fully: claim_task, do the work, then "
+        "complete_task and send_message to report. If there is no task yet, just "
+        "acknowledge briefly and END YOUR TURN now — do NOT wait, poll, or loop; "
+        "the team will message you when there is work."
     )
     # CLIs that accept the system prompt as a launch arg (claude) already carry
     # it; CLIs without such a flag get it prepended to their first user message.

@@ -24,6 +24,7 @@ import os
 from typing import TYPE_CHECKING
 
 from openjiuwen.core.common.logging import agent_logger
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.sys_operation.cwd import set_cwd, set_original_cwd
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -130,15 +131,19 @@ class WorktreeRail(DeepAgentRail):
             ExitWorktreeTool(self._manager, language=lang, agent_id=agent_id),
         ]
 
+        Runner.resource_mgr.add_tool(self._tools)
         for tool in self._tools:
-            agent.ability_manager.add_ability(tool.card, tool)
+            agent.ability_manager.add(tool.card)
 
     def uninit(self, agent) -> None:
         """Detach the tools and drop the manager reference."""
         for tool in self._tools:
             name = getattr(tool.card, "name", None)
             if name and hasattr(agent, "ability_manager"):
-                agent.ability_manager.remove_ability(name)
+                agent.ability_manager.remove(name)
+            tool_id = getattr(tool.card, "id", None)
+            if tool_id:
+                Runner.resource_mgr.remove_tool(tool_id)
         self._tools = []
         self._manager = None
 

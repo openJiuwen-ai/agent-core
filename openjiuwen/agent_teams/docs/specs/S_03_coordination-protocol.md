@@ -8,7 +8,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/coordination/` |
-| 最近一次修订日期 | 2026-06-05 |
+| 最近一次修订日期 | 2026-05-26 |
 | 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md`、`F_14_human-agent-team-event-rendering.md` |
 
 ## 范围 / 边界
@@ -253,7 +253,7 @@ class CoordinationKernel:
 
     async def enqueue(self, event: Any) -> None: ...
     async def enqueue_user_input(self, inputs: Any) -> None: ...
-    async def enqueue_initial_mailbox_poll(self) -> None: ...
+    async def enqueue_mailbox_after_first_iteration(self) -> None: ...
     async def wake_mailbox_if_interrupt_cleared(self) -> None: ...
 
     async def subscribe_transport(self, team_name: str) -> None: ...
@@ -303,7 +303,7 @@ leader-only。遍历 spawn_manager 持有的 live teammate handle，跳过 `UNST
 | 方法 | 用途 | 角色约束 |
 |---|---|---|
 | `enqueue_user_input(inputs)` | 把字符串或 `{"query": ...}` dict 包成 `InnerEventMessage(USER_INPUT)` 入队，`invoke()` / `interact()` 共用 | 无 |
-| `enqueue_initial_mailbox_poll()` | 直接投首个 `POLL_MAILBOX`，让 teammate 起来后做第一次邮箱 sweep（成员 runtime 已由 `start` 先行启动，单 supervisor 模型下 `FirstIterationGate` 已删，不再等门控） | 仅 teammate（leader 直接 return） |
+| `enqueue_mailbox_after_first_iteration()` | 等 `first_iter_gate` 后投 `POLL_MAILBOX`，让 teammate 第一次邮箱 sweep 不与启动竞争 | 仅 teammate（leader 直接 return） |
 | `wake_mailbox_if_interrupt_cleared()` | 在没有 pending interrupt 时投 `POLL_MAILBOX`，避免 interrupt 解除后邮件留底 | 仅 teammate |
 
 ### 四铁律

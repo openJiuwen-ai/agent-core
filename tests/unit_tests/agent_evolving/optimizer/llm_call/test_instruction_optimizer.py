@@ -8,9 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from openjiuwen.agent_evolving.dataset import Case, EvaluatedCase
-from openjiuwen.agent_evolving.optimizer.llm_call.instruction_optimizer import InstructionOptimizer
-from openjiuwen.agent_evolving.signal.base import EvolutionSignal
 from openjiuwen.agent_evolving.signal.from_eval import from_evaluated_case
+from openjiuwen.agent_evolving.signal.base import EvolutionSignal
+from openjiuwen.agent_evolving.optimizer.llm_call.instruction_optimizer import InstructionOptimizer
 from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 
 
@@ -72,36 +72,6 @@ class TestInstructionOptimizerInit:
         """Init with model configs."""
         optimizer, _ = make_instruction_optimizer()
         assert optimizer.parameters() == {}
-
-
-def test_select_signals_uses_current_signal_types():
-    optimizer = InstructionOptimizer.__new__(InstructionOptimizer)
-    signals = [
-        make_signal(signal_type="user_correction", score=1.0),
-        make_signal(signal_type="user_intent", score=1.0),
-        make_signal(signal_type="execution_failure", score=1.0),
-        EvolutionSignal(
-            signal_type="collaboration",
-            section="Collaboration",
-            excerpt="send",
-            context={"collaboration_event": "send", "score": 1.0},
-        ),
-        EvolutionSignal(
-            signal_type="collaboration",
-            section="Collaboration",
-            excerpt="failure",
-            context={"collaboration_event": "failure", "score": 1.0},
-        ),
-    ]
-
-    selected = optimizer._select_signals(signals)
-
-    assert [signal.signal_type for signal in selected] == [
-        "user_intent",
-        "execution_failure",
-        "collaboration",
-    ]
-    assert selected[-1].context["collaboration_event"] == "failure"
 
 
 class TestInstructionOptimizerBackward:

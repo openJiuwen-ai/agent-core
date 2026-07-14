@@ -267,13 +267,7 @@ def build_team_skill_approval_event_from_records(
         skill_name=skill_name,
         request_id=request_id,
         questions=(
-            {
-                "section": record.change.section,
-                "content": record.change.content,
-                "record_id": record.id,
-                "summary": record.summary or "",
-                "target": record.change.target.value,
-            }
+            {"section": record.change.section, "content": record.change.content, "record_id": record.id}
             for record in records
         ),
         language=language,

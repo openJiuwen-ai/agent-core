@@ -193,10 +193,15 @@ class ContextUtils:
         enable_openrouter_model_context_window_tokens: bool = False,
         openrouter_request_timeout: float = 3.0,
     ) -> Dict[str, int]:
-        """Build explicit model context windows and optionally warm the OpenRouter cache."""
+        """Build model context windows, letting explicit user values override OpenRouter metadata."""
+        resolved_tokens = {}
         if enable_openrouter_model_context_window_tokens:
-            ContextUtils.fetch_openrouter_model_context_window_tokens(openrouter_request_timeout)
-        return dict(model_context_window_tokens) if model_context_window_tokens else {}
+            resolved_tokens.update(
+                ContextUtils.fetch_openrouter_model_context_window_tokens(openrouter_request_timeout)
+            )
+        if model_context_window_tokens:
+            resolved_tokens.update(model_context_window_tokens)
+        return resolved_tokens
 
     @staticmethod
     def validate_messages(messages: BaseMessage | List[BaseMessage]) -> None:
@@ -255,8 +260,7 @@ class ContextUtils:
         1. Explicit ``fallback_context_window_tokens`` if set and positive.
         2. Look up ``model_name`` in ``model_context_window_tokens`` dict.
         3. Look up ``model_name`` in the built-in ``MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS`` dict.
-        4. Look up ``model_name`` in cached OpenRouter metadata.
-        5. Return ``DEFAULT_CONTEXT_MAX_TOKENS`` (200000).
+        4. Return ``DEFAULT_CONTEXT_MAX_TOKENS`` (200000).
         """
         if isinstance(fallback_context_window_tokens, int) and fallback_context_window_tokens > 0:
             return fallback_context_window_tokens
@@ -269,9 +273,6 @@ class ContextUtils:
             builtin = MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS.get(model_name)
             if isinstance(builtin, int) and builtin > 0:
                 return builtin
-            openrouter = _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS.get(model_name)
-            if isinstance(openrouter, int) and openrouter > 0:
-                return openrouter
 
         return DEFAULT_CONTEXT_MAX_TOKENS
 

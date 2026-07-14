@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.controller.modules.event_handler import (
@@ -22,15 +22,13 @@ from openjiuwen.core.controller.schema.event import (
 )
 from openjiuwen.core.controller.schema.task import (
     Task as CoreTask,
-)
-from openjiuwen.core.controller.schema.task import (
     TaskStatus as CoreTaskStatus,
-)
-from openjiuwen.harness.task_loop.loop_queues import (
-    LoopQueues,
 )
 from openjiuwen.harness.task_loop.task_loop_event_executor import (
     DEEP_TASK_TYPE,
+)
+from openjiuwen.harness.task_loop.loop_queues import (
+    LoopQueues,
 )
 from openjiuwen.harness.tools import SESSION_SPAWN_TASK_TYPE
 
@@ -152,8 +150,6 @@ class TaskLoopEventHandler(EventHandler):
             result = {"error": "completion_timeout"}
         except asyncio.CancelledError:
             result = {"error": "cancelled"}
-            self._last_result = result
-            raise
         if not result:
             result = {"status": "completed"}
         self._last_result = result

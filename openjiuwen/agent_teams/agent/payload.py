@@ -71,9 +71,7 @@ class SpawnPayloadBuilder:
                 "persona": ctx.persona,
                 "transport": (member_transport.model_dump(mode="json") if member_transport is not None else None),
             },
-            # Empty query means "no first round" — only a genuine first-start
-            # instruction drives the initial harness.send (gated in invoke).
-            "query": initial_message or "",
+            "query": initial_message or "Join the team and wait for your first assignment.",
         }
 
     def build_member_context(self, member_spec: TeamMemberSpec) -> TeamRuntimeContext:

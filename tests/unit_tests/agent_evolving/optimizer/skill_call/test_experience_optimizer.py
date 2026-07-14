@@ -17,12 +17,8 @@ from openjiuwen.agent_evolving.checkpointing.types import (
 )
 from openjiuwen.agent_evolving.experience.types import EvolutionContext, OnlineEvolutionContext
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
-from openjiuwen.agent_evolving.optimizer.skill_call.experience_draft_parser import (
-    normalize_summary,
-    parse_experience_draft,
-    parse_experience_drafts_with_error,
-)
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
+    SKILL_EXPERIENCE_GENERATE_PROMPT,
     SkillExperienceOptimizer,
     _build_context,
     _build_conversation_snippet,
@@ -34,6 +30,11 @@ from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import 
     _split_into_sections,
     _summarize_skill_content,
 )
+from openjiuwen.agent_evolving.optimizer.skill_call.experience_draft_parser import (
+    normalize_summary,
+    parse_experience_draft,
+    parse_experience_drafts_with_error,
+)
 from openjiuwen.agent_evolving.signal.base import (
     EvolutionSignal,
     EvolutionTarget,
@@ -41,13 +42,6 @@ from openjiuwen.agent_evolving.signal.base import (
 )
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
-
-
-def test_initial_score_by_signal_uses_user_intent_not_user_correction():
-    from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import INITIAL_SCORE_BY_SIGNAL
-
-    assert INITIAL_SCORE_BY_SIGNAL["user_intent"] == 0.70
-    assert "user_correction" not in INITIAL_SCORE_BY_SIGNAL
 
 
 def make_signal(excerpt: str = "tool timeout") -> EvolutionSignal:
@@ -846,6 +840,41 @@ class TestScriptLimit:
         assert len(script_recs) == 1
         assert text_recs[0].change.content == "A"
         assert text_recs[1].change.content == "B"
+
+
+class TestPromptRoleConstraints:
+    """SKILL_EXPERIENCE_GENERATE_PROMPT must contain role constraints and Collaboration section."""
+
+    @staticmethod
+    def test_role_constraint_in_cn_prompt():
+        """中文 prompt 必须包含角色约束段落。"""
+        prompt = SKILL_EXPERIENCE_GENERATE_PROMPT["cn"]
+        assert "角色约束" in prompt
+        assert "演进经验必须遵从 Agent 的角色能力和主要任务目标" in prompt
+
+    @staticmethod
+    def test_role_constraint_in_en_prompt():
+        """英文 prompt 必须包含角色约束段落。"""
+        prompt = SKILL_EXPERIENCE_GENERATE_PROMPT["en"]
+        assert "Role Constraints" in prompt or "role constraints" in prompt.lower()
+
+    @staticmethod
+    def test_collaboration_section_in_cn_prompt():
+        """中文 prompt 的 section 参考列表必须包含 Collaboration。"""
+        prompt = SKILL_EXPERIENCE_GENERATE_PROMPT["cn"]
+        assert "Collaboration" in prompt
+
+    @staticmethod
+    def test_collaboration_section_in_en_prompt():
+        """英文 prompt 的 section 参考列表必须包含 Collaboration。"""
+        prompt = SKILL_EXPERIENCE_GENERATE_PROMPT["en"]
+        assert "Collaboration" in prompt
+
+    @staticmethod
+    def test_prompts_request_summary_field():
+        for prompt in SKILL_EXPERIENCE_GENERATE_PROMPT.values():
+            assert '"summary"' in prompt
+            assert "summary" in prompt.lower()
 
 
 class TestBackwardContextBinding:

@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/spawn/`、`openjiuwen/agent_teams/agent/spawn_manager.py`、`openjiuwen/agent_teams/agent/stream_controller.py`、`openjiuwen/agent_teams/agent/payload.py`、`openjiuwen/agent_teams/agent/agent_configurator.py`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-06-03 |
+| 最近一次修订日期 | 2026-05-09 |
 | 关联 feature | — |
 
 ## 范围 / 边界
@@ -31,8 +31,7 @@ DeepAgent round 的 stream 队列、cooperative cancel、observer fan-out 行为
 **不管：**
 
 - DeepAgent / TeamHarness 内部的 task loop、interrupt 机制——属于 `harness/`，
-  本 spec 只到 `harness.start` / `harness.outputs` / `harness.send` / `harness.abort`
-  的调用契约（交互契约见 [[S_18_harness-interaction-contract]]）。
+  本 spec 只到 `harness.run_streaming` / `harness.abort` 的调用契约。
 - pool / dispatch / activate 决策——见 `S_06_runtime-pool-dispatch`。
 - 消息总线本身的实现——见 `messager/`。
 - worktree 后端 / 跨机器策略——见 `worktree_remote.py` 与

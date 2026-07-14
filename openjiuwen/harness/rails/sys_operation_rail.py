@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools import BashTool, PowerShellTool
@@ -76,20 +77,29 @@ class SysOperationRail(DeepAgentRail):
         if self._with_code_tool and not self._read_only:
             self.tools.append(CodeTool(self.sys_operation, lang, agent_id))
 
-        # 工具 id 形如 "write_file_<agent_id>" 与 SysOperation 实例无关; 若上一次 agent
+        # 工具 id 形如 "WriteFileTool_<agent_id>" 与 SysOperation 实例无关; 若上一次 agent
         # 生命周期里的同名工具仍残留在 resource_mgr (例如 adapter cleanup 未驱动 rail.uninit),
-        # 旧工具实例继续持有过期的 SysOperation 引用, 导致 SANDBOX 切换时 fs/shell 调用走
-        # LOCAL 并写穿宿主。add_ability 对有状态工具用 refresh=True 注册: 已存在则先 remove
-        # 再 add, 天然处理这种残留 rebind。
+        # 直接 add_tool 会因 resource_already_exist 静默失败, 旧工具实例继续持有过期的
+        # SysOperation 引用, 导致 SANDBOX 切换时 fs/shell 调用走 LOCAL 并写穿宿主。
+        # 这里与 SkillUseRail.init 同款 idempotent 注册: 已存在则先 remove, 再 add。
         for tool in self.tools:
-            agent.ability_manager.add_ability(tool.card, tool)
+            if Runner.resource_mgr.get_tool(tool.card.id) is not None:
+                Runner.resource_mgr.remove_tool(tool.card.id)
+        Runner.resource_mgr.add_tool(self.tools)
+
+        for tool in self.tools:
+            agent.ability_manager.add(tool.card)
 
     def uninit(self, agent):
         if self.tools:
             for tool in self.tools:
                 name = getattr(tool.card, 'name', None)
                 if name and hasattr(agent, 'ability_manager'):
-                    agent.ability_manager.remove_ability(name)
+                    agent.ability_manager.remove(name)
+                
+                tool_id = tool.card.id
+                if tool_id:
+                    Runner.resource_mgr.remove_tool(tool_id)
 
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:

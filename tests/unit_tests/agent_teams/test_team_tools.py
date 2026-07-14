@@ -37,9 +37,7 @@ from openjiuwen.agent_teams.tools.team_tools import (
     MappedToolOutput,
     SendMessageTool,
     ShutdownMemberTool,
-    SpawnExternalCliTool,
-    SpawnHumanAgentTool,
-    SpawnTeammateTool,
+    SpawnMemberTool,
     TaskCreateTool,
     UpdateTaskTool,
     ViewTaskToolV2,
@@ -240,53 +238,243 @@ class TestCleanTeamLifecycleGate:
 # ========== Member Management Tools ==========
 
 
-class TestSpawnTools:
-    """Per-role spawn tools: flat schemas, straight-line invoke, no role branching."""
-
-    # ----- spawn_teammate -----
+class TestSpawnMemberTool:
+    """Test SpawnMemberTool"""
 
     @pytest.mark.level0
-    def test_teammate_initialization(self, agent_team, t):
-        """spawn_teammate exposes a flat teammate-only schema."""
-        tool = SpawnTeammateTool(agent_team, t)
-        assert tool.card.name == "spawn_teammate"
-        assert tool.card.id == "team.spawn_teammate"
+    def test_initialization(self, agent_team, t):
+        """Test tool initialization"""
+        tool = SpawnMemberTool(agent_team, t)
+        assert tool.card.name == "spawn_member"
+        assert tool.card.id == "team.spawn_member"
         assert tool.team == agent_team
+        # role_type is exposed to the LLM with a default of teammate.
         props = tool.card.input_params["properties"]
-        # Flat schema — no role_type discriminator, no foreign-role fields.
-        assert "role_type" not in props
-        assert "cli_agent" not in props
-        assert "mailbox_inject_mode" not in props
-        assert set(tool.card.input_params["required"]) == {"member_name", "display_name", "desc"}
+        assert "role_type" in props
+        assert props["role_type"]["enum"] == ["teammate", "human_agent", "bridge_agent", "external_cli"]
+        assert props["role_type"]["default"] == "teammate"
+        # external_cli members reference a static spec config by name.
+        assert "cli_agent" in props
 
     @pytest.mark.asyncio
     @pytest.mark.level0
-    async def test_teammate_success(self, agent_team, t):
-        """A teammate is spawned with role_type=teammate."""
-        tool = SpawnTeammateTool(agent_team, t)
+    async def test_invoke_success(self, agent_team, t):
+        """Test invoking spawn member tool successfully"""
+        tool = SpawnMemberTool(agent_team, t)
         result = await tool.invoke(
             {"member_name": "member1", "display_name": "Member One", "desc": "Test member", "prompt": "Member prompt"}
         )
+
         assert result.success is True
         assert result.error is None
         assert result.data["role_type"] == "teammate"
 
     @pytest.mark.asyncio
     @pytest.mark.level0
-    async def test_teammate_forwards_model_name_to_allocator(self, agent_team, t):
-        """model_name is forwarded to the allocator callback."""
-        seen: list[str | None] = []
-
-        def allocator(model_name: str | None):
-            seen.append(model_name)
-            return None
-
-        tool = SpawnTeammateTool(agent_team, t, model_config_allocator=allocator)
+    async def test_invoke_role_type_teammate_explicit(self, agent_team, t):
+        """Explicit role_type='teammate' is equivalent to omitting it."""
+        tool = SpawnMemberTool(agent_team, t)
         result = await tool.invoke(
-            {"member_name": "member-m", "display_name": "M", "desc": "d", "model_name": "gpt-4"}
+            {
+                "member_name": "member-explicit-tm",
+                "display_name": "Member",
+                "desc": "Test member",
+                "role_type": "teammate",
+            }
+        )
+        assert result.success is True
+        assert result.data["role_type"] == "teammate"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_role_type_human_agent_blocked_when_hitt_disabled(self, agent_team, t):
+        """HITT-off team rejects role_type='human_agent' at the tool layer."""
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "alice",
+                "display_name": "Alice",
+                "desc": "Domain expert",
+                "role_type": "human_agent",
+            }
+        )
+        assert result.success is False
+        assert "HITT capability is disabled" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_role_type_external_cli_requires_cli_agent(self, agent_team, t):
+        """role_type='external_cli' without cli_agent fails at the tool layer."""
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "cli-1",
+                "display_name": "CLI One",
+                "desc": "external cli worker",
+                "role_type": "external_cli",
+            }
+        )
+        assert result.success is False
+        assert "cli_agent" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_role_type_external_cli_undeclared_fails(self, agent_team, t):
+        """A cli_agent absent from external_cli_agents is rejected (capability ceiling)."""
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "cli-2",
+                "display_name": "CLI Two",
+                "desc": "external cli worker",
+                "role_type": "external_cli",
+                "cli_agent": "claude",
+            }
+        )
+        assert result.success is False
+        assert "not declared" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_role_type_external_cli_success(self, db, message_bus, t):
+        """role_type='external_cli' with a declared cli_agent registers the member."""
+        await db.team.create_team(
+            team_name="ext_cli_tools_team",
+            display_name="Ext",
+            leader_member_name="leader1",
+        )
+        team = TeamBackend(
+            team_name="ext_cli_tools_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
+        )
+        tool = SpawnMemberTool(team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "claude-1",
+                "display_name": "Claude One",
+                "desc": "external cli reviewer",
+                "role_type": "external_cli",
+                "cli_agent": "claude",
+            }
         )
         assert result.success is True, result.error
-        assert seen == ["gpt-4"]
+        assert result.data["role_type"] == "external_cli"
+        assert result.data["cli_agent"] == "claude"
+        assert team.is_external_cli_agent("claude-1")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_role_type_human_agent_rejects_model_name(self, db, message_bus, t):
+        """role_type='human_agent' must not accept model_name."""
+        # Build a HITT-capable backend so the gate falls through to the
+        # field validation.
+        team = TeamBackend(
+            team_name="hitt_tools_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            enable_hitt=True,
+        )
+        team._enable_hitt = True
+        await db.team.create_team(
+            team_name="hitt_tools_team",
+            display_name="t",
+            leader_member_name="leader1",
+        )
+        tool = SpawnMemberTool(team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "alice",
+                "display_name": "Alice",
+                "desc": "x",
+                "role_type": "human_agent",
+                "model_name": "gpt-4",
+            }
+        )
+        assert result.success is False
+        assert "does not accept" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_role_type_human_agent_rejects_prompt(self, db, message_bus, t):
+        """role_type='human_agent' must not accept prompt."""
+        team = TeamBackend(
+            team_name="hitt_tools_team_p",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            enable_hitt=True,
+        )
+        team._enable_hitt = True
+        await db.team.create_team(
+            team_name="hitt_tools_team_p",
+            display_name="t",
+            leader_member_name="leader1",
+        )
+        tool = SpawnMemberTool(team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "alice",
+                "display_name": "Alice",
+                "desc": "x",
+                "role_type": "human_agent",
+                "prompt": "be nice",
+            }
+        )
+        assert result.success is False
+        assert "does not accept" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_invalid_role_type_rejected(self, agent_team, t):
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "x",
+                "display_name": "x",
+                "desc": "x",
+                "role_type": "admin",
+            }
+        )
+        assert result.success is False
+        assert "Invalid role_type" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_role_type_human_agent_success(self, db, message_bus, t):
+        """Happy path: HITT engaged, no forbidden fields → human_agent gets spawned."""
+        team = TeamBackend(
+            team_name="hitt_tools_team_ok",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            enable_hitt=True,
+        )
+        team._enable_hitt = True
+        await db.team.create_team(
+            team_name="hitt_tools_team_ok",
+            display_name="t",
+            leader_member_name="leader1",
+        )
+        tool = SpawnMemberTool(team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "alice",
+                "display_name": "Alice",
+                "desc": "Domain expert",
+                "role_type": "human_agent",
+            }
+        )
+        assert result.success is True, result.error
+        assert result.data["role_type"] == "human_agent"
+        assert await team.is_human_agent("alice") is True
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -303,161 +491,33 @@ class TestSpawnTools:
             "",
         ],
     )
-    async def test_member_name_rejects_non_portable(self, agent_team, t, bad_name):
-        """member_name must follow DNS-label kebab-case (validated in the shared base)."""
-        tool = SpawnTeammateTool(agent_team, t)
-        result = await tool.invoke({"member_name": bad_name, "display_name": "x", "desc": "x"})
+    async def test_invoke_rejects_non_portable_member_name(self, agent_team, t, bad_name):
+        """member_name must follow DNS-label kebab-case (a-z + 0-9 + hyphen, leading letter)."""
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": bad_name,
+                "display_name": "x",
+                "desc": "x",
+            }
+        )
         assert result.success is False
         assert "Invalid member_name" in (result.error or "")
 
     @pytest.mark.asyncio
     @pytest.mark.level0
-    async def test_member_name_accepts_kebab_case(self, agent_team, t):
+    async def test_invoke_accepts_kebab_case_member_name(self, agent_team, t):
         """Lowercase kebab-case names with a leading letter pass validation."""
-        tool = SpawnTeammateTool(agent_team, t)
-        result = await tool.invoke({"member_name": "backend-dev-1", "display_name": "Backend Dev", "desc": "ok"})
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "backend-dev-1",
+                "display_name": "Backend Dev",
+                "desc": "ok",
+            }
+        )
         assert result.success is True, result.error
         assert result.data["member_name"] == "backend-dev-1"
-
-    # ----- spawn_human_agent -----
-
-    @pytest.mark.level0
-    def test_human_agent_schema_omits_model_and_prompt(self, agent_team, t):
-        """Human members run on the framework template — the schema must not
-        even expose model_name / prompt (no field to misuse)."""
-        tool = SpawnHumanAgentTool(agent_team, t)
-        assert tool.card.name == "spawn_human_agent"
-        props = tool.card.input_params["properties"]
-        assert "model_name" not in props
-        assert "prompt" not in props
-        assert set(props) == {"member_name", "display_name", "desc"}
-
-    @pytest.mark.asyncio
-    @pytest.mark.level0
-    async def test_human_agent_blocked_when_hitt_disabled(self, agent_team, t):
-        """HITT-off team rejects spawn_human_agent at the tool layer (defensive)."""
-        tool = SpawnHumanAgentTool(agent_team, t)
-        result = await tool.invoke({"member_name": "alice", "display_name": "Alice", "desc": "Domain expert"})
-        assert result.success is False
-        assert "HITT capability is disabled" in (result.error or "")
-
-    @pytest.mark.asyncio
-    @pytest.mark.level0
-    async def test_human_agent_success(self, db, message_bus, t):
-        """HITT engaged → human_agent gets spawned."""
-        await db.team.create_team(team_name="hitt_tools_team_ok", display_name="t", leader_member_name="leader1")
-        team = TeamBackend(
-            team_name="hitt_tools_team_ok",
-            member_name="leader1",
-            is_leader=True,
-            db=db,
-            messager=message_bus,
-            enable_hitt=True,
-        )
-        tool = SpawnHumanAgentTool(team, t)
-        result = await tool.invoke({"member_name": "alice", "display_name": "Alice", "desc": "Domain expert"})
-        assert result.success is True, result.error
-        assert result.data["role_type"] == "human_agent"
-        assert await team.is_human_agent("alice") is True
-
-    # ----- spawn_external_cli -----
-
-    @pytest.mark.asyncio
-    @pytest.mark.level1
-    async def test_external_cli_requires_cli_agent(self, agent_team, t):
-        """An empty cli_agent is rejected at the tool layer."""
-        tool = SpawnExternalCliTool(agent_team, t)
-        result = await tool.invoke(
-            {"member_name": "cli-1", "display_name": "CLI One", "desc": "external cli worker", "cli_agent": ""}
-        )
-        assert result.success is False
-        assert "cli_agent" in (result.error or "")
-
-    @pytest.mark.asyncio
-    @pytest.mark.level1
-    async def test_external_cli_undeclared_fails(self, agent_team, t):
-        """A cli_agent absent from external_cli_agents is rejected (capability ceiling)."""
-        tool = SpawnExternalCliTool(agent_team, t)
-        result = await tool.invoke(
-            {"member_name": "cli-2", "display_name": "CLI Two", "desc": "worker", "cli_agent": "claude"}
-        )
-        assert result.success is False
-        assert "not declared" in (result.error or "")
-
-    @pytest.mark.asyncio
-    @pytest.mark.level0
-    async def test_external_cli_success(self, db, message_bus, t):
-        """A declared cli_agent registers the external-CLI member."""
-        await db.team.create_team(team_name="ext_cli_tools_team", display_name="Ext", leader_member_name="leader1")
-        team = TeamBackend(
-            team_name="ext_cli_tools_team",
-            member_name="leader1",
-            is_leader=True,
-            db=db,
-            messager=message_bus,
-            external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
-        )
-        tool = SpawnExternalCliTool(team, t)
-        result = await tool.invoke(
-            {"member_name": "claude-1", "display_name": "Claude One", "desc": "reviewer", "cli_agent": "claude"}
-        )
-        assert result.success is True, result.error
-        assert result.data["role_type"] == "external_cli"
-        assert result.data["cli_agent"] == "claude"
-        assert team.is_external_cli_agent("claude-1")
-
-
-class TestSpawnToolCapabilityGate:
-    """The three non-teammate spawn tools are wired only when the matching
-    team capability is engaged; spawn_teammate is always available."""
-
-    @pytest.mark.level0
-    def test_default_team_only_has_spawn_teammate(self, agent_team):
-        """A plain team (no HITT / Bridge / external CLI) exposes only spawn_teammate."""
-        from openjiuwen.agent_teams.tools.team_tools import create_team_tools
-
-        names = {tool.card.name for tool in create_team_tools(role="leader", agent_team=agent_team)}
-        assert "spawn_teammate" in names
-        assert "spawn_human_agent" not in names
-        assert "spawn_bridge_agent" not in names
-        assert "spawn_external_cli" not in names
-
-    @pytest.mark.level0
-    def test_all_capabilities_wire_all_spawn_tools(self, db, message_bus):
-        """HITT + Bridge + external CLI together expose all four spawn tools."""
-        from openjiuwen.agent_teams.tools.team_tools import create_team_tools
-
-        team = TeamBackend(
-            team_name="caps_team",
-            member_name="leader1",
-            is_leader=True,
-            db=db,
-            messager=message_bus,
-            enable_hitt=True,
-            enable_bridge=True,
-            external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
-        )
-        names = {tool.card.name for tool in create_team_tools(role="leader", agent_team=team)}
-        assert {"spawn_teammate", "spawn_human_agent", "spawn_bridge_agent", "spawn_external_cli"} <= names
-
-    @pytest.mark.level1
-    def test_hitt_only_wires_human_agent(self, db, message_bus):
-        """HITT on, Bridge / external CLI off → only spawn_human_agent joins spawn_teammate."""
-        from openjiuwen.agent_teams.tools.team_tools import create_team_tools
-
-        team = TeamBackend(
-            team_name="hitt_only_team",
-            member_name="leader1",
-            is_leader=True,
-            db=db,
-            messager=message_bus,
-            enable_hitt=True,
-        )
-        names = {tool.card.name for tool in create_team_tools(role="leader", agent_team=team)}
-        assert "spawn_teammate" in names
-        assert "spawn_human_agent" in names
-        assert "spawn_bridge_agent" not in names
-        assert "spawn_external_cli" not in names
 
 
 class TestShutdownMemberTool:
@@ -1785,104 +1845,3 @@ class TestTranslator:
         msg = str(excinfo.value)
         assert "nonexistent_tool_for_translator_test" in msg
         assert "cn" in msg
-
-
-# ========== Team rails are provider-built fresh each cycle (never cached) ==========
-
-
-class _FakeCtx:
-    """Minimal build-context stand-in: context_field attrs + an extras dict."""
-
-    def __init__(self, extras, *, role="leader", member_name="leader1", language="cn"):
-        self.extras = extras
-        self.role = role
-        self.member_name = member_name
-        self.language = language
-
-
-class _FakeAgentCard:
-    def __init__(self, agent_id: str):
-        self.id = agent_id
-
-
-class _FakeAgent:
-    """Minimal agent exposing a fresh AbilityManager, as a native rebuild does."""
-
-    def __init__(self, agent_id: str):
-        from openjiuwen.core.single_agent.ability_manager import AbilityManager
-
-        self.card = _FakeAgentCard(agent_id)
-        self.ability_manager = AbilityManager(owner_id=agent_id)
-
-
-@pytest.mark.asyncio
-@pytest.mark.level0
-async def test_team_tool_factory_mints_fresh_rail_and_binds_each_agent(agent_team):
-    """The team.tool factory is not cached: each call builds a fresh rail, and
-    each rail's init binds team tools onto its own agent's ability_manager.
-
-    This is the regression guard for the send_message-not-found crash, where a
-    cached rail skipped re-binding onto the second cycle's fresh ability_manager.
-    """
-    from openjiuwen.agent_teams.rails.elements import build_team_tool_rail
-    from openjiuwen.agent_teams.rails.team_context import inject_team_handles
-    from openjiuwen.core.runner import Runner
-
-    extras: dict = {}
-    inject_team_handles(extras, team_backend=agent_team)
-    ctx = _FakeCtx(extras)
-
-    rail_cycle1 = build_team_tool_rail({}, ctx)
-    rail_cycle2 = build_team_tool_rail({}, ctx)
-    assert rail_cycle1 is not rail_cycle2  # provider-built fresh, never cached
-
-    await Runner.start()
-    agent1 = _FakeAgent("leader1_cycle1")
-    agent2 = _FakeAgent("leader1_cycle2")
-    try:
-        rail_cycle1.init(agent1)
-        rail_cycle2.init(agent2)
-        assert agent1.ability_manager.get("send_message") is not None
-        assert agent2.ability_manager.get("send_message") is not None
-    finally:
-        rail_cycle1.uninit(agent1)
-        rail_cycle2.uninit(agent2)
-        await Runner.stop()
-
-
-@pytest.mark.asyncio
-@pytest.mark.level0
-async def test_reliability_factory_reuses_injected_components_across_cycles(agent_team):
-    """The reliability factory builds a fresh rail per cycle but wraps the same
-    injected (stateful) components, so detector windows survive native rebuilds.
-    """
-    from openjiuwen.agent_teams.reliability.config import ReliabilityConfig
-    from openjiuwen.agent_teams.reliability.factory import build_reliability_components
-    from openjiuwen.agent_teams.rails.elements import build_team_reliability_rail
-    from openjiuwen.agent_teams.rails.team_context import inject_team_handles
-
-    cfg = ReliabilityConfig()
-    components = build_reliability_components(
-        cfg,
-        member_name="leader1",
-        messager=None,
-        team_name="test_team",
-        sender_id="leader1",
-        is_leader=True,
-    )
-    extras: dict = {}
-    inject_team_handles(extras, team_backend=agent_team, reliability_components=components)
-    ctx = _FakeCtx(extras)
-    params = {
-        "reliability_cfg": cfg.model_dump(),
-        "team_name": "test_team",
-        "sender_id": "leader1",
-        "is_leader": True,
-    }
-
-    rail_cycle1 = build_team_reliability_rail(params, ctx)
-    rail_cycle2 = build_team_reliability_rail(params, ctx)
-    assert rail_cycle1 is not rail_cycle2  # fresh rail each cycle
-    # ...wrapping the one reused stateful core.
-    assert rail_cycle1._monitor is rail_cycle2._monitor
-    assert rail_cycle1._monitor is components.monitor

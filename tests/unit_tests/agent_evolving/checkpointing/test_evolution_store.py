@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
-from openjiuwen.agent_evolving.checkpointing.store_records import MergeRecordsRequest, StoreRecordsHelper
+from openjiuwen.agent_evolving.checkpointing.store_records import StoreRecordsHelper
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionLog,
     EvolutionPatch,
@@ -125,95 +125,6 @@ class TestEvolutionStoreBasics:
         with pytest.raises(BaseError) as exc_info:
             await store.read_skill_content("skill-a", strict=True)
         assert exc_info.value.status == StatusCode.TOOLCHAIN_EVOLVING_SKILL_DEFINITION_NOT_FOUND
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_kind_aware_resolution_keeps_same_name_skill_logs_separate(tmp_path: Path):
-        skill_root = tmp_path / "skills"
-        swarm_root = tmp_path / "swarm-skills"
-        regular_dir = prepare_skill(skill_root, "foo")
-        swarm_dir = prepare_skill(
-            swarm_root,
-            "foo",
-            "---\nname: foo\nkind: team-skill\n---\n\n# Team Skill\n",
-        )
-        store = EvolutionStore([str(skill_root), str(swarm_root)])
-
-        assert store.resolve_skill_dir("foo", subject_kind="skill") == regular_dir
-        assert store.resolve_skill_dir("foo", subject_kind="swarm-skill") == swarm_dir
-        assert store.skill_exists("foo", subject_kind="swarm-skill") is True
-
-        await store.append_record("foo", make_record("ev_skill", content="regular"), subject_kind="skill")
-        await store.append_record("foo", make_record("ev_swarm", content="swarm"), subject_kind="swarm-skill")
-        await store.append_record("foo", make_record("ev_swarm_extra", content="extra"), subject_kind="swarm-skill")
-
-        skill_log = await store.load_full_evolution_log("foo", subject_kind="skill")
-        swarm_log = await store.load_full_evolution_log("foo", subject_kind="swarm-skill")
-        skill_records = await store.get_records_by_score("foo", subject_kind="skill")
-        swarm_records = await store.load_records_by_ids("foo", ["ev_swarm"], subject_kind="swarm-skill")
-
-        assert [record.id for record in skill_log.entries] == ["ev_skill"]
-        assert [record.id for record in swarm_log.entries] == ["ev_swarm", "ev_swarm_extra"]
-        assert [record.id for record in skill_records] == ["ev_skill"]
-        assert [record.id for record in swarm_records] == ["ev_swarm"]
-        assert "ev_skill" in (regular_dir / "evolutions.json").read_text(encoding="utf-8")
-        assert "ev_swarm" in (swarm_dir / "evolutions.json").read_text(encoding="utf-8")
-
-        merged = await store.merge_records(
-            MergeRecordsRequest(
-                name="foo",
-                primary_id="ev_swarm",
-                remove_ids=["ev_swarm_extra"],
-                new_content="merged swarm",
-                subject_kind="swarm-skill",
-            )
-        )
-        updated = await store.update_record_content(
-            "foo",
-            "ev_swarm",
-            "updated swarm",
-            subject_kind="swarm-skill",
-        )
-        deleted = await store.delete_records("foo", ["ev_skill"], subject_kind="skill")
-        archive_name = await store.archive_evolutions("foo", subject_kind="swarm-skill")
-        await store.clear_evolutions("foo", subject_kind="skill")
-
-        assert merged is not None
-        assert merged.change.content == "merged swarm"
-        assert updated is not None
-        assert updated.change.content == "updated swarm"
-        assert deleted == 1
-        assert archive_name is not None
-        assert (swarm_dir / "archive" / archive_name).exists()
-        assert (await store.load_full_evolution_log("foo", subject_kind="skill")).entries == []
-        persisted_swarm_log = await store.load_full_evolution_log("foo", subject_kind="swarm-skill")
-        assert [record.id for record in persisted_swarm_log.entries] == ["ev_swarm"]
-
-    @staticmethod
-    def test_subject_kind_none_preserves_name_only_resolution_order(tmp_path: Path):
-        first_root = tmp_path / "first"
-        second_root = tmp_path / "second"
-        first_dir = prepare_skill(first_root, "foo")
-        prepare_skill(second_root, "foo", "---\nname: foo\nkind: team-skill\n---\n\n# Team Skill\n")
-
-        store = EvolutionStore([str(first_root), str(second_root)])
-
-        assert store.resolve_skill_dir("foo") == first_dir
-        assert store.skill_exists("foo") is True
-        assert store.resolve_skill_dir("bar", create=True) == first_root.resolve() / "bar"
-
-    @staticmethod
-    def test_resolve_subject_payload_reads_actual_skill_kind(tmp_path: Path):
-        root = tmp_path / "skills"
-        prepare_skill(root, "plain")
-        prepare_skill(root, "team", "---\nname: team\nkind: team-skill\n---\n\n# Team Skill\n")
-        prepare_skill(root, "swarm", "---\nname: swarm\nkind: swarm-skill\n---\n\n# Swarm Skill\n")
-        store = EvolutionStore(str(root))
-
-        assert store.resolve_subject_payload("plain") == {"kind": "skill", "name": "plain"}
-        assert store.resolve_subject_payload("team") == {"kind": "swarm-skill", "name": "team"}
-        assert store.resolve_subject_payload("swarm") == {"kind": "swarm-skill", "name": "swarm"}
-        assert store.resolve_subject_payload("missing") is None
 
 
 class TestEvolutionStoreLogCRUD:
@@ -355,24 +266,6 @@ class TestEvolutionStoreLogCRUD:
         assert evo_log.entries == []
         assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == original_skill_md
         assert_no_files(skill_dir / "evolution", "*.md")
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_append_record_preserves_existing_binary_evolution_assets(tmp_path: Path):
-        root = tmp_path / "skills"
-        skill_dir = prepare_skill(root, "xlsx")
-        assets_dir = skill_dir / "evolution" / "assets"
-        assets_dir.mkdir(parents=True)
-        workbook_bytes = b"PK\x03\x04binary-workbook-\x86-content"
-        workbook_path = assets_dir / "sample.xlsx"
-        workbook_path.write_bytes(workbook_bytes)
-        store = EvolutionStore(str(root))
-
-        await store.append_record("xlsx", make_record("ev_xlsx", content="Handle workbook templates."))
-
-        assert workbook_path.read_bytes() == workbook_bytes
-        evo_log = await store.load_full_evolution_log("xlsx")
-        assert [record.id for record in evo_log.entries] == ["ev_xlsx"]
 
     @staticmethod
     @pytest.mark.asyncio
@@ -797,15 +690,7 @@ class TestEvolutionStoreRecordMaintenance:
         await store.append_record("skill-a", make_record("ev_3", content="three"))
 
         marked = await store.mark_records_applied("skill-a", ["ev_1"])
-        merged = await store.merge_records(
-            MergeRecordsRequest(
-                name="skill-a",
-                primary_id="ev_2",
-                remove_ids=["ev_3"],
-                new_content="two+three",
-                new_score=0.9,
-            )
-        )
+        merged = await store.merge_records("skill-a", "ev_2", ["ev_3"], "two+three", new_score=0.9)
         updated = await store.update_record_content("skill-a", "ev_2", "two+three+updated", new_score=0.8)
         deleted = await store.delete_records("skill-a", ["ev_1"])
 
@@ -829,14 +714,7 @@ class TestEvolutionStoreRecordMaintenance:
         await store.append_record("skill-a", make_record("ev_1", content="one", summary="old one summary"))
         await store.append_record("skill-a", make_record("ev_2", content="two", summary="old two summary"))
 
-        merged = await store.merge_records(
-            MergeRecordsRequest(
-                name="skill-a",
-                primary_id="ev_1",
-                remove_ids=["ev_2"],
-                new_content="merged content",
-            )
-        )
+        merged = await store.merge_records("skill-a", "ev_1", ["ev_2"], "merged content")
         updated = await store.update_record_content("skill-a", "ev_1", "updated content")
 
         assert merged is not None
@@ -873,21 +751,6 @@ class TestEvolutionStoreRecordMaintenance:
         assert [record.id for record in ranked] == ["ev_low", "ev_high"]
         assert ranked[0].usage_stats.times_presented == 3
         assert ranked[0].usage_stats.times_used == 2
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_load_records_by_ids_preserves_requested_order_and_skips_missing(tmp_path: Path):
-        root = tmp_path / "skills"
-        prepare_skill(root, "skill-a")
-        store = EvolutionStore(str(root))
-
-        await store.append_record("skill-a", make_record("ev_1", content="one"))
-        await store.append_record("skill-a", make_record("ev_2", content="two"))
-        await store.append_record("skill-a", make_record("ev_3", content="three"))
-
-        records = await store.load_records_by_ids("skill-a", ["ev_3", "ev_missing", "ev_1"])
-
-        assert [record.id for record in records] == ["ev_3", "ev_1"]
 
 
 class TestPackSkillForSharing:
@@ -989,138 +852,3 @@ class TestEvolutionStoreArchiveAndCreate:
 
         assert await store.create_skill("skill-a", "desc", "body") is None
         assert await store.create_skill("../escape", "desc", "body") is None
-
-    # ── Subject-aware store Interface ──
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_subject_aware_resolve_dir_regular_skill(tmp_path: Path):
-        root = tmp_path / "skills"
-        prepare_skill(root, "foo")
-        store = EvolutionStore(str(root))
-        path = store.resolve_subject_dir({"kind": "skill", "name": "foo"})
-        assert path is not None
-        assert path.name == "foo"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_subject_aware_resolve_dir_nonexistent(tmp_path: Path):
-        root = tmp_path / "skills"
-        root.mkdir()
-        store = EvolutionStore(str(root))
-        assert store.resolve_subject_dir({"kind": "skill", "name": "nonexistent"}) is None
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_subject_aware_skill_subject_exists(tmp_path: Path):
-        root = tmp_path / "skills"
-        prepare_skill(root, "foo")
-        store = EvolutionStore(str(root))
-        assert store.skill_subject_exists({"kind": "skill", "name": "foo"}) is True
-        assert store.skill_subject_exists({"kind": "skill", "name": "bar"}) is False
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_subject_aware_read_content(tmp_path: Path):
-        root = tmp_path / "skills"
-        prepare_skill(root, "foo", content="# Skill\n\nHello world\n")
-        store = EvolutionStore(str(root))
-        content = await store.read_subject_content({"kind": "skill", "name": "foo"})
-        assert "Hello world" in content
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_subject_aware_load_evolution_log(tmp_path: Path):
-        root = tmp_path / "skills"
-        prepare_skill(root, "foo")
-        store = EvolutionStore(str(root))
-        record = make_record("ev_1", content="test")
-        await store.append_subject_record({"kind": "skill", "name": "foo"}, record)
-        log = await store.load_subject_evolution_log({"kind": "skill", "name": "foo"})
-        assert len(log.entries) == 1
-        assert log.entries[0].id == "ev_1"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_subject_aware_append_and_load_by_ids(tmp_path: Path):
-        root = tmp_path / "skills"
-        prepare_skill(root, "foo")
-        store = EvolutionStore(str(root))
-        record = make_record("ev_1", content="test")
-        await store.append_subject_record({"kind": "skill", "name": "foo"}, record)
-        records = await store.load_subject_records_by_ids({"kind": "skill", "name": "foo"}, ["ev_1"])
-        assert len(records) == 1
-        assert records[0].id == "ev_1"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_subject_aware_delete_records(tmp_path: Path):
-        root = tmp_path / "skills"
-        prepare_skill(root, "foo")
-        store = EvolutionStore(str(root))
-        record = make_record("ev_1", content="test")
-        await store.append_subject_record({"kind": "skill", "name": "foo"}, record)
-        count = await store.delete_subject_records({"kind": "skill", "name": "foo"}, ["ev_1"])
-        assert count == 1
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_subject_aware_merge_records(tmp_path: Path):
-        root = tmp_path / "skills"
-        prepare_skill(root, "foo")
-        store = EvolutionStore(str(root))
-        r1 = make_record("ev_1", content="content 1")
-        r2 = make_record("ev_2", content="content 2")
-        await store.append_subject_record({"kind": "skill", "name": "foo"}, r1)
-        await store.append_subject_record({"kind": "skill", "name": "foo"}, r2)
-        merged = await store.merge_subject_records({"kind": "skill", "name": "foo"}, "ev_1", ["ev_2"], "merged content")
-        assert merged is not None
-        assert merged.change.content == "merged content"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_subject_aware_update_record_content(tmp_path: Path):
-        root = tmp_path / "skills"
-        prepare_skill(root, "foo")
-        store = EvolutionStore(str(root))
-        record = make_record("ev_1", content="old content")
-        await store.append_subject_record({"kind": "skill", "name": "foo"}, record)
-        updated = await store.update_subject_record_content({"kind": "skill", "name": "foo"}, "ev_1", "new content")
-        assert updated is not None
-        assert updated.change.content == "new content"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_subject_aware_normalizes_team_skill_alias(tmp_path: Path):
-        root = tmp_path / "skills"
-        prepare_skill(root, "team-a", content="---\nkind: team-skill\n---\n# Skill\n")
-        store = EvolutionStore(str(root))
-        path = store.resolve_subject_dir({"kind": "team-skill", "name": "team-a"})
-        assert path is not None
-        assert path.name == "team-a"
-        assert store.skill_subject_exists({"kind": "team-skill", "name": "team-a"}) is True
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_subject_aware_accepts_evolution_subject_instance(tmp_path: Path):
-        from openjiuwen.agent_evolving.experience.draft_schema import EvolutionSubject
-
-        root = tmp_path / "skills"
-        prepare_skill(root, "foo")
-        store = EvolutionStore(str(root))
-        subject = EvolutionSubject(kind="skill", name="foo")
-        assert store.skill_subject_exists(subject) is True
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_subject_aware_existing_name_based_methods_still_work(tmp_path: Path):
-        root = tmp_path / "skills"
-        prepare_skill(root, "foo")
-        store = EvolutionStore(str(root))
-        assert store.skill_exists("foo") is True
-        content = await store.read_skill_content("foo")
-        assert content
-        record = make_record("ev_1", content="test")
-        await store.append_record("foo", record)
-        log = await store.load_full_evolution_log("foo")
-        assert len(log.entries) == 1

@@ -20,18 +20,11 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 class Session:
     """AgentTeam Session"""
 
-    def __init__(
-            self,
-            session_id: str = None,
-            envs: dict[str, Any] = None,
-            team_id: str = "agent_team",
-            source_metadata_enabled: bool = True,
-    ):
+    def __init__(self, session_id: str = None, envs: dict[str, Any] = None, team_id: str = "agent_team"):
         if session_id is None:
             session_id = str(uuid.uuid4())
         self._session_id = session_id
         self._team_id = team_id
-        self._source_metadata_enabled = source_metadata_enabled
         config = Config()
         if envs is not None:
             config.set_envs(envs)
@@ -50,9 +43,6 @@ class Session:
 
     def get_envs(self):
         return self._inner.config().get_envs()
-
-    def set_source_metadata_enabled(self, enabled: bool) -> None:
-        self._source_metadata_enabled = enabled
 
     def update_state(self, data: dict):
         return self._inner.state().update_global(data)
@@ -110,24 +100,19 @@ class Session:
         if card is None:
             card = AgentCard(id=agent_id or "team_agent", name=agent_id or "team_agent")
         stream_writer_manager = self._inner.stream_writer_manager() if share_stream_writer else None
-        source_metadata = None
-        if self._source_metadata_enabled:
-            source_metadata = {
-                "source_agent_id": card.id,
-                "source_team_id": self._team_id,
-            }
         return create_agent_session(
             session_id=self._session_id,
             envs=self.get_envs(),
             card=card,
             stream_writer_manager=stream_writer_manager,
             close_stream_on_post_run=False,
-            source_metadata=source_metadata,
+            source_metadata={
+                "source_agent_id": card.id,
+                "source_team_id": self._team_id,
+            },
         )
 
     def _tag_stream_payload(self, data: dict | OutputSchema):
-        if not self._source_metadata_enabled:
-            return data
         metadata = {"source_team_id": self._team_id}
         if isinstance(data, dict):
             return {**data, **metadata}
@@ -152,16 +137,7 @@ class Session:
         return OutputSchema(type="message", index=0, payload=data)
 
 
-def create_agent_team_session(
-        session_id: str = None,
-        envs: dict[str, Any] = None,
-        team_id: str = "agent_team",
-        source_metadata_enabled: bool = True,
-) -> Session:
+def create_agent_team_session(session_id: str = None, envs: dict[str, Any] = None,
+                              team_id: str = "agent_team") -> Session:
     """Create AgentTeam Session"""
-    return Session(
-        session_id=session_id,
-        envs=envs,
-        team_id=team_id,
-        source_metadata_enabled=source_metadata_enabled,
-    )
+    return Session(session_id=session_id, envs=envs, team_id=team_id)

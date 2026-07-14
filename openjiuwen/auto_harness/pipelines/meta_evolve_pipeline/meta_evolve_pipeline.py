@@ -21,7 +21,6 @@ from openjiuwen.auto_harness.pipelines.meta_evolve_pipeline.meta_evolve_task_pip
     PRTaskPipeline,
 )
 from openjiuwen.auto_harness.schema import (
-    OptimizationTask,
     SessionResultsArtifact,
     StageSlot,
     TaskPlanArtifact,
@@ -97,33 +96,6 @@ class MetaEvolvePipeline(BasePipeline):
             TaskPlanArtifact(tasks=tasks, raw_plan=""),
         )
 
-    @staticmethod
-    def _is_explicit_issue_fix_task(task: Any) -> bool:
-        """Return true for structured GitCode issue-fix tasks."""
-        if not isinstance(task, OptimizationTask):
-            return False
-        issue_ref = str(task.issue_ref or "")
-        text = "\n".join(
-            [
-                str(task.topic or ""),
-                str(task.description or ""),
-                issue_ref,
-            ]
-        ).lower()
-        return bool(issue_ref and "issue" in text and "gitcode" in text)
-
-    def _explicit_issue_fix_tasks(
-        self,
-        ctx: SessionContext,
-    ) -> list[OptimizationTask]:
-        input_tasks = ctx.orchestrator.artifacts.get(
-            "input_tasks", default=[]
-        )
-        tasks = list(input_tasks) if isinstance(input_tasks, list) else []
-        if tasks and all(self._is_explicit_issue_fix_task(task) for task in tasks):
-            return tasks
-        return []
-
     def _store_session_results(
         self,
         ctx: SessionContext,
@@ -139,14 +111,6 @@ class MetaEvolvePipeline(BasePipeline):
         self,
         ctx: SessionContext,
     ) -> AsyncIterator[Any]:
-        issue_tasks = self._explicit_issue_fix_tasks(ctx)
-        if issue_tasks:
-            self._populate_task_plan_from_input_tasks(ctx, issue_tasks)
-            yield ctx.message(
-                "检测到显式 GitCode issue 修复任务，跳过 assess/plan，"
-                "直接进入实现/验证/提交/发布流程。"
-            )
-            return
         async with self._readonly_assess_workspace(ctx):
             assess_stage = MetaAssessStage()
             assess_result_holder = []

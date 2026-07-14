@@ -372,10 +372,6 @@ class TaskScheduler:
                 if task_id in self._running_tasks:
                     del self._running_tasks[task_id]
 
-            # Wake up the schedule loop so newly submitted tasks are
-            # picked up promptly after a running task finishes.
-            self._submit_event.set()
-
             # Critical: Check if all tasks are done and send completion signal
             # This MUST succeed, otherwise Controller will hang forever
             await self._ensure_session_completion_signal(session.get_session_id())
@@ -441,15 +437,6 @@ class TaskScheduler:
                 if payload_type == EventType.TASK_COMPLETION:
                     logger.info(f"Task {task_id} completed")
                     await self._task_manager.update_task_status(task_id, TaskStatus.COMPLETED)
-                    # Clean up running-task bookkeeping BEFORE publishing the
-                    # event so that _resolve_future consumers (NativeHarness)
-                    # never see a stale _running_tasks entry.  This eliminates
-                    # the race where the harness transitions to IDLE while the
-                    # scheduler's finally block hasn't run yet.
-                    async with self._lock:
-                        if task_id in self._running_tasks:
-                            del self._running_tasks[task_id]
-                    self._submit_event.set()
                     await self._publish_task_event(task_id, session, chunk)
                     break
 
@@ -457,10 +444,6 @@ class TaskScheduler:
                 elif payload_type == EventType.TASK_INTERACTION:
                     logger.info(f"Task {task_id} requires interaction")
                     await self._task_manager.update_task_status(task_id, TaskStatus.INPUT_REQUIRED)
-                    async with self._lock:
-                        if task_id in self._running_tasks:
-                            del self._running_tasks[task_id]
-                    self._submit_event.set()
                     await self._publish_task_event(task_id, session, chunk)
                     break
 
@@ -468,10 +451,6 @@ class TaskScheduler:
                 elif payload_type == EventType.TASK_FAILED:
                     logger.error(f"Task {task_id} failed")
                     await self._task_manager.update_task_status(task_id, TaskStatus.FAILED)
-                    async with self._lock:
-                        if task_id in self._running_tasks:
-                            del self._running_tasks[task_id]
-                    self._submit_event.set()
                     await self._publish_task_event(task_id, session, chunk)
                     break
 
@@ -846,11 +825,7 @@ class TaskScheduler:
                         # Record in running tasks
                         self._running_tasks[task.task_id] = (None, exec_task)
 
-                    running_ids = list(self._running_tasks.keys())
-                    logger.info(
-                        f"Task {task.task_id} ({task.task_type}) started, "
-                        f"running_tasks={running_ids}"
-                    )
+                    logger.info(f"Task {task.task_id} ({task.task_type}) started")
 
                 # 3. Wait for new SUBMITTED task or timeout
                 self._submit_event.clear()

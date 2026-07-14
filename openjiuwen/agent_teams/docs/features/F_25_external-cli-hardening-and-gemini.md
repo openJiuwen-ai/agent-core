@@ -70,10 +70,6 @@
   claim/complete/update),向后兼容现有角色。
 - `_bind_session_context(client)` 集中处理 FastMCP per-task contextvar 重绑,移除散落的隐式重置。
 
-> **[[F_26]] 已重构本段**:MCP server 改为低层 `mcp.server.lowlevel.Server`,按
-> `descriptor.scope`(member/operator)而非 team role 裁剪工具集;`_ROLE_TOOLS`/
-> `_allowed_tools_for_role` 已移除。per-call session 重绑改为 `client.bind_session_context()`。
-
 ## 决策
 
 - **系统提示词 = team-rail sections,不只是 persona**:外部 CLI 成员应与进程内成员拿到

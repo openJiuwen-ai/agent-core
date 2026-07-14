@@ -123,6 +123,3 @@ class FakeMQ(MessageQueueBase):
                 name=f"fake_mq_push:{topic}",
                 group="runner.fake_mq",
             )
-
-    def _get_subscribed_topics(self):
-        return list(self._topics.keys())

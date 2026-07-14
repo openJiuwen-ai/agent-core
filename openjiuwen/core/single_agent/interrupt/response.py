@@ -8,12 +8,10 @@ from pydantic import BaseModel, Field
 
 class InterruptRequest(BaseModel):
     """Request for user interruption/confirmation."""
-
     message: str = ""
     payload_schema: dict = Field(default_factory=dict)
     auto_confirm_key: str = ""
     ui_options: list[dict] | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ToolCallInterruptRequest(InterruptRequest):
@@ -25,7 +23,6 @@ class ToolCallInterruptRequest(InterruptRequest):
     When the input request is a subclass of InterruptRequest (e.g. AskUserRequest),
     the subclass's extra fields are preserved via model_dump().
     """
-
     model_config = {"extra": "allow"}
 
     tool_name: str = ""
@@ -35,9 +32,9 @@ class ToolCallInterruptRequest(InterruptRequest):
 
     @classmethod
     def from_tool_call(
-        cls,
-        request: InterruptRequest,
-        tool_call: Any,
+            cls,
+            request: InterruptRequest,
+            tool_call: Any,
     ) -> "ToolCallInterruptRequest":
         """Create ToolCallInterruptRequest from InterruptRequest and ToolCall.
 
@@ -46,9 +43,9 @@ class ToolCallInterruptRequest(InterruptRequest):
         """
         base_fields = request.model_dump()
         base_fields.update(
-            tool_name=tool_call.name if hasattr(tool_call, "name") else str(tool_call),
-            tool_call_id=tool_call.id if hasattr(tool_call, "id") else "",
-            tool_args=tool_call.arguments if hasattr(tool_call, "arguments") else None,
-            index=tool_call.index if hasattr(tool_call, "index") else None,
+            tool_name=tool_call.name if hasattr(tool_call, 'name') else str(tool_call),
+            tool_call_id=tool_call.id if hasattr(tool_call, 'id') else "",
+            tool_args=tool_call.arguments if hasattr(tool_call, 'arguments') else None,
+            index=tool_call.index if hasattr(tool_call, 'index') else None,
         )
         return cls.model_validate(base_fields)

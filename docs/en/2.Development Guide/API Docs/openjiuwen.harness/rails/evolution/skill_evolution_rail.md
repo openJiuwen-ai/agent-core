@@ -11,66 +11,14 @@ Public rail for collecting agent trajectories, detecting reusable regular-skill 
 ### Import
 
 ```python
-from openjiuwen.harness.rails import (
-    EvolutionReviewRuntime,
-    SkillEvolutionRail,
-    SubagentRail,
-    configure_skill_evolution,
-)
+from openjiuwen.harness.rails import SkillEvolutionRail
 ```
-
-The active evolution review flow in `SkillEvolutionRail` delegates to the `evolution_reviewer` subagent, so register it together with `SubagentRail`. Synchronous subagent mode registers `task_tool`, which the follow-up prompt uses to call the review subagent.
-
-`SkillEvolutionRail.init()` now only registers the active review tools and stable review subagent; it does not configure `EvolutionInterruptRail`.
-
-Stable review subagent registration is deduplicated by name (`evolution_reviewer`). Re-registering it with different `runtime`, `query_service`, or `store` fails fast.
-
-### 推荐优先 / Recommended Construction
-
-Prefer the configuration API for normal skills:
-
-```python
-configure_skill_evolution(
-    agent,
-    skills_dir="/path/to/skills",
-    llm=model_client,
-    model="gpt-4",
-    auto_save=False,
-    language="cn",
-)
-```
-
-The configuration API adds `SubagentRail` when needed and wires `EvolutionInterruptRail` with the regular `SkillEvolutionRail`.
-
-Manual wiring requires explicit shared objects:
-
-```python
-runtime = EvolutionReviewRuntime()
-skill_rail = SkillEvolutionRail(
-    skills_dir="/path/to/skills",
-    llm=model_client,
-    model="gpt-4",
-    review_runtime=runtime,
-    auto_save=False,
-)
-interrupt_rail = EvolutionInterruptRail(
-    review_runtime=runtime,
-    submission_service=skill_rail.experience_manager.experience_submission_service,
-)
-agent = create_deep_agent(
-    model=model_client,
-    tools=tools,
-    rails=[SubagentRail(), interrupt_rail, skill_rail],
-)
-```
-
-When manual configuring, only one shared `EvolutionInterruptRail` should be used and it must be bound to one `review_runtime` and one `submission_service`. Subject kind is not used for interrupt routing.
 
 ### Trigger Mechanism
 
 - Passive evolution runs after `DeepAgent.invoke()` completes.
 - `auto_scan=False` disables passive signal scanning and async snapshot creation for passive evolution.
-- Active evolution is available through `request_user_evolution()`; the returned prompt asks the main agent to call `prepare_skill_evolution(user_confirmed=true)` first, then delegate `evolution_reviewer` with the returned `evolution_review_ref`. The prepare tool collects the current rail's execution/conversation trajectory as default review materials, and `user_intent` only adds optimization direction.
+- Active evolution is available through `request_user_evolution()`; the current rail's collected execution/conversation trajectory is used as default evidence, and `user_intent` only adds optimization direction.
 - Regular skill evolution ignores `kind: team-skill` skills; team skills use `TeamSkillEvolutionRail` / `TeamSkillRail`.
 
 ```text
@@ -79,12 +27,11 @@ class SkillEvolutionRail(
     *,
     llm: Model,
     model: str,
-    review_runtime: EvolutionReviewRuntime,
     auto_scan: bool = True,
     auto_save: bool = True,
-    subject_kind: str = "skill",
     language: str = "cn",
     trajectory_store: Optional[TrajectoryStore] = None,
+    team_trajectory_store: Optional[TrajectoryStore] = None,
     eval_interval: int = 5,
     evolution_total_timeout_secs: float = 600.0,
     generate_records_llm_policy: LLMInvokePolicy = ...,
@@ -99,12 +46,11 @@ class SkillEvolutionRail(
 * **skills_dir** (Union[str, list[str]]): Skill directory path or path list.
 * **llm** (Model): LLM client instance used by signal, record, scoring, and governance stages.
 * **model** (str): Model name.
-* **review_runtime** (EvolutionReviewRuntime): Shared active-review state for review subagent bindings.
 * **auto_scan** (bool): Whether to run passive signal scanning after invoke. Defaults to `True`.
 * **auto_save** (bool): Whether generated passive records are auto-approved and persisted. Defaults to `True`; production hosts should usually set this to `False` and consume approval events.
-* **subject_kind** (str): Subject kind used by this rail (`"skill"` or `"swarm-skill"` normalized).
 * **language** (str): Prompt language, commonly `"cn"` or `"en"`.
 * **trajectory_store** (TrajectoryStore, optional): Store for captured execution trajectories.
+* **team_trajectory_store** (TrajectoryStore, optional): Deprecated shared trajectory store parameter. It emits a deprecation warning and does not enable runtime team aggregation for regular skill evolution.
 * **eval_interval** (int): Number of presentations between experience scoring checks. Must be at least 1.
 * **evolution_total_timeout_secs** (float): Background evolution timeout budget.
 * **generate_records_llm_policy** (LLMInvokePolicy): LLM retry/timeout policy for record generation.
@@ -115,6 +61,8 @@ class SkillEvolutionRail(
 ### Priority
 
 `priority = 80`
+
+---
 
 ## Lifecycle
 
@@ -158,7 +106,7 @@ Known metadata fields:
 | `rail_kind` | Producing rail kind when available, such as `regular` or `team`. |
 | `stage` | Lifecycle stage for progress or outcome events. |
 | `skill_name` | Target skill name. |
-| `request_id` | Approval request id. |
+| `request_id` | Approval or governance request id. |
 | `signal_type` | Signal type that contributed to the request. |
 | `source` | Signal or event source. |
 | `status` | Outcome status when available. |
@@ -166,22 +114,6 @@ Known metadata fields:
 Approval events use `type="chat.ask_user_question"` and include `payload["request_id"]`. Progress events use `type="llm_reasoning"`. Background failures are reported as outcome events and do not fail the main invoke.
 
 `outcome` events are terminal machine-readable events. A normal no-op evolution run emits `status="no_evolution_no_records"` when the orchestrator completes successfully but produces no records. Hosts should not parse progress text to infer terminal state.
-
-### Subject Schema in Review/Mutation Tools
-
-Active-review and mutation tools share a subject envelope:
-
-```python
-{
-    "kind": "skill" | "swarm-skill",
-    "name": "my-skill",
-    "scope": { ... }  # optional
-}
-```
-
-`"team-skill"` is accepted as a legacy input alias and normalized to `"swarm-skill"` by runtime tooling before persistence/approval.
-
-`subject.kind` is accepted by `prepare_skill_evolution`, `list_skill_experiences`, `read_skill_experiences`, `evolve_skill_experiences`, and `simplify_skill_experiences`.
 
 ---
 
@@ -225,19 +157,19 @@ Effective LLM policies, timeout, `auto_scan`, `auto_save`, and `eval_interval`.
 
 ## Methods
 
-### async request_user_evolution(skill_name, user_intent, *, max_index_records=20) -> EvolutionRequestResult
+### async request_user_evolution(skill_name, user_intent="", *, auto_approve=False) -> EvolutionRequestResult
 
-Build a host-delivered active evolution command prompt for a regular skill. The prompt does not create a review scope directly; it instructs the main agent to call `prepare_skill_evolution(user_confirmed=true)` and then use `task_tool(subagent_type="evolution_reviewer")` with the returned `evolution_review_ref`.
+Stage active evolution for a regular skill. The method first uses the current rail's bounded trajectory evidence window to detect execution signals and user feedback; a non-empty `user_intent` is appended as an explicit request signal instead of replacing trajectory evidence.
 
 **Parameters**:
 
 * **skill_name** (str): Target regular skill name.
-* **user_intent** (str): User improvement intent.
-* **max_index_records** (int): Maximum experience index entries to inline in the prompt preview.
+* **user_intent** (str): User improvement intent. Defaults to `""`; when empty, current trajectory evidence can still trigger evolution if it contains actionable signals.
+* **auto_approve** (bool): Whether to auto-approve the generated request. Defaults to `False`.
 
 **Returns**:
 
-* `EvolutionRequestResult`: `mode="agent_prompt"` and `followup_prompt` for the host to inject into the agent loop. It does not stage records or emit an approval event.
+* `EvolutionRequestResult`: `request_id` is set when records were generated; otherwise an empty result object is returned.
 
 ### async approve_record(request_id) -> None
 
@@ -249,13 +181,15 @@ If a partial failure occurs, the unwritten tail remains in the same `PendingChan
 
 Reject staged records without writing them.
 
-### async request_simplify(skill_name, user_intent=None, mode="agent_prompt") -> SimplifyRequestResult
+### async request_simplify(skill_name, user_intent=None) -> Optional[str]
 
-Build a host-delivered simplify command prompt. The prompt contains a bounded experience summary index and asks the agent to use `list_skill_experiences`, `read_skill_experiences`, and `simplify_skill_experiences`.
+Stage a simplify proposal and emit an approval event.
 
 **Returns**:
 
-* `SimplifyRequestResult`: `mode="agent_prompt"` and `followup_prompt`. It does not call the scorer, stage governance actions, or emit an approval event.
+* `str`: governance request id when actions were proposed, otherwise `None`.
+
+Use `on_approve_simplify(request_id)` to execute and `on_reject_simplify(request_id)` to discard.
 
 ### async request_rebuild(skill_name, user_intent=None, min_score=0.5) -> Optional[str]
 
@@ -269,13 +203,17 @@ Return and clear buffered host events. If `wait=True`, waits for pending backgro
 
 Compatibility wrapper for `drain_pending_host_events()`.
 
+### async generate_and_emit_experience(...) -> bool
+
+Compatibility wrapper for legacy host-driven/manual evolution. New integrations should call `request_user_evolution()`.
+
 ---
 
 ## Example
 
 ```python
 from openjiuwen.harness import create_deep_agent
-from openjiuwen.harness.rails import SkillEvolutionRail, SubagentRail
+from openjiuwen.harness.rails import SkillEvolutionRail
 
 skill_rail = SkillEvolutionRail(
     skills_dir="/path/to/skills",
@@ -287,10 +225,7 @@ skill_rail = SkillEvolutionRail(
 agent = create_deep_agent(
     model=model_client,
     tools=tools,
-    rails=[
-        skill_rail,
-        SubagentRail(),
-    ],
+    rails=[skill_rail],
 )
 
 result = await skill_rail.request_user_evolution(
@@ -298,8 +233,6 @@ result = await skill_rail.request_user_evolution(
     "Prefer behavior-level findings before style comments",
 )
 
-if result.followup_prompt:
-    # Host delivery is application-specific: queue it as the next query,
-    # follow-up, or equivalent message in your agent loop.
-    await agent.invoke({"query": result.followup_prompt})
+if result.approval_event is not None:
+    await skill_rail.approve_record(result.request_id)
 ```

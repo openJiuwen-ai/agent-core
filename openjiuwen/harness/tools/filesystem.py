@@ -431,24 +431,20 @@ class ReadFileTool(Tool):
             mtime_ns: int,
             size_bytes: int,
             is_partial: bool,
+            rendered_line_count: int,
     ) -> None:
         if not mtime_ns or not self._is_text_read_for_edit(file_path):
             return
 
-        # A read is partial only when the caller explicitly windowed it
-        # (offset > 0 or a user-supplied limit). Do NOT re-derive partialness by
-        # comparing line counts from two different read paths: the rendered path
-        # is capped at MAX_LINES_TO_READ and skips CRLF normalization, so that
-        # comparison falsely marks files over the cap — or CRLF files with a
-        # trailing newline — as partial, leaving them permanently uneditable
-        # (read -> edit rejected -> read -> ... loop). The full-file snapshot
-        # below is still captured for external-modification detection.
         raw_state = None if is_partial else await self._read_raw_text_for_edit_state(file_path)
+        raw_line_count = raw_state.line_count if raw_state else rendered_line_count
+        effective_partial = is_partial or raw_line_count > rendered_line_count
+
         _FILE_READ_REGISTRY[file_path] = _FileReadState(
             mtime_ns=mtime_ns,
             size_bytes=size_bytes,
-            is_partial=is_partial,
-            content=raw_state.content if (not is_partial and raw_state) else None,
+            is_partial=effective_partial,
+            content=raw_state.content if not effective_partial and raw_state else None,
         )
 
     # ------------------------------------------------------------------
@@ -802,6 +798,7 @@ class ReadFileTool(Tool):
             mtime_ns=mtime_ns,
             size_bytes=size_bytes,
             is_partial=user_supplied_limit or offset > 0,
+            rendered_line_count=line_count,
         )
 
         return ToolOutput(

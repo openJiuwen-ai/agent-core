@@ -378,7 +378,7 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
         ), patch(
             "openjiuwen.auto_harness.infra.ci_gate_runner.CIGateRunner._ensure_uv_available",
             new_callable=AsyncMock,
-            return_value=(True, ""),
+            return_value=None,
         ):
             await tool._run_gate({
                 "name": "test",
