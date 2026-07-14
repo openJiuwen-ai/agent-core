@@ -40,6 +40,22 @@ class TestConnectorPool:
 
 @pytest.mark.asyncio
 class TestTcpConnectorPoolIntegration:
+    @pytest.fixture(autouse=True)
+    def _reset_connector_pool_manager(self):
+        """Reset the shared ConnectorPoolManager singleton between tests.
+
+        ConnectorPoolManager is a Singleton, so ConnectorPoolManager(max_pools=N)
+        returns the same process-global instance and ignores N. Without a reset,
+        pools created by earlier tests (here or in other files, e.g. HttpX pools
+        registered by the LLM client) leak in and break exact-count assertions.
+        """
+        manager = ConnectorPoolManager()
+        manager._connector_pools.clear()
+        manager._closed = False
+        yield
+        manager._connector_pools.clear()
+        manager._closed = False
+
     async def test_with_connector_pool_manager(self):
         manager = ConnectorPoolManager(max_pools=5)
         config = ConnectorPoolConfig(limit=50, limit_per_host=10)
