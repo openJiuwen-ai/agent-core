@@ -153,15 +153,222 @@ _PROBE_CARDS_PARAMS: Dict[str, Any] = {
     "required": [],
 }
 
+
+
+_PROBE_FORM_FIELDS_DESC = (
+    "Return compact visible form-field metadata before filling passenger/contact/profile forms. "
+    "Use this before browser_batch_interact when field selectors are not already known, especially on "
+    "booking, checkout, login, registration, passport, nationality, country, date-of-birth, and contact forms. "
+    "The result includes label, placeholder, aria label, name/id/testid, type, value, required/disabled/readonly, "
+    "selector_hint, bbox, and native select options without dumping the whole DOM."
+)
+_PROBE_FORM_FIELDS_PARAMS: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "max_fields": {
+            "type": "integer",
+            "description": "Maximum fields to return. Default 80, hard-capped at 160.",
+        },
+        "viewport_only": {
+            "type": "boolean",
+            "description": "When true, only return visible fields in the viewport. Default true.",
+        },
+        "query": {
+            "type": "string",
+            "description": "Optional field filter, e.g. 'passport', 'birth', 'nationality', 'contact'.",
+        },
+        "include_options": {
+            "type": "boolean",
+            "description": "When true, include visible options for native select elements. Default true.",
+        },
+    },
+    "required": [],
+}
+
+_FILL_FORM_SEMANTIC_DESC = (
+    "Fill visible form fields by semantic field names, using compact field matching inside the page. "
+    "Use this after browser_probe_form_fields or when passenger/contact/profile fields are ordinary visible "
+    "inputs but raw Playwright refs are stale. Pass a fields object such as "
+    "{'given name': 'Alex', 'surname': 'Tan', 'email': 'test@example.com'}. "
+    "For dropdown-style fields, use browser_select_dropdown_option instead."
+)
+_FILL_FORM_SEMANTIC_PARAMS: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "fields": {
+            "type": "object",
+            "description": "Mapping from semantic field name to value, e.g. {'given name': 'Alex'}.",
+            "properties": {},
+            "required": [],
+        },
+        "max_fields": {
+            "type": "integer",
+            "description": "Maximum visible fields to consider. Default 120, hard-capped at 200.",
+        },
+        "viewport_only": {
+            "type": "boolean",
+            "description": "When true, only consider fields visible in the viewport. Default true.",
+        },
+        "clear_existing": {
+            "type": "boolean",
+            "description": "When true, replace existing values. Default true.",
+        },
+    },
+    "required": ["fields"],
+}
+
+_PROBE_DROPDOWN_DESC = (
+    "Return compact visible options from an open dropdown, autocomplete, combobox, listbox, "
+    "menu, or suggestion popup. Use immediately after focusing/typing into dropdown-style fields "
+    "such as airports, countries, passenger titles, date-of-birth month/year, and search suggestions. "
+    "Prefer this over browser_snapshot for dynamic dropdown overlays. The result includes option text, "
+    "role, disabled/selected flags, bbox, selector_hint, and scoring against the optional query."
+)
+_PROBE_DROPDOWN_PARAMS: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "max_options": {
+            "type": "integer",
+            "description": "Maximum options to return. Default 30, hard-capped at 80.",
+        },
+        "viewport_only": {
+            "type": "boolean",
+            "description": "When true, only return options visible in the viewport. Default true.",
+        },
+        "query": {
+            "type": "string",
+            "description": "Optional option text/query filter, e.g. 'Kuala Lumpur' or 'Singapore'.",
+        },
+    },
+    "required": [],
+}
+
+_SELECT_DROPDOWN_DESC = (
+    "Atomically select one option from a dropdown/autocomplete/combobox. Use for dynamic option "
+    "lists instead of repeated browser_click/browser_type turns. Optionally pass field_selector to "
+    "focus and type query before selection; otherwise it selects from the currently open dropdown. "
+    "Verifies by returning the selected option text and selector hint."
+)
+_SELECT_DROPDOWN_PARAMS: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "field_selector": {
+            "type": "string",
+            "description": "Optional selector for the input/combobox field to focus before typing.",
+        },
+        "query": {
+            "type": "string",
+            "description": "Text to type into the field before selecting, e.g. airport/city name.",
+        },
+        "option_text": {
+            "type": "string",
+            "description": "Desired visible option text. Defaults to query when omitted.",
+        },
+        "exact": {
+            "type": "boolean",
+            "description": "When true, require exact text match. Default false.",
+        },
+        "timeout_ms": {
+            "type": "integer",
+            "description": "Timeout for field interaction. Default 5000, hard-capped at 30000.",
+        },
+        "wait_after_type_ms": {
+            "type": "integer",
+            "description": "Wait after typing before selecting options. Default 250, max 5000.",
+        },
+    },
+    "required": [],
+}
+
+_PROBE_CALENDAR_DESC = (
+    "Return compact visible date-picker/calendar state: visible months and normalized day cells. "
+    "Use after opening a calendar/date picker to avoid ambiguous clicks on bare day numbers such as '15'. "
+    "The result includes ISO date, day/month/year, disabled/selected/outside-month flags, bbox, "
+    "selector_hint, and month label. Prefer this over browser_snapshot for calendar overlays."
+)
+_PROBE_CALENDAR_PARAMS: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "max_days": {
+            "type": "integer",
+            "description": "Maximum day cells to return. Default 120, hard-capped at 240.",
+        },
+        "viewport_only": {
+            "type": "boolean",
+            "description": "When true, only return visible day cells. Default true.",
+        },
+        "query": {
+            "type": "string",
+            "description": "Optional task/date hint retained in result for traceability.",
+        },
+    },
+    "required": [],
+}
+
+_SELECT_CALENDAR_DESC = (
+    "Atomically set/select an exact ISO date from a date input or open calendar widget. "
+    "Use this for travel/booking calendars and date-of-birth calendars instead of clicking month/day refs. "
+    "It opens field_selector if provided, optionally tries direct input, navigates previous/next months, "
+    "clicks the matching enabled date cell, and returns verification metadata."
+)
+_SELECT_CALENDAR_PARAMS: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "date": {
+            "type": "string",
+            "description": "Required target date in ISO form YYYY-MM-DD, e.g. 2026-07-15.",
+        },
+        "field_selector": {
+            "type": "string",
+            "description": "Optional selector for the date input/field to open before selection.",
+        },
+        "next_selector": {
+            "type": "string",
+            "description": "Optional stable selector for the calendar next-month button.",
+        },
+        "prev_selector": {
+            "type": "string",
+            "description": "Optional stable selector for the calendar previous-month button.",
+        },
+        "max_month_clicks": {
+            "type": "integer",
+            "description": "Maximum month navigation clicks. Default 18, hard-capped at 60.",
+        },
+        "timeout_ms": {
+            "type": "integer",
+            "description": "Timeout for opening the field. Default 5000, hard-capped at 30000.",
+        },
+        "try_direct_input": {
+            "type": "boolean",
+            "description": "When true, try setting a non-readonly input value before calendar clicking. Default true.",
+        },
+    },
+    "required": ["date"],
+}
+
 _BATCH_INTERACT_DESC = (
     "Execute multiple deterministic browser interactions in one standalone runtime tool call. "
     "Use after browser_probe_interactives/browser_probe_cards when a page-level flow has multiple "
     "known targets, such as three or more form fields, click+type+choose autocomplete, dropdown or "
     "date-picker selection, filter panels, search submit plus result wait, or compact extraction. "
+    "For a single dropdown/calendar field, prefer browser_select_dropdown_option or "
+    "browser_select_calendar_date first. "
     "This is a first-class helper like the probe tools; do not route this through browser_custom_action. "
     "Do not use it for a single uncertain click; keep using browser_fill_form for ordinary visible "
     "text fields when that official tool is enough."
 )
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(value)
+
 _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -169,8 +376,8 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
             "type": "array",
             "description": (
                 "Ordered browser steps to execute in one batch. Supported ops: click, fill, type, "
-                "autocomplete, select_visible_text, press, select_option, set_checked, "
-                "wait_for_selector, wait_for_text, wait_for_load_state, sleep, extract_text, "
+                "autocomplete, select_visible_text, select_dropdown_option, select_calendar_date, press, "
+                "select_option, set_checked, wait_for_selector, wait_for_text, wait_for_load_state, sleep, "
                 "extract_value, screenshot."
             ),
             "items": {
@@ -623,6 +830,247 @@ class BrowserProbeCardsTool(Tool):
             yield None
 
 
+
+
+class BrowserProbeFormFieldsTool(Tool):
+    """Compact visible form-field probe."""
+
+    def __init__(self, runtime: "BrowserAgentRuntime", language: str = "cn") -> None:
+        del language
+        super().__init__(
+            ToolCard(
+                name="browser_probe_form_fields",
+                description=_PROBE_FORM_FIELDS_DESC,
+                input_params=_PROBE_FORM_FIELDS_PARAMS,
+            )
+        )
+        self._runtime = runtime
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
+        del kwargs
+        max_fields = inputs.get("max_fields", 80)
+        try:
+            max_fields_int = max(1, min(160, int(max_fields)))
+        except (TypeError, ValueError):
+            max_fields_int = 80
+        viewport_only = _coerce_bool(inputs.get("viewport_only"), True)
+        include_options = _coerce_bool(inputs.get("include_options"), True)
+
+        try:
+            result = await self._runtime.probe_form_fields(
+                max_fields=max_fields_int,
+                viewport_only=viewport_only,
+                query=str(inputs.get("query") or ""),
+                include_options=include_options,
+            )
+            return ToolOutput(success=bool(result.get("ok", True)), data=result, error=result.get("error"))
+        except Exception as exc:
+            return ToolOutput(success=False, error=str(exc))
+
+    async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
+        del inputs, kwargs
+        if False:
+            yield None
+
+
+
+class BrowserFillFormSemanticTool(Tool):
+    """Fill visible form fields using semantic field names."""
+
+    def __init__(self, runtime: "BrowserAgentRuntime", language: str = "cn") -> None:
+        del language
+        super().__init__(
+            ToolCard(
+                name="browser_fill_form_semantic",
+                description=_FILL_FORM_SEMANTIC_DESC,
+                input_params=_FILL_FORM_SEMANTIC_PARAMS,
+            )
+        )
+        self._runtime = runtime
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
+        del kwargs
+        fields = inputs.get("fields")
+        if not isinstance(fields, dict) or not fields:
+            return ToolOutput(success=False, error="fields must be a non-empty object")
+        max_fields = inputs.get("max_fields", 120)
+        try:
+            max_fields_int = max(1, min(200, int(max_fields)))
+        except (TypeError, ValueError):
+            max_fields_int = 120
+
+        try:
+            result = await self._runtime.fill_form_semantic(
+                fields=fields,
+                max_fields=max_fields_int,
+                viewport_only=_coerce_bool(inputs.get("viewport_only"), True),
+                clear_existing=_coerce_bool(inputs.get("clear_existing"), True),
+            )
+            return ToolOutput(success=bool(result.get("ok", True)), data=result, error=result.get("error"))
+        except Exception as exc:
+            return ToolOutput(success=False, error=str(exc))
+
+    async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
+        del inputs, kwargs
+        if False:
+            yield None
+
+class BrowserProbeDropdownTool(Tool):
+    """Compact visible-dropdown probe."""
+
+    def __init__(self, runtime: "BrowserAgentRuntime", language: str = "cn") -> None:
+        del language
+        super().__init__(
+            ToolCard(
+                name="browser_probe_dropdown",
+                description=_PROBE_DROPDOWN_DESC,
+                input_params=_PROBE_DROPDOWN_PARAMS,
+            )
+        )
+        self._runtime = runtime
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
+        del kwargs
+        max_options = inputs.get("max_options", 30)
+        try:
+            max_options_int = max(1, min(80, int(max_options)))
+        except (TypeError, ValueError):
+            max_options_int = 30
+        viewport_only = inputs.get("viewport_only", True)
+        if isinstance(viewport_only, str):
+            viewport_only = viewport_only.strip().lower() not in {"0", "false", "no"}
+
+        try:
+            result = await self._runtime.probe_dropdown(
+                max_options=max_options_int,
+                viewport_only=bool(viewport_only),
+                query=str(inputs.get("query") or ""),
+            )
+            return ToolOutput(success=bool(result.get("ok", True)), data=result, error=result.get("error"))
+        except Exception as exc:
+            return ToolOutput(success=False, error=str(exc))
+
+    async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
+        del inputs, kwargs
+        if False:
+            yield None
+
+
+class BrowserSelectDropdownOptionTool(Tool):
+    """Select a dropdown/autocomplete option atomically."""
+
+    def __init__(self, runtime: "BrowserAgentRuntime", language: str = "cn") -> None:
+        del language
+        super().__init__(
+            ToolCard(
+                name="browser_select_dropdown_option",
+                description=_SELECT_DROPDOWN_DESC,
+                input_params=_SELECT_DROPDOWN_PARAMS,
+            )
+        )
+        self._runtime = runtime
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
+        del kwargs
+        try:
+            result = await self._runtime.select_dropdown_option(
+                field_selector=str(inputs.get("field_selector") or ""),
+                query=str(inputs.get("query") or ""),
+                option_text=str(inputs.get("option_text") or ""),
+                exact=_coerce_bool(inputs.get("exact"), False),
+                timeout_ms=inputs.get("timeout_ms", 5000),
+                wait_after_type_ms=inputs.get("wait_after_type_ms", 250),
+            )
+            return ToolOutput(success=bool(result.get("ok", True)), data=result, error=result.get("error"))
+        except Exception as exc:
+            return ToolOutput(success=False, error=str(exc))
+
+    async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
+        del inputs, kwargs
+        if False:
+            yield None
+
+
+class BrowserProbeCalendarTool(Tool):
+    """Compact visible-calendar probe."""
+
+    def __init__(self, runtime: "BrowserAgentRuntime", language: str = "cn") -> None:
+        del language
+        super().__init__(
+            ToolCard(
+                name="browser_probe_calendar",
+                description=_PROBE_CALENDAR_DESC,
+                input_params=_PROBE_CALENDAR_PARAMS,
+            )
+        )
+        self._runtime = runtime
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
+        del kwargs
+        max_days = inputs.get("max_days", 120)
+        try:
+            max_days_int = max(1, min(240, int(max_days)))
+        except (TypeError, ValueError):
+            max_days_int = 120
+        viewport_only = inputs.get("viewport_only", True)
+        if isinstance(viewport_only, str):
+            viewport_only = viewport_only.strip().lower() not in {"0", "false", "no"}
+
+        try:
+            result = await self._runtime.probe_calendar(
+                max_days=max_days_int,
+                viewport_only=bool(viewport_only),
+                query=str(inputs.get("query") or ""),
+            )
+            return ToolOutput(success=bool(result.get("ok", True)), data=result, error=result.get("error"))
+        except Exception as exc:
+            return ToolOutput(success=False, error=str(exc))
+
+    async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
+        del inputs, kwargs
+        if False:
+            yield None
+
+
+class BrowserSelectCalendarDateTool(Tool):
+    """Select an exact calendar date atomically."""
+
+    def __init__(self, runtime: "BrowserAgentRuntime", language: str = "cn") -> None:
+        del language
+        super().__init__(
+            ToolCard(
+                name="browser_select_calendar_date",
+                description=_SELECT_CALENDAR_DESC,
+                input_params=_SELECT_CALENDAR_PARAMS,
+            )
+        )
+        self._runtime = runtime
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
+        del kwargs
+        date = str(inputs.get("date") or "").strip()
+        if not date:
+            return ToolOutput(success=False, error="date is required")
+        try:
+            result = await self._runtime.select_calendar_date(
+                date=date,
+                field_selector=str(inputs.get("field_selector") or ""),
+                next_selector=str(inputs.get("next_selector") or ""),
+                prev_selector=str(inputs.get("prev_selector") or ""),
+                max_month_clicks=inputs.get("max_month_clicks", 18),
+                timeout_ms=inputs.get("timeout_ms", 5000),
+                try_direct_input=_coerce_bool(inputs.get("try_direct_input"), True),
+            )
+            return ToolOutput(success=bool(result.get("ok", True)), data=result, error=result.get("error"))
+        except Exception as exc:
+            return ToolOutput(success=False, error=str(exc))
+
+    async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
+        del inputs, kwargs
+        if False:
+            yield None
+
+
 class BrowserBatchInteractTool(Tool):
     def __init__(self, runtime: "BrowserAgentRuntime", language: str = "cn") -> None:
         del language
@@ -710,6 +1158,12 @@ def build_browser_runtime_tools(
         BrowserClearCancelTool(runtime, language),
         BrowserProbeInteractivesTool(runtime, language),
         BrowserProbeCardsTool(runtime, language),
+        BrowserProbeFormFieldsTool(runtime, language),
+        BrowserFillFormSemanticTool(runtime, language),
+        BrowserProbeDropdownTool(runtime, language),
+        BrowserSelectDropdownOptionTool(runtime, language),
+        BrowserProbeCalendarTool(runtime, language),
+        BrowserSelectCalendarDateTool(runtime, language),
         BrowserBatchInteractTool(runtime, language),
         BrowserCustomActionTool(runtime, language),
         BrowserListActionsTool(runtime, language),

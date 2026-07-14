@@ -33,6 +33,14 @@ from .browser_logging import (
 from .browser_tools import ensure_browser_runtime_client_patch
 from .config import BrowserInstanceConfig, BrowserRunGuardrails
 from .probes import build_card_probe_js, build_interactive_probe_js
+from .semantic_widgets import (
+    build_calendar_probe_js,
+    build_calendar_select_js,
+    build_dropdown_probe_js,
+    build_dropdown_select_js,
+    build_form_fields_probe_js,
+    build_semantic_form_fill_js,
+)
 from .service import MAX_ITERATION_MESSAGE, BrowserService, BrowserTaskProgressState
 from .site_profiles import builtin_site_profiles, get_selector_cache
 from .status_logging import BrowserSubagentStatusLogger, is_browser_subagent_status_log_enabled
@@ -96,6 +104,12 @@ class BrowserAgentRuntime:
         self._browser_probe_interactives_tool = None
         self._browser_probe_cards_tool = None
         self._browser_batch_interact_tool = None
+        self._browser_probe_form_fields_tool = None
+        self._browser_fill_form_semantic_tool = None
+        self._browser_probe_dropdown_tool = None
+        self._browser_select_dropdown_option_tool = None
+        self._browser_probe_calendar_tool = None
+        self._browser_select_calendar_date_tool = None
 
     @property
     def service(self) -> BrowserService:
@@ -120,6 +134,30 @@ class BrowserAgentRuntime:
     @property
     def browser_batch_interact_tool(self) -> Any:
         return self._browser_batch_interact_tool
+
+    @property
+    def browser_probe_form_fields_tool(self) -> Any:
+        return self._browser_probe_form_fields_tool
+
+    @property
+    def browser_fill_form_semantic_tool(self) -> Any:
+        return self._browser_fill_form_semantic_tool
+
+    @property
+    def browser_probe_dropdown_tool(self) -> Any:
+        return self._browser_probe_dropdown_tool
+
+    @property
+    def browser_select_dropdown_option_tool(self) -> Any:
+        return self._browser_select_dropdown_option_tool
+
+    @property
+    def browser_probe_calendar_tool(self) -> Any:
+        return self._browser_probe_calendar_tool
+
+    @property
+    def browser_select_calendar_date_tool(self) -> Any:
+        return self._browser_select_calendar_date_tool
 
     @property
     def controller(self) -> BaseController:
@@ -359,12 +397,24 @@ class BrowserAgentRuntime:
             BrowserBatchInteractTool,
             BrowserCustomActionTool,
             BrowserListActionsTool,
+            BrowserProbeCalendarTool,
             BrowserProbeCardsTool,
+            BrowserProbeDropdownTool,
+            BrowserFillFormSemanticTool,
+            BrowserProbeFormFieldsTool,
             BrowserProbeInteractivesTool,
+            BrowserSelectCalendarDateTool,
+            BrowserSelectDropdownOptionTool,
         )
 
         self._browser_probe_interactives_tool = BrowserProbeInteractivesTool(self, language="en")
         self._browser_probe_cards_tool = BrowserProbeCardsTool(self, language="en")
+        self._browser_probe_form_fields_tool = BrowserProbeFormFieldsTool(self, language="en")
+        self._browser_fill_form_semantic_tool = BrowserFillFormSemanticTool(self, language="en")
+        self._browser_probe_dropdown_tool = BrowserProbeDropdownTool(self, language="en")
+        self._browser_select_dropdown_option_tool = BrowserSelectDropdownOptionTool(self, language="en")
+        self._browser_probe_calendar_tool = BrowserProbeCalendarTool(self, language="en")
+        self._browser_select_calendar_date_tool = BrowserSelectCalendarDateTool(self, language="en")
         self._browser_batch_interact_tool = BrowserBatchInteractTool(self, language="en")
         self._browser_custom_action_tool = BrowserCustomActionTool(self, language="en")
         self._browser_list_actions_tool = BrowserListActionsTool(self, language="en")
@@ -375,6 +425,30 @@ class BrowserAgentRuntime:
         self._register_runtime_tool(
             self._browser_probe_cards_tool,
             tool_name="browser_probe_cards",
+        )
+        self._register_runtime_tool(
+            self._browser_probe_form_fields_tool,
+            tool_name="browser_probe_form_fields",
+        )
+        self._register_runtime_tool(
+            self._browser_fill_form_semantic_tool,
+            tool_name="browser_fill_form_semantic",
+        )
+        self._register_runtime_tool(
+            self._browser_probe_dropdown_tool,
+            tool_name="browser_probe_dropdown",
+        )
+        self._register_runtime_tool(
+            self._browser_select_dropdown_option_tool,
+            tool_name="browser_select_dropdown_option",
+        )
+        self._register_runtime_tool(
+            self._browser_probe_calendar_tool,
+            tool_name="browser_probe_calendar",
+        )
+        self._register_runtime_tool(
+            self._browser_select_calendar_date_tool,
+            tool_name="browser_select_calendar_date",
         )
         self._register_runtime_tool(
             self._browser_batch_interact_tool,
@@ -396,6 +470,12 @@ class BrowserAgentRuntime:
             # same first-class affordances as the probe tools before MCP primitives.
             self._service.browser_agent.ability_manager.add(self._browser_probe_interactives_tool.card)
             self._service.browser_agent.ability_manager.add(self._browser_probe_cards_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_probe_form_fields_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_fill_form_semantic_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_probe_dropdown_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_select_dropdown_option_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_probe_calendar_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_select_calendar_date_tool.card)
             self._service.browser_agent.ability_manager.add(self._browser_batch_interact_tool.card)
             self._service.browser_agent.ability_manager.add(self._browser_custom_action_tool.card)
             self._service.browser_agent.ability_manager.add(self._browser_list_actions_tool.card)
@@ -440,6 +520,259 @@ class BrowserAgentRuntime:
             continue_on_error=continue_on_error,
             global_timeout_ms=global_timeout_ms,
         )
+
+
+
+    async def probe_form_fields(
+        self,
+        *,
+        max_fields: int = 80,
+        viewport_only: bool = True,
+        query: str = "",
+        include_options: bool = True,
+    ) -> Dict[str, Any]:
+        """Return compact visible form-field metadata before batch filling."""
+        await self.ensure_runtime_ready()
+
+        if self._code_executor is None:
+            return {"ok": False, "error": "browser_code_executor_not_ready", "fields": []}
+
+        js_code = build_form_fields_probe_js(
+            max_fields=max_fields,
+            viewport_only=viewport_only,
+            query=query,
+            include_options=include_options,
+        )
+
+        try:
+            raw = await self._code_executor(js_code)
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            return {"ok": False, "error": f"browser_probe_form_fields failed: {exc}", "fields": []}
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "Could not parse browser_probe_form_fields result JSON",
+                "raw_preview": str(raw)[:400],
+                "fields": [],
+            }
+
+        parsed.setdefault("ok", True)
+        parsed.setdefault("error", None)
+        parsed.setdefault("fields", [])
+        return parsed
+
+
+    async def fill_form_semantic(
+        self,
+        *,
+        fields: Dict[str, Any],
+        max_fields: int = 120,
+        viewport_only: bool = True,
+        clear_existing: bool = True,
+    ) -> Dict[str, Any]:
+        """Fill visible form fields by semantic field names rather than raw refs."""
+        await self.ensure_runtime_ready()
+
+        if self._code_executor is None:
+            return {"ok": False, "error": "browser_code_executor_not_ready", "filled": [], "failed": []}
+
+        js_code = build_semantic_form_fill_js(
+            fields=fields,
+            max_fields=max_fields,
+            viewport_only=viewport_only,
+            clear_existing=clear_existing,
+        )
+
+        try:
+            raw = await self._code_executor(js_code)
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            return {"ok": False, "error": f"browser_fill_form_semantic failed: {exc}", "filled": [], "failed": []}
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "Could not parse browser_fill_form_semantic result JSON",
+                "raw_preview": str(raw)[:400],
+                "filled": [],
+                "failed": [],
+            }
+
+        parsed.setdefault("ok", True)
+        parsed.setdefault("error", None)
+        parsed.setdefault("filled", [])
+        parsed.setdefault("failed", [])
+        return parsed
+
+    async def probe_dropdown(
+        self,
+        *,
+        max_options: int = 30,
+        viewport_only: bool = True,
+        query: str = "",
+    ) -> Dict[str, Any]:
+        """Return compact visible dropdown/autocomplete options."""
+        await self.ensure_runtime_ready()
+
+        if self._code_executor is None:
+            return {"ok": False, "error": "browser_code_executor_not_ready", "options": []}
+
+        js_code = build_dropdown_probe_js(
+            max_options=max_options,
+            viewport_only=viewport_only,
+            query=query,
+        )
+
+        try:
+            raw = await self._code_executor(js_code)
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            return {"ok": False, "error": f"browser_probe_dropdown failed: {exc}", "options": []}
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "Could not parse browser_probe_dropdown result JSON",
+                "raw_preview": str(raw)[:400],
+                "options": [],
+            }
+
+        parsed.setdefault("ok", True)
+        parsed.setdefault("error", None)
+        parsed.setdefault("options", [])
+        return parsed
+
+    async def select_dropdown_option(
+        self,
+        *,
+        field_selector: str = "",
+        query: str = "",
+        option_text: str = "",
+        exact: bool = False,
+        timeout_ms: int = 5000,
+        wait_after_type_ms: int = 250,
+    ) -> Dict[str, Any]:
+        """Type into a dropdown/autocomplete field and choose the requested option."""
+        await self.ensure_runtime_ready()
+
+        if self._code_executor is None:
+            return {"ok": False, "error": "browser_code_executor_not_ready"}
+
+        js_code = build_dropdown_select_js(
+            field_selector=field_selector,
+            query=query,
+            option_text=option_text,
+            exact=exact,
+            timeout_ms=timeout_ms,
+            wait_after_type_ms=wait_after_type_ms,
+        )
+
+        try:
+            raw = await self._code_executor(js_code)
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            return {"ok": False, "error": f"browser_select_dropdown_option failed: {exc}"}
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "Could not parse browser_select_dropdown_option result JSON",
+                "raw_preview": str(raw)[:400],
+            }
+
+        parsed.setdefault("ok", True)
+        parsed.setdefault("error", None)
+        return parsed
+
+    async def probe_calendar(
+        self,
+        *,
+        max_days: int = 120,
+        viewport_only: bool = True,
+        query: str = "",
+    ) -> Dict[str, Any]:
+        """Return compact visible calendar/date-picker days."""
+        await self.ensure_runtime_ready()
+
+        if self._code_executor is None:
+            return {"ok": False, "error": "browser_code_executor_not_ready", "days": []}
+
+        js_code = build_calendar_probe_js(
+            max_days=max_days,
+            viewport_only=viewport_only,
+            query=query,
+        )
+
+        try:
+            raw = await self._code_executor(js_code)
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            return {"ok": False, "error": f"browser_probe_calendar failed: {exc}", "days": []}
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "Could not parse browser_probe_calendar result JSON",
+                "raw_preview": str(raw)[:400],
+                "days": [],
+            }
+
+        parsed.setdefault("ok", True)
+        parsed.setdefault("error", None)
+        parsed.setdefault("days", [])
+        return parsed
+
+    async def select_calendar_date(
+        self,
+        *,
+        date: str,
+        field_selector: str = "",
+        next_selector: str = "",
+        prev_selector: str = "",
+        max_month_clicks: int = 18,
+        timeout_ms: int = 5000,
+        try_direct_input: bool = True,
+    ) -> Dict[str, Any]:
+        """Select an exact date from a date input or open calendar widget."""
+        await self.ensure_runtime_ready()
+
+        if self._code_executor is None:
+            return {"ok": False, "error": "browser_code_executor_not_ready"}
+
+        js_code = build_calendar_select_js(
+            date=date,
+            field_selector=field_selector,
+            next_selector=next_selector,
+            prev_selector=prev_selector,
+            max_month_clicks=max_month_clicks,
+            timeout_ms=timeout_ms,
+            try_direct_input=try_direct_input,
+        )
+
+        try:
+            raw = await self._code_executor(js_code)
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            return {"ok": False, "error": f"browser_select_calendar_date failed: {exc}"}
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "Could not parse browser_select_calendar_date result JSON",
+                "raw_preview": str(raw)[:400],
+            }
+
+        parsed.setdefault("ok", True)
+        parsed.setdefault("error", None)
+        return parsed
 
 
     async def run_custom_action(
