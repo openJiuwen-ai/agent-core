@@ -14,8 +14,8 @@ does not.
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-07-10 |
-| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）。其余条目见 `docs/features/` |
+| 最近一次修订日期 | 2026-07-14 |
+| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）。其余条目见 `docs/features/` |
 
 ## 范围 / 边界
 
@@ -767,6 +767,30 @@ CANCELLED    -> (terminal)
   升级为能力上限。校验在 `_validate_review_settings`。
 - **新事件** `TASK_REVIEW_VOTE`（`TaskReviewVoteEvent`）：`member_name`=author、`reviewer`=
   投票人、`decision`、`review_round`、`pass_count`/`fail_count`/`reviewer_count` 票数快照。
+
+### 消息投递载荷 `meta`（F_63）
+
+消息表 `TeamMessageBase` 新列 **`meta TEXT NULL`**（JSON 对象），承载框架模板消息的
+**投递载荷**。迁移 `engine._ensure_message_meta_column`（ALTER ADD COLUMN，幂等；旧行读
+NULL = 普通消息，行为不变）。
+
+形状：`{"template": <prompts/<lang>/<key>.md 基名>, "refs": {"task": id, "member": name},
+"params": {<标量>}}`。
+
+三条铁律（防 meta 腐化成垃圾抽屉）：
+
+1. **meta 是模板消息的单一事实**：该行 `content` 恒为空串，系统中不存在需要与 meta 保持
+   一致的第二份表述。展开失败时投递点**从 meta 现场合成** fallback 行（模板 key + task_id），
+   不预存副本。推论：**所有消息消费路径必须容忍「content 空 + meta 在」的行**——不得有
+   `if not content: skip` 式防御。
+2. **framework-only 投递载荷**：meta 只决定"这条消息如何被渲染/投递"，永不承载业务事实
+   （任务真相在任务表、票在票表）。`send_message` 工具面不暴露 meta，只有框架（调度器交接）
+   写它。凡是表能答的走 `refs` 投递时现查，`params` 只放表答不出的瞬时值（如某轮 fail
+   feedback 聚合、解析后的轮数上限）。
+3. **与 `protocol` 正交**：`protocol="json"` 维持"机器旁路控制报文"语义（tool approval
+   fallback，绕过 LLM 渲染直喂中断恢复）；模板消息是普通 `"plain"` 的 LLM 正文。
+
+占位符与命名空间白名单见 `S_22`「消息面」段与 `message_template.py`。
 
 ### Session checkpoint per-team namespace
 
