@@ -3,14 +3,13 @@
 
 from __future__ import annotations
 
-import time
+import asyncio
 from dataclasses import dataclass
 from typing import Any, List
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
-
 from openjiuwen.harness.tools.mobile_gui.config import MobileGuiRuntimeSettings
 from openjiuwen.harness.tools.mobile_gui.coordinate_utils import resolve_vlm_pixel
 from openjiuwen.harness.tools.mobile_gui.tool_support import (
@@ -328,7 +327,7 @@ async def type_text_action(text: str, ctx: AgentCallbackContext) -> str:
             return error
 
         text = "" if text is None else str(text)
-        time.sleep(0.5)
+        await asyncio.sleep(0.5)
 
         try:
             focused = device(focused=True)
