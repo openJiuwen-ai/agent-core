@@ -153,6 +153,7 @@ async def build_cli_runtime(
     system_prompt: str | None = None,
     extra_env: dict[str, str] | None = None,
     ssh_transport: SshTransportConfig | None = None,
+    resume_external_backend: bool = False,
 ) -> CliRuntimeBase:
     """Build the member runtime for ``ctx.cli_agent``.
 
@@ -183,6 +184,8 @@ async def build_cli_runtime(
             applied last only for non-descriptor keys).
         ssh_transport: Optional ssh endpoint config. Currently supported only
             by the Claude SDK backend.
+        resume_external_backend: When True, resume the derived backend session
+            instead of starting it as a fresh session.
     """
     if not ctx.cli_agent:
         raise_error(
@@ -190,6 +193,11 @@ async def build_cli_runtime(
             reason="build_cli_runtime called without ctx.cli_agent set",
         )
     descriptor = descriptor_from_context(ctx)
+    if not descriptor.session_id:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="external CLI runtime requires session_id in context",
+        )
     if ctx.cli_agent == "claude":
         if command_override is not None:
             raise_error(
@@ -210,6 +218,8 @@ async def build_cli_runtime(
             mcp_server_command=mcp_server_command,
             system_prompt=system_prompt,
             ssh_transport=ssh_transport,
+            team_session_id=descriptor.session_id,
+            resume_external_backend=resume_external_backend,
         )
     if ssh_transport is not None:
         raise_error(

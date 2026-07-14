@@ -115,3 +115,54 @@ async def test_external_cli_spawn_stops_runtime_on_cancel(monkeypatch):
     release.set()
 
     assert runtime.stopped
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_external_cli_spawn_resume_uses_empty_initial_query(monkeypatch):
+    """Resumed external CLI members should wait for mailbox input."""
+    runtime = _FakeRuntime()
+    started = asyncio.Event()
+    build_kwargs: dict[str, Any] = {}
+    run_inputs: dict[str, Any] = {}
+
+    async def _fake_build_cli_runtime(*args: Any, **kwargs: Any) -> _FakeRuntime:
+        _ = args
+        build_kwargs.update(kwargs)
+        return runtime
+
+    async def _fake_run_agent_team(*args: Any, **kwargs: Any) -> None:
+        _ = kwargs
+        run_inputs.update(args[1])
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(spawn_mod, "build_cli_runtime", _fake_build_cli_runtime)
+    monkeypatch.setattr(Runner, "run_agent_team", _fake_run_agent_team)
+
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        team_name="ext_team",
+        display_name="Ext",
+        lifecycle=TeamLifecycle.PERSISTENT,
+        teammate_mode=MemberMode.BUILD_MODE,
+    )
+    team_spec = TeamSpec(team_name="ext_team", display_name="Ext")
+    ctx = TeamRuntimeContext(
+        role=TeamRole.TEAMMATE,
+        member_name="claude-1",
+        cli_agent="claude",
+        team_spec=team_spec,
+    )
+
+    handle = await spawn_mod.external_cli_spawn(
+        _FakeTeamAgent(spec),
+        ctx,
+        session_id="sess-1",
+        resume_external_backend=True,
+    )
+    await started.wait()
+    await handle.force_kill()
+
+    assert build_kwargs["resume_external_backend"] is True
+    assert run_inputs == {"query": ""}
