@@ -94,6 +94,7 @@ async def test_spawn_external_cli_agent_unknown_adapter_fails(make_backend):
         prompt="x",
     )
     assert not result.ok
+    assert "claude" in (result.reason or "")
     assert not backend.is_external_cli_agent("cli-2")
 
 

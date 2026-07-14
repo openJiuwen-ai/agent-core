@@ -164,14 +164,14 @@ async def build_cli_runtime(
     subprocess(es); ``aclose`` tears down.
 
     Args:
-        ctx: Member runtime context; ``ctx.cli_agent`` names the adapter.
+        ctx: Member runtime context; ``ctx.cli_agent`` names the backend.
         cwd: Working directory for the subprocess(es).
         command_override: Optional full launch argv (e.g. an absolute path).
-        inject_mcp: When True (default), append the adapter's MCP-server
-            registration args so the CLI starts the team MCP server and gets
-            the team collaboration tools. Adapters without an injection
-            strategy ignore this. Only the streaming path injects; one-shot
-            CLIs register their MCP server out of band.
+        inject_mcp: When True (default), configure the backend to register the
+            team MCP server so the CLI gets the team collaboration tools.
+            Adapter-backed CLIs without an injection strategy ignore this.
+            Only the streaming adapter path injects at launch; one-shot CLIs
+            register their MCP server out of band.
         mcp_server_name: Logical name the CLI registers the MCP server under.
         mcp_server_command: Launch argv for the team MCP stdio server.
         system_prompt: The member's team-rail system prompt. Claude receives it
