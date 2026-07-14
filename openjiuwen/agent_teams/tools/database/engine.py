@@ -303,6 +303,24 @@ def _ensure_message_protocol_column(sync_conn) -> None:
         )
 
 
+def _ensure_message_meta_column(sync_conn) -> None:
+    """Backfill the ``meta`` column on pre-existing per-session message tables.
+
+    Same reason as ``_ensure_message_protocol_column``: ``create_all`` never
+    alters a live table. Legacy rows get NULL meta, which the delivery path
+    reads as "plain message, render content verbatim" — the pre-F_63 behavior.
+    """
+    inspector = inspect(sync_conn)
+    for table_name in inspector.get_table_names():
+        if not table_name.startswith("team_message_"):
+            continue
+        columns = {col["name"] for col in inspector.get_columns(table_name)}
+        if "meta" in columns:
+            continue
+        sync_conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN meta TEXT")
+        team_logger.info("Migrated legacy message table %s: added meta column", table_name)
+
+
 def _ensure_dynamic_table_indexes(sync_conn) -> None:
     """Rebuild per-session dynamic-table indexes to the current scheme (A1/A2/D4).
 
@@ -687,6 +705,7 @@ async def create_cur_session_tables(engine: AsyncEngine) -> None:
         for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
             await conn.run_sync(model.__table__.create, checkfirst=True)
         await conn.run_sync(_ensure_message_protocol_column)
+        await conn.run_sync(_ensure_message_meta_column)
         await conn.run_sync(_ensure_dynamic_table_indexes)
 
     team_logger.info("Session tables ready for session %s", session_id)
