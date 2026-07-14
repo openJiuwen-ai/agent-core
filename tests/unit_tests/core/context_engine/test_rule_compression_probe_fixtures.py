@@ -1,6 +1,6 @@
 import json
 
-from openjiuwen.core.context_engine.processor.offloader.rule_compression import (
+from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression import (
     ContentType,
     RuleContentRouter,
     RuleContext,

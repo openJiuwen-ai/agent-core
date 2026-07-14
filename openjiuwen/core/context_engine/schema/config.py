@@ -39,6 +39,14 @@ class ContextEngineConfig(BaseModel):
         increasing latency during recall. Recommended for long-running sessions
         with tight memory constraints.
 
+    enable_reload : bool, default False
+        Whether to enable automatic reloading of offloaded messages when the
+        model requests them via reload hints (e.g., [[HANDLE:xxx]]). When enabled,
+        the context engine monitors model outputs for reload signals and
+        transparently fetches the full content from storage, injecting it back
+        into the active context. When disabled, hints remain as-is in the
+        conversation, and offloaded content is never automatically restored.
+
     context_window_tokens : int, optional
         Total context window supported by the runtime model, including input and
         output tokens. Used for context compression telemetry only.
@@ -64,6 +72,7 @@ class ContextEngineConfig(BaseModel):
     default_window_message_num: Optional[int] = Field(default=None, gt=0)
     default_window_round_num: Optional[int] = Field(default=None, gt=0)
     enable_kv_cache_release: bool = Field(default=False)
+    enable_reload: bool = Field(default=False)
     enable_tiktoken_counter: bool = Field(default=False)
     context_window_tokens: Optional[int] = Field(default=None, gt=0)
     model_name: Optional[str] = Field(default=None)

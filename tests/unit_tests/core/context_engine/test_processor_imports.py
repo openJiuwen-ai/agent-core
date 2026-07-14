@@ -1,83 +1,78 @@
-import pytest
+import subprocess
+import sys
 
-from openjiuwen.core.context_engine import ContextEngine
-from openjiuwen.core.context_engine.processor.compressor.support.compression_executor import (
-    CompressionExecutor,
-)
-from openjiuwen.core.context_engine.processor.compressor.current_round_compressor import (
+from openjiuwen.core.context_engine import (
+    ContextEngine,
     CurrentRoundCompressor,
-)
-from openjiuwen.core.context_engine.processor.legacy.compressor import (
-    FullCompactProcessor,
-    LegacyDialogueCompressor,
-    MicroCompactProcessor,
-)
-from openjiuwen.core.context_engine.processor.legacy.offloader import (
+    DialogueCompressor,
     MessageSummaryOffloader,
-    ToolResultBudgetProcessor,
+    ReasoningToolLoopCompactProcessor,
+    RoundLevelCompressor,
 )
-from openjiuwen.core.context_engine.processor.legacy.offloader.message_offloader import (
-    MessageOffloader as LegacyMessageOffloader,
-    MessageOffloaderConfig as LegacyMessageOffloaderConfig,
-)
-from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
-    MessageOffloader as CurrentMessageOffloader,
-)
-from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.diff_compressor import (
-    DiffCompressor,
-)
-from openjiuwen.core.context_engine.processor.offloader.rule_compression.pipeline import (
-    RuleCompressionPipeline,
-)
-from openjiuwen.core.foundation.llm import ToolMessage
 
 
-class _LegacyOffloadContext:
-    def __init__(self):
-        self.saved_messages = {}
-
-    def session_id(self):
-        return "legacy-test"
-
-    def workspace_dir(self):
-        return ""
-
-    def offload_messages(self, handle, messages):
-        self.saved_messages[handle] = messages
+def test_official_processors_remain_default_registry_entries():
+    assert ContextEngine._PROCESSOR_MAP["MessageSummaryOffloader"] is MessageSummaryOffloader
+    assert ContextEngine._PROCESSOR_MAP["ReasoningToolLoopCompactProcessor"] is ReasoningToolLoopCompactProcessor
+    assert ContextEngine._PROCESSOR_MAP["DialogueCompressor"] is DialogueCompressor
+    assert ContextEngine._PROCESSOR_MAP["CurrentRoundCompressor"] is CurrentRoundCompressor
+    assert ContextEngine._PROCESSOR_MAP["RoundLevelCompressor"] is RoundLevelCompressor
 
 
-def test_processor_canonical_imports_are_available():
-    assert CurrentRoundCompressor.__name__ == "CurrentRoundCompressor"
-    assert CompressionExecutor.__name__ == "CompressionExecutor"
-    assert RuleCompressionPipeline.__name__ == "RuleCompressionPipeline"
-    assert DiffCompressor.__name__ == "DiffCompressor"
-
-
-def test_legacy_processor_imports_are_available_from_new_and_old_paths():
-    assert FullCompactProcessor.__name__ == "FullCompactProcessor"
-    assert MicroCompactProcessor.__name__ == "MicroCompactProcessor"
-    assert MessageSummaryOffloader.__name__ == "MessageSummaryOffloader"
-    assert ToolResultBudgetProcessor.__name__ == "ToolResultBudgetProcessor"
-    assert LegacyDialogueCompressor.__name__ == "LegacyDialogueCompressor"
-
-
-@pytest.mark.asyncio
-async def test_legacy_message_offloader_stays_unregistered_and_keeps_old_memory_fallback():
-    assert ContextEngine._PROCESSOR_MAP["MessageOffloader"] is CurrentMessageOffloader
-    assert LegacyMessageOffloader is not CurrentMessageOffloader
-
-    context = _LegacyOffloadContext()
-    message = ToolMessage(content="legacy payload", tool_call_id="legacy-call")
-    result = await LegacyMessageOffloader(LegacyMessageOffloaderConfig()).offload_messages(
-        role="tool",
-        content="legacy preview",
-        messages=[message],
-        context=context,
-        tool_call_id=message.tool_call_id,
+def test_default_context_engine_import_does_not_register_forked_processors():
+    script = """
+from openjiuwen.core.context_engine import ContextEngine
+assert not any(key.startswith("Forked") for key in ContextEngine._PROCESSOR_MAP)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
     )
 
-    assert result is not None
-    assert result.offload_type == "in_memory"
-    assert result.content.endswith("[[OFFLOAD: handle=" + result.offload_handle + ", type=in_memory]]")
-    assert not result.content.startswith("\n[[OFFLOAD")
-    assert context.saved_messages[result.offload_handle] == [message]
+    assert result.returncode == 0, result.stderr
+
+
+def test_forked_import_registers_distinct_entries_without_overwriting_official():
+    official = {
+        key: ContextEngine._PROCESSOR_MAP[key]
+        for key in (
+            "MessageSummaryOffloader",
+            "DialogueCompressor",
+            "CurrentRoundCompressor",
+            "RoundLevelCompressor",
+        )
+    }
+
+    from openjiuwen.core.context_engine.processor.forked import (
+        ForkedCurrentRoundCompressor,
+        ForkedDialogueCompressor,
+        ForkedMessageOffloader,
+        ForkedRoundLevelCompressor,
+    )
+
+    assert ContextEngine._PROCESSOR_MAP["ForkedMessageOffloader"] is ForkedMessageOffloader
+    assert ContextEngine._PROCESSOR_MAP["ForkedDialogueCompressor"] is ForkedDialogueCompressor
+    assert ContextEngine._PROCESSOR_MAP["ForkedCurrentRoundCompressor"] is ForkedCurrentRoundCompressor
+    assert ContextEngine._PROCESSOR_MAP["ForkedRoundLevelCompressor"] is ForkedRoundLevelCompressor
+    assert {
+        key: ContextEngine._PROCESSOR_MAP[key]
+        for key in official
+    } == official
+
+
+def test_forked_support_imports_are_available():
+    from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
+        CompressionExecutor,
+    )
+    from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.compressors.diff_compressor import (
+        DiffCompressor,
+    )
+    from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.pipeline import (
+        RuleCompressionPipeline,
+    )
+
+    assert CompressionExecutor.__name__ == "CompressionExecutor"
+    assert DiffCompressor.__name__ == "DiffCompressor"
+    assert RuleCompressionPipeline.__name__ == "RuleCompressionPipeline"

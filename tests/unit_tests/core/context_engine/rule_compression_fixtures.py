@@ -8,7 +8,7 @@ import json
 from dataclasses import dataclass
 from typing import Callable
 
-from openjiuwen.core.context_engine.processor.offloader.rule_compression.router import ContentType
+from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.router import ContentType
 
 
 @dataclass(frozen=True)

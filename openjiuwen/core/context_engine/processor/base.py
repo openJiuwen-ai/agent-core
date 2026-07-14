@@ -17,8 +17,8 @@ from openjiuwen.core.sys_operation import SysOperation
 
 
 _PROCESSOR_TYPE_ATTR: str = "__processor_type"
-_OFFLOAD_MESSAGE_HANDLE: str = "\n[[OFFLOAD: handle={handle}, type={type}]]"
-_OFFLOAD_MESSAGE_HANDLE_WITH_PATH: str = "\n[[OFFLOAD: handle={handle}, type={type}, path={path}]]"
+_OFFLOAD_MESSAGE_HANDLE: str = "[[OFFLOAD: handle={handle}, type={type}]]"
+_OFFLOAD_MESSAGE_HANDLE_WITH_PATH: str = "[[OFFLOAD: handle={handle}, type={type}, path={path}]]"
 
 
 class MetaContextProcessor(type):
@@ -278,7 +278,9 @@ class ContextProcessor(metaclass=MetaContextProcessor):
                     sys_operation=sys_operation,
                 )
                 if not write_success:
-                    return None
+                    return self._offload_messages_to_memory(
+                        role, content, messages, context, offload_handle, **kwargs
+                    )
                 return await self._offload_messages_to_filesystem(
                     role, content, offload_handle, offload_path, session_id=session_id, **kwargs
                 )
@@ -291,7 +293,7 @@ class ContextProcessor(metaclass=MetaContextProcessor):
             return os.path.join(
                 workspace_dir, "context", session_id + "_context", "offload", offload_handle + ".json"
             )
-        return os.path.abspath(os.path.join("memory", "offloads", session_id, offload_handle + ".json"))
+        return os.path.join("memory", "offloads", session_id, offload_handle + ".json")
 
     @staticmethod
     def _offload_messages_to_memory(

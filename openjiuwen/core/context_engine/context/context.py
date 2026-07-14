@@ -80,6 +80,14 @@ class SessionModelContext(ModelContext):
         self._last_context_window_access_at: float | None = None
         self._kv_cache_manager = KVCacheManager(session_id) if config.enable_kv_cache_release else None
         self._offload_message_buffer = OffloadMessageBuffer()
+        self._configure_offload_message_buffer()
+
+    def _configure_offload_message_buffer(self) -> None:
+        self._offload_message_buffer.set_sys_operation(self._sys_operation)
+        self._offload_message_buffer.set_workspace_info(
+            self._workspace.root_path if self._workspace else "",
+            self._session_id,
+        )
 
     def __len__(self):
         return self._message_buffer.size()
@@ -280,6 +288,7 @@ class SessionModelContext(ModelContext):
     async def clear_messages(self, with_history: bool = True):
         self.pop_messages(len(self), with_history=with_history)
         self._offload_message_buffer = OffloadMessageBuffer()
+        self._configure_offload_message_buffer()
         return
 
     @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="window")
@@ -755,7 +764,10 @@ class SessionModelContext(ModelContext):
                 use_window_hook
                 and (
                     is_offload_processor
-                    or processor.processor_type() == "DialogueCompressor"
+                    or processor.processor_type() in {
+                        "DialogueCompressor",
+                        "ForkedDialogueCompressor",
+                    }
                 )
             )
             try:
@@ -1017,3 +1029,4 @@ class SessionModelContext(ModelContext):
             for _, msg_list in offload_messages.items():
                 ContextUtils.validate_messages(msg_list)
             self._offload_message_buffer = OffloadMessageBuffer(offload_messages)
+        self._configure_offload_message_buffer()

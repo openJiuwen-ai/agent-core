@@ -1,4 +1,4 @@
-from openjiuwen.core.context_engine.processor.offloader.rule_compression.query_terms import (
+from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.query_terms import (
     extract_query_terms,
 )
 

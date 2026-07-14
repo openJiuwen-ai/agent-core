@@ -6,9 +6,21 @@ from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor imp
     DialogueCompressor,
     DialogueCompressorConfig,
 )
+from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+    FullCompactProcessor,
+    FullCompactProcessorConfig,
+)
+from openjiuwen.core.context_engine.processor.compressor.micro_compact_processor import (
+    MicroCompactProcessor,
+    MicroCompactProcessorConfig,
+)
 from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
     RoundLevelCompressor,
     RoundLevelCompressorConfig,
+)
+from openjiuwen.core.context_engine.processor.compressor.reasoning_tool_loop_compact_processor import (
+    ReasoningToolLoopCompactProcessor,
+    ReasoningToolLoopCompactProcessorConfig,
 )
 
 __all__ = [
@@ -16,6 +28,12 @@ __all__ = [
     "CurrentRoundCompressorConfig",
     "DialogueCompressor",
     "DialogueCompressorConfig",
+    "FullCompactProcessor",
+    "FullCompactProcessorConfig",
+    "MicroCompactProcessor",
+    "MicroCompactProcessorConfig",
+    "ReasoningToolLoopCompactProcessor",
+    "ReasoningToolLoopCompactProcessorConfig",
     "RoundLevelCompressor",
     "RoundLevelCompressorConfig",
 ]

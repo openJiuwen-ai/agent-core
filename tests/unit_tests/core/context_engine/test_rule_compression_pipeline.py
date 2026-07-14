@@ -1,13 +1,13 @@
 import json
 from pathlib import Path
 
-from openjiuwen.core.context_engine.processor.offloader.rule_compression.pipeline import (
+from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.pipeline import (
     RuleCompressionPipeline,
 )
-from openjiuwen.core.context_engine.processor.offloader.rule_compression.compressors.search_results_compressor import (
+from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.compressors.search_results_compressor import (
     SearchResultsCompressor,
 )
-from openjiuwen.core.context_engine.processor.offloader.rule_compression.types import RuleContext
+from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.types import RuleContext
 from openjiuwen.core.foundation.llm import ToolMessage, UserMessage
 
 
@@ -112,7 +112,7 @@ def test_rule_compression_dump_uses_env_directory_without_workspace(tmp_path, mo
 def test_search_results_compression_ignores_numbered_line_prefixes():
     content = "\n".join(
         f"{index}\topenjiuwen/core/context_engine/processor/offloader/message_offloader.py:{index}:"
-        f"    MessageOffloader match {index}"
+        f"    ForkedMessageOffloader match {index}"
         for index in range(1, 9)
     )
 

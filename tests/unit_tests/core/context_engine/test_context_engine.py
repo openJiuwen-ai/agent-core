@@ -23,9 +23,9 @@ from openjiuwen.core.context_engine import (
 )
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
-from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import DialogueCompressorConfig
-from openjiuwen.core.context_engine.processor.compressor.support.compression_executor import CompressionResult
-from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloaderConfig
+from openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor import ForkedDialogueCompressorConfig
+from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import CompressionResult
+from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader import ForkedMessageOffloaderConfig
 from openjiuwen.core.context_engine.schema.messages import OffloadUserMessage
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
@@ -292,11 +292,11 @@ class TestContextEngine:
 
     @pytest.mark.asyncio
     async def test_create_context_with_registered_processor(self, engine, session):
-        config = MessageOffloaderConfig()
+        config = ForkedMessageOffloaderConfig()
         context = await engine.create_context(
             context_id="ctx",
             session=session,
-            processors=[("MessageOffloader", config)],
+            processors=[("ForkedMessageOffloader", config)],
         )
         assert context is not None
         assert len(getattr(context, "_processors")) == 1
@@ -318,22 +318,22 @@ class TestContextEngine:
 
     @pytest.mark.asyncio
     async def test_create_context_processor_init_fails_raises(self, engine, session):
-        from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
-            MessageOffloaderConfig
+        from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader import (
+            ForkedMessageOffloaderConfig
         )
         with patch.object(
             engine,
             "_create_processor",
             side_effect=build_error(
                 StatusCode.CONTEXT_EXECUTION_ERROR,
-                msg="init processor type 'MessageOffloader' failed",
+                msg="init processor type 'ForkedMessageOffloader' failed",
             )
         ):
             with pytest.raises(BaseError) as exc_info:
                 await engine.create_context(
                     context_id="ctx",
                     session=session,
-                    processors=[("MessageOffloader", MessageOffloaderConfig())],
+                    processors=[("ForkedMessageOffloader", ForkedMessageOffloaderConfig())],
                 )
         assert exc_info.value.code == StatusCode.CONTEXT_EXECUTION_ERROR.code
 
@@ -373,6 +373,34 @@ class TestContextEngine:
         assert context.get_messages()[0].content == "[GET-COMPACTED]"
 
     @pytest.mark.asyncio
+    async def test_compress_context_persists_and_commits_compressed_messages(self, engine, session):
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[(
+                "GetOnlyActiveCompressor",
+                GetOnlyActiveCompressorConfig(replacement="[GET-COMPACTED]"),
+            )],
+        )
+        await context.add_messages([UserMessage(content="large historical context")])
+        await engine.save_contexts(session)
+        session.commit = AsyncMock()
+
+        result = await engine.compress_context(
+            context_id="ctx",
+            session_id=session.get_session_id(),
+            return_state=True,
+        )
+
+        assert result["result"] == "compressed"
+        persisted_messages = session.get_state("context")["ctx"]["messages"]
+        assert [message.content for message in persisted_messages] == ["[GET-COMPACTED]"]
+        session.commit.assert_awaited_once_with()
+
+        restored_context = await engine.create_context(context_id="ctx", session=session)
+        assert [message.content for message in restored_context.get_messages()] == ["[GET-COMPACTED]"]
+
+    @pytest.mark.asyncio
     async def test_compress_context_runs_offloader_ttl_before_compressor(self, session):
         engine = ContextEngine(ContextEngineConfig(context_window_tokens=100))
         context = await engine.create_context(
@@ -380,8 +408,8 @@ class TestContextEngine:
             session=session,
             processors=[
                 (
-                    "MessageOffloader",
-                    MessageOffloaderConfig(
+                    "ForkedMessageOffloader",
+                    ForkedMessageOffloaderConfig(
                         add_message_threshold_ratio=10,
                         ttl_seconds=10,
                         ttl_context_occupancy_ratio=0.1,
@@ -409,7 +437,7 @@ class TestContextEngine:
         assert history["processor"] == "GetOnlyActiveCompressor"
         state_history = context._processor_state_recorder.history()
         assert any(
-            state["status"] == "completed" and state["processor"] == "MessageOffloader"
+            state["status"] == "completed" and state["processor"] == "ForkedMessageOffloader"
             for state in state_history
         )
         assert context.get_messages()[0].content == "[GET-COMPACTED]"
@@ -423,8 +451,8 @@ class TestContextEngine:
             session=session,
             processors=[
                 (
-                    "MessageOffloader",
-                    MessageOffloaderConfig(
+                    "ForkedMessageOffloader",
+                    ForkedMessageOffloaderConfig(
                         add_message_threshold_ratio=10,
                         ttl_seconds=10,
                         ttl_context_occupancy_ratio=0.1,
@@ -449,7 +477,7 @@ class TestContextEngine:
 
         assert result["result"] == "compressed"
         state_history = context._processor_state_recorder.history()
-        assert not any(state["processor"] == "MessageOffloader" for state in state_history)
+        assert not any(state["processor"] == "ForkedMessageOffloader" for state in state_history)
         assert result["state"]["processor"] == "GetOnlyActiveCompressor"
 
     @pytest.mark.asyncio
@@ -460,8 +488,8 @@ class TestContextEngine:
             session=session,
             processors=[
                 (
-                    "MessageOffloader",
-                    MessageOffloaderConfig(
+                    "ForkedMessageOffloader",
+                    ForkedMessageOffloaderConfig(
                         add_message_threshold_ratio=10,
                         ttl_seconds=10,
                         ttl_context_occupancy_ratio=0.1,
@@ -478,7 +506,7 @@ class TestContextEngine:
         assert result["result"] == "noop"
         state_history = context._processor_state_recorder.history()
         assert not any(
-            state["status"] == "completed" and state["processor"] == "MessageOffloader"
+            state["status"] == "completed" and state["processor"] == "ForkedMessageOffloader"
             for state in state_history
         )
 
@@ -489,8 +517,8 @@ class TestContextEngine:
             context_id="ctx",
             session=session,
             processors=[(
-                "DialogueCompressor",
-                DialogueCompressorConfig(min_target_context_ratio=0.5),
+                "ForkedDialogueCompressor",
+                ForkedDialogueCompressorConfig(min_target_context_ratio=0.5),
             )],
         )
         processor = context._processors[0]
@@ -509,13 +537,13 @@ class TestContextEngine:
         result = await engine.compress_context(
             context_id="ctx",
             session=session,
-            processor_types=["DialogueCompressor"],
+            processor_types=["ForkedDialogueCompressor"],
             return_state=True,
         )
 
         assert result["result"] == "noop"
         assert not any(
-            state["status"] == "started" and state["processor"] == "DialogueCompressor"
+            state["status"] == "started" and state["processor"] == "ForkedDialogueCompressor"
             for state in context._processor_state_recorder.history()
         )
         processor._compression_executor.invoke.assert_not_called()
@@ -584,7 +612,7 @@ class TestContextEngine:
         result = await engine.compress_context(
             context_id="ctx",
             session=session,
-            processor_types=["DialogueCompressor"],
+            processor_types=["ForkedDialogueCompressor"],
         )
 
         assert result == "noop"

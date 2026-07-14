@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from openjiuwen.core.context_engine.processor.compressor.reinjection import (
+from openjiuwen.core.context_engine.processor.forked.compressor.reinjection import (
     build_file_reinjected_content,
     build_plan_reinjected_content,
     build_plan_mode_reinjected_content,

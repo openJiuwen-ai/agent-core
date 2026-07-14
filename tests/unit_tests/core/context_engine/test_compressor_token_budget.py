@@ -1,10 +1,10 @@
 from unittest.mock import MagicMock
 
-from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
-    DialogueCompressor,
-    DialogueCompressorConfig,
+from openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor import (
+    ForkedDialogueCompressor,
+    ForkedDialogueCompressorConfig,
 )
-from openjiuwen.core.context_engine.processor.compressor.support.util import (
+from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
     count_messages_tokens,
     resolve_context_max,
     resolve_ratio_token_threshold,
@@ -15,16 +15,16 @@ from openjiuwen.core.foundation.llm import UserMessage
 def test_compressor_delegates_message_counting_to_shared_helper(monkeypatch):
     shared_counter = MagicMock(return_value=37)
     monkeypatch.setattr(
-        "openjiuwen.core.context_engine.processor.compressor.base.count_messages_tokens",
+        "openjiuwen.core.context_engine.processor.forked.compressor.base.count_messages_tokens",
         shared_counter,
     )
     context = MagicMock()
     context.token_counter.return_value = MagicMock()
-    compressor = DialogueCompressor(DialogueCompressorConfig())
+    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig())
     messages = [UserMessage(content="hello")]
 
     assert compressor.count_messages_tokens(messages, context) == 37
-    shared_counter.assert_called_once_with(messages, context.token_counter(), "DialogueCompressor")
+    shared_counter.assert_called_once_with(messages, context.token_counter(), "ForkedDialogueCompressor")
 
 
 def test_shared_message_counter_uses_token_counter():

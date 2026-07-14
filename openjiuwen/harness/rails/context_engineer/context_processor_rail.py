@@ -13,9 +13,15 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.foundation.llm import ModelRequestConfig
 from openjiuwen.core.context_engine import (
-    MessageOffloaderConfig,
+    MessageSummaryOffloaderConfig,
     DialogueCompressorConfig,
     CurrentRoundCompressorConfig,
+    FullCompactProcessorConfig,
+    MicroCompactProcessorConfig,
+    ReasoningToolLoopCompactProcessorConfig,
+    ToolResultBudgetProcessorConfig,
+)
+from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
     RoundLevelCompressorConfig,
 )
 from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig, SessionMemoryManager
@@ -24,7 +30,7 @@ from openjiuwen.harness.schema.state import (
     _SESSION_RUNTIME_ATTR,
     _SESSION_STATE_KEY,
 )
-from openjiuwen.harness.prompts.sections.offload import build_offload_section
+from openjiuwen.harness.prompts.sections.reload import build_reload_section
 
 
 class ContextProcessorRail(DeepAgentRail):
@@ -51,7 +57,6 @@ class ContextProcessorRail(DeepAgentRail):
                 None,
             ] = None,
             preset: bool = True,
-            preset_name: str | None = None,
             session_memory: SessionMemoryConfig | Dict[str, Any] | None = None,
     ):
         """Initialize ContextProcessorRail.
@@ -59,15 +64,9 @@ class ContextProcessorRail(DeepAgentRail):
         Args:
             processors: One or more (processor_key, config) pairs.
             preset: Whether to enable preset default processor config. Defaults to True.
-            preset_name: Deprecated. Passing a value raises ValueError.
             session_memory: Session memory configuration.
         """
         super().__init__()
-        if preset_name is not None:
-            raise ValueError(
-                "ContextProcessorRail no longer supports named presets; only the default processor set is available."
-            )
-
         self._preset = preset
         self._user_processors: List[Tuple[str, Union[BaseModel, Dict]]] = []
         if processors is not None:
@@ -88,6 +87,7 @@ class ContextProcessorRail(DeepAgentRail):
 
         self._system_prompt_builder = None
         self._all_processors: List[Tuple[str, BaseModel]] = []
+        self._reload_enabled = False
 
     @staticmethod
     def _merge_config_with_overrides(
@@ -97,19 +97,8 @@ class ContextProcessorRail(DeepAgentRail):
         if not overrides:
             return base_config
         base_dict = base_config.model_dump(exclude_none=True)
-        normalized_overrides = ContextProcessorRail._normalize_config_overrides(base_config, overrides)
-        merged = {**base_dict, **normalized_overrides}
+        merged = {**base_dict, **overrides}
         return type(base_config)(**merged)
-
-    @staticmethod
-    def _normalize_config_overrides(base_config: BaseModel, overrides: Dict) -> Dict:
-        supported_fields = set(type(base_config).model_fields)
-        normalized = dict(overrides)
-        if "keep_recent_messages" in supported_fields:
-            messages_to_keep = normalized.get("messages_to_keep")
-            if "keep_recent_messages" not in normalized and messages_to_keep is not None:
-                normalized["keep_recent_messages"] = messages_to_keep
-        return {key: value for key, value in normalized.items() if key in supported_fields and value is not None}
 
     @staticmethod
     def _merge_processors(
@@ -152,53 +141,90 @@ class ContextProcessorRail(DeepAgentRail):
 
         for key, override_cfg in overrides:
             if key not in base_override_keys:
-                if base and isinstance(override_cfg, dict):
-                    logger.warning(
-                        "Skip context processor override for '%s' because it does not exist in current preset.",
-                        key,
-                    )
-                    continue
                 merged_cfg = _build_merged_cfg(key, override_cfg)
                 result.append((key, merged_cfg))
 
         return result
 
-    @staticmethod
     def _build_preset_processors(
+            self,
             model_config=None,
             model_client_config=None,
     ) -> List[Tuple[str, BaseModel]]:
-        model_cfg = ModelRequestConfig.model_copy(model_config) if model_config is not None else None
-        return [
-            (
-                "MessageOffloader",
-                MessageOffloaderConfig(
-                    protected_tool_names=["read_file"],
+        if model_config is not None:
+            model_cfg = ModelRequestConfig.model_copy(model_config)
+        else:
+            model_cfg = None
+        if self._session_memory_enabled:
+            presets: List[Tuple[str, BaseModel]] = [
+                (
+                    "ToolResultBudgetProcessor",
+                    ToolResultBudgetProcessorConfig(),
                 ),
-            ),
-            (
-                "DialogueCompressor",
-                DialogueCompressorConfig(
-                    model=model_cfg,
-                    model_client=model_client_config,
+                (
+                    "MicroCompactProcessor",
+                    MicroCompactProcessorConfig()
                 ),
-            ),
-            (
-                "CurrentRoundCompressor",
-                CurrentRoundCompressorConfig(
-                    model=model_cfg,
-                    model_client=model_client_config,
+                (
+                    "ReasoningToolLoopCompactProcessor",
+                    ReasoningToolLoopCompactProcessorConfig(),
                 ),
-            ),
-            (
-                "RoundLevelCompressor",
-                RoundLevelCompressorConfig(
-                    keep_recent_messages=3,
-                    model=model_cfg,
-                    model_client=model_client_config,
+                (
+                    "FullCompactProcessor",
+                    FullCompactProcessorConfig(
+                        model=model_config,
+                        model_client=model_client_config
+                    ),
+                )
+            ]
+        else:
+            presets: List[Tuple[str, BaseModel]] = [
+                (
+                    "MessageSummaryOffloader",
+                    MessageSummaryOffloaderConfig(
+                        large_message_threshold=15000,
+                        offload_message_type=["tool"],
+                        protected_tool_names=["read_file"],
+                        model=model_cfg,
+                        model_client=model_client_config,
+                    ),
                 ),
-            ),
-        ]
+                (
+                    "ReasoningToolLoopCompactProcessor",
+                    ReasoningToolLoopCompactProcessorConfig(),
+                ),
+                (
+                    "DialogueCompressor",
+                    DialogueCompressorConfig(
+                        tokens_threshold=100000,
+                        messages_to_keep=10,
+                        keep_last_round=False,
+                        compression_target_tokens=1800,
+                        model=model_cfg,
+                        model_client=model_client_config,
+                    ),
+                ),
+                (
+                    "CurrentRoundCompressor",
+                    CurrentRoundCompressorConfig(
+                        tokens_threshold=100000,
+                        messages_to_keep=3,
+                        model=model_cfg,
+                        model_client=model_client_config,
+                    ),
+                ),
+                (
+                    "RoundLevelCompressor",
+                    RoundLevelCompressorConfig(
+                        trigger_context_ratio=0.9,
+                        target_total_tokens=160000,
+                        keep_recent_messages=6,
+                        model=model_cfg,
+                        model_client=model_client_config,
+                    )
+                ),
+            ]
+        return presets
 
     def init(self, agent) -> None:
         """Inject / merge processors into agent.react_agent._config.context_processors."""
@@ -208,6 +234,7 @@ class ContextProcessorRail(DeepAgentRail):
 
         model_config = getattr(config, "model_config_obj", None)
         model_client_config = getattr(config, "model_client_config", None)
+
         if self._session_memory_config is not None and self._session_memory_mgr is not None:
             if self._session_memory_config.model is None:
                 self._session_memory_config.model = model_config
@@ -233,6 +260,8 @@ class ContextProcessorRail(DeepAgentRail):
         config.context_processors = all_processors
 
         self._all_processors = all_processors
+        context_engine_config = getattr(config, "context_engine_config", None)
+        self._reload_enabled = bool(getattr(context_engine_config, "enable_reload", False))
         self._system_prompt_builder = getattr(agent, "system_prompt_builder", None)
 
     def uninit(self, agent) -> None:
@@ -248,6 +277,7 @@ class ContextProcessorRail(DeepAgentRail):
         if self._system_prompt_builder is not None:
             self._system_prompt_builder.remove_section("offload")
         self._all_processors = []
+        self._reload_enabled = False
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         await self.fix_incomplete_tool_context(ctx)
@@ -412,16 +442,12 @@ class ContextProcessorRail(DeepAgentRail):
 
     async def _maybe_inject_offload_section(self) -> None:
         """Inject offload section if processors are configured."""
-        if not self._has_offload_processor():
-            if self._system_prompt_builder is not None:
-                self._system_prompt_builder.remove_section("offload")
-            return
-
         if self._system_prompt_builder is None:
             return
 
-        lang = self._system_prompt_builder.language or "cn"
-        self._system_prompt_builder.add_section(build_offload_section(lang))
+        if not self._reload_enabled or not self._all_processors:
+            self._system_prompt_builder.remove_section("offload")
+            return
 
-    def _has_offload_processor(self) -> bool:
-        return any("offload" in processor_type.lower() for processor_type, _ in self._all_processors)
+        lang = self._system_prompt_builder.language or "cn"
+        self._system_prompt_builder.add_section(build_reload_section(lang))
