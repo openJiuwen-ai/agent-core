@@ -75,7 +75,7 @@ class ExpressionCondition(Condition):
             processed_expression = processed_expression.replace(full_match, safe_var_name)
 
         runtime = {
-            "len": len,
+            "len": _safe_len,
             "bool": bool,
             "not": operator.not_,
             "and": operator.and_,
@@ -157,6 +157,18 @@ def convert_condition(condition, inputs):
         )
 
     return protected_condition
+
+
+def _safe_len(value: Any) -> int:
+    """Safely compute length, treating None as empty (length 0)"""
+    if value is None:
+        return 0
+    if not hasattr(value, "__len__"):
+        raise build_error(
+            StatusCode.EXPRESSION_EVAL_ERROR,
+            error_msg=f"len() operate on non-sequence value of type {type(value).__name__}"
+        )
+    return len(value)
 
 
 def _safe_is_empty(value):

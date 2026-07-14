@@ -28,6 +28,10 @@ from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
+from openjiuwen.harness.prompts.builder import PromptSection
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachmentKind,
+)
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.agent_mode import build_plan_mode_section
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -53,6 +57,17 @@ _PLAN_FILE_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
 _GIT_WRITE_RE = re.compile(
     r"\bgit\s+(add|commit|push|pull|reset\s+--hard|checkout\s+--\.|clean\s+-[a-zA-Z]*f|"
     r"stash\s+(drop|clear)|branch\s+-D|merge|tag|amend|rebase)\b"
+)
+
+# Non-git write operations to block in plan mode's bash tool.
+# Covers common shell write commands: mkdir, touch, rm, mv, cp, chmod,
+# chown, dd, tee, wget/curl with output flags, archivers (tar, zip, 7z),
+# and output redirection (>, >>).
+_NON_GIT_WRITE_RE = re.compile(
+    r"\b(mkdir|touch|rm|mv|cp|chmod|chown|dd|tee|wget|curl\s+.*\s*-[a-zA-Z]*O)\b"
+    r"|\b(7z|tar|zip|unzip|gzip|gunzip)\s+"
+    r"|>>"
+    r"|(?<![=<>])\s>\s*[^\s=]"
 )
 
 DEFAULT_PLAN_MODE_ALLOWED_TOOLS: tuple[str, ...] = (
@@ -84,23 +99,54 @@ class AgentModeRail(DeepAgentRail):
     Args:
         allowed_tools: Whitelist of tool names permitted in plan mode.
             If ``None``, uses :data:`DEFAULT_PLAN_MODE_ALLOWED_TOOLS`.
+        allow_switch_mode: When False, ``switch_mode`` is excluded from the
+            plan-mode whitelist so the LLM cannot unilaterally exit plan mode.
+            Defaults to True for backward compatibility.
+        plan_mode_system_note: Optional static system prompt note for plan
+            mode. When provided, injected into MODE_INSTRUCTIONS as a static
+            section (KV-cache-friendly) instead of the dynamic
+            ``build_plan_mode_section()`` output. When None, existing dynamic
+            behavior is used. Defaults to None.
+        enter_plan_instructions: Optional instructions appended to
+            ``enter_plan_mode`` tool_result. Aligns with Claude Code behavior
+            where plan instructions live in conversation, not system prompt.
+            When None, no instructions are appended. Defaults to None.
+        exit_plan_notification: Optional notification appended to
+            ``exit_plan_mode`` tool_result. Explicitly signals the model that
+            write operations are now permitted. When None, no notification is
+            appended. Defaults to None.
     """
 
     priority = 85
 
-    def __init__(self, allowed_tools: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        allowed_tools: list[str] | None = None,
+        *,
+        allow_switch_mode: bool = True,
+        plan_mode_system_note: str | None = None,
+        enter_plan_instructions: str | None = None,
+        exit_plan_notification: str | None = None,
+    ) -> None:
         super().__init__()
         names = (
             allowed_tools
             if allowed_tools is not None
             else list(DEFAULT_PLAN_MODE_ALLOWED_TOOLS)
         )
+        if not allow_switch_mode:
+            names = [t for t in names if t != "switch_mode"]
         self._allowed_tools: frozenset[str] = frozenset(names)
+        self._allow_switch_mode: bool = allow_switch_mode
+        self._plan_mode_system_note: str | None = plan_mode_system_note
+        self._enter_plan_instructions: str | None = enter_plan_instructions
+        self._exit_plan_notification: str | None = exit_plan_notification
         self._owns_task_tool: bool = False
         self._task_tools: Optional[List[Tool]] = None
         self._owned_task_tool_names: set[str] = set()
         self._tools: List[Tool] = []
         self.system_prompt_builder = None
+        self.attachment_manager = None
 
     def init(self, agent: "DeepAgent") -> None:
         """Register enter/exit tools and capture system_prompt_builder.
@@ -110,6 +156,7 @@ class AgentModeRail(DeepAgentRail):
         """
         self._agent = agent
         self.system_prompt_builder = agent.system_prompt_builder
+        self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
         language = self.system_prompt_builder.language
 
         self._tools = [
@@ -118,10 +165,74 @@ class AgentModeRail(DeepAgentRail):
             ExitPlanModeTool(agent_ref=agent, language=language),
         ]
         for tool in self._tools:
-            Runner.resource_mgr.add_tool(tool)
-            agent.ability_manager.add(tool.card)
+            agent.ability_manager.add_ability(tool.card, tool)
 
         logger.info("[AgentModeRail] Registered enter/exit plan mode tools")
+
+        # Patch EnterPlanModeTool / ExitPlanModeTool to append extra content
+        # when configured (aligns with Claude Code: plan instructions live in
+        # conversation via tool_result, not in system prompt).
+        self._patch_enter_plan_mode_tool()
+        self._patch_exit_plan_mode_tool()
+
+    def _patch_enter_plan_mode_tool(self) -> None:
+        """Patch EnterPlanModeTool.invoke() to append plan instructions.
+
+        When ``_enter_plan_instructions`` is configured, the full plan mode
+        workflow instructions are returned in the tool_result, matching
+        Claude Code behavior where plan instructions live in conversation
+        rather than in the system prompt.
+        """
+        instructions = self._enter_plan_instructions
+        if not instructions:
+            return
+
+        for tool in self._tools:
+            if getattr(tool.card, "name", "") != "enter_plan_mode":
+                continue
+
+            original_invoke = tool.invoke
+
+            async def patched_invoke(inputs, _orig=original_invoke, **kwargs):
+                result = await _orig(inputs, **kwargs)
+                return result + "\n\n" + instructions
+
+            tool.invoke = patched_invoke
+            logger.info(
+                "[AgentModeRail] Patched enter_plan_mode.invoke() "
+                "to return full plan instructions in tool_result"
+            )
+            break
+
+    def _patch_exit_plan_mode_tool(self) -> None:
+        """Patch ExitPlanModeTool.invoke() to append exit notification.
+
+        When ``_exit_plan_notification`` is configured, an explicit
+        notification is appended to the tool_result so the model knows
+        write operations are now permitted. Without this, the model only
+        sees MODE_INSTRUCTIONS removed from the system prompt but receives
+        no explicit signal.
+        """
+        notification = self._exit_plan_notification
+        if not notification:
+            return
+
+        for tool in self._tools:
+            if getattr(tool.card, "name", "") != "exit_plan_mode":
+                continue
+
+            original_invoke = tool.invoke
+
+            async def patched_invoke(inputs, _orig=original_invoke, **kwargs):
+                result = await _orig(inputs, **kwargs)
+                return result + "\n\n" + notification
+
+            tool.invoke = patched_invoke
+            logger.info(
+                "[AgentModeRail] Patched exit_plan_mode.invoke() "
+                "to append plan mode exit notification in tool_result"
+            )
+            break
 
     def _language_is_cn(self) -> bool:
         """True when UI/messages should use Simplified Chinese."""
@@ -137,19 +248,34 @@ class AgentModeRail(DeepAgentRail):
         """
         for tool in self._tools:
             try:
-                agent.ability_manager.remove(tool.name)
-                Runner.resource_mgr.remove_tool(tool.card.id)
+                agent.ability_manager.remove_ability(tool.card.name)
             except Exception as exc:
                 logger.warning(
                     f"[AgentModeRail] Failed to remove tool '{tool.name}': {exc}"
                 )
         self._tools = []
+        self.system_prompt_builder = None
+        self.attachment_manager = None
 
         if self._owns_task_tool and self._task_tools:
             self._unregister_task_tool(agent)
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject MODE_INSTRUCTIONS and filter hidden tools when in plan mode.
+
+        Two strategies for MODE_INSTRUCTIONS injection:
+
+        * **Static** (``_plan_mode_system_note is not None``): injects a
+          fixed-content section whose content never changes across turns,
+          keeping the KV cache stable.  Uses whitelist-based tool filtering.
+        * **Dynamic** (``_plan_mode_system_note is None``, default): calls
+          ``build_plan_mode_section()`` with current plan-file state.
+          Uses blacklist-based tool filtering.
+
+        In normal mode, defensively removes AgentModeRail-owned ``task_tool``
+        from the visible tool list — this covers the edge case where
+        ``switch_mode`` exits plan mode without going through
+        ``exit_plan_mode`` (which would have called ``_unregister_task_tool``).
 
         Args:
             ctx: Callback context providing agent, session, and inputs.
@@ -159,28 +285,81 @@ class AgentModeRail(DeepAgentRail):
         plan_state = agent.load_state(session).plan_mode
 
         if plan_state.mode != "plan":
+            # ---- normal mode ----
             self.system_prompt_builder.remove_section(SectionName.MODE_INSTRUCTIONS)
+            if self.attachment_manager is not None:
+                writer = self.attachment_manager.bind_context(ctx)
+                try:
+                    await writer.clear_section(SectionName.MODE_INSTRUCTIONS)
+                except ValueError as exc:
+                    logger.warning(
+                        "[AgentModeRail] skip clearing prompt attachment section=%s: %s",
+                        SectionName.MODE_INSTRUCTIONS,
+                        exc,
+                    )
             self._sync_task_tool_for_model_tool_inputs(ctx)
             if isinstance(ctx.inputs.tools, list):
                 ctx.inputs.tools = [
                     t for t in ctx.inputs.tools
                     if getattr(t, "name", "") not in _HIDDEN_IN_NORMAL
                 ]
+
+            # Defensive cleanup: when switch_mode bypasses exit_plan_mode,
+            # _owns_task_tool is still True and _sync_task_tool will inject
+            # task_tool into the tool list.  Remove it when not in plan mode.
+            # Only filter when _owns_task_tool is True to avoid removing
+            # SubagentRail's task_tool (registered unconditionally on init).
+            if (
+                self._owns_task_tool
+                and isinstance(ctx.inputs.tools, list)
+            ):
+                ctx.inputs.tools = [
+                    t for t in ctx.inputs.tools
+                    if getattr(t, "name", "") != "task_tool"
+                ]
             return
 
-        # 1. Inject MODE_INSTRUCTIONS
-        plan_file_path = agent.get_plan_file_path(session)
-        plan_file_path_str = str(plan_file_path) if plan_file_path else ""
-        plan_exists = plan_file_path.exists() if plan_file_path else False
+        # ---- plan mode ----
+        if self._plan_mode_system_note is not None:
+            # Static path: KV-cache-friendly fixed content
+            section = PromptSection(
+                name=SectionName.MODE_INSTRUCTIONS,
+                content={"en": self._plan_mode_system_note},
+                priority=85,
+            )
+        else:
+            # Dynamic path: build from current plan-file state
+            plan_file_path = agent.get_plan_file_path(session)
+            plan_file_path_str = str(plan_file_path) if plan_file_path else ""
+            plan_exists = plan_file_path.exists() if plan_file_path else False
+            section = build_plan_mode_section(
+                language=self.system_prompt_builder.language,
+                plan_file_path=plan_file_path_str,
+                plan_exists=plan_exists,
+                agent=agent,
+                session=session,
+            )
 
-        section = build_plan_mode_section(
-            language=self.system_prompt_builder.language,
-            plan_file_path=plan_file_path_str,
-            plan_exists=plan_exists,
-            agent=agent,
-            session=session,
-        )
-        self.system_prompt_builder.add_section(section)
+        # 1. Inject MODE_INSTRUCTIONS.
+        # Keep upstream's static note path in system prompt for KV-cache stability;
+        # only dynamic plan-file state is moved into prompt attachment.
+        if self._plan_mode_system_note is not None:
+            self.system_prompt_builder.add_section(section)
+        else:
+            self.system_prompt_builder.remove_section(SectionName.MODE_INSTRUCTIONS)
+
+        if self._plan_mode_system_note is None and self.attachment_manager is not None:
+            writer = self.attachment_manager.bind_context(ctx)
+            try:
+                await writer.add_from_prompt_section(
+                    prompt_section=section,
+                    kind=PromptAttachmentKind.RUNTIME,
+                    source="agent_core.agent_mode_rail",
+                    language=self.system_prompt_builder.language,
+                    content_kind="text/markdown",
+                )
+            except ValueError as exc:
+                logger.warning("[AgentModeRail] skip prompt attachment section=%s: %s", section.name, exc)
 
         # 2. Remove Todo/Session sections added by higher-priority rails
         self.system_prompt_builder.remove_section(SectionName.TODO)
@@ -188,10 +367,22 @@ class AgentModeRail(DeepAgentRail):
 
         # 3. Filter hidden tools from the visible tool list
         if isinstance(ctx.inputs.tools, list):
-            ctx.inputs.tools = [
-                t for t in ctx.inputs.tools
-                if getattr(t, "name", "") not in _HIDDEN_IN_PLAN
-            ]
+            if self._plan_mode_system_note is not None:
+                # Static path: whitelist-based filtering (more secure —
+                # the model never sees tools it cannot use)
+                filtered = []
+                for t in ctx.inputs.tools:
+                    tool_name = getattr(t, "name", "")
+                    if tool_name in self._allowed_tools:
+                        if (tool_name != "switch_mode" or self._allow_switch_mode) and tool_name not in _HIDDEN_IN_PLAN:
+                            filtered.append(t)
+                ctx.inputs.tools = filtered
+            else:
+                # Dynamic path: blacklist-based filtering (backward compat)
+                ctx.inputs.tools = [
+                    t for t in ctx.inputs.tools
+                    if getattr(t, "name", "") not in _HIDDEN_IN_PLAN
+                ]
 
         self._sync_task_tool_for_model_tool_inputs(ctx)
 
@@ -309,6 +500,26 @@ class AgentModeRail(DeepAgentRail):
                 self._reject_tool(ctx, git_msg)
                 return
 
+            # Also block non-git write operations (mkdir, touch, rm, mv, cp,
+            # chmod, chown, dd, tee, wget/curl -O, archivers, redirection).
+            # The _GIT_WRITE_RE above only covers git subcommands; this
+            # catches common shell write patterns.
+            if _NON_GIT_WRITE_RE.search(command):
+                logger.info(
+                    "reject bash call: non-git write operation in plan mode"
+                )
+                if self._language_is_cn():
+                    bash_msg = (
+                        f"[AgentModeRail] plan 模式下禁止执行写操作（{command!r}）。"
+                    )
+                else:
+                    bash_msg = (
+                        f"[AgentModeRail] Write operations are blocked in "
+                        f"plan mode ({command!r})."
+                    )
+                self._reject_tool(ctx, bash_msg)
+                return
+
         # 3d. write_file / edit_file → must target plan file only
         if tool_name in _PLAN_FILE_WRITE_TOOLS:
             file_path = self._extract_file_path(ctx)
@@ -331,6 +542,13 @@ class AgentModeRail(DeepAgentRail):
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Dynamically register/unregister task_tool around enter/exit.
 
+        Also supplements mode restoration when ``exit_plan_mode`` does not
+        call ``restore_mode_after_plan_exit`` (plan content empty, or a hook
+        blocked the tool execution).  Restoration runs only while
+        ``plan_mode.mode`` is still ``"plan"``, which avoids false triggers
+        when the call was rejected outside plan mode and prevents double
+        restoration after a successful exit with plan content.
+
         Args:
             ctx: Callback context.
         """
@@ -342,6 +560,33 @@ class AgentModeRail(DeepAgentRail):
 
         elif tool_name == "exit_plan_mode" and not ctx.extra.get("_skip_tool"):
             self._unregister_task_tool(agent)
+
+        # Supplement mode restoration: when exit_plan_mode with empty plan
+        # content exits early without calling restore_mode_after_plan_exit,
+        # mode is still "plan".  Also covers the case where a hook blocks
+        # tool execution (_skip_tool=True but restore was never called).
+        #
+        # IMPORTANT: when exit_plan_mode is intercepted by a higher-priority
+        # rail (e.g. ConfirmInterruptRail raises AbortError), tool_result is
+        # None and the tool has NOT executed — we must NOT restore the mode
+        # yet.  The user may still approve the call, in which case the tool
+        # will execute and restore the mode itself.
+        if tool_name == "exit_plan_mode":
+            session = ctx.session
+            state = agent.load_state(session)
+            if (state.plan_mode.mode == "plan"
+                    and ctx.inputs.tool_result is not None):
+                try:
+                    agent.restore_mode_after_plan_exit(session)
+                    logger.info(
+                        "[AgentModeRail] Restored mode after plan exit "
+                        "(plan was empty or hook blocked execution, "
+                        "tool did not restore)"
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[AgentModeRail] Failed to restore mode: %s", exc
+                    )
 
     def _is_task_tool_registered(self) -> bool:
         """Find if task_tool already registered in Runner."""
@@ -380,9 +625,8 @@ class AgentModeRail(DeepAgentRail):
             tool.card.name for tool in (self._task_tools or [])
             if getattr(getattr(tool, "card", None), "name", None)
         }
-        Runner.resource_mgr.add_tool(list(self._task_tools))
         for tool in self._task_tools:
-            agent.ability_manager.add(tool.card)
+            agent.ability_manager.add_ability(tool.card, tool)
         self._owns_task_tool = True
         logger.info("[AgentModeRail] Registered task_tool for plan mode")
 
@@ -397,8 +641,7 @@ class AgentModeRail(DeepAgentRail):
             return
         for tool in self._task_tools:
             try:
-                agent.ability_manager.remove(tool.card.name)
-                Runner.resource_mgr.remove_tool(tool.card.id)
+                agent.ability_manager.remove_ability(tool.card.name)
                 logger.info("[AgentModeRail] Unregistered plan-mode task_tool")
             except Exception as exc:
                 logger.warning(

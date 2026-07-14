@@ -45,6 +45,17 @@ STRINGS: dict[str, dict[str, str]] = {
         # tools/team.py
         "team.shutdown_request_content": "当前任务已全部完成，请结束流程",
         "team.cancel_request_content": "当前任务有变动，请停止执行当前任务，重新尝试认领合适任务",
+        # reliability/ — anomaly remediation messages
+        "reliability.steer_self_correct": (
+            "⚙️[可靠性] 检测到 {kind}：{summary}。请停止重复无效操作，改换策略或换用其他工具。"
+        ),
+        "reliability.report_leader": (
+            "[可靠性告警] {summary}。请评估该成员状态并决定处理方式"
+            "（发消息提醒 / 取消任务 / 停止成员 / 新建成员或任务）。"
+        ),
+        "reliability.escalate_user": (
+            "[可靠性·严重] {summary}。已超出自动处理范围，建议立即上报控制者 / 用户决策。"
+        ),
         # agent/dispatcher.py — member lifecycle events
         "dispatcher.member_online": "[成员事件] 成员 {target_id} 已上线",
         "dispatcher.member_restarted": "[成员事件] 成员 {target_id} 已重启 (第{restart_count}次)",
@@ -78,6 +89,11 @@ STRINGS: dict[str, dict[str, str]] = {
             "内容: {content}\n"
             "提示: 如果对方在提问或等待回复，请务必通过 send_message 工具回复 {sender}"
         ),
+        # XML inbound track (inbound_render.py) — note bodies kept separate
+        # from the legacy flat templates above so the original message and
+        # the framework hint land in distinct <team-inbound> / <team-note>
+        # tags. The legacy templates stay for the external/format.py path.
+        "dispatcher.reply_hint": "如果对方在提问或等待回复，请务必通过 send_message 工具回复 {sender}。",
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": ("所有任务已完成。请汇总本轮工作成果。团队继续保持运行，等待新的任务指令。"),
         "dispatcher.all_done_temporary": (
@@ -137,6 +153,41 @@ STRINGS: dict[str, dict[str, str]] = {
             "禁止用纯文本输出表达意图或承诺。\n"
             "**保持静默**，等控制者在 Inbox 里明确指示你转告或回复时再调 send_message。"
         ),
+        # XML inbound track (inbound_render.py) — the HITT silence constraint
+        # carried in a <team-note kind="hitt-silence">. The "strictly
+        # forbidden" framing is load-bearing: without it the avatar LLM
+        # drifts into autonomous replies on send_message. Kept equivalent to
+        # the legacy hitt.* flat templates above, which the external path uses.
+        "hitt.silence_note": (
+            "**这是给控制者看的通知，不是要你执行的指令**，运行时已把它原样转给控制者。\n"
+            "**严格禁止任何自主行为**：禁止主动回复发送方 / 指派方（包括调用 send_message）、"
+            "禁止自主调用 member_complete_task / claim_task / 文件 / shell 等任何工具去回应或推进、"
+            "禁止用纯文本输出表达意图或承诺。\n"
+            "**保持静默**，只有控制者在 Inbox 里下达明确指令后才能行动。"
+        ),
+        "hitt.assigned_event": "你被指派了新任务 [{task_id}] {title}。",
+        # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
+        "workflow.started": "编排 [{run_id}]「{name}」已启动，我将在每个阶段向你汇报进展。",
+        "workflow.phase": "编排 [{run_id}] 进入阶段：{phase}",
+        "workflow.human_prompt": "正在等待人工回复 [{label}]：{prompt}（correlation_id={corr}）",
+        "workflow.human_replied": "人工已回复 [{label}]，编排继续。",
+        "swarmflow.launched": (
+            "[Swarmflow 已启动] run_id={run_id}，task_id={task_id}。"
+            "并行工作流计数请只认 run_id，不要用 task_id 当作新的一局。"
+        ),
+        "swarmflow.completed": "[Swarmflow 完成] run_id={run_id}\n{result}",
+        "swarmflow.failed": "[Swarmflow 失败] run_id={run_id}，错误={error}",
+        # harness/async_tools.py — async background-tool framework feedback
+        "async_tool.launched": (
+            "[后台任务] {tool} 已启动（task_id={task_id}）。完成后结果会自动回灌给你，"
+            "无需轮询；你可以继续处理其他输入。"
+        ),
+        "async_tool.completed": "[后台任务完成] 工具={tool}\n{result}",
+        "async_tool.failed": "[后台任务失败] 工具={tool}，错误={error}",
+        "async_tool.spilled_notice": (
+            "[完整输出过大，已写入磁盘 {path}。"
+            "调用 async_task_output(task_id='{task_id}') 取回全文。]"
+        ),
     },
     "en": {
         # timefmt.py — relative-time buckets ({value} is the bucket count)
@@ -152,6 +203,19 @@ STRINGS: dict[str, dict[str, str]] = {
         "team.shutdown_request_content": "All tasks are complete. Please wrap up and exit.",
         "team.cancel_request_content": (
             "The current task has changed. Stop executing it and try claiming a suitable task again."
+        ),
+        # reliability/ — anomaly remediation messages
+        "reliability.steer_self_correct": (
+            "[reliability] Detected {kind}: {summary}. Stop repeating the ineffective action; "
+            "change strategy or use a different tool."
+        ),
+        "reliability.report_leader": (
+            "[reliability alert] {summary}. Assess this member's state and decide how to handle it "
+            "(send a reminder / cancel the task / stop the member / spawn a new member or task)."
+        ),
+        "reliability.escalate_user": (
+            "[reliability critical] {summary}. Beyond automated handling; escalate to the "
+            "controller/user for a decision now."
         ),
         # agent/dispatcher.py — member lifecycle events
         "dispatcher.member_online": "[Member Event] Member {target_id} is online",
@@ -194,6 +258,10 @@ STRINGS: dict[str, dict[str, str]] = {
             "time: {time_info}\n"
             "content: {content}\n"
             "tip: If the sender is asking or waiting for a reply, make sure to reply to {sender} via send_message"
+        ),
+        # XML inbound track (inbound_render.py) — see the cn note above.
+        "dispatcher.reply_hint": (
+            "If the sender is asking or waiting for a reply, be sure to reply to {sender} via send_message."
         ),
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": (
@@ -269,6 +337,47 @@ STRINGS: dict[str, dict[str, str]] = {
             "**Stay silent** and only call send_message after the "
             "controller explicitly instructs you via the Inbox to relay "
             "or reply."
+        ),
+        # XML inbound track (inbound_render.py) — see the cn note above. The
+        # "strictly forbidden" framing is load-bearing.
+        "hitt.silence_note": (
+            "**This is a notification for your controller, NOT an instruction "
+            "for you to act on**; the runtime has already surfaced it to the "
+            "controller as-is.\n"
+            "**Autonomous behavior is strictly forbidden**: do not reply to "
+            "the sender / assigner (including via send_message), do not "
+            "autonomously call member_complete_task / claim_task / file tools "
+            "/ shell tools or any other tool to respond or push work forward, "
+            "and do not emit plain-text intent or promises.\n"
+            "**Stay silent** and act only after the controller issues an "
+            "explicit instruction via the Inbox."
+        ),
+        "hitt.assigned_event": 'You have been assigned task [{task_id}] "{title}".',
+        # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
+        "workflow.started": (
+            "Orchestration [{run_id}] '{name}' has started; I will "
+            "report progress to you at each phase."
+        ),
+        "workflow.phase": "Orchestration [{run_id}] entering phase: {phase}",
+        "workflow.human_prompt": "Awaiting a human reply [{label}]: {prompt} (correlation_id={corr})",
+        "workflow.human_replied": "The human replied [{label}]; orchestration continues.",
+        "swarmflow.launched": (
+            "[Swarmflow launched] run_id={run_id}, task_id={task_id}. "
+            "Count parallel workflows by run_id only — do not treat task_id as a new run."
+        ),
+        "swarmflow.completed": "[Swarmflow completed] run_id={run_id}\n{result}",
+        "swarmflow.failed": "[Swarmflow failed] run_id={run_id}, error={error}",
+        # harness/async_tools.py — async background-tool framework feedback
+        "async_tool.launched": (
+            "[Background task] {tool} started (task_id={task_id}). The result will be "
+            "fed back to you automatically on completion — do not poll; you may "
+            "continue handling other input."
+        ),
+        "async_tool.completed": "[Background task completed] tool={tool}\n{result}",
+        "async_tool.failed": "[Background task failed] tool={tool}, error={error}",
+        "async_tool.spilled_notice": (
+            "[Full output was large and written to disk at {path}. "
+            "Call async_task_output(task_id='{task_id}') to retrieve it.]"
         ),
     },
 }

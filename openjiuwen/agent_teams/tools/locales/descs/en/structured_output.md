@@ -1,0 +1,1 @@
+Submit your final structured result. This is the **ONLY** way to submit results — not calling this tool means the task fails and your text output will NOT be read by anyone. You MUST call this EXACTLY ONCE when done, passing a JSON object that strictly conforms to the tool's input schema. Do NOT write the result as plain text.

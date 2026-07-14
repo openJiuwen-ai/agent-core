@@ -38,6 +38,8 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.spawn.agent_config import SpawnAgentConfig
 from openjiuwen.core.runner.spawn.process_manager import SpawnConfig
@@ -50,6 +52,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
+    from openjiuwen.agent_teams.tiny_agent import TinyAgent
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
@@ -115,6 +118,71 @@ class TeamAgent(BaseAgent):
     def resources(self):
         """Return the per-instance runtime resources container."""
         return self._configurator.resources
+
+    @property
+    def tiny_agent_model_resolver(self):
+        """Return the team's model-name resolver used to build tiny agents.
+
+        Maps a ``model_name`` to a ``TeamModelConfig`` against the team model
+        pool (None when no pool is configured). Ephemeral callers pass this to
+        ``openjiuwen.agent_teams.tiny_agent.create_tiny_agent`` (or a preset) so a
+        model name resolves the same way as for team-scoped tiny agents.
+        """
+        return self.infra.tiny_agent_model_resolver
+
+    def get_tiny_agent(self, name: str) -> Optional["TinyAgent"]:
+        """Get-or-create the team-scoped tiny agent declared under ``name``.
+
+        Lazily builds it from ``TeamAgentSpec.tiny_agents[name]`` on first access,
+        caches it on infra (one per name, per process), and reuses it afterwards.
+        Returns None when no tiny agent is declared under ``name``. The cached
+        instance is disposed when the team stops.
+
+        Args:
+            name: Logical key of the tiny agent in ``TeamAgentSpec.tiny_agents``.
+
+        Returns:
+            The cached or newly built :class:`TinyAgent`, or None if undeclared.
+        """
+        infra = self.infra
+        existing = infra.tiny_agents.get(name)
+        if existing is not None:
+            return existing
+        spec = self.spec
+        tiny_spec = spec.tiny_agents.get(name) if spec is not None else None
+        if tiny_spec is None:
+            return None
+        if infra.tiny_agent_model_resolver is None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason=f"tiny agent '{name}' needs a team model pool to resolve model '{tiny_spec.model_name}'",
+            )
+        from openjiuwen.agent_teams.tiny_agent import create_tiny_agent
+
+        language = self.blueprint.language if self.blueprint is not None else "cn"
+        agent = create_tiny_agent(
+            system_prompt=tiny_spec.system_prompt,
+            model_name=tiny_spec.model_name,
+            model_resolver=infra.tiny_agent_model_resolver,
+            default_schema=tiny_spec.default_schema,
+            name=tiny_spec.name,
+            language=language,
+            max_iterations=tiny_spec.max_iterations,
+        )
+        infra.tiny_agents[name] = agent
+        return agent
+
+    async def _dispose_tiny_agents(self) -> None:
+        """Dispose every cached team-scoped tiny agent (best-effort, idempotent)."""
+        infra = self.infra
+        for agent in list(infra.tiny_agents.values()):
+            try:
+                await agent.aclose()
+            except Exception:
+                team_logger.debug(
+                    "[{}] tiny agent dispose failed", self._member_name() or "?", exc_info=True
+                )
+        infra.tiny_agents.clear()
 
     @property
     def harness(self) -> Optional["MemberRuntime"]:
@@ -305,22 +373,24 @@ class TeamAgent(BaseAgent):
         return self._has_in_flight_round()
 
     async def deliver_input(self, content: Any, *, use_steer: bool = True) -> None:
-        if self._is_agent_running():
-            if use_steer:
-                await self.steer(content)
-            else:
-                await self.follow_up(content)
+        # The runtime's single supervisor serialises inputs: send() starts a
+        # round when idle, steers (use_steer) or queues a follow-up when running.
+        # No transition-window race, so no manual branch / pending queue here.
+        harness = self.harness
+        if harness is None:
             return
-        if self._has_in_flight_round():
-            preview = content if isinstance(content, str) else type(content).__name__
-            team_logger.info(
-                "[{}] queueing input for next round (transition window): {:.60}",
-                self._member_name() or "?",
-                str(preview),
-            )
-            self._stream_controller.pending_inputs.append(content)
-            return
-        await self._start_agent(content)
+        await harness.send(content, immediate=use_steer)
+
+    def set_background_task_controller(self, controller: Any) -> None:
+        """Attach the embedder's background task controller to this member's brain.
+
+        Forwarded to the runtime (TeamHarness), which keeps it across native
+        rebuilds; the leader's SwarmflowTool reads it to register run handles for
+        external pause/resume. No-op when no runtime is built yet.
+        """
+        harness = self.harness
+        if harness is not None:
+            harness.set_background_task_controller(controller)
 
     def has_pending_interrupt(self) -> bool:
         return self._stream_controller.has_pending_interrupt()
@@ -329,7 +399,9 @@ class TeamAgent(BaseAgent):
         await self._start_agent(content)
 
     async def follow_up(self, content: str) -> None:
-        await self._stream_controller.follow_up(content)
+        harness = self.harness
+        if harness is not None:
+            await harness.send(content, immediate=False)
 
     async def cancel_agent(self) -> None:
         team_logger.debug("[{}] cancel_agent requested", self._member_name() or "?")
@@ -399,20 +471,19 @@ class TeamAgent(BaseAgent):
             )
 
     async def steer(self, content: str) -> None:
-        await self._stream_controller.steer(content)
+        harness = self.harness
+        if harness is not None:
+            await harness.send(content, immediate=True)
 
     async def resume_interrupt(self, user_input) -> None:
         if not self._stream_controller.is_valid_interrupt_resume(user_input):
             team_logger.info("[{}] dropping stale interrupt resume input", self._member_name() or "?")
             return
-        if self._has_in_flight_round():
-            team_logger.info(
-                "[{}] queueing interrupt resume until current round completes",
-                self._member_name() or "?",
-            )
-            self._stream_controller.pending_interrupt_resumes.append(user_input)
-            return
-        await self._start_agent(user_input)
+        # The supervisor serialises the resume: send() either starts the resume
+        # round (idle) or steers it into the active one — no pending queue.
+        harness = self.harness
+        if harness is not None:
+            await harness.send(user_input)
 
     # ------------------------------------------------------------------
     # BaseAgent abstract method: configure
@@ -439,6 +510,7 @@ class TeamAgent(BaseAgent):
             spec,
             ctx,
             on_teammate_created=self._on_teammate_created,
+            on_before_team_cleaned=self._finalize_team_worktrees_before_clean,
             on_team_cleaned=self._mark_team_cleaned,
             on_team_built=self._mark_team_built,
         )
@@ -450,7 +522,14 @@ class TeamAgent(BaseAgent):
         *,
         member_runtime: Optional["MemberRuntime"] = None,
     ) -> None:
-        self._configurator.setup_agent(spec, ctx, member_runtime=member_runtime)
+        # The leader-only async ``swarmflow`` tool is wired entirely inside the
+        # NativeHarness async-tool framework (configurator builds the worker-model
+        # resolver and gates the tool on it); TeamAgent no longer participates.
+        self._configurator.setup_agent(
+            spec,
+            ctx,
+            member_runtime=member_runtime,
+        )
 
         # Build the member handle once for every role. ``create_member_handle``
         # is a pure constructor: it only needs the bound ``team_backend``
@@ -471,12 +550,13 @@ class TeamAgent(BaseAgent):
 
         self._coordination.setup(role=ctx.role)
         self._register_team_completion_callbacks()
+        self._register_reliability_local_sink()
 
     def _register_team_completion_callbacks(self) -> None:
         """Wire optional team-completion callbacks into the coordination layer.
 
-        Runs once, after the DeepAgent is fully built (rails mounted,
-        ``agent_customizer`` applied) and the dispatcher exists. Extracts
+        Runs once, after the DeepAgent is fully built (rails mounted) and the
+        dispatcher exists. Extracts
         any ``TeamSkillRail`` mounted on the agent and registers its
         ``notify_team_completed`` hook with the ``TeamCompletionHandler``
         so a drained task board triggers skill evolution — no per-event
@@ -493,6 +573,28 @@ class TeamAgent(BaseAgent):
                 notify_team_completed = getattr(rail, "notify_team_completed", None)
                 if notify_team_completed is not None:
                     dispatcher.team_completion.register_completion_callback(notify_team_completed)
+
+    def _register_reliability_local_sink(self) -> None:
+        """Wire the leader's reliability rail to its in-process anomaly sink.
+
+        Leader self-monitoring routes the leader's own anomalies straight to
+        the ReliabilityHandler instead of publishing an event the leader's
+        messager self-filter would drop. Runs after the dispatcher is built,
+        mirroring ``_register_team_completion_callbacks``. No-op when the
+        harness, dispatcher, or reliability handler is absent (reliability
+        disabled, or a non-leader member whose rail has no local reporter).
+        """
+        harness = self._configurator.harness
+        dispatcher = self._coordination.dispatcher
+        if harness is None or dispatcher is None:
+            return
+        handler = getattr(dispatcher, "reliability", None)
+        if handler is None:
+            return
+        from openjiuwen.agent_teams.reliability.rail import ReliabilityRail
+
+        for rail in harness.find_rails(ReliabilityRail):
+            rail.bind_local_sink(handler.handle_local_anomaly)
 
     def _resolve_agent_spec(
         self,
@@ -540,8 +642,9 @@ class TeamAgent(BaseAgent):
         team_logger.info("[{}] invoke start, role={}", self._member_name() or "?", self.role.value)
         self._stream_controller.stream_queue = asyncio.Queue()
         # Cache the user query so CoordinationManager can pass it to the
-        # memory pipeline during start().
-        raw_query = inputs.get("query", "") if isinstance(inputs, dict) else str(inputs)
+        # memory pipeline during start(). ``.get`` default does not cover a
+        # present-but-None value, so normalize an empty/None query to "".
+        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
         self._state.pending_user_query = raw_query
         routed_payloads = self._initial_leader_route_payloads(raw_query)
         await self._coordination.start(session)
@@ -549,8 +652,13 @@ class TeamAgent(BaseAgent):
             if routed_payloads is not None:
                 await self._dispatch_initial_leader_route(routed_payloads)
             else:
-                await self._coordination.enqueue_user_input(inputs)
-                await self._coordination.enqueue_mailbox_after_first_iteration()
+                # Only drive a first round when there is an actual message.
+                # Spawn / recover / resume with no input must not fabricate a
+                # round; the mailbox poll below delivers only real pending
+                # messages (no-op when the inbox is empty).
+                if raw_query:
+                    await self._coordination.enqueue_user_input(inputs)
+                await self._coordination.enqueue_initial_mailbox_poll()
             last_result = None
             while True:
                 chunk = await self._stream_controller.stream_queue.get()
@@ -589,7 +697,9 @@ class TeamAgent(BaseAgent):
     async def stream(self, inputs, session=None, stream_modes=None):
         team_logger.info("[{}] stream start, role={}", self._member_name() or "?", self.role.value)
         self._stream_controller.stream_queue = asyncio.Queue()
-        raw_query = inputs.get("query", "") if isinstance(inputs, dict) else str(inputs)
+        # ``.get`` default does not cover a present-but-None value, so
+        # normalize an empty/None query to "".
+        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
         self._state.pending_user_query = raw_query
         routed_payloads = self._initial_leader_route_payloads(raw_query)
 
@@ -598,8 +708,13 @@ class TeamAgent(BaseAgent):
             if routed_payloads is not None:
                 await self._dispatch_initial_leader_route(routed_payloads)
             else:
-                await self._coordination.enqueue_user_input(inputs)
-                await self._coordination.enqueue_mailbox_after_first_iteration()
+                # Only drive a first round when there is an actual message.
+                # Spawn / recover / resume with no input must not fabricate a
+                # round; the mailbox poll below delivers only real pending
+                # messages (no-op when the inbox is empty).
+                if raw_query:
+                    await self._coordination.enqueue_user_input(inputs)
+                await self._coordination.enqueue_initial_mailbox_poll()
             while True:
                 chunk = await self._stream_controller.stream_queue.get()
                 if chunk is None:
@@ -632,6 +747,7 @@ class TeamAgent(BaseAgent):
     async def stop_coordination(self) -> None:
         """Stop coordination and shut down all spawned teammates."""
         await self._stop_coordination()
+        await self._dispose_tiny_agents()
 
     def _close_stream(self) -> None:
         self._coordination.close_stream()
@@ -662,7 +778,20 @@ class TeamAgent(BaseAgent):
                     member_name,
                     e,
                 )
+        await self._dispose_tiny_agents()
         self._close_stream()
+
+    async def finalize_non_contributing_worktrees(self) -> None:
+        """Finalize current-session worktrees that did not contribute commits."""
+        if self.role != TeamRole.LEADER:
+            return
+        await self._spawn_manager.worktree_lifecycle.finalize_non_contributing_member_worktrees()
+
+    async def _finalize_team_worktrees_before_clean(self) -> None:
+        """Finalize current-session teammate worktrees before team DB deletion."""
+        if self.role != TeamRole.LEADER:
+            return
+        await self._spawn_manager.worktree_lifecycle.finalize_all_member_worktrees_for_team_clean()
 
     async def conclude_completed_round(self, member_count: int, task_count: int) -> None:
         """Emit a team-completed marker chunk, then close the leader stream.
@@ -683,7 +812,9 @@ class TeamAgent(BaseAgent):
         self._stream_controller.emit_completion_and_close(member_count, task_count)
 
     async def _start_agent(self, initial_message: Any) -> None:
-        await self._stream_controller.start_round(initial_message)
+        harness = self.harness
+        if harness is not None:
+            await harness.send(initial_message)
 
     def _initial_leader_route_payloads(self, raw_query: str) -> list["InteractPayload"] | None:
         """Parse leader initial input when it uses explicit team routing."""
@@ -805,6 +936,12 @@ class TeamAgent(BaseAgent):
         spec = TeamAgentSpec.model_validate(payload["spec"])
         context = TeamRuntimeContext.model_validate(payload["context"])
 
+        # Rebuild the provider-based build context from its serializable seed:
+        # ``build_context`` is excluded from JSON and is None after validation,
+        # so without this a spawned member loses every provider-assembled
+        # capability. No-op for the legacy path (no seed).
+        spec.materialize_build_context()
+
         agent_spec = spec.agents.get(context.role.value) or spec.agents["leader"]
         team_name = (context.team_spec.team_name if context.team_spec else None) or spec.team_name
         card_id = f"{team_name}_{context.member_name}" if context.member_name else "unknown"
@@ -853,6 +990,7 @@ class TeamAgent(BaseAgent):
         team_logger.info("[{}] build_team completed; latching team DB state", self._member_name() or "?")
         from openjiuwen.agent_teams.runtime.metadata import TEAM_DB_STATE_CREATED
 
+        self._state.team_cleaned = False
         await self._persist_team_db_state(TEAM_DB_STATE_CREATED)
 
     async def _persist_team_db_state(self, db_state: str) -> None:
@@ -967,10 +1105,10 @@ class TeamAgent(BaseAgent):
             team_name: Identifies which team's bucket to load. A session can
                 hold state for multiple teams; the caller must specify which.
             runtime_spec: Optional live spec from the current process. Used to
-                reinject non-serializable fields (currently ``agent_customizer``,
-                which is ``Field(exclude=True)`` and never survives the
-                checkpoint round-trip). When omitted the recovered spec is
-                used as-is.
+                reinject ``build_context`` and ``memory.embedding_config``, which
+                are ``Field(exclude=True)`` and never survive the checkpoint
+                round-trip. When omitted the recovered spec is used as-is
+                (rebuilding context from its seed).
 
         Raises:
             ValueError: When the session has no bucket for ``team_name`` or
@@ -986,13 +1124,18 @@ class TeamAgent(BaseAgent):
         if spec_data is None:
             raise ValueError(f"No leader spec found for team '{team_name}'")
         spec = TeamAgentSpec.model_validate(spec_data)
-        # agent_customizer is a Callable marked Field(exclude=True); it is
-        # dropped on serialization and always None after model_validate. Cold
-        # recover must reinject it from the live runtime spec, otherwise
-        # platform adapters that hook rails/tools through this callback get
-        # silently disabled across process restarts.
-        if runtime_spec is not None and runtime_spec.agent_customizer is not None:
-            spec.agent_customizer = runtime_spec.agent_customizer
+        # build_context is Field(exclude=True) and dropped on the checkpoint
+        # round-trip. Prefer the live runtime spec's context on warm recovery;
+        # otherwise rebuild it from the serializable seed so provider-based
+        # members survive a cold restart. No-op for legacy.
+        if runtime_spec is not None and runtime_spec.build_context is not None:
+            spec.build_context = runtime_spec.build_context
+        # embedding_config is also Field(exclude=True) — reinject from the
+        # live spec so resolve_embedding_config can find it during configure.
+        if runtime_spec is not None and runtime_spec.memory and runtime_spec.memory.embedding_config:
+            if spec.memory:
+                spec.memory.embedding_config = runtime_spec.memory.embedding_config
+        spec.materialize_build_context()
         context = TeamRuntimeContext.model_validate(bucket["context"])
 
         agent_spec = spec.agents.get(context.role.value) or spec.agents["leader"]

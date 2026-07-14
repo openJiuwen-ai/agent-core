@@ -20,6 +20,10 @@ from openjiuwen.agent_teams.schema.team import (
     TeamRole,
     TeamRuntimeContext,
 )
+from openjiuwen.agent_teams.tools.member_options import (
+    get_member_model_ref,
+)
+from openjiuwen.agent_teams.worktree import TeammateWorktreeLifecycle
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.runner.spawn.process_manager import SpawnConfig
@@ -62,6 +66,7 @@ class SpawnManager:
         # would re-bind the member's transport address and crash.
         self._spawning: set[str] = set()
         self.recovery_tasks: set[asyncio.Task] = set()
+        self.worktree_lifecycle = TeammateWorktreeLifecycle(configurator)
 
     async def spawn_teammate(
         self,
@@ -202,6 +207,16 @@ class SpawnManager:
             return None
         return getattr(handle, "agent_ref", None)
 
+    def has_live_handle(self, member_name: str) -> bool:
+        """Return whether ``member_name`` already has a registered spawn handle.
+
+        A present handle means the member was spawned in this runtime and has
+        not been cleaned up; ``recover_team`` uses this to skip re-spawning a
+        teammate that is already running (unhealthy members are restarted via
+        the ``on_unhealthy`` callback, not by ``recover_team``).
+        """
+        return self.spawned_handles.get(member_name) is not None
+
     async def cleanup_teammate(self, member_name: str) -> None:
         handle = self.spawned_handles.pop(member_name, None)
         if handle is None:
@@ -234,8 +249,12 @@ class SpawnManager:
         if team_backend is None:
             return False
 
-        teammate = await team_backend.get_member(member_name)
-        initial_message = teammate.prompt if teammate else None
+        # Restart / recover must not replay the member's first-start
+        # instruction: ``initial_message`` stays None so no harness.send is
+        # triggered. The member re-subscribes and recovers via its mailbox;
+        # only real pending messages drive a round. The member's existence is
+        # already validated by ``build_context_from_db`` above.
+        initial_message = None
         spawn_config = SpawnConfig(health_check_timeout=30, health_check_interval=50)
 
         for attempt in range(1, max_retries + 1):
@@ -267,6 +286,19 @@ class SpawnManager:
         team_backend = self._configurator.team_backend
         team_name = self._configurator.team_name
         if team_backend and team_name:
+            member = await team_backend.db.member.get_member(member_name, team_name)
+            if member is not None:
+                try:
+                    status = MemberStatus(member.status)
+                except ValueError:
+                    status = MemberStatus.ERROR
+                if status in {MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN}:
+                    team_logger.info(
+                        "Teammate {} is {}; skip unhealthy restart",
+                        member_name,
+                        status.value,
+                    )
+                    return
             await team_backend.db.member.update_member_status(
                 member_name,
                 team_name,
@@ -275,9 +307,8 @@ class SpawnManager:
         await self.restart_teammate(member_name)
 
     async def build_context_from_db(self, member_name: str) -> Optional[TeamRuntimeContext]:
-        import json
-
         from openjiuwen.agent_teams.models.allocator import resolve_member_model
+        from openjiuwen.agent_teams.tools.member_options import get_member_permissions_override
 
         team_backend = self._configurator.team_backend
         if team_backend is None:
@@ -288,27 +319,16 @@ class SpawnManager:
             team_logger.error("Teammate {} not found in database", member_name)
             return None
 
-        ref_json = teammate.model_ref_json
+        model_ref = get_member_model_ref(teammate)
         member_model = None
-        if ref_json:
-            try:
-                ref = json.loads(ref_json)
-            except (json.JSONDecodeError, TypeError) as e:
-                team_logger.warning(
-                    "[{}] malformed model_ref_json on DB record; ignoring: {}",
-                    self._configurator.member_name or "?",
-                    e,
+        if model_ref is not None:
+            team_spec = self._configurator.team_spec
+            if team_spec is not None:
+                member_model = resolve_member_model(
+                    team_spec,
+                    model_name=model_ref.model_name,
+                    model_index=model_ref.model_index,
                 )
-                ref = None
-
-            if isinstance(ref, dict):
-                team_spec = self._configurator.team_spec
-                if team_spec is not None:
-                    member_model = resolve_member_model(
-                        team_spec,
-                        model_name=ref.get("model_name"),
-                        model_index=ref.get("model_index"),
-                    )
 
         ctx = self._configurator.ctx
         # Role is persisted on the member row (``TeamMember.role``) so
@@ -318,9 +338,19 @@ class SpawnManager:
         # get a backfilled ``teammate`` default via
         # ``database.engine._ensure_team_member_role_column``.
         role = TeamRole(teammate.role)
+        try:
+            member_status = MemberStatus(teammate.status)
+        except ValueError:
+            member_status = MemberStatus.ERROR
+        worktree_path = None
+        if member_status not in {MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN}:
+            worktree_path = await self.worktree_lifecycle.ensure_member_worktree(teammate, role)
         # External-CLI members carry no DeepAgent: the backend registry says
         # which CLI adapter drives them, routing spawn to external_cli_spawn.
         cli_agent = team_backend.get_external_cli_agent(teammate.member_name)
+
+        permissions_override = get_member_permissions_override(teammate)
+
         return TeamRuntimeContext(
             role=role,
             member_name=teammate.member_name,
@@ -329,7 +359,9 @@ class SpawnManager:
             messager_config=self._configurator.build_member_messager_config(teammate.member_name),
             db_config=ctx.db_config if ctx else None,
             member_model=member_model,
+            worktree_path=worktree_path,
             cli_agent=cli_agent,
+            permissions_override=permissions_override,
         )
 
     async def publish_restart_event(self, member_name: str, restart_count: int) -> None:

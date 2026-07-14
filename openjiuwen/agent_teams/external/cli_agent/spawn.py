@@ -8,10 +8,9 @@ the CLI with that descriptor in its environment (so a team-member MCP server
 the CLI spawns inherits it), and returns an :class:`ExternalCliRuntime`
 bound to the subprocess via stdin (input) and a stdout line iterator.
 
-Note: an external CLI member runs in a separate process, so the team must
-use a cross-process transport (``pyzmq`` messager + file-backed sqlite) for
-the CLI's tool calls to reach the team. The in-process backends are
-single-process only.
+An external CLI member runs in a separate process. Its MCP server writes the
+shared file-backed sqlite database directly and publishes runtime events via
+either the configured team messenger or a Gateway WebSocket relay.
 """
 
 from __future__ import annotations
@@ -24,9 +23,13 @@ from typing import AsyncIterator
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.external.cli_agent.adapters import CliAgentAdapter, build_adapter
 from openjiuwen.agent_teams.external.cli_agent.injector import StdinPipeInjector
+from openjiuwen.agent_teams.external.cli_agent.transport.base import StreamReaderLike
+from openjiuwen.agent_teams.external.cli_agent.transport.local import LocalTransport
+from openjiuwen.agent_teams.external.cli_agent.transport.ssh import SshTransport
 from openjiuwen.agent_teams.external.descriptor import TeamJoinDescriptor
 from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
+from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
@@ -35,34 +38,47 @@ from openjiuwen.core.common.logging import team_logger
 
 def descriptor_from_context(ctx: TeamRuntimeContext) -> TeamJoinDescriptor:
     """Build a join descriptor an external CLI member uses to reach the team."""
-    if not ctx.member_name:
+    member_name = ctx.member_name
+    if not member_name:
         raise_error(
             StatusCode.AGENT_TEAM_CONFIG_INVALID,
             reason="external CLI member requires a member_name in its runtime context",
         )
-    team_name = ctx.team_spec.team_name if ctx.team_spec else ""
-    language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
-    transport = ctx.messager_config or MessagerTransportConfig()
-    # The in-process member shell already binds this member's ``direct_addr``
-    # ROUTER. The external client (the CLI's MCP server, a separate process)
-    # only publishes events to the pub/sub bus and reads the shared db — it
-    # never receives direct ROUTER messages — so hand it an ephemeral
-    # ``direct_addr`` to avoid colliding with the shell's bind on the same
-    # port. Pub/sub publish/subscribe still target the leader's broker.
-    if transport.direct_addr:
-        transport = transport.model_copy(update={"direct_addr": "tcp://127.0.0.1:*"})
+    team_spec = ctx.team_spec
+    if team_spec is None or not team_spec.team_name:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="external CLI member requires a team spec with team_name",
+        )
+    team_name = team_spec.team_name
+    language = team_spec.language or "cn"
+    session_id = get_session_id()
+    if not session_id:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="external CLI member requires an active team session_id",
+        )
+    transport = team_spec.external_messager_config or ctx.messager_config or MessagerTransportConfig()
+    transport_updates = {"team_name": team_name, "node_id": member_name}
+    if transport.backend == "pyzmq" and transport.direct_addr:
+        transport_updates["direct_addr"] = "tcp://127.0.0.1:*"
+    transport = transport.model_copy(update=transport_updates)
     return TeamJoinDescriptor(
-        session_id=get_session_id() or "",
+        session_id=session_id,
         team_name=team_name,
-        member_name=ctx.member_name or "",
+        member_name=member_name,
         role=ctx.role.value,
+        # A spawned third-party CLI is a first-class team member, not an
+        # external operator: it gets the native teammate tool set and its
+        # team system prompt is injected here at spawn time.
+        scope="member",
         language=language,
         db_config=ctx.db_config,
         transport_config=transport,
     )
 
 
-async def _aiter_stdout(stream: asyncio.StreamReader) -> AsyncIterator[str]:
+async def _aiter_stdout(stream: StreamReaderLike) -> AsyncIterator[str]:
     """Yield decoded, newline-stripped stdout lines until the stream ends."""
     while True:
         raw = await stream.readline()
@@ -130,6 +146,7 @@ async def build_cli_runtime(
     mcp_server_command: tuple[str, ...] = ("openjiuwen-team-mcp",),
     system_prompt: str | None = None,
     extra_env: dict[str, str] | None = None,
+    ssh_transport: SshTransportConfig | None = None,
 ) -> ExternalCliRuntime | ReinvokeCliRuntime:
     """Build the member runtime for ``ctx.cli_agent``.
 
@@ -157,6 +174,8 @@ async def build_cli_runtime(
         extra_env: Extra environment merged over the inherited env + the
             team-join descriptor (descriptor wins is not desired, so this is
             applied last only for non-descriptor keys).
+        ssh_transport: Optional ssh endpoint config. When set, the streaming
+            CLI process is launched remotely via ssh.
     """
     if not ctx.cli_agent:
         raise_error(
@@ -171,11 +190,14 @@ async def build_cli_runtime(
     # instance rather than a nested one. The descriptor env is authoritative
     # for team identity, so it is applied last — a misconfigured extra_env
     # cannot shadow the join.
-    base_env = {
-        key: value
-        for key, value in os.environ.items()
-        if not any(key.startswith(prefix) for prefix in adapter.env_strip_prefixes)
-    }
+    if ssh_transport is None:
+        base_env = {
+            key: value
+            for key, value in os.environ.items()
+            if not any(key.startswith(prefix) for prefix in adapter.env_strip_prefixes)
+        }
+    else:
+        base_env = {}
     env = {**base_env, **(extra_env or {}), **descriptor.to_env()}
 
     # System prompt as a launch arg (claude --append-system-prompt). CLIs
@@ -183,12 +205,21 @@ async def build_cli_runtime(
     # user message by the caller instead.
     sp_args = tuple(adapter.system_prompt_args(system_prompt or ""))
 
+    if ssh_transport is not None and not adapter.supports_stdin_injection:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason=(
+                "ssh transport requires a streaming CLI "
+                "(supports_stdin_injection=True); one-shot CLIs are not supported in ssh mode"
+            ),
+        )
+
     mcp_args: tuple[str, ...] = ()
     if inject_mcp:
         mcp_args = tuple(
             adapter.mcp_launch_args(server_name=mcp_server_name, server_command=mcp_server_command)
         )
-        if not mcp_args:
+        if not mcp_args and ssh_transport is None:
             # No launch-injection flag for this CLI: register the team MCP
             # server out of band (e.g. `gemini mcp add`) so the member still
             # gets team tools, or warn loudly when nothing can register it.
@@ -199,6 +230,12 @@ async def build_cli_runtime(
                 env=env,
                 cwd=cwd,
                 member_name=ctx.member_name or "",
+            )
+        elif not mcp_args:
+            team_logger.warning(
+                "[external-cli] {} has no launch MCP injection args in ssh mode; "
+                "remote MCP must be configured out of band",
+                adapter.name,
             )
 
     launch_extra_args = mcp_args + sp_args
@@ -219,14 +256,10 @@ async def build_cli_runtime(
 
     command = adapter.build_command(extra_args=launch_extra_args)
     team_logger.info("[external-cli] launching {} for member {}", command, ctx.member_name)
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-        cwd=cwd,
-    )
+    if ssh_transport is not None:
+        team_logger.info("[external-cli] using ssh transport for member {}", ctx.member_name)
+    transport = SshTransport(ssh_transport) if ssh_transport is not None else LocalTransport()
+    process = await transport.run(tuple(command), env=env, cwd=cwd)
     if process.stdin is None or process.stdout is None:
         raise_error(
             StatusCode.AGENT_TEAM_EXECUTION_ERROR,
@@ -239,6 +272,7 @@ async def build_cli_runtime(
         injector=StdinPipeInjector(process.stdin),
         output_lines=_aiter_stdout(process.stdout),
         process=process,
+        transport=transport,
     )
 
 

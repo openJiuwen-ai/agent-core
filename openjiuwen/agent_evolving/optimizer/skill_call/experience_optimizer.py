@@ -24,12 +24,14 @@ from openjiuwen.agent_evolving.optimizer.skill_call.experience_draft_parser impo
     parse_experience_drafts_with_error,
 )
 from openjiuwen.agent_evolving.optimizer.skill_call.templates import (
-    SKILL_EXPERIENCE_GENERATE_PROMPT,
     JSON_FIX_PROMPT,
     JSON_FIX_PROMPT_STRICT,
+    SKILL_EXPERIENCE_GENERATE_PROMPT,
+    TEAM_EXPERIENCE_GENERATE_PROMPT,
 )
-from openjiuwen.agent_evolving.signal.base import EvolutionSignal
 from openjiuwen.agent_evolving.protocols import EXPERIENCES_TARGET
+from openjiuwen.agent_evolving.signal.base import EvolutionSignal
+from openjiuwen.agent_evolving.signal.team import build_team_trajectory_summary
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
@@ -38,7 +40,7 @@ from openjiuwen.core.foundation.llm.model import Model
 # Initial score mapping by signal type
 INITIAL_SCORE_BY_SIGNAL = {
     "execution_failure": 0.65,
-    "user_correction": 0.70,
+    "user_intent": 0.70,
     "script_artifact": 0.60,
     "conversation_review": 0.50,
 }
@@ -49,6 +51,26 @@ GENERATE_RECORDS_LLM_POLICY = LLMInvokePolicy(
     max_attempts=2,
 )
 _RETRY_PARSE_TIMEOUT_SECS = 20
+
+# When the model is deployed on Huawei Cloud ModelArts MaaS, bump max_tokens
+# explicitly to avoid JSON truncation.
+_HUAWEI_MODELARTS_KEYWORD = "modelarts"
+_HUAWEI_MODELARTS_MAX_TOKENS = 20000
+
+
+def _resolve_max_tokens(llm: Model) -> int | None:
+    """Return the max_tokens override for the current LLM, or None to use defaults.
+
+    The Huawei Cloud ModelArts MaaS gateway truncates long JSON outputs more
+    aggressively than other providers. We bump max_tokens explicitly when the
+    configured api_base targets ModelArts. For every other provider we return
+    None and let the client/model default apply.
+    """
+    client_config = getattr(llm, "model_client_config", None)
+    api_base = getattr(client_config, "api_base", "") or ""
+    if _HUAWEI_MODELARTS_KEYWORD in api_base.lower():
+        return _HUAWEI_MODELARTS_MAX_TOKENS
+    return None
 
 
 def _build_conversation_snippet(
@@ -261,6 +283,9 @@ def _build_existing_summary(records: List[EvolutionRecord], label: str = "") -> 
         return ""
     lines: List[str] = []
     for record in records:
+        if not isinstance(record, EvolutionRecord):
+            lines.append(f"- {record}")
+            continue
         prefix = f"[{label}] " if label else ""
         lines.append(f"- {prefix}[{record.id}] [{record.change.section}] {record.change.content}")
     return "\n".join(lines)
@@ -288,18 +313,32 @@ class SkillExperienceOptimizer(BaseOptimizer):
         model: str,
         language: str = "cn",
         generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
+        profile: str = "regular",
     ) -> None:
         super().__init__()
+        if profile not in {"regular", "team"}:
+            raise ValueError("profile must be 'regular' or 'team'")
         self._llm = llm
         self._model = model
         self._language = language
         self._generate_records_llm_policy = generate_records_llm_policy
+        self._profile = profile
         self._online_contexts: Dict[str, EvolutionContext] = {}
 
     @property
     def generate_records_llm_policy(self) -> LLMInvokePolicy:
         """Get the configured record generation policy."""
         return self._generate_records_llm_policy
+
+    @property
+    def record_llm_policy(self) -> LLMInvokePolicy:
+        """Compatibility property for callers that label record generation as record_llm_policy."""
+        return self._generate_records_llm_policy
+
+    @property
+    def profile(self) -> str:
+        """Return the optimizer prompt profile."""
+        return self._profile
 
     @property
     def llm(self) -> Model:
@@ -374,6 +413,8 @@ class SkillExperienceOptimizer(BaseOptimizer):
         """Generate and parse evolution records from LLM output."""
         if not ctx.signals:
             return []
+        if self._profile == "team":
+            return await self._generate_team_records(ctx)
 
         conversation_snippet = _build_conversation_snippet(ctx.messages, language=self._language)
         signals_json = json.dumps(
@@ -384,14 +425,13 @@ class SkillExperienceOptimizer(BaseOptimizer):
         desc_summary = _build_existing_summary(ctx.existing_desc_records, label="description")
         body_summary = _build_existing_summary(ctx.existing_body_records, label="body")
         skill_content = _summarize_skill_content(ctx.skill_content)
-        default_existing_summary = "无已有记录" if self._language == "cn" else "No existing records"
         prompt = SKILL_EXPERIENCE_GENERATE_PROMPT[self._language].format(
             skill_content=skill_content,
             signals_json=signals_json,
             conversation_snippet=(conversation_snippet or "").strip(),
-            existing_desc_summary=desc_summary or default_existing_summary,
-            existing_body_summary=body_summary or default_existing_summary,
-            user_query=ctx.user_query or ("无" if self._language == "cn" else "None"),
+            existing_desc_summary=desc_summary or self._default_existing_summary(),
+            existing_body_summary=body_summary or self._default_existing_summary(),
+            user_query=self._default_user_query(ctx.user_query),
         )
         retry_prompt = SKILL_EXPERIENCE_GENERATE_PROMPT[self._language].format(
             skill_content=_summarize_skill_content(ctx.skill_content, max_chars=2500),
@@ -403,10 +443,10 @@ class SkillExperienceOptimizer(BaseOptimizer):
                 language=self._language,
             ).strip(),
             existing_desc_summary=_limit_summary_lines(desc_summary, 2)
-            or ("无已有记录" if self._language == "cn" else "No existing records"),
+            or self._default_existing_summary(),
             existing_body_summary=_limit_summary_lines(body_summary, 2)
-            or ("无已有记录" if self._language == "cn" else "No existing records"),
-            user_query=(ctx.user_query[:500] if ctx.user_query else ("无" if self._language == "cn" else "None")),
+            or self._default_existing_summary(),
+            user_query=self._default_user_query(ctx.user_query, max_chars=500),
         )
 
         logger.info("[SkillExperienceOptimizer] calling LLM (skill=%s)", ctx.skill_name)
@@ -421,33 +461,110 @@ class SkillExperienceOptimizer(BaseOptimizer):
         except ValueError:
             logger.warning("[SkillExperienceOptimizer] all retries exhausted, returning no records")
             return []
-        source = ctx.signals[0].signal_type
-        merged_context = _build_context(ctx.signals)
+        return self._build_records_from_drafts(
+            drafts,
+            signals=ctx.signals,
+            skip_log_message="LLM decided to skip",
+            empty_log_message="LLM returned empty content, skipping",
+            generated_log_prefix="",
+        )
+
+    async def _generate_team_records(self, ctx: EvolutionContext) -> List[EvolutionRecord]:
+        """Generate team/swarm skill records with the team prompt profile."""
+        signals_json = json.dumps(
+            [signal.to_dict() for signal in ctx.signals],
+            ensure_ascii=False,
+            indent=2,
+        )
+        desc_summary = _build_existing_summary(ctx.existing_desc_records, label="description")
+        body_summary = _build_existing_summary(ctx.existing_body_records, label="body")
+        script_summary = _build_existing_summary(ctx.existing_script_records, label="script")
+        skill_content = _summarize_skill_content(ctx.skill_content)
+        trajectory_summary = self._build_team_trajectory_summary(ctx)
+        prompt = TEAM_EXPERIENCE_GENERATE_PROMPT[self._language].format(
+            skill_content=skill_content,
+            trajectory_summary=trajectory_summary,
+            signals_json=signals_json,
+            existing_desc_summary=desc_summary or self._default_existing_summary(),
+            existing_body_summary=body_summary or self._default_existing_summary(),
+            existing_script_summary=script_summary or self._default_existing_summary(),
+            user_query=self._default_user_query(ctx.user_query),
+        )
+        retry_prompt = TEAM_EXPERIENCE_GENERATE_PROMPT[self._language].format(
+            skill_content=_summarize_skill_content(ctx.skill_content, max_chars=2500),
+            trajectory_summary=self._limit_text(trajectory_summary, 4000),
+            signals_json=json.dumps([signal.to_dict() for signal in ctx.signals], ensure_ascii=False),
+            existing_desc_summary=_limit_summary_lines(desc_summary, 2) or self._default_existing_summary(),
+            existing_body_summary=_limit_summary_lines(body_summary, 2) or self._default_existing_summary(),
+            existing_script_summary=_limit_summary_lines(script_summary, 1) or self._default_existing_summary(),
+            user_query=self._default_user_query(ctx.user_query, max_chars=500),
+        )
+
+        logger.info("[SkillExperienceOptimizer] calling team-profile LLM (skill=%s)", ctx.skill_name)
+        try:
+            drafts = await self._generate_drafts_with_retries(
+                prompt=prompt,
+                retry_prompt=retry_prompt,
+            )
+        except BaseError as exc:
+            logger.error("[SkillExperienceOptimizer] team-profile LLM call failed: %s", exc)
+            raise
+        except ValueError:
+            logger.warning("[SkillExperienceOptimizer] team-profile retries exhausted, returning no records")
+            return []
+        return self._build_records_from_drafts(
+            drafts,
+            signals=ctx.signals,
+            skip_log_message="team profile skipped record",
+            empty_log_message="team profile returned empty content, skipping",
+            generated_log_prefix="team profile ",
+        )
+
+    def _default_existing_summary(self) -> str:
+        return "无已有记录" if self._language == "cn" else "No existing records"
+
+    def _default_user_query(self, user_query: str | None, max_chars: int | None = None) -> str:
+        if not user_query:
+            return "无" if self._language == "cn" else "None"
+        if max_chars is None or len(user_query) <= max_chars:
+            return user_query
+        return user_query[:max_chars]
+
+    def _build_records_from_drafts(
+        self,
+        drafts: List[ParsedExperienceDraft],
+        *,
+        signals: List[EvolutionSignal],
+        skip_log_message: str,
+        empty_log_message: str,
+        generated_log_prefix: str,
+    ) -> List[EvolutionRecord]:
+        source = signals[0].signal_type
+        merged_context = _build_context(signals)
         text_records: List[EvolutionRecord] = []
         script_records: List[EvolutionRecord] = []
-
         for draft in drafts:
             patch = draft.patch
             if patch.action == "skip":
                 logger.info(
-                    "[SkillExperienceOptimizer] LLM decided to skip (reason=%s)",
+                    "[SkillExperienceOptimizer] %s (reason=%s)",
+                    skip_log_message,
                     patch.skip_reason or "unknown",
                 )
                 continue
             if not patch.content.strip():
-                logger.info("[SkillExperienceOptimizer] LLM returned empty content, skipping")
+                logger.info("[SkillExperienceOptimizer] %s", empty_log_message)
                 continue
             is_script = patch.target == EvolutionTarget.SCRIPT
             if is_script and len(script_records) >= 1:
                 continue
             if not is_script and len(text_records) >= 2:
                 continue
-            initial_score = INITIAL_SCORE_BY_SIGNAL.get(source, 0.6)
             record = EvolutionRecord.make(
                 source=source,
                 context=merged_context,
                 change=patch,
-                score=initial_score,
+                score=INITIAL_SCORE_BY_SIGNAL.get(source, 0.6),
                 summary=draft.summary,
             )
             if is_script:
@@ -455,13 +572,26 @@ class SkillExperienceOptimizer(BaseOptimizer):
             else:
                 text_records.append(record)
             logger.info(
-                "[SkillExperienceOptimizer] generated record %s -> [%s] target=%s merge_target=%s",
+                "[SkillExperienceOptimizer] %sgenerated record %s -> [%s] target=%s merge_target=%s",
+                generated_log_prefix,
                 record.id,
                 patch.section,
                 patch.target.value,
                 patch.merge_target,
             )
         return text_records + script_records
+
+    @staticmethod
+    def _limit_text(text: str, max_chars: int) -> str:
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + f"\n... [truncated, original {len(text)} chars]"
+
+    def _build_team_trajectory_summary(self, ctx: EvolutionContext) -> str:
+        trajectory = ctx.trajectory
+        if trajectory is not None:
+            return build_team_trajectory_summary(trajectory)
+        return _build_conversation_snippet(ctx.messages, language=self._language)
 
     async def retry_parse(
         self,
@@ -528,11 +658,17 @@ class SkillExperienceOptimizer(BaseOptimizer):
             retry_prompt = JSON_FIX_PROMPT.format(parse_error=error_detail, broken_output=broken_raw)
 
         try:
+            max_tokens = _resolve_max_tokens(self._llm)
+            invoke_kwargs: dict[str, Any] = {
+                "temperature": 0.1,
+                "timeout": _RETRY_PARSE_TIMEOUT_SECS,
+            }
+            if max_tokens is not None:
+                invoke_kwargs["max_tokens"] = max_tokens
             response = await self._llm.invoke(
                 model=self._model,
                 messages=[{"role": "user", "content": retry_prompt}],
-                temperature=0.1,
-                timeout=_RETRY_PARSE_TIMEOUT_SECS,
+                **invoke_kwargs,
             )
             retry_raw = response.content if hasattr(response, "content") else str(response)
         except Exception as exc:
@@ -553,12 +689,17 @@ class SkillExperienceOptimizer(BaseOptimizer):
         prompt: str,
         retry_prompt: str,
     ) -> List[ParsedExperienceDraft]:
+        extra_kwargs: dict[str, Any] = {}
+        max_tokens = _resolve_max_tokens(self._llm)
+        if max_tokens is not None:
+            extra_kwargs["max_tokens"] = max_tokens
         raw, prompt_used = await invoke_text_with_retry_and_prompt(
             llm=self._llm,
             model=self._model,
             prompt=prompt,
             retry_prompt=retry_prompt,
             policy=self._generate_records_llm_policy,
+            **extra_kwargs,
         )
 
         drafts, last_error = parse_experience_drafts_with_error(raw, _extract_json_with_error)

@@ -12,12 +12,20 @@
 
 The local agent id is ``LOCAL_AGENT_ID``. It forwards ``Runner.run_agent`` /
 ``Runner.run_agent_streaming`` to the remote id, which uses the A2A protocol.
+
+Remote ``invoke`` returns the aggregated final ``AgentResult`` (``COMPLETED`` + artifacts);
+``stream`` exposes incremental A2A events.
 """
 
 from __future__ import annotations
 
 import asyncio
+import sys
+from pathlib import Path
 from types import SimpleNamespace
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from example_utils import print_invoke_result, print_stream_chunk
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
@@ -72,17 +80,21 @@ async def main() -> None:
         _require_ok(Runner.resource_mgr.add_agent(remote_card, remote), "add_agent(remote)")
         _require_ok(Runner.resource_mgr.add_agent(local_card, local_provider), "add_agent(local)")
 
-        payload = {"query": "hello from local agent", "conversation_id": "session-delegate-1"}
-        print("--- invoke via local agent ---")
-        inv = await Runner.run_agent(LOCAL_AGENT_ID, payload)
-        print(inv)
+        invoke_query = "hello from local agent"
+        inv = await Runner.run_agent(
+            LOCAL_AGENT_ID,
+            {"query": invoke_query, "conversation_id": "session-delegate-1"},
+        )
+        print_invoke_result(inv, label="invoke via local agent", expect_text=invoke_query)
 
         print("--- stream via local agent ---")
+        index = 0
         async for chunk in Runner.run_agent_streaming(
             LOCAL_AGENT_ID,
             {"query": "hello stream", "conversation_id": "session-delegate-2"},
         ):
-            print(chunk)
+            print_stream_chunk(f"stream[{index}]", chunk)
+            index += 1
     finally:
         await Runner.stop()
 

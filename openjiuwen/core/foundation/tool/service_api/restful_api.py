@@ -249,13 +249,14 @@ class RestfulApi(Tool):
             f"Proxy enabled for {url}: {proxy is not None}",
             event_type=LogEventType.TOOL_CALL_START
         )
-        async with aiohttp.ClientSession(proxy=proxy, connector=connector) as session:
+        async with aiohttp.ClientSession(connector=connector) as session:
             async with session.request(
                     self._method,
                     url,
                     headers=headers,
                     allow_redirects=False,
                     timeout=aiohttp.ClientTimeout(total=timeout),
+                    proxy=proxy,
                     **request_arg,
             ) as response:
                 if raise_for_status is not False:

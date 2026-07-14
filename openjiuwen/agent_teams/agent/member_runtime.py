@@ -5,15 +5,23 @@
 
 ``StreamController`` / coordination / the configurator drive a member's
 "brain" exclusively through this surface. :class:`~openjiuwen.agent_teams.harness.TeamHarness`
-(DeepAgent-backed) is the default implementation; an external CLI agent is
-driven by ``ExternalCliRuntime`` implementing the same Protocol. Capturing
-the contract here lets the runtime be swapped without business-code changes,
-exactly as ``TeamHarness``'s module docstring promises.
+(NativeHarness/DeepAgent-backed) is the default implementation; an external
+CLI agent is driven by ``ExternalCliRuntime`` / ``ReinvokeCliRuntime``
+implementing the same Protocol. Capturing the contract here lets the runtime
+be swapped without business-code changes.
 
-Only members actually accessed on a harness *instance* are declared. Rail /
-memory / customizer hooks are present because the default DeepAgent path
-uses them; an external runtime that skips those features implements them as
-no-ops (the configurator never invokes them for such members).
+The interaction surface mirrors :class:`~openjiuwen.agent_teams.harness.HarnessProtocol`
+(``start`` / ``stop`` / ``outputs`` / ``send`` / ``abort`` / ``pause`` /
+``subscribe`` / ``state`` / ``session_id``): one cycle is
+started per ``coordination.start`` and torn down at ``finalize_round``. Inputs
+arrive through ``send`` (``immediate`` steers the active round); the producing
+side fires phase/round events the StreamController maps onto
+MemberStatus / ExecutionStatus.
+
+Only members actually accessed on a runtime *instance* are declared. Rail /
+memory hooks are present because the default DeepAgent path uses
+them; an external runtime that skips those features implements them as no-ops
+(the configurator never invokes them for such members).
 """
 
 from __future__ import annotations
@@ -27,35 +35,76 @@ from typing import (
     runtime_checkable,
 )
 
-# User-facing customizer hook: (agent, member_name, role_value) -> None.
-AgentCustomizer = Callable[[Any, Optional[str], str], None]
-
 
 @runtime_checkable
 class MemberRuntime(Protocol):
     """The brain a team member's coordination layer drives."""
 
-    # ---- round runtime surface ----
+    # ---- lifecycle ----
 
-    def run_streaming(self, inputs: dict[str, Any], *, session_id: Optional[str]) -> AsyncIterator[Any]:
-        """Stream chunks for one round, given ``inputs['query']``."""
+    async def start(self, *, team_session: Optional[Any] = None) -> None:
+        """Start the runtime's round lifecycle for one run cycle.
+
+        The DeepAgent-backed runtime materialises a fresh harness over a child
+        agent session derived from ``team_session`` (so it shares the team
+        session id and persisted DeepAgentState); a CLI runtime ignores
+        ``team_session`` because its subprocess owns its own session.
+        """
         ...
 
-    async def steer(self, content: str) -> None:
-        """Inject content into the in-flight round (mid-turn)."""
+    async def stop(self) -> None:
+        """Stop the runtime, cancel in-flight work, and close outputs."""
         ...
 
-    async def follow_up(self, content: str) -> None:
-        """Queue content to be handled after the current turn."""
+    @property
+    def state(self) -> Any:
+        """Return the current lifecycle phase (a ``HarnessState``)."""
         ...
 
-    async def abort(self) -> None:
-        """Ask the in-flight round to stop cooperatively."""
+    @property
+    def session_id(self) -> Optional[str]:
+        """Return the current session id, or None before ``start``."""
         ...
 
-    def init_cwd_for_round(self) -> None:
-        """Initialise the per-round working directory, if any."""
+    # ---- interaction ----
+
+    def outputs(self) -> AsyncIterator[Any]:
+        """Return a queue-backed async iterator over output chunks."""
         ...
+
+    async def send(self, content: Any, *, immediate: bool = False) -> Any:
+        """Submit input; ``immediate=True`` steers the in-flight round.
+
+        ``content`` may be an ``InteractiveInput`` to resume a pending
+        interrupt. Returns a runtime-defined acknowledgement (a sequence id for
+        the DeepAgent runtime; None for CLI runtimes).
+        """
+        ...
+
+    async def abort(self, *, immediate: bool = False) -> None:
+        """Abort the in-flight round: graceful (False) or hard+rollback (True)."""
+        ...
+
+    async def pause(self) -> None:
+        """Pause the in-flight round; the next send restarts it."""
+        ...
+
+    async def subscribe(
+        self,
+        *,
+        on_state: Callable[..., Any] | None = None,
+        on_round: Callable[..., Any] | None = None,
+    ) -> None:
+        """Register optional phase/round callbacks; both keyword-only and optional.
+
+        ``on_state`` receives ``old`` / ``new`` (phase) and ``session_id``;
+        ``on_round`` receives ``kind`` (started/finished/aborted/paused/failed),
+        ``round_id`` and ``result``. Only the non-None callbacks are registered;
+        kwargs are narrowed to each callback's declared parameters.
+        """
+        ...
+
+    # ---- interrupt-resume helpers ----
 
     def has_pending_interrupt(self) -> bool:
         """Return whether the runtime is waiting on an interrupt resume."""
@@ -65,7 +114,11 @@ class MemberRuntime(Protocol):
         """Return whether ``user_input`` resolves the pending interrupt."""
         ...
 
-    # ---- rail / memory / customizer hooks (default DeepAgent path) ----
+    def init_cwd_for_round(self) -> None:
+        """Initialise the per-round working directory, if any."""
+        ...
+
+    # ---- rail / memory hooks (default DeepAgent path) ----
 
     def find_rails(self, rail_type: type) -> list[Any]:
         """Return mounted rails of ``rail_type`` (empty when unsupported)."""
@@ -87,8 +140,12 @@ class MemberRuntime(Protocol):
         """Inject loaded memory into the agent's system prompt."""
         ...
 
-    def run_agent_customizer(self, customizer: AgentCustomizer) -> None:
-        """Invoke a user-supplied customizer hook on the underlying agent."""
+    def set_background_task_controller(self, controller: Any) -> None:
+        """Attach an external background task controller (pause/resume surface).
+
+        Drives the leader's background swarmflow run; non-DeepAgent runtimes that
+        launch no background tools implement it as a no-op.
+        """
         ...
 
     # ---- config snapshots ----
@@ -104,4 +161,4 @@ class MemberRuntime(Protocol):
         ...
 
 
-__all__ = ["AgentCustomizer", "MemberRuntime"]
+__all__ = ["MemberRuntime"]

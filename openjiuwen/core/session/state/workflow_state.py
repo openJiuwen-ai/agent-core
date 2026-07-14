@@ -132,10 +132,9 @@ class CommitState(StateCollection):
     def commit_user_inputs(self, inputs: Any) -> None:
         if self._io_state is None or inputs is None:
             return
-        self._io_state.update_by_id(self._node_id,
-                                    {self._node_id: inputs} if self._node_id != DEFAULT_NODE_ID else inputs)
-        self._global_state.update_by_id(self._node_id, inputs)
-        self.commit()
+        io_data = {self._node_id: inputs} if self._node_id != DEFAULT_NODE_ID else inputs
+        self._io_state.update_by_id_and_commit(self._node_id, io_data)
+        self._global_state.update_by_id_and_commit(self._node_id, inputs)
 
     def commit(self) -> None:
         self._io_state.commit()
@@ -149,12 +148,12 @@ class CommitState(StateCollection):
         self._global_state.rollback(self._node_id)
         self._workflow_state.rollback(self._node_id)
 
-    def get_state(self) -> dict:
+    def get_state(self, **kwargs) -> dict:
         return {
-            IO_STATE_KEY: self._io_state.get_state(),
-            GLOBAL_STATE_KEY: self._global_state.get_state() if self._workflow_only else None,
-            COMP_STATE_KEY: self._comp_state.get_state(),
-            WORKFLOW_STATE_KEY: self._workflow_state.get_state()
+            IO_STATE_KEY: self._io_state.get_state(**kwargs),
+            GLOBAL_STATE_KEY: self._global_state.get_state(**kwargs) if self._workflow_only else None,
+            COMP_STATE_KEY: self._comp_state.get_state(**kwargs),
+            WORKFLOW_STATE_KEY: self._workflow_state.get_state(**kwargs)
         }
 
     def set_state(self, state: dict) -> None:

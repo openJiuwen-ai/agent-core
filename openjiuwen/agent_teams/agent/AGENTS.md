@@ -1,0 +1,48 @@
+# Agent Teams Agent
+
+`TeamAgent` 运行时主骨架。`TeamAgent` 是单一实现——同一个类同时承担 leader 和 teammate 两个角色，通过 `TeamRole` 切换行为，内部组合一个 `DeepAgent` 跑 LLM。本目录把 TeamAgent 的内部结构按"四象限"+ 协作层组织。
+
+## 四象限分解
+
+`TeamAgent` 的字段被刻意分到四个文件，避免一个类塞 100+ 字段：
+
+| 象限 | 文件 | 含义 |
+|---|---|---|
+| **静态数据** | `blueprint.py` | `TeamAgentBlueprint`，frozen dataclass。构造时确定的配置，整个生命周期不变（spec、role、member_name、persona 等） |
+| **运行时可变状态** | `state.py` | `TeamAgentState`。**只放跨 operator 的字段**——operator 内部状态（spawn_manager 的 spawned_handles、coordination 的 subscribed_topics 等）留在 operator 自己里 |
+| **每实例资源** | `resources.py` | `PrivateAgentResources`。这个 TeamAgent 独占的资源（DeepAgent、worktree manager、memory manager 等）。每个 member 一份 |
+| **每进程基础设施** | `infra.py` | `TeamInfra`。**进程内**所有 member 共享的资源（messager、db、team_backend 等）。leader 和 teammate 在不同进程，所以 "共享" 是 per-process 而不是跨实例单例。也持有 tiny-agent 资源：`tiny_agent_model_resolver`（model_name→TeamModelConfig）+ `tiny_agents`（team-scoped tiny agent 按名缓存，`stop`/`shutdown` 时 dispose）。见 `tiny_agent.py` / F_45 |
+
+新增字段前先想：跨 operator 吗？跨实例吗？跨进程吗？放错象限就会出现"这个状态我看到 3 处都在改"的代码烂味。
+
+## Manager / 协作层
+
+| 文件 | 类 | 职责 |
+|---|---|---|
+| `team_agent.py` | `TeamAgent(BaseAgent)` | 唯一对外类。leader / teammate 都是它，行为由 `blueprint.role` 切。`auto_start_member` / `auto_start_all` 用于 interact dispatch 层 best-effort lazy startup |
+| `agent_configurator.py` | `AgentConfigurator` | DeepAgent 装配：team rail 经 `RailSpec` 声明式注入 `build_spec.rails` + live handle 注入 `BuildContext.extras`（不再手动 `new` rail / 不再有 customizer，见 `docs/features/F_32`）；`_resolve_team_mode` 在这里 |
+| `member.py` | `TeamMember` | 成员状态机封装 |
+| `member_factory.py` | `create_member_handle(...)` | 集中 TeamMember 构造，leader / teammate 路径共用一份实现 |
+| `payload.py` | `SpawnPayloadBuilder` | spawn teammate 时的**跨进程 wire 格式**。输出键是 `TeamAgent.from_spawn_payload` 的公共契约——改这里的字段要同步改子进程入口 |
+| `spawn_manager.py` | `SpawnManager` | teammate 进程生命周期：拉起 / 心跳 / 重启 / 取消。`restart_teammate`（容错 / 切 session）以 `initial_message=None` re-spawn——**恢复不 replay 首启指令**，见下方"初始消息只首启注入" |
+| `recovery_manager.py` | `RecoveryManager` | 团队级容错：成员崩溃恢复、状态对齐 |
+| `session_manager.py` | `SessionManager` | session checkpoint 读写、生命周期 |
+| `stream_controller.py` | `StreamController` | runtime（NativeHarness/CLI runtime）输出转发 + 状态映射层。`start()` 挂 `_forward_outputs`（消费 `runtime.outputs()`→`_tag_chunk`→stream_queue+observers）+ 经 `subscribe(on_state=, on_round=)` 注册 phase/round 回调；不再驱动 round / 排 pending / 自重启（单 supervisor 模型接管）。`_map_state` RUNNING→BUSY、IDLE→READY+`_on_idle_settled`；`_map_round` 走 EXECUTION_TRANSITIONS；transient retry（181001）在 `_handle_retry` swallow+重驱，exhausted/non-retryable 转发不再 raise；自动升级 chunk 为 `TeamOutputSchema` 并 `add_chunk_observer` fan-out；`emit_completion_and_close` 发完成标记 + 关流；`_on_idle_settled` 经注入的 `request_completion_poll_callback` 触发 leader 完成评估 |
+
+## coordination/ — 唤醒循环
+
+事件驱动的 wake-up 层：`EventBus` 收事件 → `EventDispatcher` 粗筛 → `AsyncCallbackFramework` 分发到 7 个固定场景 handler（lifecycle / member / message / task_board / stale_task / team_completion / workflow）+ 可选的 `ReliabilityHandler`（opt-in，见 [`coordination/AGENTS.md`](coordination/AGENTS.md)）。**自身不做决策**，handler 走三类 narrow protocol 触发行为：`AgentRoundController` 驱动 TeamHarness（round 控制），`TeamLifecycleController` 触发 TeamAgent 级生命周期（shutdown），`PollController` 直达 EventBus（poll 暂停/恢复）。详见 [`coordination/AGENTS.md`](coordination/AGENTS.md)。
+
+## 跨文件协作的几个关键点
+
+- **同一 team 的 leader 和 teammate 不在同一进程**：`infra.py` 的 "per-process" 语义就来自这里。要让两边都看到的状态走 db / messager，不要走对象引用。
+- **`payload.py` 的 wire 格式是公共契约**：`build_spawn_payload(...)` 的所有输出键 = `TeamAgent.from_spawn_payload` 的所有读取键，改一边必须改另一边。
+- **stream_controller 不直接驱动 DeepAgent**：它管理 stream queue 和 round 状态；驱动 DeepAgent 的入口是 `team_agent.py` 的 `start_agent / steer / follow_up / deliver_input`。
+- **初始消息只首启注入，空则不 send**（见 [`docs/features/F_33`](../docs/features/F_33_spawn-first-start-message-injection.md)）：spawn 不再 fabricate `"Join the team and wait..."` 占位符；`TeamAgent.invoke` / `stream` 仅在 `raw_query` 非空时 `enqueue_user_input`（首轮 send），空 query（首启无 prompt / restart / recover / resume）只起来订阅、靠 `enqueue_initial_mailbox_poll` 的 `POLL_MAILBOX` 投递真实消息——`MessageHandler` 收件箱为空即不 send。`restart_teammate` 因此恒传 `initial_message=None`，不 replay DB 里的 `teammate.prompt`。例外：external CLI 成员（`external_cli_spawn`）仍自带 join prompt，未纳入此模型。
+- **stream chunk 跨成员 fan-out**：每个 `StreamController` 在 chunk 进 queue 之前用 `_tag_chunk` 把 chunk 升级为 `TeamOutputSchema`（带 `source_member` + `role`），再 fan-out 给注册在 `_chunk_observers` 上的回调。inprocess 模式下，`SpawnManager._wire_inprocess_chunk_forward` 会把每个 spawn 出来的 teammate `StreamController` 上挂一个 forward observer——把 chunk 转投到 leader 的 `stream_queue`，让 `Runner.run_agent_team_streaming` 对外流出全成员 chunk。observer 抛错自动 detach 不阻塞主流；teardown 时由 `cleanup_teammate` 反注册。subprocess 模式不挂 observer（不同进程不共享对象），扩展点已留好（messager-driven observer）。
+
+## 跟其他子目录的边界
+
+- 真正干活的 LLM 在 `harness/deep_agent.py`，本目录只组装 + 调度。
+- 跨 team 的对象池 / 派发 / 并发门禁在 `runtime/`（leader 进 pool 的唯一公共路径是 spec → `manager.activate`）。
+- 三视角交互（GodView / Operator / HumanAgent）通过 `interaction/` 进 coordination；mention 解析在 `interaction/router.py` 不在 dispatcher。

@@ -8,7 +8,9 @@ The inbox does **not** parse the body — the top-layer
 syntax into structured payloads. ``send`` only routes based on the
 explicit ``to`` argument:
 
-* ``to is None`` → drive the matching avatar's DeepAgent (no bus).
+* ``to is None`` → enqueue the body into the matching avatar's own
+  coordination as user input (``interact`` → ``USER_INPUT`` event); the
+  avatar consumes it after its harness has started. No bus message.
 * ``to in BROADCAST_TARGETS`` (``"all"`` / ``"*"``) → broadcast as the
   human-agent ``sender``.
 * ``to=<member>`` → validate the target and post a point-to-point bus
@@ -85,8 +87,9 @@ class HumanAgentInbox:
     Construction-time hooks:
 
     * ``agent_lookup(sender) -> TeamAgent | None`` — resolves the
-      live human-agent runtime so non-mention input drives its LLM.
-      Required for the LLM-driven path; ``None`` falls back to a
+      live human-agent runtime so non-mention input is enqueued into
+      its coordination (``interact``) and drives its LLM. Required for
+      the LLM-driven path; ``None`` falls back to a
       ``DeliverResult.failure("agent_unavailable")`` so the caller
       learns the avatar is not running yet.
     * ``on_inbound(HumanAgentInboundEvent)`` — passed through to the
@@ -151,8 +154,10 @@ class HumanAgentInbox:
 
         Routes purely on ``to``:
 
-        * ``to is None`` → feed ``body`` to the matching avatar's
-          DeepAgent via ``deliver_input``. Returns
+        * ``to is None`` → enqueue ``body`` into the matching avatar's
+          own coordination via ``interact`` (a ``USER_INPUT`` event);
+          the avatar's loop consumes it once its harness is started, so
+          no reach-in to a not-yet-started harness. Returns
           ``DeliverResult.failure("agent_unavailable")`` when no
           ``agent_lookup`` is wired or the avatar is not running.
         * ``to`` in :data:`BROADCAST_TARGETS` (``"all"`` / ``"*"``) →
@@ -225,7 +230,15 @@ class HumanAgentInbox:
         if agent is None:
             team_logger.warning("HumanAgentInbox: human agent %s has no live runtime", sender)
             return DeliverResult.failure("agent_unavailable")
-        await agent.deliver_input(body)
+        # Route through the avatar's OWN coordination (a USER_INPUT inner
+        # event) instead of reaching into its harness directly. ``interact``
+        # only enqueues; the avatar's coordination loop consumes it after
+        # ``coordination.start`` has started the harness. A direct
+        # ``deliver_input`` here would call ``harness.send`` from the
+        # leader's coroutine and crash with "NativeHarness not started"
+        # whenever the avatar was spawned but its run cycle has not yet
+        # started its harness (e.g. the leader's initial routed input).
+        await agent.interact(body)
         return DeliverResult.success(None)
 
 

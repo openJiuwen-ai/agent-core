@@ -16,7 +16,7 @@
 
 | 字段 | 实际暴露面 |
 |---|---|
-| `member_name` / `display_name` / `desc` | 进 `TeamMember` 表 → 由 `build_team_members_section`（`prompts/sections.py:620`）拼成 `# 成员关系` 注入所有 peer 的 system prompt；也由 `list_members` 工具返回（`tools/team_tools.py:538-567`，`map_result` 至少返回 `member_name` / `display_name` / `status`，`data` 返回完整 `model_dump()`） |
+| `member_name` / `display_name` / `desc` | 进 `TeamMember` 表 → 由 `build_team_members_section`（`prompts/sections.py:620`）拼成 `# 成员关系` 注入所有 peer 的 system prompt；也由 `list_members` 工具返回（仅外部成员通道；Leader 已摘除该工具，`tools/team_tools.py:538-567`，`map_result` 至少返回 `member_name` / `display_name` / `status`，`data` 返回完整 `model_dump()`） |
 | `prompt` | 仅作为该成员启动时的人设/约定写入该成员自己的 system prompt，不出现在 `# 成员关系` section、不出现在 `list_members` 输出 |
 | `model_name` | 内部 allocator hint，不进入任何 LLM 上下文 |
 
@@ -33,7 +33,7 @@
    - `prompt` → `私有`
    - `role_type` / `model_name` → `内部`（`role_type` 决定 framework 装配方式，不进入任何成员的 prompt 文本；F_18 默认对 teammate 也隐藏）
 2. **在 `_desc` 增加独立的「信息可见性边界」小节**，明确：
-   - 公开字段会注入到 peer 的 system prompt 与 `list_members`；
+   - 公开字段会注入到 peer 的 system prompt，并经 `list_members`（仅外部成员通道）返回；
    - 私有字段只注入该成员自己；
    - 列出 leader 不应写到 `desc` / `display_name` 里的典型私密内容（内部考量、隐藏约束、机密策略），引导到 `prompt`。
 3. **在 `locales/<lang>.py` 各参数描述前缀 `[公开]` / `[私有]` / `[内部]`** 并同时把 visibility 描述写进短文。这一层是 LLM 在工具入参 JSON schema 中直接看到的 description，必须自带可见性信号——而不是依赖它去读完整的 `_desc` Markdown。
@@ -79,7 +79,7 @@
   `create_task` 的 `title` / `content`）也未在描述里标 visibility。本次只动
   `spawn_member` 是因为它是泄漏面最严重的入口（一次性写入长期生效，且 leader
   天然会在这里思考"对成员的定位"）。其它入口的对称改造留到下次触发点出现。
-- `list_members` 工具的 `data` 段返回完整 `TeamMember.model_dump()`，包含
+- （外部成员通道的）`list_members` 工具的 `data` 段返回完整 `TeamMember.model_dump()`，包含
   `prompt` 字段。当前 `map_result` 只渲染 `member_name` / `display_name` /
   `status`，因此 LLM 看不到 `prompt`；但调用方若直接读 `ToolOutput.data` 即可
   拿到。短期内不构成 LLM-side 暴露，但严格意义上 `prompt` 也应在 backend 层从

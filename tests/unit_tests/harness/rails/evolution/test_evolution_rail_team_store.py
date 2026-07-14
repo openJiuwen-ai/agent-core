@@ -10,9 +10,10 @@ from typing import Any
 import pytest
 
 from openjiuwen.agent_evolving.trajectory import (
-    FileTrajectoryStore,
     InMemoryTrajectoryRegistry,
     InMemoryTrajectoryStore,
+    trajectory_meta,
+    trajectory_steps,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.single_agent.rail.base import InvokeInputs, ModelCallInputs, ToolCallInputs
@@ -98,7 +99,7 @@ class TestEvolutionRailTeamTrajectory:
         assert snapshot.session_id == "test-session"
         assert snapshot.member_id == "test-agent"
         assert snapshot.member_role is None
-        assert len(snapshot.trajectory.steps) == 1
+        assert len(trajectory_steps(snapshot.trajectory)) == 1
 
     @pytest.mark.asyncio
     async def test_after_invoke_without_sink_only_saves_personal_store(self):
@@ -121,13 +122,11 @@ class TestEvolutionRailTeamTrajectory:
         assert len(sink.snapshots) == 2
         assert all(snapshot.team_id == "team-a" for snapshot in sink.snapshots)
         assert all(snapshot.member_id == "test-agent" for snapshot in sink.snapshots)
-        assert [len(snapshot.trajectory.steps) for snapshot in sink.snapshots] == [1, 2]
+        assert [len(trajectory_steps(snapshot.trajectory)) for snapshot in sink.snapshots] == [1, 2]
 
-    def test_team_trajectory_store_is_deprecated(self):
-        with pytest.warns(DeprecationWarning, match="team_trajectory_store"):
-            rail = EvolutionRail(team_trajectory_store=InMemoryTrajectoryStore())
-
-        assert rail is not None
+    def test_team_trajectory_store_is_not_accepted_by_evolution_rail(self):
+        with pytest.raises(TypeError, match="team_trajectory_store"):
+            EvolutionRail(team_trajectory_store=InMemoryTrajectoryStore())
 
     def test_trajectory_sink_requires_team_id(self):
         rail = EvolutionRail(async_evolution=False)
@@ -166,7 +165,7 @@ class TestEvolutionRailTeamTrajectory:
 
         snapshot = sink.snapshots[0]
         assert snapshot.member_role is None
-        assert "member_role" not in snapshot.trajectory.meta
+        assert "member_role" not in trajectory_meta(snapshot.trajectory)
 
     @pytest.mark.asyncio
     async def test_bound_member_role_fills_snapshot_when_ctx_agent_has_no_role(self):
@@ -199,7 +198,7 @@ class TestEvolutionRailTeamTrajectory:
         snapshot = sink.snapshots[0]
         assert snapshot.member_id == "jiuwen_team_a_team_leader"
         assert snapshot.member_role == "leader"
-        assert snapshot.trajectory.meta["member_role"] == "leader"
+        assert trajectory_meta(snapshot.trajectory)["member_role"] == "leader"
 
     @pytest.mark.asyncio
     async def test_bound_leader_role_keeps_llm_steps_in_team_aggregate_without_ctx_agent_role(self):
@@ -241,7 +240,7 @@ class TestEvolutionRailTeamTrajectory:
         aggregated = registry.get_trajectory(team_id="team-a", session_id="test-session")
 
         assert aggregated is not None
-        assert [step.kind for step in aggregated.steps] == ["llm", "tool"]
+        assert [step.kind for step in trajectory_steps(aggregated)] == ["llm", "tool"]
 
     @pytest.mark.asyncio
     async def test_registry_aggregate_uses_latest_trajectory_for_repeated_member(self, monkeypatch):
@@ -259,21 +258,7 @@ class TestEvolutionRailTeamTrajectory:
         aggregated = registry.get_trajectory(team_id="team-a", session_id="test-session")
 
         assert aggregated is not None
-        assert [step.detail.tool_name for step in aggregated.steps if step.detail is not None] == [
+        assert [step.detail.tool_name for step in trajectory_steps(aggregated) if step.detail is not None] == [
             "view_task",
             "send_message",
         ]
-
-    @pytest.mark.asyncio
-    async def test_deprecated_team_trajectory_store_does_not_append_snapshots(self, tmp_path):
-        team_store = FileTrajectoryStore(tmp_path)
-        with pytest.warns(DeprecationWarning, match="team_trajectory_store"):
-            rail = EvolutionRail(
-                trajectory_store=InMemoryTrajectoryStore(),
-                team_trajectory_store=team_store,
-                async_evolution=False,
-            )
-        await _record_tool_invoke(rail, tool_name="read_file", tool_result="x" * 1000)
-        await _record_tool_invoke(rail, tool_name="read_file", tool_result="y" * 1000)
-
-        assert not (tmp_path / "trajectories_default.jsonl").exists()

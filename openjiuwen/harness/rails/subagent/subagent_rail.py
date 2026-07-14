@@ -7,9 +7,11 @@ from __future__ import annotations
 from typing import List, TYPE_CHECKING
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.sections import SectionName
+from openjiuwen.harness.prompts.tools import get_tool_description
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.tools import SessionToolkit, build_session_tools, create_task_tool
@@ -73,12 +75,29 @@ class SubagentRail(DeepAgentRail):
                 agent_id=agent_id,
             )
 
-        Runner.resource_mgr.add_tool(list(self.tools))
         for tool in self.tools:
-            agent.ability_manager.add(tool.card)
+            agent.ability_manager.add_ability(tool.card, tool)
 
         mode = "async session" if self.enable_async_subagent else "sync task"
         logger.info(f"[SubagentRail] Registered {mode} tool with {len(agent.deep_config.subagents)} subagent(s)")
+
+    def refresh_available_agents(self, agent) -> None:
+        """Refresh the available-agents text in registered subagent tool cards."""
+        if not self.tools:
+            return
+        self.system_prompt_builder = getattr(agent, "system_prompt_builder", self.system_prompt_builder)
+        language = getattr(self.system_prompt_builder, "language", "cn")
+        available_agents = self._build_available_agents_description(agent.deep_config.subagents or [])
+        refreshed = []
+        for tool in self.tools:
+            card = getattr(tool, "card", None)
+            name = getattr(card, "name", None)
+            if name not in {"task_tool", "sessions_spawn"}:
+                continue
+            card.description = get_tool_description(name, language).format(available_agents=available_agents)
+            refreshed.append(name)
+        if refreshed:
+            logger.info("[SubagentRail] Refreshed available_agents for %s", ", ".join(refreshed))
 
     def uninit(self, agent) -> None:
         """Remove tools from the agent.
@@ -90,10 +109,7 @@ class SubagentRail(DeepAgentRail):
             for tool in self.tools:
                 name = getattr(tool.card, "name", None)
                 if name:
-                    agent.ability_manager.remove(name)
-                tool_id = tool.card.id
-                if tool_id:
-                    Runner.resource_mgr.remove_tool(tool_id)
+                    agent.ability_manager.remove_ability(name)
 
         if self.enable_async_subagent:
             agent.set_session_toolkit(None)
@@ -127,9 +143,7 @@ class SubagentRail(DeepAgentRail):
                 else:
                     self.system_prompt_builder.remove_section(SectionName.TASK_TOOL)
             except ImportError:
-                logger.warning(
-                    "[SubagentRail] task_tool prompt section not available, skipping"
-                )
+                logger.warning("[SubagentRail] task_tool prompt section not available, skipping")
             return
 
         try:
@@ -143,15 +157,18 @@ class SubagentRail(DeepAgentRail):
             else:
                 self.system_prompt_builder.remove_section(SectionName.SESSION_TOOLS)
         except ImportError:
-            logger.warning(
-                "[SubagentRail] session_tools prompt section not available, skipping"
-            )
+            logger.warning("[SubagentRail] session_tools prompt section not available, skipping")
 
     # Well-known tool sets for built-in agent types whose tools are resolved
     # at runtime (i.e. ``SubAgentConfig.tools`` is empty).
     _KNOWN_AGENT_TOOLS: dict[str, str] = {
         "explore_agent": "bash, glob, grep, list_files, read_file",
         "plan_agent": "bash, glob, grep, list_files, read_file",
+        "browser_agent": (
+            "Playwright browser MCP tools, browser_probe_cards, "
+            "browser_probe_interactives, browser_custom_action, "
+            "browser_list_custom_actions, browser_runtime_health"
+        ),
     }
 
     def _build_available_agents_description(self, subagents: List[SubAgentConfig | "DeepAgent"]) -> str:
@@ -207,10 +224,16 @@ class SubagentRail(DeepAgentRail):
             if ability_mgr is not None:
                 try:
                     tool_names: list[str] = []
-                    for c in getattr(ability_mgr, "cards", []):
-                        n = getattr(c, "name", None)
-                        if isinstance(n, str):
-                            tool_names.append(n)
+                    list_abilities = getattr(ability_mgr, "list", None)
+                    cards = list_abilities() if callable(list_abilities) else []
+                    if not isinstance(cards, list):
+                        cards = []
+                    for card in cards:
+                        if not isinstance(card, ToolCard):
+                            continue
+                        name = getattr(card, "name", None)
+                        if isinstance(name, str):
+                            tool_names.append(name)
                     if tool_names:
                         return ", ".join(tool_names)
                 except (AttributeError, TypeError) as e:

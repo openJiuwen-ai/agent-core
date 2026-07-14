@@ -252,6 +252,24 @@ class MaxFileReadTokenExceededError(Exception):
         self.max_tokens = max_tokens
 
 
+class _TokenBudget:
+    """Tracks cumulative token spend against a fixed budget for progressive extraction."""
+
+    def __init__(self, max_tokens: int) -> None:
+        self.max_tokens = max_tokens
+        self.spent = 0
+
+    def can_fit(self, tokens: int) -> bool:
+        return self.spent + tokens <= self.max_tokens
+
+    def spend(self, tokens: int) -> None:
+        self.spent += tokens
+
+    @property
+    def exhausted(self) -> bool:
+        return self.spent >= self.max_tokens
+
+
 def _resolve_tool_file_path(operation: SysOperation, file_path: str) -> str:
     """Resolve relative tool paths against the configured sys_operation work_dir.
 
@@ -297,10 +315,19 @@ class ReadFileTool(Tool):
     def _is_pdf(file_path: str) -> bool:
         return file_path.lower().endswith(".pdf")
 
+    @staticmethod
+    def _is_notebook(file_path: str) -> bool:
+        return file_path.lower().endswith(".ipynb")
+
     @classmethod
     def _is_image(cls, file_path: str) -> bool:
         _, ext = os.path.splitext(file_path.lower())
         return ext in cls._IMAGE_EXTENSIONS
+
+    @classmethod
+    def _is_binary_check_exempt(cls, file_path: str) -> bool:
+        """File types handled by dedicated readers, exempt from the binary-file guard."""
+        return cls._is_pdf(file_path) or cls._is_notebook(file_path) or cls._is_image(file_path)
 
     @staticmethod
     def _is_pdf_supported(model_name: str) -> bool:
@@ -431,20 +458,24 @@ class ReadFileTool(Tool):
             mtime_ns: int,
             size_bytes: int,
             is_partial: bool,
-            rendered_line_count: int,
     ) -> None:
         if not mtime_ns or not self._is_text_read_for_edit(file_path):
             return
 
+        # A read is partial only when the caller explicitly windowed it
+        # (offset > 0 or a user-supplied limit). Do NOT re-derive partialness by
+        # comparing line counts from two different read paths: the rendered path
+        # is capped at MAX_LINES_TO_READ and skips CRLF normalization, so that
+        # comparison falsely marks files over the cap — or CRLF files with a
+        # trailing newline — as partial, leaving them permanently uneditable
+        # (read -> edit rejected -> read -> ... loop). The full-file snapshot
+        # below is still captured for external-modification detection.
         raw_state = None if is_partial else await self._read_raw_text_for_edit_state(file_path)
-        raw_line_count = raw_state.line_count if raw_state else rendered_line_count
-        effective_partial = is_partial or raw_line_count > rendered_line_count
-
         _FILE_READ_REGISTRY[file_path] = _FileReadState(
             mtime_ns=mtime_ns,
             size_bytes=size_bytes,
-            is_partial=effective_partial,
-            content=raw_state.content if not effective_partial and raw_state else None,
+            is_partial=is_partial,
+            content=raw_state.content if (not is_partial and raw_state) else None,
         )
 
     # ------------------------------------------------------------------
@@ -512,22 +543,20 @@ class ReadFileTool(Tool):
                 f"  cat \"{file_path}\" | jq '.cells | length'    # Count total cells"
             )
 
-        tokens = self._estimate_tokens(raw_text)
-        if tokens > self.MAX_TOKENS:
-            raise MaxFileReadTokenExceededError(tokens, self.MAX_TOKENS)
-
         notebook = json.loads(raw_text)
         cells = notebook.get("cells", [])
+        budget = _TokenBudget(self.MAX_TOKENS)
         blocks = []
+        extracted_count = 0
         for idx, cell in enumerate(cells, 1):
             cell_type = cell.get("cell_type", "unknown")
             source = "".join(cell.get("source", []))
-            blocks.append(f"## Cell {idx} [{cell_type}]")
+            cell_lines = [f"## Cell {idx} [{cell_type}]"]
             if source:
-                blocks.append(source.rstrip("\n"))
+                cell_lines.append(source.rstrip("\n"))
             outputs = cell.get("outputs") or []
             if outputs:
-                blocks.append("### Outputs")
+                cell_lines.append("### Outputs")
             for out in outputs:
                 text = ""
                 if "text" in out:
@@ -541,7 +570,19 @@ class ReadFileTool(Tool):
                 elif "ename" in out and "evalue" in out:
                     text = f"{out.get('ename')}: {out.get('evalue')}"
                 if text:
-                    blocks.append(text.rstrip("\n"))
+                    cell_lines.append(text.rstrip("\n"))
+
+            cell_text = "\n".join(cell_lines)
+            cell_tokens = self._estimate_tokens(cell_text)
+            if extracted_count > 0 and not budget.can_fit(cell_tokens):
+                blocks.append(
+                    f"… (truncated — {extracted_count}/{len(cells)} cells extracted, "
+                    f"{self.MAX_TOKENS}-token budget reached)"
+                )
+                break
+            budget.spend(cell_tokens)
+            blocks.append(cell_text)
+            extracted_count += 1
         return "\n".join(blocks).strip()
 
     async def _read_pdf(self, file_path: str, pages: Optional[str]) -> str:
@@ -576,10 +617,22 @@ class ReadFileTool(Tool):
                     "Narrow the pages parameter range."
                 )
 
+            budget = _TokenBudget(self.MAX_TOKENS)
             parts = []
+            extracted_count = 0
             for page_no in range(start, end + 1):
                 page_text = pdf.pages[page_no - 1].extract_text() or ""
-                parts.append(f"## Page {page_no}\n{page_text}".rstrip())
+                page_block = f"## Page {page_no}\n{page_text}".rstrip()
+                page_tokens = self._estimate_tokens(page_block)
+                if extracted_count > 0 and not budget.can_fit(page_tokens):
+                    parts.append(
+                        f"… (truncated — {extracted_count}/{page_count} pages extracted, "
+                        f"{self.MAX_TOKENS}-token budget reached)"
+                    )
+                    break
+                budget.spend(page_tokens)
+                parts.append(page_block)
+                extracted_count += 1
             return "\n\n".join(parts).strip()
 
     @staticmethod
@@ -712,10 +765,9 @@ class ReadFileTool(Tool):
                 error=f"Reading device file '{file_path}' is not allowed.",
             )
 
-        # Binary files are not readable as text (errorCode 4); PDF and images are exempt.
+        # Binary files are not readable as text (errorCode 4); PDF, notebooks, and images are exempt.
         if (
-            not self._is_pdf(file_path)
-            and not self._is_image(file_path)
+            not self._is_binary_check_exempt(file_path)
             and not self._is_plain_text_candidate(file_path)
         ):
             return ToolOutput(
@@ -765,10 +817,25 @@ class ReadFileTool(Tool):
         except OSError:
             pass
 
+        if (
+            self._is_plain_text_candidate(file_path)
+            and not user_supplied_limit
+            and size_bytes > self.MAX_SIZE_BYTES
+        ):
+            return ToolOutput(
+                success=False,
+                error=(
+                    f"File content ({size_bytes / 1024:.1f}KB) exceeds maximum allowed size "
+                    f"({self.MAX_SIZE_BYTES // 1024}KB). "
+                    "Use offset and limit parameters to read specific portions of the file, "
+                    "or search for specific content instead of reading the whole file."
+                ),
+            )
+
         try:
             if self._is_pdf(file_path):
                 rendered = await self._read_pdf(file_path, pages)
-            elif file_path.lower().endswith(".ipynb"):
+            elif self._is_notebook(file_path):
                 rendered = await self._read_notebook(file_path)
             elif self._is_image(file_path):
                 rendered = await self._read_image(file_path, model_name)
@@ -798,7 +865,6 @@ class ReadFileTool(Tool):
             mtime_ns=mtime_ns,
             size_bytes=size_bytes,
             is_partial=user_supplied_limit or offset > 0,
-            rendered_line_count=line_count,
         )
 
         return ToolOutput(
@@ -1277,9 +1343,16 @@ class EditFileTool(Tool):
             current_mtime = 0
             current_size = 0
 
-        # ---- Pre-read validation -------------------------------------------------
+        # ---- Pre-read validation ---------------------------------------------
+        # Only require that read_file has been called at least once for this
+        # path. A partial read (offset/limit) is accepted: old_string is
+        # matched against freshly re-read content below, and the external
+        # modification check still rejects edits against a stale read.
+        # Requiring a *full* read here would make large files — which
+        # read_file itself forces into partial reads via MAX_LINES_TO_READ /
+        # MAX_TOKENS — permanently uneditable.
         read_state = _FILE_READ_REGISTRY.get(file_path)
-        if read_state is None or read_state.is_partial:
+        if read_state is None:
             return ToolOutput(
                 success=False,
                 error=(

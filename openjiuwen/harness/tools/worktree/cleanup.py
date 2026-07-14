@@ -31,6 +31,8 @@ EPHEMERAL_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^teammate-[0-9a-f]{8}$"),
     # agent-<7hex> (legacy compatibility)
     re.compile(r"^agent-[0-9a-f]{7}$"),
+    # agent-<team>-<member>-<8hex>
+    re.compile(r"^agent-[a-z0-9._-]{1,24}-[a-z0-9._-]{1,24}-[0-9a-f]{8}$"),
 ]
 
 

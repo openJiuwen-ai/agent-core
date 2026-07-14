@@ -91,6 +91,19 @@ class VisionModelConfig:
         )
 
 
+def is_vision_model_config_complete(
+    config: Optional[VisionModelConfig],
+) -> bool:
+    """Return whether a vision model config can be used for model calls."""
+    if config is None:
+        return False
+    return bool(
+        str(config.api_key or "").strip()
+        and str(config.base_url or "").strip()
+        and str(config.model or "").strip()
+    )
+
+
 @dataclass
 class AudioModelConfig:
     """Shared runtime configuration for all DeepAgent audio tools."""
@@ -128,6 +141,7 @@ class AudioModelConfig:
             ),
             question_answering_model=(
                 os.getenv("AUDIO_QUESTION_ANSWERING_MODEL")
+                or os.getenv("AUDIO_MODEL_NAME")
                 or DEFAULT_OPENAI_AUDIO_QA_MODEL
             ),
             max_retries=_parse_int_from_env("AUDIO_MAX_RETRIES", 3),
@@ -184,6 +198,8 @@ class DeepAgentConfig:
             常见键结构见 :class:`openjiuwen.harness.security.models.PermissionsSection`。
         permission_host: Optional ToolPermissionHost callbacks (YAML path,
             workspace, hot-reload snapshot, hosted confirmation).
+        parallel_tool_calls: Whether or not tool calls are executed in parallel
+            (True for parallel, False for sequential)
     """
 
     model: Optional[Model] = None
@@ -208,7 +224,7 @@ class DeepAgentConfig:
     prompt_mode: Optional[str] = None
     vision_model_config: Optional[VisionModelConfig] = None
     audio_model_config: Optional[AudioModelConfig] = None
-    enable_read_image_multimodal: bool = True
+    enable_read_image_multimodal: Optional[bool] = None
     rails: Optional[List[AgentRail]] = None
     enable_plan_mode: bool = False
     model_selection: Optional[Dict[Model, str]] = None
@@ -229,6 +245,13 @@ class DeepAgentConfig:
     # Tool permission guardrail (tiered_policy / interrupt confirm)
     permissions: PermissionsSection | None = None
     permission_host: Any = None
+
+    # Whether or not the inner ReactAgent executes tool calls in parallel.
+    parallel_tool_calls: bool = True
+
+    # Filesystem sandbox: when True, file ops are restricted to workspace/project root.
+    # Subagents inherit the stricter of their own spec and this value.
+    restrict_to_work_dir: bool = True
 
 
 @dataclass
@@ -252,4 +275,5 @@ class SubAgentConfig:
     factory_name: Optional[str] = None
     factory_kwargs: dict[str, Any] = field(default_factory=dict)
     enable_plan_mode: bool = False
+    parallel_tool_calls: bool = True
     restrict_to_work_dir: bool = True

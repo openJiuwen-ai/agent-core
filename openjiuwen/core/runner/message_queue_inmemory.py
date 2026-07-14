@@ -178,6 +178,9 @@ class MessageQueueInMemory(MessageQueueBase):
     async def produce_message(self, topic: str, message: QueueMessage):
         await self._queue.put((topic, message))
 
+    def _get_subscribed_topics(self):
+        return list(self._subscribers.keys())
+
     async def _consume_message(self):
         while self._is_running:
             topic, message = await self._queue.get()

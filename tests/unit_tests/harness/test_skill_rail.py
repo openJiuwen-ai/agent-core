@@ -24,6 +24,7 @@ from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts.builder import PromptSection, SystemPromptBuilder
 from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
 from openjiuwen.harness.tools import ListSkillTool
+from openjiuwen.harness.tools.skills.skill_tool import SKILL_TOOL_MARKDOWN_IMAGES_HINT
 
 
 class _DummyResponse:
@@ -57,6 +58,7 @@ def _write_skill(
     root: Path,
     name: str,
     description: str,
+    body: str = "",
 ) -> Path:
     """Create a minimal skill directory with SKILL.md."""
     skill_dir = root / name
@@ -66,7 +68,7 @@ def _write_skill(
         "---\n"
         f"description: {description}\n"
         "---\n\n"
-        f"# {name}\n",
+        f"# {name}\n{body}",
         encoding="utf-8",
     )
     return skill_dir
@@ -116,7 +118,6 @@ async def test_skill_rail_all_mode_loads_skills_on_before_invoke(tmp_path: Path)
     _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
     _write_skill(skills_root, "xlsx-writer", "Write xlsx reports")
 
-    sys_operation = _make_sys_operation(tmp_path)
     skill_rail = SkillUseRail(
         skills_dir=str(skills_root),
         skill_mode="all",
@@ -188,6 +189,92 @@ async def test_skill_rail_all_mode_injects_skill_prompt(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_skill_rail_before_model_call_refreshes_when_before_invoke_is_skipped(tmp_path: Path):
+    """before_model_call should load skills for task-loop paths that skip before_invoke."""
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+
+    sys_operation = _make_sys_operation(tmp_path)
+    skill_rail = _TrackingSkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+    )
+    skill_rail.set_sys_operation(sys_operation)
+
+    builder = SystemPromptBuilder()
+    builder.add_section(PromptSection(
+        name="identity",
+        content={"cn": "Base system prompt.", "en": "Base system prompt."},
+    ))
+    skill_rail.system_prompt_builder = builder
+
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=ModelCallInputs(tools=[]),
+        session=None,
+    )
+
+    await skill_rail.before_model_call(ctx)
+
+    assert skill_rail.load_calls == ["invoice-parser"]
+    assert _sorted_skill_names(skill_rail.skills) == ["invoice-parser"]
+    assert "invoice-parser" in builder.build()
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_before_model_call_refreshes_only_when_skill_snapshot_changes(tmp_path: Path):
+    """before_model_call should refresh only when directories or SKILL.md mtimes change."""
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+
+    sys_operation = _make_sys_operation(tmp_path)
+    skill_rail = _TrackingSkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+    )
+    skill_rail.set_sys_operation(sys_operation)
+
+    builder = SystemPromptBuilder()
+    builder.add_section(PromptSection(
+        name="identity",
+        content={"cn": "Base system prompt.", "en": "Base system prompt."},
+    ))
+    skill_rail.system_prompt_builder = builder
+
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=ModelCallInputs(tools=[]),
+        session=None,
+    )
+
+    await skill_rail.before_model_call(ctx)
+    assert skill_rail.load_calls == ["invoice-parser"]
+
+    skill_rail.load_calls.clear()
+    await skill_rail.before_model_call(ctx)
+    assert skill_rail.load_calls == []
+
+    _write_skill(skills_root, "xlsx-writer", "Write xlsx reports")
+    await skill_rail.before_model_call(ctx)
+    assert skill_rail.load_calls == ["xlsx-writer"]
+
+    skill_rail.load_calls.clear()
+    time.sleep(1.1)
+    skill_md = skills_root / "invoice-parser" / "SKILL.md"
+    original = skill_md.read_text(encoding="utf-8")
+    skill_md.write_text(original + "\n<!-- updated -->\n", encoding="utf-8")
+
+    await skill_rail.before_model_call(ctx)
+    assert skill_rail.load_calls == ["invoice-parser"]
+
+
+@pytest.mark.asyncio
 async def test_skill_rail_filters_enabled_and_disabled_skills(tmp_path: Path):
     """SkillUseRail should respect enabled_skills and disabled_skills."""
     skills_root = tmp_path / "skills"
@@ -197,7 +284,6 @@ async def test_skill_rail_filters_enabled_and_disabled_skills(tmp_path: Path):
     _write_skill(skills_root, "xlsx-writer", "Write xlsx reports")
     _write_skill(skills_root, "legacy-skill", "Old skill")
 
-    sys_operation = _make_sys_operation(tmp_path)
     skill_rail = SkillUseRail(
         skills_dir=str(skills_root),
         skill_mode="all",
@@ -218,6 +304,59 @@ async def test_skill_rail_filters_enabled_and_disabled_skills(tmp_path: Path):
         "invoice-parser",
         "xlsx-writer",
     ]
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_skill_tool_reads_multimodal_skill_in_hint_mode(tmp_path: Path):
+    """Registered skill_tool should read SKILL.md from disk and inject media hints."""
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(
+        skills_root,
+        "media-skill",
+        "Skill with reference screenshots",
+        "See ![landing](images/landing.png) for the layout.\n",
+    )
+
+    sys_operation = _make_sys_operation(tmp_path)
+    agent = create_deep_agent(
+        model=init_model(
+            provider="OpenAI",
+            model_name="dummy-model",
+            api_key="dummy-key",
+            api_base="https://example.com/v1",
+            verify_ssl=False,
+        ),
+        card=AgentCard(name="test_skill_agent", description="test skill agent"),
+        system_prompt="You are a test assistant.",
+        max_iterations=3,
+        enable_task_loop=False,
+        workspace=skills_root,
+        sys_operation=sys_operation,
+        enable_read_image_multimodal=True,
+    )
+    skill_rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        multimodal_skill_mode="hint",
+        include_tools=False,
+    )
+    await agent.register_rail(skill_rail)
+
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    await skill_rail.before_invoke(ctx)
+
+    skill_tool_card = next(
+        item for item in agent.ability_manager.list()
+        if getattr(item, "name", None) == "skill_tool"
+    )
+    skill_tool = Runner.resource_mgr.get_tool(skill_tool_card.id)
+
+    result = await skill_tool.invoke({"skill_name": "media-skill"})
+
+    assert result.success is True
+    assert SKILL_TOOL_MARKDOWN_IMAGES_HINT in result.data["content"]
+    assert "images/landing.png" in result.data["content"]
 
 
 @pytest.mark.asyncio
@@ -264,7 +403,6 @@ async def test_auto_list_prompt_is_injected_without_preselecting_skills(tmp_path
 
     _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
 
-    sys_operation = _make_sys_operation(tmp_path)
     skill_rail = SkillUseRail(
         skills_dir=str(skills_root),
         skill_mode="auto_list",
@@ -307,7 +445,6 @@ async def test_list_skill_tool_reads_latest_skills_from_skill_rail(tmp_path: Pat
     _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
     _write_skill(skills_root, "xlsx-writer", "Write xlsx reports")
 
-    sys_operation = _make_sys_operation(tmp_path)
     routing_model = _DummyModel(
         content='{"skills": ["xlsx-writer"]}'
     )
@@ -344,7 +481,6 @@ async def test_list_skill_tool_returns_all_skills_when_query_empty(tmp_path: Pat
     _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
     _write_skill(skills_root, "xlsx-writer", "Write xlsx reports")
 
-    sys_operation = _make_sys_operation(tmp_path)
     skill_rail = SkillUseRail(
         skills_dir=str(skills_root),
         skill_mode="auto_list",
@@ -495,7 +631,6 @@ async def test_skill_rail_skips_nonexistent_directories(tmp_path: Path):
     nonexistent = tmp_path / "does_not_exist"
     another_nonexistent = tmp_path / "also_missing"
 
-    sys_operation = _make_sys_operation(tmp_path)
     skill_rail = SkillUseRail(
         skills_dir=[str(nonexistent), str(skills_root), str(another_nonexistent)],
         skill_mode="all",
@@ -514,7 +649,6 @@ async def test_skill_rail_all_dirs_nonexistent_produces_empty_skills(tmp_path: P
     nonexistent_a = tmp_path / "missing_a"
     nonexistent_b = tmp_path / "missing_b"
 
-    sys_operation = _make_sys_operation(tmp_path)
     skill_rail = SkillUseRail(
         skills_dir=[str(nonexistent_a), str(nonexistent_b)],
         skill_mode="all",
@@ -568,7 +702,6 @@ async def test_skill_rail_multi_dir_with_missing_dirs(tmp_path: Path):
     # dir_b does not exist
     _write_skill(existing_c, "skill-c", "From dir C")
 
-    sys_operation = _make_sys_operation(tmp_path)
     skill_rail = SkillUseRail(
         skills_dir=[str(existing_a), str(missing_b), str(existing_c)],
         skill_mode="all",

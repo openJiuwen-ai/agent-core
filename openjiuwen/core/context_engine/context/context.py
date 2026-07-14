@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 import uuid
-from typing import List, Optional, Tuple, Dict, Any
+from typing import Awaitable, Callable, List, Optional, Tuple, Dict, Any
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -17,8 +17,8 @@ from openjiuwen.core.context_engine.context.processor_state_recorder import (
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
-from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage, AssistantMessage
-from openjiuwen.core.foundation.tool import ToolInfo, Tool, ToolCard, tool
+from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage
+from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.context_engine.base import ModelContext, ContextWindow, ContextStats
 from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
 from openjiuwen.core.context_engine.context.kv_cache_manager import KVCacheManager
@@ -26,16 +26,6 @@ from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import ContextEvents
 
 
-_RELOADER_SYSTEM_PROMPT = """
-You may see offloaded content markers in your context: [[OFFLOAD: handle=<id>, type=<type>]].
-
-When you see an offloaded-content marker and believe retrieving it will help your answer, 
-feel free to call reload_original_context_messages:
-- Call reload_original_context_messages(offload_handle="<id>", offload_type="<type>") with the exact values from the marker
-- Do not guess or make up the missing content
-
-Storage types: "in_memory" (session cache).
-"""
 _ACTIVE_COMPRESSION_RESULT_BUSY = "busy"
 _ACTIVE_COMPRESSION_RESULT_COMPRESSED = "compressed"
 _ACTIVE_COMPRESSION_RESULT_NOOP = "noop"
@@ -54,6 +44,9 @@ class SessionModelContext(ModelContext):
             session_ref=None,
             workspace=None,
             sys_operation=None,
+            window_mutators: List[
+                Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]
+            ] = None,
     ):
         self._message_id = 0
         ContextUtils.validate_messages(history_messages)
@@ -62,7 +55,6 @@ class SessionModelContext(ModelContext):
         self._session_id = session_id
         self._message_buffer = ContextMessageBuffer(history_messages or [], config.max_context_message_num)
         self._default_window_size = config.default_window_message_num
-        self._enable_reload = config.enable_reload
         self._context_window_tokens = config.context_window_tokens
         self._model_name = config.model_name
         self._model_context_window_tokens = ContextUtils.build_model_context_window_tokens(
@@ -72,6 +64,7 @@ class SessionModelContext(ModelContext):
         )
         self._workspace = workspace
         self._sys_operation = sys_operation
+        self._window_mutators = window_mutators if window_mutators is not None else []
         self._session_ref = session_ref
         self._default_dialogue_round = config.default_window_round_num
         self._token_counter = token_counter
@@ -90,32 +83,6 @@ class SessionModelContext(ModelContext):
         self._offload_message_buffer.set_workspace_info(
             workspace.root_path if workspace else "",
             session_id
-        )
-        self._reloader_tool_card = ToolCard(
-            id=f"reload_{session_id}_{context_id}",
-            name="reload_original_context_messages",
-            description="Retrieve messages that were previously offloaded from the context window."
-                        "Provide the exact handle and storage type returned when the content was offloaded;"
-                        "the tool will fetch the complete original message list and inject "
-                        "it back into the conversation, allowing the model to see the full text "
-                        "as if it had never been removed.",
-            input_params={
-                "type": "object",
-                "properties": {
-                    "offload_handle": {
-                        "description": "A unique identifier or file path pointing to the offloaded content. "
-                                       "Accepts either a UUID string (e.g., 'abc123-def456') for memory-based storage.",
-                        "type": "string",
-                    },
-                    "offload_type": {
-                        "description": "The storage backend used when the content was offloaded. Must be one of: "
-                                       "'in_memory': Content was stored in in-memory cache. "
-                                       "Requires offload_handle to be a UUID or key string.",
-                        "type": "string",
-                    },
-                },
-                "required": ["offload_handle", "offload_type"],
-            },
         )
 
     def __len__(self):
@@ -299,6 +266,11 @@ class SessionModelContext(ModelContext):
     async def clear_messages(self, with_history: bool = True):
         self.pop_messages(len(self), with_history=with_history)
         self._offload_message_buffer = OffloadMessageBuffer()
+        self._offload_message_buffer.set_sys_operation(self._sys_operation)
+        self._offload_message_buffer.set_workspace_info(
+            self._workspace.root_path if self._workspace else "",
+            self._session_id
+        )
         return
 
     @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="window")
@@ -324,8 +296,6 @@ class SessionModelContext(ModelContext):
 
         async with self._processor_lock:
             system_messages = (system_messages or [])[:]
-            if self._enable_reload:
-                system_messages.append(SystemMessage(content=_RELOADER_SYSTEM_PROMPT))
 
             # with specific context size
             system_messages, context_messages = self._get_window_messages(
@@ -340,6 +310,7 @@ class SessionModelContext(ModelContext):
                 tools=tools or []
             )
 
+            call_window_mutators = kwargs.pop("window_mutators", None) or []
             kwargs.update({"window_size": window_size})
             kwargs.setdefault("sys_operation", self._sys_operation)
             for processor in self._processors:
@@ -426,6 +397,15 @@ class SessionModelContext(ModelContext):
                     )
 
             ContextUtils.validate_and_fix_context_window(window)
+            window_mutators = [*self._window_mutators, *call_window_mutators]
+            for mutator in window_mutators:
+                try:
+                    window = await mutator(self, window)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to mutate context window before KV release by using {mutator}, reason: {str(e)}"
+                    )
+            ContextUtils.validate_and_fix_context_window(window)
             if self._kv_cache_manager:
                 await self._kv_cache_manager.release(window, **kwargs)
             window.statistic = self._stat_context_window(window)
@@ -445,7 +425,8 @@ class SessionModelContext(ModelContext):
             )
             context_messages = self._message_buffer.get_back()
             round_index = ContextUtils.find_last_n_dialogue_round(context_messages, dialogue_round)
-            context_messages = context_messages[round_index:]
+            if round_index >= 0: 
+                context_messages = context_messages[round_index:]
         else:
             context_messages = self._message_buffer.get_back()
 
@@ -759,15 +740,6 @@ class SessionModelContext(ModelContext):
             ]
         return processors
 
-    def reloader_tool(self) -> Tool:
-        @tool(card=self._reloader_tool_card)
-        async def reload_original_context_messages(offload_handle: str, offload_type: str) -> str:
-            reloaded_messages = await self._offload_message_buffer.reload(offload_handle, offload_type)
-            if not reloaded_messages:
-                return f"Failed to reload messages with offload_handle={offload_handle} and offload_type={offload_type}"
-            return ContextUtils.format_reloaded_messages(offload_handle, reloaded_messages)
-        return reload_original_context_messages
-
     def offload_messages(self, offload_handle: str, messages: List[BaseMessage]):
         self._offload_message_buffer.offload(offload_handle, "in_memory", messages)
 
@@ -789,3 +761,8 @@ class SessionModelContext(ModelContext):
             for _, msg_list in offload_messages.items():
                 ContextUtils.validate_messages(msg_list)
             self._offload_message_buffer = OffloadMessageBuffer(offload_messages)
+        self._offload_message_buffer.set_sys_operation(self._sys_operation)
+        self._offload_message_buffer.set_workspace_info(
+            self._workspace.root_path if self._workspace else "",
+            self._session_id
+        )

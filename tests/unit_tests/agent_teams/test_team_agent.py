@@ -51,7 +51,7 @@ class _FakeCoordination:
         self.enqueued_inputs.append(inputs)
         await self._agent._stream_controller.stream_queue.put(None)
 
-    async def enqueue_mailbox_after_first_iteration(self) -> None:
+    async def enqueue_initial_mailbox_poll(self) -> None:
         self.mailbox_enqueued = True
 
     async def finalize_round(self) -> None:
@@ -86,7 +86,7 @@ def test_team_plan_leader_mounts_team_plan_mode_rail() -> None:
         enable_team_plan=True,
     ).build()
 
-    assert isinstance(leader.harness.rails.team_plan_mode, TeamPlanModeRail)
+    assert leader.harness.find_rails(TeamPlanModeRail)
 
 
 @pytest.mark.level0
@@ -97,7 +97,7 @@ def test_team_normal_leader_does_not_mount_team_plan_mode_rail() -> None:
         enable_team_plan=False,
     ).build()
 
-    assert leader.harness.rails.team_plan_mode is None
+    assert not leader.harness.find_rails(TeamPlanModeRail)
 
 
 @pytest.mark.level0
@@ -129,6 +129,44 @@ def test_spawn_payload_contains_member_identity() -> None:
     assert payload["coordination"]["persona"] == "追求交互质量的前端工程师"
     assert payload["coordination"]["transport"]["node_id"] == "fe-1"
     assert payload["query"] == "Review the design system impact."
+
+
+@pytest.mark.level0
+def test_external_transport_is_separate_from_team_transport(monkeypatch) -> None:
+    captured_contexts: list[TeamRuntimeContext] = []
+
+    def capture_context(self, _spec, context):
+        captured_contexts.append(context)
+        return self
+
+    monkeypatch.setattr(TeamAgent, "configure", capture_context)
+
+    TeamAgentSpec(
+        agents=_dummy_agents(),
+        team_name="delivery",
+        transport=TransportSpec(
+            type="pyzmq",
+            params={
+                "team_id": "delivery-team",
+                "node_id": "leader",
+                "direct_addr": "tcp://127.0.0.1:19001",
+                "pubsub_publish_addr": "tcp://127.0.0.1:19100",
+                "pubsub_subscribe_addr": "tcp://127.0.0.1:19101",
+            },
+        ),
+        external_transport=TransportSpec(
+            type="hybrid",
+            params={"external_publish_url": "ws://gateway:19000/ws"},
+        ),
+    ).build()
+
+    context = captured_contexts[0]
+    assert context.messager_config is not None
+    assert context.messager_config.backend == "pyzmq"
+    external_config = context.team_spec.external_messager_config
+    assert external_config is not None
+    assert external_config.backend == "hybrid"
+    assert external_config.external_publish_url == "ws://gateway:19000/ws"
 
 
 @pytest.mark.asyncio

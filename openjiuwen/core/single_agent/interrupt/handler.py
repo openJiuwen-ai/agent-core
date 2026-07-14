@@ -33,6 +33,8 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeI
 if TYPE_CHECKING:
     from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 
+_RESUME_USER_INPUT_KEY_METADATA = "resume_user_input_key"
+
 
 @dataclass
 class ResumeContext:
@@ -322,7 +324,8 @@ class ToolInterruptHandler:
 
         self._save_auto_confirm_from_state(state, user_input, session)
 
-        ctx.extra[RESUME_USER_INPUT_KEY] = user_input
+        resume_user_input_keys = self._resume_user_input_keys_for_state(state)
+        ctx.extra.update({key: user_input for key in resume_user_input_keys})
 
         tools_to_execute = []
         for outer_id, entry in state.interrupted_tools.items():
@@ -331,13 +334,15 @@ class ToolInterruptHandler:
                 tc = self._build_sub_agent_resume_tool_call(tc, user_input)
             tools_to_execute.append(tc)
 
-        if tools_to_execute:
-            execute_tool_call = resume_ctx.execute_tool_call
-            results = await execute_tool_call(ctx, tools_to_execute, session, context)
-        else:
-            results = []
-
-        ctx.extra.pop(RESUME_USER_INPUT_KEY, None)
+        try:
+            if tools_to_execute:
+                execute_tool_call = resume_ctx.execute_tool_call
+                results = await execute_tool_call(ctx, tools_to_execute, session, context)
+            else:
+                results = []
+        finally:
+            for resume_user_input_key in resume_user_input_keys:
+                ctx.extra.pop(resume_user_input_key, None)
 
         new_interrupted_tools, sub_agent_outputs, auto_confirm_mapping = self._collect_interrupts(
             results, tools_to_execute
@@ -351,6 +356,25 @@ class ToolInterruptHandler:
 
         ctx.extra[RESUME_START_ITERATION_KEY] = resume_iteration + 1
         return None
+
+    @staticmethod
+    def _resume_user_input_keys_for_state(state: ToolInterruptionState) -> set[str]:
+        """Return all ctx.extra keys that should expose the current resume input."""
+        resume_keys: set[str] = set()
+        needs_generic_key = False
+        for entry in state.interrupted_tools.values():
+            for request in entry.interrupt_requests.values():
+                metadata = request.metadata if isinstance(request.metadata, dict) else {}
+                resume_user_input_key = metadata.get(_RESUME_USER_INPUT_KEY_METADATA)
+                if not isinstance(resume_user_input_key, str) or not resume_user_input_key:
+                    needs_generic_key = True
+                    continue
+
+                resume_keys.add(resume_user_input_key)
+
+        if needs_generic_key or not resume_keys:
+            resume_keys.add(RESUME_USER_INPUT_KEY)
+        return resume_keys
 
     @staticmethod
     def _save_auto_confirm_from_state(

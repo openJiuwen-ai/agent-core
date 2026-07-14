@@ -12,6 +12,7 @@ agent before tear-down.
 
 from __future__ import annotations
 
+import json
 from typing import Any, ClassVar
 
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
@@ -20,6 +21,11 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
 )
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
 from openjiuwen.agent_teams.i18n import t
+from openjiuwen.agent_teams.inbound_render import (
+    INBOUND_TYPE_BROADCAST,
+    INBOUND_TYPE_DIRECT,
+    render_inbound,
+)
 from openjiuwen.agent_teams.schema.events import EventMessage, MessageEvent, TeamEvent
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.timefmt import format_time_context
@@ -131,23 +137,73 @@ class MessageHandler(BaseCoordinationHandler):
                 break
 
             team_logger.info("[{}] processing {} unread messages (steer={})", member_name, len(new_messages), use_steer)
-            for msg in new_messages:
-                seen_ids.add(msg.message_id)
-                if self._round.has_pending_interrupt():
-                    team_logger.info(
-                        "[{}] deferring mailbox message {} until pending interrupt is resolved",
-                        member_name,
-                        msg.message_id,
-                    )
-                    return
-                if is_bridge:
-                    text = await self._bridge_deliverable_for(member_name, msg)
-                else:
-                    text = self._format_message(msg, is_human_agent=is_human_agent, now_ms=get_current_time())
-                team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
+            # Collect delivered ids and batch their read-state write into a
+            # single transaction after the loop — one commit (one fsync)
+            # instead of one per message. The finally guarantees already
+            # delivered messages are marked even if delivery raises or an
+            # interrupt cuts the drain short; undelivered ones stay unread
+            # for the next poll.
+            #
+            # Broadcast read state is a per-member watermark (one row per
+            # ``(member, team)`` keyed by the newest read broadcast timestamp),
+            # so marking the newest broadcast in the batch advances the
+            # watermark past every older broadcast too. Collecting more than
+            # one broadcast id would make ``mark_messages_read`` insert
+            # duplicate ``(member, team)`` rows in the same transaction and
+            # the commit would raise ``UNIQUE constraint failed``, rolling
+            # back the whole batch and stalling the watermark — the mailbox
+            # reprocessing loop. ``_read_all_unread`` returns newest-first,
+            # so the first broadcast delivered is the watermark anchor; older
+            # broadcasts are still delivered to the agent but skipped on the
+            # read-state write.
+            delivered_ids: list[str] = []
+            broadcast_marked = False
+            interrupted = False
+            try:
+                for msg in new_messages:
+                    seen_ids.add(msg.message_id)
+                    if self._round.has_pending_interrupt():
+                        # Approval messages are admitted to resume_interrupt;
+                        # all other messages are deferred until the interrupt clears.
+                        approval_data = self._try_parse_approval_payload(msg)
+                        if approval_data is not None:
+                            team_logger.info(
+                                "[{}] admitting approval message {} to resume interrupt",
+                                member_name,
+                                msg.message_id,
+                            )
+                            await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
+                            await self._round.resume_interrupt(approval_data)
+                            continue
+                        team_logger.info(
+                            "[{}] deferring mailbox message {} until pending interrupt is resolved",
+                            member_name,
+                            msg.message_id,
+                        )
+                        interrupted = True
+                        break
+                    if is_bridge:
+                        text = await self._bridge_deliverable_for(member_name, msg)
+                    else:
+                        text = self._format_message(msg, is_human_agent=is_human_agent, now_ms=get_current_time())
+                    team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
-                await self._round.deliver_input(text, use_steer=use_steer)
-                await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
+                    await self._round.deliver_input(text, use_steer=use_steer)
+                    # Direct messages flip their own ``is_read`` row, so every
+                    # delivered direct id goes to the batch. Broadcasts share
+                    # one watermark row — collect only the newest (first seen,
+                    # since the unread list is newest-first) and let the
+                    # watermark cover the rest.
+                    if msg.broadcast:
+                        if broadcast_marked:
+                            continue
+                        broadcast_marked = True
+                    delivered_ids.append(msg.message_id)
+            finally:
+                if delivered_ids:
+                    await self._infra.message_manager.mark_messages_read(delivered_ids, member_name)
+            if interrupted:
+                return
 
     async def _bridge_deliverable_for(self, member_name: str, msg: Any) -> str:
         """Build the text delivered to a bridge avatar's DeepAgent.
@@ -362,36 +418,67 @@ class MessageHandler(BaseCoordinationHandler):
         return merged
 
     def _format_message(self, msg: Any, *, is_human_agent: bool, now_ms: int) -> str:
-        """Format one TeamMessage for agent input.
+        """Render one TeamMessage as ``<team-inbound>`` XML for agent input.
 
-        Includes message_id so the agent can call mark_message_read,
-        and distinguishes direct vs broadcast messages. The message's
-        send time is rendered as ``<absolute local time> (<relative
-        diff>)`` so the agent can judge recency and ordering — mailbox
-        delivery is often delayed, and a bare epoch tells the LLM
-        nothing about how stale the message is.
+        The sender's original content goes verbatim inside the
+        ``<team-inbound>`` element (sender / message_id / type / time as
+        attributes), and the framework-added hint goes in a separate
+        ``<team-note>`` — so the LLM sees a clean boundary between the
+        original message and what the runtime appended. ``message_id`` is
+        carried so the agent can call ``mark_message_read``; the send time
+        is rendered as ``<absolute local time> (<relative diff>)`` so the
+        agent can judge recency (mailbox delivery is often delayed).
 
-        Rendering is role-aware. A teammate / leader sees
-        ``dispatcher.msg_received`` ("reply via send_message if the
-        sender is waiting"). A human_agent avatar sees
-        ``hitt.msg_received_for_human``, which frames the message as a
-        notification for the controlling human and tells the avatar LLM
-        not to autonomously call ``send_message`` — the avatar's
-        outbound actions are driven only by Inbox instructions from
-        its controller.
+        Rendering is role-aware. A teammate / leader gets a
+        ``reply-hint`` note. A human_agent avatar gets ``for="controller"``
+        plus a ``hitt-silence`` note: the message is framed as a
+        notification for the controlling human, and the load-bearing
+        "stay silent" constraint keeps the avatar from autonomously
+        calling ``send_message`` — its outbound actions are driven only by
+        Inbox instructions from its controller.
 
         Args:
             msg: The team message row to render.
             is_human_agent: Whether the recipient is a human-agent avatar.
             now_ms: Current millisecond UTC epoch, the relative-time anchor.
         """
-        msg_type = t("dispatcher.msg_type_broadcast") if msg.broadcast else t("dispatcher.msg_type_direct")
-        key = "hitt.msg_received_for_human" if is_human_agent else "dispatcher.msg_received"
-        return t(
-            key,
-            msg_type=msg_type,
-            message_id=msg.message_id,
-            sender=msg.from_member_name,
+        msg_type = INBOUND_TYPE_BROADCAST if msg.broadcast else INBOUND_TYPE_DIRECT
+        time_info = format_time_context(msg.timestamp, now_ms)
+        if is_human_agent:
+            return render_inbound(
+                content=msg.content,
+                sender=msg.from_member_name,
+                message_id=msg.message_id,
+                msg_type=msg_type,
+                time_info=time_info,
+                for_controller=True,
+                note_kind="hitt-silence",
+                note_text=t("hitt.silence_note"),
+            )
+        return render_inbound(
             content=msg.content,
-            time_info=format_time_context(msg.timestamp, now_ms),
+            sender=msg.from_member_name,
+            message_id=msg.message_id,
+            msg_type=msg_type,
+            time_info=time_info,
+            note_kind="reply-hint",
+            note_text=t("dispatcher.reply_hint", sender=msg.from_member_name),
         )
+
+    @staticmethod
+    def _try_parse_approval_payload(msg: Any) -> dict | None:
+        """Try to parse a tool-approval result from a message.
+
+        Returns the parsed approval dict if the message is a
+        ``protocol="json"` message with ``type == "tool_approval_result"``,
+        or ``None`` otherwise.  Parses JSON only once.
+        """
+        if msg.protocol != "json" or not msg.content:
+            return None
+        try:
+            data = json.loads(msg.content)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if isinstance(data, dict) and data.get("type") == "tool_approval_result":
+            return data
+        return None

@@ -51,6 +51,7 @@ class MemberInfo(BaseModel):
     status: str = Field(description="MemberStatus value")
     execution_status: str | None = Field(default=None, description="ExecutionStatus value")
     mode: str = Field(description="MemberMode value")
+    role: str = Field(description="TeamRole value (leader/teammate/human_agent)")
 
     @classmethod
     def from_internal(cls, member) -> MemberInfo:
@@ -67,6 +68,7 @@ class MemberInfo(BaseModel):
             status=member.status,
             execution_status=member.execution_status,
             mode=member.mode,
+            role=member.role,
         )
 
 
@@ -112,6 +114,7 @@ class MessageInfo(BaseModel):
     from_member_name: str
     to_member_name: str | None = None
     content: str
+    protocol: str = "plain"
     timestamp: int
     broadcast: bool
     is_read: bool = False
@@ -129,6 +132,7 @@ class MessageInfo(BaseModel):
             from_member_name=msg.from_member_name,
             to_member_name=msg.to_member_name,
             content=msg.content,
+            protocol=msg.protocol,
             timestamp=msg.timestamp,
             broadcast=msg.broadcast,
             is_read=msg.is_read,

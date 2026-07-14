@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from openjiuwen.agent_evolving.trajectory import LLMCallDetail, Trajectory, TrajectoryStep
+from openjiuwen.agent_evolving.trajectory import LLMCallDetail, TrajectoryStep, trajectory_from_steps
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ModelCallInputs
 
 
@@ -58,10 +58,9 @@ async def test_rl_online_rail_background_evolution_uploads_batch():
         tenant_id="user-1",
         uploader=uploader,
     )
-    trajectory = Trajectory(
+    trajectory = trajectory_from_steps(
         execution_id="traj-1",
         session_id="s1",
-        source="rl_online",
         steps=[
             TrajectoryStep(
                 kind="llm",
@@ -72,6 +71,7 @@ async def test_rl_online_rail_background_evolution_uploads_batch():
                 ),
             )
         ],
+        source="rl_online",
     )
 
     await rail._safe_run_evolution({"trajectory": trajectory})
@@ -119,6 +119,50 @@ async def test_rl_online_rail_keeps_one_invoke_per_uploaded_batch():
     assert len(uploader.batches) == 2
     assert [len(batch.samples) for batch in uploader.batches] == [1, 1]
     assert uploader.batches[1].samples[0].response_text == "a2"
+
+
+@pytest.mark.asyncio
+async def test_rl_online_rail_uploads_extracted_token_fields():
+    from openjiuwen.agent_evolving.agent_rl.online.rail.online_rail import RLOnlineRail
+
+    uploader = _CollectingUploader()
+    rail = RLOnlineRail(
+        session_id="s1",
+        gateway_endpoint="http://gateway.local",
+        tenant_id="user-1",
+        uploader=uploader,
+        async_evolution=False,
+    )
+
+    invoke = InvokeInputs(query="q", conversation_id="same-session")
+    await rail.before_invoke(AgentCallbackContext(agent=_Agent(), inputs=invoke))
+    await rail.after_model_call(AgentCallbackContext(
+        agent=_Agent(),
+        inputs=ModelCallInputs(
+            messages=[{"role": "user", "content": "q"}],
+            response={
+                "role": "assistant",
+                "content": "a",
+                "choices": [
+                    {
+                        "prompt_token_ids": [1, 2, 3],
+                        "token_ids": [4, 5],
+                        "logprobs": [-0.4, -0.5],
+                    }
+                ],
+            },
+        ),
+    ))
+    await rail.after_invoke(AgentCallbackContext(agent=_Agent(), inputs=invoke))
+
+    assert len(uploader.batches) == 1
+    sample = uploader.batches[0].samples[0]
+    assert sample.prompt_ids == [1, 2, 3]
+    assert sample.response_tokens == [4, 5]
+    assert sample.logprobs == [-0.4, -0.5]
+    assert sample.meta["turn_id"] == 0
+    assert sample.meta["source"] == "rl_online"
+    assert sample.meta["tenant_id"] == "user-1"
 
 
 @pytest.mark.asyncio

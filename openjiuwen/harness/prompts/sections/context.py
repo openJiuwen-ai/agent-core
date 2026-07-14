@@ -1,20 +1,16 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Context prompt section for DeepAgent - reads config files and daily memory."""
+"""Context prompt section for DeepAgent - reads stable workspace config files."""
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 import re
-
-from zoneinfo import ZoneInfo
 
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.harness.prompts.workspace_content.workspace_header import (
     CONTEXT_HEADER,
     CONTEXT_FILE_TITLES,
-    DAILY_MEMORY_TITLE,
     CONTEXT_FILES,
 )
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
@@ -22,6 +18,19 @@ from openjiuwen.harness.prompts.sections import SectionName
 
 if TYPE_CHECKING:
     from openjiuwen.harness.prompts.builder import PromptSection
+
+CONTEXT_SECTION_BY_FILE = {
+    "AGENT.md": "context.agent",
+    "SOUL.md": "context.soul",
+    "HEARTBEAT.md": "context.heartbeat",
+    "USER.md": "context.user",
+    "IDENTITY.md": "context.identity",
+}
+
+_IDENTITY_FILLED_NAME_RE = re.compile(
+    r"^\s*[-*]?\s*(?:\*\*)?(?:名字|Name)[：:](?:\*\*)?\s*(?P<name>\S.*?)\s*$",
+    re.MULTILINE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -60,23 +69,37 @@ def _is_unfilled_template(content: str, max_template_len: int = 500) -> bool:
     return not no_headings
 
 
+def _clean_agent_name(raw_name: str) -> str:
+    name = raw_name.strip()
+    name = re.sub(r"\s*[（(].*?(权威|见\s*IDENTITY\.md).*?[）)]\s*$", "", name).strip()
+    return name.strip("`\"'“”‘’。；;,，")
+
+
+def _identity_has_filled_name(content: str) -> bool:
+    for match in _IDENTITY_FILLED_NAME_RE.finditer(content):
+        name = _clean_agent_name(match.group("name"))
+        if name and not name.startswith("_("):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
 
-
-def _format_date(timezone: str = "Asia/Shanghai") -> str:
-    """Format current date string with timezone.
-
-    Args:
-        timezone: IANA timezone name (e.g. 'Asia/Shanghai', 'UTC').
-                  Defaults to 'Asia/Shanghai'.
-
-    Returns:
-        Date string in 'YYYY-MM-DD' format.
-    """
-    tz = ZoneInfo(timezone)
-    return datetime.now(tz).strftime("%Y-%m-%d")
+DAILY_MEMORY_GUIDANCE = {
+    "cn": (
+        "每日记忆不会自动注入系统提示词。涉及今天、昨天、之前、继续、上次、记忆、偏好、历史"
+        "等上下文时，先调用 `read_memory` 读取 `memory/daily_memory/YYYY-MM-DD.md`，"
+        "或使用 `memory_search` 检索相关记忆。\n\n"
+    ),
+    "en": (
+        "Daily memory is not automatically injected into the system prompt. When context involves "
+        "today, yesterday, earlier, continue, last time, memory, preferences, history, or similar "
+        "historical context, first call `read_memory` to read "
+        "`memory/daily_memory/YYYY-MM-DD.md`, or use `memory_search` to retrieve relevant memories.\n\n"
+    ),
+}
 
 
 async def _read_context_file(
@@ -110,51 +133,10 @@ async def _read_context_file(
     result = await sys_operation.fs().read_file(str(full_path))
     if result.code == 0 and result.data:
         content = result.data.content
+        if file_key == WorkspaceNode.IDENTITY_MD.value and _identity_has_filled_name(content):
+            return content
         if content and not _is_unfilled_template(content):
             return content
-
-    return None
-
-
-async def _read_daily_memory(
-        sys_operation,
-        workspace,
-        timezone: Optional[str] = None,
-) -> str | None:
-    """Read today's daily memory file only when today's file exists.
-
-    Args:
-        sys_operation: SysOperation instance.
-        workspace: Workspace instance.
-        timezone: IANA timezone name for date formatting (e.g. 'Asia/Shanghai', 'UTC').
-                  Defaults to 'Asia/Shanghai' if None.
-
-    Returns:
-        Daily memory content string, or None if today's file doesn't exist.
-    """
-    if sys_operation is None:
-        return None
-
-    memory_dir = workspace.get_node_path(WorkspaceNode.MEMORY)
-    if memory_dir is None:
-        return None
-
-    tz = timezone or "Asia/Shanghai"
-    date = _format_date(tz)
-    daily_memory_dir = memory_dir / WorkspaceNode.DAILY_MEMORY.value
-    list_result = await sys_operation.fs().list_files(path=str(daily_memory_dir))
-    if list_result.code != 0 or not list_result.data or not list_result.data.list_items:
-        return None
-
-    today_file = f"{date}.md"
-    if not any(item.name == today_file for item in list_result.data.list_items):
-        return None
-
-    full_path = daily_memory_dir / f"{date}.md"
-
-    result = await sys_operation.fs().read_file(str(full_path))
-    if result.code == 0 and result.data:
-        return result.data.content
 
     return None
 
@@ -175,16 +157,14 @@ async def _build_context_content(
         workspace: Workspace instance.
         language: 'cn' or 'en'.
         extra_content: Optional content to append at the end (e.g. tools list).
-        timezone: IANA timezone name for date formatting (e.g. 'Asia/Shanghai', 'UTC').
-                  Uses local timezone if None.
-        include_daily_memory: Whether to include today's daily memory file.
+        timezone: Kept for API compatibility. Daily memory is not read here.
+        include_daily_memory: Whether to include the stable daily-memory guidance.
 
     Returns:
         Formatted context content string.
     """
     header = CONTEXT_HEADER.get(language, CONTEXT_HEADER["cn"])
     titles = CONTEXT_FILE_TITLES.get(language, CONTEXT_FILE_TITLES["cn"])
-    daily_title_tpl = DAILY_MEMORY_TITLE.get(language, DAILY_MEMORY_TITLE["cn"])
 
     parts = [header]
 
@@ -204,11 +184,7 @@ async def _build_context_content(
         )
 
     if include_daily_memory:
-        daily_content = await _read_daily_memory(sys_operation, workspace, timezone)
-        if daily_content:
-            date = _format_date(timezone or "Asia/Shanghai")
-            title = daily_title_tpl.format(date=date)
-            parts.append(f"{title}\n\n{daily_content}\n\n")
+        parts.append(DAILY_MEMORY_GUIDANCE.get(language, DAILY_MEMORY_GUIDANCE["cn"]))
 
     if extra_content:
         parts.append(extra_content)
@@ -232,9 +208,8 @@ async def build_context_section(
         workspace: Workspace object with root_path attribute.
         language: 'cn' or 'en'.
         tools_content: Optional pre-rendered tools content string for the given language.
-        timezone: IANA timezone name for date formatting (e.g. 'Asia/Shanghai', 'UTC').
-                  Uses local timezone if None.
-        include_daily_memory: Whether to include today's daily memory file.
+        timezone: Kept for API compatibility. Daily memory is not read here.
+        include_daily_memory: Whether to include the stable daily-memory guidance.
 
     Returns:
         A PromptSection instance with context content, or None if workspace is None.
@@ -258,6 +233,39 @@ async def build_context_section(
         content={language: content},
         priority=80,
     )
+
+
+async def build_context_file_sections(
+        sys_operation,
+        workspace,
+        language: str = "cn",
+) -> dict[str, "PromptSection"]:
+    """Build one PromptSection per configured context file.
+
+    Each section is named by ``CONTEXT_SECTION_BY_FILE`` so stable files can
+    live in the system prompt while dynamic files can remain attachments.
+    """
+    from openjiuwen.harness.prompts.builder import PromptSection
+
+    if workspace is None:
+        return {}
+
+    titles = CONTEXT_FILE_TITLES.get(language, CONTEXT_FILE_TITLES["cn"])
+    sections: dict[str, PromptSection] = {}
+    for file_key in CONTEXT_FILES:
+        section_name = CONTEXT_SECTION_BY_FILE.get(file_key)
+        if not section_name:
+            continue
+        content = await _read_context_file(sys_operation, workspace, file_key)
+        if content is None:
+            continue
+        title = titles.get(file_key, f"## {file_key}")
+        sections[section_name] = PromptSection(
+            name=section_name,
+            content={language: f"{title}\n\n{content}\n"},
+            priority=80,
+        )
+    return sections
 
 
 def _extract_task_tool_agent_lines(
@@ -444,6 +452,35 @@ def build_tools_content(
     if "task_tool" in tool_descriptions and "task_tool" not in rendered_names:
         lines.append(f"- task_tool: {_tool_summary('task_tool')}")
         rendered_names.add("task_tool")
+
+    if language == "cn":
+        lines.extend(
+            [
+                "",
+                "## 工具调用去重规则",
+                "",
+                "- 调用工具前先检查本轮对话中是否已经用相同参数调用过同一工具；如果已有结果，优先基于已有结果继续推理，不要重复调用",
+                "- 如果上一次工具结果为空、无匹配或没有提供新信息，不要用完全相同的参数再次调用；应调整查询条件、换用更合适的工具，或直接说明当前结果不足",
+                "- 只有当任务确实需要分步执行、状态已经变化、参数不同，或前一次结果明确要求继续获取下一部分信息时，才可以再次调用同一工具",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "## Tool Call Deduplication Rules",
+                "",
+                "- Before calling a tool, check whether the same tool has already been called with the same "
+                "arguments in this turn; if a result already exists, reason from that result instead of "
+                "repeating the call",
+                "- If the previous tool result was empty, had no matches, or added no new information, do not "
+                "call again with identical arguments; adjust the query, use a better-suited tool, or explain "
+                "that the current result is insufficient",
+                "- Call the same tool again only when the task genuinely requires multiple steps, state has "
+                "changed, arguments differ, or the previous result clearly asks you to fetch the next part of "
+                "the information",
+            ]
+        )
 
     if "bash" in rendered_names:
         if language == "cn":

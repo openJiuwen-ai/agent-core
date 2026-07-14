@@ -5,7 +5,8 @@
 Run **after** ``server_three_openjiuwen_agents_a2a.py`` in another terminal / another process.
 
 For each server base URL, runs *invoke-style* (drain events, print last) and *stream-style*
-(print each ``StreamResponse``).
+(print each ``StreamResponse``). This matches openjiuwen ``invoke`` (aggregated final result) vs
+``stream`` (incremental chunks).
 
 **Process 1** — multi-server::
 

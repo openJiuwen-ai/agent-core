@@ -61,6 +61,8 @@ topic 统一为 `TeamTopic.{TEAM,TASK,MESSAGE}.build(session_id, team_name)`。
   MCP 工具，协同协议放进 server-level `instructions`（工具 schema 自描述，无需单独
   skill）。client 在 server 事件循环内**懒连接**（首个工具调用时，从 env 读 descriptor），
   使 messager/DB 资源绑定到使用它的 loop。仓库首个 MCP server。
+  **（[[F_26]] 已改：低层 `mcp.server.lowlevel.Server`，按 `descriptor.scope` 分 member /
+  operator 两套工具集；member 复用真实 TeamTool、instructions 置空。）**
 
 ### 部署形态
 

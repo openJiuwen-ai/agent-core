@@ -22,6 +22,7 @@ def _should_decorate(obj, session):
             session and
             hasattr(session, "tracer") and
             session.tracer() and
+            session.tracer().agent_handler_valid() and
             hasattr(session, "span"))
 
 

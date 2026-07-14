@@ -9,9 +9,9 @@ Scenario (one autonomous leader round):
   ``spawn_member(role_type='external_cli', cli_agent=...)``.
 * Each member is a real third-party CLI subprocess. The spawn path
   auto-injects the team MCP server (``openjiuwen-team-mcp``) so the CLI
-  gets the team collaboration tools (read_inbox / claim_task /
-  complete_task / send_message), and launches it with ``cwd`` set to the
-  shared team workspace.
+  gets the real teammate team tools (read_inbox / view_task / claim_task —
+  status claimed/completed — / send_message), and launches it with ``cwd``
+  set to the shared team workspace.
 * The leader creates one task per member: write a file
   ``<member>.md`` into the team workspace, then complete the task and
   report. Members do the file write with their native filesystem ability.
@@ -77,7 +77,7 @@ os.environ.setdefault("IS_SENSITIVE", "false")
 # credentials (claude / codex are authenticated locally), so only the leader
 # needs an endpoint here. The leader key is read from LEADER_API_KEY, falling
 # back to API_KEY (the convention used by the sibling main.py entry).
-_REQUIRED_ENV = ("API_BASE", "MODEL_NAME")
+_REQUIRED_ENV = ("API_BASE", "MODEL_NAME", "TEAM_EVENT_GATEWAY_WS_URL")
 
 
 def _leader_api_key() -> str | None:
@@ -105,6 +105,25 @@ _RUN_TIMEOUT_S = 1200.0
 _MCP_SERVER_COMMAND = [sys.executable, "-m", "openjiuwen.agent_teams.mcp"]
 
 
+def _use_ssh_for_claude() -> bool:
+    """Return whether claude members should be launched through local SSH."""
+    return os.environ.get("EXTERNAL_CLI_E2E_CLAUDE_TRANSPORT", "").strip().lower() == "ssh"
+
+
+def _local_ssh_transport() -> dict[str, Any]:
+    """Build the SSH endpoint config for localhost port 23."""
+    username = os.environ.get("EXTERNAL_CLI_SSH_USER") or os.environ.get("USERNAME") or os.environ.get("USER")
+    config: dict[str, Any] = {
+        "host": "127.0.0.1",
+        "port": 23,
+        "agent": True,
+        "disable_host_key_check": True,
+    }
+    if username:
+        config["username"] = username
+    return config
+
+
 def _leader_model() -> dict[str, Any]:
     """Build the leader TeamModelConfig dict from the environment."""
     return {
@@ -125,13 +144,19 @@ def _leader_model() -> dict[str, Any]:
 def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
     """Assemble the team spec for the external-CLI scenario.
 
-    External CLI members run in separate processes, so the team uses a
-    cross-process ``pyzmq`` messager (the leader binds the pub/sub broker;
-    each member's MCP server connects with its own node id) and a
-    file-backed sqlite db. ``external_cli_agents`` statically declares the
-    launch config for each CLI kind — the leader's ``spawn_member`` call
-    only references it by name.
+    External CLI members run in separate processes and publish standard team
+    events through the configured Gateway relay. The Team itself keeps its
+    standard PyZMQ messenger and file-backed sqlite database.
     """
+    claude_cli_config: dict[str, Any] = {
+        "cli_agent": "claude",
+        "cwd": str(workspace_path),
+        "inject_mcp": True,
+        "mcp_server_command": _MCP_SERVER_COMMAND,
+    }
+    if _use_ssh_for_claude():
+        claude_cli_config["ssh_transport"] = _local_ssh_transport()
+
     cfg: dict[str, Any] = {
         "team_name": team_name,
         "lifecycle": "temporary",
@@ -146,7 +171,7 @@ def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
         "agents": {
             "leader": {
                 "model": _leader_model(),
-                "rails": [{"type": "filesystem"}],
+                "rails": [{"type": "core.sys_operation"}],
                 "language": "cn",
                 "max_iterations": 200,
                 "enable_task_planning": False,
@@ -168,14 +193,16 @@ def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
                 "metadata": {"pubsub_bind": True},
             },
         },
+        "external_transport": {
+            "type": "hybrid",
+            "params": {
+                "team_name": team_name,
+                "external_publish_url": os.environ["TEAM_EVENT_GATEWAY_WS_URL"],
+            },
+        },
         "storage": {"type": "sqlite"},
         "external_cli_agents": [
-            {
-                "cli_agent": "claude",
-                "cwd": str(workspace_path),
-                "inject_mcp": True,
-                "mcp_server_command": _MCP_SERVER_COMMAND,
-            },
+            claude_cli_config,
             {
                 "cli_agent": "codex",
                 "cwd": str(workspace_path),
@@ -201,15 +228,15 @@ def _god_view_query(workspace_path: Path) -> str:
         "尽量减少往返）。每个任务的 content 必须写成"
         "成员要严格按顺序执行的强制清单（逐字照抄下面五步，把 <member>/<file> 换成实际值）：\n"
         f"   - 共享工作目录绝对路径：{workspace_path}\n"
-        "     『(1) claim_task 认领本任务；"
+        "     『(1) claim_task 认领本任务（status=\"claimed\"）；"
         "(2) 在共享工作目录写文件 <abs_path>/<file>.md，内容写一行：<member> reporting in.；"
-        "(3) 【强制】调用 complete_task(task_id) 把任务标记完成——只写文件不算完成，不调 complete_task 任务会一直挂着；"
+        "(3) 【强制】再次调用 claim_task(task_id, status=\"completed\") 把任务标记完成——只写文件不算完成，不标记 completed 任务会一直挂着；"
         "(4) 【强制】用 send_message 向 team_leader 汇报已完成；"
-        "(5) complete_task 和 send_message 都调用过，本任务才算结束。』\n\n"
+        "(5) claim_task(status=\"completed\") 和 send_message 都调用过，本任务才算结束。』\n\n"
         "3. 把任务分派给对应成员（send_message 会自动启动未启动的成员）。\n\n"
         "4. 持续用 view_task 跟踪任务状态。**只有状态变成 completed 才算成员完成**——"
         "如果某成员只认领（claimed）却迟迟不 completed，用 send_message 明确催它："
-        "『立即调用 complete_task(<task_id>) 标记完成，并 send_message 汇报』，直到四个任务全部 completed。\n\n"
+        "『立即调用 claim_task(<task_id>, status=\"completed\") 标记完成，并 send_message 汇报』，直到四个任务全部 completed。\n\n"
         "5. 四个任务都 completed 后，逐一确认这 4 个文件都已真实存在"
         "（通过本地文件系统读取共享工作目录）。\n\n"
         "6. 全部确认存在后，调用 clean_team 解散这个临时团队，并简要汇报结果。\n"
@@ -242,6 +269,10 @@ async def _run() -> int:
     print(f"External-CLI team E2E — team={team_name}")
     print(f"workspace={workspace_path}")
     print("members: " + ", ".join(f"{n}({c})" for n, c in _MEMBERS))
+    if _use_ssh_for_claude():
+        print("claude transport: ssh://127.0.0.1:23")
+    else:
+        print("claude transport: local")
     print("=" * 70)
 
     await Runner.start()

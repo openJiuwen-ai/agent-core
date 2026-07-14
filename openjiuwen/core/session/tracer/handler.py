@@ -3,7 +3,7 @@
 
 import copy
 import json
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -26,6 +26,184 @@ class TracerHandlerName(Enum):
     """
     TRACE_AGENT = "tracer_agent"
     TRACER_WORKFLOW = "tracer_workflow"
+
+
+class TraceExtAgentHandler(ABC):
+    """Base class for externally registered agent handlers.
+
+    Defines all event methods that agent handlers must implement.
+    Unlike TraceBaseHandler, this class does not require StreamWriterManager
+    or tracer's SpanManager. External handlers can freely choose their own
+    span management approach (e.g., OpenTelemetry Tracer).
+    """
+
+    def __init__(self):
+        self._trace_id: str = ""
+
+    def set_trace_id(self, trace_id: str) -> None:
+        """Inject the tracer UUID into this handler.
+
+        Called by ``Tracer.init()`` to associate extension handlers with
+        the current tracer session. Subclasses can use ``self._trace_id``
+        to bridge OTel traces with tracer's UUID.
+        """
+        self._trace_id = trace_id
+
+    # --- LLM events ---
+    @abstractmethod
+    async def on_llm_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_llm_request(self, span: TraceAgentSpan, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_llm_end(self, span: TraceAgentSpan, outputs, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_llm_error(self, span: TraceAgentSpan, error, **kwargs):
+        ...
+
+    # --- Plugin (Tool) events ---
+    @abstractmethod
+    async def on_plugin_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_plugin_end(self, span: TraceAgentSpan, outputs, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_plugin_error(self, span: TraceAgentSpan, error, **kwargs):
+        ...
+
+    # --- Prompt events ---
+    @abstractmethod
+    async def on_prompt_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_prompt_end(self, span: TraceAgentSpan, outputs, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_prompt_error(self, span: TraceAgentSpan, error, **kwargs):
+        ...
+
+    # --- Chain events ---
+    @abstractmethod
+    async def on_chain_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_chain_end(self, span: TraceAgentSpan, outputs, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_chain_error(self, span: TraceAgentSpan, error, **kwargs):
+        ...
+
+    # --- Retriever events ---
+    @abstractmethod
+    async def on_retriever_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_retriever_end(self, span: TraceAgentSpan, outputs, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_retriever_error(self, span: TraceAgentSpan, error, **kwargs):
+        ...
+
+    # --- Evaluator events ---
+    @abstractmethod
+    async def on_evaluator_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_evaluator_end(self, span: TraceAgentSpan, outputs, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_evaluator_error(self, span: TraceAgentSpan, error, **kwargs):
+        ...
+
+    # --- Workflow events (agent-level workflow invocation) ---
+    @abstractmethod
+    async def on_workflow_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_workflow_end(self, span: TraceAgentSpan, outputs, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_workflow_error(self, span: TraceAgentSpan, error, **kwargs):
+        ...
+
+
+class TraceExtWorkflowHandler(ABC):
+    """Base class for externally registered workflow handlers.
+
+    Defines all event methods that workflow handlers must implement.
+    Unlike TraceBaseHandler, this class does not require StreamWriterManager
+    or tracer's SpanManager. External handlers can freely choose their own
+    span management approach (e.g., OpenTelemetry Tracer).
+    """
+
+    def __init__(self):
+        self._trace_id: str = ""
+
+    def set_trace_id(self, trace_id: str) -> None:
+        """Inject the tracer UUID into this handler.
+
+        Called by ``Tracer.init()`` to associate extension handlers with
+        the current tracer session. Subclasses can use ``self._trace_id``
+        to bridge OTel traces with tracer's UUID.
+        """
+        self._trace_id = trace_id
+
+    # --- Lifecycle events ---
+    @abstractmethod
+    async def on_call_start(self, invoke_id: str, metadata: dict = None, inputs: Any = None,
+                            need_send: bool = False, source_ids: list = None, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_call_done(self, invoke_id: str, outputs: Any = None, **kwargs):
+        ...
+
+    # --- Input/output events ---
+    @abstractmethod
+    async def on_pre_invoke(self, invoke_id: str, inputs: Any, component_metadata: dict,
+                            need_send: bool = False, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_pre_stream(self, invoke_id: str, chunk, need_send: bool = False, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_invoke(self, invoke_id: str, on_invoke_data: dict = None,
+                        exception: Exception = None, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_post_invoke(self, invoke_id: str, outputs, inputs=None, **kwargs):
+        ...
+
+    @abstractmethod
+    async def on_post_stream(self, invoke_id: str, chunk, **kwargs):
+        ...
+
+    # --- Interactive events ---
+    @abstractmethod
+    async def on_interact(self, invoke_id: str, inputs: Any, component_metadata: dict,
+                          need_send: bool = False, **kwargs):
+        ...
 
 
 class TraceBaseHandler:
@@ -340,6 +518,15 @@ class TraceWorkflowHandler(TraceBaseHandler):
         self._span_manager.update_span(span, update_data)
 
         await self._send_data(span)
+        # Retry intermediate error: history stays in on_invoke_data; clear span field
+        # so the next pre_invoke trace is not emitted as error again.
+        if (
+            exception is None
+            and isinstance(on_invoke_data, dict)
+            and "inner_error" in on_invoke_data
+        ):
+            span.inner_error = None
+            self._span_manager.update_span(span, {"inner_error": None})
         if exception and span.component_type == "LLM":
             self._span_manager.update_span(span, {})
 

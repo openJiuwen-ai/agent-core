@@ -1,5 +1,7 @@
 # External-CLI as a spawn_member Role + Static Spec Config + MCP Auto-Injection
 
+> **后续变更（F_26）**：本特性当时复用 `spawn_member` + `role_type` 区分、并明确拒绝独立工具；F_26 基于「降低 LLM 调用负担」反转该决策，把 spawn 按 role_type 拆为四个独立工具，外部 CLI 对应 `spawn_external_cli`。下文「复用 spawn_member」「拒绝独立工具」是当时的决策记录，现状以 F_26 / S_08 为准。
+
 ## 元信息
 
 | 项 | 值 |
@@ -27,8 +29,10 @@
 
 - `schema/team.py:ExternalCliAgentSpec`：一条 CLI 种类的静态启动配置——`cli_agent`（种类标识，
   如 `claude`/`codex`）、`command`（可选 argv 覆盖）、`cwd`、`inject_mcp`、`mcp_server_command`
-  （默认 `["openjiuwen-team-mcp"]`）、`env`。一条配置服务该种类下拉起的所有成员；每个成员仍各自
-  起子进程、各自带 team-join 身份。
+  （默认 `["openjiuwen-team-mcp"]`）、`env`、`ssh_transport`（可选远程 SSH 端点）。一条配置
+  服务该种类下拉起的所有成员；每个成员仍各自起进程、各自带 team-join 身份。
+  `ssh_transport=None` 时保持本地 fork；配置后 `command`、`cwd`、`env`、`mcp_server_command`
+  都按远程主机解释。
 - `schema/blueprint.py:TeamAgentSpec.external_cli_agents: list[ExternalCliAgentSpec]`：非空声明集
   即外部 CLI 成员的**能力上限**（capability ceiling，镜像 `enable_bridge` 的语义，但配置而非布尔）。
   `model_validator` 拒绝重复 `cli_agent` 名。
@@ -57,6 +61,13 @@
   透传给 `build_cli_runtime`；查不到则回退默认（成员注册时已校验过存在）。
 - **descriptor env 优先级**：`build_cli_runtime` 里 `env = {**os.environ, **extra_env,
   **descriptor.to_env()}`——descriptor 最后应用，`extra_env` 配错也盖不掉团队身份。
+- **SSH transport 只远程化进程，不远程化基础设施**：`build_cli_runtime` 在 streaming CLI 路径上
+  可选择 `SshTransport`，用 `asyncssh.create_process(..., encoding=None)` 在远程主机启动同一份
+  adapter argv。SSH 模式下不继承整份本地 `os.environ`，只透传 `env` 配置和
+  `OPENJIUWEN_TEAM_JOIN` descriptor；transport 额外用 shell `export OPENJIUWEN_TEAM_JOIN=...`
+  兜底，避免 sshd 拒绝普通 env 时 MCP 子进程拿不到成员身份。`inject_mcp=True` 仍按 adapter
+  拼 `--mcp-config` / `-c mcp_servers...`，但对应的 `openjiuwen-team-mcp` 必须在远程主机可执行
+  （或 `mcp_server_command` 指向远程绝对路径）。DB / messager 端点是否可从远程访问由部署保证。
 
 ## 拒绝的方案
 

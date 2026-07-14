@@ -38,6 +38,7 @@ class MessagerTransportConfig(BaseModel):
     direct_addr: Optional[str] = None
     pubsub_publish_addr: Optional[str] = None
     pubsub_subscribe_addr: Optional[str] = None
+    external_publish_url: Optional[str] = None
     listen_addrs: list[str] = Field(default_factory=list)
     bootstrap_peers: list[MessagerPeerConfig] = Field(default_factory=list)
     known_peers: list[MessagerPeerConfig] = Field(default_factory=list)

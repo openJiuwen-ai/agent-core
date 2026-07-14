@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
@@ -18,9 +20,14 @@ from openjiuwen.agent_teams.schema.team import (
 
 
 def _tool_names(agent) -> set[str]:
-    """Extract registered tool names from the agent's
-    ability manager."""
-    return set(agent.harness.inner_agent.ability_manager._tools.keys())
+    """Extract registered tool names from the agent's ability manager.
+
+    Team tools register during ``ensure_initialized`` (the rail init pass), so
+    drive it first — ``build`` only prepares the config and queues the rails.
+    """
+    native = agent.harness.inner_agent
+    asyncio.run(native.ensure_initialized())
+    return set(native.ability_manager._tools.keys())
 
 
 def _dummy_agents() -> dict[str, DeepAgentSpec]:
@@ -52,7 +59,7 @@ def test_leader_gets_management_tools():
     names = _tool_names(leader)
     assert "create_task" in names
     assert "build_team" in names
-    assert "spawn_member" in names
+    assert "spawn_teammate" in names
     assert "send_message" in names
     assert "view_task" in names
 
@@ -97,7 +104,7 @@ def test_teammate_gets_execution_tools():
     # Leader-only tools absent
     assert "create_task" not in names
     assert "build_team" not in names
-    assert "spawn_member" not in names
+    assert "spawn_teammate" not in names
 
 
 # === Manager instances are stored ===

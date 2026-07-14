@@ -33,6 +33,7 @@ from openjiuwen.agent_teams.constants import (
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.memory import TeamMemoryConfig
 from openjiuwen.agent_teams.models.pool import ModelPoolEntry, ModelRouterConfig
+from openjiuwen.agent_teams.reliability.config import ReliabilityConfig
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
     BridgeMemberSpec,
@@ -46,6 +47,7 @@ from openjiuwen.agent_teams.schema.team import (
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.tools.worktree import WorktreeConfig
+from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyLimits, validate_swarmflow_concurrency
 
 if TYPE_CHECKING:
     # Resolved for type-checkers only; the runtime import lives in ``build()``
@@ -77,6 +79,7 @@ def _ensure_builtin_infra_registered() -> None:
 
         _TRANSPORT_REGISTRY["inprocess"] = MessagerTransportConfig
         _TRANSPORT_REGISTRY["pyzmq"] = MessagerTransportConfig
+        _TRANSPORT_REGISTRY["hybrid"] = MessagerTransportConfig
 
     if not _STORAGE_REGISTRY:
         from openjiuwen.agent_teams.tools.database import DatabaseConfig
@@ -169,6 +172,26 @@ class LeaderSpec(BaseModel):
     """
 
 
+class TinyAgentSpec(BaseModel):
+    """Team-scoped tiny-agent specification (one per name, held by TeamInfra).
+
+    A team may declare several independent tiny agents in
+    ``TeamAgentSpec.tiny_agents``; each is lazily built on first access and
+    disposed when the team stops. A tiny agent carries only a system prompt +
+    model (resolved from ``model_name`` against the team model pool) and,
+    optionally, a default output schema — no tools beyond structured output.
+    """
+
+    model_config = {"protected_namespaces": ()}
+
+    system_prompt: str
+    model_name: str
+    name: str = "tiny"
+    max_iterations: int = 6
+    default_schema: Optional[dict[str, Any]] = None
+    """Optional default JSON-Schema applied to structured output on every call."""
+
+
 class TeamAgentSpec(BaseModel):
     """Fully JSON-serializable specification for constructing a TeamAgent.
 
@@ -203,6 +226,13 @@ class TeamAgentSpec(BaseModel):
     type and the CLI identifier — all launch knowledge stays here. A
     ``cli_agent`` not declared here is rejected at spawn time (the non-empty
     set is the capability ceiling for external-CLI members).
+    """
+    tiny_agents: dict[str, TinyAgentSpec] = {}
+    """Team-scoped tiny agents, keyed by logical name.
+
+    Each entry is an independent invisible member (system prompt + model only,
+    no team-collaboration tools), lazily built on first ``TeamAgent.get_tiny_agent``
+    access and disposed when the team stops. Not persisted to the team DB.
     """
     model_pool: list[ModelPoolEntry] = []
     """Optional pool of LLM endpoints shared by every team member.
@@ -262,6 +292,8 @@ class TeamAgentSpec(BaseModel):
     caller to configure a cross-process backend (e.g. ``"pyzmq"``) when
     teammates are involved.
     """
+    external_transport: Optional[TransportSpec] = None
+    """Optional transport used by external CLI MCP clients."""
     storage: Optional[StorageSpec] = None
     worktree: Optional[WorktreeConfig] = None
     """Optional worktree isolation config for team members."""
@@ -335,6 +367,23 @@ class TeamAgentSpec(BaseModel):
     - ``enable_bridge=True`` with no BRIDGE_AGENT predefined → allowed
       (dynamic spawn path).
     """
+    enable_swarmflow: bool = False
+    """Spec-level capability gate for swarmflow orchestration.
+
+    True wires the leader-only ``swarmflow(script_path, args)`` tool, which
+    runs a swarmflow script (a multi-agent workflow) in the background. The
+    script's ``agent()`` calls execute as single-shot ``WORKER`` members via
+    the team worker backend, and phase progress is streamed back to the leader
+    (a spectator) which narrates it to the user. False (default) hides the
+    tool. Workers reuse the leader's model; no separate worker spec is required
+    for the MVP. See ``openjiuwen/agent_teams/workflow``.
+    """
+    swarmflow_concurrency: ConcurrencyLimits = Field(default_factory=ConcurrencyLimits)
+    """Three-layer Swarmflow concurrency caps (L1/L2/L3). Used when ``enable_swarmflow``."""
+
+    enable_permissions: bool = False
+    """Team-specific permission control."""
+
     language: Optional[str] = None
     """Preferred language for prompts and tool descriptions ("cn" or "en").
 
@@ -344,21 +393,61 @@ class TeamAgentSpec(BaseModel):
     at ``build()`` time via ``resolve_language()``.
     """
 
-    agent_customizer: Optional[Callable[..., None]] = Field(
+    build_context: Optional[Any] = Field(
         default=None,
         exclude=True,
     )
-    """Optional callback invoked on each member's DeepAgent after creation."""
+    """Optional runtime carrier for provider-based capability assembly.
+
+    Holds a ``BuildContext`` subclass with live, non-serializable handles
+    (excluded from JSON). ``setup_agent`` derives a per-member view from it to
+    thread into ``DeepAgentSpec.build``.
+    Typed as ``Any`` so Pydantic does not attempt to build a schema for the
+    opaque carrier. Across a serialization boundary it is rebuilt from
+    ``build_context_seed`` via ``materialize_build_context`` rather than relying
+    on in-process survival.
+    """
+
+    build_context_seed: Optional[dict[str, Any]] = Field(default=None)
+    """Serializable seed used to rebuild ``build_context`` after deserialization.
+
+    Unlike ``build_context`` this travels with ``model_dump`` / ``model_validate``.
+    The platform fills it (a plain mapping of primitives) alongside
+    ``build_context``; the receiving side calls ``materialize_build_context`` to
+    turn it back into a live ``BuildContext`` through the registered factory
+    (``register_build_context_factory``).
+    """
 
     memory: Optional[TeamMemoryConfig] = None
     """Optional team memory configuration. When enabled, TeamMemoryManager
     replaces default MemoryRail/CodingMemoryRail with per-member isolated instances."""
+
+    reliability: Optional[ReliabilityConfig] = None
+    """Optional team reliability framework configuration. Opt-in via
+    ``reliability.enabled``; attaches a monitoring rail to the configured roles
+    and a remediation handler on the leader."""
 
     """
     Signature: ``(deep_agent: DeepAgent) -> None``.
     Used by platform adapters to inject additional rails / tools.
     Not serializable — only usable with in-process spawn mode.
     """
+
+    def materialize_build_context(self) -> None:
+        """Rebuild ``build_context`` from ``build_context_seed`` when missing.
+
+        Idempotent: acts only when ``build_context`` is None and a seed is
+        present, so the in-process path (live context already set) and the
+        legacy path (no seed) are both untouched. Called on the
+        receiving side of a serialization boundary (``from_spawn_payload`` /
+        ``recover_from_session``) before ``configure`` so provider-based members
+        rebuild their capabilities declaratively from the registered factory.
+        """
+        if self.build_context is not None or not self.build_context_seed:
+            return
+        from openjiuwen.agent_teams.schema.build_context import build_context_from_seed
+
+        self.build_context = build_context_from_seed(self.build_context_seed)
 
     @model_validator(mode="after")
     def _validate_pool_router_exclusive(self) -> "TeamAgentSpec":
@@ -447,6 +536,8 @@ class TeamAgentSpec(BaseModel):
         self._validate_reserved_names()
         self._validate_hitt_consistency()
         self._validate_bridge_consistency()
+        if self.enable_swarmflow:
+            validate_swarmflow_concurrency(self.swarmflow_concurrency)
 
         resolved_language = resolve_language(self.language)
         for role_spec in self.agents.values():
@@ -464,6 +555,7 @@ class TeamAgentSpec(BaseModel):
             team_pool = list(self.model_pool)
             team_strategy = self.model_pool_strategy
 
+        external_messager_config = self.external_transport.build() if self.external_transport else None
         team_spec = TeamSpec(
             team_name=self.team_name,
             display_name=self.team_name,
@@ -471,6 +563,7 @@ class TeamAgentSpec(BaseModel):
             language=resolved_language,
             model_pool=team_pool,
             model_pool_strategy=team_strategy,
+            external_messager_config=external_messager_config,
         )
 
         messager_config = self.transport.build() if self.transport else None
@@ -668,6 +761,7 @@ __all__ = [
     "PredefinedMemberSpec",
     "StorageSpec",
     "TeamAgentSpec",
+    "TinyAgentSpec",
     "TransportSpec",
     "register_storage",
     "register_transport",

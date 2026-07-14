@@ -374,17 +374,15 @@ async def test_non_excluded_command_still_runs_in_sandbox(
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.environ.get("RUN_JIUWENBOX_TEST") != "1", reason="Requires running Jiuwenbox sandbox")
-async def test_fallback_on_failure_runs_locally_after_sandbox_nonzero_exit(
+async def test_fallback_on_failure_does_not_rerun_locally_on_sandbox_nonzero_exit(
     server_endpoint, monkeypatch, tmp_path: Path
 ):
-    """``fallback_on_failure=True`` → sandbox returns non-zero → local fallback
-    runs the same command; the host file lands while the sandbox path stays
-    empty (sandbox container has no access to the host's pytest tmp_path).
+    """``fallback_on_failure=True`` must NOT re-run locally when the sandbox
+    successfully executed the command but returned a non-zero exit code.
     """
     base_url = _normalize_endpoint(server_endpoint)
     marker = uuid4().hex[:8]
-    host_marker = tmp_path / f"jiuwenbox_fallback_{marker}.txt"
-    payload = "fallback-payload"
+    host_marker = tmp_path / f"jiuwenbox_no_local_rerun_{marker}.txt"
 
     with httpx.Client(base_url=base_url, timeout=30.0) as client:
         create_resp = client.post("/api/v1/sandboxes", json={"command": LONG_RUNNING_COMMAND})
@@ -409,22 +407,11 @@ async def test_fallback_on_failure_runs_locally_after_sandbox_nonzero_exit(
 
             fallback_op = Runner.resource_mgr.get_sys_operation(fallback_card_id)
 
-            # Sandbox: ``printf`` to the host's tmp_path fails (parent does
-            # not exist inside the container) and ``exit 5`` makes the whole
-            # command non-zero → triggers fallback. Host: tmp_path exists →
-            # printf succeeds → ``exit 5`` still surfaces 5.
-            cmd = f"printf {payload} > {host_marker}; exit 5"
+            cmd = f"printf SHOULD-NOT-LAND > {host_marker}; exit 5"
             res = await fallback_op.shell().execute_cmd(cmd)
             assert res.code == StatusCode.SUCCESS.code
             assert res.data.exit_code == 5
-
-            # 1) Host file written by the local fallback.
-            assert host_marker.exists()
-            assert host_marker.read_text() == payload
-
-            # 2) Sandbox does not have it (it never saw the host's tmp_path
-            # tree, and even the fallback path never travels back there).
-            assert not _sandbox_has_file(client, sandbox_id, str(host_marker))
+            assert not host_marker.exists()
         finally:
             if fallback_added:
                 Runner.resource_mgr.remove_sys_operation(sys_operation_id=fallback_card_id)

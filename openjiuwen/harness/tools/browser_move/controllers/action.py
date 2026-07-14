@@ -14,9 +14,13 @@ import inspect
 import json
 import sys
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
+    browser_agent_log_info,
+    browser_agent_log_warning,
+)
 from .base import BaseController
 try:
     # Normal package import (openjiuwen.harness.tools.browser_move.controllers.action)
@@ -32,6 +36,25 @@ except ImportError:  # pragma: no cover
 ActionResult = dict[str, Any]
 ActionHandler = Callable[..., Awaitable[Any] | Any]
 CodeExecutor = Callable[[str], Awaitable[Any]]
+
+
+def _unwrap_browser_code_result(raw: Any) -> Any:
+    """Extract text/data payloads from common browser_run_code/MCP result shapes."""
+    if isinstance(raw, dict):
+        content = raw.get("content")
+        if isinstance(content, list):
+            texts: list[str] = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    texts.append(str(item.get("text") or ""))
+            if texts:
+                return "\n".join(texts)
+
+        for key in ("result", "text", "data", "final"):
+            if key in raw:
+                return raw.get(key)
+
+    return raw
 
 
 class RuntimeRunner(Protocol):
@@ -447,7 +470,7 @@ def _build_drag_operation_body() -> str:
         "      const y = Math.trunc(source.y + (target.y - source.y) * ratio);\n"
         "      await page.mouse.move(x, y);\n"
         "      if (delayMs > 0) {\n"
-        "        await new Promise((resolve) => setTimeout(resolve, delayMs));\n"
+        "        await page.waitForTimeout(delayMs);\n"
         "      }\n"
         "    }\n"
         "    await page.mouse.move(target.x, target.y);\n"
@@ -503,6 +526,280 @@ def _build_set_input_files_script(selector: str, paths: list[str]) -> str:
         "    }\n"
         f"    return {{ ok: false, error: msg, selector: {selector_js}, paths: {paths_json} }};\n"
         "  }\n"
+        "}"
+    )
+
+
+
+def _build_batch_interact_script(payload: dict[str, Any]) -> str:
+    """Build a Playwright function that executes compact deterministic browser steps.
+
+    The model provides a structured plan; the runtime constructs the JS, so the
+    browser worker does not need to emit arbitrary page scripts for common form
+    and search-flow interactions.
+    """
+    payload_json = json.dumps(payload, ensure_ascii=False)
+    return (
+        "async (page) => {\n"
+        f"  const payload = {payload_json};\n"
+        "  const startedAt = Date.now();\n"
+        "  const steps = Array.isArray(payload.steps) ? payload.steps : [];\n"
+        "  const defaultTimeout = Math.max(250, Number(payload.timeout_ms || 5000));\n"
+        "  const defaultAfter = Math.max(0, Number(payload.wait_after_each_ms || 0));\n"
+        "  const results = [];\n"
+        "  const sleep = async (ms) => {\n"
+        "    const delay = Math.max(0, Number(ms || 0));\n"
+        "    if (delay <= 0) return;\n"
+        "    await page.waitForTimeout(delay);\n"
+        "  };\n"
+        "  const compactText = (value, maxLen = 1200) => String(value || '')\n"
+        "    .replace(/\\s+/g, ' ')\n"
+        "    .trim()\n"
+        "    .slice(0, maxLen);\n"
+        "  const hasTarget = (step) => !!(\n"
+        "    step.selector || step.role || step.label || step.placeholder ||\n"
+        "    step.text || step.testid\n"
+        "  );\n"
+        "  const selectAllKey = process.platform === 'darwin' ? 'Meta+A' : 'Control+A';\n"
+        "  const locatorFromStep = (step) => {\n"
+        "    if (step.selector) return page.locator(String(step.selector)).first();\n"
+        "    if (step.role) {\n"
+        "      if (step.name !== undefined && step.name !== null && String(step.name).length > 0) {\n"
+        "        return page.getByRole(\n"
+        "          String(step.role),\n"
+        "          { name: String(step.name), exact: !!step.exact }\n"
+        "        ).first();\n"
+        "      }\n"
+        "      return page.getByRole(String(step.role)).first();\n"
+        "    }\n"
+        "    if (step.label) {\n"
+        "      return page.getByLabel(\n"
+        "        String(step.label),\n"
+        "        { exact: !!step.exact }\n"
+        "      ).first();\n"
+        "    }\n"
+        "    if (step.placeholder) {\n"
+        "      return page.getByPlaceholder(\n"
+        "        String(step.placeholder),\n"
+        "        { exact: !!step.exact }\n"
+        "      ).first();\n"
+        "    }\n"
+        "    if (step.testid) return page.getByTestId(String(step.testid)).first();\n"
+        "    if (step.text) {\n"
+        "      return page.getByText(\n"
+        "        String(step.text),\n"
+        "        { exact: !!step.exact }\n"
+        "      ).first();\n"
+        "    }\n"
+        "    throw new Error('step needs selector, role, label, placeholder, testid, or text');\n"
+        "  };\n"
+        "  const optionLocatorFromStep = (step) => {\n"
+        "    if (step.option_selector || step.choose_selector) {\n"
+        "      return page.locator(\n"
+        "        String(step.option_selector || step.choose_selector)\n"
+        "      ).first();\n"
+        "    }\n"
+        "    if (step.option_role || step.choose_role) {\n"
+        "      const role = String(step.option_role || step.choose_role);\n"
+        "      const name = step.option_name ?? step.choose_name ?? step.choose_text ?? step.option_text;\n"
+        "      if (name !== undefined && name !== null && String(name).length > 0) {\n"
+        "        return page.getByRole(\n"
+        "          role,\n"
+        "          { name: String(name), exact: !!step.exact }\n"
+        "        ).first();\n"
+        "      }\n"
+        "      return page.getByRole(role).first();\n"
+        "    }\n"
+        "    const chosenText = step.choose_text ?? step.option_text ?? step.text_to_choose ?? step.value;\n"
+        "    if (chosenText !== undefined && chosenText !== null && String(chosenText).length > 0) {\n"
+        "      return page.getByText(\n"
+        "        String(chosenText),\n"
+        "        { exact: !!step.exact }\n"
+        "      ).first();\n"
+        "    }\n"
+        "    throw new Error(\n"
+        "      'autocomplete/select_visible_text needs choose_text/option_text or option selector'\n"
+        "    );\n"
+        "  };\n"
+        "  const summarizeVisible = async () => {\n"
+        "    return await page.evaluate(() => {\n"
+        "      const text = (document.body && document.body.innerText) ? document.body.innerText : '';\n"
+        "      return text.replace(/\\s+/g, ' ').trim().slice(0, 1200);\n"
+        "    });\n"
+        "  };\n"
+        "  for (let i = 0; i < steps.length; i += 1) {\n"
+        "    const step = steps[i] || {};\n"
+        "    const op = String(step.op || '').trim().toLowerCase();\n"
+        "    const timeout = Math.max(250, Number(step.timeout_ms || defaultTimeout));\n"
+        "    const stepStartedAt = Date.now();\n"
+        "    const item = { index: i, op, ok: false, elapsed_ms: 0 };\n"
+        "    try {\n"
+        "      if (!op) throw new Error('missing op');\n"
+        "      if (op === 'click') {\n"
+        "        await locatorFromStep(step).click({ timeout });\n"
+        "      } else if (op === 'fill' || op === 'type') {\n"
+        "        const target = locatorFromStep(step);\n"
+        "        const value = String(step.value ?? step.text_value ?? '');\n"
+        "        if (op === 'type' || step.mode === 'type') {\n"
+        "          await target.click({ timeout });\n"
+        "          try {\n"
+        "            await page.keyboard.press(selectAllKey);\n"
+        "          } catch (_err) {}\n"
+        "          try {\n"
+        "            await page.keyboard.press('Backspace');\n"
+        "          } catch (_err) {}\n"
+        "          await page.keyboard.type(\n"
+        "            value,\n"
+        "            { delay: Math.max(0, Number(step.delay_ms || 0)) }\n"
+        "          );\n"
+        "        } else {\n"
+        "          await target.fill(value, { timeout });\n"
+        "        }\n"
+        "      } else if (op === 'autocomplete') {\n"
+        "        const target = locatorFromStep(step);\n"
+        "        const value = String(step.value ?? step.query ?? step.text_value ?? '');\n"
+        "        await target.click({ timeout });\n"
+        "        try {\n"
+        "          await page.keyboard.press(selectAllKey);\n"
+        "        } catch (_err) {}\n"
+        "        try {\n"
+        "          await page.keyboard.press('Backspace');\n"
+        "        } catch (_err) {}\n"
+        "        if (step.fill_first) {\n"
+        "          await target.fill(value, { timeout });\n"
+        "        } else {\n"
+        "          await page.keyboard.type(\n"
+        "            value,\n"
+        "            { delay: Math.max(0, Number(step.delay_ms || 0)) }\n"
+        "          );\n"
+        "        }\n"
+        "        if (step.wait_after_type_ms !== undefined) {\n"
+        "          await sleep(Math.max(0, Number(step.wait_after_type_ms || 0)));\n"
+        "        }\n"
+        "        const option = optionLocatorFromStep(step);\n"
+        "        await option.waitFor({ state: 'visible', timeout });\n"
+        "        await option.click({ timeout });\n"
+        "      } else if (op === 'select_visible_text') {\n"
+        "        const option = optionLocatorFromStep(step);\n"
+        "        await option.waitFor({ state: 'visible', timeout });\n"
+        "        await option.click({ timeout });\n"
+        "      } else if (op === 'press') {\n"
+        "        const key = String(step.key || 'Enter');\n"
+        "        if (hasTarget(step)) {\n"
+        "          await locatorFromStep(step).press(key, { timeout });\n"
+        "        } else {\n"
+        "          await page.keyboard.press(key);\n"
+        "        }\n"
+        "      } else if (op === 'select_option') {\n"
+        "        const target = locatorFromStep(step);\n"
+        "        if (step.values !== undefined) {\n"
+        "          const values = Array.isArray(step.values)\n"
+        "            ? step.values.map((item) => String(item))\n"
+        "            : String(step.values);\n"
+        "          await target.selectOption(values, { timeout });\n"
+        "        } else {\n"
+        "          const option = {};\n"
+        "          if (step.value !== undefined || step.option_value !== undefined) {\n"
+        "            option.value = String(step.option_value ?? step.value);\n"
+        "          }\n"
+        "          if (\n"
+        "            step.label_value !== undefined ||\n"
+        "            step.option_label !== undefined ||\n"
+        "            step.option_text !== undefined ||\n"
+        "            step.choose_text !== undefined\n"
+        "          ) {\n"
+        "            option.label = String(\n"
+        "              step.label_value ?? step.option_label ?? step.option_text ?? step.choose_text\n"
+        "            );\n"
+        "          }\n"
+        "          if (step.index !== undefined) option.index = Number(step.index);\n"
+        "          if (!Object.keys(option).length) {\n"
+        "            throw new Error(\n"
+        "              'select_option requires value, values, option_value, option_text, '\n"
+        "              + 'option_label, label_value, choose_text, or index'\n"
+        "            );\n"
+        "          }\n"
+        "          await target.selectOption(option, { timeout });\n"
+        "        }\n"
+        "      } else if (op === 'set_checked') {\n"
+        "        const checked = step.checked === undefined ? true : !!step.checked;\n"
+        "        await locatorFromStep(step).setChecked(checked, { timeout });\n"
+        "      } else if (op === 'wait_for_selector') {\n"
+        "        if (!step.selector) throw new Error('wait_for_selector requires selector');\n"
+        "        await page.locator(String(step.selector)).first().waitFor({\n"
+        "          state: String(step.state || 'visible'),\n"
+        "          timeout,\n"
+        "        });\n"
+        "      } else if (op === 'wait_for_text') {\n"
+        "        if (!step.text) throw new Error('wait_for_text requires text');\n"
+        "        await page.getByText(String(step.text), { exact: !!step.exact })\n"
+        "          .first()\n"
+        "          .waitFor({ timeout });\n"
+        "      } else if (op === 'wait_for_load_state') {\n"
+        "        await page.waitForLoadState(\n"
+        "          String(step.state || 'domcontentloaded'),\n"
+        "          { timeout }\n"
+        "        );\n"
+        "      } else if (op === 'sleep') {\n"
+        "        await sleep(Math.max(0, Number(step.ms || step.time_ms || 0)));\n"
+        "      } else if (op === 'extract_text') {\n"
+        "        item.text = compactText(\n"
+        "          await locatorFromStep(step).innerText({ timeout }),\n"
+        "          Number(step.max_chars || 500)\n"
+        "        );\n"
+        "      } else if (op === 'extract_value') {\n"
+        "        item.value = await locatorFromStep(step).inputValue({ timeout });\n"
+        "      } else if (op === 'screenshot') {\n"
+        "        const path = String(step.path || 'screenshots/batch_interact.png');\n"
+        "        await page.screenshot({ path, fullPage: !!step.full_page });\n"
+        "        item.path = path;\n"
+        "      } else {\n"
+        "        throw new Error(`unsupported op: ${op}`);\n"
+        "      }\n"
+        "      item.ok = true;\n"
+        "      if (step.wait_after_ms !== undefined) {\n"
+        "        await sleep(Math.max(0, Number(step.wait_after_ms || 0)));\n"
+        "      } else if (defaultAfter > 0) {\n"
+        "        await sleep(defaultAfter);\n"
+        "      }\n"
+        "    } catch (error) {\n"
+        "      item.error = String(error && error.message ? error.message : error);\n"
+        "      item.target = {\n"
+        "        selector: step.selector || null,\n"
+        "        role: step.role || null,\n"
+        "        name: step.name || null,\n"
+        "        label: step.label || null,\n"
+        "        placeholder: step.placeholder || null,\n"
+        "        text: step.text || null,\n"
+        "        testid: step.testid || null,\n"
+        "        choose_text: step.choose_text || step.option_text || null,\n"
+        "      };\n"
+        "      item.elapsed_ms = Date.now() - stepStartedAt;\n"
+        "      results.push(item);\n"
+        "      if (step.optional || payload.continue_on_error) continue;\n"
+        "      return {\n"
+        "        ok: false,\n"
+        "        error: item.error,\n"
+        "        failed_step: item,\n"
+        "        completed_steps: results,\n"
+        "        elapsed_ms: Date.now() - startedAt,\n"
+        "        url: page.url(),\n"
+        "        title: await page.title().catch(() => ''),\n"
+        "        visible_text_preview: await summarizeVisible().catch(() => ''),\n"
+        "      };\n"
+        "    }\n"
+        "    item.elapsed_ms = Date.now() - stepStartedAt;\n"
+        "    results.push(item);\n"
+        "  }\n"
+        "  return {\n"
+        "    ok: true,\n"
+        "    error: null,\n"
+        "    steps: results,\n"
+        "    elapsed_ms: Date.now() - startedAt,\n"
+        "    url: page.url(),\n"
+        "    title: await page.title().catch(() => ''),\n"
+        "    visible_text_preview: await summarizeVisible().catch(() => ''),\n"
+        "  };\n"
         "}"
     )
 
@@ -686,6 +983,19 @@ async def run_action(
         request_id=request_id,
         **kwargs,
     )
+
+
+def _normalize_batch_interact_payload(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    payload = {
+        key: value
+        for key, value in kwargs.items()
+        if value is not None
+    }
+
+    payload["session_id"] = str(payload.get("session_id") or "")
+    payload["request_id"] = str(payload.get("request_id") or "")
+    payload["continue_on_error"] = bool(payload.get("continue_on_error", False))
+    return payload
 
 
 def register_builtin_actions(controller: ActionController | None = None) -> None:
@@ -1028,6 +1338,218 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
             "runtime": runtime_result,
         }
 
+
+    async def browser_batch_interact(**kwargs: Any) -> ActionResult:
+        """Execute multiple deterministic browser interactions with one LLM-visible tool call."""
+        payload_args = _normalize_batch_interact_payload(kwargs)
+
+        session_id = payload_args["session_id"]
+        request_id = payload_args["request_id"]
+        steps = payload_args.get("steps")
+        timeout_ms = payload_args.get("timeout_ms")
+        wait_after_each_ms = payload_args.get("wait_after_each_ms")
+        continue_on_error = bool(payload_args.get("continue_on_error", False))
+        global_timeout_ms = payload_args.get("global_timeout_ms")
+
+        if not isinstance(steps, list) or not steps:
+            return {
+                "ok": False,
+                "error": "steps is required and must be a non-empty list",
+                "session_id": session_id,
+                "request_id": request_id,
+            }
+
+        original_step_count = len(steps)
+        max_steps = 25
+        safe_steps = steps[:max_steps]
+        truncated = original_step_count > len(safe_steps)
+        dropped_step_count = original_step_count - len(safe_steps)
+        if truncated:
+            browser_agent_log_warning(
+                "[BROWSER_BATCH] truncated session_id=%s request_id=%s "
+                "original_steps=%s executed_steps=%s dropped_steps=%s",
+                session_id or "-",
+                request_id or "-",
+                original_step_count,
+                len(safe_steps),
+                dropped_step_count,
+            )
+        try:
+            per_step_timeout = int(timeout_ms or 5000)
+        except (TypeError, ValueError):
+            per_step_timeout = 5000
+        per_step_timeout = max(250, min(30000, per_step_timeout))
+
+        try:
+            after_each = int(wait_after_each_ms or 0)
+        except (TypeError, ValueError):
+            after_each = 0
+        after_each = max(0, min(5000, after_each))
+
+        if global_timeout_ms is None:
+            step_budget_ms = per_step_timeout + after_each + 250
+            computed_timeout_ms = step_budget_ms * len(safe_steps) + 5000
+            effective_global_timeout_ms = min(
+                90000,
+                max(5000, computed_timeout_ms),
+            )
+        else:
+            try:
+                effective_global_timeout_ms = int(global_timeout_ms)
+            except (TypeError, ValueError):
+                effective_global_timeout_ms = 60000
+            effective_global_timeout_ms = max(
+                1000,
+                min(120000, effective_global_timeout_ms),
+            )
+
+        payload = {
+            "steps": safe_steps,
+            "timeout_ms": per_step_timeout,
+            "wait_after_each_ms": after_each,
+            "continue_on_error": continue_on_error,
+            "original_step_count": original_step_count,
+            "executed_step_limit": max_steps,
+            "truncated": truncated,
+            "dropped_step_count": dropped_step_count,
+        }
+        js_code = _build_batch_interact_script(payload)
+        code_executor = ctl.code_executor
+
+        browser_agent_log_info(
+            "[BROWSER_BATCH] start session_id=%s request_id=%s steps=%s "
+            "timeout_ms=%s global_timeout_ms=%s",
+            session_id or "-",
+            request_id or "-",
+            len(safe_steps),
+            per_step_timeout,
+            effective_global_timeout_ms,
+        )
+
+        if code_executor is None:
+            browser_agent_log_warning(
+                "[BROWSER_BATCH] end ok=false session_id=%s request_id=%s error=%s",
+                session_id or "-",
+                request_id or "-",
+                "browser_code_executor_not_ready",
+            )
+            return {
+                "ok": False,
+                "error": "browser_code_executor_not_ready",
+                "session_id": session_id,
+                "request_id": request_id,
+                "steps_requested": len(safe_steps),
+                "original_step_count": original_step_count,
+                "executed_step_limit": max_steps,
+                "truncated": truncated,
+                "dropped_step_count": dropped_step_count,
+            }
+
+        try:
+            raw = await asyncio.wait_for(
+                code_executor(js_code),
+                timeout=effective_global_timeout_ms / 1000,
+            )
+        except asyncio.TimeoutError:
+            error = f"browser_batch_interact timed out after {effective_global_timeout_ms}ms"
+            browser_agent_log_warning(
+                "[BROWSER_BATCH] end ok=false session_id=%s request_id=%s error=%s",
+                session_id or "-",
+                request_id or "-",
+                error,
+            )
+            return {
+                "ok": False,
+                "error": error,
+                "session_id": session_id,
+                "request_id": request_id,
+                "steps_requested": len(safe_steps),
+                "original_step_count": original_step_count,
+                "executed_step_limit": max_steps,
+                "truncated": truncated,
+                "dropped_step_count": dropped_step_count,
+            }
+        except Exception as exc:
+            error = f"browser_run_code failed: {exc}"
+            browser_agent_log_warning(
+                "[BROWSER_BATCH] end ok=false session_id=%s request_id=%s error=%s",
+                session_id or "-",
+                request_id or "-",
+                error,
+            )
+            return {
+                "ok": False,
+                "error": error,
+                "session_id": session_id,
+                "request_id": request_id,
+                "steps_requested": len(safe_steps),
+                "original_step_count": original_step_count,
+                "executed_step_limit": max_steps,
+                "truncated": truncated,
+                "dropped_step_count": dropped_step_count,
+            }
+
+        unwrapped = _unwrap_browser_code_result(raw)
+        parsed = extract_json_object(unwrapped)
+        if not parsed:
+            error = "Could not parse browser_batch_interact result JSON from browser_run_code output"
+            raw_text = str(unwrapped)
+            browser_agent_log_warning(
+                "[BROWSER_BATCH] end ok=false session_id=%s request_id=%s "
+                "error=%s raw_preview=%r",
+                session_id or "-",
+                request_id or "-",
+                error,
+                raw_text[:200],
+            )
+            return {
+                "ok": False,
+                "error": error,
+                "raw_preview": raw_text[:400],
+                "session_id": session_id,
+                "request_id": request_id,
+                "steps_requested": len(safe_steps),
+                "original_step_count": original_step_count,
+                "executed_step_limit": max_steps,
+                "truncated": truncated,
+                "dropped_step_count": dropped_step_count,
+            }
+
+        parsed.setdefault("session_id", session_id)
+        parsed.setdefault("request_id", request_id)
+        parsed.setdefault("action", "browser_batch_interact")
+        parsed.setdefault("original_step_count", original_step_count)
+        parsed.setdefault("executed_step_limit", max_steps)
+        parsed.setdefault("truncated", truncated)
+        parsed.setdefault("dropped_step_count", dropped_step_count)
+        completed = parsed.get("steps") or parsed.get("completed_steps") or []
+
+        browser_agent_log_info(
+            "[BROWSER_BATCH] end ok=%s session_id=%s request_id=%s elapsed_ms=%s "
+            "completed_steps=%s error=%s",
+            bool(parsed.get("ok", False)),
+            session_id or "-",
+            request_id or "-",
+            parsed.get("elapsed_ms"),
+            len(completed) if isinstance(completed, list) else "?",
+            parsed.get("error") or "-",
+        )
+
+        completed_steps = completed if isinstance(completed, list) else []
+        for item in completed_steps:
+            if isinstance(item, dict):
+                browser_agent_log_info(
+                    "[BROWSER_BATCH] step index=%s op=%s ok=%s elapsed_ms=%s "
+                    "error=%s",
+                    item.get("index"),
+                    item.get("op"),
+                    bool(item.get("ok", False)),
+                    item.get("elapsed_ms"),
+                    item.get("error") or "-",
+                )
+
+        return parsed
+
     async def browser_set_input_files(
         session_id: str = "",
         request_id: str = "",
@@ -1188,6 +1710,41 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
             "delay_ms": "int: optional delay between drag steps",
             "source/target": "string aliases for element_source/element_target",
             "source_x/source_y/target_x/target_y": "int aliases for coord_* fields",
+        },
+    )
+
+    ctl.register_action(
+        "browser_batch_interact",
+        browser_batch_interact,
+        overwrite=True,
+    )
+    ctl.register_action_spec(
+        "browser_batch_interact",
+        summary=(
+            "Executes multiple deterministic page interactions in one Playwright code call "
+            "and returns compact per-step status."
+        ),
+        when_to_use=(
+            "Use for multi-field forms with several known controls, search boxes with autocomplete, "
+            "dropdown/date-picker flows, filter panels, and short click/type/wait/extract sequences. "
+            "Prefer this over many separate browser_click, browser_type, browser_wait_for, and "
+            "browser_evaluate turns when the next actions are already known. Do not use it for a single "
+            "uncertain click or when the page state must be inspected first."
+        ),
+        params={
+            "steps": (
+                "list[object]: required, max 25. Each step has op plus target fields. Supported op values: "
+                "click, fill, type, autocomplete, select_visible_text, press, select_option, set_checked, "
+                "wait_for_selector, wait_for_text, wait_for_load_state, sleep, extract_text, extract_value, "
+                "screenshot. Targets may use selector, role+name, label, placeholder, testid, or text. "
+                "For fill/type/autocomplete use value. For autocomplete also use choose_text/option_text "
+                "or option_selector/choose_selector. For native select_option, use value/option_value, "
+                "option_text/option_label/label_value, index, or values for MCP-style multi/single selection."
+            ),
+            "timeout_ms": "int: default timeout per step, default 5000, max 30000",
+            "wait_after_each_ms": "int: optional small pause after successful steps, max 5000",
+            "continue_on_error": "bool: when true, continue after failed optional/non-critical steps",
+            "global_timeout_ms": "int: hard ceiling for the full batch, default derived from step count, max 120000",
         },
     )
     ctl.register_action(

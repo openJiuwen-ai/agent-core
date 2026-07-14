@@ -9,12 +9,18 @@ not a persistence layer and should not be used as an execution audit log.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from threading import RLock
 from typing import Protocol
 
 from openjiuwen.agent_evolving.trajectory.aggregator import aggregate_member_trajectories
-from openjiuwen.agent_evolving.trajectory.types import Trajectory
+from openjiuwen.agent_evolving.trajectory.types import (
+    Trajectory,
+    trajectory_session_id,
+    trajectory_with_resource_attributes,
+)
+
+TrajectoryRecord = Trajectory
 
 
 @dataclass(frozen=True)
@@ -25,7 +31,7 @@ class MemberTrajectorySnapshot:
     session_id: str
     member_id: str
     member_role: str | None
-    trajectory: Trajectory
+    trajectory: TrajectoryRecord
     recorded_at_ms: int
 
     @classmethod
@@ -34,7 +40,7 @@ class MemberTrajectorySnapshot:
         *,
         team_id: str,
         member_id: str,
-        trajectory: Trajectory,
+        trajectory: TrajectoryRecord,
         member_role: str | None = None,
         session_id: str | None = None,
         recorded_at_ms: int | None = None,
@@ -42,7 +48,7 @@ class MemberTrajectorySnapshot:
         """Create a snapshot with runtime defaults filled in."""
         return cls(
             team_id=team_id,
-            session_id=session_id if session_id is not None else trajectory.session_id or "",
+            session_id=session_id if session_id is not None else trajectory_session_id(trajectory) or "",
             member_id=member_id,
             member_role=member_role,
             trajectory=trajectory,
@@ -127,12 +133,11 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _trajectory_for_snapshot(snapshot: MemberTrajectorySnapshot) -> Trajectory:
-    meta = dict(snapshot.trajectory.meta)
-    meta["member_id"] = snapshot.member_id
+def _trajectory_for_snapshot(snapshot: MemberTrajectorySnapshot) -> TrajectoryRecord:
+    attributes = {"member_id": snapshot.member_id}
     if snapshot.member_role is not None:
-        meta["member_role"] = snapshot.member_role
-    return replace(snapshot.trajectory, meta=meta)
+        attributes["member_role"] = snapshot.member_role
+    return trajectory_with_resource_attributes(snapshot.trajectory, attributes)
 
 
 def _should_keep_current(

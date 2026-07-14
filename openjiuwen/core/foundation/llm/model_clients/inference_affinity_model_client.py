@@ -163,7 +163,10 @@ class InferenceAffinityModelClient(BaseModelClient):
                 tools=params.get("tools"),
                 temperature=params.get("temperature"),
                 top_p=params.get("top_p"),
-                max_tokens=params.get("max_tokens"))
+                max_tokens=params.get("max_tokens"),
+                frequency_penalty=params.get("frequency_penalty"),
+                presence_penalty=params.get("presence_penalty"),
+                stop=params.get("stop"))
 
             response_data = await self._make_async_request(params, timeout=timeout)
 
@@ -290,6 +293,9 @@ class InferenceAffinityModelClient(BaseModelClient):
                 temperature=params.get("temperature"),
                 top_p=params.get("top_p"),
                 max_tokens=params.get("max_tokens"),
+                frequency_penalty=params.get("frequency_penalty"),
+                presence_penalty=params.get("presence_penalty"),
+                stop=params.get("stop"),
                 is_stream=True)
 
             if output_parser:
@@ -638,17 +644,12 @@ class InferenceAffinityModelClient(BaseModelClient):
             output_tokens = usage.get("completion_tokens", 0) or 0
             total_tokens = usage.get("total_tokens", 0) or 0
 
-            cache_tokens = 0
-            prompt_tokens_details = usage.get("prompt_tokens_details")
-            if prompt_tokens_details:
-                cache_tokens = prompt_tokens_details.get("cached_tokens", 0) or 0
-
             usage_metadata = UsageMetadata(
                 model_name=self.model_config.model_name,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
-                cache_tokens=cache_tokens,
+                cache_tokens=self._extract_cache_tokens(usage),
             )
 
         # Apply output parser (only parse content field)
@@ -837,10 +838,17 @@ class InferenceAffinityModelClient(BaseModelClient):
                         input_tokens=usage.get("prompt_tokens", 0) or 0,
                         output_tokens=usage.get("completion_tokens", 0) or 0,
                         total_tokens=usage.get("total_tokens", 0) or 0,
+                        cache_tokens=self._extract_cache_tokens(usage),
                     )
 
                 # Skip empty chunks
-                if not content and not reasoning_content and not tool_calls:
+                is_response_empty = (
+                        not content
+                        and not reasoning_content
+                        and not tool_calls
+                        and not usage_metadata
+                )
+                if is_response_empty:
                     return None
 
                 return AssistantMessageChunk(

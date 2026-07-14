@@ -34,6 +34,7 @@ class SystemPromptBuilder(BaseSystemPromptBuilder):
         SectionName.SKILLS,
         SectionName.TOOLS,
         SectionName.RUNTIME,
+        SectionName.PROMPT_ATTACHMENTS,
         SectionName.MEMORY,
     })
 

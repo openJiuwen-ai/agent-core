@@ -58,6 +58,34 @@ class _LazyFrameworkProxy:
             extra_kwargs=extra_kwargs,
         )
 
+    def transform_io(
+        self,
+        *,
+        input_event=None,
+        output_event=None,
+        result_key="result",
+        input_transform=None,
+        output_transform=None,
+        output_mode="frame",
+    ):
+        from openjiuwen.core.runner.callback.decorator import (
+            create_transform_io_by_events_decorator,
+            create_transform_io_decorator,
+        )
+        if input_event is not None or output_event is not None:
+            return create_transform_io_by_events_decorator(
+                self,
+                input_event=input_event,
+                output_event=output_event,
+                result_key=result_key,
+                output_mode=output_mode,
+            )
+        return create_transform_io_decorator(
+            input_transform=input_transform,
+            output_transform=output_transform,
+            output_mode=output_mode,
+        )
+
     @staticmethod
     def __getattr__(name):
         return getattr(get_callback_framework(), name)
@@ -74,4 +102,6 @@ async def trigger(event, **kwargs):
         **kwargs: Additional arguments passed to the trigger call.
     """
     fw = get_callback_framework()
+    if not fw.has_subscribers(event):
+        return
     await fw.trigger(event, **kwargs)

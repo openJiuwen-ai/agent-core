@@ -184,6 +184,7 @@ class MockLLMModel(BaseModelClient):
         # Convert AssistantMessage to AssistantMessageChunk for streaming
         chunk = AssistantMessageChunk(
             content=result.content,
+            reasoning_content=result.reasoning_content,
             tool_calls=result.tool_calls,
             usage_metadata=result.usage_metadata
         )
@@ -275,6 +276,33 @@ def create_text_response(
         content=content,
         usage_metadata=UsageMetadata(
             model_name=model_name,
+        )
+    )
+
+
+def create_reasoning_response(
+    content: str,
+    reasoning_content: str,
+    model_name: str = "mock-model",
+    finish_reason: str = "stop",
+) -> AssistantMessage:
+    """Create a text response with reasoning_content.
+
+    Args:
+        content: The text content of the response.
+        reasoning_content: The reasoning/thinking content.
+        model_name: Model name for metadata.
+        finish_reason: Finish reason for metadata.
+
+    Returns:
+        AIMessage with both content and reasoning_content.
+    """
+    return AssistantMessage(
+        content=content,
+        reasoning_content=reasoning_content,
+        usage_metadata=UsageMetadata(
+            model_name=model_name,
+            finish_reason=finish_reason,
         )
     )
 

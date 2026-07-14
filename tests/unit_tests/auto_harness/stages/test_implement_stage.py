@@ -227,6 +227,27 @@ class _FakeGit:
         del revision
         return list(self._diff_files)
 
+    async def has_commits_against_base(
+        self,
+        base_ref: str = "HEAD",
+    ) -> bool:
+        del base_ref
+        return False
+
+    async def diff_name_only_against_base(
+        self,
+        base_ref: str = "HEAD",
+    ) -> list[str]:
+        del base_ref
+        return []
+
+    async def find_existing_issue_fix_ref(
+        self,
+        issue_number: int,
+    ) -> dict:
+        del issue_number
+        return {"success": False}
+
 
 class TestImplementStageHelpers(
     IsolatedAsyncioTestCase,
@@ -607,7 +628,7 @@ class TestImplementStageHelpers(
     async def test_start_fix_loop_emits_progress_messages(
         self,
     ):
-        task, queue, done = _start_fix_loop(
+        task, queue, done, _last_ci = _start_fix_loop(
             config=AutoHarnessConfig(),
             task=OptimizationTask(topic="fix lint"),
             agent=None,
@@ -638,7 +659,7 @@ class TestImplementStageHelpers(
     async def test_start_fix_loop_omits_warning_summary_in_fix_target(
         self,
     ):
-        task, queue, done = _start_fix_loop(
+        task, queue, done, _last_ci = _start_fix_loop(
             config=AutoHarnessConfig(),
             task=OptimizationTask(topic="fix pytest failure"),
             agent=None,

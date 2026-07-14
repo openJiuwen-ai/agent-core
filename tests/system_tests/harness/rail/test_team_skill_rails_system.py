@@ -4,17 +4,12 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from examples.agent_evolving import (
-    team_skill_create_rail_example,
-    team_skill_rail_example,
-)
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     InvokeInputs,
@@ -22,6 +17,7 @@ from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
 )
 from openjiuwen.harness.rails import TeamSkillCreateRail, TeamSkillRail
+from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 
 
 @dataclass
@@ -139,6 +135,7 @@ async def test_team_skill_rail_generates_and_persists_patch_after_completion(tmp
         model="mock-model",
         auto_save=False,
         async_evolution=False,
+        review_runtime=EvolutionReviewRuntime(),
     )
     agent = _Agent()
 
@@ -167,6 +164,16 @@ async def test_team_skill_rail_generates_and_persists_patch_after_completion(tmp
         _ctx(
             agent,
             ToolCallInputs(
+                tool_name="send_message",
+                tool_args={"to_member_name": "researcher"},
+                tool_result="Error: researcher handoff failed because output format was missing",
+            ),
+        )
+    )
+    await rail.after_tool_call(
+        _ctx(
+            agent,
+            ToolCallInputs(
                 tool_name="view_task",
                 tool_args={},
                 tool_result="task-a completed\ntask-b completed",
@@ -187,40 +194,3 @@ async def test_team_skill_rail_generates_and_persists_patch_after_completion(tmp
     assert len(evo_log.entries) == 1
     assert evo_log.entries[0].change.section == "Workflow"
     assert "tighten handoff" in evo_log.entries[0].change.content
-
-
-@pytest.mark.parametrize(
-    "loader",
-    [
-        team_skill_create_rail_example.load_env_if_present,
-        team_skill_rail_example.load_env_if_present,
-    ],
-)
-def test_examples_can_load_model_env_from_local_dotenv(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    loader,
-):
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "\n".join(
-            [
-                "MODEL_NAME=deepseek-chat",
-                "API_KEY=test-key",
-                "MODEL_PROVIDER=OpenAI",
-                "API_BASE=https://example.test/v1",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    for key in ("MODEL_NAME", "API_KEY", "MODEL_PROVIDER", "API_BASE"):
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.chdir(tmp_path)
-
-    loader()
-
-    assert os.getenv("MODEL_NAME") == "deepseek-chat"
-    assert os.getenv("API_KEY") == "test-key"
-    assert os.getenv("MODEL_PROVIDER") == "OpenAI"
-    assert os.getenv("API_BASE") == "https://example.test/v1"

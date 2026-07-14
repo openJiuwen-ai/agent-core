@@ -11,6 +11,11 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.harness.tools import SkillTool
+from openjiuwen.harness.tools.skills.skill_tool import (
+    SKILL_TOOL_MARKDOWN_IMAGES_HINT,
+    SKILL_TOOL_MARKDOWN_IMAGES_VISION_HINT,
+    SKILL_TOOL_MARKDOWN_VIDEOS_HINT,
+)
 
 
 @pytest.fixture
@@ -141,3 +146,62 @@ async def test_skill_tool_invalid_reference_file(sys_op, temp_dir):
     skill_res = await skill_tool.invoke({"skill_name": "test_skill_1", "relative_file_path": "reference/unknown_file.md"})
     assert skill_res.success is False
     assert skill_res.error is not None
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_hint_mode_adds_image_and_video_hints(sys_op, temp_dir):
+    skills_root = Path(temp_dir) / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    body = (
+        "See ![landing](images/landing.png) and "
+        "![demo](videos/demo.mp4) in this skill."
+    )
+    skill = _write_skill(skills_root, "media_skill", "skill with media", body)
+    skill_tool = SkillTool(sys_op, lambda: [skill], multimodal_skill_mode="hint")
+
+    skill_res = await skill_tool.invoke({"skill_name": "media_skill"})
+
+    assert skill_res.success is True
+    assert "content" in skill_res.data
+    assert SKILL_TOOL_MARKDOWN_IMAGES_HINT in skill_res.data["content"]
+    assert SKILL_TOOL_MARKDOWN_VIDEOS_HINT in skill_res.data["content"]
+    assert "images/landing.png" in skill_res.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_hint_mode_uses_vision_hint_when_image_multimodal_disabled(
+    sys_op,
+    temp_dir,
+):
+    skills_root = Path(temp_dir) / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    body = "See ![landing](images/landing.png) in this skill."
+    skill = _write_skill(skills_root, "media_skill", "skill with media", body)
+    skill_tool = SkillTool(
+        sys_op,
+        lambda: [skill],
+        multimodal_skill_mode="hint",
+        enable_read_image_multimodal=False,
+    )
+
+    skill_res = await skill_tool.invoke({"skill_name": "media_skill"})
+
+    assert skill_res.success is True
+    assert "content" in skill_res.data
+    assert SKILL_TOOL_MARKDOWN_IMAGES_VISION_HINT in skill_res.data["content"]
+    assert SKILL_TOOL_MARKDOWN_IMAGES_HINT not in skill_res.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_non_hint_mode_skips_media_hints(sys_op, temp_dir):
+    skills_root = Path(temp_dir) / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    body = "See ![landing](images/landing.png) in this skill."
+    skill = _write_skill(skills_root, "media_skill", "skill with media", body)
+    skill_tool = SkillTool(sys_op, lambda: [skill], multimodal_skill_mode="attach")
+
+    skill_res = await skill_tool.invoke({"skill_name": "media_skill"})
+
+    assert skill_res.success is True
+    assert "content" not in skill_res.data
+    assert SKILL_TOOL_MARKDOWN_IMAGES_HINT not in skill_res.data["skill_content"]

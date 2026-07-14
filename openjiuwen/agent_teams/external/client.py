@@ -23,12 +23,14 @@ from typing import TYPE_CHECKING, Awaitable, Callable, NoReturn
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.external.descriptor import TeamJoinDescriptor
+from openjiuwen.agent_teams.external.format import render_messages, render_task_board
 from openjiuwen.agent_teams.i18n import set_language
 from openjiuwen.agent_teams.messager.base import create_messager
 from openjiuwen.agent_teams.messager.messager import Messager
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
-from openjiuwen.agent_teams.schema.task import TaskDetail, TaskOpResult
+from openjiuwen.agent_teams.schema.task import TaskCreateResult, TaskDetail, TaskOpResult
 from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.agent_teams.tools.models import TeamMember, TeamMessageBase, TeamTaskBase
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
@@ -39,6 +41,8 @@ from openjiuwen.core.common.logging import team_logger
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.database import TeamDatabase
     from openjiuwen.agent_teams.tools.memory_database import InMemoryTeamDatabase
+    from openjiuwen.agent_teams.tools.team import TeamBackend
+    from openjiuwen.core.foundation.tool.base import Tool
 
 # Broadcast routing sentinel, matching the team ``send_message`` tool.
 BROADCAST_TARGET = "*"
@@ -77,10 +81,16 @@ class ExternalTeamClient:
         """Bind the client to a join descriptor without opening resources."""
         self._descriptor = descriptor
         self._messager: Messager | None = None
+        self._backend: "TeamBackend | None" = None
         self._tasks: TeamTaskManager | None = None
         self._messages: TeamMessageManager | None = None
         self._db: "TeamDatabase | InMemoryTeamDatabase | None" = None
         self._session_token: Token[str] | None = None
+        # Member-scope real team tools, keyed by card.name. Built at connect()
+        # for the ``member`` scope so an external CLI member calls the exact
+        # same TeamTool instances (same schema + map_result text) as a native
+        # in-process teammate. Empty for the ``operator`` scope.
+        self._tools: dict[str, "Tool"] = {}
         self._connected = False
 
     @property
@@ -115,13 +125,49 @@ class ExternalTeamClient:
         """Whether this member carries the leader role."""
         return self._descriptor.role == "leader"
 
+    @property
+    def scope(self) -> str:
+        """The external-access scenario: ``"member"`` or ``"operator"``."""
+        return self._descriptor.scope
+
+    @property
+    def tools(self) -> dict[str, "Tool"]:
+        """The real team tools for the ``member`` scope (keyed by card.name).
+
+        Populated at :meth:`connect` only when ``scope == "member"`` — the
+        external CLI member then drives the exact same ``view_task`` /
+        ``claim_task`` / ``send_message`` ``TeamTool`` instances a native
+        teammate uses. Empty for the ``operator`` scope (operators act through
+        the explicit op methods / backend).
+        """
+        return self._tools
+
+    def bind_session_context(self) -> None:
+        """Re-assert the session-id + language contextvars for this call.
+
+        A dispatcher that runs each operation in its own ``asyncio.Task``
+        (e.g. an MCP server handling each tool call in a fresh task) must call
+        this before every operation: the bind done in :meth:`connect` only
+        lives in that connect call's task context, so without re-binding a
+        later call sees an empty session id and targets a non-existent
+        per-session dynamic table.
+        """
+        set_session_id(self._descriptor.session_id)
+        set_language(self._descriptor.language)  # type: ignore[arg-type]
+
     async def connect(self) -> None:
         """Open the team database and messager and wire up the managers.
 
-        Idempotent: a second call is a no-op.
+        Builds a minimal :class:`TeamBackend` over the shared db + messager;
+        for the ``member`` scope it also builds the real teammate team tools
+        via ``create_team_tools`` so the external member is indistinguishable
+        from an in-process teammate. Idempotent: a second call is a no-op.
         """
         if self._connected:
             return
+
+        from openjiuwen.agent_teams.tools.team import TeamBackend
+        from openjiuwen.agent_teams.tools.team_tools import create_team_tools
 
         set_language(self._descriptor.language)  # type: ignore[arg-type]
         self._session_token = set_session_id(self._descriptor.session_id)
@@ -129,14 +175,53 @@ class ExternalTeamClient:
         db = get_shared_db(self._descriptor.db_config)
         await db.initialize()
 
-        self._messager = create_messager(self._descriptor.transport_config)
+        transport_config = self._descriptor.transport_config
+        if transport_config.backend == "hybrid":
+            from openjiuwen.agent_teams.messager.hybrid import HybridMessager, WebSocketEventPublisher
+
+            if not transport_config.external_publish_url:
+                raise ValueError("hybrid messager requires external_publish_url")
+            publisher = WebSocketEventPublisher(
+                url=transport_config.external_publish_url,
+                session_id=self.session_id,
+                team_name=self.team_name,
+                request_timeout=transport_config.request_timeout,
+            )
+            self._messager = HybridMessager(
+                publisher=publisher,
+                sender_id=self.member_name,
+            )
+        else:
+            self._messager = create_messager(transport_config)
         await self._messager.start()
 
-        self._tasks = TeamTaskManager(self.team_name, self.member_name, db, self._messager)
-        self._messages = TeamMessageManager(self.team_name, self.member_name, db, self._messager)
+        backend = TeamBackend(
+            team_name=self.team_name,
+            member_name=self.member_name,
+            is_leader=self.is_leader,
+            db=db,
+            messager=self._messager,
+        )
+        self._backend = backend
+        self._tasks = backend.task_manager
+        self._messages = backend.message_manager
         self._db = db
+
+        if self._descriptor.scope == "member":
+            real_tools = create_team_tools(
+                role="teammate",
+                agent_team=backend,
+                lang=self._descriptor.language,
+            )
+            self._tools = {tool.card.name: tool for tool in real_tools}
+
         self._connected = True
-        team_logger.info("ExternalTeamClient connected: team=%s member=%s", self.team_name, self.member_name)
+        team_logger.info(
+            "ExternalTeamClient connected: team=%s member=%s scope=%s",
+            self.team_name,
+            self.member_name,
+            self._descriptor.scope,
+        )
 
     async def close(self) -> None:
         """Stop the messager and release the session context. Idempotent."""
@@ -148,6 +233,8 @@ class ExternalTeamClient:
             self._session_token = None
         self._tasks = None
         self._messages = None
+        self._backend = None
+        self._tools = {}
         self._connected = False
 
     async def __aenter__(self) -> "ExternalTeamClient":
@@ -175,6 +262,27 @@ class ExternalTeamClient:
         return await messages.send_message(content, to_member_name=to)
 
     # ---- task board -----------------------------------------------------
+
+    async def create_task(
+        self,
+        *,
+        title: str,
+        content: str,
+        task_id: str | None = None,
+        dependencies: list[str] | None = None,
+    ) -> TaskCreateResult:
+        """Create a team task (operator scope — external team control).
+
+        An external operator drives the team's work by creating tasks the
+        members claim. Goes through the same ``TeamTaskManager.add`` an
+        in-process leader uses, so it publishes the same task-created event.
+        """
+        return await self._require_tasks().add(
+            title=title,
+            content=content,
+            task_id=task_id,
+            dependencies=dependencies,
+        )
 
     async def list_tasks(self, status: str | None = None) -> list[TeamTaskBase]:
         """List team tasks, optionally filtered by status."""
@@ -235,6 +343,25 @@ class ExternalTeamClient:
 
         tasks = await self.list_tasks()
         return InboxView(messages=unread, tasks=tasks)
+
+    async def read_inbox(self, *, mark_read: bool = True) -> str:
+        """Render unread messages + the task board as one text block.
+
+        The external analog of how a native member is *pushed* its inbound
+        messages and task board by the coordination layer — external members
+        must *pull*, so this is the one tool with no native counterpart. The
+        text mirrors the in-process dispatcher (``render_messages`` +
+        ``render_task_board``) so a member reads the same shape either way.
+        """
+        view = await self.fetch_inbox(mark_read=mark_read)
+        now_ms = get_current_time()
+        parts: list[str] = []
+        if view.messages:
+            parts.append(render_messages(view.messages, now_ms=now_ms))
+        board = render_task_board(view.tasks, is_leader=self.is_leader, now_ms=now_ms)
+        if board:
+            parts.append(board)
+        return "\n\n".join(parts) if parts else "(inbox empty)"
 
     async def watch(self, observer: InboxObserver) -> None:
         """Block on team events, invoking ``observer`` with a fresh inbox.

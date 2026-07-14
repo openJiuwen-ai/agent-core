@@ -40,7 +40,7 @@ class RecallMemoryOp(BaseOp):
         all_nodes = await self.vector_store.async_search(
             embedding=[0.0] * 2560,  # Dummy embedding
             top_k=50,  # Max bullets
-            metadata_filter={"workspace_id": user_id, "type": "ace_memory"}
+            metadata_filter={"workspace_id": user_id, "type": "exp_memory"}
         )
 
         # Convert to ACERetrievedMemory objects

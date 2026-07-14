@@ -3,6 +3,7 @@
 
 import os
 import base64
+import json
 import shutil
 import tempfile
 import unittest
@@ -23,7 +24,8 @@ from openjiuwen.harness.tools import (
     ReadFileTool, WriteFileTool, EditFileTool,
     GlobTool, ListDirTool, GrepTool,
 )
-from openjiuwen.harness.tools.filesystem import _FILE_READ_REGISTRY
+from openjiuwen.harness.tools import filesystem as filesystem_module
+from openjiuwen.harness.tools.filesystem import _FILE_READ_REGISTRY, _TokenBudget
 
 
 @pytest.fixture
@@ -460,6 +462,86 @@ async def test_edit_file_tool_requires_read_first(sys_op, temp_dir):
 
 
 @pytest.mark.asyncio
+async def test_edit_file_tool_accepts_partial_read(sys_op, temp_dir):
+    # A large file forces read_file into offset/limit (partial) reads; edit_file
+    # must still allow editing once any read_file call has populated the registry —
+    # otherwise files too big to read in one shot would be permanently uneditable.
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "partial_edit.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "line1\nline2\nline3"})
+
+    read_res = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 1})
+    assert read_res.success is True
+    assert _FILE_READ_REGISTRY[file_path].is_partial is True
+
+    edit_res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "line2",
+        "new_string": "line2-edited",
+    })
+    assert edit_res.success is True
+    assert edit_res.data["replacements"] == 1
+
+
+@pytest.mark.asyncio
+async def test_edit_file_tool_editable_after_offset_paginated_reads_only(sys_op, temp_dir):
+    # Reproduces the original deadlock: a file larger than MAX_LINES_TO_READ can
+    # never produce a non-partial registry entry (default reads truncate and get
+    # flagged partial; explicit offset/limit reads are always flagged partial too).
+    # edit_file must still succeed once the file has been paginated through via
+    # offset/limit alone, with no full read ever taking place.
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "big_file.txt")
+
+    total_lines = ReadFileTool.MAX_LINES_TO_READ + 500
+    lines = [f"line{i}" for i in range(total_lines)]
+    lines[2400] = "TARGET_LINE"
+    await write_tool.invoke({"file_path": file_path, "content": "\n".join(lines)})
+
+    # Paginate through the file in chunks, mirroring how an agent would read a
+    # file too large to fit in one call. Never issue a full (no offset/limit) read.
+    page_size = 1000
+    for offset in range(0, total_lines, page_size):
+        page_res = await read_tool.invoke({"file_path": file_path, "offset": offset, "limit": page_size})
+        assert page_res.success is True
+    assert _FILE_READ_REGISTRY[file_path].is_partial is True
+
+    edit_res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "TARGET_LINE",
+        "new_string": "EDITED_LINE",
+    })
+    assert edit_res.success is True
+    assert edit_res.data["replacements"] == 1
+
+
+@pytest.mark.asyncio
+async def test_edit_file_tool_partial_read_still_rejects_external_modification(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "partial_edit_stale.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "line1\nline2\nline3"})
+    await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 1})
+
+    # External modification after the partial read must still be detected.
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("line1\nCHANGED\nline3")
+
+    res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "line2",
+        "new_string": "line2-edited",
+    })
+    assert res.success is False
+    assert "modified externally" in res.error
+
+
+@pytest.mark.asyncio
 async def test_edit_file_tool_full_workflow(sys_op, temp_dir):
     write_tool = WriteFileTool(sys_op)
     read_tool = ReadFileTool(sys_op)
@@ -639,6 +721,35 @@ async def test_read_file_tool_text(sys_op, temp_dir):
     assert relative_found.success is True
 
 
+@pytest.mark.asyncio
+async def test_read_file_tool_rejects_large_text_without_explicit_limit(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "large.txt")
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("A" * (ReadFileTool.MAX_SIZE_BYTES + 1))
+
+    result = await read_tool.invoke({"file_path": file_path})
+
+    assert result.success is False
+    assert "exceeds maximum allowed size" in result.error
+    assert "offset and limit" in result.error
+
+
+@pytest.mark.asyncio
+async def test_read_file_tool_allows_large_text_with_explicit_limit(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "large_lines.txt")
+    with open(file_path, "w", encoding="utf-8") as fh:
+        for idx in range(30000):
+            fh.write(f"line-{idx}\n")
+
+    result = await read_tool.invoke({"file_path": file_path, "offset": 0, "limit": 2})
+
+    assert result.success is True
+    assert "line-0" in result.data["content"]
+    assert "line-1" in result.data["content"]
+
+
 def test_read_file_tool_capability_flags_keep_backward_compatibility():
     assert ReadFileTool.is_read_only() is True
     assert ReadFileTool.is_concurrency_safe() is True
@@ -647,6 +758,167 @@ def test_read_file_tool_capability_flags_keep_backward_compatibility():
     assert ReadFileTool.isReadOnly() is True
     assert ReadFileTool.isConcurrencySafe() is True
     assert ReadFileTool.checkPermissions() == "allow"
+
+
+# ── _TokenBudget boundary semantics ─────────────────────────────────
+
+def test_token_budget_initial_state_not_exhausted():
+    budget = _TokenBudget(100)
+    assert budget.spent == 0
+    assert budget.exhausted is False
+
+
+def test_token_budget_can_fit_within_budget():
+    budget = _TokenBudget(100)
+    assert budget.can_fit(100) is True
+
+
+def test_token_budget_can_fit_exact_remaining():
+    budget = _TokenBudget(100)
+    budget.spend(60)
+    assert budget.can_fit(40) is True
+
+
+def test_token_budget_cannot_fit_over_budget():
+    budget = _TokenBudget(100)
+    assert budget.can_fit(101) is False
+
+
+def test_token_budget_spend_accumulates():
+    budget = _TokenBudget(100)
+    budget.spend(30)
+    budget.spend(20)
+    assert budget.spent == 50
+
+
+def test_token_budget_not_exhausted_below_max():
+    budget = _TokenBudget(100)
+    budget.spend(99)
+    assert budget.exhausted is False
+
+
+def test_token_budget_exhausted_at_exact_max():
+    budget = _TokenBudget(100)
+    budget.spend(100)
+    assert budget.exhausted is True
+
+
+def test_token_budget_exhausted_over_max():
+    budget = _TokenBudget(100)
+    budget.spend(150)
+    assert budget.exhausted is True
+
+
+def test_token_budget_cannot_fit_after_exhausted():
+    budget = _TokenBudget(100)
+    budget.spend(100)
+    assert budget.can_fit(1) is False
+    assert budget.can_fit(0) is True
+
+
+def test_token_budget_zero_max_tokens_starts_exhausted():
+    budget = _TokenBudget(0)
+    assert budget.exhausted is True
+    assert budget.can_fit(1) is False
+    assert budget.can_fit(0) is True
+
+
+# ── notebook / PDF progressive truncation ─────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_read_file_tool_reads_ipynb_notebook(sys_op, temp_dir):
+    """.ipynb files must not be rejected by the binary-file guard in invoke()."""
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "small.ipynb")
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "source": ["print('hello')\n"],
+                "outputs": [{"output_type": "stream", "text": ["hello\n"]}],
+            },
+            {
+                "cell_type": "markdown",
+                "source": ["# Title\n"],
+                "outputs": [],
+            },
+        ],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    with open(file_path, "w", encoding="utf-8") as fh:
+        json.dump(notebook, fh)
+
+    result = await read_tool.invoke({"file_path": file_path})
+
+    assert result.success is True
+    assert "## Cell 1 [code]" in result.data["content"]
+    assert "print('hello')" in result.data["content"]
+    assert "## Cell 2 [markdown]" in result.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_notebook_truncation_on_token_budget(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "big.ipynb")
+    cell_source = "x = 1  # " + ("filler " * 80) + "\n"
+    cells = [
+        {"cell_type": "code", "source": [cell_source], "outputs": []}
+        for _ in range(200)
+    ]
+    notebook = {"cells": cells, "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+    with open(file_path, "w", encoding="utf-8") as fh:
+        json.dump(notebook, fh)
+
+    result = await read_tool.invoke({"file_path": file_path})
+
+    assert result.success is True
+    content = result.data["content"]
+    assert "## Cell 1 [code]" in content
+    assert "## Cell 200 [code]" not in content
+    assert "truncated" in content
+    assert "/200 cells extracted" in content
+    assert f"{ReadFileTool.MAX_TOKENS}-token budget reached" in content
+
+
+@pytest.mark.asyncio
+async def test_read_pdf_truncation_on_token_budget(sys_op, temp_dir, monkeypatch):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "big.pdf")
+    with open(file_path, "wb") as fh:
+        fh.write(b"%PDF-1.4 fake content for mocked pdfplumber\n")
+
+    class _FakePage:
+        def __init__(self, text: str):
+            self._text = text
+
+        def extract_text(self):
+            return self._text
+
+    class _FakePdf:
+        def __init__(self, pages):
+            self.pages = pages
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+    page_text = "word " * 3000
+    fake_pdf = _FakePdf([_FakePage(page_text) for _ in range(15)])
+    monkeypatch.setattr(filesystem_module.pdfplumber, "open", lambda *_a, **_kw: fake_pdf)
+
+    result = await read_tool.invoke({"file_path": file_path})
+
+    assert result.success is True
+    content = result.data["content"]
+    assert "## Page 1" in content
+    assert "## Page 15" not in content
+    assert "truncated" in content
+    assert "/15 pages extracted" in content
+    assert f"{ReadFileTool.MAX_TOKENS}-token budget reached" in content
 
 
 # ── history path construction ─────────────────────────────────

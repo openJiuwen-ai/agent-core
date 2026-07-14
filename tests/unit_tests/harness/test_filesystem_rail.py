@@ -13,28 +13,57 @@ from openjiuwen.core.sys_operation import (
     SysOperationCard,
 )
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
+from openjiuwen.harness.schema.config import VisionModelConfig
+from openjiuwen.harness.tools import VisualQuestionAnsweringTool
 from openjiuwen.harness.tools.filesystem import ReadFileTool
 
 
 class _AbilityManager:
     def __init__(self) -> None:
         self.cards = {}
+        self._owner_id = None
 
     def add(self, card):
         self.cards[card.name] = card
+        return type("_AddResult", (), {"name": card.name, "added": True})()
 
     def remove(self, name: str):
         self.cards.pop(name, None)
 
+    def add_ability(self, card, resource):
+        if card.stateless:
+            Runner.resource_mgr.add_tool(resource, skip_if_exists=True)
+        else:
+            if self._owner_id:
+                card.id = f"{card.name}_{self._owner_id}"
+            Runner.resource_mgr.add_tool(resource, refresh=True)
+        return self.add(card)
+
+    def remove_ability(self, name: str):
+        card = self.cards.get(name)
+        self.remove(name)
+        if card is not None and not card.stateless:
+            Runner.resource_mgr.remove_tool(card.id)
+
 
 class _Agent:
-    def __init__(self, *, enable_read_image_multimodal: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        enable_read_image_multimodal: bool = True,
+        vision_model_config=None,
+        registered_cards: dict | None = None,
+    ) -> None:
         self.ability_manager = _AbilityManager()
+        self.ability_manager.cards.update(registered_cards or {})
         self.system_prompt_builder = type("_Builder", (), {"language": "en"})()
         self.deep_config = type(
             "_Config",
             (),
-            {"enable_read_image_multimodal": enable_read_image_multimodal},
+            {
+                "enable_read_image_multimodal": enable_read_image_multimodal,
+                "vision_model_config": vision_model_config,
+            },
         )()
 
 
@@ -162,6 +191,116 @@ def test_sys_operation_rail_applies_read_image_multimodal_config(tmp_path):
             rail.init(agent)
 
             read_tool = next(tool for tool in rail.tools if isinstance(tool, ReadFileTool))
+            assert read_tool.enable_image_multimodal is False
+        finally:
+            rail.uninit(agent)
+            Runner.resource_mgr.remove_sys_operation(sys_operation_id=card.id)
+            await Runner.stop()
+
+    asyncio.run(_run())
+
+
+def test_sys_operation_rail_keeps_native_multimodal_without_complete_vision_config(
+    tmp_path,
+):
+    async def _run():
+        await Runner.start()
+        try:
+            card = SysOperationCard(
+                id="test_sys_operation_rail_keeps_native_without_vision_config",
+                mode=OperationMode.LOCAL,
+                work_config=LocalWorkConfig(work_dir=str(tmp_path)),
+            )
+            Runner.resource_mgr.add_sys_operation(card)
+            sys_operation = Runner.resource_mgr.get_sys_operation(card.id)
+
+            rail = SysOperationRail()
+            rail.set_sys_operation(sys_operation)
+            agent = _Agent(registered_cards={"visual_question_answering": object()})
+
+            rail.init(agent)
+
+            read_tool = next(
+                tool for tool in rail.tools if isinstance(tool, ReadFileTool)
+            )
+            assert read_tool.enable_image_multimodal is True
+        finally:
+            rail.uninit(agent)
+            Runner.resource_mgr.remove_sys_operation(sys_operation_id=card.id)
+            await Runner.stop()
+
+    asyncio.run(_run())
+
+
+def test_sys_operation_rail_prefers_complete_registered_vision_tool(tmp_path):
+    async def _run():
+        vision_tool = None
+        await Runner.start()
+        try:
+            card = SysOperationCard(
+                id="test_sys_operation_rail_prefers_complete_registered_vision_tool",
+                mode=OperationMode.LOCAL,
+                work_config=LocalWorkConfig(work_dir=str(tmp_path)),
+            )
+            Runner.resource_mgr.add_sys_operation(card)
+            sys_operation = Runner.resource_mgr.get_sys_operation(card.id)
+
+            rail = SysOperationRail()
+            rail.set_sys_operation(sys_operation)
+            vision_tool = VisualQuestionAnsweringTool(
+                vision_model_config=VisionModelConfig(
+                    api_key="key",
+                    base_url="https://vision.example/v1",
+                    model="vision-model",
+                ),
+                agent_id="vision-agent",
+            )
+            Runner.resource_mgr.add_tool(vision_tool)
+            agent = _Agent(registered_cards={"visual_question_answering": vision_tool.card})
+
+            rail.init(agent)
+
+            read_tool = next(
+                tool for tool in rail.tools if isinstance(tool, ReadFileTool)
+            )
+            assert read_tool.enable_image_multimodal is False
+        finally:
+            rail.uninit(agent)
+            if vision_tool is not None:
+                Runner.resource_mgr.remove_tool(vision_tool.card.id)
+            Runner.resource_mgr.remove_sys_operation(sys_operation_id=card.id)
+            await Runner.stop()
+
+    asyncio.run(_run())
+
+
+def test_sys_operation_rail_prefers_complete_vision_config(tmp_path):
+    async def _run():
+        await Runner.start()
+        try:
+            card = SysOperationCard(
+                id="test_sys_operation_rail_prefers_complete_vision_config",
+                mode=OperationMode.LOCAL,
+                work_config=LocalWorkConfig(work_dir=str(tmp_path)),
+            )
+            Runner.resource_mgr.add_sys_operation(card)
+            sys_operation = Runner.resource_mgr.get_sys_operation(card.id)
+
+            rail = SysOperationRail()
+            rail.set_sys_operation(sys_operation)
+            agent = _Agent(
+                vision_model_config=VisionModelConfig(
+                    api_key="key",
+                    base_url="https://vision.example/v1",
+                    model="vision-model",
+                ),
+            )
+
+            rail.init(agent)
+
+            read_tool = next(
+                tool for tool in rail.tools if isinstance(tool, ReadFileTool)
+            )
             assert read_tool.enable_image_multimodal is False
         finally:
             rail.uninit(agent)

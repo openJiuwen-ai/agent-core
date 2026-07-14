@@ -3,21 +3,38 @@
 """DeepAgent implementation."""
 from __future__ import annotations
 
+import asyncio
 import importlib
 import os
 import sys
 import uuid
-from typing import (
-    Any, AsyncIterator, Dict, List, Optional,
-    TYPE_CHECKING, Tuple, cast,
-)
-import asyncio
 from pathlib import Path
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    cast,
+)
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.user_config import UserConfig
+from openjiuwen.core.context_engine import ContextEngine
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.controller.config import ControllerConfig
+from openjiuwen.core.controller.modules.task_manager import TaskFilter
+from openjiuwen.core.controller.schema.event import (
+    FollowUpEvent,
+    TaskInteractionEvent,
+)
+from openjiuwen.core.controller.schema.task import TaskStatus
+from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
+from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -29,50 +46,42 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
     AgentRail,
     InvokeInputs,
-    RunKind,
     RunContext,
+    RunKind,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.harness_config.loader import (
+    HarnessConfigLoader,
+)
+from openjiuwen.harness.image_modality_probe import probe_image_support
 from openjiuwen.harness.rails import DeepAgentRail
+from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from openjiuwen.harness.rails.task_completion_rail import (
     TaskCompletionRail,
 )
-from openjiuwen.core.foundation.tool import ToolCard
-from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
 from openjiuwen.harness.schema.config import DeepAgentConfig
-from openjiuwen.core.controller.config import ControllerConfig
-from openjiuwen.core.context_engine import ContextEngine
-from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-from openjiuwen.core.controller.schema.event import (
-    TaskInteractionEvent,
-    FollowUpEvent,
+from openjiuwen.harness.schema.state import (
+    _SESSION_RUNTIME_ATTR,
+    _SESSION_STATE_KEY,
+    DeepAgentState,
 )
-from openjiuwen.harness.task_loop.task_loop_event_handler import (
-    TaskLoopEventHandler,
+from openjiuwen.harness.security.factory import build_permission_interrupt_rail
+from openjiuwen.harness.task_loop.loop_coordinator import (
+    LoopCoordinator,
+)
+from openjiuwen.harness.task_loop.loop_queues import (
+    LoopQueues,
+)
+from openjiuwen.harness.task_loop.task_loop_controller import (
+    TaskLoopController,
 )
 from openjiuwen.harness.task_loop.task_loop_event_executor import (
     DEEP_TASK_TYPE,
     build_deep_executor,
 )
-from openjiuwen.harness.task_loop.loop_coordinator import (
-    LoopCoordinator,
+from openjiuwen.harness.task_loop.task_loop_event_handler import (
+    TaskLoopEventHandler,
 )
-from openjiuwen.harness.schema.state import (
-    DeepAgentState,
-    _SESSION_RUNTIME_ATTR,
-    _SESSION_STATE_KEY,
-)
-from openjiuwen.harness.task_loop.loop_queues import (
-    LoopQueues,
-)
-from openjiuwen.harness.harness_config.loader import (
-    HarnessConfigLoader,
-)
-from openjiuwen.harness.task_loop.task_loop_controller import (
-    TaskLoopController,
-)
-from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
-from openjiuwen.harness.security.factory import build_permission_interrupt_rail
 from openjiuwen.harness.tools import SessionToolkit, is_free_search_enabled, is_paid_search_enabled
 
 if TYPE_CHECKING:
@@ -82,10 +91,13 @@ if TYPE_CHECKING:
     from openjiuwen.harness.schema.config import SubAgentConfig
 
 from openjiuwen.harness.prompts import (
-    resolve_language,
-    resolve_mode,
     PromptSection,
     SystemPromptBuilder,
+    resolve_language,
+    resolve_mode,
+)
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachmentManager,
 )
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.identity import build_identity_section
@@ -100,6 +112,10 @@ _BRIDGE_EVENTS = frozenset(
         AgentCallbackEvent.BEFORE_TOOL_CALL,
         AgentCallbackEvent.AFTER_TOOL_CALL,
         AgentCallbackEvent.ON_TOOL_EXCEPTION,
+        # Fired by the inner ReActAgent at each successful iteration end, so a
+        # rail registered via DeepAgent.register_rail must bridge to the inner
+        # agent (same callback-manager namespace) rather than the outer one.
+        AgentCallbackEvent.AFTER_REACT_ITERATION,
     }
 )
 
@@ -118,6 +134,8 @@ _DEEP_EVENTS = frozenset(
         AgentCallbackEvent.AFTER_TASK_ITERATION,
     }
 )
+
+_SUB_AGENTS_DIR = "sub_agents"
 
 
 class DeepAgent(BaseAgent):
@@ -141,6 +159,7 @@ class DeepAgent(BaseAgent):
         self._bound_session_id: Optional[str] = None
         self._session_toolkit: SessionToolkit | None = None
         self._pending_harness_configs: List[str] = []
+        self.prompt_attachment_manager: PromptAttachmentManager = PromptAttachmentManager()
         super().__init__(card)
 
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
@@ -182,38 +201,19 @@ class DeepAgent(BaseAgent):
             return
         if Runner.resource_mgr.get_tool(card.id) is None:
             return
-        tags = Runner.resource_mgr.get_resource_tag(card.id) or []
-        if self.card.id in tags and len(tags) > 1:
-            result = Runner.resource_mgr.remove_resource_tag(
-                card.id,
-                self.card.id,
-                skip_if_tag_not_exists=True,
+        result = Runner.resource_mgr.remove_tool(card.id)
+        if result.is_err():
+            logger.warning(
+                "[DeepAgent] Failed to unregister tool during hot reload: %s",
+                result.msg(),
             )
-            if result.is_err():
-                logger.warning(
-                    "[DeepAgent] Failed to remove tool tag during hot reload: %s",
-                    result.msg(),
-                )
-            return
-        if self.card.id in tags or not tags:
-            result = Runner.resource_mgr.remove_tool(card.id)
-            if result.is_err():
-                logger.warning(
-                    "[DeepAgent] Failed to unregister tool during hot reload: %s",
-                    result.msg(),
-                )
 
     def _ensure_builtin_tool_resource(self, card: ToolCard, config: DeepAgentConfig) -> None:
         if card.name not in {"free_search", "paid_search"}:
             return
-        existing_tool = Runner.resource_mgr.get_tool(card.id)
-        if existing_tool is not None:
-            tag_result = Runner.resource_mgr.add_resource_tag(card.id, self.card.id)
-            if tag_result.is_err():
-                logger.warning(
-                    "[DeepAgent] Failed to tag existing free_search during hot reload: %s",
-                    tag_result.msg(),
-                )
+        # Builtin search tools are not shared across agents; a hit here means
+        # this agent already registered the same card on a prior reconfigure.
+        if Runner.resource_mgr.get_tool(card.id) is not None:
             return
 
         from openjiuwen.harness.tools import WebFreeSearchTool, WebPaidSearchTool
@@ -232,6 +232,7 @@ class DeepAgent(BaseAgent):
         self._deep_config = config
         if config.card is not None:
             self.card = config.card
+            self.ability_manager.set_owner_id(self.card.id)
 
         self._react_agent = self._create_react_agent()
         self._queue_pending_rails(config)
@@ -242,6 +243,7 @@ class DeepAgent(BaseAgent):
         self._deep_config = config
         if config.card is not None:
             self.card = config.card
+            self.ability_manager.set_owner_id(self.card.id)
 
         self._hot_reload_rails(config)
 
@@ -258,7 +260,7 @@ class DeepAgent(BaseAgent):
             self._hot_reload_system_prompt(config)
 
         self._queue_pending_rails(config)
-        self._sync_builder_to_active_rails()
+        self._sync_prompt_builder_references()
 
     def _hot_reload_rails(self, config: DeepAgentConfig) -> None:
         """Cycle stale rails out and prepare replacement rails during hot-reconfigure.
@@ -319,6 +321,7 @@ class DeepAgent(BaseAgent):
         if config.context_engine_config is not None:
             new_react_config.context_engine_config = config.context_engine_config
         self._react_agent.configure(new_react_config)
+        self._sync_prompt_builder_references()
         logger.info("[DeepAgent] Model configuration hot reloaded")
 
     def _hot_reload_tools(
@@ -390,20 +393,31 @@ class DeepAgent(BaseAgent):
         new_react_config.prompt_template = [{"role": "system", "content": prompt}]
         self._react_agent.configure(new_react_config)
         self.system_prompt_builder = prompt_builder
-        self._react_agent.prompt_builder = prompt_builder
-        self._react_agent.system_prompt_builder = prompt_builder
+        self._sync_prompt_builder_references()
         logger.info("[DeepAgent] System prompt hot reloaded")
 
-    def _sync_builder_to_active_rails(self) -> None:
-        """Push the current system_prompt_builder reference to active rails.
+    def _sync_prompt_builder_references(self) -> None:
+        """Push the current system_prompt_builder reference everywhere.
 
-        Syncs to _registered_rails and _stale_rails only.  _pending_rails do not
-        need syncing because they will acquire the correct builder from the agent
-        during init() in _ensure_initialized.
+        ReActAgent.configure() may rebuild its prompt_builder, and rails can be
+        registered, pending, or stale across hot-reconfigure cycles.  Keep every
+        mutable prompt participant on the same builder object so callbacks never
+        write to a builder different from the one used for the final model call.
         """
-        for rail in (*self._registered_rails, *self._stale_rails):
+        builder = self.system_prompt_builder
+        if builder is None:
+            return
+
+        if self._react_agent is not None:
+            self._react_agent.prompt_builder = builder
+            self._react_agent.system_prompt_builder = builder
+            self._react_agent.prompt_attachment_manager = self.prompt_attachment_manager
+
+        for rail in (*self._pending_rails, *self._registered_rails, *self._stale_rails):
             if hasattr(rail, "system_prompt_builder"):
-                rail.system_prompt_builder = self.system_prompt_builder
+                rail.system_prompt_builder = builder
+            if hasattr(rail, "_system_prompt_builder"):
+                setattr(rail, "_system_prompt_builder", builder)
 
     def _queue_pending_rails(self, config: DeepAgentConfig) -> None:
         """Append config-driven rails to _pending_rails for lazy registration."""
@@ -723,6 +737,10 @@ class DeepAgent(BaseAgent):
         if cfg.context_engine_config is not None:
             react_config.context_engine_config = cfg.context_engine_config
         react_config.workspace = cfg.workspace
+        if cfg.sys_operation is not None:
+            react_config.sys_operation_id = cfg.sys_operation.id
+
+        react_config.parallel_tool_calls = cfg.parallel_tool_calls
 
         language = resolve_language(cfg.language)
         mode = resolve_mode(cfg.prompt_mode)
@@ -760,6 +778,7 @@ class DeepAgent(BaseAgent):
         self.system_prompt_builder = prompt_builder
         agent.prompt_builder = prompt_builder
         agent.system_prompt_builder = prompt_builder
+        agent.prompt_attachment_manager = self.prompt_attachment_manager
 
         # Share ability manager so tools registered on DeepAgent are visible inside.
         agent.ability_manager = self.ability_manager
@@ -810,6 +829,33 @@ class DeepAgent(BaseAgent):
 
             self.ability_manager.add(mcp_config)
 
+    async def _resolve_read_image_multimodal(self) -> None:
+        """Probe the agent model when read_file image modality is set to auto."""
+        config = self._deep_config
+        if config is None or config.enable_read_image_multimodal is not None:
+            return
+
+        if config.model is None:
+            logger.debug(
+                "[DeepAgent] no model configured; disabling read_file image multimodal",
+            )
+            config.enable_read_image_multimodal = False
+            return
+
+        supported = await probe_image_support(config.model)
+        if supported is None:
+            logger.warning(
+                "[DeepAgent] image multimodal probe inconclusive; "
+                "leaving auto and degrading to metadata-only for this run",
+            )
+            return
+
+        config.enable_read_image_multimodal = supported
+        logger.info(
+            "[DeepAgent] read_file image multimodal auto-detected: %s",
+            supported,
+        )
+
     async def _ensure_initialized(self) -> None:
         """Perform lazy async initialization."""
         if self._initialized:
@@ -832,6 +878,10 @@ class DeepAgent(BaseAgent):
         if self._needs_workspace_init():
             await self.init_workspace()
 
+        await self._resolve_read_image_multimodal()
+        
+        self._sync_prompt_builder_references()
+
         # Unregister stale rails left over from a previous configure() cycle.
         # Skip rails that are also in pending (same instance): they will be
         # re-initialized by the pending loop below without needing a full retire.
@@ -849,6 +899,7 @@ class DeepAgent(BaseAgent):
             rail_inst.init(self)
             await self._register_rail_selective(rail_inst)
         self._pending_rails.clear()
+        self._sync_prompt_builder_references()
         self._initialized = True
 
     def _needs_workspace_init(self) -> bool:
@@ -921,9 +972,9 @@ class DeepAgent(BaseAgent):
 
         if not self._deep_config.workspace or isinstance(self._deep_config.workspace, str):
             workspace_path = (
-                f"{self._deep_config.workspace}/{subsession_id}"
+                str(Path(self._deep_config.workspace) / _SUB_AGENTS_DIR / subsession_id)
                 if self._deep_config.workspace
-                else f"./{subsession_id}"
+                else str(Path(".") / _SUB_AGENTS_DIR / subsession_id)
             )
             workspace = Workspace(
                 root_path=workspace_path,
@@ -931,7 +982,7 @@ class DeepAgent(BaseAgent):
             )
         else:
             workspace = Workspace(
-                root_path=Path(self._deep_config.workspace.root_path) / subsession_id,
+                root_path=Path(self._deep_config.workspace.root_path) / _SUB_AGENTS_DIR / subsession_id,
                 language=self._deep_config.language
             )
 
@@ -978,7 +1029,8 @@ class DeepAgent(BaseAgent):
             "enable_async_subagent": False,
             "add_general_purpose_agent": False,
             "enable_plan_mode": spec.enable_plan_mode,
-            "restrict_to_work_dir": spec.restrict_to_work_dir,
+            "parallel_tool_calls": spec.parallel_tool_calls,
+            "restrict_to_work_dir": spec.restrict_to_work_dir or self._deep_config.restrict_to_work_dir,
         }
 
         if spec.factory_name:
@@ -1067,6 +1119,14 @@ class DeepAgent(BaseAgent):
                 context_data = run.get("context")
                 if context_data:
                     run_context = RunContext(**context_data)
+            # Merge raw_query into RunContext.extra
+            # (without affecting run_kind for normal queries)
+            raw_query = inputs.get("raw_query", "")
+            if raw_query:
+                if run_context is None:
+                    run_context = RunContext(extra={"raw_query": raw_query})
+                else:
+                    run_context.extra["raw_query"] = raw_query
         elif isinstance(inputs, str):
             query = inputs
             conversation_id = None
@@ -1083,11 +1143,48 @@ class DeepAgent(BaseAgent):
                 error_msg="Input must be dict with 'query', str, or InteractiveInput.",
             )
 
-        return InvokeInputs(
+        invoke_inputs = InvokeInputs(
             query=query,
             conversation_id=conversation_id,
             run_kind=run_kind,
             run_context=run_context
+        )
+        return invoke_inputs
+
+    @staticmethod
+    def _copy_run_context_with_raw_query(
+        run_context: RunContext,
+        raw_query: str,
+    ) -> RunContext:
+        """Return a per-round RunContext with refreshed raw_query."""
+        extra = dict(run_context.extra)
+        extra["raw_query"] = raw_query
+        return RunContext(
+            reason=run_context.reason,
+            session_id=run_context.session_id,
+            context_mode=run_context.context_mode,
+            extra=extra,
+        )
+
+    @classmethod
+    def _run_context_for_task_loop_round(
+        cls,
+        run_context: Optional[RunContext],
+        current_query: Any,
+        is_follow_up: bool,
+    ) -> Optional[RunContext]:
+        """Return the RunContext that should be passed to one task-loop round."""
+        if run_context is None:
+            return None
+        if not is_follow_up:
+            return run_context
+        if not isinstance(current_query, str):
+            return run_context
+        if not current_query.strip():
+            return run_context
+        return cls._copy_run_context_with_raw_query(
+            run_context,
+            current_query,
         )
 
     @staticmethod
@@ -1152,6 +1249,14 @@ class DeepAgent(BaseAgent):
         self._pending_rails.append(rail)
         return self
 
+    def configured_rails(self) -> List[AgentRail]:
+        """Return all queued + registered rails (pending first, then registered).
+
+        Public accessor for hosts that need to copy a template agent's full rail
+        set without touching DeepAgent's internal rail lists directly.
+        """
+        return [*self._pending_rails, *self._registered_rails]
+
     def find_rails_by_type(self, rail_types: tuple[type, ...]) -> List[AgentRail]:
         """Return queued + registered rails matching any of the given types.
 
@@ -1191,8 +1296,10 @@ class DeepAgent(BaseAgent):
         if isinstance(rail, DeepAgentRail):
             rail.set_sys_operation(self.deep_config.sys_operation)
             rail.set_workspace(self.deep_config.workspace)
+        self._sync_prompt_builder_references()
         rail.init(self)
         await self._register_rail_selective(rail)
+        self._sync_prompt_builder_references()
         return self
 
     async def unregister_rail(self, rail: AgentRail) -> "DeepAgent":
@@ -2045,6 +2152,11 @@ class DeepAgent(BaseAgent):
                         _state.pending_follow_ups.pop(0)
                     )
                     self.save_state(session, _state)
+                round_run_context = self._run_context_for_task_loop_round(
+                    modified.run_context,
+                    current_query,
+                    is_follow_up,
+                )
 
                 query_preview = str(current_query)[:120]
                 self._log_loop(
@@ -2056,7 +2168,7 @@ class DeepAgent(BaseAgent):
                     session, current_query,
                     is_follow_up=is_follow_up,
                     run_kind=modified.run_kind,
-                    run_context=modified.run_context,
+                    run_context=round_run_context,
                 )
                 result = await controller.wait_round_completion(timeout=timeout)
 
@@ -2212,6 +2324,7 @@ class DeepAgent(BaseAgent):
             # Cancel background task explicitly to speed up cleanup.
             # Without this, await task could wait for a long-running
             # operation (e.g., wait_round_completion with 600s timeout).
+            await self._cancel_session_deep_tasks(session.get_session_id())
             await self._cancel_stream_process_task()
             raise
         finally:
@@ -2451,6 +2564,48 @@ class DeepAgent(BaseAgent):
                 "stream process task raised during cancel",
                 exc_info=True,
             )
+
+    async def _cancel_session_deep_tasks(self, session_id: str) -> None:
+        """Cancel active DeepAgent round tasks for a session.
+
+        Session-spawn tasks intentionally keep running after the foreground
+        stream disconnects, so this only targets the current DeepAgent round.
+        """
+        controller = self._loop_controller
+        if controller is None:
+            return
+        scheduler = controller.task_scheduler
+        if scheduler is None or scheduler.task_manager is None:
+            return
+
+        try:
+            tasks = await scheduler.task_manager.get_task(
+                task_filter=TaskFilter(session_id=session_id)
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to list session tasks during stream cancel: %s",
+                e,
+                exc_info=True,
+            )
+            return
+
+        cancellable = {
+            TaskStatus.SUBMITTED,
+            TaskStatus.WORKING,
+        }
+        for task in tasks:
+            if task.task_type != DEEP_TASK_TYPE or task.status not in cancellable:
+                continue
+            try:
+                await scheduler.cancel_task(task.task_id)
+            except Exception as e:
+                logger.warning(
+                    "Failed to cancel deep task %s during stream cancel: %s",
+                    task.task_id,
+                    e,
+                    exc_info=True,
+                )
 
     async def abort(
         self,

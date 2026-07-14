@@ -23,6 +23,7 @@ from typing import (
 
 from openjiuwen.agent_teams.interaction import (
     DeliverResult,
+    ExternalTeamEvent,
     GodViewMessage,
     HumanAgentInbox,
     HumanAgentMessage,
@@ -60,6 +61,7 @@ from openjiuwen.agent_teams.runtime.pool import (
 )
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
+from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
@@ -112,7 +114,7 @@ class TeamRuntimeManager:
         inputs: object = None,
     ) -> TeamRuntimeActivation:
         """Resolve the TeamAgent to run for the target team/session."""
-        team_session = TeamRuntimeManager._build_session(spec, session)
+        team_session = TeamRuntimeManager._build_session(session)
         target_session_id = team_session.get_session_id()
         team_name = spec.team_name
 
@@ -386,11 +388,28 @@ class TeamRuntimeManager:
                 return DeliverResult.success(None)
             return DeliverResult.failure("unsupported_interactive_input")
 
+        try:
+            external_event = (
+                payload if isinstance(payload, ExternalTeamEvent) else ExternalTeamEvent.from_wire(payload)
+            )
+        except ValueError:
+            return DeliverResult.failure("invalid_external_event")
+        if external_event is not None:
+            return await self._route_external_team_event(entry, external_event)
+
         if isinstance(payload, str):
             parsed = parse_interact_str(payload)
             payloads: list[InteractPayload] = parsed or [GodViewMessage(body=payload)]
         else:
             payloads = [payload]
+
+        # A swarmflow human-session reply is addressed by correlation id, not a
+        # roster member — route it straight to the run's reply topic before the
+        # roster-matching dispatch would fold it as an unknown mention. It bypasses
+        # the interact gate (a lightweight publish, not a leader round).
+        reply = self._as_swarmflow_human_reply(payloads)
+        if reply is not None:
+            return await self._route_swarmflow_human_reply(entry, reply[0], reply[1])
 
         ticket = await entry.interact_gate.admit()
         if ticket is None:
@@ -404,6 +423,73 @@ class TeamRuntimeManager:
             return await self.dispatch_payloads(entry.agent, payloads)
         finally:
             await entry.interact_gate.consume_done(ticket)
+
+    @staticmethod
+    def _as_swarmflow_human_reply(payloads: list[InteractPayload]) -> Optional[tuple[str, str]]:
+        """Detect a swarmflow human-session reply, returning ``(corr, answer)`` or None.
+
+        A reply is a single ``HumanAgentMessage`` whose ``target`` is
+        ``"swarmflow:<correlation_id>"`` — the convention a UI uses to answer a
+        pending swarmflow human turn (the correlation id rode out on the
+        ``human_prompt`` progress event).
+        """
+        prefix = "swarmflow:"
+        if len(payloads) != 1:
+            return None
+        item = payloads[0]
+        if not isinstance(item, HumanAgentMessage) or not item.target:
+            return None
+        if not item.target.startswith(prefix):
+            return None
+        corr = item.target[len(prefix):]
+        return (corr, item.body) if corr else None
+
+    @staticmethod
+    async def _route_swarmflow_human_reply(
+        entry: "ActiveTeam",
+        correlation_id: str,
+        answer: str,
+    ) -> DeliverResult:
+        """Publish a swarmflow human reply on the run's dedicated reply topic."""
+        from openjiuwen.agent_teams.schema.events import (
+            EventMessage,
+            TeamEvent,
+            swarmflow_human_reply_topic,
+        )
+
+        backend = entry.agent.team_backend
+        messager = getattr(backend, "messager", None) if backend is not None else None
+        if messager is None:
+            return DeliverResult.failure("no_messager")
+        topic = swarmflow_human_reply_topic(entry.current_session_id, entry.team_name)
+        message = EventMessage(
+            event_type=TeamEvent.WORKFLOW_HUMAN_REPLY,
+            payload={"correlation_id": correlation_id, "answer": answer},
+            sender_id="user",
+        )
+        await messager.publish(topic_id=topic, message=message)
+        return DeliverResult.success(None)
+
+    @staticmethod
+    async def _route_external_team_event(
+        entry: "ActiveTeam",
+        external_event: ExternalTeamEvent,
+    ) -> DeliverResult:
+        """Publish one externally received event on the active runtime's local bus."""
+        try:
+            event_payload = external_event.event.get_payload()
+        except ValueError:
+            return DeliverResult.failure("invalid_external_event")
+        if event_payload.team_name != entry.team_name:
+            return DeliverResult.failure("external_event_team_mismatch")
+
+        backend = entry.agent.team_backend
+        messager = getattr(backend, "messager", None) if backend is not None else None
+        if messager is None:
+            return DeliverResult.failure("no_messager")
+        topic = external_event.topic.build(entry.current_session_id, entry.team_name)
+        await messager.publish(topic_id=topic, message=external_event.event)
+        return DeliverResult.success(None)
 
     @staticmethod
     async def dispatch_payloads(
@@ -657,6 +743,8 @@ class TeamRuntimeManager:
         await db.initialize()
         for session_id in session_ids:
             await db.drop_session_tables_by_id(session_id)
+            if not await remove_session_worktrees(team_name, session_id):
+                team_logger.warning("Failed to remove session worktrees for team={} session={}", team_name, session_id)
 
         for session_id in session_ids:
             await checkpointer.release(session_id)
@@ -719,6 +807,9 @@ class TeamRuntimeManager:
         db = get_shared_db(release_info.db_config)
         await db.initialize()
         await db.drop_session_tables_by_id(session_id)
+        for team_name in release_info.team_names:
+            if not await remove_session_worktrees(team_name, session_id):
+                team_logger.warning("Failed to remove session worktrees for team={} session={}", team_name, session_id)
 
     @staticmethod
     async def _resolve_any_team_session_release_info(
@@ -766,7 +857,7 @@ class TeamRuntimeManager:
 
         from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
 
-        session = create_agent_team_session(session_id=session_id)
+        session = TeamRuntimeManager._build_session(session_id)
         try:
             await session.pre_run()
         except Exception as e:
@@ -896,20 +987,26 @@ class TeamRuntimeManager:
             # prompts) that the rest of manager.py doesn't need at import time.
             from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 
+            # Recover only the leader here. Teammate recovery is a coordination
+            # concern owned by the leader's ``coordination.start`` (which calls
+            # ``recover_team`` once the leader's runtime is live); the activation
+            # is always streamed right after, so spawning teammates eagerly here
+            # would just rebuild the same members the coordination start spawns
+            # — a redundant second restart per teammate every cold recover.
             agent = TeamAgent.recover_from_session(team_session, team_name, runtime_spec=spec)
-            await agent.recover_team()
         elif kind is RunActionKind.NEW_TEAM_IN_SESSION:
             await self._pre_run_with_inputs(team_session, inputs)
             agent = spec.build()
             await agent.resume_for_new_session(team_session)
-            # team_in_db is True at this point — the team row exists, so
-            # there may be teammate rows left over from before the stop
-            # (status STOPPED / PAUSED / etc). Replay them onto the new
-            # session so "recover with a fresh session" actually brings
-            # the original members back, not just an empty leader. Safe
-            # on never-built teams: recover_team iterates DB members and
-            # is a no-op when none exist.
-            await agent.recover_team()
+            # team_in_db is True at this point — the team row exists, so there
+            # may be teammate rows left over from before the stop (status
+            # STOPPED / PAUSED / etc). Those original members are replayed onto
+            # the new session by the leader's ``coordination.start`` (which calls
+            # ``recover_team`` once the leader runtime is live, then iterates the
+            # DB members); the activation is streamed right after, so recovering
+            # them eagerly here would just rebuild the same members a second
+            # time. ``_flush_team_manifest`` persists only the leader config, so
+            # it has no dependency on teammates being spawned first.
             await self._flush_team_manifest(agent, team_session)
         elif kind is RunActionKind.CREATE:
             await self._pre_run_with_inputs(team_session, inputs)
@@ -930,14 +1027,14 @@ class TeamRuntimeManager:
 
     @staticmethod
     def _build_session(
-        spec: "TeamAgentSpec",
         session: str | AgentTeamSession | None,
     ) -> AgentTeamSession:
         if isinstance(session, AgentTeamSession):
+            session.set_source_metadata_enabled(False)
             return session
         if isinstance(session, str):
-            return create_agent_team_session(session_id=session)
-        return create_agent_team_session()
+            return create_agent_team_session(session_id=session, source_metadata_enabled=False)
+        return create_agent_team_session(source_metadata_enabled=False)
 
     @staticmethod
     async def _pre_run_with_inputs(session: AgentTeamSession, inputs: object) -> None:

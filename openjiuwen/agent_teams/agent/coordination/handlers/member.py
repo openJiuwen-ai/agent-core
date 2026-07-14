@@ -69,6 +69,7 @@ class MemberHandler(BaseCoordinationHandler):
         # status flip and a poll tick within the same window cannot
         # double-nudge the same task.
         self._last_stale_nudge = stale_claim_throttle
+        self._team_clean_requested = False
 
     async def on_member_event(self, event: EventMessage) -> None:
         """Handle MEMBER_* lifecycle events.
@@ -147,6 +148,7 @@ class MemberHandler(BaseCoordinationHandler):
                 old_status,
                 new_status,
             )
+            await self._maybe_clean_team_after_shutdown(new_status)
         elif event_type == TeamEvent.MEMBER_EXECUTION_CHANGED:
             text = t(
                 "dispatcher.member_execution_changed",
@@ -162,6 +164,52 @@ class MemberHandler(BaseCoordinationHandler):
             return
 
         team_logger.debug(text)
+
+    async def _maybe_clean_team_after_shutdown(self, new_status: str | None) -> None:
+        """Clean the team once every non-leader member has shut down.
+
+        Temporary teams normally rely on the leader calling ``clean_team``
+        after ``shutdown_member``. In practice, natural-language "disband
+        team" requests can stop after shutting members down, and persistent
+        teams do not expose ``clean_team`` as a leader tool. This leader-side
+        guard keeps the final cleanup deterministic while still requiring
+        every teammate to reach the terminal SHUTDOWN state first.
+        """
+        if self._team_clean_requested:
+            return
+        if new_status != MemberStatus.SHUTDOWN.value:
+            return
+
+        team_backend = self._infra.team_backend
+        if team_backend is None:
+            return
+
+        try:
+            members = await team_backend.list_members()
+        except Exception as e:
+            team_logger.warning("Failed to list members before team clean: {}", e)
+            return
+
+        leader_name = self._blueprint.member_name
+        teammates = [member for member in members if getattr(member, "member_name", None) != leader_name]
+        if not teammates:
+            return
+        if any(getattr(member, "status", None) != MemberStatus.SHUTDOWN.value for member in teammates):
+            return
+
+        self._team_clean_requested = True
+        team_logger.info(
+            "All non-leader members for team {} are SHUTDOWN; invoking clean_team",
+            getattr(team_backend, "team_name", "?"),
+        )
+        try:
+            cleaned = await team_backend.clean_team()
+        except Exception as e:
+            self._team_clean_requested = False
+            team_logger.warning("Team clean after member shutdown failed: {}", e)
+            return
+        if not cleaned:
+            self._team_clean_requested = False
 
     async def _nudge_idle_member_with_stale_claims(
         self,

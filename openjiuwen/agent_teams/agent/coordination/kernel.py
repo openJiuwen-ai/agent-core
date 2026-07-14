@@ -127,8 +127,21 @@ class CoordinationKernel:
             await infra.team_backend.db.initialize()
         if session is not None:
             await sess_mgr.bind_session(session)
+            memory_manager = resources.memory_manager
+            if memory_manager is not None:
+                memory_manager.bind_session_id(session.get_session_id())
+            # Start the member runtime (native supervisor + child session) for
+            # this run cycle, then attach the StreamController's output forwarder
+            # + status mappers. Order matters: the controller consumes the
+            # runtime's outputs, so the runtime must be started first.
+            if resources.harness is not None:
+                await resources.harness.start(team_session=session)
+                await host.stream_controller.start()
         else:
             sess_mgr.release_session()
+            memory_manager = resources.memory_manager
+            if memory_manager is not None:
+                memory_manager.bind_session_id(None)
 
         if host.role == TeamRole.LEADER and infra.team_backend:
             existing = await infra.team_backend.db.team.get_team(infra.team_backend.team_name)
@@ -193,6 +206,12 @@ class CoordinationKernel:
         team_logger.info("[{}] coordination pausing (persistent)", host.member_name or "?")
         await self.drain_agent_task()
         host.persist_allocator_state()
+        # Extract team memories while the session is still bound and the DB
+        # is accessible. Moved from finalize_round so extraction runs once
+        # per run cycle instead of on every streaming round.
+        memory_manager = host.resources.memory_manager
+        if memory_manager:
+            await memory_manager.extract_after_round()
         if host.role == TeamRole.LEADER:
             await self._mark_live_teammates(MemberStatus.PAUSED)
             await host.spawn_manager.cancel_recovery_tasks()
@@ -303,6 +322,13 @@ class CoordinationKernel:
         team_logger.info("[{}] coordination stopping", host.member_name or "?")
         await self.drain_agent_task()
         host.persist_allocator_state()
+        # Final memory extraction before permanent teardown. Only extract
+        # when transitioning directly from running (session still bound).
+        # When coming from paused, extraction already happened in pause()
+        # and the session is already released — the DB query would fail.
+        memory_manager = host.resources.memory_manager
+        if memory_manager and self._lifecycle_state == "running":
+            await memory_manager.extract_after_round()
         if host.role == TeamRole.LEADER:
             # Mirror of the pause path: mark every spawned teammate so the
             # persistence layer captures why the runtime went away. STOPPED
@@ -313,12 +339,20 @@ class CoordinationKernel:
         await self.unsubscribe_transport()
         await host.spawn_manager.cancel_recovery_tasks()
         await host.spawn_manager.shutdown_all_handles()
-        memory_manager = host.resources.memory_manager
         if memory_manager:
             await memory_manager.close()
         if self._event_bus is not None:
             await self._event_bus.stop()
         self.close_stream()
+        # Permanent teardown (not round-end): stop the native and drop its
+        # process-global sys_operation so a stopped/discarded member does not
+        # leak it. The round-end ``finalize_round`` path only calls
+        # ``harness.stop`` (kept for reuse on the same session); this stop is
+        # where the runtime goes away. Done before ``release_session`` because
+        # ``dispose`` tears the native down over its bound session, and it does
+        # not always follow a ``finalize_round`` (e.g. external stop_team).
+        if host.resources.harness is not None:
+            await host.resources.harness.dispose()
         host.session_manager.release_session()
         # See pause(): team_member status update for the agent's own
         # ``team_member`` handle is owned by
@@ -388,14 +422,15 @@ class CoordinationKernel:
             )
         )
 
-    async def enqueue_mailbox_after_first_iteration(self) -> None:
+    async def enqueue_initial_mailbox_poll(self) -> None:
         host = self._host
         if host.role == TeamRole.LEADER:
             return
-        gate = host.resources.first_iter_gate
-        if gate is None or self._event_bus is None:
+        if self._event_bus is None:
             return
-        await gate.wait()
+        # The member runtime is already started by ``start`` before coordination
+        # runs, so the first mailbox poll is enqueued directly — the old
+        # FirstIterationGate wait is gone with the single-supervisor model.
         await self._event_bus.enqueue(
             InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX),
         )
@@ -421,14 +456,16 @@ class CoordinationKernel:
     async def finalize_round(self) -> None:
         """Run round-end cleanup; lifecycle decisions live at the Runner layer.
 
-        Limited to memory extraction and stream queue release. Whether to
-        pause (persistent) or stop (temporary / shutdown_requested) is now
-        decided by the run entry point in ``core/runner/team_runner.py`` so
-        external ``stop_coordination`` calls cannot be silently overridden
-        by the stream finally path.
+        Purely tears down this cycle's runtime resources (stream controller
+        and native harness). Memory extraction has moved to
+        :meth:`pause` / :meth:`stop` so it runs once per run cycle
+        rather than on every round.
         """
         host = self._host
-        memory_manager = host.resources.memory_manager
-        if memory_manager:
-            await memory_manager.extract_after_round()
+        # Tear down this cycle's runtime: stop the controller's forwarder/status
+        # mappers, then the member runtime (native supervisor). start() rebuilds
+        # a fresh native next cycle.
+        await host.stream_controller.stop()
+        if host.resources.harness is not None:
+            await host.resources.harness.stop()
         host.stream_controller.stream_queue = None

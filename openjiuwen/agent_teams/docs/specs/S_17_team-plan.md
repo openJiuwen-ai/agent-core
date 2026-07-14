@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `schema/blueprint.py`、`runtime/team_plan.py`、`harness.py`、`tools/team_tools.py`、`tools/task_manager.py`、`schema/events.py` |
-| 最近一次修订日期 | 2026-05-27 |
+| 最近一次修订日期 | 2026-06-03 |
 | 关联 feature | `F_21_team-plan.md` |
 
 ## 范围 / 边界
@@ -71,10 +71,13 @@ Team-level plan 的顺序必须是：
 1. `TeamRuntimeManager.activate()` 创建或恢复 team runtime。
 2. `Runner.run_agent_team_streaming()` 发出 `team.runtime_ready`。
 3. `TeamAgent.stream()` 启动 Leader 协调轮。
-4. `StreamController` 调用 `TeamHarness.run_streaming(...)`。
-5. `TeamHarness` 创建 child `AgentSession` 并执行 `pre_run()`。
-6. 如果当前角色是 Leader 且 `enable_team_plan=True`，`TeamHarness` 调用 `DeepAgent.switch_mode(session, "plan")`。
-7. 真实 Leader DeepAgent 收到原始用户输入，按单 agent plan prompt/tool 流程运行。
+4. coordination kernel 调用 `TeamHarness.start(team_session=...)` 起 native cycle，
+   并挂 `StreamController.start()` 转发输出。
+5. `TeamHarness.start` 创建 child `AgentSession`（复用 team session_id，
+   share_stream_writer=False）并执行 `pre_run()`。
+6. 如果当前角色是 Leader 且 `initial_plan_mode=True`，`TeamHarness._seed_initial_plan_mode`
+   在 child session 上调用 `DeepAgent.switch_mode(session, "plan")`（首迭代一次，幂等）。
+7. 真实 Leader DeepAgent 收到原始用户输入（经 `harness.send`），按单 agent plan prompt/tool 流程运行。
 8. `enter_plan_mode` 创建或复用 `{leader_workspace}/.plans/{slug}.md`。
 9. `exit_plan_mode` 将计划 Markdown 返回给用户，并恢复原模式。
 10. 用户后续确认、修改或拒绝，作为普通文本输入经 `interact_agent_team(text)` 投递。

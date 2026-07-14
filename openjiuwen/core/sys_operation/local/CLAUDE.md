@@ -43,13 +43,19 @@ Streaming is useful for long-running code where output is needed incrementally; 
 
 ### Concurrency: Read-Write Locks
 
-`FsOperation` uses per-file async read-write locks (`_AsyncReadWriteLock`) stored in `_rw_locks` WeakValueDictionary:
+`FsOperation` uses `filelock.AsyncReadWriteLock`, backed by per-file SQLite lock databases in the system temporary directory. The lock database path is a stable hash of the normalized target path, so independent processes coordinate on the same lock:
 
 - **Multiple readers** allowed simultaneously
 - **Exclusive writer** blocks readers and other writers
 - **Writer priority** — waiting writers block new readers to prevent starvation
+- **Cross-process locking** — processes on the same host coordinate through SQLite shared/exclusive transactions
+- **Cancellation safety** — cross-process acquisition uses short non-blocking attempts so cancelled tasks do not leave long-running executor calls behind
+- **Temporary storage** — databases live in the fixed machine-local directory `tempfile.gettempdir()/openjiuwen-fs-rwlocks`, so independently launched local processes derive the same database path
+- **Idle cleanup** — when the last local user releases a lock, the process retains its reusable lock object until shutdown and adds the database to the idle queue. A per-process task runs every 20 minutes; after a database has been idle for 2 minutes, it deletes the database only if it can acquire the write lock immediately. A new local use invalidates its pending cleanup entry.
+- **Executor isolation** — each lock instance uses a dedicated single-thread executor so blocked SQLite acquisitions cannot starve the release that unblocks them
 
 Lock acquisition happens in `_maybe_read_lock()`, `_file_lock()`, and `_ordered_file_locks()`. All take a `timeout` (default 300s from options).
+`_rw_lock_manager.py` owns lock caching and cleanup; `FsOperation` only enters its lock contexts.
 
 **Ordered locking:** When operations touch multiple files (e.g., `upload_file` reads src, writes dst), use `_ordered_file_locks()` which acquires locks in sorted path order to prevent deadlocks.
 

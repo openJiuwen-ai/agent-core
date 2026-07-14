@@ -27,71 +27,110 @@ STRINGS: dict[str, str] = {
     ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/cn/clean_team.md
-    # ===== spawn_member ========================================================
-    # spawn_member._desc lives in descs/cn/spawn_member.md
-    "spawn_member.member_name": (
+    # ===== spawn_teammate ======================================================
+    # spawn_teammate._desc lives in descs/cn/spawn_teammate.md
+    "spawn_teammate.member_name": (
         "[公开] 成员唯一名（语义化 slug，如 backend-dev-1，DNS label 风格 kebab-case）。"
         "**首字符必须是小写英文字母（a-z），其后仅允许小写字母、数字（0-9）和连字符（-）**；"
         "禁止大写字母、下划线、空白、中文及其他非 ASCII 字符。"
         "同时作为主键和消息/审批/任务路由键，在同一团队内必须唯一"
     ),
-    "spawn_member.display_name": (
+    "spawn_teammate.display_name": (
         "[公开] 成员的显示名（如「后端开发专家」），仅用于展示，不用于路由。"
         "会注入所有其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
     ),
-    "spawn_member.desc": (
+    "spawn_teammate.desc": (
         "[公开] 成员的长期角色画像，包括专业背景、核心专长、"
         "优先认领的任务类型、协作风格以及不负责的边界，用于任务匹配和角色定位。"
         "会注入所有其他成员的 system prompt 并由 list_members 返回，"
         "禁止写入对成员的内部考量、敏感目标或机密策略"
     ),
-    "spawn_member.role_type": (
-        "[内部] 可选。成员角色类型，决定 framework 装配方式，不进入任何成员的 prompt 文本："
-        "'teammate'（默认）= 普通 LLM 队友，需提供 model_name/prompt；"
-        "'human_agent' = 人类成员，由真人通过 HumanAgentInbox 驱动，"
-        "**不接受** model_name 与 prompt（由框架内置模板托管），传入这两个字段会报错。"
-        "选用 'human_agent' 需要 spec.enable_hitt=True 且当前 build_team 实例未禁用 HITT。"
-        "'bridge_agent' = 桥接外部独立 agent（如 claudecode / codex / hermes 等）。"
-        "本地是完整 teammate（按 teammate 行为认领任务、收发消息），但具体工作产出由通过协议接入的"
-        "远程 agent 完成；本地 LLM 只做调度，原样转发远程结果。"
-        "选用 'bridge_agent' 时 'desc' 字段必填（同时作为团队 persona 和远程的 system prompt 核心）；"
-        "可选传入 mailbox_inject_mode / protocol / adapter_config / model_name。"
-        "选用 'bridge_agent' 需要 spec.enable_bridge=True 且当前 build_team 实例未禁用 Bridge。"
-        "'external_cli' = 直接拉起第三方 CLI agent（claudecode / codex 等）作为队友，"
-        "其大脑是 CLI 子进程而非本地 LLM，通过自动注入的团队 MCP 工具收发消息与认领任务。"
-        "选用 'external_cli' 时 'cli_agent' 字段必填（指定 CLI 类型），'desc' 必填（成员 persona），"
-        "禁止传入 model_name/prompt（模型与配置都在 CLI 侧）。"
-        "'cli_agent' 取值必须是 spec.external_cli_agents 中预先声明过的 CLI 类型"
-    ),
-    "spawn_member.cli_agent": (
-        "仅 role_type='external_cli' 时使用。要拉起的第三方 CLI agent 类型标识，"
-        "如 'claude'（claudecode）或 'codex'。取值必须命中 spec.external_cli_agents 中"
-        "预先声明的某条静态配置——具体启动命令、工作目录、MCP 注入等都在那条配置里，"
-        "本字段只负责按名引用"
-    ),
-    "spawn_member.prompt": (
+    "spawn_teammate.prompt": (
         "[私有，仅该成员自己可见] 成员的长期工作约定，注入该成员自己的 system prompt："
         "稳定遵循的工作风格、技术偏好、协作约束，"
         "以及只该让本成员知道的隐藏目标或敏感细节。"
-        "不要写当前批次任务，也不要写'开始工作''查看任务列表'这类空泛启动语句。"
-        "当 role_type='human_agent' 时禁止传入"
+        "不要写当前批次任务，也不要写'开始工作''查看任务列表'这类空泛启动语句"
     ),
-    "spawn_member.model_name": (
+    "spawn_teammate.model_name": (
         "可选。建议该成员使用的模型名称（如 gpt-4、claude-sonnet-4 等）；"
-        "未指定时由系统自动选择合适的模型。当 role_type='human_agent' 时禁止传入；"
-        "role_type='bridge_agent' 时为本地调度 LLM 的模型选择，可选"
+        "未指定时由系统自动选择合适的模型"
     ),
-    "spawn_member.mailbox_inject_mode": (
-        "仅 role_type='bridge_agent' 时使用。控制团队消息被自动转发给远程 agent 时的形态："
-        "'passthrough'（默认）= 仅加最简发送者前缀直传；'rephrase' = 包装完整发送者上下文（角色、人设、相关任务）"
+    "spawn_teammate.permissions": (
+        "收窄该 teammate 的工具权限（只能收紧，不能放宽）。"
+        "键为工具名，值为权限级别：'allow'、'ask' 或 'deny'。"
+        "示例：{\"bash\": \"deny\", \"write_file\": \"ask\"}"
     ),
-    "spawn_member.protocol": (
-        "仅 role_type='bridge_agent' 时使用。协议标识（如 'a2a' / 'acp' / 'claudecode'）。"
+    # ===== spawn_human_agent ===================================================
+    # spawn_human_agent._desc lives in descs/cn/spawn_human_agent.md
+    "spawn_human_agent.member_name": (
+        "[公开] 人类成员唯一名（语义化 slug，如 product-owner，DNS label 风格 kebab-case）。"
+        "**首字符必须是小写英文字母（a-z），其后仅允许小写字母、数字（0-9）和连字符（-）**；"
+        "禁止大写字母、下划线、空白、中文及其他非 ASCII 字符。"
+        "同时作为主键和消息/审批/任务路由键，在同一团队内必须唯一"
+    ),
+    "spawn_human_agent.display_name": (
+        "[公开] 人类成员的显示名（如「产品负责人」），仅用于展示，不用于路由。"
+        "会注入所有其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
+    ),
+    "spawn_human_agent.desc": (
+        "[公开] 人类成员的角色画像与职责范围，用于展示与持久化人设，"
+        "并注入其他成员的 system prompt、由 list_members 返回。"
+        "真人通过 HumanAgentInbox 驱动该成员；模型与启动提示由框架内置模板托管，无需在此提供"
+    ),
+    # ===== spawn_bridge_agent ==================================================
+    # spawn_bridge_agent._desc lives in descs/cn/spawn_bridge_agent.md
+    "spawn_bridge_agent.member_name": (
+        "[公开] 桥接成员唯一名（语义化 slug，如 remote-claude-1，DNS label 风格 kebab-case）。"
+        "**首字符必须是小写英文字母（a-z），其后仅允许小写字母、数字（0-9）和连字符（-）**；"
+        "禁止大写字母、下划线、空白、中文及其他非 ASCII 字符。"
+        "同时作为主键和消息/审批/任务路由键，在同一团队内必须唯一"
+    ),
+    "spawn_bridge_agent.display_name": (
+        "[公开] 桥接成员的显示名（如「远程 Claude」），仅用于展示，不用于路由。"
+        "会注入所有其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
+    ),
+    "spawn_bridge_agent.desc": (
+        "[公开] 桥接成员的角色画像。**必填**：同时作为本地团队 persona 与远程 agent 的连接 briefing"
+        "（通过 adapter.connect 下发，远程据此扮演角色）。"
+        "会注入其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
+    ),
+    "spawn_bridge_agent.mailbox_inject_mode": (
+        "控制团队消息被自动转发给远程 agent 时的形态："
+        "'passthrough'（默认）= 仅加最简发送者前缀直传；"
+        "'rephrase' = 包装完整发送者上下文（角色、人设、相关任务）"
+    ),
+    "spawn_bridge_agent.protocol": (
+        "协议标识（如 'a2a' / 'acp' / 'claudecode'）。"
         "目前作为元数据保留，用于后续 BridgeProtocolAdapter 适配器查找；空字符串表示尚未绑定适配器"
     ),
-    "spawn_member.adapter_config": (
-        "仅 role_type='bridge_agent' 时使用。协议适配器配置（如 endpoint、auth、relay_timeout_s 等），"
+    "spawn_bridge_agent.adapter_config": (
+        "协议适配器配置（如 endpoint、auth、relay_timeout_s 等），"
         "原样透传给 BridgeProtocolAdapter.connect。结构由具体适配器实现自行定义"
+    ),
+    "spawn_bridge_agent.model_name": (
+        "可选。本地调度 LLM 的模型名称（如 gpt-4、claude-sonnet-4 等）；"
+        "未指定时由系统自动选择。注意远程 agent 的模型在其自身侧，不由此字段控制"
+    ),
+    # ===== spawn_external_cli ===================================================
+    # spawn_external_cli._desc lives in descs/cn/spawn_external_cli.md
+    "spawn_external_cli.member_name": (
+        "[公开] CLI 成员唯一名（语义化 slug，如 cli-coder-1，DNS label 风格 kebab-case）。"
+        "**首字符必须是小写英文字母（a-z），其后仅允许小写字母、数字（0-9）和连字符（-）**；"
+        "禁止大写字母、下划线、空白、中文及其他非 ASCII 字符。"
+        "同时作为主键和消息/审批/任务路由键，在同一团队内必须唯一"
+    ),
+    "spawn_external_cli.display_name": (
+        "[公开] CLI 成员的显示名（如「Claude CLI 编码助手」），仅用于展示，不用于路由。"
+        "会注入所有其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
+    ),
+    "spawn_external_cli.desc": (
+        "[公开] 该 CLI 成员的 persona / 角色画像。**必填**。"
+        "会注入其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
+    ),
+    "spawn_external_cli.cli_agent": (
+        "要拉起的第三方 CLI agent 类型标识，如 'claude'（claudecode）或 'codex'。"
+        "取值必须命中 spec.external_cli_agents 中预先声明的某条静态配置——"
+        "具体启动命令、工作目录、MCP 注入等都在那条配置里，本字段只负责按名引用"
     ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/cn/shutdown_member.md
@@ -170,4 +209,54 @@ STRINGS: dict[str, str] = {
     # workspace_meta._desc lives in descs/cn/workspace_meta.md
     "workspace_meta.action": "操作类型：lock（获取文件锁）、unlock（释放文件锁）、locks（列出所有活跃锁）、history（查看文件版本历史）",
     "workspace_meta.path": "目标文件的相对路径（lock/unlock/history 时必填）",
+    # ===== swarmflow / structured_output ======================================
+    # swarmflow._desc lives in descs/cn/swarmflow.md
+    # structured_output._desc lives in descs/cn/structured_output.md (无固定参数，schema 动态)
+    "swarmflow.script_path": (
+        "磁盘上的 swarmflow 脚本文件路径——一个 Python 模块，含顶层 META（纯字面量）与 "
+        "async def run(args)，脚本体用 from swarmflow import 引入 agent()/parallel()/pipeline() "
+        "等原语。与内联 script 同为当前已接通执行的来源，适合已落盘 / 需反复迭代或 resume 的脚本。"
+    ),
+    "swarmflow.script": (
+        "自包含的内联 swarmflow 脚本源码（免去先写盘）。必须以顶层 META（纯字面量，无变量 / 函数调用 / "
+        "f-string）开头，后跟 async def run(args)，脚本体用 agent()/parallel()/pipeline()/phase() 等原语。"
+        "已接通执行——简单场景优先用它，框架会自动把源码落到该工作流的 journal 目录再运行。"
+    ),
+    "swarmflow.name": (
+        "已保存 / 具名 swarmflow 工作流的名称，解析为一个自包含脚本来运行。"
+        "接口已就位、执行推进中——当前请改用 script_path。"
+    ),
+    "swarmflow.resume_id": (
+        "要续跑的上次运行 run_id。内容未变的 agent() 调用（prompt + opts + schema 一致）瞬时返回缓存结果，"
+        "只有改动 / 新增的调用重跑（上游变更级联失效下游）；同脚本 + 同 args → 全缓存命中。"
+        "接口已就位、执行推进中——当前请改用 script_path。"
+    ),
+    "swarmflow.args": (
+        "传给脚本 async def run(args) 的可选参数，作为**字符串**原样传入（如研究问题、目标路径）。"
+        "脚本内自行解析（需结构化输入可在 run 里 json.loads）。"
+    ),
+    "swarmflow_worker.schema": (
+        "你是一名单次执行的 swarmflow 工作节点。阅读用户消息中的任务，完成工作，"
+        "然后**必须**调用 `structured_output` 工具**恰好一次**，传入符合其输入 schema "
+        "的结构化结果。重要提示：`structured_output` 是**唯一**的结果提交方式——如果你"
+        "不调用它，任务被视为失败，你的文本输出将被丢弃。禁止将结果作为纯文本输出"
+        "——结果只能通过工具调用被捕获。调用 `structured_output` 后立即停止。"
+    ),
+    "swarmflow_worker.free": (
+        "你是一名单次执行的 swarmflow 工作节点。阅读用户消息中的任务，完成工作，"
+        "并将答案作为你的最终消息返回。"
+    ),
+    "structured_output.reminder": (
+        "【重要提醒】你必须通过调用 `structured_output` 工具来提交结果，不要把结果"
+        "写在文本中。这是唯一的结果提交方式，不调用该工具=任务失败。"
+    ),
+    # ===== async control tools (list / output / cancel) =======================
+    # async_tasks_list._desc / async_task_output._desc / async_task_cancel._desc
+    # live in descs/cn/*.md
+    "async_task_output.task_id": "要查询的后台任务 id（来自启动工具返回的 task_id）。",
+    "async_task_output.block": (
+        "是否阻塞等待任务进入终态：true 时轮询至完成/失败或超时，默认 false 立即返回当前状态。"
+    ),
+    "async_task_output.timeout": "block=true 时的最大等待毫秒数（默认 30000，上限 600000）。",
+    "async_task_cancel.task_id": "要取消的后台任务 id。",
 }

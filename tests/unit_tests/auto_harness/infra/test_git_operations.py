@@ -36,13 +36,15 @@ class TestBuildGitAuthEnv:
         expected = base64.b64encode(
             b"bot-user:secret-token"
         ).decode("ascii")
-        assert env["GIT_CONFIG_COUNT"] == "3"
+        assert env["GIT_CONFIG_COUNT"] == "6"
         assert env["GIT_CONFIG_KEY_2"] == (
             "http.https://gitcode.com/.extraheader"
         )
         assert env["GIT_CONFIG_VALUE_2"] == (
             f"AUTHORIZATION: basic {expected}"
         )
+        assert env["GIT_CONFIG_KEY_3"] == "http.version"
+        assert env["GIT_CONFIG_VALUE_3"] == "HTTP/1.1"
 
 
 class TestGitOperations:

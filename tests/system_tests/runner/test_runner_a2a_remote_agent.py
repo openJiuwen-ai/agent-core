@@ -202,11 +202,14 @@ async def test_runner_should_return_agent_result_from_a2a_remote_agent(registere
         {"query": "hello a2a", "conversation_id": conversation_id},
     )
 
-    assert response.status == TaskStatus.SUBMITTED
+    assert response.status == TaskStatus.COMPLETED
     assert response.task_id
     assert response.sessionId == conversation_id
     assert response.task_id != response.sessionId
-    assert not response.artifacts
+    assert any(
+        artifact.parts and artifact.parts[0].text == "echo: hello a2a"
+        for artifact in response.artifacts
+    )
 
 
 @pytest.mark.asyncio

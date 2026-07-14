@@ -18,6 +18,7 @@ from openjiuwen.core.context_engine import (
     CurrentRoundCompressorConfig,
     FullCompactProcessorConfig,
     MicroCompactProcessorConfig,
+    ReasoningToolLoopCompactProcessorConfig,
     ToolResultBudgetProcessorConfig,
 )
 from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
@@ -86,6 +87,7 @@ class ContextProcessorRail(DeepAgentRail):
 
         self._system_prompt_builder = None
         self._all_processors: List[Tuple[str, BaseModel]] = []
+        self._reload_enabled = False
 
     @staticmethod
     def _merge_config_with_overrides(
@@ -164,6 +166,10 @@ class ContextProcessorRail(DeepAgentRail):
                     MicroCompactProcessorConfig()
                 ),
                 (
+                    "ReasoningToolLoopCompactProcessor",
+                    ReasoningToolLoopCompactProcessorConfig(),
+                ),
+                (
                     "FullCompactProcessor",
                     FullCompactProcessorConfig(
                         model=model_config,
@@ -176,12 +182,16 @@ class ContextProcessorRail(DeepAgentRail):
                 (
                     "MessageSummaryOffloader",
                     MessageSummaryOffloaderConfig(
-                        large_message_threshold=10000,
+                        large_message_threshold=15000,
                         offload_message_type=["tool"],
-                        protected_tool_names=["read_file:*SKILL.md", "reload_original_context_messages"],
+                        protected_tool_names=["read_file"],
                         model=model_cfg,
                         model_client=model_client_config,
                     ),
+                ),
+                (
+                    "ReasoningToolLoopCompactProcessor",
+                    ReasoningToolLoopCompactProcessorConfig(),
                 ),
                 (
                     "DialogueCompressor",
@@ -206,7 +216,7 @@ class ContextProcessorRail(DeepAgentRail):
                 (
                     "RoundLevelCompressor",
                     RoundLevelCompressorConfig(
-                        trigger_total_tokens=230000,
+                        trigger_context_ratio=0.9,
                         target_total_tokens=160000,
                         keep_recent_messages=6,
                         model=model_cfg,
@@ -250,6 +260,8 @@ class ContextProcessorRail(DeepAgentRail):
         config.context_processors = all_processors
 
         self._all_processors = all_processors
+        context_engine_config = getattr(config, "context_engine_config", None)
+        self._reload_enabled = bool(getattr(context_engine_config, "enable_reload", False))
         self._system_prompt_builder = getattr(agent, "system_prompt_builder", None)
 
     def uninit(self, agent) -> None:
@@ -265,6 +277,7 @@ class ContextProcessorRail(DeepAgentRail):
         if self._system_prompt_builder is not None:
             self._system_prompt_builder.remove_section("offload")
         self._all_processors = []
+        self._reload_enabled = False
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         await self.fix_incomplete_tool_context(ctx)
@@ -429,12 +442,11 @@ class ContextProcessorRail(DeepAgentRail):
 
     async def _maybe_inject_offload_section(self) -> None:
         """Inject offload section if processors are configured."""
-        if not self._all_processors:
-            if self._system_prompt_builder is not None:
-                self._system_prompt_builder.remove_section("offload")
+        if self._system_prompt_builder is None:
             return
 
-        if self._system_prompt_builder is None:
+        if not self._reload_enabled or not self._all_processors:
+            self._system_prompt_builder.remove_section("offload")
             return
 
         lang = self._system_prompt_builder.language or "cn"

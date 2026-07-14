@@ -109,9 +109,15 @@ def test_create_vision_tools_register_and_invoke(monkeypatch):
 
 
 def test_runner_stop_clears_registered_vision_tools():
+    vision_model_config = VisionModelConfig(
+        api_key="test-key",
+        base_url="https://example.com/v1",
+        model="mock-model",
+    )
+
     async def _run():
         await Runner.start()
-        tools = create_vision_tools()
+        tools = create_vision_tools(vision_model_config=vision_model_config)
         add_results = Runner.resource_mgr.add_tool(tools)
         assert all(result.is_ok() for result in add_results)
         await Runner.stop()

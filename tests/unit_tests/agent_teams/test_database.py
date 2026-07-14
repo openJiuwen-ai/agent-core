@@ -8,19 +8,30 @@ import warnings
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.exc import SAWarning
-from sqlalchemy import inspect
 
 from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
+)
+from openjiuwen.agent_teams.paths import (
+    configure_openjiuwen_home,
+    reset_openjiuwen_home,
+    team_session_worktrees_dir,
 )
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
     TeamDatabase,
 )
+from openjiuwen.agent_teams.tools.database.engine import _ensure_team_member_options_column
 from openjiuwen.agent_teams.tools.memory_database import InMemoryTeamDatabase
+from openjiuwen.agent_teams.tools.member_options import (
+    build_member_options,
+    get_member_options,
+    load_member_options,
+)
 from openjiuwen.agent_teams.tools.models import (
     _get_message_model,
     _get_message_read_status_model,
@@ -85,6 +96,51 @@ class TestDatabaseType:
 
 class TestTeamDatabaseInit:
     """Test TeamDatabase initialization"""
+
+    @pytest.mark.level0
+    def test_options_migration_backfills_and_drops_legacy_model_ref_json_column(self):
+        """Legacy model_ref_json data is copied into options, then the old column is removed."""
+        engine = create_engine("sqlite:///:memory:")
+        legacy_model_ref = '{"model_name": "gpt-4", "model_index": 1}'
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_member (
+                        member_name TEXT NOT NULL,
+                        team_name TEXT NOT NULL,
+                        options TEXT,
+                        model_ref_json TEXT,
+                        PRIMARY KEY (member_name, team_name)
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    """
+                    INSERT INTO team_member (member_name, team_name, options, model_ref_json)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    ("member_options", "team_options", None, legacy_model_ref),
+                )
+
+                _ensure_team_member_options_column(conn)
+
+                columns = {col["name"] for col in inspect(conn).get_columns("team_member")}
+                row = conn.exec_driver_sql(
+                    """
+                    SELECT options FROM team_member
+                    WHERE member_name = ? AND team_name = ?
+                    """,
+                    ("member_options", "team_options"),
+                ).mappings().one()
+
+            assert "model_ref_json" not in columns
+            options = load_member_options(row["options"])
+            assert options.model_ref is not None
+            assert options.model_ref.model_name == "gpt-4"
+            assert options.model_ref.model_index == 1
+        finally:
+            engine.dispose()
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -328,6 +384,56 @@ class TestMemberOperations:
         assert member.desc == "Code reviewer"
         assert member.execution_status == "idle"
         assert member.prompt == "Review code"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_create_member_stores_model_ref_in_options(self, db):
+        """Member model refs are stored in options."""
+        await db.team.create_team(
+            team_name="team_member_options",
+            display_name="Team Member Options",
+            leader_member_name="leader_options",
+        )
+
+        success = await db.member.create_member(
+            member_name="member_options",
+            team_name="team_member_options",
+            display_name="Member Options",
+            agent_card=AgentCard(name="OptionAgent").model_dump_json(),
+            status="ready",
+            options=build_member_options(
+                model_ref={"model_name": "gpt-4", "model_index": 2},
+                worktree_isolation="worktree",
+            ),
+        )
+
+        assert success is True
+        member = await db.member.get_member("member_options", "team_member_options")
+        assert member is not None
+        options = get_member_options(member)
+        assert options.model_ref is not None
+        assert options.model_ref.model_name == "gpt-4"
+        assert options.model_ref.model_index == 2
+        assert options.worktree is not None
+        assert options.worktree.isolation == "worktree"
+        assert options.worktree.path is None
+
+        updated = await db.member.update_member_worktree(
+            "member_options",
+            "team_member_options",
+            isolation="worktree",
+            worktree_path="/tmp/member-options-worktree",
+        )
+
+        assert updated is True
+        member = await db.member.get_member("member_options", "team_member_options")
+        assert member is not None
+        options = get_member_options(member)
+        assert options.model_ref is not None
+        assert options.model_ref.model_name == "gpt-4"
+        assert options.worktree is not None
+        assert options.worktree.isolation == "worktree"
+        assert options.worktree.path == "/tmp/member-options-worktree"
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -2259,7 +2365,7 @@ class TestSessionTables:
             await database.drop_cur_session_tables()
 
             try:
-                task_after = await database.task.get_task("task1")
+                await database.task.get_task("task1")
                 assert False
             except Exception as e:
                 assert "no such table" in str(e).lower()
@@ -2497,7 +2603,7 @@ class TestSessionTables:
             await database.drop_cur_session_tables()
 
             try:
-                task_after_drop = await database.task.get_task("task1")
+                await database.task.get_task("task1")
                 assert False
             except Exception as e:
                 assert "no such table" in str(e)
@@ -2961,6 +3067,38 @@ class TestRuntimeCleanup:
         finally:
             await database.close()
             reset_session_id(token)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_force_delete_team_session_removes_current_session_worktrees(self, tmp_path):
+        """Force delete should remove the current session's managed worktree root."""
+        db_path = tmp_path / "force_cleanup_worktree.db"
+        config = DatabaseConfig(
+            db_type=DatabaseType.SQLITE,
+            connection_string=str(db_path),
+        )
+        configure_openjiuwen_home(tmp_path / "openjiuwen-home")
+        database = TeamDatabase(config)
+        token = set_session_id("force_cleanup_worktree")
+        worktree_root = team_session_worktrees_dir("cleanup_team", "force_cleanup_worktree")
+        worktree_path = worktree_root / "agent-cleanup-team-dev-abcdef1234"
+        worktree_path.mkdir(parents=True)
+        (worktree_path / "file.txt").write_text("content", encoding="utf-8")
+        try:
+            await database.initialize()
+            await database.team.create_team(
+                "cleanup_team",
+                "Cleanup Team",
+                "leader1",
+            )
+
+            assert await database.force_delete_team_session("cleanup_team") is True
+
+            assert not worktree_root.exists()
+        finally:
+            await database.close()
+            reset_session_id(token)
+            reset_openjiuwen_home()
 
 
 # ---------------------------------------------------------------------------

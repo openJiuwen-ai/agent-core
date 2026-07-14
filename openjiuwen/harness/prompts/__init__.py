@@ -15,6 +15,15 @@ from openjiuwen.harness.prompts.builder import (
 )
 from openjiuwen.harness.prompts.report import PromptReport
 from openjiuwen.harness.prompts.sanitize import sanitize_path, sanitize_user_content
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachment,
+    PromptAttachmentContextWriter,
+    PromptAttachmentKind,
+    PromptAttachmentManager,
+    PromptAttachmentUpdate,
+    hash_prompt_attachment,
+    hash_rendered,
+)
 from openjiuwen.harness.prompts import sections  # noqa: F401 — expose subpackage
 
 
@@ -47,6 +56,13 @@ __all__ = [
     "PromptSection",
     "PromptReport",
     "SystemPromptBuilder",
+    "PromptAttachment",
+    "PromptAttachmentContextWriter",
+    "PromptAttachmentKind",
+    "PromptAttachmentManager",
+    "PromptAttachmentUpdate",
+    "hash_prompt_attachment",
+    "hash_rendered",
     "sanitize_path",
     "sanitize_user_content",
     "sections",

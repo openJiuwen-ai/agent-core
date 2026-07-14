@@ -7,7 +7,6 @@ from typing import List, Optional
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from openjiuwen.agent_teams.schema.status import (
     EXECUTION_TRANSITIONS,
@@ -17,7 +16,11 @@ from openjiuwen.agent_teams.schema.status import (
     MemberStatus,
     is_valid_transition,
 )
-from openjiuwen.agent_teams.tools.database.engine import get_current_time
+from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
+from openjiuwen.agent_teams.tools.member_options import (
+    MemberWorktreeOptions,
+    set_member_worktree_options,
+)
 from openjiuwen.agent_teams.tools.models import TeamMember
 from openjiuwen.core.common.logging import team_logger
 
@@ -25,9 +28,9 @@ from openjiuwen.core.common.logging import team_logger
 class MemberDao:
     """Data access object for the team_member table."""
 
-    def __init__(self, session_local: async_sessionmaker) -> None:
-        """Initialize member DAO with the shared session factory."""
-        self._session_local = session_local
+    def __init__(self, sessions: DbSessions) -> None:
+        """Initialize member DAO with the shared read/write session provider."""
+        self._sessions = sessions
 
     async def create_member(
         self,
@@ -42,7 +45,7 @@ class MemberDao:
         execution_status: Optional[str] = None,
         mode: str = MemberMode.BUILD_MODE.value,
         prompt: Optional[str] = None,
-        model_ref_json: Optional[str] = None,
+        options: Optional[str] = None,
     ) -> bool:
         """Create a new team member.
 
@@ -57,8 +60,11 @@ class MemberDao:
                 because that matches the overwhelmingly common spawn
                 path. HITT callers must pass
                 ``role=TeamRole.HUMAN_AGENT.value`` explicitly.
+            options: JSON object for extensible member configuration.
+                Current shape: ``{"model_ref": {...}, "worktree": {...},
+                "permissions_override": {...}}``.
         """
-        async with self._session_local() as session:
+        async with self._sessions.write() as session:
             try:
                 member = TeamMember(
                     member_name=member_name,
@@ -71,7 +77,7 @@ class MemberDao:
                     execution_status=execution_status,
                     mode=mode,
                     prompt=prompt,
-                    model_ref_json=model_ref_json,
+                    options=options,
                     updated_at=get_current_time(),
                 )
                 session.add(member)
@@ -91,7 +97,7 @@ class MemberDao:
         """
         from openjiuwen.agent_teams.schema.team import TeamRole
 
-        async with self._session_local() as session:
+        async with self._sessions.read() as session:
             stmt = select(TeamMember.member_name).where(
                 TeamMember.team_name == team_name,
                 TeamMember.member_name == member_name,
@@ -107,7 +113,7 @@ class MemberDao:
         """
         from openjiuwen.agent_teams.schema.team import TeamRole
 
-        async with self._session_local() as session:
+        async with self._sessions.read() as session:
             stmt = select(TeamMember.member_name).where(
                 TeamMember.team_name == team_name,
                 TeamMember.role == TeamRole.HUMAN_AGENT.value,
@@ -116,7 +122,7 @@ class MemberDao:
 
     async def get_member(self, member_name: str, team_name: str) -> Optional[TeamMember]:
         """Get member information by ID."""
-        async with self._session_local() as session:
+        async with self._sessions.read() as session:
             result = await session.execute(
                 select(TeamMember).where(
                     TeamMember.member_name == member_name,
@@ -132,7 +138,7 @@ class MemberDao:
             team_name: Team identifier.
             status: If provided, only return members with this status.
         """
-        async with self._session_local() as session:
+        async with self._sessions.read() as session:
             stmt = select(TeamMember).where(TeamMember.team_name == team_name)
             if status is not None:
                 stmt = stmt.where(TeamMember.status == status)
@@ -148,7 +154,7 @@ class MemberDao:
             Largest member update timestamp (ms), or ``0`` when no
             members exist or all rows have null ``updated_at``.
         """
-        async with self._session_local() as session:
+        async with self._sessions.read() as session:
             result = await session.execute(
                 select(func.max(TeamMember.updated_at)).where(TeamMember.team_name == team_name)
             )
@@ -162,7 +168,7 @@ class MemberDao:
         status: str,
     ) -> bool:
         """Update member status."""
-        async with self._session_local() as session:
+        async with self._sessions.write() as session:
             result = await session.execute(
                 select(TeamMember).where(
                     TeamMember.member_name == member_name,
@@ -215,7 +221,7 @@ class MemberDao:
         Returns:
             True if the transition succeeded, False otherwise.
         """
-        async with self._session_local() as session:
+        async with self._sessions.write() as session:
             result = await session.execute(
                 update(TeamMember)
                 .where(
@@ -244,7 +250,7 @@ class MemberDao:
         execution_status: str,
     ) -> bool:
         """Update member execution status."""
-        async with self._session_local() as session:
+        async with self._sessions.write() as session:
             result = await session.execute(
                 select(TeamMember).where(
                     TeamMember.member_name == member_name,
@@ -276,4 +282,34 @@ class MemberDao:
                 member_name,
                 execution_status,
             )
+            return True
+
+    async def update_member_worktree(
+        self,
+        member_name: str,
+        team_name: str,
+        worktree: MemberWorktreeOptions | None = None,
+        *,
+        isolation: Optional[str] = None,
+        worktree_path: Optional[str] = None,
+    ) -> bool:
+        """Update worktree isolation metadata for a member."""
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                select(TeamMember).where(
+                    TeamMember.member_name == member_name,
+                    TeamMember.team_name == team_name,
+                )
+            )
+            member = result.scalar_one_or_none()
+            if not member:
+                team_logger.error("Member %s not found in team %s", member_name, team_name)
+                return False
+            member.options = set_member_worktree_options(
+                member.options,
+                worktree,
+                isolation=isolation,
+                worktree_path=worktree_path,
+            )
+            await session.commit()
             return True

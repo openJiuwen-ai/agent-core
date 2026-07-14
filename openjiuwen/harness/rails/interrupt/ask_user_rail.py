@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt import InterruptRequest
 from openjiuwen.core.single_agent.rail import AgentCallbackContext
-from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.tools.ask_user import AskUserTool
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail, InterruptDecision
@@ -53,21 +52,13 @@ class AskUserRail(BaseInterruptRail):
         self.tools = [
             AskUserTool(language=language, agent_id=agent_id),
         ]
-        from openjiuwen.core.runner.runner import Runner
-        Runner.resource_mgr.add_tool(self.tools)
-
         for tool in self.tools:
-            agent.ability_manager.add(tool.card)
+            agent.ability_manager.add_ability(tool.card, tool)
 
     def uninit(self, agent):
         if self.tools:
             for tool in self.tools:
-                name = tool.card.name
-                agent.ability_manager.remove(name)
-
-                tool_id = tool.card.id
-                from openjiuwen.core.runner.runner import Runner
-                Runner.resource_mgr.remove_tool(tool_id)
+                agent.ability_manager.remove_ability(tool.card.name)
 
     async def resolve_interrupt(
             self,

@@ -177,6 +177,7 @@ def initialized_logger(mock_log_config, stdout_capture):
 
         log.logger().setLevel(logging.DEBUG)
 
+    set_session_id()  # reset any session_id leaked by a previous test
     yield
 
     set_session_id()

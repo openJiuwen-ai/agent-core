@@ -12,8 +12,10 @@ from unittest.mock import patch
 
 import pytest
 
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail, ModelCallInputs
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.runner import Runner
 
@@ -34,6 +36,32 @@ def _make_agent(agent_id: str = "test_stream_agent") -> ReActAgent:
     config.configure_prompt_template([{"role": "system", "content": "You are a helpful assistant."}])
     agent.configure(config)
     return agent
+
+
+class _StreamingFinishReasonRail(AgentRail):
+    """Capture the final model response seen by after_model_call hooks."""
+
+    def __init__(self):
+        self.finish_reasons = []
+
+    async def after_model_call(self, ctx):
+        self.finish_reasons.append(ctx.inputs.response.finish_reason)
+
+
+class _FakeContext:
+    async def get_context_window(self, **kwargs):
+        return self
+
+    def get_messages(self):
+        return []
+
+    def get_tools(self):
+        return []
+
+
+class _FakeSession:
+    async def write_stream(self, frame):
+        return None
 
 
 class TestReActAgentStreaming(unittest.IsolatedAsyncioTestCase):
@@ -84,6 +112,41 @@ class TestReActAgentStreaming(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(llm_output_frames), 0)
         streamed_text = "".join(f.payload.get("content", "") for f in llm_output_frames)
         self.assertIn("Hello from streaming!", streamed_text)
+
+    @pytest.mark.asyncio
+    async def test_streaming_preserves_finish_reason_for_after_model_call(self):
+        """The final AssistantMessage should keep the accumulated chunk finish_reason."""
+        agent = _make_agent("agent_stream_finish_reason")
+        rail = _StreamingFinishReasonRail()
+        await agent.register_rail(rail)
+
+        async def streaming_chunks(*args, **kwargs):
+            yield AssistantMessageChunk(content="partial ", finish_reason="null")
+            yield AssistantMessageChunk(content="done", finish_reason="length")
+
+        async def unexpected_invoke(*args, **kwargs):
+            raise AssertionError("invoke() should not be used for streaming")
+
+        ctx = AgentCallbackContext(
+            agent=agent,
+            session=_FakeSession(),
+            context=_FakeContext(),
+            inputs=ModelCallInputs(messages=[], tools=[]),
+            extra={"_streaming": True},
+        )
+
+        with patch(
+            "openjiuwen.core.foundation.llm.model.Model.stream",
+            side_effect=streaming_chunks,
+        ), patch(
+            "openjiuwen.core.foundation.llm.model.Model.invoke",
+            side_effect=unexpected_invoke,
+        ):
+            result = await agent._railed_model_call(ctx)
+
+        self.assertEqual(result.content, "partial done")
+        self.assertEqual(result.finish_reason, "length")
+        self.assertEqual(rail.finish_reasons, ["length"])
 
     @pytest.mark.asyncio
     async def test_no_session_falls_back_to_invoke(self):

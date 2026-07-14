@@ -197,6 +197,9 @@ class AgentCallbackEvent(str, Enum):
         AFTER_INVOKE: After agent.invoke() completes
         BEFORE_TASK_ITERATION: Before one outer task-loop iteration starts
         AFTER_TASK_ITERATION: After one outer task-loop iteration completes
+        AFTER_REACT_ITERATION: After one inner ReAct iteration completes
+            (LLM + all tool calls + ToolMessage writes). Only fires on
+            fully successful iterations, not on any break path.
 
     Model Interaction Callbacks:
         BEFORE_MODEL_CALL: Before LLM is called
@@ -212,6 +215,7 @@ class AgentCallbackEvent(str, Enum):
     AFTER_INVOKE = "after_invoke"
     BEFORE_TASK_ITERATION = "before_task_iteration"
     AFTER_TASK_ITERATION = "after_task_iteration"
+    AFTER_REACT_ITERATION = "after_react_iteration"
     BEFORE_MODEL_CALL = "before_model_call"
     AFTER_MODEL_CALL = "after_model_call"
     ON_MODEL_EXCEPTION = "on_model_exception"
@@ -442,6 +446,7 @@ EVENT_METHOD_MAP: Dict[AgentCallbackEvent, str] = {
     AgentCallbackEvent.ON_TOOL_EXCEPTION: "on_tool_exception",
     AgentCallbackEvent.BEFORE_TASK_ITERATION: "before_task_iteration",
     AgentCallbackEvent.AFTER_TASK_ITERATION: "after_task_iteration",
+    AgentCallbackEvent.AFTER_REACT_ITERATION: "after_react_iteration",
 }
 
 

@@ -19,7 +19,29 @@ from openjiuwen.agent_teams.prompts import (
 from openjiuwen.agent_teams.rails import TeamPolicyRail
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.single_agent.prompts.builder import SystemPromptBuilder
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from tests.test_logger import logger
+
+# Session id the dynamic-attachment tests bind their context to.
+_SESSION_ID = "s1"
+
+
+class _StubSession:
+    """Minimal session exposing the id the attachment writer resolves."""
+
+    def __init__(self, session_id: str) -> None:
+        self._session_id = session_id
+
+    def get_session_id(self) -> str:
+        """Return the bound session id."""
+        return self._session_id
+
+
+class _StubContext:
+    """Minimal AgentCallbackContext stand-in carrying a resolvable session."""
+
+    def __init__(self, session_id: str = _SESSION_ID) -> None:
+        self.session = _StubSession(session_id)
 
 # ---------------------------------------------------------------------------
 # Section builders
@@ -76,7 +98,7 @@ class TestTeamWorkflowSection:
         assert section.priority == 13
         content = section.render("cn")
         assert "# 工作流程" in content
-        assert "spawn_member" in content
+        assert "spawn_teammate" in content
 
     @pytest.mark.level0
     def test_leader_workflow_predefined(self):
@@ -98,7 +120,7 @@ class TestTeamWorkflowSection:
         assert section is not None
         content = section.render("cn")
         assert "混合团队模式" in content
-        assert "spawn_member" in content
+        assert "spawn_teammate" in content
 
     @pytest.mark.level0
     def test_teammate_returns_none(self):
@@ -276,10 +298,20 @@ class TestTeamMembersSection:
 
 
 class _StubAgent:
-    """Minimal stand-in exposing only the system_prompt_builder attribute."""
+    """Minimal stand-in exposing the builder + prompt attachment manager.
 
-    def __init__(self, builder: SystemPromptBuilder) -> None:
+    Dynamic team-state sections now land in the attachment manager rather
+    than the system prompt builder, so the stub agent provides a real
+    :class:`PromptAttachmentManager` for the dynamic-section tests to read.
+    """
+
+    def __init__(
+        self,
+        builder: SystemPromptBuilder,
+        attachment_manager: PromptAttachmentManager | None = None,
+    ) -> None:
         self.system_prompt_builder = builder
+        self.prompt_attachment_manager = attachment_manager
 
 
 class _StubMember:
@@ -426,8 +458,29 @@ class TestTeamPolicyRailStaticSections:
         assert TeamSectionName.PERSONA in sections
 
 
+async def _attachment_content(
+    manager: PromptAttachmentManager,
+    section: str,
+    *,
+    session_id: str = _SESSION_ID,
+) -> str | None:
+    """Return the content of one dynamic section attachment, or None."""
+    items = await manager.list_by_filter(session_id=session_id, section=section)
+    if not items:
+        return None
+    return items[0].content
+
+
 class TestTeamPolicyRailDynamicSections:
-    """Dynamic behaviour driven by the injected ``_FakeTeamBackend``."""
+    """Dynamic behaviour driven by the injected ``_FakeTeamBackend``.
+
+    The three dynamic sections (team_info / team_members / team_hitt) no
+    longer live in the system prompt builder; the rail pushes them to the
+    DeepAgent's :class:`PromptAttachmentManager` so the system-prompt
+    prefix stays cache-stable. These tests assert the dynamic sections are
+    absent from the builder and present in the attachment manager, while
+    keeping the original cache hit / miss / mtime intents intact.
+    """
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -440,7 +493,8 @@ class TestTeamPolicyRailDynamicSections:
             ],
         )
         builder = SystemPromptBuilder(language="cn")
-        agent = _StubAgent(builder)
+        manager = PromptAttachmentManager()
+        agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
             persona="PM",
@@ -450,17 +504,22 @@ class TestTeamPolicyRailDynamicSections:
             team_backend=backend,
         )
         rail.init(agent)
-        await rail.before_model_call(None)
+        await rail.before_model_call(_StubContext())
 
-        assert builder.has_section(TeamSectionName.INFO)
-        assert builder.has_section(TeamSectionName.MEMBERS)
+        # Dynamic sections are no longer in the builder.
+        assert not builder.has_section(TeamSectionName.INFO)
+        assert not builder.has_section(TeamSectionName.MEMBERS)
+        # They live in the attachment manager instead.
+        info = await _attachment_content(manager, TeamSectionName.INFO)
+        members = await _attachment_content(manager, TeamSectionName.MEMBERS)
+        assert info is not None
+        assert members is not None
         assert backend.get_info_calls == 1
         assert backend.list_members_calls == 1
         # The members section excluded the leader (self exclusion).
-        members_render = builder.get_section(TeamSectionName.MEMBERS).render("cn")
-        assert "Dev" in members_render
-        assert "Leader" not in members_render
-        logger.info("First call loaded info + members from backend")
+        assert "Dev" in members
+        assert "Leader" not in members
+        logger.info("First call pushed info + members to attachment manager")
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -470,7 +529,8 @@ class TestTeamPolicyRailDynamicSections:
             members=[_StubMember("dev1", "Dev")],
         )
         builder = SystemPromptBuilder(language="cn")
-        agent = _StubAgent(builder)
+        manager = PromptAttachmentManager()
+        agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
             persona="PM",
@@ -480,9 +540,9 @@ class TestTeamPolicyRailDynamicSections:
             team_backend=backend,
         )
         rail.init(agent)
-        await rail.before_model_call(None)
-        await rail.before_model_call(None)
-        await rail.before_model_call(None)
+        await rail.before_model_call(_StubContext())
+        await rail.before_model_call(_StubContext())
+        await rail.before_model_call(_StubContext())
 
         # Three model calls, three probes each, but only one full fetch.
         assert backend.team_mtime_calls == 3
@@ -500,7 +560,8 @@ class TestTeamPolicyRailDynamicSections:
             members_mtime=1,
         )
         builder = SystemPromptBuilder(language="cn")
-        agent = _StubAgent(builder)
+        manager = PromptAttachmentManager()
+        agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
             persona="PM",
@@ -510,16 +571,18 @@ class TestTeamPolicyRailDynamicSections:
             team_backend=backend,
         )
         rail.init(agent)
-        await rail.before_model_call(None)
-        first_render = builder.get_section(TeamSectionName.MEMBERS).render("cn")
+        await rail.before_model_call(_StubContext())
+        first_render = await _attachment_content(manager, TeamSectionName.MEMBERS)
+        assert first_render is not None
         assert "Dev" in first_render
         assert "Newbie" not in first_render
 
         # Simulate spawn_member: add a row and bump mtime.
         backend.add_member(_StubMember("dev2", "Newbie", "fresh"), mtime=2)
-        await rail.before_model_call(None)
+        await rail.before_model_call(_StubContext())
 
-        second_render = builder.get_section(TeamSectionName.MEMBERS).render("cn")
+        second_render = await _attachment_content(manager, TeamSectionName.MEMBERS)
+        assert second_render is not None
         assert "Newbie" in second_render
         assert backend.list_members_calls == 2
         logger.info("Member roster bump triggered refetch")
@@ -534,7 +597,8 @@ class TestTeamPolicyRailDynamicSections:
             members_mtime=42,
         )
         builder = SystemPromptBuilder(language="cn")
-        agent = _StubAgent(builder)
+        manager = PromptAttachmentManager()
+        agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
             persona="PM",
@@ -544,9 +608,9 @@ class TestTeamPolicyRailDynamicSections:
             team_backend=backend,
         )
         rail.init(agent)
-        await rail.before_model_call(None)
+        await rail.before_model_call(_StubContext())
         # mtime stays at 42 -- a real status update would not bump it.
-        await rail.before_model_call(None)
+        await rail.before_model_call(_StubContext())
         assert backend.list_members_calls == 1
 
     @pytest.mark.asyncio
@@ -557,7 +621,8 @@ class TestTeamPolicyRailDynamicSections:
             members=[_StubMember("dev1", "Dev")],
         )
         builder = SystemPromptBuilder(language="cn")
-        agent = _StubAgent(builder)
+        manager = PromptAttachmentManager()
+        agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
             persona="PM",
@@ -569,27 +634,36 @@ class TestTeamPolicyRailDynamicSections:
             team_workspace_path="/abs/team-workspace",
         )
         rail.init(agent)
-        await rail.before_model_call(None)
-        first = builder.get_section(TeamSectionName.INFO).render("cn")
+        await rail.before_model_call(_StubContext())
+        first = await _attachment_content(manager, TeamSectionName.INFO)
+        assert first is not None
         assert "`.team/beta/`" in first
 
         # Trigger a roster refresh (members mtime bump).  The info section
         # is independent but should keep the workspace mount on rebuild too.
         backend.set_team(_StubTeam("Beta-renamed", "Test"), mtime=99)
-        await rail.before_model_call(None)
-        second = builder.get_section(TeamSectionName.INFO).render("cn")
+        await rail.before_model_call(_StubContext())
+        second = await _attachment_content(manager, TeamSectionName.INFO)
+        assert second is not None
         assert "`.team/beta/`" in second
         assert "Beta-renamed" in second
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_priority_order_in_built_prompt(self):
+    async def test_static_sections_in_builder_dynamic_in_attachments(self):
+        """Static sections stay in the cache-stable builder prefix.
+
+        Replaces the old prompt-ordering test: dynamic sections no longer
+        appear in ``builder.build()``, so the relevant invariant is now
+        "statics in the builder, dynamics only in attachments".
+        """
         backend = _FakeTeamBackend(
             team=_StubTeam("T1", "D"),
             members=[_StubMember("dev1", "D")],
         )
         builder = SystemPromptBuilder(language="cn")
-        agent = _StubAgent(builder)
+        manager = PromptAttachmentManager()
+        agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
             persona="PM",
@@ -600,26 +674,33 @@ class TestTeamPolicyRailDynamicSections:
             team_backend=backend,
         )
         rail.init(agent)
-        await rail.before_model_call(None)
+        await rail.before_model_call(_StubContext())
 
         prompt = builder.build()
+        # Static sections render into the system prompt, ordered by priority.
         idx_role = prompt.index("# 团队角色")
         idx_workflow = prompt.index("# 工作流程")
         idx_lifecycle = prompt.index("# 团队生命周期")
         idx_persona = prompt.index("# 当前人设")
-        idx_info = prompt.index("# 团队信息")
-        idx_members = prompt.index("# 成员关系")
-        assert idx_role < idx_workflow < idx_lifecycle < idx_persona < idx_info < idx_members
+        assert idx_role < idx_workflow < idx_lifecycle < idx_persona
+        # Dynamic sections do not leak into the system prompt anymore.
+        assert "# 团队信息" not in prompt
+        assert "# 成员关系" not in prompt
+        # But are present as attachments.
+        assert await _attachment_content(manager, TeamSectionName.INFO) is not None
+        assert await _attachment_content(manager, TeamSectionName.MEMBERS) is not None
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_uninit_removes_static_and_dynamic_sections(self):
+    async def test_uninit_removes_static_sections_only(self):
+        """uninit strips static builder sections; dynamics never were there."""
         backend = _FakeTeamBackend(
             team=_StubTeam("T", "D"),
             members=[_StubMember("dev1", "Dev")],
         )
         builder = SystemPromptBuilder(language="cn")
-        agent = _StubAgent(builder)
+        manager = PromptAttachmentManager()
+        agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
             persona="PM",
@@ -629,10 +710,13 @@ class TestTeamPolicyRailDynamicSections:
             team_backend=backend,
         )
         rail.init(agent)
-        await rail.before_model_call(None)
+        await rail.before_model_call(_StubContext())
+        # Static sections registered in the builder; dynamics not in builder.
         assert builder.has_section(TeamSectionName.ROLE)
-        assert builder.has_section(TeamSectionName.INFO)
-        assert builder.has_section(TeamSectionName.MEMBERS)
+        assert not builder.has_section(TeamSectionName.INFO)
+        assert not builder.has_section(TeamSectionName.MEMBERS)
+        # Dynamics live in the attachment manager.
+        assert await _attachment_content(manager, TeamSectionName.INFO) is not None
 
         rail.uninit(agent)
         for name in (
@@ -640,7 +724,5 @@ class TestTeamPolicyRailDynamicSections:
             TeamSectionName.WORKFLOW,
             TeamSectionName.LIFECYCLE,
             TeamSectionName.PERSONA,
-            TeamSectionName.INFO,
-            TeamSectionName.MEMBERS,
         ):
             assert not builder.has_section(name)

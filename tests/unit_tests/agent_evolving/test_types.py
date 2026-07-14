@@ -126,3 +126,10 @@ class TestPendingChangeCompatibility:
         assert pending.operator_id == "skill_experience_skill-a"
         assert pending.skill_name == "skill-a"
         assert pending.change_type == "skill_experience_entry"
+        assert pending.subject_kind is None
+
+    @staticmethod
+    def test_pending_change_make_preserves_subject_kind():
+        pending = PendingChange.make("team-a", [], subject_kind="swarm-skill")
+
+        assert pending.subject_kind == "swarm-skill"

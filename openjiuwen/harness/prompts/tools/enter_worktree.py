@@ -67,7 +67,8 @@ DESCRIPTION: Dict[str, str] = {
 PARAMS_NAME: Dict[str, str] = {
     "cn": (
         '可选的 worktree 名称。每个 "/" 分隔的段只能包含字母、数字、点、下划线和短横线;'
-        "总长度最多 64 字符。若该名称对应的 worktree 已存在则直接进入; "
+        "总长度最多 64 字符。"
+        "若该名称对应的 worktree 已存在则直接进入; "
         "不提供则使用当前 session 的默认名称,首次未指定时自动生成"
     ),
     "en": (
@@ -80,14 +81,22 @@ PARAMS_NAME: Dict[str, str] = {
     ),
 }
 
+_WORKTREE_NAME_PATTERN = (
+    r"^(?=.{1,64}$)(?!(?:.*(?:^|/)\.{1,2}(?:/|$)))"
+    r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
+)
+
 
 def get_enter_worktree_input_params(language: str = "cn") -> Dict[str, Any]:
     """Return the JSON Schema for ``enter_worktree`` input_params."""
     return {
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "name": {
                 "type": "string",
+                "maxLength": 64,
+                "pattern": _WORKTREE_NAME_PATTERN,
                 "description": PARAMS_NAME.get(language, PARAMS_NAME["cn"]),
             },
         },

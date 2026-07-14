@@ -17,10 +17,13 @@ from openjiuwen.agent_evolving.experience.common import (
     execute_simplify_actions,
     make_pending_change,
     reject_pending_change,
-    request_rebuild_context,
 )
-from openjiuwen.agent_evolving.experience.lifecycle import LocalApplyPreview, PendingCommitResult, RebuildRequest
+from openjiuwen.agent_evolving.experience.draft_schema import normalize_evolution_subject_kind
+from openjiuwen.agent_evolving.experience.lifecycle import LocalApplyPreview, PendingCommitResult
+from openjiuwen.agent_evolving.experience.query import ExperienceQueryService
+from openjiuwen.agent_evolving.experience.rebuild import ExperienceRebuildService
 from openjiuwen.agent_evolving.experience.scorer import ExperienceScorer
+from openjiuwen.agent_evolving.experience.submission import ExperienceSubmissionService
 from openjiuwen.agent_evolving.experience.types import (
     ExperienceApplyResult,
     ExperienceApprovalRequest,
@@ -39,6 +42,7 @@ from openjiuwen.agent_evolving.protocols import (
 )
 from openjiuwen.agent_evolving.types import ApplyResult, UpdateValue
 from openjiuwen.agent_evolving.update_execution import execute_updates
+from openjiuwen.agent_evolving.trajectory.types import Trajectory
 from openjiuwen.core.common.logging import logger
 
 if TYPE_CHECKING:
@@ -46,96 +50,55 @@ if TYPE_CHECKING:
 
 
 class ExperienceManager:
-    """Orchestrates the online lifecycle for skill and team-skill evolution."""
+    """Orchestrates the online lifecycle for skill and team-skill evolution.
 
-    _SUPPORTED_KINDS = {"skill", "team-skill"}
-    _REBUILD_PROMPT_TEMPLATES = {
-        "skill": {
-            "cn": (
-                "你收到了一个技能的重建请求。旧版本已归档，请执行以下步骤：\n\n"
-                "## 已筛选的历史演进经验（score >= {min_score}）\n\n"
-                "{evolution_records}\n\n"
-                "## 用户意图\n\n"
-                "{user_intent}\n\n"
-                "## 执行要求\n\n"
-                "请调用 skill-creator 技能：\n"
-                "1. 基于以上历史经验和用户意图，生成新的 SKILL.md\n"
-                "2. 重置 evolutions.json 为空列表\n\n"
-                "旧版本已归档至 archive/ 目录，可直接创建新版本。"
-            ),
-            "en": (
-                "You received a skill rebuild request. Old version has been archived. Please follow these steps:\n\n"
-                "## Filtered Historical Evolution Records (score >= {min_score})\n\n"
-                "{evolution_records}\n\n"
-                "## User Intent\n\n"
-                "{user_intent}\n\n"
-                "## Execution Requirements\n\n"
-                "Please invoke the skill-creator skill:\n"
-                "1. Generate new SKILL.md based on the historical records and user intent above\n"
-                "2. Reset evolutions.json to empty list\n\n"
-                "Old version has been archived to archive/ directory, you can directly create the new version."
-            ),
-        },
-        "team-skill": {
-            "cn": (
-                "你收到了一个团队技能的重建请求。旧版本已归档，请执行以下步骤：\n\n"
-                "## 已筛选的历史演进经验（score >= {min_score}）\n\n"
-                "{evolution_records}\n\n"
-                "## 用户意图\n\n"
-                "{user_intent}\n\n"
-                "## 执行要求\n\n"
-                "请调用 teamskill-creator 技能：\n"
-                "1. 基于以上历史经验和用户意图，生成新的 SKILL.md\n"
-                "2. 重置 evolutions.json 为空列表\n\n"
-                "旧版本已归档至 archive/ 目录，可直接创建新版本。"
-            ),
-            "en": (
-                "You received a team skill rebuild request. Old version has been archived. "
-                "Please follow these steps:\n\n"
-                "## Filtered Historical Evolution Records (score >= {min_score})\n\n"
-                "{evolution_records}\n\n"
-                "## User Intent\n\n"
-                "{user_intent}\n\n"
-                "## Execution Requirements\n\n"
-                "Please invoke the teamskill-creator skill:\n"
-                "1. Generate new SKILL.md based on the historical records and user intent above\n"
-                "2. Reset evolutions.json to empty list\n\n"
-                "Old version has been archived to archive/ directory, you can directly create the new version."
-            ),
-        },
-    }
-    _DEFAULT_REBUILD_INTENTS = {
-        "skill": {
-            "cn": "根据以上演进经验，对技能进行全面优化和重建。",
-            "en": "Based on the evolution records above, perform a comprehensive rebuild of the skill.",
-        },
-        "team-skill": {
-            "cn": "根据以上演进经验，对团队技能进行全面优化和重建。",
-            "en": "Based on the evolution records above, perform a comprehensive rebuild of the team skill.",
-        },
-    }
+    New code that only queries experiences or applies agent-submitted drafts
+    should depend on ExperienceQueryService or ExperienceSubmissionService
+    directly. Keep this manager for online approval and governance lifecycle
+    orchestration that owns pending state.
+    """
 
     def __init__(
         self,
         *,
         store: EvolutionStore,
         scorer: ExperienceScorer,
-        kind: str = "skill",
         language: str = "cn",
         skill_ops: Optional[Dict[str, SkillExperienceOperator]] = None,
         pending_approval_snapshots: Optional[Dict[str, PendingChange]] = None,
         pending_governance: Optional[Dict[str, Dict[str, Any]]] = None,
+        query_service: ExperienceQueryService | None = None,
+        submission_service: ExperienceSubmissionService | None = None,
+        rebuild_service: ExperienceRebuildService | None = None,
+        subject_kind: str | None = None,
     ) -> None:
-        if kind not in self._SUPPORTED_KINDS:
-            raise ValueError(f"unsupported experience manager kind: {kind}")
         self._store = store
         self._scorer = scorer
-        self._kind = kind
         self._language = language
+        self._subject_kind = normalize_evolution_subject_kind(subject_kind) if subject_kind else None
         self._skill_ops = skill_ops if skill_ops is not None else {}
         self._pending_approval_snapshots: Dict[str, PendingChange] = {}
         self._pending_governance = pending_governance if pending_governance is not None else {}
         self.bind_pending_approval_snapshots(pending_approval_snapshots)
+        self._query_service = self._coerce_service(
+            service=query_service,
+            service_name="query_service",
+            default_factory=lambda: ExperienceQueryService(store=self._store),
+        )
+        self._submission_service = self._coerce_service(
+            service=submission_service,
+            service_name="submission_service",
+            default_factory=lambda: ExperienceSubmissionService(
+                store=self._store,
+                pending_approval_snapshots=self._pending_approval_snapshots,
+            ),
+        )
+        self._rebuild_service = self._coerce_service(
+            service=rebuild_service,
+            service_name="rebuild_service",
+            default_factory=lambda: ExperienceRebuildService(store=self._store),
+        )
+        self.bind_pending_approval_snapshots(self._pending_approval_snapshots)
 
     @property
     def pending_approval_snapshots(self) -> Dict[str, PendingChange]:
@@ -149,12 +112,97 @@ class ExperienceManager:
     def skill_ops(self) -> Dict[str, SkillExperienceOperator]:
         return self._skill_ops
 
+    @property
+    def experience_query_service(self) -> ExperienceQueryService:
+        return self._query_service
+
+    @property
+    def experience_submission_service(self) -> ExperienceSubmissionService:
+        return self._submission_service
+
+    @property
+    def rebuild_service(self) -> ExperienceRebuildService:
+        return self._rebuild_service
+
     def bind_pending_approval_snapshots(
         self,
         pending_approval_snapshots: Optional[Dict[str, PendingChange]],
     ) -> None:
         """Bind the caller-owned pending snapshot store."""
         self._pending_approval_snapshots = pending_approval_snapshots if pending_approval_snapshots is not None else {}
+        service = getattr(self, "_submission_service", None)
+        bind = getattr(service, "bind_pending_approval_snapshots", None)
+        if callable(bind):
+            bind(self._pending_approval_snapshots)
+
+    @staticmethod
+    def _coerce_service(
+        service: Any,
+        *,
+        service_name: str,
+        default_factory,
+    ) -> Any:
+        if service is None:
+            return default_factory()
+        if isinstance(service, dict):
+            raise TypeError(f"{service_name} must be a shared service instance, not a per-kind mapping")
+        return service
+
+    async def list_skill_experiences(
+        self,
+        subject: dict[str, Any],
+        *,
+        min_score: Optional[float] = None,
+        limit: int = 20,
+        cursor: Optional[str] = None,
+        target: Optional[str] = None,
+        section: Optional[str] = None,
+        query: Optional[str] = None,
+        sort: str = "score_desc",
+    ) -> dict[str, Any]:
+        """Return bounded structured experience metadata for agent reasoning."""
+        return await self._query_service.list_experiences(
+            subject,
+            min_score=min_score,
+            limit=limit,
+            cursor=cursor,
+            target=target,
+            section=section,
+            query=query,
+            sort=sort,
+        )
+
+    async def read_agent_experiences(
+        self,
+        subject: dict[str, Any],
+        *,
+        record_ids: list[str],
+        max_content_chars: int = 2000,
+    ) -> dict[str, Any]:
+        """Read selected full experience records for agent reasoning."""
+        return await self._query_service.read_experiences(
+            subject,
+            record_ids=record_ids,
+            max_content_chars=max_content_chars,
+        )
+
+    async def apply_experience_drafts(
+        self,
+        subject: dict[str, Any],
+        drafts: list[dict[str, Any]],
+        *,
+        source: str = "agent_evolve_tool",
+    ) -> dict[str, Any]:
+        """Persist approved agent-submitted experience drafts."""
+        return await self._submission_service.apply_experience_drafts(subject, drafts, source=source)
+
+    async def apply_simplify_drafts(
+        self,
+        subject: dict[str, Any],
+        actions: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Execute approved agent-submitted simplify actions."""
+        return await self._submission_service.apply_simplify_actions(subject, actions)
 
     def stage_records(
         self,
@@ -168,7 +216,7 @@ class ExperienceManager:
         signal_source: Optional[str] = None,
         change_type: str = SKILL_EXPERIENCE_ENTRY,
         request_id_prefix: Optional[str] = None,
-        trajectory: Any | None = None,
+        trajectory: Trajectory | None = None,
         messages: Optional[List[dict]] = None,
         is_shared_records: bool = False,
     ) -> ExperienceApprovalRequest:
@@ -231,7 +279,7 @@ class ExperienceManager:
         records: list[EvolutionRecord],
         change_type: str,
         request_id_prefix: Optional[str] = None,
-        trajectory: Any | None = None,
+        trajectory: Trajectory | None = None,
         messages: Optional[List[dict]] = None,
         is_shared_records: bool = False,
     ) -> ExperienceApprovalRequest:
@@ -267,7 +315,7 @@ class ExperienceManager:
         proposal: ExperienceProposal,
         preview: LocalApplyPreview,
         request_id_prefix: Optional[str] = None,
-        trajectory: Any | None = None,
+        trajectory: Trajectory | None = None,
         messages: Optional[List[dict]] = None,
         is_shared_records: bool = False,
     ) -> ExperienceApprovalRequest:
@@ -386,12 +434,12 @@ class ExperienceManager:
         """Compatibility hook for executing online preview updates."""
         return execute_updates(operators, updates)
 
-    @staticmethod
     def _make_pending_change_from_preview(
+        self,
         preview: LocalApplyPreview,
         *,
         request_id_prefix: Optional[str] = None,
-        trajectory: Any | None = None,
+        trajectory: Trajectory | None = None,
         messages: Optional[List[dict]] = None,
         is_shared_records: bool = False,
     ) -> PendingChange:
@@ -399,6 +447,7 @@ class ExperienceManager:
             preview.skill_name,
             preview.records,
             request_id_prefix=request_id_prefix,
+            subject_kind=self._subject_kind,
             trajectory=trajectory,
             messages=messages,
             is_shared_records=is_shared_records,
@@ -466,27 +515,25 @@ class ExperienceManager:
     ) -> Optional[str]:
         """Stage simplify governance for a skill."""
         started_at = time.monotonic()
-        if not self._store.skill_exists(skill_name):
+        subject_kind = self._subject_kind
+        if not self._store.skill_exists(skill_name, subject_kind=subject_kind):
             logger.info(
-                "[ExperienceManager] request_simplify skipped: kind=%s skill=%s reason=skill_not_found",
-                self._kind,
+                "[ExperienceManager] request_simplify skipped: skill=%s reason=skill_not_found",
                 skill_name,
             )
             return None
         if not self._store.skill_definition_exists(skill_name):
             logger.info(
-                "[ExperienceManager] request_simplify skipped: kind=%s skill=%s reason=skill_definition_not_found",
-                self._kind,
+                "[ExperienceManager] request_simplify skipped: skill=%s reason=skill_definition_not_found",
                 skill_name,
             )
             return None
 
-        evo_log = await self._store.load_full_evolution_log(skill_name)
+        evo_log = await self._store.load_full_evolution_log(skill_name, subject_kind=subject_kind)
         records = evo_log.entries
         if not records:
             logger.info(
-                "[ExperienceManager] request_simplify skipped: kind=%s skill=%s reason=no_records",
-                self._kind,
+                "[ExperienceManager] request_simplify skipped: skill=%s reason=no_records",
                 skill_name,
             )
             return None
@@ -494,8 +541,7 @@ class ExperienceManager:
         content = await self._store.read_skill_content(skill_name, strict=True)
         summary = self._store.extract_description_from_skill_md(content)
         logger.info(
-            "[ExperienceManager] request_simplify loaded records: kind=%s skill=%s records=%d",
-            self._kind,
+            "[ExperienceManager] request_simplify loaded records: skill=%s records=%d",
             skill_name,
             len(records),
         )
@@ -507,8 +553,7 @@ class ExperienceManager:
         )
         if not actions:
             logger.info(
-                "[ExperienceManager] request_simplify finished without actions: kind=%s skill=%s elapsed=%.1fs",
-                self._kind,
+                "[ExperienceManager] request_simplify finished without actions: skill=%s elapsed=%.1fs",
                 skill_name,
                 time.monotonic() - started_at,
             )
@@ -518,11 +563,11 @@ class ExperienceManager:
         self._pending_governance[request_id] = {
             "kind": "simplify",
             "skill_name": skill_name,
+            "subject_kind": subject_kind,
             "actions": actions,
         }
         logger.info(
-            "[ExperienceManager] request_simplify staged: kind=%s skill=%s request=%s actions=%d elapsed=%.1fs",
-            self._kind,
+            "[ExperienceManager] request_simplify staged: skill=%s request=%s actions=%d elapsed=%.1fs",
             skill_name,
             request_id,
             len(actions),
@@ -539,41 +584,45 @@ class ExperienceManager:
             store=self._store,
             skill_name=gov["skill_name"],
             actions=gov["actions"],
+            subject_kind=gov.get("subject_kind"),
         )
 
     async def reject_simplify(self, request_id: str) -> None:
         """Discard staged simplify governance."""
         self._pending_governance.pop(request_id, None)
 
-    def _get_rebuild_template(self) -> str:
-        return self._REBUILD_PROMPT_TEMPLATES[self._kind].get(
-            self._language,
-            self._REBUILD_PROMPT_TEMPLATES[self._kind]["en"],
-        )
-
-    def _get_default_rebuild_intent(self) -> str:
-        return self._DEFAULT_REBUILD_INTENTS[self._kind].get(
-            self._language,
-            self._DEFAULT_REBUILD_INTENTS[self._kind]["en"],
-        )
-
     async def request_rebuild(
         self,
         skill_name: str,
+        *,
+        subject: dict[str, Any] | None = None,
         user_intent: Optional[str] = None,
         min_score: float = 0.5,
+        max_context_records: int = 40,
+        max_context_chars: int = 20000,
     ) -> Optional[str]:
         """Prepare a rebuild prompt for a skill."""
-        context = await request_rebuild_context(
-            self._store,
-            RebuildRequest(skill_name=skill_name, user_intent=user_intent, min_score=min_score),
-            format_records=lambda records: self.format_evolution_records(records, language=self._language),
-            default_intent=self._get_default_rebuild_intent(),
-            template=self._get_rebuild_template(),
+        default_kind = self._subject_kind or "skill"
+        resolved_subject: dict[str, Any] = (
+            subject if subject is not None else {"kind": default_kind, "name": skill_name}
+        )
+        context = await self._rebuild_service.prepare_rebuild_context(
+            resolved_subject,
+            user_intent=user_intent,
+            min_score=min_score,
+            max_context_records=max_context_records,
+            max_context_chars=max_context_chars,
         )
         if context is None:
             return None
-        return str(context["prompt"])
+        from openjiuwen.harness.rails.evolution.commands import build_rebuild_command_prompt
+
+        return build_rebuild_command_prompt(
+            subject=context["subject"],
+            user_intent=user_intent,
+            rebuild_context=context,
+            language=self._language,
+        )
 
     @staticmethod
     def _to_apply_result(skill_name: str, result: PendingCommitResult) -> ExperienceApplyResult:

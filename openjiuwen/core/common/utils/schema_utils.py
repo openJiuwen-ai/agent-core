@@ -365,7 +365,7 @@ class SchemaUtils:
         type_mapping = {
             "string": str,
             "integer": int,
-            "number": float,
+            "number": typing.Union[int, float],
             "boolean": bool,
             "array": List,
             "object": Dict,
@@ -501,6 +501,12 @@ class SchemaUtils:
         Returns:
             JSON Schema type string or list of type strings
         """
+        origin = typing.get_origin(python_type)
+        if origin is typing.Union:
+            union_args = {arg for arg in typing.get_args(python_type) if arg is not type(None)}
+            if union_args == {int, float}:
+                return "number"
+
         type_str = str(python_type)
 
         # Map Python types to JSON Schema types

@@ -29,6 +29,7 @@ Card + Config 设计模式。与老接口 (create_react_agent_config) 区分。
 - 新接口: 本文件使用 AgentCard + ReActAgentConfig + configure()
 """
 import asyncio
+import json
 import os
 import unittest
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -72,7 +73,7 @@ class TestNewReActAgentConfig(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.prompt_template_name, "")
         self.assertEqual(config.prompt_template, [])
         self.assertEqual(config.context_engine_config, ContextEngineConfig(
-            max_context_message_num=200, default_window_round_num=10
+            max_context_message_num=None, default_window_round_num=None
         ))
         self.assertEqual(config.max_iterations, 5)
 
@@ -435,7 +436,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(agent.system_prompt_builder, agent.prompt_builder)
         identity = agent.prompt_builder.get_section("identity")
-        skills = agent.prompt_builder.get_section("skills")
+        skills = agent.prompt_builder.get_section("legacy_skills")
         self.assertIsNotNone(identity)
         self.assertIsNotNone(skills)
         self.assertEqual(identity.render("cn"), "你当前处理的任务是：计算1+2")
@@ -994,6 +995,75 @@ class TestAbilityManagerFixes(unittest.IsolatedAsyncioTestCase):
         remaining = self.ability_manager.list()
         self.assertEqual(len(remaining), 1)
         self.assertEqual(remaining[0].name, "tool3")
+
+    @patch('openjiuwen.core.runner.Runner.resource_mgr.get_tool')
+    async def test_execute_repairs_tool_call_arguments_in_place(self, mock_get_tool):
+        tool = MagicMock()
+        tool.invoke = AsyncMock(return_value={"ok": True})
+        mock_get_tool.return_value = tool
+        self.ability_manager.add(ToolCard(id="repair_tool", name="repair_tool", description="repair"))
+        tool_call = ToolCall(
+            id="call_repair",
+            type="function",
+            name="repair_tool",
+            arguments='{"todos":[{"step_id":1,"status":"done"}]',
+        )
+
+        result, tool_message = await self.ability_manager._execute_single_tool_call(  # pylint: disable=protected-access
+            tool_call,
+            session=None,
+        )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(tool_message.tool_call_id, "call_repair")
+        tool.invoke.assert_awaited_once_with(
+            {"todos": [{"step_id": 1, "status": "done"}]},
+            session=None,
+        )
+        self.assertEqual(
+            json.loads(tool_call.arguments),
+            {"todos": [{"step_id": 1, "status": "done"}]},
+        )
+
+    @patch('openjiuwen.core.runner.Runner.resource_mgr.get_tool')
+    async def test_execute_leaves_valid_tool_call_arguments_unchanged(self, mock_get_tool):
+        tool = MagicMock()
+        tool.invoke = AsyncMock(return_value={"ok": True})
+        mock_get_tool.return_value = tool
+        self.ability_manager.add(ToolCard(id="valid_tool", name="valid_tool", description="valid"))
+        arguments = '{ "query" : "hello" }'
+        tool_call = ToolCall(
+            id="call_valid",
+            type="function",
+            name="valid_tool",
+            arguments=arguments,
+        )
+
+        await self.ability_manager._execute_single_tool_call(  # pylint: disable=protected-access
+            tool_call,
+            session=None,
+        )
+
+        self.assertEqual(tool_call.arguments, arguments)
+        tool.invoke.assert_awaited_once_with({"query": "hello"}, session=None)
+
+    async def test_execute_rejects_unrepairable_tool_call_arguments(self):
+        self.ability_manager.add(ToolCard(id="bad_tool", name="bad_tool", description="bad"))
+        tool_call = ToolCall(
+            id="call_bad",
+            type="function",
+            name="bad_tool",
+            arguments='{"query": "unterminated}',
+        )
+
+        with self.assertRaises(Exception) as exc_info:
+            await self.ability_manager._execute_single_tool_call(  # pylint: disable=protected-access
+                tool_call,
+                session=None,
+            )
+
+        self.assertIn("Invalid tool arguments JSON", str(exc_info.exception))
+        self.assertEqual(tool_call.arguments, '{"query": "unterminated}')
 
     @patch('openjiuwen.core.runner.Runner.resource_mgr.get_mcp_tool_infos')
     async def test_list_tool_info_adds_mcp_tools_to_tools_dict(self, mock_get_mcp_tool_infos):

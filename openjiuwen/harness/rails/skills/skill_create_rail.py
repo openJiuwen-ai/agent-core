@@ -20,7 +20,7 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
 
 _FOLLOW_UP_PROMPT_CN = (
-    "**重要：你必须先向用户确认，，不可跳过此步骤。**\n"
+    "**重要：你必须先向用户确认，不可跳过此步骤。**\n"
     "系统检测到对话中存在可复用模式，可能值得创建新技能。请按以下步骤执行：\n"
     "1. 直接询问或调用 ask_user 工具向用户确认：\n"
     "   - 问题：\"我检测到您可能值得创建一个新技能。是否创建？\"\n"
@@ -127,15 +127,17 @@ class SkillCreateRail(EvolutionRail):
             logger.debug("[SkillCreateRail] trajectory builder is None, skipping")
             return False
 
-        tool_calls: list[str] = []
+        total_calls = 0
+        unique_tools: set[str] = set()
         for step in self._builder.steps:
             if step.kind == "tool" and step.detail:
                 tool_name = getattr(step.detail, "tool_name", "")
                 if tool_name:
-                    tool_calls.append(tool_name)
-
-        total_calls = len(tool_calls)
-        unique_tools = len(set(tool_calls))
+                    if self._normalize_tool_name(tool_name) == "skill_tool":
+                        logger.info("[SkillCreateRail] skill_tool call detected, skipping creation proposal")
+                        return False
+                    total_calls += 1
+                    unique_tools.add(tool_name)
 
         if total_calls < self._tool_call_threshold:
             logger.debug(
@@ -145,10 +147,11 @@ class SkillCreateRail(EvolutionRail):
             )
             return False
 
-        if unique_tools < self._tool_diversity_threshold:
+        unique_tool_count = len(unique_tools)
+        if unique_tool_count < self._tool_diversity_threshold:
             logger.debug(
                 "[SkillCreateRail] unique tool count %d below threshold %d, skipping",
-                unique_tools,
+                unique_tool_count,
                 self._tool_diversity_threshold,
             )
             return False
@@ -157,11 +160,19 @@ class SkillCreateRail(EvolutionRail):
             "[SkillCreateRail] skill creation threshold met: %d tool calls, %d unique tools "
             "(thresholds: %d calls, %d unique)",
             total_calls,
-            unique_tools,
+            unique_tool_count,
             self._tool_call_threshold,
             self._tool_diversity_threshold,
         )
         return True
+
+    @staticmethod
+    def _normalize_tool_name(tool_name: str) -> str:
+        """Normalize tool names to base names to support namespaced variants."""
+        tool = (tool_name or "").strip()
+        if "." in tool:
+            tool = tool.rsplit(".", 1)[-1]
+        return tool
 
 
 __all__ = ["SkillCreateRail"]

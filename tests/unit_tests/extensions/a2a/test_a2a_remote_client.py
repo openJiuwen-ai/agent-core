@@ -26,30 +26,6 @@ class TestA2ARemoteClient:
                 )
             )
 
-    async def test_a2a_remote_client_should_pass_polling_to_a2a_client(self, monkeypatch):
-        captured = {}
-
-        class FakeA2AClient:
-            def __init__(self, **kwargs):
-                captured["init_kwargs"] = kwargs
-
-        monkeypatch.setattr(
-            "openjiuwen.extensions.a2a.a2a_remote_client.A2AClient",
-            FakeA2AClient,
-        )
-
-        A2ARemoteClient(
-            RemoteClientConfig(
-                id="a2a-agent",
-                protocol=ProtocolEnum.A2A,
-                url="http://127.0.0.1:41241",
-                kwargs={"card": AgentCard(id="a2a-agent", name="a2a-agent"), "polling": True},
-            )
-        )
-
-        assert captured["init_kwargs"]["polling"] is True
-        assert captured["init_kwargs"]["card"] is not None
-
     async def test_a2a_remote_client_should_pass_card_from_kwargs_to_a2a_client(self, monkeypatch):
         captured = {}
 
@@ -72,7 +48,6 @@ class TestA2ARemoteClient:
             )
         )
 
-        assert captured["init_kwargs"]["polling"] is False
         assert captured["init_kwargs"]["card"] is not None
 
     async def test_invoke_should_return_agent_result_from_a2a_client(self, monkeypatch):
@@ -110,7 +85,6 @@ class TestA2ARemoteClient:
         finally:
             await client.stop()
 
-        assert captured["init_kwargs"]["polling"] is False
         assert captured["init_kwargs"]["card"] is not None
         assert captured["invoke_inputs"]["query"] == "hello"
         assert response.status == TaskStatus.COMPLETED
@@ -196,7 +170,6 @@ class TestA2ARemoteClient:
                 "url": "http://127.0.0.1:41241",
                 "kwargs": {
                     "card": AgentCard(id="a2a-agent", name="a2a-agent"),
-                    "polling": True,
                 },
             },
         )
@@ -204,7 +177,6 @@ class TestA2ARemoteClient:
         assert response.status == TaskStatus.COMPLETED
         assert response.sessionId == "conv-1"
         assert response.artifacts[0].parts[0].text == "invoke ok"
-        assert agent.client.client.kwargs["polling"] is True
 
     async def test_remote_agent_should_bootstrap_a2a_registration_without_preimport(self, monkeypatch):
         from openjiuwen.core.runner.drunner import remote_client as remote_client_module

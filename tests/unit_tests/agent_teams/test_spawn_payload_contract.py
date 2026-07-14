@@ -77,13 +77,19 @@ def test_spawn_payload_coordination_keys_are_frozen():
     assert payload["query"] == "hello"
 
 
-def test_spawn_payload_query_default_when_no_initial_message():
+def test_spawn_payload_query_empty_when_no_initial_message():
+    """No initial_message -> empty query (no fabricated placeholder).
+
+    An empty query signals "no first round": the spawned member comes up,
+    subscribes, and idles until a real mailbox message arrives. The
+    ``query`` key is still present to keep the wire schema frozen.
+    """
     builder = _make_builder()
     ctx = _make_member_ctx("worker_a")
 
     payload = builder.build_spawn_payload(ctx)
 
-    assert payload["query"] == "Join the team and wait for your first assignment."
+    assert payload["query"] == ""
 
 
 def test_spawn_payload_with_empty_team_spec():
@@ -127,3 +133,24 @@ def test_build_spawn_config_payload_has_spec_and_context():
     assert isinstance(spawn_config.payload["context"], dict)
     assert spawn_config.payload["context"]["member_name"] == "worker_a"
     assert spawn_config.payload["context"]["role"] == "teammate"
+
+
+def test_worktree_spawn_context_only_carries_cwd_override():
+    """Worktree host metadata stays out of the child runtime context."""
+    pytest.importorskip("openjiuwen.core.runner.runner")
+    builder = _make_builder()
+    ctx = _make_member_ctx("worker_a").model_copy(
+        update={"worktree_path": "/tmp/repo/.worktrees/agent-t-worker-a-deadbeef"}
+    )
+
+    spawn_config = builder.build_spawn_config(ctx)
+
+    context = spawn_config.payload["context"]
+    assert context["worktree_path"] == "/tmp/repo/.worktrees/agent-t-worker-a-deadbeef"
+    for key in (
+        "isolation",
+        "worktree_name",
+        "worktree_branch",
+        "worktree_head_commit",
+    ):
+        assert key not in context

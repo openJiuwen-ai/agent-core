@@ -21,6 +21,7 @@ from typing import (
 
 from pydantic import BaseModel
 
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.schema.status import (
     EXECUTION_TRANSITIONS,
     MEMBER_TRANSITIONS,
@@ -39,6 +40,10 @@ from openjiuwen.agent_teams.tools.database import (
     TASK_DEPENDENCY_REJECT_STATUSES,
     TASK_TERMINAL_STATUSES,
     detect_cycle_in_adjacency,
+)
+from openjiuwen.agent_teams.tools.member_options import (
+    MemberWorktreeOptions,
+    set_member_worktree_options,
 )
 from openjiuwen.agent_teams.tools.models import (
     Team,
@@ -133,6 +138,7 @@ class _MemMessage:
         content: str,
         timestamp: int,
         broadcast: bool,
+        protocol: str = "plain",
         to_member_name: Optional[str] = None,
         is_read: Optional[bool] = False,
     ) -> None:
@@ -142,6 +148,7 @@ class _MemMessage:
         self.content = content
         self.timestamp = timestamp
         self.broadcast = broadcast
+        self.protocol = protocol
         self.to_member_name = to_member_name
         self.is_read = is_read
 
@@ -295,6 +302,15 @@ class InMemoryTeamDatabase:
     async def get_team(self, team_name: str) -> Optional[Team]:
         return self._teams.get(team_name)
 
+    async def team_exists(self, team_name: str) -> bool:
+        """Check whether a team row exists in the in-memory store.
+
+        Mirrors ``TeamDao.team_exists`` for drop-in API parity so callers
+        like ``_inspect_session`` can use ``db.team.team_exists`` without
+        branching on the storage backend.
+        """
+        return team_name in self._teams
+
     async def delete_team(self, team_name: str) -> bool:
         """Delete a team and cascade-purge its members, tasks, and messages."""
         async with self._lock:
@@ -323,10 +339,16 @@ class InMemoryTeamDatabase:
 
     async def force_delete_team_session(self, team_name: str) -> bool:
         """Force delete a team's records and clear in-memory session data."""
+        from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
+
+        session_id = get_session_id()
+        cleanup_success = True
+        if session_id:
+            cleanup_success = await remove_session_worktrees(team_name, session_id)
         deleted = await self.delete_team(team_name)
         await self.drop_cur_session_tables()
         team_logger.info("Force deleted team session data for {}", team_name)
-        return deleted
+        return deleted and cleanup_success
 
     # =====================================================================
     # Member Operations
@@ -347,7 +369,7 @@ class InMemoryTeamDatabase:
         execution_status: Optional[str] = None,
         mode: str = MemberMode.BUILD_MODE.value,
         prompt: Optional[str] = None,
-        model_ref_json: Optional[str] = None,
+        options: Optional[str] = None,
     ) -> bool:
         async with self._lock:
             if member_name in self._members:
@@ -364,10 +386,32 @@ class InMemoryTeamDatabase:
                 execution_status=execution_status,
                 mode=mode,
                 prompt=prompt,
-                model_ref_json=model_ref_json,
+                options=options,
                 updated_at=self.get_current_time(),
             )
             team_logger.info("Member %s created", member_name)
+            return True
+
+    async def update_member_worktree(
+        self,
+        member_name: str,
+        team_name: str,
+        worktree: MemberWorktreeOptions | None = None,
+        *,
+        isolation: Optional[str] = None,
+        worktree_path: Optional[str] = None,
+    ) -> bool:
+        async with self._lock:
+            member = self._members.get(member_name)
+            if member is None or member.team_name != team_name:
+                team_logger.error("Member %s not found in team %s", member_name, team_name)
+                return False
+            member.options = set_member_worktree_options(
+                member.options,
+                worktree,
+                isolation=isolation,
+                worktree_path=worktree_path,
+            )
             return True
 
     async def is_human_agent(self, team_name: str, member_name: str) -> bool:
@@ -922,6 +966,7 @@ class InMemoryTeamDatabase:
         to_member_name: Optional[str] = None,
         broadcast: bool = False,
         is_read: bool = False,
+        protocol: str = "plain",
     ) -> bool:
         async with self._lock:
             for m in self._messages:
@@ -937,6 +982,7 @@ class InMemoryTeamDatabase:
                     to_member_name=to_member_name,
                     timestamp=self.get_current_time(),
                     broadcast=broadcast,
+                    protocol=protocol,
                     # Broadcast rows leave is_read NULL — per-member read
                     # state lives in _MemReadStatus instead.
                     is_read=None if broadcast else is_read,
@@ -1061,3 +1107,40 @@ class InMemoryTeamDatabase:
                 msg.is_read = True
             team_logger.debug("Message %s marked as read by %s", message_id, member_name)
             return True
+
+    async def mark_messages_read(self, message_ids: list[str], member_name: str) -> int:
+        """Mark several messages read for one member (in-memory batch).
+
+        Mirrors the SQL backend's batch API so callers share one code
+        path. Missing ids are skipped; returns the count actually marked.
+        """
+        if not message_ids:
+            return 0
+        async with self._lock:
+            if member_name not in self._members:
+                team_logger.error("Member %s not found", member_name)
+                return 0
+            by_id = {m.message_id: m for m in self._messages}
+            marked = 0
+            for message_id in message_ids:
+                msg = by_id.get(message_id)
+                if not msg:
+                    team_logger.error("Message %s not found", message_id)
+                    continue
+                if msg.broadcast:
+                    key = (member_name, msg.team_name)
+                    rs = self._read_status.get(key)
+                    if rs is None:
+                        self._read_status[key] = _MemReadStatus(
+                            member_name=member_name,
+                            team_name=msg.team_name,
+                            read_at=msg.timestamp,
+                        )
+                    else:
+                        rs.read_at = msg.timestamp
+                else:
+                    msg.is_read = True
+                marked += 1
+            if marked:
+                team_logger.debug("Marked %d messages read by %s", marked, member_name)
+            return marked

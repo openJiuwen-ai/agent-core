@@ -5,7 +5,6 @@ import asyncio
 import datetime
 import os
 import pathlib
-import weakref
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, Literal, List, AsyncIterator, Iterator
@@ -30,6 +29,7 @@ from openjiuwen.core.sys_operation.result import (
     FileSystemItem, FileSystemData, SearchFilesData, DownloadFileChunkData, UploadFileChunkData
 )
 from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
+from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
 
 
 class _ListItemsSpec(BaseModel):
@@ -127,67 +127,9 @@ class _ErrorLogParams:
     start_time: Optional[float] = None
 
 
-class _AsyncReadWriteLock:
-    """Async read-write lock: concurrent readers, exclusive writers."""
-
-    def __init__(self):
-        self._condition = asyncio.Condition()
-        self._readers = 0
-        self._writer_active = False
-        self._waiting_writers = 0
-
-    async def acquire_read(self):
-        async with self._condition:
-            while self._writer_active or self._waiting_writers > 0:
-                await self._condition.wait()
-            self._readers += 1
-
-    async def release_read(self):
-        async with self._condition:
-            self._readers -= 1
-            if self._readers == 0:
-                self._condition.notify_all()
-
-    async def acquire_write(self):
-        async with self._condition:
-            self._waiting_writers += 1
-            try:
-                while self._writer_active or self._readers > 0:
-                    await self._condition.wait()
-                self._writer_active = True
-            finally:
-                self._waiting_writers -= 1
-
-    async def release_write(self):
-        async with self._condition:
-            self._writer_active = False
-            self._condition.notify_all()
-
-
-class _AsyncReadWriteLockGuard:
-    def __init__(self, lock: _AsyncReadWriteLock, mode: Literal["read", "write"]):
-        self._lock = lock
-        self._mode = mode
-
-    async def __aenter__(self):
-        if self._mode == "read":
-            await self._lock.acquire_read()
-        else:
-            await self._lock.acquire_write()
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        if self._mode == "read":
-            await self._lock.release_read()
-        else:
-            await self._lock.release_write()
-        return False
-
-
 @operation(name="fs", mode=OperationMode.LOCAL, description="local fs operation")
 class FsOperation(BaseFsOperation):
     """File system operation"""
-    _rw_locks: weakref.WeakValueDictionary[str, _AsyncReadWriteLock] = weakref.WeakValueDictionary()
 
     @staticmethod
     def _get_lock_timeout(options: Optional[Dict[str, Any]] = None) -> float:
@@ -205,16 +147,6 @@ class FsOperation(BaseFsOperation):
         return 300.0
 
     @classmethod
-    def _get_rw_lock(cls, file_path: pathlib.Path) -> _AsyncReadWriteLock:
-        """Gets the in-process read-write lock for the given file path."""
-        key = os.path.normcase(str(file_path))
-        lock = cls._rw_locks.get(key)
-        if lock is None:
-            lock = _AsyncReadWriteLock()
-            cls._rw_locks[key] = lock
-        return lock
-
-    @classmethod
     @asynccontextmanager
     async def _file_lock(
             cls,
@@ -222,10 +154,8 @@ class FsOperation(BaseFsOperation):
             mode: Literal["read", "write"],
             timeout: float,
     ):
-        lock = cls._get_rw_lock(file_path)
-        async with asyncio.timeout(timeout):
-            async with _AsyncReadWriteLockGuard(lock, mode):
-                yield
+        async with ReadWriteLockManager.lock_guard(file_path, mode, timeout):
+            yield
 
     @classmethod
     @asynccontextmanager
@@ -258,12 +188,14 @@ class FsOperation(BaseFsOperation):
             merged_requests.values(),
             key=lambda item: os.path.normcase(str(item[0])),
         )
+        deadline = asyncio.get_running_loop().time() + timeout
         async with AsyncExitStack() as stack:
-            async with asyncio.timeout(timeout):
-                for lock_path, lock_mode in ordered_requests:
-                    lock = cls._get_rw_lock(lock_path)
-                    await stack.enter_async_context(_AsyncReadWriteLockGuard(lock, lock_mode))
-                yield
+            for lock_path, lock_mode in ordered_requests:
+                remaining_timeout = max(0.0, deadline - asyncio.get_running_loop().time())
+                await stack.enter_async_context(
+                    ReadWriteLockManager.lock_guard(lock_path, lock_mode, remaining_timeout)
+                )
+            yield
 
     async def read_file(
             self,

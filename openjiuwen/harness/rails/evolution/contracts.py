@@ -79,6 +79,8 @@ class EvolutionRequestResult:
     """Structured result returned by active user-triggered evolution APIs."""
 
     skill_name: str
+    mode: str = "agent_prompt"
+    followup_prompt: Optional[str] = None
     request_id: Optional[str] = None
     approval_event: Optional[OutputSchema] = None
     records: list[EvolutionRecord] = field(default_factory=list)
@@ -88,7 +90,7 @@ class EvolutionRequestResult:
 
     @property
     def has_changes(self) -> bool:
-        return bool(self.records or self.approval_event)
+        return bool(self.records or self.approval_event or self.followup_prompt)
 
 
 @dataclass(frozen=True)
@@ -96,13 +98,15 @@ class SimplifyRequestResult:
     """Structured result returned by active simplify request APIs."""
 
     skill_name: str
+    mode: str = "agent_prompt"
+    followup_prompt: Optional[str] = None
     request_id: Optional[str] = None
     approval_event: Optional[OutputSchema] = None
     actions: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def has_changes(self) -> bool:
-        return bool(self.actions or self.approval_event)
+        return bool(self.actions or self.approval_event or self.followup_prompt)
 
 
 @runtime_checkable

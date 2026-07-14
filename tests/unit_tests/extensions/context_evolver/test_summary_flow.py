@@ -35,6 +35,9 @@ from openjiuwen.extensions.context_evolver.summary.task.reasoning_bank.update im
 from openjiuwen.extensions.context_evolver.summary.task.reme.update import (
     PersistMemoryOp as ReMePersist,
 )
+from openjiuwen.extensions.context_evolver.summary.task.cognition.update import (
+    PersistMemoryOp as CognitionPersist,
+)
 
 # Live API tests are opt-in because they require external network.
 # Set RUN_CONTEXT_EVOLVER_API_TESTS=1 to run them with a valid API_KEY.
@@ -48,7 +51,7 @@ def _live_api_tests_enabled():
     """Check whether live context_evolver API tests were explicitly enabled."""
     return os.getenv(API_TESTS_ENV, "").strip().lower() in TRUE_VALUES
 
-
+    
 def _api_key_missing():
     """Check if API_KEY is missing or placeholder."""
     api_key = app_config.get("API_KEY")
@@ -69,8 +72,6 @@ requires_api_key = pytest.mark.skipif(
 async def test_rb_summarize_and_retrieve():
     """Test full cycle: summarize then retrieve."""
     service = TaskMemoryService(
-        llm_model="gpt-3.5-turbo",
-        embedding_model="text-embedding-3-small",
         retrieval_algo="RB",
         summary_algo="RB",
     )
@@ -156,8 +157,6 @@ async def test_rb_summarize_and_retrieve():
 async def test_reme_summarize_and_retrieve():
     """Test ReMe algorithm full cycle: summarize then retrieve."""
     service = TaskMemoryService(
-        llm_model="gpt-3.5-turbo",
-        embedding_model="text-embedding-3-small",
         retrieval_algo="REME",
         summary_algo="REME",
     )
@@ -276,8 +275,6 @@ async def test_reme_summarize_and_retrieve():
 async def test_ace_summarize_and_retrieve():
     """Test ACE algorithm full cycle: summarize then retrieve."""
     service = TaskMemoryService(
-        llm_model="gpt-3.5-turbo",
-        embedding_model="text-embedding-3-small",
         retrieval_algo="ACE",
         summary_algo="ACE",
     )
@@ -384,8 +381,6 @@ async def test_refcon_summarize_and_retrieve():
     with deduplication enabled and validation disabled.
     """
     service = TaskMemoryService(
-        llm_model="gpt-3.5-turbo",
-        embedding_model="text-embedding-3-small",
         retrieval_algo="REFCON",
         summary_algo="REFCON",
     )
@@ -475,8 +470,6 @@ async def test_divcon_summarize_and_retrieve():
     but is intended for diverse/contrastive trajectory sets.
     """
     service = TaskMemoryService(
-        llm_model="gpt-3.5-turbo",
-        embedding_model="text-embedding-3-small",
         retrieval_algo="DIVCON",
         summary_algo="DIVCON",
     )
@@ -557,7 +550,82 @@ async def test_divcon_summarize_and_retrieve():
 
 
 # ============================================================================
-# Parametrized Tests for All Five Algorithms
+# Cognition Algorithm Tests
+# ============================================================================
+
+
+@requires_api_key
+@pytest.mark.asyncio
+async def test_cognition_summarize_and_retrieve():
+    """Test Cognition algorithm full cycle: summarize then retrieve."""
+    service = TaskMemoryService(
+        retrieval_algo="COGNITION",
+        summary_algo="COGNITION",
+    )
+
+    algorithm = service.summary_algorithm
+    logger.info("Using algorithm: %s", algorithm)
+    assert algorithm == "Cognition", f"Expected Cognition algorithm, got {algorithm}"
+
+    user_id = "test_cognition_cycle"
+
+    trajectories = [
+        (
+            "USER: How do I search for files by extension in Linux?\n"
+            "ASSISTANT: I'll help you find files by extension.\n"
+            "ACTION: shell.run(command='find /home -name \"*.py\" -type f')\n"
+            "OBSERVATION: /home/user/scripts/process.py\n/home/user/projects/app.py\n"
+            "ASSISTANT: Found 2 Python files: process.py and app.py."
+        ),
+        (
+            "USER: How can I locate all Python files on the system?\n"
+            "ASSISTANT: Let me search for Python files using find.\n"
+            "ACTION: shell.run(command='find / -name \"*.py\" -type f 2>/dev/null')\n"
+            "OBSERVATION: /usr/lib/python3/dist-packages/apt/__init__.py\n"
+            "/home/user/scripts/process.py\n"
+            "ASSISTANT: Found multiple Python files across the system."
+        ),
+    ]
+
+    summary_result = await service.summarize(
+        user_id=user_id,
+        matts="none",
+        query="How do I find Python files in Linux?",
+        trajectories=trajectories,
+        score=[1.0, 0.8],
+    )
+
+    logger.info("%s Cognition Summary Result %s", "=" * 50, "=" * 50)
+    logger.info("%s", summary_result)
+    assert summary_result["status"] == "success"
+
+    retrieve_result = await service.retrieve(
+        user_id=user_id,
+        query="How do I search for Python files on Linux?",
+    )
+
+    logger.info("%s Cognition Retrieve Result %s", "=" * 50, "=" * 50)
+    logger.info("%s", retrieve_result)
+
+    assert "status" in retrieve_result
+    assert retrieve_result["status"] == "success"
+    assert "memory_string" in retrieve_result
+    assert "retrieved_memory" in retrieve_result
+
+    if retrieve_result["retrieved_memory"]:
+        logger.info("Retrieved %d memories", len(retrieve_result["retrieved_memory"]))
+        for idx, memory in enumerate(retrieve_result["retrieved_memory"]):
+            logger.info("Memory %d:", idx + 1)
+            if "description" in memory:
+                logger.info("  Description: %s", memory["description"])
+            if "experience" in memory:
+                logger.info("  Experience: %s", memory["experience"])
+
+    logger.info("Cognition cycle test completed successfully")
+
+
+# ============================================================================
+# Parametrized Tests for All Six Algorithms
 # ============================================================================
 
 ALL_ALGORITHMS = [
@@ -566,6 +634,7 @@ ALL_ALGORITHMS = [
     ("REME", "ReMe"),
     ("REFCON", "RefCon"),
     ("DIVCON", "DivCon"),
+    ("COGNITION", "Cognition"),
 ]
 
 
@@ -575,8 +644,6 @@ ALL_ALGORITHMS = [
 async def test_algorithm_normalize(algo_key, algo_name):
     """Test that each algorithm key normalizes to the expected name."""
     service = TaskMemoryService(
-        llm_model="gpt-3.5-turbo",
-        embedding_model="text-embedding-3-small",
         retrieval_algo=algo_key,
         summary_algo=algo_key,
     )
@@ -603,9 +670,9 @@ class TestSummaryFlowMock:
             app_config.set_value("API_KEY", "test-key")
             app_config.delete("PERSIST_TYPE")
             with patch(
-                "openjiuwen.extensions.context_evolver.service.task_memory_service.OpenAILLMWrapper"
+                "openjiuwen.extensions.context_evolver.service.task_memory_service.LLMWrapper"
             ) as mock_llm, patch(
-                "openjiuwen.extensions.context_evolver.service.task_memory_service.OpenAIEmbeddingWrapper"
+                "openjiuwen.extensions.context_evolver.service.task_memory_service.EmbeddingWrapper"
             ) as mock_emb:
                 mock_llm.return_value = MagicMock()
                 mock_emb.return_value = MagicMock()
@@ -629,9 +696,9 @@ class TestSummaryFlowMock:
     @staticmethod
     def test_no_persist_op_when_persist_type_none():
         """When persist_type is None the last op must NOT be a PersistMemoryOp."""
-        persist_ops = (ACEPersist, RBPersist, ReMePersist)
+        persist_ops = (ACEPersist, RBPersist, ReMePersist, CognitionPersist)
 
-        for algo in ["ACE", "RB", "REME", "REFCON", "DIVCON"]:
+        for algo in ["ACE", "RB", "REME", "REFCON", "DIVCON", "COGNITION"]:
             svc = TestSummaryFlowMock._make_service(summary_algo=algo, persist_type=None)
             last = TestSummaryFlowMock._last_op(svc.summary_flow)
             assert not isinstance(last, persist_ops), \
@@ -668,6 +735,12 @@ class TestSummaryFlowMock:
         assert isinstance(last, ReMePersist)
 
     @staticmethod
+    def test_persist_op_appended_cognition():
+        svc = TestSummaryFlowMock._make_service(summary_algo="COGNITION", persist_type="json")
+        last = TestSummaryFlowMock._last_op(svc.summary_flow)
+        assert isinstance(last, CognitionPersist)
+
+    @staticmethod
     def test_persist_path_forwarded_to_op():
         svc = TestSummaryFlowMock._make_service(
             summary_algo="ACE",
@@ -689,12 +762,21 @@ class TestSummaryFlowMock:
     @staticmethod
     def test_reconfigure_without_persist_no_persist_op():
         """After reconfigure() when persist_type=None, still no PersistMemoryOp."""
-        persist_ops = (ACEPersist, RBPersist, ReMePersist)
+        persist_ops = (ACEPersist, RBPersist, ReMePersist, CognitionPersist)
 
         svc = TestSummaryFlowMock._make_service(summary_algo="ACE", persist_type=None)
         svc.reconfigure("REME")
         last = TestSummaryFlowMock._last_op(svc.summary_flow)
         assert not isinstance(last, persist_ops)
+
+    @staticmethod
+    def test_reconfigure_to_cognition_preserves_persist_type():
+        """After reconfigure() to Cognition, the summary flow should have CognitionPersist."""
+        svc = TestSummaryFlowMock._make_service(summary_algo="ACE", persist_type="json")
+        svc.reconfigure("COGNITION")
+        last = TestSummaryFlowMock._last_op(svc.summary_flow)
+        assert isinstance(last, CognitionPersist)
+        assert svc.summary_algorithm == "Cognition"
 
     @staticmethod
     def test_all_algorithm_normalizations():

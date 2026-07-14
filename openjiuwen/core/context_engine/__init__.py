@@ -17,6 +17,10 @@ from openjiuwen.core.context_engine.processor.offloader.tool_result_budget_proce
     ToolResultBudgetProcessor,
     ToolResultBudgetProcessorConfig,
 )
+from openjiuwen.core.context_engine.processor.offloader.tool_result_window_processor import (
+    ToolResultWindowProcessor,
+    ToolResultWindowProcessorConfig,
+)
 from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import (
     MessageSummaryOffloader,
     MessageSummaryOffloaderConfig
@@ -41,6 +45,10 @@ from openjiuwen.core.context_engine.processor.compressor.full_compact_processor 
     FullCompactProcessor,
     FullCompactProcessorConfig,
 )
+from openjiuwen.core.context_engine.processor.compressor.reasoning_tool_loop_compact_processor import (
+    ReasoningToolLoopCompactProcessor,
+    ReasoningToolLoopCompactProcessorConfig,
+)
 
 # context base classes
 _CORE_CLASSES = [
@@ -63,6 +71,9 @@ _PROCESSORS_CLASSES = [
     "ContextProcessor",
     "ToolResultBudgetProcessor",
     "ToolResultBudgetProcessorConfig",
+    # tool result window
+    "ToolResultWindowProcessor",
+    "ToolResultWindowProcessorConfig",
     # message offloader
     "MessageOffloader",
     "MessageOffloaderConfig",
@@ -84,6 +95,9 @@ _PROCESSORS_CLASSES = [
     # full compact processor
     "FullCompactProcessor",
     "FullCompactProcessorConfig",
+    # reasoning + tool-call loop compact
+    "ReasoningToolLoopCompactProcessor",
+    "ReasoningToolLoopCompactProcessorConfig",
 ]
 
 

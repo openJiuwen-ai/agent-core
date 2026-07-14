@@ -10,9 +10,21 @@ from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, Mod
 def _builtin_model_client(provider, client_config: ModelClientConfig, model_config: ModelRequestConfig):
     if client_config is None:
         return None
-    if provider == ProviderType.OpenAI.value or provider == ProviderType.OpenRouter.value:
+    if provider == ProviderType.OpenAI.value:
         from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
         return OpenAIModelClient(model_config=model_config, model_client_config=client_config)
+
+    if provider == ProviderType.OpenAIAccount.value:
+        from openjiuwen.core.foundation.llm.model_clients.openai_account_model_client import OpenAIAccountModelClient
+        return OpenAIAccountModelClient(model_config=model_config, model_client_config=client_config)
+
+    if provider == ProviderType.OpenRouter.value:
+        from openjiuwen.core.foundation.llm.model_clients.openrouter_model_client import OpenRouterModelClient
+        return OpenRouterModelClient(model_config=model_config, model_client_config=client_config)
+
+    if provider == ProviderType.Anthropic.value:
+        from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import AnthropicModelClient
+        return AnthropicModelClient(model_config=model_config, model_client_config=client_config)
 
     if provider == ProviderType.SiliconFlow.value:
         from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import \
@@ -67,7 +79,7 @@ def create_model_client(client_config: ModelClientConfig, model_config: ModelReq
     try:
         client = get_client_registry().get_client(provider, "llm", model_config=model_config,
                                                   model_client_config=client_config)
-    except ValueError as e:
+    except ValueError:
         supported_types = [name[4:] for name in get_client_registry().list_clients() if name.startswith("llm_")]
         raise build_error(
             StatusCode.MODEL_PROVIDER_INVALID,

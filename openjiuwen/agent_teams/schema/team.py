@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.models.pool import ModelPoolEntry
 from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
+from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 
@@ -74,12 +75,21 @@ class TeamRole(str, Enum):
     pure-text protocol — the local LLM acts as a scheduler while
     concrete work output is produced by the remote agent and surfaced
     through framework-managed mailbox auto-forwarding.
+
+    ``WORKER`` is the swarmflow execution role: a single-shot, stateless
+    member the swarmflow engine's worker backend creates for one
+    ``agent()`` call. It carries a roster identity (member_name + DB row)
+    but does NOT enter the coordination loop — it runs one DeepAgent turn
+    that ends by calling the structured-output tool, then is torn down.
+    Context is fresh per call ("用完即弃"); workers never poll the
+    mailbox, claim tasks, or run multi-turn.
     """
 
     LEADER = "leader"
     TEAMMATE = "teammate"
     HUMAN_AGENT = "human_agent"
     BRIDGE_AGENT = "bridge_agent"
+    WORKER = "worker"
 
 
 class BridgeMailboxInjectMode(str, Enum):
@@ -221,6 +231,15 @@ class ExternalCliAgentSpec(BaseModel):
     """Extra environment variables for the CLI subprocess, merged over the
     inherited process env (the team-join descriptor is injected separately)."""
 
+    ssh_transport: SshTransportConfig | None = None
+    """Optional ssh endpoint used to launch this CLI on a remote host.
+
+    When set, ``command``, ``cwd``, ``env``, and ``mcp_server_command`` are
+    interpreted on the remote host. The team join descriptor is still injected
+    through ``OPENJIUWEN_TEAM_JOIN`` so a stdio MCP child process can inherit
+    this member identity when remote DB and messager endpoints are reachable.
+    """
+
 
 class TeamSpec(BaseModel):
     """Definition of a team and its goal."""
@@ -259,6 +278,8 @@ class TeamSpec(BaseModel):
       flat expansion of that router. Lookup-by-name semantics; no hint
       yields the first declared name as the default.
     """
+    external_messager_config: Optional[MessagerTransportConfig] = None
+    """Transport used by an external CLI member's MCP client."""
 
 
 class TeamRuntimeContext(BaseModel):
@@ -278,6 +299,8 @@ class TeamRuntimeContext(BaseModel):
     db_config: DatabaseConfig | MemoryDatabaseConfig = Field(default_factory=DatabaseConfig)
     member_model: Optional[TeamModelConfig] = None
     """TeamModelConfig assigned to this member by the allocator."""
+    worktree_path: Optional[str] = None
+    """Absolute cwd override for a teammate running in an isolated worktree."""
     cli_agent: Optional[str] = None
     """When set, this teammate is driven by an external CLI agent (the named
     adapter, e.g. ``"claude"`` / ``"codex"``) instead of a local DeepAgent.
@@ -287,6 +310,14 @@ class TeamRuntimeContext(BaseModel):
     (default) keeps the standard DeepAgent-backed member. See
     ``agent_teams/external/cli_agent``.
     """
+    permissions_override: Optional[dict[str, str]] = Field(
+        default=None,
+        description=(
+            "Per-member permission narrowing from spawn_teammate.permissions. "
+            "Flat {tool_name: level_string} dict fed to narrow_permissions "
+            "to tighten the base config. None when no override was specified."
+        ),
+    )
 
 
 __all__ = [
