@@ -25,6 +25,7 @@ class TeamDao:
         team_name: str,
         display_name: str,
         leader_member_name: str,
+        *,
         desc: Optional[str] = None,
         prompt: Optional[str] = None,
         dispatch_mode: str = "autonomous",
@@ -32,9 +33,11 @@ class TeamDao:
     ) -> bool:
         """Create a new team.
 
-        ``dispatch_mode`` / ``enable_task_verification`` persist the effective
-        per-instance capability choices made at ``build_team`` time (F_62) so
-        cold recovery restores them.
+        The optional columns are keyword-only: ``desc`` / ``prompt`` sit next to
+        each other and ``dispatch_mode`` / ``enable_task_verification`` carry the
+        effective per-instance capability choices made at ``build_team`` time
+        (F_62, persisted so cold recovery restores them) — naming them at the
+        call site is what keeps them from being swapped.
         """
         async with self._sessions.write() as session:
             try:

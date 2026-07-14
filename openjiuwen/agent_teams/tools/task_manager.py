@@ -729,12 +729,12 @@ class TeamTaskManager:
         decides (see ``settle_review``).
         """
         await self.db.task.insert_review_vote(
-            self.team_name,
-            task.task_id,
-            task.review_round,
-            self.member_name,
-            decision,
-            feedback or None,
+            team_name=self.team_name,
+            task_id=task.task_id,
+            review_round=task.review_round,
+            reviewer=self.member_name,
+            decision=decision,
+            feedback=feedback or None,
         )
         tally = await self.get_review_tally(task)
         await self._publish_task_event(

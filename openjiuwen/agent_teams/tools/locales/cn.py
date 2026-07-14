@@ -182,16 +182,25 @@ STRINGS: dict[str, str] = {
     ),
     "create_task.task.depends_on": "前置依赖的任务 ID 列表；可引用本次调用中一起创建的任务或已有任务",
     "create_task.task.depended_by": "需要等待本任务完成的已有任务 ID 列表（反向依赖）；不得引用本次调用创建的任务——批内依赖一律用对方的 depends_on 表示",
-    "create_task.task.reviewer": "该任务的验证者 member_name 列表（可选，可多个）；这些成员必须已存在且不能是 assignee 本人。配了验证者的任务在 assignee 完成后进入 in_review 等验证，验证通过才 completed",
+    "create_task.task.reviewer": (
+        "该任务的验证者 member_name 列表（可选，可多个）；这些成员必须已存在且不能是 assignee 本人。"
+        "配了验证者的任务在 assignee 完成后进入 in_review 等验证，验证通过才 completed"
+    ),
     "create_task.task.max_review_rounds": (
         "该任务验证返工的轮数上限（可选，整数 ≥1，需同时配 reviewer）；不传用团队默认值。"
         "验证不通过会打回重做开新一轮，超过上限后不再自动打回，而是升级给你处置"
     ),
     # ===== view_task ===========================================================
     # view_task._desc lives in descs/cn/view_task.md
-    "view_task.action": "查看模式：'list'（默认，所有任务摘要）、'get'（单个任务详情，需传 task_id）、'claimable'（可认领的 pending 任务）、'in_review'（指派给你验证、正在 in_review 的任务）",
+    "view_task.action": (
+        "查看模式：'list'（默认，所有任务摘要）、'get'（单个任务详情，需传 task_id）、"
+        "'claimable'（可认领的 pending 任务）、'in_review'（指派给你验证、正在 in_review 的任务）"
+    ),
     "view_task.task_id": "任务 ID — action=get 时必填，其他模式忽略",
-    "view_task.status": "仅 action=list 时使用的状态过滤：pending/blocked/planning/in_progress/in_review/completed/cancelled，不传则返回全部",
+    "view_task.status": (
+        "仅 action=list 时使用的状态过滤："
+        "pending/blocked/planning/in_progress/in_review/completed/cancelled，不传则返回全部"
+    ),
     # ===== update_task =========================================================
     # update_task._desc lives in descs/cn/update_task.md
     "update_task.task_id": "要更新的任务 ID，传 '*' 取消所有任务",
@@ -199,7 +208,10 @@ STRINGS: dict[str, str] = {
     "update_task.title": "新任务标题",
     "update_task.content": "新任务内容",
     "update_task.assignee": "指派任务的目标 member_name（仅当任务当前无 assignee 时生效）。系统会向被指派成员发送通知",
-    "update_task.reviewer": "设置该任务的验证者 member_name 列表（传空列表清除验证）；验证者必须已存在且不能是 assignee。配了验证者后，assignee 完成任务会进入 in_review 等验证",
+    "update_task.reviewer": (
+        "设置该任务的验证者 member_name 列表（传空列表清除验证）；验证者必须已存在且不能是 assignee。"
+        "配了验证者后，assignee 完成任务会进入 in_review 等验证"
+    ),
     "update_task.max_review_rounds": (
         "设置该任务验证返工的轮数上限（整数 ≥1，任务需已配或同时配 reviewer）。"
         "超过上限后验证失败不再自动打回，而是升级给你处置"
