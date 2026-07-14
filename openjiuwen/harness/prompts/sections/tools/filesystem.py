@@ -107,10 +107,17 @@ LIST_DIR_DESCRIPTION: Dict[str, str] = {
 }
 
 GREP_DESCRIPTION: Dict[str, str] = {
-    "cn": "在文件中搜索内容。支持正则表达式。",
+    "cn": (
+        "在文件中搜索内容。支持正则表达式。"
+        "用户记不清措辞时：勿将其原话作连续精确匹配；"
+        "分别搜关键词A、关键词B，或用 关键词A.*关键词B 允许两词中间夹字；无命中则放宽再搜。"
+    ),
     "en": (
         "Search file contents with regex, structured output modes, pagination, "
-        "context lines, file-type filters, and glob filters."
+        "context lines, file-type filters, and glob filters. "
+        "When the user is unsure of the exact wording, do not use their paraphrase as one literal phrase; "
+        "search keywordA and keywordB separately, or use keywordA.*keywordB to allow other text between them; "
+        "retry with broader patterns if no matches are found."
     ),
 }
 
@@ -202,7 +209,17 @@ LIST_DIR_PARAMS: Dict[str, Dict[str, str]] = {
 }
 
 GREP_PARAMS: Dict[str, Dict[str, str]] = {
-    "pattern": {"cn": "搜索模式（正则表达式）", "en": "Search pattern (regular expression)"},
+    "pattern": {
+        "cn": (
+            "搜索模式（正则表达式）。"
+            "措辞不准时分别搜关键词A、关键词B，或用 关键词A.*关键词B 允许两词中间夹字"
+        ),
+        "en": (
+            "Search pattern (regular expression). "
+            "If wording is uncertain, search keywordA and keywordB separately, "
+            "or use keywordA.*keywordB to allow other text between them"
+        ),
+    },
     "path": {
         "cn": "搜索路径（文件或目录），默认为当前工作目录",
         "en": "Search path (file or directory). Defaults to the current working directory",
