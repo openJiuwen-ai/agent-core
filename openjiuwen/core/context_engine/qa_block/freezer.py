@@ -16,6 +16,7 @@ from openjiuwen.core.context_engine.qa_block.config import QABlockConfig
 from openjiuwen.core.context_engine.qa_block.freezer_lifecycle import register_qa_block_freezer
 from openjiuwen.core.context_engine.qa_block.history_buffer import HistoryQABuffer
 from openjiuwen.core.context_engine.qa_block.messages import (
+    build_compaction_corpus,
     estimate_messages_tokens,
     extract_final_answer,
     extract_qa_native_messages,
@@ -174,10 +175,16 @@ class QABlockFreezer:
 
         user_query = extract_user_query(native_messages)
         final_answer = extract_final_answer(native_messages)
+        corpus = build_compaction_corpus(
+            native_messages,
+            per_tool_max_chars=self._config.l1_corpus_per_tool_max_chars,
+            max_tool_results=self._config.l1_corpus_max_tool_results,
+        )
         l1_text, l1_source = await self._summarizer.generate_l1(
             user_query,
             final_answer,
             allow_llm=False,
+            corpus=corpus,
         )
         had_compact = had_full_compact_in_messages(native_messages)
         l0_mode: Literal["delta", "compact_summary_tail"] = "compact_summary_tail" if had_compact else "delta"
@@ -259,12 +266,18 @@ class QABlockFreezer:
             )
             user_query = extract_user_query(native_messages)
             final_answer = extract_final_answer(native_messages)
+            corpus = build_compaction_corpus(
+                native_messages,
+                per_tool_max_chars=self._config.l1_corpus_per_tool_max_chars,
+                max_tool_results=self._config.l1_corpus_max_tool_results,
+            )
             prior_l1 = entry.l1_text
             l1_text, l1_source = await self._summarizer.generate_l1(
                 user_query,
                 final_answer,
                 model=summarizer_model,
                 allow_llm=True,
+                corpus=corpus,
             )
 
             entry.l0_store = L0Store(path=rel_path, handle=entry.qa_id)

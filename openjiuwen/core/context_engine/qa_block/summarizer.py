@@ -10,9 +10,11 @@ from openjiuwen.core.context_engine.qa_block.config import QABlockConfig
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig, UserMessage
 
 _L1_SUMMARY_PROMPT = (
-    "将以下单次问答（Q+A）压缩为不超过 {max_chars} 字的目录摘要，"
-    "保留用户诉求与最终结论要点。只输出摘要正文，格式：\n"
-    "Q: ...\nA: ...\n\n"
+    "将以下本轮完整语料压缩为不超过 {max_chars} 字的目录摘要。"
+    "必须覆盖：用户诉求、每一个 [tool_call] 的工具名与核心参数、"
+    "每一个 [tool_result] 的关键结论（尤其是并行子任务的各自产出），"
+    "以及最终结论要点。不得只复述末尾 A: 而遗漏中间工具产出。"
+    "只输出摘要正文，格式：\nQ: ...\n[工具与产出要点]: ...\nA: ...\n\n"
     "待压缩内容：\n{text}"
 )
 
@@ -39,6 +41,7 @@ class QABlockSummarizer:
         *,
         model: Any | None = None,
         allow_llm: bool = True,
+        corpus: str | None = None,
     ) -> tuple[str, Literal["inline", "compressed"]]:
         """Generate L1 catalog line from Q+A.
 
@@ -50,9 +53,10 @@ class QABlockSummarizer:
         user_query = (user_query or "").strip()
         final_answer = (final_answer or "").strip()
         inline_text = f"Q: {user_query}\nA: {final_answer}".strip()
-        combined_len = len(user_query) + len(final_answer)
+        source_text = corpus or inline_text
+        combined_len = len(source_text)
 
-        if combined_len <= self._config.l1_inline_max_chars:
+        if combined_len <= self._config.l1_inline_max_chars and corpus is None:
             logger.info(
                 "[QABlockSummarizer] inline L1 chars=%s allow_llm=%s",
                 len(inline_text),
@@ -61,10 +65,10 @@ class QABlockSummarizer:
             return inline_text, "inline"
 
         if not allow_llm or combined_len < self._config.l1_llm_min_chars:
-            summary = self._truncate_summary(inline_text)
+            summary = self._truncate_summary(source_text)
             logger.info(
                 "[QABlockSummarizer] truncated L1 source_chars=%s summary_chars=%s allow_llm=%s",
-                len(inline_text),
+                len(source_text),
                 len(summary),
                 allow_llm,
             )
@@ -74,26 +78,26 @@ class QABlockSummarizer:
         if llm_model is None:
             logger.warning(
                 "[QABlockSummarizer] llm unavailable, fallback truncated source_chars=%s",
-                len(inline_text),
+                len(source_text),
             )
         else:
-            summary = await self._summarize_with_llm(inline_text, llm_model)
+            summary = await self._summarize_with_llm(source_text, llm_model)
             if summary:
                 logger.info(
                     "[QABlockSummarizer] llm L1 source_chars=%s summary_chars=%s",
-                    len(inline_text),
+                    len(source_text),
                     len(summary),
                 )
                 return summary, "compressed"
             logger.warning(
                 "[QABlockSummarizer] llm empty response, fallback truncated source_chars=%s",
-                len(inline_text),
+                len(source_text),
             )
 
-        summary = self._truncate_summary(inline_text)
+        summary = self._truncate_summary(source_text)
         logger.info(
             "[QABlockSummarizer] fallback truncated L1 source_chars=%s summary_chars=%s",
-            len(inline_text),
+            len(source_text),
             len(summary),
         )
         return summary, "compressed"
@@ -106,11 +110,12 @@ class QABlockSummarizer:
         return summary
 
     async def _summarize_with_llm(self, inline_text: str, model: Any) -> str:
-        prompt = _L1_SUMMARY_PROMPT.format(
-            max_chars=self._config.l1_summary_max_chars,
-            text=inline_text[:8000],
-        )
         try:
+            cap = max(8000, self._config.l1_summary_max_chars * 4)
+            prompt = _L1_SUMMARY_PROMPT.format(
+                max_chars=self._config.l1_summary_max_chars,
+                text=inline_text[:cap],
+            )
             invoke = getattr(model, "invoke", None)
             if not callable(invoke):
                 return ""

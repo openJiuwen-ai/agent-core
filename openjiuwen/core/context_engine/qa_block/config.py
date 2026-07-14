@@ -11,8 +11,10 @@ from pydantic import BaseModel, Field
 class QABlockConfig(BaseModel):
     enabled: bool = True
     l1_inline_max_chars: int = Field(default=500, gt=0)
-    l1_summary_max_chars: int = Field(default=300, gt=0)
+    l1_summary_max_chars: int = Field(default=800, gt=0)
     l1_llm_min_chars: int = Field(default=1500, gt=0)
+    l1_corpus_per_tool_max_chars: int = Field(default=600, gt=0)
+    l1_corpus_max_tool_results: int = Field(default=12, gt=0)
     history_qa_buffer_size: int = Field(default=3, gt=0)
     async_freeze_persist: bool = True
     freeze_overview_await_s: float = Field(

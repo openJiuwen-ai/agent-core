@@ -30,6 +30,9 @@ Identify the planning need and call todo_create BEFORE starting execution.
 **When NOT to use todo tools — do not call todo_create, todo_modify, or todo_list when:**
 - User only wants a task list displayed and explicitly says no execution is needed now (e.g. list only, do not execute, not yet) → present the list in your reply as text or a table; do not call any todo tools
 
+**No echo rule:**
+ - When starting a task, give a brief one-sentence summary of what you will do — never copy the full task description verbatim
+
 **Task management rules:**
 - Update status in real-time: call todo_modify the moment a task status changes
 - Only one task can be in_progress at a time; complete it before starting the next
@@ -70,6 +73,9 @@ TODO_SYSTEM_PROMPT_CN = """
 
 **何时不使用 todo 工具 — 以下情况不要调用 todo_create、todo_modify、todo_list：**
 - 用户仅要求列出/展示任务清单，且明确表示不需要执行、暂不执行、先不要做等 → 直接在回复中以文本或表格呈现清单，勿调用 todo 工具
+
+**禁止回显规则：**
+- 开始执行任务时，用一句简短的话概括你要做什么即可，不要把完整任务描述复述一遍。
 
 **任务管理规则：**
 - 实时更新状态：任务状态变化时立即调用 todo_modify
