@@ -143,11 +143,17 @@ def _build_scheduler(db, bus, **spec_overrides):
     return scheduler, host, message_manager, task_manager
 
 
-def _dm_targets(message_manager) -> list[tuple[str, str]]:
-    """(recipient, content) pairs of every leader-identity handoff sent."""
+def _dm_targets(message_manager) -> list[tuple[str, dict]]:
+    """(recipient, delivery meta) pairs of every leader-identity handoff sent.
+
+    The scheduler decides *which template binds to which task* and stores that
+    in ``meta``; the wording is rendered from the template files at delivery
+    (F_63). So these assertions target the decision, not the prose — the
+    rendering contract is covered by the message-template tests.
+    """
     calls = []
     for call in message_manager.send_message.await_args_list:
-        calls.append((call.kwargs["to_member_name"], call.kwargs["content"]))
+        calls.append((call.kwargs["to_member_name"], call.kwargs["meta"]))
     return calls
 
 
@@ -201,9 +207,27 @@ async def test_activate_starts_assigned_pending_and_hands_off(db, bus):
     assert (await tm.get("b")).status == TaskStatus.IN_PROGRESS.value
     handoffs = _dm_targets(mm)
     assert {target for target, _ in handoffs} == {"dev-1", "dev-2"}
-    assert all("[a]" in content or "[b]" in content for _, content in handoffs)
+    assert all(meta["template"] == "scheduler_task_start" for _, meta in handoffs)
+    assert {meta["refs"]["task"] for _, meta in handoffs} == {"a", "b"}
     # Delivery lazily starts the member runtime.
     assert set(host.started_members) == {"dev-1", "dev-2"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_handoffs_carry_no_body_only_meta(db, bus):
+    """A templated handoff stores no text: meta is the single source (F_63)."""
+    scheduler, _host, mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph([TaskGraphSpec(title="one", content="do one", task_id="a", assignee="dev-1")])
+
+    await scheduler.activate()
+
+    sent = mm.send_message.await_args_list
+    assert sent
+    for call in sent:
+        assert call.kwargs["content"] == ""
+        assert call.kwargs["meta"]["template"]
+        assert call.kwargs["meta"]["refs"]["task"] == "a"
 
 
 @pytest.mark.asyncio
@@ -244,7 +268,7 @@ async def test_plan_mode_member_starts_into_planning(db, bus):
     handoffs = _dm_targets(mm)
     assert len(handoffs) == 1
     assert handoffs[0][0] == "planner"
-    assert "submit_plan" in handoffs[0][1]
+    assert handoffs[0][1]["template"] == "scheduler_task_start_plan"
 
 
 @pytest.mark.asyncio
@@ -311,12 +335,12 @@ async def test_review_dispatch_once_per_round_then_settle_pass(db, bus):
     await _seed_review(db, bus, scheduler, tm)
 
     await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
-    review_dms = [(to, content) for to, content in _dm_targets(mm) if "verify_task" in content]
+    review_dms = [(to, meta) for to, meta in _dm_targets(mm) if meta["template"] == "scheduler_review_request"]
     assert {to for to, _ in review_dms} == {"rev-1", "rev-2", "rev-3"}
 
     # A second scan does not re-dispatch the same round.
     await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
-    review_dms_after = [(to, content) for to, content in _dm_targets(mm) if "verify_task" in content]
+    review_dms_after = [(to, meta) for to, meta in _dm_targets(mm) if meta["template"] == "scheduler_review_request"]
     assert len(review_dms_after) == len(review_dms)
 
     # Two pass votes reach the 2/3 quorum; the scan settles.
@@ -326,7 +350,9 @@ async def test_review_dispatch_once_per_round_then_settle_pass(db, bus):
 
     assert (await tm.get("r")).status == TaskStatus.COMPLETED.value
     # The author is told to report to the leader; the leader gets digests.
-    report_dms = [to for to, content in _dm_targets(mm) if "send_message" in content and to == "dev-1"]
+    report_dms = [
+        to for to, meta in _dm_targets(mm) if meta["template"] == "scheduler_verified_report" and to == "dev-1"
+    ]
     assert report_dms
     assert any("[r]" in text for text in host.leader_inputs)
 
@@ -343,8 +369,12 @@ async def test_review_fail_settles_rework_with_feedback(db, bus):
 
     task = await tm.get("r")
     assert task.status == TaskStatus.IN_PROGRESS.value
-    rework_dms = [(to, content) for to, content in _dm_targets(mm) if to == "dev-1" and "broken build" in content]
+    rework_dms = [(to, meta) for to, meta in _dm_targets(mm) if to == "dev-1" and meta["template"] == "scheduler_rework"]
     assert rework_dms
+    # The aggregated fail feedback rides in params — a vote-round aggregate the
+    # task row cannot answer at delivery time.
+    assert "broken build" in rework_dms[0][1]["params"]["feedback"]
+    assert rework_dms[0][1]["params"]["max_rounds"] == "3"
 
 
 @pytest.mark.asyncio
@@ -396,9 +426,10 @@ async def test_silent_reviewers_get_renudged_once_per_window(db, bus):
     await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
     await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
 
-    renudges = [(to, content) for to, content in _dm_targets(mm) if "rev-2" == to and "[r]" in content]
-    # First DM is the review request, second is exactly one reminder.
-    assert len(renudges) == 2
+    handoffs_to_silent = [(to, meta) for to, meta in _dm_targets(mm) if to == "rev-2"]
+    templates = [meta["template"] for _, meta in handoffs_to_silent]
+    # The review request, then exactly one reminder despite two scans in window.
+    assert templates == ["scheduler_review_request", "scheduler_review_renudge"]
 
 
 # ---------------------------------------------------------------------------

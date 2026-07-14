@@ -4,6 +4,7 @@
 """Unit tests for TeamDatabase module"""
 
 import asyncio
+import json
 import warnings
 
 import pytest
@@ -272,6 +273,50 @@ class TestTeamDatabaseInit:
             assert "enable_task_verification" in columns
             assert row["dispatch_mode"] == "autonomous"
             assert not row["enable_task_verification"]
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level1
+    def test_message_migration_adds_meta_column(self):
+        """A pre-F_63 message table gains the meta column; legacy rows read NULL.
+
+        NULL meta is exactly "an ordinary message" to the delivery path, so a
+        legacy row keeps rendering its own content — the pre-F_63 behavior.
+        """
+        from openjiuwen.agent_teams.tools.database.engine import _ensure_message_meta_column
+
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_message_premeta (
+                        message_id TEXT PRIMARY KEY,
+                        team_name TEXT NOT NULL,
+                        from_member_name TEXT NOT NULL,
+                        to_member_name TEXT,
+                        content TEXT NOT NULL,
+                        timestamp BIGINT NOT NULL,
+                        broadcast BOOLEAN NOT NULL,
+                        protocol TEXT NOT NULL DEFAULT 'plain',
+                        is_read BOOLEAN
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    "INSERT INTO team_message_premeta "
+                    "(message_id, team_name, from_member_name, content, timestamp, broadcast) "
+                    "VALUES ('m1', 'team', 'leader', 'hello', 1, 0)"
+                )
+
+                _ensure_message_meta_column(conn)
+
+                columns = {col["name"] for col in inspect(conn).get_columns("team_message_premeta")}
+                row = conn.exec_driver_sql("SELECT content, meta FROM team_message_premeta").mappings().one()
+
+            assert "meta" in columns
+            assert row["meta"] is None
+            assert row["content"] == "hello"
         finally:
             engine.dispose()
 
@@ -1570,6 +1615,44 @@ class TestMessageOperations:
         assert message.to_member_name == "member9"
         assert message.content == "Hello"
         assert message.broadcast == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_create_templated_message_round_trips_meta_and_stays_unread(self, db):
+        """A templated handoff stores meta, no body — and must still be delivered.
+
+        Its ``content`` is empty by design (the document is rendered from meta
+        at delivery, F_63), so the unread sweep that feeds a member's mailbox
+        must not treat the row as nothing to deliver.
+        """
+        await db.team.create_team(
+            team_name="team18b",
+            display_name="Team 18b",
+            leader_member_name="leader18b"
+        )
+
+        meta = {"template": "scheduler_task_start", "refs": {"task": "t-1"}}
+        success = await db.message.create_message(
+            message_id="msg-tpl",
+            team_name="team18b",
+            from_member_name="leader18b",
+            to_member_name="dev-1",
+            content="",
+            broadcast=False,
+            meta=meta,
+        )
+        assert success is True
+
+        message = await db.message.get_message("msg-tpl")
+        assert message.content == ""
+        assert json.loads(message.meta) == meta
+
+        unread = await db.message.get_messages(
+            team_name="team18b",
+            to_member_name="dev-1",
+            unread_only=True,
+        )
+        assert [m.message_id for m in unread] == ["msg-tpl"]
 
     @pytest.mark.asyncio
     @pytest.mark.level1
