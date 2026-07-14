@@ -589,7 +589,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
 
     def _build_team_trajectory_summary(self, ctx: EvolutionContext) -> str:
         trajectory = ctx.trajectory
-        if trajectory is not None and getattr(trajectory, "steps", None) is not None:
+        if trajectory is not None:
             return build_team_trajectory_summary(trajectory)
         return _build_conversation_snippet(ctx.messages, language=self._language)
 

@@ -183,7 +183,10 @@ class SiliconFlowModelClient(BaseModelClient):
                 tools=params.get("tools"),
                 temperature=params.get("temperature"),
                 top_p=params.get("top_p"),
-                max_tokens=params.get("max_tokens"))
+                max_tokens=params.get("max_tokens"),
+                frequency_penalty=params.get("frequency_penalty"),
+                presence_penalty=params.get("presence_penalty"),
+                stop=params.get("stop"))
 
             async with self._apost(params, timeout=timeout) as response:
                 data = await response.json()
@@ -308,6 +311,9 @@ class SiliconFlowModelClient(BaseModelClient):
                 temperature=params.get("temperature"),
                 top_p=params.get("top_p"),
                 max_tokens=params.get("max_tokens"),
+                frequency_penalty=params.get("frequency_penalty"),
+                presence_penalty=params.get("presence_penalty"),
+                stop=params.get("stop"),
                 is_stream=True)
 
             final_message = None

@@ -9,7 +9,12 @@ from openjiuwen.agent_evolving.agent_rl.offline.runtime.collector import (
     TrajectoryCollector,
 )
 from openjiuwen.agent_evolving.agent_rl.rl_rail import RLRail
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryStore
+from openjiuwen.agent_evolving.agent_rl.schemas import trajectory_to_rollouts
+from openjiuwen.agent_evolving.trajectory import (
+    InMemoryTrajectoryStore,
+    trajectory_session_id,
+    trajectory_steps,
+)
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     InvokeInputs,
@@ -55,8 +60,8 @@ async def test_rl_rail_uses_evolution_rail_flow():
 
     trajectories = store.query()
     assert len(trajectories) == 1
-    assert trajectories[0].session_id == "test-session"
-    step0 = trajectories[0].steps[0]
+    assert trajectory_session_id(trajectories[0]) == "test-session"
+    step0 = trajectory_steps(trajectories[0])[0]
     assert step0.meta.get("turn_id") == 0
     assert step0.meta.get("case_id") == "case-123"
 
@@ -94,8 +99,43 @@ async def test_rl_rail_with_tool_calls():
 
     trajectories = store.query()
     assert len(trajectories) == 1
-    response = trajectories[0].steps[0].detail.response
+    response = trajectory_steps(trajectories[0])[0].detail.response
     assert response["tool_calls"][0]["function"]["name"] == "test_tool"
+
+
+@pytest.mark.asyncio
+async def test_rl_rail_lifts_token_fields_into_otlp_trajectory_rollouts():
+    """RLRail should persist token fields on the new trajectory projection."""
+    store = InMemoryTrajectoryStore()
+    rail = RLRail(trajectory_store=store)
+
+    invoke_inputs = InvokeInputs(query="q", conversation_id="test")
+    await rail.before_invoke(_ctx(invoke_inputs))
+
+    response = {
+        "role": "assistant",
+        "content": "answer",
+        "prompt_token_ids": [11, 12],
+        "completion_token_ids": [21, 22, 23],
+        "logprobs": [-0.1, -0.2, -0.3],
+    }
+    await rail.after_model_call(_ctx(ModelCallInputs(
+        messages=[{"role": "user", "content": "q"}],
+        response=response,
+    )))
+    await rail.after_invoke(_ctx(invoke_inputs))
+
+    trajectories = store.query()
+    assert len(trajectories) == 1
+    step = trajectory_steps(trajectories[0])[0]
+    assert step.prompt_token_ids == [11, 12]
+    assert step.completion_token_ids == [21, 22, 23]
+    assert step.logprobs == [-0.1, -0.2, -0.3]
+    assert step.detail.response == {"role": "assistant", "content": "answer"}
+
+    rollout = trajectory_to_rollouts(trajectories[0])[0]
+    assert rollout.input_prompt_ids == [11, 12]
+    assert rollout.output_response_ids == [21, 22, 23]
 
 
 @pytest.mark.asyncio
@@ -122,8 +162,8 @@ async def test_rl_rail_keeps_one_invoke_per_trajectory():
 
     trajectories = store.query()
     assert len(trajectories) == 2
-    assert [len(trajectory.steps) for trajectory in trajectories] == [1, 1]
-    assert trajectories[1].steps[0].detail.messages[0]["content"] == "q2"
+    assert [len(trajectory_steps(trajectory)) for trajectory in trajectories] == [1, 1]
+    assert trajectory_steps(trajectories[1])[0].detail.messages[0]["content"] == "q2"
 
 
 @pytest.mark.asyncio
@@ -143,8 +183,8 @@ async def test_rl_rail_keeps_full_single_invoke_trajectory():
 
     trajectories = store.query()
     assert len(trajectories) == 1
-    assert len(trajectories[0].steps) == 201
-    assert trajectories[0].steps[0].detail.messages[0]["content"] == "q0"
+    assert len(trajectory_steps(trajectories[0])) == 201
+    assert trajectory_steps(trajectories[0])[0].detail.messages[0]["content"] == "q0"
 
 
 @pytest.mark.asyncio
@@ -206,5 +246,4 @@ async def test_trajectory_collector_partial_on_exception():
     result = await collector.collect(mock_agent, {"query": "test"})
 
     assert result is not None
-    assert hasattr(result, "steps")
-    assert len(result.steps) == 1
+    assert len(trajectory_steps(result)) == 1

@@ -105,6 +105,25 @@ _RUN_TIMEOUT_S = 1200.0
 _MCP_SERVER_COMMAND = [sys.executable, "-m", "openjiuwen.agent_teams.mcp"]
 
 
+def _use_ssh_for_claude() -> bool:
+    """Return whether claude members should be launched through local SSH."""
+    return os.environ.get("EXTERNAL_CLI_E2E_CLAUDE_TRANSPORT", "").strip().lower() == "ssh"
+
+
+def _local_ssh_transport() -> dict[str, Any]:
+    """Build the SSH endpoint config for localhost port 23."""
+    username = os.environ.get("EXTERNAL_CLI_SSH_USER") or os.environ.get("USERNAME") or os.environ.get("USER")
+    config: dict[str, Any] = {
+        "host": "127.0.0.1",
+        "port": 23,
+        "agent": True,
+        "disable_host_key_check": True,
+    }
+    if username:
+        config["username"] = username
+    return config
+
+
 def _leader_model() -> dict[str, Any]:
     """Build the leader TeamModelConfig dict from the environment."""
     return {
@@ -132,6 +151,15 @@ def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
     launch config for each CLI kind — the leader's ``spawn_member`` call
     only references it by name.
     """
+    claude_cli_config: dict[str, Any] = {
+        "cli_agent": "claude",
+        "cwd": str(workspace_path),
+        "inject_mcp": True,
+        "mcp_server_command": _MCP_SERVER_COMMAND,
+    }
+    if _use_ssh_for_claude():
+        claude_cli_config["ssh_transport"] = _local_ssh_transport()
+
     cfg: dict[str, Any] = {
         "team_name": team_name,
         "lifecycle": "temporary",
@@ -170,12 +198,7 @@ def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
         },
         "storage": {"type": "sqlite"},
         "external_cli_agents": [
-            {
-                "cli_agent": "claude",
-                "cwd": str(workspace_path),
-                "inject_mcp": True,
-                "mcp_server_command": _MCP_SERVER_COMMAND,
-            },
+            claude_cli_config,
             {
                 "cli_agent": "codex",
                 "cwd": str(workspace_path),
@@ -242,6 +265,10 @@ async def _run() -> int:
     print(f"External-CLI team E2E — team={team_name}")
     print(f"workspace={workspace_path}")
     print("members: " + ", ".join(f"{n}({c})" for n, c in _MEMBERS))
+    if _use_ssh_for_claude():
+        print("claude transport: ssh://127.0.0.1:23")
+    else:
+        print("claude transport: local")
     print("=" * 70)
 
     await Runner.start()

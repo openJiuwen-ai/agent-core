@@ -10,7 +10,7 @@ from typing import Any, Literal, Optional, Protocol, runtime_checkable
 
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
 from openjiuwen.agent_evolving.experience.types import PendingChange
-from openjiuwen.agent_evolving.trajectory import LegacyTrajectory, Trajectory, to_legacy_trajectory
+from openjiuwen.agent_evolving.trajectory import Trajectory
 from openjiuwen.core.session.stream import OutputSchema
 
 EvolutionEventKind = Literal["approval", "progress", "outcome"]
@@ -51,15 +51,14 @@ class EvolutionHostEventMeta:
 class EvolutionSnapshot:
     """Async evolution snapshot captured while callback context is still alive."""
 
-    trajectory: Trajectory | LegacyTrajectory
+    trajectory: Trajectory
     messages: list[dict]
     skill_name: Optional[str] = None
 
     def to_legacy_dict(self) -> dict[str, Any]:
         """Return the existing dict shape consumed by rail hooks and tests."""
-        legacy_trajectory = to_legacy_trajectory(self.trajectory)
         snapshot: dict[str, Any] = {
-            "trajectory": legacy_trajectory,
+            "trajectory": self.trajectory,
             "messages": self.messages,
         }
         if self.skill_name is not None:

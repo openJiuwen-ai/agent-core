@@ -25,7 +25,7 @@ dependencies = [
     # Date & time
     "python-dateutil>=2.9.0.post0",
     # File & locking
-    "filelock>=3.20.1",
+    "filelock>=3.25.0",
     "portalocker>=3.2.0",
     "aiofiles>=25.1.0",
     # Database ORM
@@ -87,6 +87,7 @@ sandbox = ["agent-sandbox>=0.0.26"]
 mem0 = ["mem0ai>=1.0.0"]
 jiuwen-memory = ["JiuwenMemory>=0.1.0", "httpx>=0.24"]
 agentarts = ["agentarts-sdk>=0.1.2,<0.2"]
+ssh = ["asyncssh>=2.24.0"]
 observability = [
     "opentelemetry-api>=1.25.0",
     "opentelemetry-sdk>=1.25.0",

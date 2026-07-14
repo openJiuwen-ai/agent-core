@@ -310,20 +310,32 @@ class ExternalMemoryRail(DeepAgentRail):
     @staticmethod
     def _resolve_user_text_for_memory(ctx: AgentCallbackContext) -> str:
         """Resolve user text for memory storage.
-        
+
         Priority rules:
-        1. Prefer non-empty ctx.inputs.query
-        2. Fallback to last user message in ctx.inputs.messages
-        3. Log warning and return empty string if both are empty
-        
+        1. RunContext.extra["raw_query"]
+        2. Prefer non-empty ctx.inputs.query
+        3. Fallback to last user message in ctx.inputs.messages
+        4. Log warning and return empty string if all are empty
+
         Note: Should use this method consistently for prefetch and sync_turn.
-        
+
         Args:
             ctx: AgentCallbackContext
-            
+
         Returns:
-            User text string    
+            User text string
         """
+        # Highest priority: raw query from RunContext.extra
+        #   before_model_call: ctx.extra["run_context"] (bridged to ReActAgent)
+        #   after_invoke: ctx.inputs.run_context (on DeepAgent)
+        run_context = getattr(ctx.inputs, "run_context", None)
+        if run_context is None and isinstance(getattr(ctx, "extra", None), dict):
+            run_context = ctx.extra.get("run_context")
+        if run_context is not None and hasattr(run_context, "extra"):
+            mem_query = run_context.extra.get("raw_query", "")
+            if isinstance(mem_query, str) and mem_query.strip():
+                return mem_query.strip()
+
         # Prioritize the query field
         if hasattr(ctx.inputs, "query"):
             q = ctx.inputs.query

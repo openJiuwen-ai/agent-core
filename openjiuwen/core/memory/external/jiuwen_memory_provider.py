@@ -23,12 +23,17 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from jiuwen_memory.common.logging import memory_logger
-from jiuwen_memory.memory_core.external.provider import MemoryProvider
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.memory.external.provider import MemoryProvider
 
 
 DEFAULT_RECALL_USER_MEM_NUM = 5
 DEFAULT_RECALL_HISTORY_MEM_NUM = 3
+
+# Per-endpoint HTTP timeouts (seconds) for the server backend.
+# `/add_messages/` triggers real-LLM extraction (gen_all_memory) — user profile,
+_SERVER_READ_TIMEOUT = 30.0
+_SERVER_WRITE_TIMEOUT = 120.0
 
 # Shared tool schemas — identical for both backends.
 LTM_SEARCH_SCHEMA = {
@@ -146,7 +151,6 @@ class _SDKBackend:
         self._is_initialized = False
         self._user_id = "__default__"
         self._scope_id = "__default__"
-        self._session_id = "__default__"
 
     @property
     def is_initialized(self) -> bool:
@@ -160,7 +164,6 @@ class _SDKBackend:
     async def initialize(self, **kwargs: Any) -> None:
         self._user_id = kwargs.get("user_id", self._user_id)
         self._scope_id = kwargs.get("scope_id", self._scope_id)
-        self._session_id = kwargs.get("session_id", self._session_id)
 
         if self._kv_store is None:
             self._kv_store = self._create_kv_store()
@@ -246,9 +249,8 @@ class _SDKBackend:
                 agent_config,
                 user_id=kwargs.get("user_id", self._user_id),
                 scope_id=kwargs.get("scope_id", self._scope_id),
-                session_id=kwargs.get("session_id", self._session_id),
             )
-        except Exception as exc:  
+        except Exception as exc:
             memory_logger.warning("[JiuwenMemoryProvider/sdk] sync_turn add_messages failed: %s", exc)
 
     async def handle_tool_call(self, tool_name: str, args: dict) -> str:
@@ -357,7 +359,7 @@ class _SDKBackend:
             {
                 "results": [
                     {
-                        "id": r.mem_info.mem_id,
+                        "mem_id": r.mem_info.mem_id,
                         "content": r.mem_info.content,
                         "type": r.mem_info.type.value if r.mem_info.type else "unknown",
                         "score": r.score,
@@ -381,8 +383,9 @@ class _SDKBackend:
             {
                 "results": [
                     {
-                        "id": r.mem_info.mem_id,
+                        "mem_id": r.mem_info.mem_id,
                         "content": r.mem_info.content,
+                        "type": r.mem_info.type.value if r.mem_info.type else "unknown",
                         "score": r.score,
                     }
                     for r in results
@@ -401,15 +404,21 @@ class _SDKBackend:
 class _ServerBackend:
     """Backend that talks to a remote ``memory_server`` over HTTP."""
 
-    def __init__(self, *, base_url: str = "http://127.0.0.1:8000", api_key: str = "", timeout: float = 30.0):
-        self._base_url = (base_url or "http://127.0.0.1:8000").rstrip("/")
+    def __init__(
+        self,
+        *,
+        base_url: str = "http://127.0.0.1:8000",
+        api_key: str = "",
+        timeout: float = _SERVER_READ_TIMEOUT,
+    ):
+        self._base_url = base_url.rstrip("/") if base_url else ""
         self._api_key = api_key
-        self._timeout = timeout
+        self._read_timeout = timeout
+        self._write_timeout = max(timeout, _SERVER_WRITE_TIMEOUT)
         self._http: Any | None = None
         self._is_initialized = False
         self._user_id = "__default__"
         self._scope_id = "__default__"
-        self._session_id = "__default__"
 
     @property
     def is_initialized(self) -> bool:
@@ -427,7 +436,6 @@ class _ServerBackend:
     async def initialize(self, **kwargs: Any) -> None:
         self._user_id = kwargs.get("user_id", self._user_id)
         self._scope_id = kwargs.get("scope_id", self._scope_id)
-        self._session_id = kwargs.get("session_id", self._session_id)
         try:
             import httpx
         except ImportError as exc:  # pragma: no cover - optional dependency
@@ -435,7 +443,7 @@ class _ServerBackend:
                 "httpx is required for server mode. Install with `pip install httpx`."
             ) from exc
 
-        self._http = httpx.AsyncClient(base_url=self._base_url, headers=self._headers(), timeout=self._timeout)
+        self._http = httpx.AsyncClient(base_url=self._base_url, headers=self._headers(), timeout=self._read_timeout)
 
         # Optional connectivity check — never fatal, server may be reachable later.
         try:
@@ -455,8 +463,8 @@ class _ServerBackend:
     async def prefetch(self, query: str, **kwargs: Any) -> str:
         if not self._http or not self._is_initialized or not query:
             return ""
-        user_id = kwargs.get("user_id", "__default__")
-        scope_id = kwargs.get("scope_id", "__default__")
+        user_id = kwargs.get("user_id", self._user_id)
+        scope_id = kwargs.get("scope_id", self._scope_id)
         mem_results: list = []
         summary_results: list = []
         try:
@@ -487,13 +495,13 @@ class _ServerBackend:
             return
         payload = {
             "messages": messages,
-            "user_id": kwargs.get("user_id", "__default__"),
-            "scope_id": kwargs.get("scope_id", "__default__"),
+            "user_id": kwargs.get("user_id", self._user_id),
+            "scope_id": kwargs.get("scope_id", self._scope_id),
         }
         try:
-            resp = await self._http.post("/add_messages/", json=payload)
+            resp = await self._http.post("/add_messages/", json=payload, timeout=self._write_timeout)
             resp.raise_for_status()
-        except Exception as exc:  
+        except Exception as exc:
             memory_logger.warning("[JiuwenMemoryProvider/server] sync_turn add_messages failed: %s", exc)
 
     async def handle_tool_call(self, tool_name: str, args: dict) -> str:
@@ -557,7 +565,9 @@ class JiuwenMemoryProvider(MemoryProvider):
             or ``"sdk"`` to run a local ``LongTermMemory`` engine in-process.
         base_url: memory_server URL. Server mode only.
         api_key: optional bearer token for memory_server auth. Server mode only.
-        timeout: HTTP request timeout in seconds. Server mode only.
+        timeout: read-path (search) HTTP request timeout in seconds. Server
+            mode only. The write path (``add_messages``) uses a larger ceiling
+            (at least ``_SERVER_WRITE_TIMEOUT``) since it triggers LLM extraction.
         config: SDK engine configuration dict (``kv``/``vector``/``db``/
             ``embedding``/``scope_config``). SDK mode only.
         kv_store / vector_store / db_store / embedding_model: pre-built store
@@ -575,7 +585,7 @@ class JiuwenMemoryProvider(MemoryProvider):
         # server-mode kwargs
         base_url: str = "http://127.0.0.1:8000",
         api_key: str = "",
-        timeout: float = 30.0,
+        timeout: float = _SERVER_READ_TIMEOUT,
         # sdk-mode kwargs
         config: dict | None = None,
         kv_store: Any | None = None,

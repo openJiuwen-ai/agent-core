@@ -407,6 +407,8 @@ class StatusCode(Enum):
     AGENT_TEAM_BUSY_INVALID = (132005,
                                "agent team is busy, team='{team_name}', session='{session_id}', reason: {reason}")
     AGENT_TEAM_STATE_INVALID = (132006, "agent team state inconsistent, reason: {reason}")
+    AGENT_TEAM_SSH_CONNECT_ERROR = (132007, "ssh connect failed, host='{host}', reason='{reason}'")
+    AGENT_TEAM_SSH_EXECUTION_ERROR = (132008, "ssh remote execution failed, reason='{reason}'")
 
     # =========================
     # DevTools / AgentBuilder 140000 - 140099

@@ -9,7 +9,7 @@ from enum import Enum
 
 from openjiuwen.agent_evolving.protocols import TRAJECTORY_ISSUE_SIGNAL, USER_INTENT_SIGNAL
 from openjiuwen.agent_evolving.signal.base import EvolutionSignal, make_evolution_signal
-from openjiuwen.agent_evolving.trajectory.types import Trajectory
+from openjiuwen.agent_evolving.trajectory.types import Trajectory, trajectory_steps
 from openjiuwen.core.common.logging import logger
 
 
@@ -52,7 +52,7 @@ def build_team_trajectory_summary(trajectory: Trajectory) -> str:
     llm_count = 0
     tool_count = 0
 
-    for step in trajectory.steps:
+    for step in trajectory_steps(trajectory):
         if step.kind == "tool" and step.detail:
             tool_count += 1
             tool_name = getattr(step.detail, "tool_name", "unknown")
