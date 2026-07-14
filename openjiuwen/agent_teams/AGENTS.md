@@ -161,12 +161,12 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 
 ### spawn/ — 成员启动
 
-两种启动模式走不同入口，但对外由两条路径触发：
+**注册与拉起是两件事**（细则见 `docs/specs/S_05` 不变量 1）：
 
-- `TeamAgent.spawn_member`（工具层）→ `SpawnManager.spawn_teammate`：Leader LLM 调用 spawn_teammate tool 时触发
-- `TeamAgent.auto_start_member` / `auto_start_all`（interact dispatch 层）→ `TeamBackend.startup_member` / `startup`：用户通过 `@member` 或 `@all` 发消息时 best-effort lazy startup
+- **注册**：四个 `spawn_*` 工具与 `build_team` 的 predefined 成员都只落到 `TeamBackend.spawn_member`——**只写 DB 行（`UNSTARTED`），不启动任何东西**（该方法 docstring 即契约："does NOT start the member"）。
+- **拉起**：只有一条链 —— `TeamAgent.auto_start_member` / `auto_start_all` → `TeamBackend.startup_member` / `startup` → `MemberStatus.UNSTARTED→STARTING` 的 CAS guard（`try_transition_member_status`）→ `_spawn_and_publish` → `_on_teammate_created` → `SpawnManager.spawn_teammate`。
 
-两条路径最终都走 `_on_teammate_created`（即 `SpawnManager.spawn_teammate`），并且都经过 `MemberStatus.UNSTARTED→STARTING` 的 CAS guard（`try_transition_member_status`）。模式由 `TeamAgentSpec.spawn_mode` 决定。
+拉起漏斗有三个触发点，全是"消息 / 任务要投给一个还没起来的成员"：leader `send_message` 的 `_auto_start_members`、interact dispatch（`@member` / `@all` / operator 消息）、调度器投递（F_62）。CAS 是这条链上唯一的并发闸——**不要在 spawn 工具里顺手把 agent 拉起来**，那会绕过它。模式由 `TeamAgentSpec.spawn_mode` 决定。
 
 启动模式：
 - `spawn_mode="process"` → `Runner.spawn_agent` 走子进程（跨平台，默认）。

@@ -514,19 +514,27 @@ class UpdateTaskTool(TeamTool):
         }
 
     async def _is_human_agent_locked(self, task) -> bool:
-        """Whether a task is held by a human-agent member and therefore
-        leader-immutable.
+        """Whether a task is held by a human-agent member still on the team,
+        and therefore leader-immutable.
 
-        The leader may not cancel or reassign such tasks — only the human
-        collaborator can release them (by completing, or by the team
-        being cleaned). The leader's only recourse is send_message nudges.
+        The leader may not cancel, reassign or edit such tasks — only the
+        human collaborator can release them (by completing them). While that
+        human is on the team, the leader's only recourse is send_message
+        nudges.
+
+        The lock keys on a *live* human, not on the bare role: once the
+        leader shuts the member down, the task it still holds becomes an
+        ordinary orphan the leader may cancel or reassign, exactly like the
+        leftovers of a shut-down teammate. Keying on the role alone would
+        strand the task of every human the leader ever removes — nobody left
+        to complete it, and the leader forbidden from touching it.
         """
         active = (
             TaskStatus.PLANNING.value,
             TaskStatus.IN_PROGRESS.value,
             TaskStatus.IN_REVIEW.value,
         )
-        return await self.agent_team.is_human_agent(task.assignee) and task.status in active
+        return await self.agent_team.is_live_human_agent(task.assignee) and task.status in active
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         task_id = inputs.get("task_id")
@@ -546,8 +554,10 @@ class UpdateTaskTool(TeamTool):
             # Each cancelled task fires a targeted TASK_CANCELLED carrying its
             # assignee, so every affected member is steered off its task via
             # on_task_cancelled — no member-wide cancel needed. Preserve every
-            # human-agent-claimed task (empty set is treated as None).
-            skip = set(await self.agent_team.human_agent_names())
+            # task claimed by a human still on the team (empty set is treated
+            # as None); a departed human's leftovers are cancelled like any
+            # other member's.
+            skip = set(await self.agent_team.live_human_agent_names())
             count = await self.agent_team.cancel_all_tasks(skip_assignees=skip or None)
             return ToolOutput(success=True, data={"cancelled_count": count})
 

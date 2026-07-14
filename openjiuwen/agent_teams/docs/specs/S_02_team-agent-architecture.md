@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_02 / team-agent-architecture |
 | 关联模块 | `openjiuwen/agent_teams/agent/` |
-| 最近一次修订日期 | 2026-07-03 |
+| 最近一次修订日期 | 2026-07-14 |
 | 关联 feature | F_11_leader-member-status-tracking.md、F_10_temporary-leader-clean-team-stream-end.md、F_38_team-teammate-worktree-isolation-agenttool.md |
 
 ## 范围 / 边界
@@ -388,7 +388,7 @@ TeamAgent (composition root)
 - `SpawnManager → AgentConfigurator + TeamAgent`（用 getter 闭包避免硬引用环）。
 - `RecoveryManager → AgentConfigurator + SpawnManager`。
 - `SessionManager → state + AgentConfigurator + RecoveryManager`。
-- `StreamController → blueprint + state + resources +` 三个回调（status / execution / wake mailbox）。回调由 `TeamAgent` 注入，`StreamController` 不反向持有 `TeamAgent`。`StreamController._run_one_round` 的 round-end finally 把 `state.team_cleaned` 作为**最高优先级终止条件**：置位则 `close_stream()` 入队 `None`，不 restart pending input / interrupt resume——这是临时团队 leader 调用 `clean_team` 后唯一能结束自身 stream 的路径（leader 故意忽略自己的 `TeamCleanedEvent`，见 F_10）。
+- `StreamController → blueprint + state + resources +` 三个回调（status / execution / wake mailbox）。回调由 `TeamAgent` 注入，`StreamController` 不反向持有 `TeamAgent`。`StreamController._on_idle_settled`（runtime 转 IDLE 时由 `_map_state` 触发）把 `state.team_cleaned` 作为**最高优先级终止条件**：置位则 `close_stream()` 入队 `None`，不 restart pending input / interrupt resume——这是临时团队 leader 调用 `clean_team` 后唯一能结束自身 stream 的路径（leader 故意忽略自己的 `TeamCleanedEvent`，见 F_10）。同一方法里的次优先级条件是 `team_member.status() == SHUTDOWN_REQUESTED` → `close_stream()`，即成员跑完末轮后的 graceful 退场（终态 `SHUTDOWN` 由 Runner finally 的 `manager.finalize_member` 落，见 `S_06` 不变量 13 与 `S_03` 机制 18）。
 - `CoordinationKernel → TeamAgent`（构造时持引用，是事件驱动的总线 + dispatcher 容器；细节见 S_03）。
 
 每个 manager 的**内部**状态留在自己里（`SpawnManager.spawned_handles`、`StreamController.pending_inputs` 等），不进 `TeamAgentState`。这是不变量 5 在拓扑层的具体落点。

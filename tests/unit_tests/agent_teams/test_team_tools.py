@@ -26,7 +26,7 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
 )
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
-from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec
+from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, TeamRole
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
     ApprovePlanTool,
@@ -2104,18 +2104,23 @@ async def test_edit_claimed_task_keeps_claim_without_cancel_member(agent_team, t
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_edit_human_locked_task_is_refused(agent_team, t, sample_agent_card, db):
-    """A human-agent-claimed task's content is leader-immutable — editing it is
-    refused, same lock as cancel / reassign."""
+    """A task held by a human still on the team is leader-immutable — editing its
+    content is refused, same lock as cancel / reassign.
+
+    The member is created with a real ``human_agent`` role rather than stubbing
+    the backend probe, so the lock resolves through the DB exactly as it does in
+    production (role + not-departed status).
+    """
     await db.member.create_member(
         member_name="human-1",
         team_name="test_team",
         display_name="human-1",
         agent_card=sample_agent_card.model_dump_json(),
         status=MemberStatus.READY,
+        role=TeamRole.HUMAN_AGENT.value,
     )
     task = await agent_team.task_manager.add(title="Task", content="old")
     await db.task.claim_task(task.task_id, "human-1")
-    agent_team.is_human_agent = AsyncMock(return_value=True)
 
     tool = UpdateTaskTool(agent_team, t)
     result = await tool.invoke({"task_id": task.task_id, "content": "new content"})

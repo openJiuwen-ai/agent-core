@@ -977,8 +977,8 @@ class TeamAgent(BaseAgent):
         ``setup_team_backend(on_team_cleaned=...)``. ``clean_team`` runs
         synchronously inside the leader's DeepAgent round, so setting the
         flag here guarantees it is visible before
-        ``StreamController._run_one_round``'s finally block evaluates
-        terminal conditions — no reliance on the racy ``TeamCleanedEvent``
+        ``StreamController._on_idle_settled`` evaluates terminal
+        conditions — no reliance on the racy ``TeamCleanedEvent``
         bus handler, which the leader deliberately ignores (see
         ``coordination/handlers/agent_lifecycle.py::on_cleaned``).
         """

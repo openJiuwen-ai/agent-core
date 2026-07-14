@@ -47,6 +47,38 @@ class MemberStatus(str, Enum):
     ERROR = "error"
 
 
+# There are two thresholds on a member's way out, and they are deliberately
+# NOT the same one. Conflating them is how a departing member ends up either
+# stranding its work or never being told it was removed.
+#
+# MEMBER_DEPARTED_STATUSES — the leader has released the member: shutdown is
+# requested, or the member is already gone. Guards that protect a member's
+# in-flight work lift here, at the *request*, not at the terminal state. The
+# HITT task lock (``UpdateTaskTool``) is the one that matters: an avatar wedged
+# mid-round may never reach SHUTDOWN, so waiting for the terminal state would
+# strand the task it holds forever — nobody left to finish it, and the leader
+# forbidden from touching it.
+#
+# MEMBER_UNREACHABLE_STATUSES — the member is actually gone. Message delivery
+# stops only here, NOT at the request: ``TeamBackend.shutdown_member`` writes
+# SHUTDOWN_REQUESTED *before* it sends the shutdown notice, so a member that is
+# merely on its way out must still be delivered to. Cut delivery at the request
+# and the one message that never arrives is the notice saying it was removed —
+# for a human member, that notice is what its controller reads.
+#
+# PAUSED / STOPPED / ERROR / RESTARTING are in neither set: those members still
+# belong to the team and are expected back, so both the work guards and the
+# delivery path keep treating them as ordinary members.
+MEMBER_DEPARTED_STATUSES: frozenset[MemberStatus] = frozenset(
+    {
+        MemberStatus.SHUTDOWN_REQUESTED,
+        MemberStatus.SHUTDOWN,
+    }
+)
+
+MEMBER_UNREACHABLE_STATUSES: frozenset[MemberStatus] = frozenset({MemberStatus.SHUTDOWN})
+
+
 # State transition table for MemberStatus
 MEMBER_TRANSITIONS: Dict[MemberStatus, List[MemberStatus]] = {
     MemberStatus.UNSTARTED: [

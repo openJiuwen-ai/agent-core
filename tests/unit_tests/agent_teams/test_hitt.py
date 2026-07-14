@@ -464,6 +464,125 @@ async def test_cancel_all_preserves_human_agent_claimed_task(built_team, db):
 
 
 # ---------------------------------------------------------------------------
+# Task lock lifts once the human member leaves the team
+#
+# The lock exists to stop the leader stealing work from under a live human.
+# A human the leader has shut down is no longer there to do it, so the task it
+# still holds must become an ordinary orphan — otherwise shutting down an
+# unresponsive human strands that task forever: nobody can finish it and the
+# leader may not touch it.
+# ---------------------------------------------------------------------------
+
+
+async def _depart(backend, member_name: str, status: MemberStatus) -> None:
+    """Drive ``member_name`` out of the team through the real shutdown path.
+
+    ``shutdown_member`` only accepts a started member, so bring the member to
+    READY first (``build_team`` registers humans as UNSTARTED). It leaves the
+    member at SHUTDOWN_REQUESTED; pass ``MemberStatus.SHUTDOWN`` to also settle
+    the terminal transition the avatar performs when it finally collapses.
+    """
+    started = await backend.db.member.update_member_status(
+        member_name, backend.team_name, MemberStatus.READY.value
+    )
+    assert started
+    result = await backend.shutdown_member(member_name)
+    assert result.ok, result.reason
+    if status == MemberStatus.SHUTDOWN:
+        settled = await backend.db.member.update_member_status(member_name, backend.team_name, status.value)
+        assert settled
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize("departed_status", [MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN])
+async def test_cancel_task_owned_by_departed_human_agent_is_allowed(built_team, db, departed_status):
+    """Both departed statuses lift the lock, not just the terminal one.
+
+    SHUTDOWN_REQUESTED has to count: an avatar stuck mid-round may never reach
+    SHUTDOWN, and waiting for it would restore the very wedge this prevents.
+    """
+    from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.agent_teams.tools.team_tools import UpdateTaskTool
+
+    await _create_and_assign(built_team, db, "t-gone", HUMAN_AGENT_MEMBER_NAME)
+    await _depart(built_team, HUMAN_AGENT_MEMBER_NAME, departed_status)
+
+    tool = UpdateTaskTool(built_team, make_translator("cn"))
+    out = await tool.invoke({"task_id": "t-gone", "status": "cancelled"})
+    assert out.success is True, out.error
+    assert (await built_team.task_manager.get("t-gone")).status == TaskStatus.CANCELLED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_reassign_task_owned_by_departed_human_agent_is_allowed(built_team, db):
+    from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.agent_teams.tools.team_tools import UpdateTaskTool
+
+    await _create_and_assign(built_team, db, "t-gone", HUMAN_AGENT_MEMBER_NAME)
+    await _depart(built_team, HUMAN_AGENT_MEMBER_NAME, MemberStatus.SHUTDOWN_REQUESTED)
+
+    tool = UpdateTaskTool(built_team, make_translator("cn"))
+    out = await tool.invoke({"task_id": "t-gone", "assignee": "team_leader"})
+    assert out.success is True, out.error
+    assert (await built_team.task_manager.get("t-gone")).assignee == "team_leader"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_edit_task_owned_by_departed_human_agent_is_allowed(built_team, db):
+    from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.agent_teams.tools.team_tools import UpdateTaskTool
+
+    await _create_and_assign(built_team, db, "t-gone", HUMAN_AGENT_MEMBER_NAME)
+    await _depart(built_team, HUMAN_AGENT_MEMBER_NAME, MemberStatus.SHUTDOWN_REQUESTED)
+
+    tool = UpdateTaskTool(built_team, make_translator("cn"))
+    out = await tool.invoke({"task_id": "t-gone", "title": "retargeted"})
+    assert out.success is True, out.error
+    assert (await built_team.task_manager.get("t-gone")).title == "retargeted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_lock_still_holds_for_human_agent_that_only_paused(built_team, db):
+    """Only departure lifts the lock — an idle human is still on the team.
+
+    PAUSED / STOPPED / ERROR members are expected back, so their in-flight work
+    stays protected. Narrowing the lock must not widen into "any non-running
+    human".
+    """
+    from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.agent_teams.tools.team_tools import UpdateTaskTool
+
+    await _create_and_assign(built_team, db, "t-paused", HUMAN_AGENT_MEMBER_NAME)
+    await db.member.update_member_status(HUMAN_AGENT_MEMBER_NAME, "hitt_team", MemberStatus.READY.value)
+    await db.member.update_member_status(HUMAN_AGENT_MEMBER_NAME, "hitt_team", MemberStatus.PAUSED.value)
+
+    tool = UpdateTaskTool(built_team, make_translator("cn"))
+    out = await tool.invoke({"task_id": "t-paused", "status": "cancelled"})
+    assert out.success is False
+    assert (await built_team.task_manager.get("t-paused")).status == TaskStatus.IN_PROGRESS.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_backend_live_human_agent_probes_exclude_departed(built_team):
+    """``is_human_agent`` stays role-only; the live probes drop the departed."""
+    assert await built_team.is_human_agent(HUMAN_AGENT_MEMBER_NAME) is True
+    assert await built_team.is_live_human_agent(HUMAN_AGENT_MEMBER_NAME) is True
+    assert await built_team.live_human_agent_names() == frozenset({HUMAN_AGENT_MEMBER_NAME})
+
+    await _depart(built_team, HUMAN_AGENT_MEMBER_NAME, MemberStatus.SHUTDOWN_REQUESTED)
+
+    assert await built_team.is_human_agent(HUMAN_AGENT_MEMBER_NAME) is True
+    assert await built_team.is_live_human_agent(HUMAN_AGENT_MEMBER_NAME) is False
+    assert await built_team.live_human_agent_names() == frozenset()
+    assert await built_team.human_agent_names() == frozenset({HUMAN_AGENT_MEMBER_NAME})
+
+
+# ---------------------------------------------------------------------------
 # Message auto-read
 # ---------------------------------------------------------------------------
 
@@ -771,6 +890,25 @@ async def test_cancel_all_preserves_all_human_members(multi_human_backend, db):
     assert (await multi_human_backend.task_manager.get("t-designer")).status == TaskStatus.IN_PROGRESS.value
     assert (await multi_human_backend.task_manager.get("t-pm")).status == TaskStatus.IN_PROGRESS.value
     assert (await multi_human_backend.task_manager.get("t-open")).status == TaskStatus.CANCELLED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_cancel_all_skips_only_human_members_still_on_the_team(multi_human_backend, db):
+    """Batch cancel preserves a live human's task and sweeps a departed one's."""
+    from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.agent_teams.tools.team_tools import UpdateTaskTool
+
+    await _create_and_assign(multi_human_backend, db, "t-designer", "human_designer")
+    await _create_and_assign(multi_human_backend, db, "t-pm", "human_pm")
+    await _depart(multi_human_backend, "human_designer", MemberStatus.SHUTDOWN_REQUESTED)
+
+    tool = UpdateTaskTool(multi_human_backend, make_translator("en"))
+    out = await tool.invoke({"task_id": "*", "status": "cancelled"})
+    assert out.success is True
+
+    assert (await multi_human_backend.task_manager.get("t-designer")).status == TaskStatus.CANCELLED.value
+    assert (await multi_human_backend.task_manager.get("t-pm")).status == TaskStatus.IN_PROGRESS.value
 
 
 @pytest.mark.asyncio
