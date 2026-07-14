@@ -17,7 +17,7 @@ import asyncio
 import contextvars
 from typing import TYPE_CHECKING, Any, Optional
 
-from openjiuwen.agent_teams.external.cli_agent.adapters import build_adapter
+from openjiuwen.agent_teams.external.cli_agent.backends import backend_for
 from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_runtime
 from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
@@ -107,7 +107,7 @@ async def external_cli_spawn(
     # Build the member's system prompt from the team-rail sections (the same
     # sections an in-process member gets), excluding the other DeepAgent rails.
     system_prompt = await _build_member_system_prompt(team_agent, spec, ctx, member_name)
-    adapter = build_adapter(ctx.cli_agent) if ctx.cli_agent else None
+    backend = backend_for(ctx.cli_agent) if ctx.cli_agent else None
 
     # Resolve the static launch config declared on the spec for this CLI kind.
     # The member was registered through ``spawn_external_cli_agent`` which
@@ -148,9 +148,9 @@ async def external_cli_spawn(
         "If there is no task yet, just acknowledge briefly and END YOUR TURN now — "
         "do NOT wait, poll, or loop; the team will message you when there is work."
     )
-    # CLIs that accept the system prompt as a launch arg (claude) already carry
-    # it; CLIs without such a flag get it prepended to their first user message.
-    if system_prompt and adapter is not None and not adapter.injects_system_prompt_via_arg():
+    # Backends that accept the system prompt as a launch arg already carry it;
+    # others get it prepended to their first user message.
+    if system_prompt and backend is not None and not backend.injects_system_prompt_via_arg:
         query = f"{system_prompt}\n\n---\n\n{base_query}"
     else:
         query = base_query

@@ -266,9 +266,9 @@ class TeamBackend:
         # ``REMOTE_UNAVAILABLE_SENTINEL`` so the bridge degrades to a
         # normal teammate.
         self._bridge_adapters: dict[str, BridgeProtocolAdapter] = {}
-        # External-CLI member registry: member_name -> cli_agent adapter
-        # name. A member listed here is driven by a third-party CLI
-        # subprocess (ExternalCliRuntime) instead of a local DeepAgent.
+        # External-CLI member registry: member_name -> cli_agent backend name.
+        # A member listed here is driven by an external backend instead of a
+        # local DeepAgent.
         # Consulted by ``SpawnManager.build_context_from_db`` to set
         # ``ctx.cli_agent`` so the spawn path picks the external-CLI route.
         # In-memory (per-process), mirroring the bridge spec registry; a
@@ -1702,7 +1702,7 @@ class TeamBackend:
         return member_name in self._external_cli_specs
 
     def get_external_cli_agent(self, member_name: str) -> Optional[str]:
-        """Return the cli_agent adapter name for a member, or ``None``."""
+        """Return the cli_agent backend name for a member, or ``None``."""
         return self._external_cli_specs.get(member_name)
 
     def external_cli_agent_names(self) -> frozenset[str]:
@@ -1739,7 +1739,7 @@ class TeamBackend:
         Args:
             member_name: Unique member identifier.
             display_name: Human-readable label.
-            cli_agent: Adapter name (``"claude"`` / ``"codex"`` / ...); see
+            cli_agent: External CLI backend name (``"claude"`` / ``"codex"`` / ...); see
                 ``agent_teams/external/cli_agent/adapters.py``.
             desc: Public description stored on the member row (roster view).
                 Optional; defaults to empty.
@@ -1749,10 +1749,10 @@ class TeamBackend:
                 the external CLI); accepted for signature symmetry.
 
         Returns:
-            ``MemberOpResult`` — failure if the adapter is unknown or the
+            ``MemberOpResult`` — failure if the backend name is unknown or the
             underlying ``spawn_member`` rejects the registration.
         """
-        from openjiuwen.agent_teams.external.cli_agent.adapters import available_adapters
+        from openjiuwen.agent_teams.external.cli_agent.backends import available_backends, is_known_backend
 
         if not prompt:
             return MemberOpResult.fail("spawn_external_cli_agent requires non-empty 'prompt'")
@@ -1765,8 +1765,8 @@ class TeamBackend:
                 f"cli_agent '{cli_agent}' is not declared in TeamAgentSpec.external_cli_agents "
                 f"(declared: {declared}); add a static config entry for it first"
             )
-        if cli_agent not in available_adapters():
-            return MemberOpResult.fail(f"Unknown cli_agent '{cli_agent}'; known: {', '.join(available_adapters())}")
+        if not is_known_backend(cli_agent):
+            return MemberOpResult.fail(f"Unknown cli_agent '{cli_agent}'; known: {', '.join(available_backends())}")
 
         member_card = AgentCard(
             id=f"{self.team_name}_{member_name}",
