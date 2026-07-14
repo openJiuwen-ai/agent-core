@@ -1,14 +1,14 @@
 # coding: utf-8
 
 from openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor import (
-    ForkedCurrentRoundCompressor,
-    ForkedCurrentRoundCompressorConfig,
+    CurrentRoundCompressor,
+    CurrentRoundCompressorConfig,
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor import (
-    ForkedDialogueCompressor,
+    DialogueCompressor,
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.round_level_compressor import (
-    ForkedRoundLevelCompressor,
+    RoundLevelCompressor,
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.prompts.prompts import (
     CURRENT_COMPACT_PROMPT,
@@ -18,11 +18,11 @@ from openjiuwen.core.context_engine.processor.forked.compressor.prompts.prompts 
 
 
 def test_compressors_use_prompts_module_defaults():
-    assert ForkedCurrentRoundCompressor.default_prompt == CURRENT_COMPACT_PROMPT
+    assert CurrentRoundCompressor.default_prompt == CURRENT_COMPACT_PROMPT
 
-    assert ForkedDialogueCompressor.default_prompt == DIALOGUE_COMPACT_PROMPT
+    assert DialogueCompressor.default_prompt == DIALOGUE_COMPACT_PROMPT
 
-    assert ForkedRoundLevelCompressor.default_prompt == ROUND_COMPACT_PROMPT
+    assert RoundLevelCompressor.default_prompt == ROUND_COMPACT_PROMPT
 
 
 def test_prompts_are_the_structured_compaction_prompts():
@@ -32,7 +32,7 @@ def test_prompts_are_the_structured_compaction_prompts():
 
 
 def test_manual_compact_preserve_instruction_is_appended_to_prompt():
-    processor = ForkedCurrentRoundCompressor(ForkedCurrentRoundCompressorConfig())
+    processor = CurrentRoundCompressor(CurrentRoundCompressorConfig())
 
     default_prompt = processor._build_prompt(None)
     assert default_prompt == CURRENT_COMPACT_PROMPT

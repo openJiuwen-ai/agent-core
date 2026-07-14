@@ -11,7 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.forked.base import ContextEvent, ContextProcessor
 from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
     count_messages_tokens,
@@ -31,10 +30,10 @@ _OFFLOAD_STRATEGY: OffloadStrategy = "rule_then_truncate"
 _OFFLOAD_PREVIEW_HEAD_TAIL_CHARS = 2000
 
 
-class ForkedMessageOffloaderConfig(BaseModel):
+class MessageSummaryOffloaderConfig(BaseModel):
     """Minimal configuration for context-relative tool-result offloading."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     add_message_threshold_ratio: float = Field(default=0.1, gt=0)
     """Context-token-capacity ratio above which a newly added tool message is processed."""
@@ -63,12 +62,11 @@ class ForkedMessageOffloaderConfig(BaseModel):
     """Persist rule-compression and offload debug records when enabled."""
 
     debug_dump_dir: str | None = Field(default=None)
-    """Optional directory for ForkedMessageOffloader debug records."""
+    """Optional directory for MessageSummaryOffloader debug records."""
 
 
-@ContextEngine.register_processor()
-class ForkedMessageOffloader(ContextProcessor):
-    def __init__(self, config: ForkedMessageOffloaderConfig):
+class MessageSummaryOffloader(ContextProcessor):
+    def __init__(self, config: MessageSummaryOffloaderConfig):
         super().__init__(config)
         self._rule_pipeline = RuleCompressionPipeline(
             enable_dump=bool(getattr(config, "enable_debug_dump", False)),
@@ -557,7 +555,7 @@ class ForkedMessageOffloader(ContextProcessor):
                 json.dump(record, handle, ensure_ascii=False, default=str)
                 handle.write("\n")
         except Exception as exc:
-            logger.warning("[ForkedMessageOffloader] failed to write debug log: %s", exc)
+            logger.warning("[MessageSummaryOffloader] failed to write debug log: %s", exc)
 
     def _debug_log_path(self, context: ModelContext) -> str:
         return os.path.join(self._debug_log_dir(context), MESSAGE_OFFLOADER_DEBUG_LOG_FILE)
@@ -619,12 +617,12 @@ class ForkedMessageOffloader(ContextProcessor):
         processed_messages: list[BaseMessage],
     ) -> None:
         replacements = {
-            ForkedMessageOffloader._message_id(message): message
+            MessageSummaryOffloader._message_id(message): message
             for message in processed_messages
-            if ForkedMessageOffloader._message_id(message)
+            if MessageSummaryOffloader._message_id(message)
         }
         context_window.context_messages = [
-            replacements.get(ForkedMessageOffloader._message_id(message), message)
+            replacements.get(MessageSummaryOffloader._message_id(message), message)
             for message in context_window.context_messages
         ]
 

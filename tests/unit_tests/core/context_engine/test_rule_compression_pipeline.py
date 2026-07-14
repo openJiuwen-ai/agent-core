@@ -112,7 +112,7 @@ def test_rule_compression_dump_uses_env_directory_without_workspace(tmp_path, mo
 def test_search_results_compression_ignores_numbered_line_prefixes():
     content = "\n".join(
         f"{index}\topenjiuwen/core/context_engine/processor/offloader/message_offloader.py:{index}:"
-        f"    ForkedMessageOffloader match {index}"
+        f"    MessageSummaryOffloader match {index}"
         for index in range(1, 9)
     )
 

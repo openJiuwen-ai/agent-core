@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.forked.compressor.base import (
     PrefixCompactProcessorConfig,
     PrefixCompactProcessor,
@@ -21,18 +20,17 @@ MEMORY_BLOCK_CURRENT_CLOSE = "</memory_block_current>"
 DEFAULT_CURRENT_COMPRESSION_PROMPT = CURRENT_COMPACT_PROMPT
 
 
-class ForkedCurrentRoundCompressorConfig(PrefixCompactProcessorConfig):
+class CurrentRoundCompressorConfig(PrefixCompactProcessorConfig):
     trigger_context_ratio: float = Field(default=0.8, gt=0.0, lt=1.0)
     min_target_context_ratio: float = Field(default=0.1, ge=0.0, lt=1.0)
     keep_recent_messages: int = Field(default=0, ge=0)
 
 
-@ContextEngine.register_processor()
-class ForkedCurrentRoundCompressor(PrefixCompactProcessor):
+class CurrentRoundCompressor(PrefixCompactProcessor):
     memory_block_open = MEMORY_BLOCK_CURRENT_OPEN
     memory_block_close = MEMORY_BLOCK_CURRENT_CLOSE
     default_prompt = DEFAULT_CURRENT_COMPRESSION_PROMPT
-    processor_label = "ForkedCurrentRoundCompressor"
+    processor_label = "CurrentRoundCompressor"
     memory_block_meaning = (
         "This is a compressed summary of work already performed after the latest user request. "
         "It is not a new user request. "
@@ -44,11 +42,11 @@ class ForkedCurrentRoundCompressor(PrefixCompactProcessor):
     )
     reinject_builder_names = ["plan_mode", "plan", "task_status", "todo", "skills", "read_file"]
 
-    def __init__(self, config: ForkedCurrentRoundCompressorConfig):
+    def __init__(self, config: CurrentRoundCompressorConfig):
         super().__init__(config)
 
     @property
-    def config(self) -> ForkedCurrentRoundCompressorConfig:
+    def config(self) -> CurrentRoundCompressorConfig:
         return self._config
 
     def _build_span(self, messages: list[BaseMessage]) -> PrefixCompactSpan:

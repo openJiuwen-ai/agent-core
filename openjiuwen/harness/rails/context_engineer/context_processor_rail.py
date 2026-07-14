@@ -258,6 +258,11 @@ class ContextProcessorRail(DeepAgentRail):
             )
 
         config.context_processors = all_processors
+        processor_paths = ", ".join(
+            f"{name}={processor_config.__class__.__module__}.{processor_config.__class__.__qualname__}"
+            for name, processor_config in all_processors
+        )
+        logger.info("context processors initialized: %s", processor_paths)
 
         self._all_processors = all_processors
         context_engine_config = getattr(config, "context_engine_config", None)

@@ -1,8 +1,8 @@
 from unittest.mock import MagicMock
 
 from openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor import (
-    ForkedDialogueCompressor,
-    ForkedDialogueCompressorConfig,
+    DialogueCompressor,
+    DialogueCompressorConfig,
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
     count_messages_tokens,
@@ -20,11 +20,11 @@ def test_compressor_delegates_message_counting_to_shared_helper(monkeypatch):
     )
     context = MagicMock()
     context.token_counter.return_value = MagicMock()
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig())
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     messages = [UserMessage(content="hello")]
 
     assert compressor.count_messages_tokens(messages, context) == 37
-    shared_counter.assert_called_once_with(messages, context.token_counter(), "ForkedDialogueCompressor")
+    shared_counter.assert_called_once_with(messages, context.token_counter(), "DialogueCompressor")
 
 
 def test_shared_message_counter_uses_token_counter():

@@ -9,12 +9,12 @@ import pytest
 
 from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor import (
-    ForkedCurrentRoundCompressor,
-    ForkedCurrentRoundCompressorConfig,
+    CurrentRoundCompressor,
+    CurrentRoundCompressorConfig,
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor import (
-    ForkedDialogueCompressor,
-    ForkedDialogueCompressorConfig,
+    DialogueCompressor,
+    DialogueCompressorConfig,
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
     CompressionError,
@@ -22,8 +22,8 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.compress
     CompressionResult,
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.round_level_compressor import (
-    ForkedRoundLevelCompressor,
-    ForkedRoundLevelCompressorConfig,
+    RoundLevelCompressor,
+    RoundLevelCompressorConfig,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
 
@@ -83,7 +83,7 @@ def _write_plan_file(workspace_root, slug: str = "active"):
 
 @pytest.mark.asyncio
 async def test_compression_stores_only_state_snapshot_block():
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig())
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     _attach_executor(
         compressor,
         "\n".join(
@@ -119,7 +119,7 @@ async def test_compression_stores_only_state_snapshot_block():
 
 @pytest.mark.asyncio
 async def test_compression_falls_back_to_raw_response_without_state_snapshot():
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig())
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     _attach_executor(compressor, "raw compact state")
     context = _context({})
     window = _context_window(
@@ -138,7 +138,7 @@ async def test_compression_falls_back_to_raw_response_without_state_snapshot():
 
 @pytest.mark.asyncio
 async def test_current_reinjects_current_execution_state_after_compression(tmp_path):
-    compressor = ForkedCurrentRoundCompressor(ForkedCurrentRoundCompressorConfig(keep_recent_messages=1))
+    compressor = CurrentRoundCompressor(CurrentRoundCompressorConfig(keep_recent_messages=1))
     _attach_executor(compressor)
     _write_todo_file(tmp_path)
     _write_plan_file(tmp_path)
@@ -175,7 +175,7 @@ async def test_current_reinjects_current_execution_state_after_compression(tmp_p
 
 @pytest.mark.asyncio
 async def test_dialogue_reinjects_only_external_materials_after_compression():
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig())
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     _attach_executor(compressor)
     context = _context(
         {
@@ -215,7 +215,7 @@ async def test_dialogue_reinjects_only_external_materials_after_compression():
     assert '<section name="read_file">' in reinjected.content
     assert "Recently read file: /repo/src/app.py" in reinjected.content
     assert "Partial read: false" not in reinjected.content
-    # ForkedDialogueCompressor.reinject_builder_names is
+    # DialogueCompressor.reinject_builder_names is
     # ["skills", "read_file", "plan_mode", "plan"], so plan_mode is emitted
     # here. plan is not, because this test does not stage a plan file
     # (workspace_root is empty) and build_plan_reinjected_content returns "".
@@ -231,7 +231,7 @@ async def test_dialogue_reinjects_only_external_materials_after_compression():
 
 @pytest.mark.asyncio
 async def test_dialogue_uses_real_user_message_boundary():
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig())
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     _attach_executor(compressor, "historical compact state")
     context = _context({})
     window = _context_window(
@@ -258,7 +258,7 @@ async def test_dialogue_uses_real_user_message_boundary():
 
 @pytest.mark.asyncio
 async def test_dialogue_skips_when_target_is_below_min_context_ratio():
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig())
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     _attach_executor(compressor, "historical compact state")
     context = _context({})
     window = _context_window(
@@ -276,7 +276,7 @@ async def test_dialogue_skips_when_target_is_below_min_context_ratio():
 
 @pytest.mark.asyncio
 async def test_current_compresses_internal_user_messages_after_real_user_boundary():
-    compressor = ForkedCurrentRoundCompressor(ForkedCurrentRoundCompressorConfig(keep_recent_messages=0))
+    compressor = CurrentRoundCompressor(CurrentRoundCompressorConfig(keep_recent_messages=0))
     _attach_executor(compressor, "current compact state")
     context = _context({})
     window = _context_window(
@@ -302,7 +302,7 @@ async def test_current_compresses_internal_user_messages_after_real_user_boundar
 
 
 def test_current_default_targets_tool_results_before_trailing_internal_user():
-    compressor = ForkedCurrentRoundCompressor(ForkedCurrentRoundCompressorConfig())
+    compressor = CurrentRoundCompressor(CurrentRoundCompressorConfig())
     window_messages = [
         UserMessage(content='你收到一条消息： {"type": "user input", "content": "Read files"}'),
         AssistantMessage(
@@ -327,7 +327,7 @@ def test_current_default_targets_tool_results_before_trailing_internal_user():
 
 @pytest.mark.asyncio
 async def test_round_reinjects_all_state_except_tool_result_hint_after_compression(tmp_path):
-    compressor = ForkedRoundLevelCompressor(ForkedRoundLevelCompressorConfig(keep_recent_messages=1))
+    compressor = RoundLevelCompressor(RoundLevelCompressorConfig(keep_recent_messages=1))
     _attach_executor(compressor)
     _write_todo_file(tmp_path)
     _write_plan_file(tmp_path)
@@ -378,7 +378,7 @@ async def test_round_reinjects_all_state_except_tool_result_hint_after_compressi
 
 @pytest.mark.asyncio
 async def test_context_overflow_retry_increases_exclude_recent_messages():
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig())
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     executor = MagicMock()
     executor.invoke = AsyncMock(
         side_effect=[
@@ -410,7 +410,7 @@ async def test_context_overflow_retry_increases_exclude_recent_messages():
 
 @pytest.mark.asyncio
 async def test_context_overflow_retry_stops_after_budget_retries_without_mutating_context():
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig())
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     executor = MagicMock()
     executor.invoke = AsyncMock(side_effect=_compression_error(CompressionErrorKind.CONTEXT_OVERFLOW))
     compressor._compression_executor = executor
@@ -434,7 +434,7 @@ async def test_context_overflow_retry_stops_after_budget_retries_without_mutatin
 
 @pytest.mark.asyncio
 async def test_transient_compression_error_retries_without_changing_request():
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig())
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     executor = MagicMock()
     executor.invoke = AsyncMock(
         side_effect=[
@@ -463,7 +463,7 @@ async def test_transient_compression_error_retries_without_changing_request():
 
 @pytest.mark.asyncio
 async def test_non_retryable_compression_error_does_not_retry():
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig())
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     executor = MagicMock()
     executor.invoke = AsyncMock(side_effect=_compression_error(CompressionErrorKind.AUTHENTICATION))
     compressor._compression_executor = executor

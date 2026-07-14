@@ -4,10 +4,10 @@
 """
 Integration tests for ContextEngine + InferenceAffinityModel + processors (CE + model layer).
 
-**Scope**: Full flow from ContextEngine.create_context + ForkedMessageOffloader to
+**Scope**: Full flow from ContextEngine.create_context + MessageSummaryOffloader to
 get_context_window(model=...) and release() call/logs. Uses mocked InferenceAffinityModel
 invoke and patched InferenceAffinityModelClient.release. Verifies:
-- When processors (e.g. ForkedMessageOffloader) modify context, release is triggered and
+- When processors (e.g. MessageSummaryOffloader) modify context, release is triggered and
   session_id / block_released / cache_salt are correct in call and logs.
 - When no processors modify context, release is NOT called and no release logs.
 
@@ -26,7 +26,7 @@ import pytest
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader import (
-    ForkedMessageOffloaderConfig,
+    MessageSummaryOffloaderConfig,
 )
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import UserMessage, ToolMessage, AssistantMessage
@@ -34,7 +34,7 @@ from openjiuwen.core.foundation.llm.inference_affinity_model import InferenceAff
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.session.agent import create_agent_session
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("refactored_context_processors")]
 
 
 def _build_mock_inference_affinity_model() -> InferenceAffinityModel:
@@ -111,12 +111,12 @@ def _extract_metadata_from_record(record) -> dict:
     'openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client.InferenceAffinityModelClient.release')
 async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_release, caplog):
     """
-    Test KV cache release when ForkedMessageOffloader modifies context messages.
+    Test KV cache release when MessageSummaryOffloader modifies context messages.
 
     This test verifies the complete workflow:
     1. Context is created with initial messages including a large tool message
-    2. ForkedMessageOffloader is configured to offload tool messages above threshold
-    3. When new messages are added, ForkedMessageOffloader triggers and modifies context
+    2. MessageSummaryOffloader is configured to offload tool messages above threshold
+    3. When new messages are added, MessageSummaryOffloader triggers and modifies context
     4. KV cache release is triggered due to message modification
     5. Release operation is properly logged with correct session_id and block count
 
@@ -175,7 +175,7 @@ async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_r
     )
     engine = ContextEngine(engine_config)
 
-    offloader_cfg = ForkedMessageOffloaderConfig(ttl_seconds=10)
+    offloader_cfg = MessageSummaryOffloaderConfig(ttl_seconds=10)
 
     # Set up test environment
     affinity_model = _build_mock_inference_affinity_model()
@@ -200,12 +200,12 @@ async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_r
             ]
         )
 
-    # Create context with ForkedMessageOffloader processor
+    # Create context with MessageSummaryOffloader processor
     context = await engine.create_context(
         "affinity_offload_ctx",
         agent_session,
         history_messages=initial_messages,
-        processors=[("ForkedMessageOffloader", offloader_cfg)],
+        processors=[("MessageSummaryOffloader", offloader_cfg)],
         token_counter=None,
     )
 
@@ -229,17 +229,17 @@ async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_r
 
     # === Verification Phase ===
 
-    # 1. Verify ForkedMessageOffloader was triggered
+    # 1. Verify MessageSummaryOffloader was triggered
     offload_logs = [
         record for record in caplog.records
-        if "trigger context processor ForkedMessageOffloader on GET" in record.message
+        if "trigger context processor MessageSummaryOffloader on GET" in record.message
     ]
     assert len(offload_logs) > 0, (
-        f"Expected ForkedMessageOffloader triggered log not found. All logs:\n{caplog.text}"
+        f"Expected MessageSummaryOffloader triggered log not found. All logs:\n{caplog.text}"
     )
 
     # 2. Verify release reason was logged
-    # Release should be triggered because ForkedMessageOffloader modified the context
+    # Release should be triggered because MessageSummaryOffloader modified the context
     release_reason_logs = [
         record for record in caplog.records
         if "RELEASE REASON" in record.message and "Message modified" in record.message

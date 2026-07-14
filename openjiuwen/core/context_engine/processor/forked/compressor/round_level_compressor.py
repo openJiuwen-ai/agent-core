@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.forked.compressor.base import (
     PrefixCompactProcessorConfig,
     PrefixCompactProcessor,
@@ -20,17 +19,16 @@ MEMORY_BLOCK_ROUND_CLOSE = "</memory_block_round>"
 DEFAULT_ROUND_COMPRESSION_PROMPT = ROUND_COMPACT_PROMPT
 
 
-class ForkedRoundLevelCompressorConfig(PrefixCompactProcessorConfig):
+class RoundLevelCompressorConfig(PrefixCompactProcessorConfig):
     trigger_context_ratio: float = Field(default=0.8, gt=0.0, lt=1.0)
     keep_recent_messages: int = Field(default=4, ge=0)
 
 
-@ContextEngine.register_processor()
-class ForkedRoundLevelCompressor(PrefixCompactProcessor):
+class RoundLevelCompressor(PrefixCompactProcessor):
     memory_block_open = MEMORY_BLOCK_ROUND_OPEN
     memory_block_close = MEMORY_BLOCK_ROUND_CLOSE
     default_prompt = DEFAULT_ROUND_COMPRESSION_PROMPT
-    processor_label = "ForkedRoundLevelCompressor"
+    processor_label = "RoundLevelCompressor"
     memory_block_meaning = (
         "This is a task-continuity checkpoint across multiple conversation rounds. "
         "It may include long-running project state, prior decisions, current goals, completed work, "
@@ -42,11 +40,11 @@ class ForkedRoundLevelCompressor(PrefixCompactProcessor):
     )
     reinject_builder_names = ["plan_mode", "plan", "task_status", "todo", "skills", "read_file"]
 
-    def __init__(self, config: ForkedRoundLevelCompressorConfig):
+    def __init__(self, config: RoundLevelCompressorConfig):
         super().__init__(config)
 
     @property
-    def config(self) -> ForkedRoundLevelCompressorConfig:
+    def config(self) -> RoundLevelCompressorConfig:
         return self._config
 
     def _build_span(self, messages: list[BaseMessage]) -> PrefixCompactSpan:

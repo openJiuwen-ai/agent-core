@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.forked.compressor.base import (
     PrefixCompactProcessorConfig,
     PrefixCompactProcessor,
@@ -21,17 +20,16 @@ MEMORY_BLOCK_DIALOGUE_CLOSE = "</memory_block_dialogue>"
 DEFAULT_DIALOGUE_COMPRESSION_PROMPT = DIALOGUE_COMPACT_PROMPT
 
 
-class ForkedDialogueCompressorConfig(PrefixCompactProcessorConfig):
+class DialogueCompressorConfig(PrefixCompactProcessorConfig):
     trigger_context_ratio: float = Field(default=0.8, gt=0.0, lt=1.0)
     min_target_context_ratio: float = Field(default=0.1, ge=0.0, lt=1.0)
 
 
-@ContextEngine.register_processor()
-class ForkedDialogueCompressor(PrefixCompactProcessor):
+class DialogueCompressor(PrefixCompactProcessor):
     memory_block_open = MEMORY_BLOCK_DIALOGUE_OPEN
     memory_block_close = MEMORY_BLOCK_DIALOGUE_CLOSE
     default_prompt = DEFAULT_DIALOGUE_COMPRESSION_PROMPT
-    processor_label = "ForkedDialogueCompressor"
+    processor_label = "DialogueCompressor"
     memory_block_meaning = (
         "This is a compressed handoff of earlier conversation history. "
         "It is not a new user request. "
@@ -43,11 +41,11 @@ class ForkedDialogueCompressor(PrefixCompactProcessor):
     )
     reinject_builder_names = ["skills", "read_file", "plan_mode", "plan"]
 
-    def __init__(self, config: ForkedDialogueCompressorConfig):
+    def __init__(self, config: DialogueCompressorConfig):
         super().__init__(config)
 
     @property
-    def config(self) -> ForkedDialogueCompressorConfig:
+    def config(self) -> DialogueCompressorConfig:
         return self._config
 
     def _build_span(self, messages: list[BaseMessage]) -> PrefixCompactSpan:

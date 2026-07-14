@@ -12,8 +12,8 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.compress
     COMPRESSION_DUMP_DIR_ENV,
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor import (
-    ForkedDialogueCompressor,
-    ForkedDialogueCompressorConfig,
+    DialogueCompressor,
+    DialogueCompressorConfig,
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import CompressionResult
 from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
@@ -53,7 +53,7 @@ def _compressible_window():
 
 @pytest.mark.asyncio
 async def test_dump_disabled_by_default_creates_no_files(tmp_path):
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig(compression_dump_dir=str(tmp_path)))
+    compressor = DialogueCompressor(DialogueCompressorConfig(compression_dump_dir=str(tmp_path)))
     _attach_executor(compressor)
     context = _context()
     window = _compressible_window()
@@ -65,8 +65,8 @@ async def test_dump_disabled_by_default_creates_no_files(tmp_path):
 
 @pytest.mark.asyncio
 async def test_dump_writes_request_and_post_compression_context(tmp_path):
-    compressor = ForkedDialogueCompressor(
-        ForkedDialogueCompressorConfig(
+    compressor = DialogueCompressor(
+        DialogueCompressorConfig(
             enable_compression_dump=True,
             compression_dump_dir=str(tmp_path),
         )
@@ -81,7 +81,7 @@ async def test_dump_writes_request_and_post_compression_context(tmp_path):
     assert len(files) == 1
     payload = json.loads(files[0].read_text(encoding="utf-8"))
 
-    assert payload["processor_type"] == "ForkedDialogueCompressor"
+    assert payload["processor_type"] == "DialogueCompressor"
     assert payload["session_id"] == "session-1"
 
     request = payload["compression_request"]
@@ -109,8 +109,8 @@ async def test_dump_writes_request_and_post_compression_context(tmp_path):
 
 @pytest.mark.asyncio
 async def test_dump_expands_session_template_dir(tmp_path):
-    compressor = ForkedDialogueCompressor(
-        ForkedDialogueCompressorConfig(
+    compressor = DialogueCompressor(
+        DialogueCompressorConfig(
             enable_compression_dump=True,
             compression_dump_dir=str(
                 tmp_path / "context" / "{session_id}_context" / "debug_artifacts" / "compression"
@@ -132,7 +132,7 @@ async def test_dump_expands_session_template_dir(tmp_path):
 @pytest.mark.asyncio
 async def test_dump_uses_env_var_when_config_dir_unset(tmp_path, monkeypatch):
     monkeypatch.setenv(COMPRESSION_DUMP_DIR_ENV, str(tmp_path))
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig(enable_compression_dump=True))
+    compressor = DialogueCompressor(DialogueCompressorConfig(enable_compression_dump=True))
     _attach_executor(compressor)
     context = _context()
     window = _compressible_window()
@@ -146,7 +146,7 @@ async def test_dump_uses_env_var_when_config_dir_unset(tmp_path, monkeypatch):
 async def test_dump_uses_session_workspace_default_dir(tmp_path):
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    compressor = ForkedDialogueCompressor(ForkedDialogueCompressorConfig(enable_compression_dump=True))
+    compressor = DialogueCompressor(DialogueCompressorConfig(enable_compression_dump=True))
     _attach_executor(compressor)
     context = _context(workspace_root=str(workspace), session_id="s-7")
     window = _compressible_window()
@@ -166,8 +166,8 @@ async def test_dump_failure_does_not_break_compression(tmp_path):
     blocking_file = tmp_path / "not_a_dir"
     blocking_file.write_text("block", encoding="utf-8")
 
-    compressor = ForkedDialogueCompressor(
-        ForkedDialogueCompressorConfig(
+    compressor = DialogueCompressor(
+        DialogueCompressorConfig(
             enable_compression_dump=True,
             compression_dump_dir=str(blocking_file),
         )

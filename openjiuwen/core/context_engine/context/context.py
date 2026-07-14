@@ -764,10 +764,7 @@ class SessionModelContext(ModelContext):
                 use_window_hook
                 and (
                     is_offload_processor
-                    or processor.processor_type() in {
-                        "DialogueCompressor",
-                        "ForkedDialogueCompressor",
-                    }
+                    or processor.processor_type() == "DialogueCompressor"
                 )
             )
             try:

@@ -7,18 +7,19 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from pydantic import ValidationError
 
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader import (
-    ForkedMessageOffloaderConfig,
+    MessageSummaryOffloaderConfig,
 )
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
 
+pytestmark = pytest.mark.usefixtures("refactored_context_processors")
+
 
 async def create_context(
-    config: ForkedMessageOffloaderConfig | None = None,
+    config: MessageSummaryOffloaderConfig | None = None,
     *,
     context_window_tokens: int = 100,
     default_window_message_num: int = 100,
@@ -34,7 +35,7 @@ async def create_context(
     )
     return await engine.create_context(
         "test_ctx",
-        processors=[("ForkedMessageOffloader", config or ForkedMessageOffloaderConfig())],
+        processors=[("MessageSummaryOffloader", config or MessageSummaryOffloaderConfig())],
         token_counter=token_counter,
     )
 
@@ -99,7 +100,7 @@ def _python_function_for_offload(name: str, *, line_count: int) -> list[str]:
 
 class TestMessageOffloaderConfig:
     def test_only_exposes_ttl_threshold_ratios_and_protected_tools(self):
-        assert set(ForkedMessageOffloaderConfig.model_fields) == {
+        assert set(MessageSummaryOffloaderConfig.model_fields) == {
             "add_message_threshold_ratio",
             "ttl_context_occupancy_ratio",
             "ttl_message_threshold_ratio",
@@ -109,30 +110,15 @@ class TestMessageOffloaderConfig:
             "debug_dump_dir",
         }
 
-    @pytest.mark.parametrize(
-        "removed_field",
-        [
-            "enable_rule_compression",
-            "enable_rule_compression_dump",
-            "offload_strategy",
-            "offload_preview_head_tail_chars",
-            "messages_threshold",
-            "large_message_threshold",
-            "trim_size",
-            "messages_to_keep",
-            "keep_last_round",
-            "offload_message_type",
-            "rule_compression_ratio",
-            "rule_compression_expired_ratio",
-            "rule_compression_context_window_tokens",
-            "rule_compression_ttl_keep_recent_messages",
-            "rule_truncate_head_tokens",
-            "rule_truncate_tail_tokens",
-        ],
-    )
-    def test_rejects_removed_configuration(self, removed_field):
-        with pytest.raises(ValidationError):
-            ForkedMessageOffloaderConfig(**{removed_field: 1})
+    def test_ignores_official_configuration_fields_for_switch_compatibility(self):
+        config = MessageSummaryOffloaderConfig(
+            large_message_threshold=15_000,
+            offload_message_type=["tool"],
+            messages_to_keep=10,
+            keep_last_round=False,
+        )
+
+        assert config == MessageSummaryOffloaderConfig()
 
 
 class TestMessageOffloaderAddTrigger:
@@ -255,7 +241,7 @@ class TestMessageOffloaderAddTrigger:
         assert message.content.rstrip().endswith("]]")
 
         offload_path = tmp_path / "context" / "default_session_id_context" / "offload"
-        files = list(offload_path.glob("ForkedMessageOffloader_*.json"))
+        files = list(offload_path.glob("MessageSummaryOffloader_*.json"))
         assert len(files) == 1
         payload = json.loads(files[0].read_text(encoding="utf-8"))
         assert payload["messages"][0]["content"] == content
@@ -340,7 +326,7 @@ class TestMessageOffloaderAddTrigger:
     @pytest.mark.asyncio
     async def test_add_threshold_ratio_is_configurable(self):
         context = await create_context(
-            ForkedMessageOffloaderConfig(add_message_threshold_ratio=0.5),
+            MessageSummaryOffloaderConfig(add_message_threshold_ratio=0.5),
             context_window_tokens=100,
         )
 
@@ -355,7 +341,7 @@ class TestMessageOffloaderTtl:
     async def test_ttl_uses_token_thresholds_for_context_and_each_message(self):
         counter = _metadata_token_counter()
         context = await create_context(
-            ForkedMessageOffloaderConfig(
+            MessageSummaryOffloaderConfig(
                 ttl_seconds=10,
                 add_message_threshold_ratio=10,
                 ttl_context_occupancy_ratio=0.5,
@@ -387,7 +373,7 @@ class TestMessageOffloaderTtl:
     async def test_ttl_requires_idle_timeout_and_half_context_occupancy(self):
         counter = _metadata_token_counter()
         context = await create_context(
-            ForkedMessageOffloaderConfig(ttl_seconds=10, add_message_threshold_ratio=1.0),
+            MessageSummaryOffloaderConfig(ttl_seconds=10, add_message_threshold_ratio=1.0),
             context_window_tokens=50002,
             token_counter=counter,
         )
@@ -417,7 +403,7 @@ class TestMessageOffloaderTtl:
     async def test_ttl_falls_back_to_offload_when_rule_compression_has_no_savings(self):
         counter = _metadata_token_counter()
         context = await create_context(
-            ForkedMessageOffloaderConfig(ttl_seconds=10),
+            MessageSummaryOffloaderConfig(ttl_seconds=10),
             context_window_tokens=50002,
             token_counter=counter,
         )
@@ -446,7 +432,7 @@ class TestMessageOffloaderTtl:
 
     @pytest.mark.asyncio
     async def test_ttl_skips_context_below_half_capacity(self):
-        context = await create_context(ForkedMessageOffloaderConfig(ttl_seconds=10))
+        context = await create_context(MessageSummaryOffloaderConfig(ttl_seconds=10))
         processor = context._processors[0]
         processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         await context.add_messages(
@@ -465,7 +451,7 @@ class TestMessageOffloaderTtl:
     @pytest.mark.asyncio
     async def test_ttl_context_occupancy_ratio_is_configurable(self):
         context = await create_context(
-            ForkedMessageOffloaderConfig(
+            MessageSummaryOffloaderConfig(
                 ttl_seconds=10,
                 add_message_threshold_ratio=1.0,
                 ttl_context_occupancy_ratio=0.8,
@@ -491,7 +477,7 @@ class TestMessageOffloaderTtl:
     @pytest.mark.asyncio
     async def test_ttl_message_threshold_ratio_is_configurable(self):
         context = await create_context(
-            ForkedMessageOffloaderConfig(
+            MessageSummaryOffloaderConfig(
                 ttl_seconds=10,
                 add_message_threshold_ratio=1.0,
                 ttl_context_occupancy_ratio=0.1,
@@ -515,7 +501,7 @@ class TestMessageOffloaderTtl:
     @pytest.mark.asyncio
     async def test_ttl_rule_compression_offloads_original_even_when_compressed_fits_budget(self):
         context = await create_context(
-            ForkedMessageOffloaderConfig(
+            MessageSummaryOffloaderConfig(
                 ttl_seconds=10,
                 add_message_threshold_ratio=1.0,
                 ttl_context_occupancy_ratio=0.1,
@@ -546,7 +532,7 @@ class TestMessageOffloaderTtl:
         debug_dir = tmp_path / "debug"
         monkeypatch.setenv("OPENJIUWEN_MESSAGE_OFFLOADER_DEBUG_LOG_DIR", str(debug_dir))
         context = await create_context(
-            ForkedMessageOffloaderConfig(enable_debug_dump=True),
+            MessageSummaryOffloaderConfig(enable_debug_dump=True),
             context_window_tokens=100,
         )
         content = "\n".join(["same line"] * 10000)
@@ -586,7 +572,7 @@ class TestMessageOffloaderTtl:
     async def test_uses_configured_debug_dump_dir(self, tmp_path):
         debug_dir = tmp_path / "configured-debug"
         context = await create_context(
-            ForkedMessageOffloaderConfig(
+            MessageSummaryOffloaderConfig(
                 enable_debug_dump=True,
                 debug_dump_dir=str(debug_dir),
             ),
@@ -603,7 +589,7 @@ class TestMessageOffloaderTtl:
     @pytest.mark.asyncio
     async def test_expands_session_template_debug_dump_dir(self, tmp_path):
         context = await create_context(
-            ForkedMessageOffloaderConfig(
+            MessageSummaryOffloaderConfig(
                 enable_debug_dump=True,
                 debug_dump_dir=str(
                     tmp_path / "context" / "{session_id}_context" / "debug_artifacts" / "message_offloader"
@@ -624,7 +610,7 @@ class TestMessageOffloaderTtl:
     async def test_ttl_traverses_full_model_context_not_only_returned_window(self):
         counter = _metadata_token_counter()
         context = await create_context(
-            ForkedMessageOffloaderConfig(ttl_seconds=10, add_message_threshold_ratio=1.0),
+            MessageSummaryOffloaderConfig(ttl_seconds=10, add_message_threshold_ratio=1.0),
             context_window_tokens=50002,
             default_window_message_num=1,
             token_counter=counter,
@@ -651,7 +637,7 @@ class TestMessageOffloaderTtl:
 
     @pytest.mark.asyncio
     async def test_ttl_skips_messages_that_were_already_rule_compressed(self):
-        context = await create_context(ForkedMessageOffloaderConfig(ttl_seconds=10))
+        context = await create_context(MessageSummaryOffloaderConfig(ttl_seconds=10))
         processor = context._processors[0]
         processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         await context.add_messages(
@@ -683,7 +669,7 @@ class TestMessageOffloaderTtl:
     @pytest.mark.asyncio
     async def test_ttl_skips_protected_tool_messages(self):
         context = await create_context(
-            ForkedMessageOffloaderConfig(
+            MessageSummaryOffloaderConfig(
                 ttl_seconds=10,
                 add_message_threshold_ratio=1.0,
                 ttl_context_occupancy_ratio=0.1,
@@ -713,7 +699,7 @@ class TestMessageOffloaderTtl:
     async def test_ttl_offloads_message_when_rule_compression_still_exceeds_budget(self):
         counter = _metadata_token_counter()
         context = await create_context(
-            ForkedMessageOffloaderConfig(ttl_seconds=10, add_message_threshold_ratio=1.0),
+            MessageSummaryOffloaderConfig(ttl_seconds=10, add_message_threshold_ratio=1.0),
             context_window_tokens=50002,
             token_counter=counter,
         )
@@ -744,12 +730,12 @@ class TestMessageOffloaderTtl:
 
     @pytest.mark.asyncio
     async def test_context_window_access_time_is_saved_and_restored(self):
-        context = await create_context(ForkedMessageOffloaderConfig(ttl_seconds=10))
+        context = await create_context(MessageSummaryOffloaderConfig(ttl_seconds=10))
         processor = context._processors[0]
         processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         await context.get_context_window()
 
-        restored = await create_context(ForkedMessageOffloaderConfig(ttl_seconds=10))
+        restored = await create_context(MessageSummaryOffloaderConfig(ttl_seconds=10))
         restored.load_state({"test_ctx": context.save_state()})
 
         assert restored.last_context_window_access_at() == 100.0
