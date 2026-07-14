@@ -869,6 +869,10 @@ class ReActAgent(BaseAgent):
                 else:
                     raise
             ctx.inputs.response = ai_message
+            if ai_message.usage_metadata:
+                ai_message.usage_metadata.prompt = _format_messages_as_prompt(
+                    ctx.inputs.messages
+                )
             return ai_message
 
         # Streaming path: accumulate chunks via __add__, write to session in real-time
