@@ -1,58 +1,71 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Render scheduler handoff messages (F_62).
+"""Scheduler message assembly (F_62, templated by F_63).
 
-Pure text assembly over ``i18n.t`` — the scheduler speaks to members through
-leader-identity mailbox messages and to the leader through direct input
-injection; every wording lives in ``agent_teams/i18n.py`` under the
-``scheduler.*`` keys. No XML here: mailbox delivery wraps the content in
-``<team-inbound>`` on the receiving side with the leader as sender.
+Two audiences, two mechanisms:
+
+* **members** get leader-identity mailbox messages. Their wording is *not*
+  assembled here — this module only builds the delivery payload (``meta``:
+  template key + row refs + transient params) and the mailbox row stores an
+  empty ``content``. The text lives in ``prompts/<lang>/scheduler_*.md`` and
+  is rendered against the *current* task row at delivery time, so a handoff
+  that sat in an offline member's mailbox never carries a stale task brief.
+  See ``message_template.py``.
+* **the leader** gets direct input injections (digests / escalations). Those
+  never touch the mailbox, so there is no meta channel and no delivery-time
+  expansion — they stay one-line ``i18n.t`` strings rendered right here.
 """
 
 from __future__ import annotations
 
 from openjiuwen.agent_teams.i18n import t
+from openjiuwen.agent_teams.message_template import build_meta
 from openjiuwen.agent_teams.schema.status import TaskStatus
 
+# Template keys, i.e. ``prompts/<lang>/<key>.md`` basenames.
+_TASK_START = "scheduler_task_start"
+_TASK_START_PLAN = "scheduler_task_start_plan"
+_REVIEW_REQUEST = "scheduler_review_request"
+_REVIEW_RENUDGE = "scheduler_review_renudge"
+_REWORK = "scheduler_rework"
+_VERIFIED_REPORT = "scheduler_verified_report"
 
-def render_task_start(task) -> str:
-    """Start instruction for the assignee (plan gate aware)."""
-    key = "scheduler.task_start_plan" if task.status == TaskStatus.PLANNING.value else "scheduler.task_start"
-    return t(key, task_id=task.task_id, title=task.title, content=task.content)
+
+def meta_task_start(task) -> dict:
+    """Delivery payload for the assignee's start instruction (plan gate aware)."""
+    template = _TASK_START_PLAN if task.status == TaskStatus.PLANNING.value else _TASK_START
+    return build_meta(template, refs={"task": task.task_id})
 
 
-def render_review_request(task) -> str:
-    """Review instruction for one reviewer of a freshly opened round."""
-    return t(
-        "scheduler.review_request",
-        task_id=task.task_id,
-        title=task.title,
-        author=task.assignee or "?",
-        round=task.review_round,
+def meta_review_request(task) -> dict:
+    """Delivery payload for one reviewer of a freshly opened round."""
+    return build_meta(_REVIEW_REQUEST, refs={"task": task.task_id})
+
+
+def meta_review_renudge(task) -> dict:
+    """Delivery payload for a reviewer that has not voted in the open round."""
+    return build_meta(_REVIEW_RENUDGE, refs={"task": task.task_id})
+
+
+def meta_rework(task, max_rounds: int, feedback: str) -> dict:
+    """Delivery payload for the author after a failed round settled.
+
+    ``max_rounds`` and ``feedback`` are params rather than refs: the ceiling is
+    the *resolved* value (the task column may be NULL and fall back to the spec
+    default), and the feedback aggregates the vote rows of the round that just
+    closed — the task row can answer neither at delivery time.
+    """
+    return build_meta(
+        _REWORK,
+        refs={"task": task.task_id},
+        params={"max_rounds": str(max_rounds), "feedback": feedback or t("scheduler.none")},
     )
 
 
-def render_review_renudge(task) -> str:
-    """Reminder for a reviewer that has not voted in the open round."""
-    return t("scheduler.review_renudge", task_id=task.task_id, title=task.title, round=task.review_round)
-
-
-def render_rework(task, max_rounds: int, feedback: str) -> str:
-    """Rework instruction for the author after a failed round settled."""
-    return t(
-        "scheduler.rework",
-        task_id=task.task_id,
-        title=task.title,
-        round=task.review_round,
-        max_rounds=max_rounds,
-        feedback=feedback or t("scheduler.none"),
-    )
-
-
-def render_verified_report(task) -> str:
-    """Post-pass notice asking the author to report results to the leader."""
-    return t("scheduler.verified_report", task_id=task.task_id, title=task.title)
+def meta_verified_report(task) -> dict:
+    """Delivery payload asking the author to report results to the leader."""
+    return build_meta(_VERIFIED_REPORT, refs={"task": task.task_id})
 
 
 def render_leader_task_done(task_id: str, title: str, *, verified: bool, remaining: int) -> str:

@@ -203,7 +203,7 @@ class TeamScheduler:
             started = await task_manager.get(candidate.task_id)
             if started is None:
                 continue
-            await self._send_as_leader(member_name, render.render_task_start(started))
+            await self._send_as_leader(member_name, render.meta_task_start(started))
             acted = True
         return acted
 
@@ -223,7 +223,7 @@ class TeamScheduler:
             round_key = (task.task_id, task.review_round)
             if round_key not in self._review_dispatched:
                 for reviewer in reviewers:
-                    await self._send_as_leader(reviewer, render.render_review_request(task))
+                    await self._send_as_leader(reviewer, render.meta_review_request(task))
                 self._review_dispatched.add(round_key)
 
             tally = await task_manager.get_review_tally(task)
@@ -247,7 +247,7 @@ class TeamScheduler:
             team_logger.debug("[scheduler] pass settle for %s did not apply: %s", task.task_id, result.reason)
             return False
         if task.assignee:
-            await self._send_as_leader(task.assignee, render.render_verified_report(task))
+            await self._send_as_leader(task.assignee, render.meta_verified_report(task))
         await self._digest_task_done(task_manager, task.task_id, task.title, verified=True)
         return True
 
@@ -262,7 +262,7 @@ class TeamScheduler:
             team_logger.debug("[scheduler] fail settle for %s did not apply: %s", task.task_id, result.reason)
             return False
         if task.assignee:
-            await self._send_as_leader(task.assignee, render.render_rework(task, max_rounds, feedback))
+            await self._send_as_leader(task.assignee, render.meta_rework(task, max_rounds, feedback))
         return True
 
     async def _handle_undecided(self, task, tally: dict, now_ms: int) -> None:
@@ -290,26 +290,29 @@ class TeamScheduler:
         self._renudged_at[round_key] = now_ms
         for reviewer in task.reviewers():
             if reviewer not in tally["voted"]:
-                await self._send_as_leader(reviewer, render.render_review_renudge(task))
+                await self._send_as_leader(reviewer, render.meta_review_renudge(task))
 
     # ------------------------------------------------------------------
     # Delivery primitives
     # ------------------------------------------------------------------
 
-    async def _send_as_leader(self, member_name: str, content: str) -> None:
+    async def _send_as_leader(self, member_name: str, meta: dict) -> None:
         """Leader-identity mailbox handoff + idempotent lazy member startup.
 
-        The mailbox row lands first (durable — an offline member drains it on
-        its first mailbox sweep), then the runtime is started best-effort via
-        the same ``UNSTARTED -> STARTING`` CAS the send_message tool uses; an
-        already-running member simply gets the MESSAGE wake. Per-recipient
+        The row carries the delivery payload, not the text: ``content`` is
+        empty and ``meta`` names the template plus the task it binds to, so the
+        recipient's mailbox drain renders it against the task row as it stands
+        *then* (F_63). The row lands first (durable — an offline member drains
+        it on its first mailbox sweep), then the runtime is started best-effort
+        via the same ``UNSTARTED -> STARTING`` CAS the send_message tool uses;
+        an already-running member simply gets the MESSAGE wake. Per-recipient
         failures are logged and never abort the scan.
         """
         message_manager = self._infra.message_manager
         if message_manager is None:
             return
         try:
-            message_id = await message_manager.send_message(content=content, to_member_name=member_name)
+            message_id = await message_manager.send_message(content="", to_member_name=member_name, meta=meta)
             if not message_id:
                 team_logger.error("[scheduler] handoff message to %s was not delivered", member_name)
             await self._host.auto_start_member(member_name)

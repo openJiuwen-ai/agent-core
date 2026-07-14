@@ -49,19 +49,31 @@ class _TaskLike(Protocol):
     updated_at: int | None
 
 
-def render_message(message: _MessageLike, *, is_human_agent: bool = False, now_ms: int) -> str:
+def render_message(
+    message: _MessageLike,
+    *,
+    is_human_agent: bool = False,
+    now_ms: int,
+    body: str | None = None,
+) -> str:
     """Render one inbound message as ``<team-inbound>`` XML.
 
-    Mirrors the in-process ``MessageHandler._format_message``: the sender's
-    content goes verbatim inside ``<team-inbound>`` (sender / message_id / type
-    / time as attributes) and the framework hint goes in a separate
-    ``<team-note>``. A human-agent avatar gets ``for="controller"`` plus a
-    ``hitt-silence`` note; any other member gets a ``reply-hint`` note.
+    Mirrors the in-process ``MessageHandler._format_message``: the message body
+    goes verbatim inside ``<team-inbound>`` (sender / message_id / type / time
+    as attributes) and the framework hint goes in a separate ``<team-note>``. A
+    human-agent avatar gets ``for="controller"`` plus a ``hitt-silence`` note;
+    any other member gets a ``reply-hint`` note.
 
     Args:
         message: A team message row (direct or broadcast).
         is_human_agent: Whether the recipient is a human-agent avatar.
         now_ms: Current millisecond UTC epoch, the relative-time anchor.
+        body: Delivery-time body of a framework template message, rendered by
+            the caller (which owns the DB handle this pure module does not —
+            see ``message_template.expand_message``). Passing it also drops the
+            reply hint: a framework instruction is answered with a tool call,
+            not a reply. ``None`` means an ordinary message — render its own
+            content and keep the hint.
 
     Returns:
         The ``<team-inbound>`` XML, optionally followed by a ``<team-note>``.
@@ -70,7 +82,7 @@ def render_message(message: _MessageLike, *, is_human_agent: bool = False, now_m
     time_info = format_time_context(message.timestamp, now_ms)
     if is_human_agent:
         return render_inbound(
-            content=message.content,
+            content=body if body is not None else message.content,
             sender=message.from_member_name,
             message_id=message.message_id,
             msg_type=msg_type,
@@ -78,6 +90,14 @@ def render_message(message: _MessageLike, *, is_human_agent: bool = False, now_m
             for_controller=True,
             note_kind="hitt-silence",
             note_text=t("hitt.silence_note"),
+        )
+    if body is not None:
+        return render_inbound(
+            content=body,
+            sender=message.from_member_name,
+            message_id=message.message_id,
+            msg_type=msg_type,
+            time_info=time_info,
         )
     return render_inbound(
         content=message.content,
@@ -90,9 +110,25 @@ def render_message(message: _MessageLike, *, is_human_agent: bool = False, now_m
     )
 
 
-def render_messages(messages: list[_MessageLike], *, is_human_agent: bool = False, now_ms: int) -> str:
-    """Render a batch of inbound messages, newest-handling left to caller."""
-    return "\n\n".join(render_message(m, is_human_agent=is_human_agent, now_ms=now_ms) for m in messages)
+def render_messages(
+    messages: list[_MessageLike],
+    *,
+    is_human_agent: bool = False,
+    now_ms: int,
+    bodies: dict[str, str] | None = None,
+) -> str:
+    """Render a batch of inbound messages, newest-handling left to caller.
+
+    Args:
+        bodies: Delivery-time bodies of the framework template messages in the
+            batch, keyed by ``message_id``. Ordinary messages are absent from
+            the mapping and render their own content.
+    """
+    bodies = bodies or {}
+    return "\n\n".join(
+        render_message(m, is_human_agent=is_human_agent, now_ms=now_ms, body=bodies.get(m.message_id))
+        for m in messages
+    )
 
 
 def render_task_line(task: _TaskLike, *, now_ms: int) -> str:

@@ -3,6 +3,7 @@
 
 """Message and message-read-status data access object."""
 
+import json
 from typing import List, Optional
 
 from sqlalchemy import select, update
@@ -48,6 +49,7 @@ class MessageDao:
         broadcast: bool = False,
         is_read: bool = False,
         protocol: str = "plain",
+        meta: Optional[dict] = None,
     ) -> bool:
         """Create a new team message.
 
@@ -59,6 +61,10 @@ class MessageDao:
                 whose per-member read state lives in MessageReadStatus.
             protocol: Message format — ``"plain"`` for normal text,
                 ``"json"`` for structured payloads (e.g. approval results).
+            meta: Framework-only delivery payload, JSON-serialized into the
+                ``meta`` column. A templated message carries the template key
+                plus its refs/params here and stores an empty ``content`` —
+                the delivery path expands it. See ``message_template.py``.
         """
         message_model = _get_message_model()
 
@@ -74,6 +80,7 @@ class MessageDao:
                         timestamp=get_current_time(),
                         broadcast=broadcast,
                         protocol=protocol,
+                        meta=json.dumps(meta, ensure_ascii=False) if meta else None,
                         is_read=None if broadcast else is_read,
                     )
                     session.add(message)

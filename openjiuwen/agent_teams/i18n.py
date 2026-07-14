@@ -105,39 +105,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "dispatcher.task_verified_to_self": (
             "[验证通过] 你的任务 [{task_id}] 已通过验证并标记完成。请通过 view_task 查看是否有新的可认领任务。"
         ),
-        # agent/scheduling/render.py — scheduler leader-identity handoff messages (F_62)
-        "scheduler.task_start": (
-            "[任务开工] 任务 [{task_id}]「{title}」已由调度框架启动并指派给你，现在开始执行。\n\n"
-            "目标与验收标准：\n{content}\n\n"
-            "完成后调用 member_complete_task(task_id='{task_id}') 标记完成；"
-            "执行中需要澄清或协调时用 send_message 联系 leader。"
-        ),
-        "scheduler.task_start_plan": (
-            "[任务开工·计划阶段] 任务 [{task_id}]「{title}」已由调度框架启动并指派给你，"
-            "你处于计划模式：先用 submit_plan 提交执行计划，待 leader 批准后再开始执行。\n\n"
-            "目标与验收标准：\n{content}"
-        ),
-        "scheduler.review_request": (
-            "[验收指派] 任务 [{task_id}]「{title}」的承担者 {author} 已提交交付物（第 {round} 轮验收），"
-            "你是该任务的验证者之一，请现在验收：\n"
-            "1. view_task(action='get', task_id='{task_id}') 查看任务目标与验收标准\n"
-            "2. 检查交付产物是否达标\n"
-            "3. verify_task(task_id='{task_id}', decision='pass'|'fail') 投票，fail 时用 feedback 写明返工要求\n"
-            "投票后无需跟进，调度框架会按票数判定并推进。"
-        ),
-        "scheduler.review_renudge": (
-            "[验收催办] 任务 [{task_id}]「{title}」第 {round} 轮验收仍在等待你的投票。"
-            "请尽快 view_task(action='get') 查看并 verify_task 投票。"
-        ),
-        "scheduler.rework": (
-            "[验收未过·返工] 任务 [{task_id}]「{title}」第 {round} 轮验收未通过（轮数上限 {max_rounds}），"
-            "已打回给你返工。验证者反馈：\n{feedback}\n\n"
-            "按反馈修复后再次 member_complete_task(task_id='{task_id}') 提交验收。"
-        ),
-        "scheduler.verified_report": (
-            "[验收通过] 任务 [{task_id}]「{title}」已通过验收并标记完成。"
-            "请用 send_message 向 leader 汇报执行结果：关键产物路径、重要决策、遗留问题。"
-        ),
+        # agent/scheduling/render.py — leader-side digests / escalations (F_62).
+        # Member handoffs are NOT here: they are mailbox messages rendered at
+        # delivery from prompts/<lang>/scheduler_*.md, the single source of
+        # their wording (F_63). Leader digests bypass the mailbox (direct input
+        # injection), so they have no meta channel and stay one-line i18n.
         "scheduler.leader_task_done": (
             "[调度器] 任务 [{task_id}]「{title}」已完成（{how}）。看板剩余未终结任务 {remaining} 个。"
         ),
@@ -356,43 +328,11 @@ STRINGS: dict[str, dict[str, str]] = {
             "[Verified] Your task [{task_id}] passed verification and is now completed. "
             "Call view_task to find your next available task."
         ),
-        # agent/scheduling/render.py — scheduler leader-identity handoff messages (F_62)
-        "scheduler.task_start": (
-            "[Task Started] Task [{task_id}] \"{title}\" was started by the scheduling framework "
-            "and is assigned to you — begin now.\n\n"
-            "Goal and acceptance criteria:\n{content}\n\n"
-            "Call member_complete_task(task_id='{task_id}') when done; use send_message to reach "
-            "the leader if you need clarification or coordination."
-        ),
-        "scheduler.task_start_plan": (
-            "[Task Started · Planning] Task [{task_id}] \"{title}\" was started by the scheduling "
-            "framework and is assigned to you. You run in plan mode: submit an execution plan via "
-            "submit_plan first and wait for the leader's approval before executing.\n\n"
-            "Goal and acceptance criteria:\n{content}"
-        ),
-        "scheduler.review_request": (
-            "[Review Assigned] {author} submitted the deliverable of task [{task_id}] \"{title}\" "
-            "(review round {round}); you are one of its reviewers — verify it now:\n"
-            "1. view_task(action='get', task_id='{task_id}') for the goal and acceptance criteria\n"
-            "2. inspect the deliverable\n"
-            "3. verify_task(task_id='{task_id}', decision='pass'|'fail') to vote; on fail, state the "
-            "rework requirements in feedback\n"
-            "No follow-up needed after voting — the scheduling framework settles by tally."
-        ),
-        "scheduler.review_renudge": (
-            "[Review Reminder] Task [{task_id}] \"{title}\" round {round} is still waiting for your "
-            "vote. Please view_task(action='get') and verify_task soon."
-        ),
-        "scheduler.rework": (
-            "[Review Failed · Rework] Task [{task_id}] \"{title}\" failed review round {round} "
-            "(ceiling {max_rounds}) and was sent back to you. Reviewer feedback:\n{feedback}\n\n"
-            "Fix per the feedback and resubmit via member_complete_task(task_id='{task_id}')."
-        ),
-        "scheduler.verified_report": (
-            "[Review Passed] Task [{task_id}] \"{title}\" passed review and is completed. "
-            "Report the outcome to the leader via send_message: key artifact paths, notable "
-            "decisions, open issues."
-        ),
+        # agent/scheduling/render.py — leader-side digests / escalations (F_62).
+        # Member handoffs are NOT here: they are mailbox messages rendered at
+        # delivery from prompts/<lang>/scheduler_*.md, the single source of
+        # their wording (F_63). Leader digests bypass the mailbox (direct input
+        # injection), so they have no meta channel and stay one-line i18n.
         "scheduler.leader_task_done": (
             "[Scheduler] Task [{task_id}] \"{title}\" completed ({how}). {remaining} unfinished "
             "task(s) remain on the board."

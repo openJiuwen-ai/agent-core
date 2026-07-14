@@ -232,6 +232,23 @@ class TeamMessageBase(SQLModel):
     # the message row cannot represent "read by A, unread by B".  Writers
     # must enforce this — see ``create_message``.
     is_read: Optional[bool] = Field(default=False, nullable=True)
+    # Framework-only delivery payload (JSON object, F_63). Three rules keep
+    # this from rotting into a junk drawer:
+    #   1. meta is the single source of truth for a templated message: its
+    #      ``content`` is the empty string, and no second rendition of the
+    #      message exists anywhere. A delivery-time expansion failure
+    #      synthesizes a fallback line from meta itself, so consumers must
+    #      tolerate rows whose content is empty and whose meta is set.
+    #   2. framework-only: meta shapes *how a message is rendered at delivery*
+    #      and never carries business facts (task truth lives in the task
+    #      table, votes in the vote table). The send_message tool does not
+    #      expose it.
+    #   3. orthogonal to ``protocol``: protocol="json" stays the machine
+    #      side-channel (approval payloads bypassing LLM rendering);
+    #      templated messages are ordinary "plain" LLM-facing text.
+    # Shape: {"template": <prompts/<lang>/<key>.md>, "refs": {"task": id,
+    # "member": name}, "params": {<scalar>}}. See ``message_template.py``.
+    meta: Optional[str] = Field(default=None, nullable=True)
 
 
 class MessageReadStatusBase(SQLModel):

@@ -26,6 +26,7 @@ from openjiuwen.agent_teams.inbound_render import (
     INBOUND_TYPE_DIRECT,
     render_inbound,
 )
+from openjiuwen.agent_teams.message_template import ExpandedMessage, expand_message
 from openjiuwen.agent_teams.schema.events import EventMessage, MessageEvent, TeamEvent
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.timefmt import format_time_context
@@ -171,10 +172,16 @@ class MessageHandler(BaseCoordinationHandler):
                         )
                         interrupted = True
                         break
+                    expanded = await self._expand(msg)
                     if is_bridge:
-                        text = await self._bridge_deliverable_for(member_name, msg)
+                        text = await self._bridge_deliverable_for(member_name, msg, expanded=expanded)
                     else:
-                        text = self._format_message(msg, is_human_agent=is_human_agent, now_ms=get_current_time())
+                        text = self._format_message(
+                            msg,
+                            expanded=expanded,
+                            is_human_agent=is_human_agent,
+                            now_ms=get_current_time(),
+                        )
                     team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
                     await self._round.deliver_input(text, use_steer=use_steer)
@@ -185,7 +192,38 @@ class MessageHandler(BaseCoordinationHandler):
             if interrupted:
                 return
 
-    async def _bridge_deliverable_for(self, member_name: str, msg: Any) -> str:
+    def _language(self) -> str:
+        """Team language for delivery-time template rendering."""
+        team_spec = self._blueprint.team_spec
+        if team_spec is not None and team_spec.language:
+            return team_spec.language
+        return "cn"
+
+    async def _expand(self, msg: Any) -> ExpandedMessage:
+        """Render a message row's delivery text (F_63 two-phase templating).
+
+        Ordinary messages pass through with their content. A framework
+        template message carries only ``meta``, and its document is rendered
+        here — against the task row as it stands *now*, so a handoff that sat
+        in an offline member's mailbox never delivers a stale task brief.
+        """
+        backend = self._infra.team_backend
+        db = backend.db if backend is not None else None
+
+        async def _get_task(task_id: str) -> Any:
+            return await db.task.get_task(task_id) if db is not None else None
+
+        async def _get_member(name: str) -> Any:
+            return await db.member.get_member(name, backend.team_name) if db is not None else None
+
+        return await expand_message(
+            msg,
+            task_getter=_get_task,
+            member_getter=_get_member,
+            language=self._language(),
+        )
+
+    async def _bridge_deliverable_for(self, member_name: str, msg: Any, *, expanded: ExpandedMessage) -> str:
         """Build the text delivered to a bridge avatar's DeepAgent.
 
         The bridge avatar is a full local teammate, but inbound team
@@ -201,6 +239,9 @@ class MessageHandler(BaseCoordinationHandler):
         Falls back to ``REMOTE_UNAVAILABLE_SENTINEL`` when no adapter
         is wired or when the adapter raises — the bridge then degrades
         to a normal teammate-style mailbox round.
+
+        The relayed body is the *expanded* text: a remote executor has no DB,
+        so it could not render a framework template itself (F_63).
         """
         from openjiuwen.agent_teams.agent.bridge_inbound_compose import compose_bridge_inbound
         from openjiuwen.agent_teams.agent.bridge_outbound_wrap import wrap_outbound_to_remote
@@ -216,19 +257,21 @@ class MessageHandler(BaseCoordinationHandler):
         # fall back to the plain teammate format. A bridge avatar is
         # never a human_agent, so the human-forwarding template stays off.
         if spec is None:
-            return self._format_message(msg, is_human_agent=False, now_ms=get_current_time())
+            return self._format_message(
+                msg,
+                expanded=expanded,
+                is_human_agent=False,
+                now_ms=get_current_time(),
+            )
 
-        language = "cn"
-        team_spec = self._blueprint.team_spec
-        if team_spec is not None and team_spec.language:
-            language = team_spec.language
+        language = self._language()
 
         outbound_text = wrap_outbound_to_remote(
             sender=msg.from_member_name,
             sender_display_name=await self._lookup_display_name(msg.from_member_name),
             sender_role=await self._lookup_role(msg.from_member_name),
             sender_desc=await self._lookup_desc(msg.from_member_name),
-            body=msg.content,
+            body=expanded.body,
             broadcast=bool(getattr(msg, "broadcast", False)),
             task_hint=None,
             mode=spec.mailbox_inject_mode or BridgeMailboxInjectMode.PASSTHROUGH,
@@ -250,7 +293,7 @@ class MessageHandler(BaseCoordinationHandler):
 
         return compose_bridge_inbound(
             original_sender=msg.from_member_name,
-            original_body=msg.content,
+            original_body=expanded.body,
             remote_reply=remote_reply,
             language=language,
             time_info=format_time_context(msg.timestamp, get_current_time()),
@@ -330,7 +373,10 @@ class MessageHandler(BaseCoordinationHandler):
         if row is None:
             return
 
-        body = row.content
+        # A human agent can be a scheduled team's assignee or reviewer, so the
+        # row may be a framework template whose content is empty — expand it
+        # here too, or the controller would be pushed a blank message (F_63).
+        body = (await self._expand(row)).body
         ts = row.timestamp
 
         if is_broadcast:
@@ -397,28 +443,33 @@ class MessageHandler(BaseCoordinationHandler):
         merged.sort(key=lambda m: m.timestamp, reverse=True)
         return merged
 
-    def _format_message(self, msg: Any, *, is_human_agent: bool, now_ms: int) -> str:
+    def _format_message(self, msg: Any, *, expanded: ExpandedMessage, is_human_agent: bool, now_ms: int) -> str:
         """Render one TeamMessage as ``<team-inbound>`` XML for agent input.
 
-        The sender's original content goes verbatim inside the
-        ``<team-inbound>`` element (sender / message_id / type / time as
-        attributes), and the framework-added hint goes in a separate
-        ``<team-note>`` — so the LLM sees a clean boundary between the
-        original message and what the runtime appended. ``message_id`` is
-        carried so the agent can call ``mark_message_read``; the send time
-        is rendered as ``<absolute local time> (<relative diff>)`` so the
-        agent can judge recency (mailbox delivery is often delayed).
+        The message body goes verbatim inside the ``<team-inbound>`` element
+        (sender / message_id / type / time as attributes), and the
+        framework-added hint goes in a separate ``<team-note>`` — so the LLM
+        sees a clean boundary between the message and what the runtime
+        appended. ``message_id`` is carried so the agent can call
+        ``mark_message_read``; the send time is rendered as ``<absolute local
+        time> (<relative diff>)`` so the agent can judge recency (mailbox
+        delivery is often delayed). The envelope is uniform across every team
+        message — a framework template message differs only in where its body
+        came from (rendered at delivery, see ``_expand``), not in its shape.
 
-        Rendering is role-aware. A teammate / leader gets a
-        ``reply-hint`` note. A human_agent avatar gets ``for="controller"``
-        plus a ``hitt-silence`` note: the message is framed as a
-        notification for the controlling human, and the load-bearing
-        "stay silent" constraint keeps the avatar from autonomously
-        calling ``send_message`` — its outbound actions are driven only by
-        Inbox instructions from its controller.
+        Rendering is role-aware. A teammate / leader gets a ``reply-hint``
+        note — except on a framework template message, which is answered with
+        a tool call (start work, cast a vote), never with a reply. A
+        human_agent avatar gets ``for="controller"`` plus a ``hitt-silence``
+        note: the message is framed as a notification for the controlling
+        human, and the load-bearing "stay silent" constraint keeps the avatar
+        from autonomously calling ``send_message`` — its outbound actions are
+        driven only by Inbox instructions from its controller.
 
         Args:
             msg: The team message row to render.
+            expanded: The delivery-time body plus whether it came from a
+                framework template.
             is_human_agent: Whether the recipient is a human-agent avatar.
             now_ms: Current millisecond UTC epoch, the relative-time anchor.
         """
@@ -426,7 +477,7 @@ class MessageHandler(BaseCoordinationHandler):
         time_info = format_time_context(msg.timestamp, now_ms)
         if is_human_agent:
             return render_inbound(
-                content=msg.content,
+                content=expanded.body,
                 sender=msg.from_member_name,
                 message_id=msg.message_id,
                 msg_type=msg_type,
@@ -435,14 +486,16 @@ class MessageHandler(BaseCoordinationHandler):
                 note_kind="hitt-silence",
                 note_text=t("hitt.silence_note"),
             )
+        note_kind = None if expanded.is_template else "reply-hint"
+        note_text = None if expanded.is_template else t("dispatcher.reply_hint", sender=msg.from_member_name)
         return render_inbound(
-            content=msg.content,
+            content=expanded.body,
             sender=msg.from_member_name,
             message_id=msg.message_id,
             msg_type=msg_type,
             time_info=time_info,
-            note_kind="reply-hint",
-            note_text=t("dispatcher.reply_hint", sender=msg.from_member_name),
+            note_kind=note_kind,
+            note_text=note_text,
         )
 
     @staticmethod
