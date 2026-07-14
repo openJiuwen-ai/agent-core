@@ -170,7 +170,7 @@ async def external_cli_spawn(
             team_logger.error("[external-cli] member {} crashed", member_name, exc_info=True)
             raise
         finally:
-            await runtime.aclose()
+            await runtime.stop()
 
     task = run_ctx.run(asyncio.get_running_loop().create_task, _run())
     handle = InProcessSpawnHandle(
