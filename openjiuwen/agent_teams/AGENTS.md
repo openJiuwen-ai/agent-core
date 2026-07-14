@@ -36,6 +36,7 @@ agent_teams/
 ├── i18n.py              # 运行时中/英文字符串（仅装运行时 hard-coded 串）
 ├── timefmt.py           # 毫秒 epoch → "绝对本地时间 + 相对差" 渲染（喂 LLM/观测，文案走 i18n）
 ├── inbound_render.py    # 入站消息/框架事件 → <team-inbound>/<team-event>/<team-note> XML 渲染（纯函数，喂 LLM；文案由 handler 从 i18n 取）。见 F_46
+├── message_template.py  # 框架模板消息的两阶段渲染：发送存意图（消息行 content 空 + meta={template,refs,params}），投递时按收件人语言加载 prompts/<lang>/<key>.md、用 {{task.*}}/{{member.*}}/{{param.*}} 填当前行（单遍替换不二次扫描、字段白名单、失败降级为 meta 合成的 fallback 行）。见 F_63
 ├── tiny_agent.py        # Tiny Agent：随时唤起的极简 NativeHarness（system_prompt + model + 仅结构化输出工具）；run 单轮 / chat 多轮；ephemeral（含 title/summary 预定义）+ team-scoped（TeamAgentSpec.tiny_agents 多实例，TeamInfra 持有）。见 F_45
 ├── paths.py             # 文件系统布局单一真相源
 ├── schema/              # 全部数据模型（Spec / Context / Event / Status / Task）
@@ -285,7 +286,10 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 4. **i18n 的两条路径**  
    - 运行时 hard-coded 字符串（dispatcher 通知、default desc 等）走 `agent_teams/i18n.py` 的 `t(key)`；
    - Prompt / 工具描述的长文本走各自模块的 `locales/` 或 `prompts/`（按 `lang` 参数入参传递）。  
-   **新增字符串前先判断归属**：运行时提示进 `i18n.py`，模板正文进 `prompts/` 或 `tools/locales/descs/`。
+   **新增字符串前先判断归属**：运行时提示进 `i18n.py`，模板正文进 `prompts/` 或 `tools/locales/descs/`。  
+   调度器交接消息（F_63）属后者且**只有模板一份**：文案在 `prompts/<lang>/scheduler_*.md`，
+   投递时渲染；`i18n.py` 里**不再**留成员侧短句变体——同一条消息两处文案必然漂移。
+   `scheduler.*` 键只剩 leader 直投的摘要/升级（不经邮箱，无模板通道）。
 
 5. **paths.py 是文件系统布局的单一真相源**  
    `get_agent_teams_home()`、`team_home(team_name)`、`independent_member_workspace(member_name)`。创建和清理都走这里，不要散落 `Path("…")` 硬编码。

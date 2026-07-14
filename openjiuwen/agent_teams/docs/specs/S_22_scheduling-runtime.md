@@ -8,8 +8,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/scheduling/` |
-| 最近一次修订日期 | 2026-07-10 |
-| 关联 feature | `F_62_scheduled-dispatch-runtime-and-review-voting.md` |
+| 最近一次修订日期 | 2026-07-14 |
+| 关联 feature | `F_62_scheduled-dispatch-runtime-and-review-voting.md`、`F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染） |
 
 ## 范围 / 边界
 
@@ -19,6 +19,7 @@
 - dispatch_mode 作为静态 spec 配置的消费方式（调度器构造/激活、verify 裁决策略、handler 类装配）。
 - 评审投票的数据面（票表、`review_round`）与判定面（`verdict.judge`、`settle_review`）分工。
 - `SchedulerHost` 窄协议与 kernel 接线（组合 wake、`SCHEDULER_SCAN` 回声、激活/失活时机）。
+- 成员交接消息的两阶段渲染契约（模板 key / 占位符标准 / 命名空间白名单 / 展开点 / 降级链）。
 
 **这个规约不管：**
 
@@ -32,7 +33,7 @@
 2. **激活条件 = team 已建成**。两个激活点：`kernel.notify_team_built()`（build_team 成功回调内，先于任何 teammate spawn / create_task）与 `kernel.start()`（team 行已存在——warm resume / 冷恢复）。`pause()` / `stop()` 即 `deactivate()`。
 3. **dispatch_mode 是静态 spec 配置**（F_62 评审定稿）：`TeamAgentSpec.dispatch_mode` 在构建期决定一切——rails/工具形态/提示词按模式装配、每套一份互不混写；`TeamSpec.dispatch_mode` 镜像它随 spawn 载荷到达成员进程；`build_team` **不选择协调模式**（`team_info.dispatch_mode` 列只是记录，spec 是运行时真相）；运行期没有任何模式切换路径。
 4. **调度器不理解事件，只理解看板**：任何触发（`task_*` / `member_*` transport 事件、`POLL_TASK`、`SCHEDULER_SCAN`、激活）都跑同一对幂等扫描到有界不动点（`_MAX_SCAN_PASSES`）。恢复没有独立路径——激活扫描就是恢复。事件仅承担两个扫描推不出的职责：终态摘要与 `TASK_LIST_DRAINED` 收尾（事件只发一次）。
-5. **交接 = leader 身份邮箱消息，投递即启动**：`_send_as_leader` 先写邮箱行（持久）再 `host.auto_start_member`（`UNSTARTED→STARTING` CAS，幂等）。成员在线与否不是开工前置条件；成员侧零新代码（走既有 `MessageHandler`）。
+5. **交接 = leader 身份邮箱消息，投递即启动**：`_send_as_leader` 先写邮箱行（持久）再 `host.auto_start_member`（`UNSTARTED→STARTING` CAS，幂等）。成员在线与否不是开工前置条件；成员侧零新代码（走既有 `MessageHandler`）。行里存的是**投递载荷不是文案**（`content=""` + `meta`），文案在投递时按模板渲染——见「消息面」段与 `S_12` 的 meta 三铁律。
 6. **`SchedulerHost.deliver_input` 只准注入 leader 自身**（终态摘要 / 升级 / 收尾）。对成员的输入永远走邮箱。
 7. **开工规则**：成员无活跃任务（`{PLANNING, IN_PROGRESS, IN_REVIEW}`）时，取其名下 `updated_at` 最早的 `PENDING(assignee)` 任务 `start_task`（DAO CAS；plan_mode 成员落 `PLANNING`）。并发/重复触发由 CAS 与一活跃探针消歧。
 8. **验票规则**：每轮 `(task_id, review_round)` 送审派发一次（内存去重，崩溃后至多重发一轮）；`verdict.judge` 三值判定——`pass ≥ ceil(threshold×n)` 过、fail 票使配额不可达即败、否则未定；settle 经 `task_manager.settle_review` 的 `IN_REVIEW` 源态 CAS，单判定者 + CAS 保证不双结算。
@@ -88,18 +89,54 @@ kernel 侧：
 - 票表 / `review_round` / `max_review_rounds` / `team_info` 能力列：见 `S_12`。
 - 调度器内存记账：`_review_dispatched: set[(task_id, round)]`、`_renudged_at: dict[(task_id, round), ms]`、`_escalated: set[(task_id, round)]`、`_digested_tasks: set[task_id]`、`_all_done_announced: bool`（`activate()` 复位）。
 
-## 消息面（i18n `scheduler.*`）
+## 消息面
+
+两类收件人，两套机制——**成员走模板（投递时渲染），leader 走 i18n 短串（直投）**。
+
+### 成员交接：两阶段渲染（F_63）
+
+调度器**不组装文案**，只组装投递载荷：`render.meta_*` 产出
+`{"template", "refs", "params"}`，`_send_as_leader` 以 `content=""` + `meta=...` 落邮箱行。
+文案在**投递时刻**由 `message_template.expand_message` 渲染——按收件人语言加载
+`prompts/<lang>/<template>.md`，用 `refs` 指向的**当前**任务/成员行填充占位符。
+
+| 场景 | 收件人 | template key |
+|---|---|---|
+| 开工（build / plan 闸） | assignee | `scheduler_task_start` / `scheduler_task_start_plan` |
+| 送审派发 / 催办 | 每个 reviewer / 未投票 reviewer | `scheduler_review_request` / `scheduler_review_renudge` |
+| 打回返工（`params`: 聚合 fail feedback + 解析后轮数上限） | author | `scheduler_rework` |
+| 验收通过后要求汇报 | author | `scheduler_verified_report` |
+
+**占位符标准** `{{namespace.field}}`：单遍 `re.sub` 替换，**填充值永不二次扫描**（任务正文
+是 LLM 写的，防占位符注入）；命名空间**字段白名单**（无 getattr 直通，新增 DB 列不会
+无意泄进提示词）；未知命名空间/字段渲染为 `<missing:ns.field>`（模板 bug，不炸投递）。
+
+| 命名空间 | 数据源 | 时机 | 白名单 |
+|---|---|---|---|
+| `task.*` | 任务行（`refs.task`） | 投递时现查 | `task_id` `title` `content` `status` `assignee` `reviewer` `review_round` `max_review_rounds` |
+| `member.*` | 成员行（`refs.member`） | 投递时现查 | `member_name` `display_name` `desc` |
+| `param.*` | `meta.params` | 发送时定格 | 键即字段（标量）；只放表答不出的瞬时值 |
+
+**降级链**：模板缺失 / `refs` 指向的行已删 / meta 解析失败 → 投递点**从 meta 现场合成**
+一行 fallback（template key + task_id，成员 `view_task` 兜底），不预存副本；meta 整体缺失 =
+普通消息，原样投 `content`。
+
+**展开点共四处**（缺一处即漏投空消息）：`handlers/message.py` 的
+`_format_message`（进程内邮箱）与 `_notify_human_agent_inbound`（HITT 人类成员回调——
+人类可以是 assignee/reviewer）、`_bridge_deliverable_for`（bridge relay 必须转发**展开后**
+文本，远程执行者无 DB）、`external/format.py` + `client.read_inbox`（外部成员 pull）。
+模板消息**不挂 `reply-hint` note**——框架指令的响应是调工具，不是回信。
+
+### leader 直投：i18n `scheduler.*`
 
 | 场景 | 收件人 | key |
 |---|---|---|
-| 开工（build / plan 闸） | assignee | `scheduler.task_start` / `scheduler.task_start_plan` |
-| 送审派发 / 催办 | 每个 reviewer / 未投票 reviewer | `scheduler.review_request` / `scheduler.review_renudge` |
-| 打回返工（聚合 fail feedback） | author | `scheduler.rework` |
-| 验收通过后要求汇报 | author | `scheduler.verified_report` |
 | 终态摘要 / 轮数升级 / 停摆升级 / 收尾 | leader（`deliver_input`，非 steer） | `scheduler.leader_task_done` / `scheduler.leader_escalation_rounds` / `scheduler.leader_escalation_stall` / `scheduler.leader_all_done` |
+
+leader 摘要不经邮箱 → 无 meta 通道、无投递时展开，维持一行式 i18n 运行时短串。
 
 ## 与其它 spec 的关系
 
 - **`S_03_coordination-protocol`**：wake_callback 组合、`SCHEDULER_SCAN` 的产生点（`_filter_self`）、调度器生命周期挂点在该 spec 的 kernel 段登记；coordination"不做决策"铁律由本包承接决策而保持成立。
 - **`S_08_team-tools-contract`**：scheduled 形态 `create_task`（assignee 必填 + `max_review_rounds`）、`verify_task` 按模式二分的语义与描述形态、`build_team` 不选协调模式（不变量 21）。
-- **`S_12_schema-data-models`**：状态机（`start` 边的 PLANNING/IN_PROGRESS 落点）、票表、任务行新列、`TASK_REVIEW_VOTE` 事件。
+- **`S_12_schema-data-models`**：状态机（`start` 边的 PLANNING/IN_PROGRESS 落点）、票表、任务行新列、`TASK_REVIEW_VOTE` 事件、消息表 `meta` 投递载荷列与其三铁律。
