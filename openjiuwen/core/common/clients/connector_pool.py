@@ -309,7 +309,8 @@ class ConnectorPoolManager(metaclass=Singleton):
                     # lifetime instead of growing on every request.
                     if increment_ref:
                         connector_pool.increment_ref()
-                        logger.debug("Incremented ref count for pool %s, now ref_count=%s", key, connector_pool.ref_count)
+                        logger.debug("Incremented ref count for pool %s, now ref_count=%s",
+                            key, connector_pool.ref_count)
                     return connector_pool
 
             # Check if maximum number of pools is reached
