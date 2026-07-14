@@ -39,7 +39,6 @@ class VisionPerceptionRail(AgentRail):
         self._step_executor = settings.step_executor
         self._max_width = settings.vlm_grounding_max_width
         self._jpeg_quality = settings.vlm_grounding_jpeg_quality
-        self._coordinate_scale = settings.vlm_coordinate_scale
         del model_name  # reserved for future per-model image sizing, mirroring mobile_gui
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
@@ -119,8 +118,6 @@ class VisionPerceptionRail(AgentRail):
             f"[Task Goal] {pinned_goal}" if pinned_goal else "",
             f"[Last Reported Plan]\n{last_plan}" if last_plan else "[Last Reported Plan] none yet -- call report_plan.",
             f"Photo resolution: {raw_frame.width}x{raw_frame.height}.",
-            f"Coordinates are normalized numbers in [0, {self._coordinate_scale}] for both axes; "
-            "(0, 0) is top-left, max is bottom-right.",
             "Call report_plan with the FULL sub-task list every turn. The sub-task marked "
             "in_progress is executed automatically right after you submit the plan -- there is "
             "no separate action tool to call.",

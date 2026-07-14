@@ -13,7 +13,7 @@ to end without any real hardware/network/ML dependency.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -171,13 +171,42 @@ def test_capture_backprojects_full_frame_and_returns_rgb(calibration_files: dict
     executor = _make_executor(calibration_files, keypoint_proposer=_FakeKeypointProposer(np.zeros((1, 3))))
     rgb = np.zeros((480, 640, 3), dtype=np.uint8)
     depth = np.full((480, 640), 1000, dtype=np.uint16)
-    executor._read_frame = MagicMock(return_value=(rgb, depth))
+    executor._retry_capture = MagicMock(return_value=(rgb, depth))
 
     frame = executor.capture()
 
     assert isinstance(frame, Image.Image)
     assert executor._last_points is not None
     assert executor._last_points.shape == (480, 640, 3)
+
+
+def test_retry_capture_succeeds_after_one_failed_attempt(calibration_files: dict) -> None:
+    executor = _make_executor(calibration_files)
+    executor.reset_camera = MagicMock()
+    rgb = np.zeros((2, 2, 3), dtype=np.uint8)
+    depth = np.zeros((2, 2), dtype=np.uint16)
+    executor._read_frame = MagicMock(side_effect=[(None, None), (rgb, depth)])
+
+    with patch("openjiuwen.harness.tools.robotic_arm.vendors.so101.rekep.executor.time.sleep"):
+        result_rgb, result_depth = executor._retry_capture(max_retry_attempt=3)
+
+    assert result_rgb is rgb
+    assert result_depth is depth
+    assert executor.reset_camera.call_count == 2
+    assert executor._read_frame.call_count == 2
+
+
+def test_retry_capture_raises_after_exhausting_attempts(calibration_files: dict) -> None:
+    executor = _make_executor(calibration_files)
+    executor.reset_camera = MagicMock()
+    executor._read_frame = MagicMock(return_value=(None, None))
+
+    with patch("openjiuwen.harness.tools.robotic_arm.vendors.so101.rekep.executor.time.sleep"):
+        with pytest.raises(ToolError, match="could not capture"):
+            executor._retry_capture(max_retry_attempt=2)
+
+    assert executor.reset_camera.call_count == 2
+    assert executor._read_frame.call_count == 2
 
 
 def test_execute_without_capture_reports_error(calibration_files: dict) -> None:
@@ -204,7 +233,7 @@ def test_execute_runs_single_subgoal_on_success(calibration_files: dict) -> None
     executor._last_points = np.zeros((480, 640, 3))
     frame = Image.new("RGB", (640, 480))
 
-    result = executor.execute(frame, {"description": "grasp the tape", "start_x": 500, "start_y": 500})
+    result = executor.execute(frame, {"description": "grasp the tape"})
 
     assert "Completed 'grasp the tape'" in result
     assert len(robot.actions) == 1
@@ -238,38 +267,6 @@ def test_execute_no_keypoints_detected_reports_failure(calibration_files: dict) 
     result = executor.execute(Image.new("RGB", (640, 480)), {"description": "grasp the tape"})
 
     assert "no keypoints detected" in result
-
-
-def test_execute_appends_destination_keypoint_from_end_xy(calibration_files: dict) -> None:
-    """``end_x``/``end_y`` should be backprojected and drawn as one more numbered
-    keypoint on the overlay the VLM sees, distinct from detected object keypoints."""
-    keypoints = np.array([[0.1, 0.0, 0.05]])
-    vlm = _FakeVlm(_GRASP_RESPONSE)
-    executor = _make_executor(calibration_files, keypoint_proposer=_FakeKeypointProposer(keypoints), vlm_client=vlm)
-    last_points = np.zeros((480, 640, 3))
-    last_points[240, 320] = [0.2, 0.05, 0.05]  # end_x=500,end_y=500 on a 640x480 frame -> pixel (320, 240)
-    executor._last_points = last_points
-    frame = Image.new("RGB", (640, 480))
-
-    executor.execute(frame, {"description": "place the tape on the book", "end_x": 500, "end_y": 500})
-
-    assert vlm.last_prompt is not None
-    assert "Number of keypoints in image: 2" in vlm.last_prompt
-    assert "Keypoint 1" in vlm.last_prompt
-    assert "keypoints[1]" in vlm.last_prompt
-
-
-def test_execute_skips_destination_keypoint_on_invalid_depth(calibration_files: dict) -> None:
-    keypoints = np.array([[0.1, 0.0, 0.05]])
-    vlm = _FakeVlm(_GRASP_RESPONSE)
-    executor = _make_executor(calibration_files, keypoint_proposer=_FakeKeypointProposer(keypoints), vlm_client=vlm)
-    executor._last_points = np.full((480, 640, 3), np.nan)  # no valid depth anywhere, incl. the end pixel
-    frame = Image.new("RGB", (640, 480))
-
-    executor.execute(frame, {"description": "place the tape on the book", "end_x": 500, "end_y": 500})
-
-    assert vlm.last_prompt is not None
-    assert "Number of keypoints in image: 1" in vlm.last_prompt
 
 
 def test_execute_stops_on_ik_failure(calibration_files: dict) -> None:

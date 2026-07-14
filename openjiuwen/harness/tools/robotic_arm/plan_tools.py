@@ -8,6 +8,12 @@ after every physical action because the world can change in ways the model
 did not predict (grasp slipped, object moved, occlusion resolved). A single
 tool that always takes the complete list keeps "the plan" and "what actually
 happened" from silently diverging.
+
+Sub-tasks carry no coordinates: the model only decides sequencing and what
+each step is (``description``); where to point on the photo and whether to
+grip is decided downstream by the executor's own VLM constraint generation
+(see ``vendors/so101/rekep/constraint_generation.py``), which sees the same
+photo plus each sub-task's description.
 """
 
 from __future__ import annotations
@@ -51,22 +57,6 @@ REPORT_PLAN_TOOL_CARD = ToolCard(
                             "enum": list(_VALID_STATUSES),
                             "description": "One of pending, in_progress, done, failed.",
                         },
-                        "start_x": {
-                            "type": "number",
-                            "description": "Normalized start-point x on the latest photo, if this sub-task has one.",
-                        },
-                        "start_y": {
-                            "type": "number",
-                            "description": "Normalized start-point y on the latest photo, if this sub-task has one.",
-                        },
-                        "end_x": {
-                            "type": "number",
-                            "description": "Normalized end-point x on the latest photo, if this sub-task has one.",
-                        },
-                        "end_y": {
-                            "type": "number",
-                            "description": "Normalized end-point y on the latest photo, if this sub-task has one.",
-                        },
                     },
                     "required": ["id", "description", "status"],
                 },
@@ -77,19 +67,10 @@ REPORT_PLAN_TOOL_CARD = ToolCard(
 )
 
 
-def _format_point(item: dict, x_key: str, y_key: str) -> str:
-    x, y = item.get(x_key), item.get(y_key)
-    if x is None or y is None:
-        return "-"
-    return f"({x:g}, {y:g})"
-
-
 def summarize_plan(sub_tasks: List[dict]) -> str:
     lines = [f"Plan ({len(sub_tasks)} sub-task(s)):"]
     for item in sub_tasks:
-        start = _format_point(item, "start_x", "start_y")
-        end = _format_point(item, "end_x", "end_y")
-        lines.append(f"  [{item.get('id')}] {item.get('status')}: {item.get('description')} (start={start}, end={end})")
+        lines.append(f"  [{item.get('id')}] {item.get('status')}: {item.get('description')}")
     return "\n".join(lines)
 
 

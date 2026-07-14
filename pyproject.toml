@@ -115,6 +115,7 @@ robotic-arm-so101-rekep = [
     "transformers>=4.40",
     "scikit-learn>=1.3",
     "openai>=1.0",
+    "opencv-python>=4.8",
 ]
 
 online-rl = [
