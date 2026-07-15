@@ -189,6 +189,10 @@ class CliRuntimeBase(ABC):
         self._output_queue.put_nowait(_END)
         await self._events.unregister_namespace(_EVENT_NAMESPACE)
 
+    async def dispose(self) -> None:
+        """Permanently dispose this CLI-backed runtime."""
+        await self.stop()
+
     @property
     def state(self) -> HarnessState:
         """Return the current lifecycle phase."""

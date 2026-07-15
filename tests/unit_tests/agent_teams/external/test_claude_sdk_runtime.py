@@ -14,7 +14,7 @@ import pytest
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.external.cli_agent import spawn as spawn_mod
-from openjiuwen.agent_teams.external.cli_agent.claude.options import derive_claude_session_id
+from openjiuwen.agent_teams.external.cli_agent.claude.options import build_claude_session_id
 from openjiuwen.agent_teams.external.cli_agent.claude.runtime import ClaudeSdkRuntime
 from openjiuwen.agent_teams.external.cli_agent.claude.ssh_transport import build_claude_sdk_ssh_transport
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
@@ -291,7 +291,7 @@ async def test_build_cli_runtime_uses_claude_sdk_backend(fake_claude_sdk):
     assert options.env["EXTRA"] == "1"
     assert "OPENJIUWEN_TEAM_JOIN" in options.env
     assert options.mcp_servers["openjiuwen-team"]["command"] == "openjiuwen-team-mcp"
-    assert options.session_id == derive_claude_session_id(team_session_id="sess-1", member_name="claude-1")
+    assert options.session_id == build_claude_session_id(team_session_id="sess-1", member_name="claude-1")
     assert options.resume is None
 
 
@@ -309,7 +309,7 @@ async def test_build_cli_runtime_resumes_claude_sdk_session(fake_claude_sdk):
         reset_session_id(token)
 
     options = runtime._options
-    expected = derive_claude_session_id(team_session_id="session:with:colon", member_name="claude-1")
+    expected = build_claude_session_id(team_session_id="session:with:colon", member_name="claude-1")
     assert options.session_id is None
     assert options.resume == expected
 

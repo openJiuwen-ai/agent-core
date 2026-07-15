@@ -44,6 +44,7 @@ class RecoveryManager:
 
         member_name = self._configurator.member_name
         team_logger.info("[{}] recovering team", member_name or "?")
+        await team_backend.restore_external_cli_specs_from_db()
         all_members = await team_backend.list_member_roster()
         restarted: list[str] = []
 

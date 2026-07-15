@@ -48,7 +48,7 @@ def build_claude_options(
 ) -> "ClaudeAgentOptions":
     """Build SDK options matching the previous Claude CLI member behavior."""
     sdk = load_claude_sdk()
-    claude_session_id = derive_claude_session_id(
+    claude_session_id = build_claude_session_id(
         team_session_id=team_session_id,
         member_name=member_name,
     )
@@ -81,12 +81,30 @@ def build_claude_options(
     )
 
 
-def derive_claude_session_id(*, team_session_id: str | None, member_name: str) -> str | None:
-    """Derive a stable Claude UUID from the team session and member identity."""
+def build_claude_session_id(*, team_session_id: str | None, member_name: str) -> str | None:
+    """Build a stable Claude UUID from the team session and member identity."""
     if not team_session_id:
         return None
     seed = json.dumps([team_session_id, member_name], ensure_ascii=False, separators=(",", ":"))
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+
+
+def delete_claude_session(
+    *,
+    team_session_id: str,
+    member_name: str,
+    cwd: str | None,
+) -> bool:
+    """Delete the Claude SDK session derived for a team member."""
+    claude_session_id = build_claude_session_id(
+        team_session_id=team_session_id,
+        member_name=member_name,
+    )
+    if claude_session_id is None:
+        return False
+    sdk = load_claude_sdk()
+    sdk.delete_session(claude_session_id, directory=cwd)
+    return True
 
 
 def strip_parent_claude_env(environ: dict[str, str]) -> dict[str, str]:
@@ -98,4 +116,10 @@ def strip_parent_claude_env(environ: dict[str, str]) -> dict[str, str]:
     }
 
 
-__all__ = ["build_claude_options", "derive_claude_session_id", "load_claude_sdk", "strip_parent_claude_env"]
+__all__ = [
+    "build_claude_options",
+    "build_claude_session_id",
+    "delete_claude_session",
+    "load_claude_sdk",
+    "strip_parent_claude_env",
+]

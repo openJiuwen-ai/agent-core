@@ -76,8 +76,8 @@ class MemberDao:
                 path. HITT callers must pass
                 ``role=TeamRole.HUMAN_AGENT.value`` explicitly.
             options: JSON object for extensible member configuration.
-                Current shape: ``{"model_ref": {...}, "worktree": {...},
-                "permissions_override": {...}}``.
+                Current shape: ``{"model_ref": {...}, "cli_agent": "...",
+                "worktree": {...}, "permissions_override": {...}}``.
         """
         async with self._sessions.write() as session:
             try:
