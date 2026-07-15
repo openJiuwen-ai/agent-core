@@ -393,9 +393,12 @@ class StatusCode(Enum):
     PREGEL_GRAPH_NODE_INVALID = (112101, "node is invalid, node_id={node_id}, error='{reason}'")
     PREGEL_GRAPH_EDGE_INVALID = (112102,
                                  "edge is invalid, source_id={source_id}, target_id={target_id}, error='{reason}'")
-    PREGEL_GRAPH_CONDITION_EDGE_INVALID = (112103, "condition edge is invalid, source_id={source_id}, error='{reason}'")
-    PREGEL_GRAPH_SUPER_STEP_EXECUTION_ERROR = (112104,
-                                               "pregel graph super step execution error, step={step}, reason='{reason}'")
+    PREGEL_GRAPH_CONDITION_EDGE_INVALID = (112103,
+                                           "condition edge is invalid, source_id={source_id}, error='{reason}'")
+    PREGEL_GRAPH_SUPER_STEP_EXECUTION_ERROR = (
+        112104,
+        "pregel graph super step execution error, step={step}, reason='{reason}'",
+    )
 
     # =========================
     # Multi-Agent 130000 - 130999
