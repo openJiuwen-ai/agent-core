@@ -17,7 +17,10 @@ that session, specifically so they still fire through this delegated path.
 appends a full-detail JSON record of every callback (complete sub_tasks list,
 result_text, and debug dict -- keypoints, movable_mask, gripper_action,
 target, IK error) to ``events.jsonl``, so the whole run's intermediate
-process is available afterwards, not just what scrolled past on the console.
+process is available afterwards, not just what scrolled past on the console --
+every console line (this script's own prints, plus stdout/stderr from
+anything else in the process) is also mirrored into ``console.log`` in the
+same run folder, via ``_TeeStream``.
 
 Same ``.env`` as ``main.py`` -- see that file's docstring for setup
 (``cp examples/robotic_arm/.env.example examples/robotic_arm/.env`` and fill
@@ -38,9 +41,11 @@ import asyncio
 import base64
 import json
 import os
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -95,6 +100,26 @@ def build_step_executor() -> So101RekepExecutor:
         vlm_api_key=os.environ["VLM_API_KEY"],
         vlm_model=os.environ["VLM_MODEL"],
     )
+
+
+class _TeeStream:
+    """Mirror every write to this stream into a log file as well as the original stream."""
+
+    def __init__(self, original: Any, log_file: Any) -> None:
+        self._original = original
+        self._log_file = log_file
+
+    def write(self, text: str) -> None:
+        self._original.write(text)
+        self._log_file.write(text)
+        self._log_file.flush()
+
+    def flush(self) -> None:
+        self._original.flush()
+        self._log_file.flush()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._original, name)
 
 
 class _CaptureLogger:
@@ -190,6 +215,11 @@ class _CaptureLogger:
 
 async def main() -> None:
     run_dir = Path(__file__).resolve().parent / "_captures" / datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    console_log = (run_dir / "console.log").open("a", encoding="utf-8")
+    sys.stdout = _TeeStream(sys.stdout, console_log)
+    sys.stderr = _TeeStream(sys.stderr, console_log)
+
     capture_logger = _CaptureLogger(run_dir)
 
     settings = RoboticArmRuntimeSettings(
