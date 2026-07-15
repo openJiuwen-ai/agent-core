@@ -10,21 +10,23 @@ from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.
     strip_display_line_prefixes,
     strip_display_line_prefixes_preserving_body_whitespace,
 )
-from .compressors.diff_compressor import DiffCompressor
-from .compressors.html_compressor import HtmlCompressor
-from .compressors.json_array_compressor import JsonArrayCompressor
-from .compressors.log_compressor import LogCompressor
-from .compressors.plain_text_compressor import PlainTextCompressor
-from .compressors.search_results_compressor import SearchResultsCompressor
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.types import (
     ContentType,
     RuleCompressionResult,
     RuleContext,
 )
 
+from .compressors.diff_compressor import DiffCompressor
+from .compressors.html_compressor import HtmlCompressor
+from .compressors.json_array_compressor import JsonArrayCompressor
+from .compressors.log_compressor import LogCompressor
+from .compressors.plain_text_compressor import PlainTextCompressor
+from .compressors.search_results_compressor import SearchResultsCompressor
+
 
 class RuleCompressor(Protocol):
-    def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult: ...
+    def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult:
+        pass
 
 
 class RuleContentRouter:
