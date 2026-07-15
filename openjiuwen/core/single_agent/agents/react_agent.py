@@ -690,6 +690,45 @@ class ReActAgent(BaseAgent):
             UserMessage(content="\n\n".join(mem_parts))
         )
 
+    @staticmethod
+    def _consume_context_prefetch(ctx: AgentCallbackContext) -> None:
+        """Pop ``context_prefetch`` from ctx.extra and insert as a fenced
+        UserMessage immediately BEFORE the last user message in
+        ``ctx.inputs.messages`` (i.e. before the current turn's query).
+
+        Unlike ``memory_prefetch`` (tail append), this places untrusted
+        recalled context (e.g. daily_memory) AHEAD of the current query so
+        the query stays last (recency-highest), per the RAG query-last best
+        practice — untrusted context should sit as far from the latest query
+        as possible, never after it. Each entry's ``content`` is already
+        wrapped in ``<memory-context>`` fences by the producing rail. This
+        method does not mutate any existing message object; it only inserts a
+        new message into the list sent to the LLM this turn.
+        """
+        context_prefetch = ctx.extra.pop("context_prefetch", None)
+        if not context_prefetch:
+            return
+        block = "\n\n".join(
+            r.get("content") for r in context_prefetch if r.get("content")
+        )
+        if not block.strip():
+            return
+        msgs = ctx.inputs.messages
+        insert_idx = None
+        for i in range(len(msgs) - 1, -1, -1):
+            _m = msgs[i]
+            _role = getattr(_m, "role", None)
+            if _role is None and isinstance(_m, dict):
+                _role = _m.get("role")
+            if _role == "user":
+                insert_idx = i
+                break
+        fence_msg = UserMessage(content=block)
+        if insert_idx is None:
+            msgs.append(fence_msg)
+        else:
+            msgs.insert(insert_idx, fence_msg)
+
     @rail(
         before=AgentCallbackEvent.BEFORE_MODEL_CALL,
         after=AgentCallbackEvent.AFTER_MODEL_CALL,
@@ -808,6 +847,10 @@ class ReActAgent(BaseAgent):
         ctx.inputs.messages = context_window.get_messages()
         ctx.inputs.tools = context_window.get_tools()
 
+        # Insert untrusted recalled context (e.g. daily_memory) BEFORE the
+        # last user message (current query) so the query stays last — RAG
+        # query-last best practice. Distinct from memory_prefetch (tail).
+        self._consume_context_prefetch(ctx)
         # Append memory-recall messages injected by rails via ctx.extra.
         # Same KV-cache-stability rationale as environment_context above.
         self._consume_memory_prefetch(ctx)
