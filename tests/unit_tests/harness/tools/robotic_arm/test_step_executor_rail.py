@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -196,6 +196,62 @@ async def test_executes_in_progress_task() -> None:
     # report_plan_action's own write never runs (see plan_tools.py).
     assert ctx.extra["last_plan_sub_tasks"] == [sub_task]
     assert "pick up the cup" in ctx.extra["last_plan_summary"]
+
+
+@pytest.mark.asyncio
+async def test_on_step_result_callback_receives_debug_when_executor_exposes_it() -> None:
+    executor = MagicMock(execute=MagicMock(return_value="Success: picked up the cup"))
+    executor.last_debug = {"overlay_image_base64": "abc", "keypoints_3d": [[0.1, 0.2, 0.3]]}
+    on_step_result = AsyncMock()
+    rail = StepExecutorRail(
+        RoboticArmRuntimeSettings(step_executor=executor, health_check=False, on_step_result=on_step_result)
+    )
+    sub_task = {"id": "s1", "description": "pick up the cup", "status": "in_progress"}
+    ctx = _make_tool_call_ctx(tool_args={"sub_tasks": [sub_task]}, extra={"vlm_raw_frame": object()})
+
+    await rail.after_tool_call(ctx)
+
+    on_step_result.assert_awaited_once()
+    (payload,), _ = on_step_result.call_args
+    assert payload["sub_tasks"] == [sub_task]
+    assert payload["current"] == sub_task
+    assert payload["result_text"] == "Success: picked up the cup"
+    assert payload["debug"] == executor.last_debug
+
+
+@pytest.mark.asyncio
+async def test_on_step_result_callback_debug_defaults_to_none() -> None:
+    """Vendors that don't expose ``last_debug`` (duck-typed, optional) must not break the callback."""
+    executor = MagicMock(spec=["capture", "execute"], execute=MagicMock(return_value="Success: done"))
+    on_step_result = AsyncMock()
+    rail = StepExecutorRail(
+        RoboticArmRuntimeSettings(step_executor=executor, health_check=False, on_step_result=on_step_result)
+    )
+    ctx = _make_tool_call_ctx(
+        tool_args={"sub_tasks": [{"id": "s1", "status": "in_progress"}]}, extra={"vlm_raw_frame": object()}
+    )
+
+    await rail.after_tool_call(ctx)
+
+    on_step_result.assert_awaited_once()
+    (payload,), _ = on_step_result.call_args
+    assert payload["debug"] is None
+
+
+@pytest.mark.asyncio
+async def test_on_step_result_callback_exception_does_not_raise() -> None:
+    executor = MagicMock(execute=MagicMock(return_value="Success: done"))
+    on_step_result = AsyncMock(side_effect=RuntimeError("stream closed"))
+    rail = StepExecutorRail(
+        RoboticArmRuntimeSettings(step_executor=executor, health_check=False, on_step_result=on_step_result)
+    )
+    ctx = _make_tool_call_ctx(
+        tool_args={"sub_tasks": [{"id": "s1", "status": "in_progress"}]}, extra={"vlm_raw_frame": object()}
+    )
+
+    await rail.after_tool_call(ctx)  # must not raise
+
+    on_step_result.assert_awaited_once()
 
 
 @pytest.mark.asyncio

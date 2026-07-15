@@ -5,7 +5,7 @@ deriving the pinned goal from message history (no outer-layer before_invoke)."""
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from PIL import Image
@@ -105,6 +105,39 @@ async def test_successful_capture_injects_observation_with_image() -> None:
     last_msg = fake_context.get_messages()[-1]
     assert any(block.get("type") == "image_url" for block in last_msg.content)
     assert any("[Task Goal] pick up the cup" in block.get("text", "") for block in last_msg.content if "text" in block)
+
+
+@pytest.mark.asyncio
+async def test_on_frame_captured_callback_invoked_with_image() -> None:
+    frame = Image.new("RGB", (640, 480), color=(1, 2, 3))
+    executor = MagicMock(capture=MagicMock(return_value=frame))
+    on_frame_captured = AsyncMock()
+    rail = VisionPerceptionRail(RoboticArmRuntimeSettings(step_executor=executor, on_frame_captured=on_frame_captured))
+    fake_context = _FakeModelContext([UserMessage(content="pick up the cup")])
+    ctx = _make_model_call_ctx(context=fake_context, messages=[UserMessage(content="pick up the cup")])
+
+    await rail.before_model_call(ctx)
+
+    on_frame_captured.assert_awaited_once()
+    (payload,), _ = on_frame_captured.call_args
+    assert payload["width"] == 640
+    assert payload["height"] == 480
+    assert isinstance(payload["image_base64"], str) and payload["image_base64"]
+
+
+@pytest.mark.asyncio
+async def test_on_frame_captured_callback_exception_does_not_raise() -> None:
+    frame = Image.new("RGB", (640, 480), color=(1, 2, 3))
+    executor = MagicMock(capture=MagicMock(return_value=frame))
+    on_frame_captured = AsyncMock(side_effect=RuntimeError("stream closed"))
+    rail = VisionPerceptionRail(RoboticArmRuntimeSettings(step_executor=executor, on_frame_captured=on_frame_captured))
+    fake_context = _FakeModelContext([UserMessage(content="pick up the cup")])
+    ctx = _make_model_call_ctx(context=fake_context, messages=[UserMessage(content="pick up the cup")])
+
+    await rail.before_model_call(ctx)  # must not raise
+
+    on_frame_captured.assert_awaited_once()
+    assert ctx.extra["vlm_raw_frame"] is frame
 
 
 @pytest.mark.asyncio

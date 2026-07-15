@@ -31,6 +31,7 @@ class StepExecutorRail(AgentRail):
     def __init__(self, settings: RoboticArmRuntimeSettings) -> None:
         super().__init__()
         self._step_executor: SubTaskExecutor | None = settings.step_executor
+        self._on_step_result = settings.on_step_result
         if self._step_executor is None:
             raise ValueError(
                 "RoboticArmRuntimeSettings.step_executor or step_executor_model is required: either "
@@ -94,6 +95,19 @@ class StepExecutorRail(AgentRail):
             logger.exception("[StepExecutorRail] step_executor.execute failed")
 
         ctx.push_steering(f"[Execution Result] {result_text}")
+
+        await self._notify_step_result(sub_tasks, current, result_text)
+
+    async def _notify_step_result(self, sub_tasks: list, current: dict, result_text: str) -> None:
+        if self._on_step_result is None:
+            return
+        debug = getattr(self._step_executor, "last_debug", None)
+        try:
+            await self._on_step_result(
+                {"sub_tasks": sub_tasks, "current": current, "result_text": result_text, "debug": debug}
+            )
+        except Exception:
+            logger.exception("[StepExecutorRail] on_step_result callback failed")
 
 
 __all__ = ["StepExecutorRail"]

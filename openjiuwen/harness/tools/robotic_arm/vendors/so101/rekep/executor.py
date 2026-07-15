@@ -39,6 +39,8 @@ rig separately.
 
 from __future__ import annotations
 
+import base64
+import io
 import subprocess
 import time
 from typing import Any, Callable, Optional, Sequence
@@ -167,6 +169,7 @@ class So101RekepExecutor:
 
         self._last_points: Optional[np.ndarray] = None
         self._ee_at_grasp: Optional[np.ndarray] = None
+        self.last_debug: Optional[dict] = None
 
     # -- SubTaskExecutor protocol -------------------------------------------------
 
@@ -223,6 +226,18 @@ class So101RekepExecutor:
         roll = np.deg2rad(cg["gripper_roll_deg"])
         ik_result = self._ik.solve(target_m, approach_dir=approach, roll_override=roll)
         err_cm = ik_result.error_m * 100.0
+
+        self.last_debug = {
+            "overlay_image_base64": self._encode_overlay(overlay),
+            "keypoints_3d": np.asarray(keypoints).tolist(),
+            "movable_mask": list(mask),
+            "gripper_action": cg["gripper_action"],
+            "approach_elevation_deg": float(cg["approach_elevation_deg"]),
+            "gripper_roll_deg": float(cg["gripper_roll_deg"]),
+            "target_m": np.asarray(target_m).tolist(),
+            "ik_error_cm": float(err_cm),
+        }
+
         if err_cm > self._ik_tolerance_cm:
             return f"Failed: IK error {err_cm:.1f} cm exceeds tolerance {self._ik_tolerance_cm} cm for '{description}'."
 
@@ -238,6 +253,13 @@ class So101RekepExecutor:
             self._ee_at_grasp = None
 
         return f"Completed '{description}'; final EE {np.round(ee_now * 100, 1)} cm."
+
+    @staticmethod
+    def _encode_overlay(overlay: np.ndarray) -> str:
+        """JPEG-encode the numbered keypoint overlay for ``last_debug`` (grounding visualization)."""
+        buf = io.BytesIO()
+        Image.fromarray(overlay).convert("RGB").save(buf, format="JPEG", quality=85)
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
 
     def _read_current_joints(self) -> np.ndarray:
         robot = self._ensure_robot()
