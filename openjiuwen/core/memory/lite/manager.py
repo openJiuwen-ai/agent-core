@@ -362,6 +362,14 @@ class MemoryIndexManager:
 
     async def _initialize_provider(self) -> None:
         """Initialize embedding provider."""
+        if self.embedding_config is None or not getattr(self.embedding_config, "api_key", None):
+            self.provider = None
+            self.provider_key = "none:no-embedding"
+            logger.info(
+                "Embedding provider not configured (no embedding_config / api_key); "
+                "memory will use FTS5 keyword search only."
+            )
+            return
         try:
             self.provider = await create_embedding_provider(
                 model=self.settings.model,
@@ -600,10 +608,13 @@ class MemoryIndexManager:
 
             meta = json.loads(row["value"])
 
-            if meta.get("provider") != self.provider.id:
+            provider_id = self.provider.id if self.provider else None
+            provider_model = self.provider.model if self.provider else None
+
+            if meta.get("provider") != provider_id:
                 return True
 
-            if meta.get("model") != self.provider.model:
+            if meta.get("model") != provider_model:
                 return True
 
             if meta.get("chunkTokens") != self.settings.chunking.get("tokens"):
@@ -633,8 +644,8 @@ class MemoryIndexManager:
             await self._sync_session_files()
 
         meta = {
-            "provider": self.provider.id,
-            "model": self.provider.model,
+            "provider": self.provider.id if self.provider else None,
+            "model": self.provider.model if self.provider else None,
             "providerKey": self.provider_key,
             "chunkTokens": self.settings.chunking.get("tokens"),
             "chunkOverlap": self.settings.chunking.get("overlap"),
@@ -762,6 +773,8 @@ class MemoryIndexManager:
 
         embedding = await self._get_embedding(chunk.text)
 
+        model_name = self.provider.model if self.provider else None
+
         cursor = self.db.execute("""
             INSERT OR REPLACE INTO chunks
             (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
@@ -769,7 +782,7 @@ class MemoryIndexManager:
             RETURNING rowid
         """, (
             chunk_id, file_path, source, chunk.start_line, chunk.end_line,
-            chunk_hash, self.provider.model, chunk.text,
+            chunk_hash, model_name, chunk.text,
             vector_to_blob(embedding) if embedding else None,
             int(asyncio.get_event_loop().time()) if self._event_loop else 0
         ))
@@ -914,6 +927,13 @@ class MemoryIndexManager:
                 if r["score"] >= min_score
             ][:max_results]
 
+        # if not embedding, Skip the rerank and use the raw keyword scores directly instead.
+        if not has_vector:
+            return [
+                r for r in keyword_results
+                if r["score"] >= min_score
+            ][:max_results]
+
         merged = _merge_hybrid_results(
             vector_results,
             keyword_results,
@@ -933,6 +953,8 @@ class MemoryIndexManager:
             return await self._search_vector_fallback(query_vec, limit)
 
         if not self.vector_dims:
+            if not self.provider:
+                return []
             sample = await self.provider.embed_query("sample")
             self._ensure_vector_table(len(sample))
         else:
@@ -1122,6 +1144,8 @@ class MemoryIndexManager:
 
     async def _embed_query_with_timeout(self, query: str) -> List[float]:
         """Embed query with timeout."""
+        if not self.provider:
+            return []
         try:
             timeout = 60.0
             return await asyncio.wait_for(
