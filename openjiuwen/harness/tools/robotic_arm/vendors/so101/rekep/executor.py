@@ -227,10 +227,22 @@ class So101RekepExecutor:
         ik_result = self._ik.solve(target_m, approach_dir=approach, roll_override=roll)
         err_cm = ik_result.error_m * 100.0
 
+        segmentation_overlay = result.get("segmentation_overlay")
+
         self.last_debug = {
-            "overlay_image_base64": self._encode_overlay(overlay),
+            "overlay_image_base64": self._encode_image(overlay),
+            "segmentation_image_base64": (
+                self._encode_image(segmentation_overlay) if segmentation_overlay is not None else None
+            ),
+            # 2D pixel coords match the numbers drawn on overlay_image_base64 one-to-one.
+            "keypoints_pixels": np.asarray(result["pixels"]).tolist(),
             "keypoints_3d": np.asarray(keypoints).tolist(),
             "movable_mask": list(mask),
+            # The VLM-generated constraint code that decided the target below -- see
+            # constraint_generation.py's prompt for what it was asked to produce.
+            "constraint_code": cg["code_str"],
+            "grasp_keypoints": list(cg["grasp_keypoints"]),
+            "release_keypoints": list(cg["release_keypoints"]),
             "gripper_action": cg["gripper_action"],
             "approach_elevation_deg": float(cg["approach_elevation_deg"]),
             "gripper_roll_deg": float(cg["gripper_roll_deg"]),
@@ -255,10 +267,10 @@ class So101RekepExecutor:
         return f"Completed '{description}'; final EE {np.round(ee_now * 100, 1)} cm."
 
     @staticmethod
-    def _encode_overlay(overlay: np.ndarray) -> str:
-        """JPEG-encode the numbered keypoint overlay for ``last_debug`` (grounding visualization)."""
+    def _encode_image(image: np.ndarray) -> str:
+        """JPEG-encode a debug/grounding visualization image for ``last_debug``."""
         buf = io.BytesIO()
-        Image.fromarray(overlay).convert("RGB").save(buf, format="JPEG", quality=85)
+        Image.fromarray(image).convert("RGB").save(buf, format="JPEG", quality=85)
         return base64.b64encode(buf.getvalue()).decode("utf-8")
 
     def _read_current_joints(self) -> np.ndarray:

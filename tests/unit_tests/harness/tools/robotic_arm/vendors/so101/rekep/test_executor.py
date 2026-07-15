@@ -72,7 +72,12 @@ class _FakeKeypointProposer:
         self.keypoints = keypoints
 
     def get_keypoints(self, rgb, points, visualize=True):
-        return {"keypoints_3d": self.keypoints, "pixels": np.zeros((len(self.keypoints), 2)), "overlay": rgb}
+        return {
+            "keypoints_3d": self.keypoints,
+            "pixels": np.zeros((len(self.keypoints), 2)),
+            "overlay": rgb,
+            "segmentation_overlay": rgb,
+        }
 
 
 class _FakeVlm:
@@ -297,11 +302,18 @@ def test_execute_populates_last_debug_on_success(calibration_files: dict) -> Non
     assert executor.last_debug is not None
     assert executor.last_debug["gripper_action"] == "closed"
     assert executor.last_debug["keypoints_3d"] == keypoints.tolist()
+    assert executor.last_debug["keypoints_pixels"] == np.zeros((1, 2)).tolist()
     assert executor.last_debug["movable_mask"] == [False]
     assert executor.last_debug["ik_error_cm"] == pytest.approx(0.0)
+    # the VLM's raw constraint code, plus which keypoint indices it grasped/released.
+    assert "def subgoal_constraint1" in executor.last_debug["constraint_code"]
+    assert executor.last_debug["grasp_keypoints"] == [0]
+    assert executor.last_debug["release_keypoints"] == []
     # overlay must be JPEG-encoded, not the raw numpy array, so it's JSON/wire-safe.
     assert isinstance(executor.last_debug["overlay_image_base64"], str)
     assert executor.last_debug["overlay_image_base64"]
+    assert isinstance(executor.last_debug["segmentation_image_base64"], str)
+    assert executor.last_debug["segmentation_image_base64"]
 
 
 def test_execute_populates_last_debug_on_ik_failure(calibration_files: dict) -> None:

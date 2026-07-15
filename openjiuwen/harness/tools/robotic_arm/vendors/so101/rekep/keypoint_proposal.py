@@ -29,6 +29,19 @@ _IMAGENET_MEAN = [0.485, 0.456, 0.406]
 _IMAGENET_STD = [0.229, 0.224, 0.225]
 _PATCH = 14  # DINOv2 ViT-S/14 patch size
 
+# Fixed palette (cycled by mask index) for the segmentation overlay -- deterministic
+# across calls, unlike random colors, so the same object gets a stable color run to run.
+_MASK_COLORS = [
+    (255, 99, 71),
+    (60, 179, 113),
+    (65, 105, 225),
+    (238, 130, 238),
+    (255, 215, 0),
+    (0, 206, 209),
+    (255, 140, 0),
+    (147, 112, 219),
+]
+
 
 class KeypointProposer:
     def __init__(
@@ -185,7 +198,19 @@ class KeypointProposer:
             merged_mid.append(np.bincount(mids[idx]).argmax())
         return np.array(merged_3d), np.array(merged_px), np.array(merged_mid)
 
-    # -- 6. numbered overlay for the VLM ----------------------------------------
+    # -- 6a. segmentation overlay for debugging/UI (SAM masks, not sent to the VLM) --
+
+    @staticmethod
+    def _segmentation_overlay(rgb: np.ndarray, masks: list[np.ndarray]) -> np.ndarray:
+        """Alpha-blend each SAM mask over ``rgb`` in a distinct color from ``_MASK_COLORS``."""
+        img = rgb.astype(np.float32).copy()
+        alpha = 0.45
+        for i, m in enumerate(masks):
+            color = np.array(_MASK_COLORS[i % len(_MASK_COLORS)], dtype=np.float32)
+            img[m] = img[m] * (1 - alpha) + color * alpha
+        return img.astype(np.uint8)
+
+    # -- 6b. numbered overlay for the VLM ----------------------------------------
 
     @staticmethod
     def _overlay(rgb: np.ndarray, pixels: np.ndarray) -> np.ndarray:
@@ -211,7 +236,10 @@ class KeypointProposer:
             visualize: whether to render the numbered overlay image.
 
         Returns:
-            ``{"keypoints_3d": [K,3], "pixels": [K,2], "mask_ids": [K], "overlay": [H,W,3] | None}``
+            ``{"keypoints_3d": [K,3], "pixels": [K,2], "mask_ids": [K], "overlay": [H,W,3] | None,
+            "segmentation_overlay": [H,W,3] | None}``. ``overlay`` is the numbered-keypoint image sent
+            to the VLM; ``segmentation_overlay`` is the SAM masks alpha-blended in distinct colors,
+            for debugging/UI only -- the VLM never sees it.
         """
         rgb = np.asarray(rgb)
         max_side = 1280
@@ -232,8 +260,15 @@ class KeypointProposer:
         pts3d, px, mids = self._project(candidates, points)
         pts3d, px, mids = self._merge(pts3d, px, mids)
         overlay = self._overlay(rgb, px) if visualize else None
+        segmentation_overlay = self._segmentation_overlay(rgb, masks) if visualize else None
         tool_logger.info("[KeypointProposer] %s final keypoints after merge + filter", len(pts3d))
-        return {"keypoints_3d": pts3d, "pixels": px, "mask_ids": mids, "overlay": overlay}
+        return {
+            "keypoints_3d": pts3d,
+            "pixels": px,
+            "mask_ids": mids,
+            "overlay": overlay,
+            "segmentation_overlay": segmentation_overlay,
+        }
 
 
 __all__ = ["KeypointProposer"]
