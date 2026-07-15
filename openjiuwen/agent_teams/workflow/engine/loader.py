@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .errors import MetaError, WorkflowError
+from .errors import EngineError, MetaError
 
 _BANNED_ATTRS = {"now", "today", "utcnow"}  # datetime.*.now(), etc.
 _BANNED_MODULE_CALLS = {
@@ -101,7 +101,7 @@ def load_workflow_source(path: str) -> LoadedWorkflow:
     if not any(
         isinstance(node, ast.AsyncFunctionDef) and node.name == "run" for node in tree.body
     ):
-        raise WorkflowError(
+        raise EngineError(
             f"{path}: a workflow must define a top-level `async def run(args)` "
             f"(the SwarmFlow entrypoint)."
         )
