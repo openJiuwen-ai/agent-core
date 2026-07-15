@@ -46,7 +46,8 @@ def test_auto_harness_context_rail_init_keeps_context_processors():
 
     processors = dict(agent.react_agent._config.context_processors)
     assert list(processors) == [
-        "MessageOffloader",
+        "MessageSummaryOffloader",
+        "ReasoningToolLoopCompactProcessor",
         "DialogueCompressor",
         "CurrentRoundCompressor",
         "RoundLevelCompressor",
@@ -62,9 +63,7 @@ async def test_auto_harness_context_rail_skips_prompt_section_injection():
 
     ctx = AgentCallbackContext(
         agent=agent,
-        inputs=ModelCallInputs(
-            messages=[{"role": "user", "content": "test"}]
-        ),
+        inputs=ModelCallInputs(messages=[{"role": "user", "content": "test"}]),
         session=None,
     )
     await rail.before_model_call(ctx)
