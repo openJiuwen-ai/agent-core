@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import Any, Awaitable, Callable, Optional, Protocol, runtime_checkable
 
 
 def _get_int(name: str, default: int) -> int:
@@ -54,6 +54,13 @@ class SubTaskExecutor(Protocol):
         """
         ...
 
+    # Optional, duck-typed: implementations MAY set a ``last_debug`` attribute
+    # (``Optional[dict]``, JSON-serializable) after ``execute()`` runs, holding
+    # whatever grounding/visualization artifacts they computed (e.g. an
+    # overlay image, keypoints, the chosen target). ``StepExecutorRail`` reads
+    # it via ``getattr(..., "last_debug", None)`` and forwards it to
+    # ``on_step_result`` -- implementations that don't set it are unaffected.
+
 
 @dataclass
 class RoboticArmRuntimeSettings:
@@ -76,6 +83,24 @@ class RoboticArmRuntimeSettings:
     step_executor_params: dict = field(default_factory=dict)
 
     health_check: bool = True
+
+    # Optional runtime-observability hooks -- neither is required for the arm to
+    # function; they exist purely so a caller (e.g. a UI-facing wrapper) can
+    # mirror what the model sees/does without touching TaskTool or the session
+    # plumbing. Both MUST be async callables; exceptions raised by either are
+    # caught and logged by the calling rail, never allowed to interrupt the
+    # actual perception/execution pipeline.
+    #
+    # on_frame_captured(payload): called from VisionPerceptionRail right after
+    # each photo capture. payload = {"image_base64": str, "width": int, "height": int}.
+    #
+    # on_step_result(payload): called from StepExecutorRail right after each
+    # report_plan-triggered execute() call. payload = {"sub_tasks": list[dict],
+    # "current": dict, "result_text": str, "debug": Optional[dict]}, where
+    # "debug" is whatever the step_executor exposed via ``last_debug`` (see
+    # ``SubTaskExecutor``), or None if it doesn't expose one.
+    on_frame_captured: Optional[Callable[[dict], Awaitable[None]]] = None
+    on_step_result: Optional[Callable[[dict], Awaitable[None]]] = None
 
     vlm_grounding_max_width: int = field(default_factory=lambda: _get_int("ARM_VLM_MAX_WIDTH", 1280))
     vlm_grounding_jpeg_quality: int = field(default_factory=lambda: _get_int("ARM_VLM_JPEG_QUALITY", 85))

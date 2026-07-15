@@ -284,3 +284,44 @@ def test_execute_stops_on_ik_failure(calibration_files: dict) -> None:
 
     assert "IK error" in result
     assert len(robot.actions) == 0
+
+
+def test_execute_populates_last_debug_on_success(calibration_files: dict) -> None:
+    keypoints = np.array([[0.1, 0.0, 0.05]])
+    executor = _make_executor(calibration_files, keypoint_proposer=_FakeKeypointProposer(keypoints))
+    executor._last_points = np.zeros((480, 640, 3))
+    frame = Image.new("RGB", (640, 480))
+
+    executor.execute(frame, {"description": "grasp the tape"})
+
+    assert executor.last_debug is not None
+    assert executor.last_debug["gripper_action"] == "closed"
+    assert executor.last_debug["keypoints_3d"] == keypoints.tolist()
+    assert executor.last_debug["movable_mask"] == [False]
+    assert executor.last_debug["ik_error_cm"] == pytest.approx(0.0)
+    # overlay must be JPEG-encoded, not the raw numpy array, so it's JSON/wire-safe.
+    assert isinstance(executor.last_debug["overlay_image_base64"], str)
+    assert executor.last_debug["overlay_image_base64"]
+
+
+def test_execute_populates_last_debug_on_ik_failure(calibration_files: dict) -> None:
+    """Grounding data (which keypoint was picked, why) is still useful when the move itself fails."""
+    ik_solver = _FakeIKSolver(error_m=0.10)  # 10 cm > 5 cm tolerance -> fails
+    executor = _make_executor(
+        calibration_files,
+        ik_solver=ik_solver,
+        keypoint_proposer=_FakeKeypointProposer(np.array([[0.1, 0.0, 0.05]])),
+    )
+    executor._last_points = np.zeros((480, 640, 3))
+
+    result = executor.execute(Image.new("RGB", (640, 480)), {"description": "grasp the tape"})
+
+    assert "IK error" in result
+    assert executor.last_debug is not None
+    assert executor.last_debug["ik_error_cm"] == pytest.approx(10.0)
+
+
+def test_last_debug_is_none_before_first_execute(calibration_files: dict) -> None:
+    executor = _make_executor(calibration_files)
+
+    assert executor.last_debug is None

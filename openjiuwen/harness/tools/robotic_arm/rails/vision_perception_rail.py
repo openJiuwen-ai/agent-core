@@ -39,6 +39,7 @@ class VisionPerceptionRail(AgentRail):
         self._step_executor = settings.step_executor
         self._max_width = settings.vlm_grounding_max_width
         self._jpeg_quality = settings.vlm_grounding_jpeg_quality
+        self._on_frame_captured = settings.on_frame_captured
         del model_name  # reserved for future per-model image sizing, mirroring mobile_gui
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
@@ -56,6 +57,8 @@ class VisionPerceptionRail(AgentRail):
             return
 
         ctx.extra["vlm_raw_frame"] = raw_frame
+
+        await self._notify_frame_captured(raw_frame, frame_base64)
 
         observation_msg = self._build_observation_message(ctx, frame_base64, raw_frame)
         await self._inject_observation_message(ctx, observation_msg)
@@ -93,6 +96,16 @@ class VisionPerceptionRail(AgentRail):
             frame = frame.convert("RGB")
         displayed = self._resize_to_max_width(frame)
         return frame, displayed, self._pil_to_base64(displayed)
+
+    async def _notify_frame_captured(self, raw_frame: Image.Image, frame_base64: str) -> None:
+        if self._on_frame_captured is None:
+            return
+        try:
+            await self._on_frame_captured(
+                {"image_base64": frame_base64, "width": raw_frame.width, "height": raw_frame.height}
+            )
+        except Exception:
+            logger.exception("[VisionPerceptionRail] on_frame_captured callback failed")
 
     def _resize_to_max_width(self, img: Image.Image) -> Image.Image:
         if img.width <= self._max_width:
