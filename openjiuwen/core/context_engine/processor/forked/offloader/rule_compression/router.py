@@ -10,22 +10,12 @@ from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.
     strip_display_line_prefixes,
     strip_display_line_prefixes_preserving_body_whitespace,
 )
-from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.compressors.diff_compressor import (
-    DiffCompressor,
-)
-from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.compressors.html_compressor import (
-    HtmlCompressor,
-)
-from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.compressors.json_array_compressor import (
-    JsonArrayCompressor,
-)
-from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.compressors.log_compressor import LogCompressor
-from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.compressors.plain_text_compressor import (
-    PlainTextCompressor,
-)
-from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.compressors.search_results_compressor import (
-    SearchResultsCompressor,
-)
+from .compressors.diff_compressor import DiffCompressor
+from .compressors.html_compressor import HtmlCompressor
+from .compressors.json_array_compressor import JsonArrayCompressor
+from .compressors.log_compressor import LogCompressor
+from .compressors.plain_text_compressor import PlainTextCompressor
+from .compressors.search_results_compressor import SearchResultsCompressor
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.types import (
     ContentType,
     RuleCompressionResult,
@@ -34,8 +24,7 @@ from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.
 
 
 class RuleCompressor(Protocol):
-    def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult:
-        ...
+    def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult: ...
 
 
 class RuleContentRouter:
@@ -108,9 +97,7 @@ class RuleContentRouter:
         lines = [line for line in display_text.splitlines() if line.strip()]
         if lines:
             matches = sum(
-                1
-                for line in lines
-                if self._SEARCH_LINE_RE.match(line) and not self._TIMESTAMP_LOG_LINE_RE.match(line)
+                1 for line in lines if self._SEARCH_LINE_RE.match(line) and not self._TIMESTAMP_LOG_LINE_RE.match(line)
             )
             if matches / len(lines) >= 0.3:
                 return ContentType.SEARCH_RESULTS
@@ -123,7 +110,8 @@ class RuleContentRouter:
         else:
             routed_content = (
                 strip_display_line_prefixes(content)
-                if content_type in {
+                if content_type
+                in {
                     ContentType.HTML,
                     ContentType.JSON_ARRAY,
                     ContentType.SEARCH_RESULTS,
@@ -155,5 +143,6 @@ class RuleContentRouter:
     def _looks_like_html(self, content: str) -> bool:
         html_prefixes = ("<!doctype html", "<html", "<head", "<body")
         return content.startswith(html_prefixes) or len(self._HTML_STRUCTURAL_TAG_RE.findall(content)) >= 2
+
 
 ContentRouter = RuleContentRouter

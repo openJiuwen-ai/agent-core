@@ -8,7 +8,10 @@ from typing import Any
 
 from json_repair import loads as repair_json_loads
 
-from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.common import ERROR_RE, fits_budget_and_saves
+from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.common import (
+    ERROR_RE,
+    fits_budget_and_saves,
+)
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.types import (
     ContentType,
     RuleCompressionResult,
@@ -191,10 +194,7 @@ class JsonArrayCompressor:
                     values.append(value)
             if len(values) < minimum_coverage:
                 continue
-            counts = Counter(
-                value if isinstance(value, str) else json.dumps(value)
-                for value in values
-            )
+            counts = Counter(value if isinstance(value, str) else json.dumps(value) for value in values)
             if len(counts) <= 10:
                 value_counts[key] = dict(counts)
         summary: dict[str, Any] = {"total_rows": len(rows)}
