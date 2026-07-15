@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import sys
 from pathlib import Path
@@ -26,6 +27,44 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_FILE = REPO_ROOT / "except-baseline.json"
 PATTERN = re.compile(r"except\s+Exception\b")
+
+logger = logging.getLogger("check_except_baseline")
+
+
+class _MaxLevelFilter(logging.Filter):
+    """Pass only records strictly below ``level`` (keeps stdout free of errors)."""
+
+    def __init__(self, level: int) -> None:
+        super().__init__()
+        self.level = level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno < self.level
+
+
+def _configure_logging() -> None:
+    """Route INFO output to stdout and WARNING+ to stderr with no prefix.
+
+    This mirrors the previous ``print``/``print(..., file=sys.stderr)`` split so
+    results stay pipe-friendly on stdout while failures go to stderr.
+    """
+    if logger.handlers:  # idempotent; avoid duplicate handlers on re-entry
+        return
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(message)s")
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(logging.INFO)
+    stdout_handler.addFilter(_MaxLevelFilter(logging.WARNING))
+    stdout_handler.setFormatter(formatter)
+
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(logging.WARNING)
+    stderr_handler.setFormatter(formatter)
+
+    logger.addHandler(stdout_handler)
+    logger.addHandler(stderr_handler)
+    logger.propagate = False
 
 EXCLUDED_DIR_NAMES = {
     "__pycache__",
@@ -72,36 +111,39 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    _configure_logging()
+
     total, per_file = count_broad_excepts()
 
     if args.top:
         for f, n in sorted(per_file.items(), key=lambda kv: -kv[1])[: args.top]:
-            print(f"{n:5d}  {f}")
+            logger.info("%5d  %s", n, f)
 
     if args.update_baseline or not BASELINE_FILE.exists():
         BASELINE_FILE.write_text(
             json.dumps({"except_exception": total}, indent=2) + "\n",
             encoding="utf-8",
         )
-        print(f"baseline written: except_exception = {total}")
+        logger.info("baseline written: except_exception = %d", total)
         return 0
 
     baseline = json.loads(BASELINE_FILE.read_text(encoding="utf-8"))
     allowed = baseline.get("except_exception", 0)
 
-    print(f"broad 'except Exception' count: {total} (baseline: {allowed})")
+    logger.info("broad 'except Exception' count: %d (baseline: %d)", total, allowed)
     if total > allowed:
-        print(
-            f"FAIL: {total - allowed} new broad except block(s). Catch specific "
+        logger.error(
+            "FAIL: %d new broad except block(s). Catch specific "
             "exception types, or handle at a designated boundary "
             "(see .semgrep/no-silent-except.yml for the boundary list).",
-            file=sys.stderr,
+            total - allowed,
         )
         return 1
     if total < allowed:
-        print(
-            f"Improved by {allowed - total} — run with --update-baseline to "
-            "ratchet the baseline down."
+        logger.info(
+            "Improved by %d — run with --update-baseline to "
+            "ratchet the baseline down.",
+            allowed - total,
         )
     return 0
 
