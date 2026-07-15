@@ -24,6 +24,9 @@ REVIEW_EVOLUTION_TOOL_NAMES = (
 
 _SECTION_VALUES = sorted(VALID_SECTIONS)
 _TARGET_VALUES = list(EVOLUTION_TARGET_VALUES)
+_TRAJECTORY_LIST_DEFAULT_LIMIT = 25
+_TRAJECTORY_LIST_MAX_LIMIT = 50
+_TRAJECTORY_READ_MAX_REFS = 8
 
 
 def _text(language: str, *, cn: str, en: str) -> str:
@@ -464,7 +467,7 @@ class EvolutionReviewListTrajectoryStepsTool(_EvolutionReviewTool):
                 },
                 "limit": {
                     "type": "integer",
-                    "default": 50,
+                    "default": _TRAJECTORY_LIST_DEFAULT_LIMIT,
                     "description": _text(
                         self._language,
                         cn="最多返回的 trajectory 索引条目数。",
@@ -531,12 +534,12 @@ class EvolutionReviewListTrajectoryStepsTool(_EvolutionReviewTool):
             except (TypeError, ValueError):
                 start = 0
             try:
-                limit = int(args.get("limit", 50))
+                limit = int(args.get("limit", _TRAJECTORY_LIST_DEFAULT_LIMIT))
             except (TypeError, ValueError):
-                limit = 50
+                limit = _TRAJECTORY_LIST_DEFAULT_LIMIT
             if limit <= 0:
-                limit = 50
-            limit = min(limit, 100)
+                limit = _TRAJECTORY_LIST_DEFAULT_LIMIT
+            limit = min(limit, _TRAJECTORY_LIST_MAX_LIMIT)
             page = items[slice(start, start + limit)]
             next_index = start + len(page)
             next_cursor = str(next_index) if next_index < total else None
@@ -573,6 +576,11 @@ class EvolutionReviewReadTrajectoryStepsTool(_EvolutionReviewTool):
             args = dict(inputs or {})
             ref = str(args.get("evolution_review_ref"))
             refs = [str(item) for item in args.get("refs", [])]
+            if len(refs) > _TRAJECTORY_READ_MAX_REFS:
+                return ToolOutput(
+                    success=False,
+                    error=f"read at most {_TRAJECTORY_READ_MAX_REFS} trajectory refs per call",
+                )
             session_id = self._session_id(kwargs)
             runtime = self._runtime_for_ref(ref)
             scope = runtime.resolve_scope(ref, session_id=session_id)

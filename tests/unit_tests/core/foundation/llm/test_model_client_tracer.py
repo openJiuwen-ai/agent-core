@@ -6,10 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client import InferenceAffinityModelClient
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
 from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import SiliconFlowModelClient
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
 from openjiuwen.core.foundation.llm.schema.message import UserMessage
+from openjiuwen.core.runner.callback.events import LLMCallEvents
 
 
 @pytest.fixture
@@ -35,12 +37,36 @@ def siliconflow_client_config():
 
 
 @pytest.fixture
+def inference_affinity_client_config():
+    """Create InferenceAffinity client config for testing."""
+    return ModelClientConfig(
+        client_provider=ProviderType.InferenceAffinity,
+        api_key="sk-test",
+        api_base="https://api.inference-affinity.test/v1",
+        verify_ssl=False,
+    )
+
+
+@pytest.fixture
 def model_request_config():
     """Create model request config for testing."""
     return ModelRequestConfig(
         model_name="gpt-3.5-turbo",
         temperature=0.7,
     )
+
+
+@pytest.fixture
+def model_request_config_with_extra_params():
+    """Create model request config with extra params for LLM_INPUT regression tests."""
+    config = ModelRequestConfig(
+        model_name="gpt-3.5-turbo",
+        temperature=0.7,
+    )
+    config.frequency_penalty = -1
+    config.presence_penalty = 0.5
+    config.stop = "END"
+    return config
 
 
 class TestOpenAIModelClientTracer:
@@ -294,3 +320,90 @@ class TestSiliconFlowModelClientTracer:
 
             assert len(collected) > 0
             assert collected[0].content == "Hello"
+
+
+@pytest.mark.parametrize(
+    (
+        "client_cls",
+        "client_config_fixture",
+        "trigger_patch_path",
+        "method_name",
+        "abort_method_name",
+    ),
+    [
+        (
+            OpenAIModelClient,
+            "openai_client_config",
+            "openjiuwen.core.foundation.llm.model_clients.openai_model_client.trigger",
+            "invoke",
+            "_create_async_openai_client",
+        ),
+        (
+            OpenAIModelClient,
+            "openai_client_config",
+            "openjiuwen.core.foundation.llm.model_clients.openai_model_client.trigger",
+            "stream",
+            "_create_async_openai_client",
+        ),
+        (
+            SiliconFlowModelClient,
+            "siliconflow_client_config",
+            "openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client.trigger",
+            "invoke",
+            "_apost",
+        ),
+        (
+            SiliconFlowModelClient,
+            "siliconflow_client_config",
+            "openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client.trigger",
+            "stream",
+            "_apost",
+        ),
+        (
+            InferenceAffinityModelClient,
+            "inference_affinity_client_config",
+            "openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client.trigger",
+            "invoke",
+            "_make_async_request",
+        ),
+        (
+            InferenceAffinityModelClient,
+            "inference_affinity_client_config",
+            "openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client.trigger",
+            "stream",
+            "_stream_response",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_llm_input_includes_extra_request_params(
+    request,
+    client_cls,
+    client_config_fixture,
+    trigger_patch_path,
+    method_name,
+    abort_method_name,
+    model_request_config_with_extra_params,
+):
+    client_config = request.getfixturevalue(client_config_fixture)
+    client = client_cls(model_request_config_with_extra_params, client_config)
+    trigger_mock = AsyncMock()
+
+    with patch(trigger_patch_path, trigger_mock), patch.object(
+        client, abort_method_name, side_effect=RuntimeError("abort after LLM_INPUT")
+    ):
+        try:
+            if method_name == "stream":
+                async for _ in client.stream([UserMessage(content="Hello")]):
+                    pass
+            else:
+                await client.invoke([UserMessage(content="Hello")])
+        except Exception:
+            pass
+
+    llm_input_call = next(
+        call for call in trigger_mock.call_args_list if call.args[0] == LLMCallEvents.LLM_INPUT
+    )
+    assert llm_input_call.kwargs["frequency_penalty"] == -1
+    assert llm_input_call.kwargs["presence_penalty"] == 0.5
+    assert llm_input_call.kwargs["stop"] == "END"

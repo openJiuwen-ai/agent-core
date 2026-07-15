@@ -175,7 +175,24 @@ class ExternalTeamClient:
         db = get_shared_db(self._descriptor.db_config)
         await db.initialize()
 
-        self._messager = create_messager(self._descriptor.transport_config)
+        transport_config = self._descriptor.transport_config
+        if transport_config.backend == "hybrid":
+            from openjiuwen.agent_teams.messager.hybrid import HybridMessager, WebSocketEventPublisher
+
+            if not transport_config.external_publish_url:
+                raise ValueError("hybrid messager requires external_publish_url")
+            publisher = WebSocketEventPublisher(
+                url=transport_config.external_publish_url,
+                session_id=self.session_id,
+                team_name=self.team_name,
+                request_timeout=transport_config.request_timeout,
+            )
+            self._messager = HybridMessager(
+                publisher=publisher,
+                sender_id=self.member_name,
+            )
+        else:
+            self._messager = create_messager(transport_config)
         await self._messager.start()
 
         backend = TeamBackend(

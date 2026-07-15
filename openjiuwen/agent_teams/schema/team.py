@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.models.pool import ModelPoolEntry
 from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
+from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 
@@ -230,6 +231,15 @@ class ExternalCliAgentSpec(BaseModel):
     """Extra environment variables for the CLI subprocess, merged over the
     inherited process env (the team-join descriptor is injected separately)."""
 
+    ssh_transport: SshTransportConfig | None = None
+    """Optional ssh endpoint used to launch this CLI on a remote host.
+
+    When set, ``command``, ``cwd``, ``env``, and ``mcp_server_command`` are
+    interpreted on the remote host. The team join descriptor is still injected
+    through ``OPENJIUWEN_TEAM_JOIN`` so a stdio MCP child process can inherit
+    this member identity when remote DB and messager endpoints are reachable.
+    """
+
 
 class TeamSpec(BaseModel):
     """Definition of a team and its goal."""
@@ -268,6 +278,8 @@ class TeamSpec(BaseModel):
       flat expansion of that router. Lookup-by-name semantics; no hint
       yields the first declared name as the default.
     """
+    external_messager_config: Optional[MessagerTransportConfig] = None
+    """Transport used by an external CLI member's MCP client."""
 
 
 class TeamRuntimeContext(BaseModel):

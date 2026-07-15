@@ -79,6 +79,7 @@ def _ensure_builtin_infra_registered() -> None:
 
         _TRANSPORT_REGISTRY["inprocess"] = MessagerTransportConfig
         _TRANSPORT_REGISTRY["pyzmq"] = MessagerTransportConfig
+        _TRANSPORT_REGISTRY["hybrid"] = MessagerTransportConfig
 
     if not _STORAGE_REGISTRY:
         from openjiuwen.agent_teams.tools.database import DatabaseConfig
@@ -291,6 +292,8 @@ class TeamAgentSpec(BaseModel):
     caller to configure a cross-process backend (e.g. ``"pyzmq"``) when
     teammates are involved.
     """
+    external_transport: Optional[TransportSpec] = None
+    """Optional transport used by external CLI MCP clients."""
     storage: Optional[StorageSpec] = None
     worktree: Optional[WorktreeConfig] = None
     """Optional worktree isolation config for team members."""
@@ -552,6 +555,7 @@ class TeamAgentSpec(BaseModel):
             team_pool = list(self.model_pool)
             team_strategy = self.model_pool_strategy
 
+        external_messager_config = self.external_transport.build() if self.external_transport else None
         team_spec = TeamSpec(
             team_name=self.team_name,
             display_name=self.team_name,
@@ -559,6 +563,7 @@ class TeamAgentSpec(BaseModel):
             language=resolved_language,
             model_pool=team_pool,
             model_pool_strategy=team_strategy,
+            external_messager_config=external_messager_config,
         )
 
         messager_config = self.transport.build() if self.transport else None

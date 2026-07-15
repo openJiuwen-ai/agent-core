@@ -77,7 +77,7 @@ os.environ.setdefault("IS_SENSITIVE", "false")
 # credentials (claude / codex are authenticated locally), so only the leader
 # needs an endpoint here. The leader key is read from LEADER_API_KEY, falling
 # back to API_KEY (the convention used by the sibling main.py entry).
-_REQUIRED_ENV = ("API_BASE", "MODEL_NAME")
+_REQUIRED_ENV = ("API_BASE", "MODEL_NAME", "TEAM_EVENT_GATEWAY_WS_URL")
 
 
 def _leader_api_key() -> str | None:
@@ -105,6 +105,25 @@ _RUN_TIMEOUT_S = 1200.0
 _MCP_SERVER_COMMAND = [sys.executable, "-m", "openjiuwen.agent_teams.mcp"]
 
 
+def _use_ssh_for_claude() -> bool:
+    """Return whether claude members should be launched through local SSH."""
+    return os.environ.get("EXTERNAL_CLI_E2E_CLAUDE_TRANSPORT", "").strip().lower() == "ssh"
+
+
+def _local_ssh_transport() -> dict[str, Any]:
+    """Build the SSH endpoint config for localhost port 23."""
+    username = os.environ.get("EXTERNAL_CLI_SSH_USER") or os.environ.get("USERNAME") or os.environ.get("USER")
+    config: dict[str, Any] = {
+        "host": "127.0.0.1",
+        "port": 23,
+        "agent": True,
+        "disable_host_key_check": True,
+    }
+    if username:
+        config["username"] = username
+    return config
+
+
 def _leader_model() -> dict[str, Any]:
     """Build the leader TeamModelConfig dict from the environment."""
     return {
@@ -125,13 +144,19 @@ def _leader_model() -> dict[str, Any]:
 def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
     """Assemble the team spec for the external-CLI scenario.
 
-    External CLI members run in separate processes, so the team uses a
-    cross-process ``pyzmq`` messager (the leader binds the pub/sub broker;
-    each member's MCP server connects with its own node id) and a
-    file-backed sqlite db. ``external_cli_agents`` statically declares the
-    launch config for each CLI kind — the leader's ``spawn_member`` call
-    only references it by name.
+    External CLI members run in separate processes and publish standard team
+    events through the configured Gateway relay. The Team itself keeps its
+    standard PyZMQ messenger and file-backed sqlite database.
     """
+    claude_cli_config: dict[str, Any] = {
+        "cli_agent": "claude",
+        "cwd": str(workspace_path),
+        "inject_mcp": True,
+        "mcp_server_command": _MCP_SERVER_COMMAND,
+    }
+    if _use_ssh_for_claude():
+        claude_cli_config["ssh_transport"] = _local_ssh_transport()
+
     cfg: dict[str, Any] = {
         "team_name": team_name,
         "lifecycle": "temporary",
@@ -168,14 +193,16 @@ def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
                 "metadata": {"pubsub_bind": True},
             },
         },
+        "external_transport": {
+            "type": "hybrid",
+            "params": {
+                "team_name": team_name,
+                "external_publish_url": os.environ["TEAM_EVENT_GATEWAY_WS_URL"],
+            },
+        },
         "storage": {"type": "sqlite"},
         "external_cli_agents": [
-            {
-                "cli_agent": "claude",
-                "cwd": str(workspace_path),
-                "inject_mcp": True,
-                "mcp_server_command": _MCP_SERVER_COMMAND,
-            },
+            claude_cli_config,
             {
                 "cli_agent": "codex",
                 "cwd": str(workspace_path),
@@ -242,6 +269,10 @@ async def _run() -> int:
     print(f"External-CLI team E2E — team={team_name}")
     print(f"workspace={workspace_path}")
     print("members: " + ", ".join(f"{n}({c})" for n, c in _MEMBERS))
+    if _use_ssh_for_claude():
+        print("claude transport: ssh://127.0.0.1:23")
+    else:
+        print("claude transport: local")
     print("=" * 70)
 
     await Runner.start()

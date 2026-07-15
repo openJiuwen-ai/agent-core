@@ -23,6 +23,7 @@ from typing import (
 
 from openjiuwen.agent_teams.interaction import (
     DeliverResult,
+    ExternalTeamEvent,
     GodViewMessage,
     HumanAgentInbox,
     HumanAgentMessage,
@@ -387,6 +388,15 @@ class TeamRuntimeManager:
                 return DeliverResult.success(None)
             return DeliverResult.failure("unsupported_interactive_input")
 
+        try:
+            external_event = (
+                payload if isinstance(payload, ExternalTeamEvent) else ExternalTeamEvent.from_wire(payload)
+            )
+        except ValueError:
+            return DeliverResult.failure("invalid_external_event")
+        if external_event is not None:
+            return await self._route_external_team_event(entry, external_event)
+
         if isinstance(payload, str):
             parsed = parse_interact_str(payload)
             payloads: list[InteractPayload] = parsed or [GodViewMessage(body=payload)]
@@ -458,6 +468,27 @@ class TeamRuntimeManager:
             sender_id="user",
         )
         await messager.publish(topic_id=topic, message=message)
+        return DeliverResult.success(None)
+
+    @staticmethod
+    async def _route_external_team_event(
+        entry: "ActiveTeam",
+        external_event: ExternalTeamEvent,
+    ) -> DeliverResult:
+        """Publish one externally received event on the active runtime's local bus."""
+        try:
+            event_payload = external_event.event.get_payload()
+        except ValueError:
+            return DeliverResult.failure("invalid_external_event")
+        if event_payload.team_name != entry.team_name:
+            return DeliverResult.failure("external_event_team_mismatch")
+
+        backend = entry.agent.team_backend
+        messager = getattr(backend, "messager", None) if backend is not None else None
+        if messager is None:
+            return DeliverResult.failure("no_messager")
+        topic = external_event.topic.build(entry.current_session_id, entry.team_name)
+        await messager.publish(topic_id=topic, message=external_event.event)
         return DeliverResult.success(None)
 
     @staticmethod

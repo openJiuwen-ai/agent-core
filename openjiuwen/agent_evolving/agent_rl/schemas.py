@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
+from openjiuwen.agent_evolving.trajectory import Trajectory, trajectory_steps
+
 
 # ---------------------------------------------------------------------------
 # Runtime-side models (trajectory representation)
@@ -107,21 +109,21 @@ class RolloutWithReward(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def trajectory_to_rollouts(trajectory: Any) -> List[Rollout]:
-    """Convert a Trajectory (from agent_evolving.trajectory) to a list of Rollout objects.
+def trajectory_to_rollouts(trajectory: Trajectory) -> List[Rollout]:
+    """Convert an OTLP-first Trajectory to a list of Rollout objects.
 
     Extracts LLM steps from the Trajectory, mapping each TrajectoryStep
     with kind='llm' and an LLMCallDetail to a Rollout compatible with
     the RL training pipeline.
 
     Args:
-        trajectory: A Trajectory object from agent_evolving.trajectory.types.
+        trajectory: An OTLP-first Trajectory from agent_evolving.trajectory.
 
     Returns:
         List of Rollout objects, one per LLM turn.
     """
     rollouts: List[Rollout] = []
-    for step in trajectory.steps:
+    for step in trajectory_steps(trajectory):
         if step.kind != "llm":
             continue
         detail = step.detail

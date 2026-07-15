@@ -39,12 +39,14 @@ from openjiuwen.agent_evolving.signal import (
     make_signal_fingerprint,
 )
 from openjiuwen.agent_evolving.trajectory import (
-    LegacyTrajectory,
     Trajectory,
     TrajectorySink,
     TrajectorySource,
     TrajectoryStore,
-    to_legacy_trajectory,
+    trajectory_execution_id,
+    trajectory_meta,
+    trajectory_session_id,
+    trajectory_steps,
 )
 from openjiuwen.agent_evolving.utils import infer_skill_from_texts, parse_top_level_frontmatter
 from openjiuwen.core.common.logging import logger
@@ -125,7 +127,7 @@ def is_completed_team_task_view(result: Any) -> bool:
 
 
 def infer_team_skill_from_trajectory(
-    trajectory: Trajectory | LegacyTrajectory,
+    trajectory: Trajectory,
     known_team_skills: set[str],
 ) -> Optional[str]:
     """Attribute a trajectory to a known team skill via SKILL.md read traces.
@@ -133,10 +135,9 @@ def infer_team_skill_from_trajectory(
     This is an attribution heuristic for passive evolution routing, not a
     guarantee that the skill was semantically responsible for the run.
     """
-    legacy = _legacy_team_trajectory(trajectory)
     skill_tool_payloads: list[Any] = []
     texts: list[str] = []
-    for step in legacy.steps:
+    for step in trajectory_steps(trajectory):
         if step.kind != "tool" or not step.detail:
             continue
         tool_name = getattr(step.detail, "tool_name", "")
@@ -150,13 +151,6 @@ def infer_team_skill_from_trajectory(
         skill_tool_payloads=skill_tool_payloads,
         texts=texts,
     )
-
-
-def _legacy_team_trajectory(trajectory: Trajectory | LegacyTrajectory) -> LegacyTrajectory:
-    """Return the step-based trajectory view expected by team evolution logic."""
-    if isinstance(trajectory, LegacyTrajectory):
-        return trajectory
-    return to_legacy_trajectory(trajectory)
 
 
 class TeamSkillEvolutionRail(SkillEvolutionRail):
@@ -294,7 +288,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         """Return the team/swarm stage source for generated experiences."""
         return "team_skill_experience_updater"
 
-    def _build_swarm_review_trajectory(self) -> LegacyTrajectory | None:
+    def _build_swarm_review_trajectory(self) -> Trajectory | None:
         """Build the team-aggregated trajectory exposed to the restricted review agent."""
         trajectory = self._build_trajectory()
         if trajectory is None:
@@ -603,11 +597,11 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
 
     async def _on_after_evolution_triggered(
         self,
-        trajectory: LegacyTrajectory,
+        trajectory: Trajectory,
         ctx: AgentCallbackContext,
     ) -> None:
         """Consume host completion marks after the after-invoke trigger fires."""
-        if self._host_completion_pending_session_id == trajectory.session_id:
+        if self._host_completion_pending_session_id == trajectory_session_id(trajectory):
             self._host_completion_pending_session_id = None
 
     # ===== Public API: external completion notification =====
@@ -673,7 +667,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
 
     async def run_evolution(
         self,
-        trajectory: Trajectory | LegacyTrajectory,
+        trajectory: Trajectory,
         ctx: Optional[AgentCallbackContext] = None,
         *,
         snapshot: Optional[dict] = None,
@@ -682,7 +676,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         if not getattr(self, "_auto_scan", True):
             logger.info("[TeamSkillEvolutionRail] auto_scan disabled, skipping")
             return
-        trajectory = _legacy_team_trajectory(trajectory)
         t0 = time.time()
         try:
             self._emit_progress(
@@ -886,11 +879,11 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         self,
         *,
         skill_name: str,
-        trajectory: Trajectory | LegacyTrajectory,
+        trajectory: Trajectory,
     ) -> list[EvolutionSignal]:
         """Detect deterministic team trajectory signals for an explicit active request."""
         return self._detect_rule_signals(
-            trajectory=_legacy_team_trajectory(trajectory),
+            trajectory=trajectory,
             skill_name=skill_name,
         )
 
@@ -911,7 +904,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
 
     # ===== Private helpers =====
 
-    def _detect_used_team_skill(self, trajectory: LegacyTrajectory) -> Optional[str]:
+    def _detect_used_team_skill(self, trajectory: Trajectory) -> Optional[str]:
         """Scan trajectory for SKILL.md read traces to identify which team skill was used.
 
         Only considers skills whose SKILL.md frontmatter declares a
@@ -1046,41 +1039,44 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
                 return skill_name
         return None
 
-    def _aggregate_team_trajectory(self, trajectory: LegacyTrajectory) -> LegacyTrajectory:
+    def _aggregate_team_trajectory(self, trajectory: Trajectory) -> Trajectory:
         """Return aggregated team trajectory when a runtime source has data."""
         source = getattr(self, "_trajectory_source", None)
         if source is None:
             return trajectory
 
         team_id = getattr(self, "_team_id", None) or "unknown"
+        fallback = trajectory
+        session_id = trajectory_session_id(trajectory) or ""
         try:
             team_traj = source.get_trajectory(
                 team_id=team_id,
-                session_id=trajectory.session_id or "",
+                session_id=session_id,
                 filter_collaborative=True,
             )
-        except TypeError as exc:
-            if "Trajectory.__init__()" not in str(exc):
-                raise
-            logger.warning(
-                "[TeamSkillEvolutionRail] team trajectory source returned incompatible trajectory: %s",
-                exc,
-            )
-            return trajectory
+        except TypeError:
+            try:
+                team_traj = source.get_trajectory(
+                    team_id=team_id,
+                    session_id=session_id,
+                )
+            except TypeError:
+                return fallback
         if team_traj is None:
-            return trajectory
-        team_legacy = _legacy_team_trajectory(team_traj)
-        if not team_legacy.steps:
-            return trajectory
+            return fallback
+        team_steps = trajectory_steps(team_traj)
+        if not team_steps:
+            return fallback
+        team_meta = trajectory_meta(team_traj)
 
         self._emit_progress(
             "detecting_signals",
-            f"aggregated {team_legacy.meta.get('member_count', 0)} members, "
-            f"{len(team_legacy.steps)} collaborative steps",
+            f"aggregated {team_meta.get('member_count', 0)} members, "
+            f"{len(team_steps)} collaborative steps",
         )
-        return team_legacy
+        return team_traj
 
-    def _detect_rule_signals(self, *, trajectory: LegacyTrajectory, skill_name: str) -> list[EvolutionSignal]:
+    def _detect_rule_signals(self, *, trajectory: Trajectory, skill_name: str) -> list[EvolutionSignal]:
         """Detect deterministic execution/script signals and attribute them to the team skill."""
         try:
             detected = SignalDetector(existing_skills={skill_name}).detect_trajectory_signals(
@@ -1107,7 +1103,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         self,
         *,
         skill_name: str,
-        trajectory: LegacyTrajectory,
+        trajectory: Trajectory,
         signals: list[EvolutionSignal],
         auto_approve: bool,
         user_query: str = "",
@@ -1193,7 +1189,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         self,
         skill_name: str,
         *,
-        trajectory: LegacyTrajectory,
+        trajectory: Trajectory,
         signals: list[EvolutionSignal],
         auto_approve: bool,
         user_query: str = "",
@@ -1227,16 +1223,18 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         except OSError:
             return False
 
-    def _dump_trajectory_debug(self, trajectory: LegacyTrajectory) -> None:
+    def _dump_trajectory_debug(self, trajectory: Trajectory) -> None:
         """Dump trajectory to a JSON file for debugging."""
         try:
             debug_dir = self._store.base_dirs[0].parent / "_debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y%m%d_%H%M%S")
-            path = debug_dir / f"trajectory_{ts}_{trajectory.execution_id[:8]}.json"
+            execution_id = trajectory_execution_id(trajectory)
+            steps = trajectory_steps(trajectory)
+            path = debug_dir / f"trajectory_{ts}_{execution_id[:8]}.json"
 
             steps_data = []
-            for step in trajectory.steps:
+            for step in steps:
                 entry: dict[str, Any] = {"kind": step.kind}
                 if step.detail:
                     if step.kind == "tool":
@@ -1251,10 +1249,9 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
                 steps_data.append(entry)
 
             dump = {
-                "execution_id": trajectory.execution_id,
-                "session_id": trajectory.session_id,
-                "source": trajectory.source,
-                "step_count": len(trajectory.steps),
+                "execution_id": execution_id,
+                "session_id": trajectory_session_id(trajectory),
+                "step_count": len(steps),
                 "steps": steps_data,
             }
             path.write_text(json.dumps(dump, ensure_ascii=False, indent=2), encoding="utf-8")

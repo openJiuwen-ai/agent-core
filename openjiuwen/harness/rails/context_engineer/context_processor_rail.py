@@ -18,6 +18,7 @@ from openjiuwen.core.context_engine import (
     CurrentRoundCompressorConfig,
     FullCompactProcessorConfig,
     MicroCompactProcessorConfig,
+    ReasoningToolLoopCompactProcessorConfig,
     ToolResultBudgetProcessorConfig,
 )
 from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
@@ -165,6 +166,10 @@ class ContextProcessorRail(DeepAgentRail):
                     MicroCompactProcessorConfig()
                 ),
                 (
+                    "ReasoningToolLoopCompactProcessor",
+                    ReasoningToolLoopCompactProcessorConfig(),
+                ),
+                (
                     "FullCompactProcessor",
                     FullCompactProcessorConfig(
                         model=model_config,
@@ -183,6 +188,10 @@ class ContextProcessorRail(DeepAgentRail):
                         model=model_cfg,
                         model_client=model_client_config,
                     ),
+                ),
+                (
+                    "ReasoningToolLoopCompactProcessor",
+                    ReasoningToolLoopCompactProcessorConfig(),
                 ),
                 (
                     "DialogueCompressor",

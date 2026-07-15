@@ -25,7 +25,6 @@ from openjiuwen.agent_evolving.trajectory.semconv import (
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
     GEN_AI_USAGE_TOTAL_TOKENS,
-    LEGACY_PARENT_LLM_CALL,
     OJ_AGENT_INPUTS,
     OJ_AGENT_INVOKE_TYPE,
     OJ_AGENT_NAME,
@@ -71,7 +70,6 @@ from openjiuwen.agent_evolving.trajectory.semconv import (
     TRAJECTORY_SCHEMA_VERSION_ATTR,
     TRAJECTORY_SCOPE_NAME,
     TRAJECTORY_SOURCE,
-    TRAJECTORY_STEP_KIND,
     TRAJECTORY_TASK_HASH,
     TRAJECTORY_TRACE_ID,
 )
@@ -86,12 +84,7 @@ from openjiuwen.agent_evolving.trajectory.span_codec import (
     span_id_hex,
     unwrap_io,
 )
-from openjiuwen.agent_evolving.trajectory.types import (
-    LLMCallDetail,
-    ToolCallDetail,
-    Trajectory,
-    TrajectoryStep,
-)
+from openjiuwen.agent_evolving.trajectory.types import Trajectory
 from openjiuwen.core.session.tracer.data import InvokeType, NodeStatus
 from openjiuwen.core.session.tracer.span import TraceAgentSpan
 
@@ -714,162 +707,6 @@ class TrajectoryTraceState:
                     state.attributes[TRAJECTORY_INCOMPLETE] = True
                     state.attributes[OJ_STATUS] = state.status
         return states
-
-    def project_legacy_steps(self, states: list[TrajectorySpanState]) -> list[TrajectoryStep]:
-        steps = []
-        llm_refs: dict[str, str] = {}
-        for state in states:
-            step_kind = self.legacy_step_kind(state)
-            if step_kind is None:
-                continue
-            if step_kind == "llm":
-                llm_ref = f"llm_{len(llm_refs) + 1:04d}"
-                llm_refs[state.invoke_id] = llm_ref
-                steps.append(self.build_llm_step(state))
-                continue
-            parent_llm_ref = llm_refs.get(state.parent_invoke_id or "")
-            steps.append(self.build_tool_step(state, parent_llm_ref=parent_llm_ref))
-        return steps
-
-    @staticmethod
-    def legacy_step_kind(state: TrajectorySpanState) -> str | None:
-        operation_name = str(state.attributes.get(GEN_AI_OPERATION_NAME) or "").lower()
-        if operation_name in ("chat", "text_completion", "generate_content"):
-            return "llm"
-        if operation_name == "execute_tool":
-            return "tool"
-        has_llm_messages = (
-            state.attributes.get(GEN_AI_INPUT_MESSAGES) is not None
-            or state.attributes.get(GEN_AI_OUTPUT_MESSAGES) is not None
-        )
-        if has_llm_messages:
-            return "llm"
-        if (
-            state.attributes.get(GEN_AI_TOOL_NAME) is not None
-            or state.attributes.get(GEN_AI_TOOL_CALL_ARGUMENTS) is not None
-            or state.attributes.get(GEN_AI_TOOL_CALL_RESULT) is not None
-        ):
-            return "tool"
-        invoke_type = str(
-            state.attributes.get(TRAJECTORY_INVOKE_TYPE)
-            or state.attributes.get(OJ_AGENT_INVOKE_TYPE)
-            or ""
-        ).lower()
-        component_type = str(state.attributes.get(OJ_WORKFLOW_COMPONENT_TYPE) or "").lower()
-        if invoke_type == InvokeType.LLM.value or component_type == "llm":
-            return "llm"
-        if invoke_type in (InvokeType.PLUGIN.value, "tool") or component_type in ("tool", "plugin"):
-            return "tool"
-        explicit = state.attributes.get(TRAJECTORY_STEP_KIND)
-        if explicit in ("llm", "tool"):
-            return explicit
-        span_name = str(state.name or "").lower()
-        if span_name.startswith("llm.") or span_name == "llm.call":
-            return "llm"
-        if span_name.startswith("tool.") or span_name.startswith("execute_tool "):
-            return "tool"
-        return None
-
-    def build_llm_step(self, state: TrajectorySpanState) -> TrajectoryStep:
-        inputs = unwrap_io(state.inputs, "inputs")
-        outputs = unwrap_io(state.outputs, "outputs")
-        input_tokens = state.attributes.get(GEN_AI_USAGE_INPUT_TOKENS)
-        output_tokens = state.attributes.get(GEN_AI_USAGE_OUTPUT_TOKENS)
-        usage = None
-        if input_tokens is not None or output_tokens is not None:
-            usage = {
-                "prompt_tokens": int(input_tokens or 0),
-                "completion_tokens": int(output_tokens or 0),
-            }
-        output_payload = json_safe(outputs)
-        if (
-            usage is None
-            and isinstance(output_payload, dict)
-            and isinstance(output_payload.get("usage"), dict)
-        ):
-            usage = output_payload["usage"]
-        output_messages = state.attributes.get(GEN_AI_OUTPUT_MESSAGES)
-        if isinstance(output_messages, list) and len(output_messages) == 1:
-            response = output_messages[0]
-        elif output_messages is not None:
-            response = output_messages
-        else:
-            response = json_safe(outputs)
-        detail = LLMCallDetail(
-            model=str(state.attributes.get(GEN_AI_REQUEST_MODEL) or state.name or ""),
-            messages=json_safe(
-                state.attributes.get(GEN_AI_INPUT_MESSAGES) or as_message_list(inputs)
-            ),
-            response=json_safe(response),
-            tools=json_safe(state.attributes.get(GEN_AI_TOOL_DEFINITIONS)),
-            usage=usage,
-            meta=self.legacy_meta(state),
-        )
-        return TrajectoryStep(
-            kind="llm",
-            error=state.error,
-            start_time_ms=state.start_time_unix_nano // 1_000_000,
-            end_time_ms=state.end_time_unix_nano // 1_000_000 if state.end_time_unix_nano else None,
-            detail=detail,
-            reward=state.attributes.get(OJ_RL_REWARD),
-            prompt_token_ids=json_safe(state.attributes.get(OJ_RL_PROMPT_TOKEN_IDS)),
-            completion_token_ids=json_safe(state.attributes.get(OJ_RL_COMPLETION_TOKEN_IDS)),
-            logprobs=json_safe(state.attributes.get(OJ_RL_LOGPROBS)),
-            meta=self.legacy_meta(state),
-        )
-
-    def build_tool_step(self, state: TrajectorySpanState, *, parent_llm_ref: str | None) -> TrajectoryStep:
-        meta = self.legacy_meta(state)
-        if parent_llm_ref:
-            meta["parent_llm_call"] = parent_llm_ref
-            meta[LEGACY_PARENT_LLM_CALL] = parent_llm_ref
-        detail = ToolCallDetail(
-            tool_name=str(state.attributes.get(GEN_AI_TOOL_NAME) or state.name or ""),
-            call_args=json_safe(
-                state.attributes.get(GEN_AI_TOOL_CALL_ARGUMENTS, unwrap_io(state.inputs, "inputs"))
-            ),
-            call_result=json_safe(
-                state.attributes.get(GEN_AI_TOOL_CALL_RESULT, unwrap_io(state.outputs, "outputs"))
-            ),
-            tool_call_id=state.attributes.get(GEN_AI_TOOL_CALL_ID),
-        )
-        return TrajectoryStep(
-            kind="tool",
-            error=state.error,
-            start_time_ms=state.start_time_unix_nano // 1_000_000,
-            end_time_ms=state.end_time_unix_nano // 1_000_000 if state.end_time_unix_nano else None,
-            detail=detail,
-            meta=meta,
-        )
-
-    @staticmethod
-    def legacy_meta(state: TrajectorySpanState) -> dict[str, Any]:
-        return {
-            "operator_id": state.attributes.get(GEN_AI_TOOL_NAME)
-            or state.attributes.get(OJ_AGENT_NAME)
-            or state.name,
-            "span_name": state.name,
-            "invoke_id": state.invoke_id,
-            "parent_invoke_id": state.parent_invoke_id,
-            "span_id": state.span_id(),
-            "parent_span_id": state.parent_span_id(),
-            "status": state.status,
-            "attributes": json_safe(state.attributes),
-        }
-
-    @staticmethod
-    def calculate_cost(steps: list[TrajectoryStep]) -> dict[str, int] | None:
-        input_tokens = 0
-        output_tokens = 0
-        for step in steps:
-            detail = step.detail
-            if step.kind != "llm" or not isinstance(detail, LLMCallDetail) or not detail.usage:
-                continue
-            input_tokens += int(detail.usage.get("prompt_tokens", 0) or 0)
-            output_tokens += int(detail.usage.get("completion_tokens", 0) or 0)
-        if input_tokens <= 0 and output_tokens <= 0:
-            return None
-        return {"input_tokens": input_tokens, "output_tokens": output_tokens}
 
 
 __all__ = [
