@@ -151,7 +151,7 @@ class TestEvolutionLog:
 
 class TestEvolutionSignal:
     @staticmethod
-    def test_to_dict_contains_enum_value():
+    def test_to_dict_contains_core_fields():
         signal = EvolutionSignal(
             signal_type="execution_failure",
             evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
@@ -161,8 +161,14 @@ class TestEvolutionSignal:
             skill_name="skill-a",
         )
         data = signal.to_dict()
-        assert data["evolution_type"] == "skill_experience"
-        assert data["tool_name"] == "bash"
+        assert data["type"] == "execution_failure"
+        assert data["section"] == "Troubleshooting"
+        assert data["excerpt"] == "timeout"
+        assert data["skill_name"] == "skill-a"
+        assert "evolution_type" not in data
+        assert "tool_name" not in data
+        assert signal.evolution_type == EvolutionCategory.SKILL_EXPERIENCE
+        assert signal.tool_name == "bash"
 
     @staticmethod
     def test_to_dict_omits_context_when_none():

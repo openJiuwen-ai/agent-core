@@ -6,6 +6,8 @@ from openjiuwen.agent_evolving.signal.base import (
     EvolutionCategory,
     EvolutionSignal,
     EvolutionTarget,
+    get_signal_source,
+    make_evolution_signal,
     make_signal_fingerprint,
 )
 from openjiuwen.agent_evolving.signal.from_conv import (
@@ -21,6 +23,8 @@ __all__ = [
     "EvolutionSignal",
     "EvolutionCategory",
     "EvolutionTarget",
+    "get_signal_source",
+    "make_evolution_signal",
     "make_signal_fingerprint",
     "ConversationSignalDetector",
     "SignalDetector",

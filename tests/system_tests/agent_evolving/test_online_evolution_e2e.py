@@ -169,16 +169,12 @@ class TestOnlineEvolutionE2E:
         # --- Phase 1: Signal Detection ---
         messages = _build_conversation_with_script()
         detector = SignalDetector(existing_skills={skill_name})
-        signals = await detector.detect(messages)
+        signals = detector.detect(messages)
 
-        assert len(signals) >= 2, f"Expected >=2 signals, got {len(signals)}: {[s.signal_type for s in signals]}"
+        assert len(signals) >= 1, f"Expected >=1 signals, got {len(signals)}: {[s.signal_type for s in signals]}"
 
         signal_types = {s.signal_type for s in signals}
-        assert "script_artifact" in signal_types
-        assert "execution_failure" in signal_types or "user_correction" in signal_types
-
-        script_signals = [s for s in signals if s.signal_type == "script_artifact"]
-        assert script_signals[0].skill_name == skill_name
+        assert "execution_failure" in signal_types
 
         # --- Phase 2: LLM-based Experience Generation (mocked) ---
         formatter_patches = json.loads(_build_mock_llm_response_with_script())
@@ -295,7 +291,7 @@ class TestOnlineEvolutionE2E:
         ]
 
         detector = SignalDetector()
-        signals = await detector.detect(messages)
+        signals = detector.detect(messages)
 
         failure_signals = [s for s in signals if s.signal_type == "execution_failure"]
         assert len(failure_signals) == 0
@@ -330,7 +326,7 @@ class TestOnlineEvolutionE2E:
 
         optimizer = SkillExperienceOptimizer(llm=llm, model="mock", language="cn")
         detector = SignalDetector()
-        signals = await detector.detect([
+        signals = detector.detect([
             {"role": "tool", "name": "bash", "content": "Error: command timeout"},
         ])
 
@@ -375,7 +371,7 @@ class TestOnlineEvolutionE2E:
         optimizer = SkillExperienceOptimizer(llm=llm, model="mock", language="en")
         store = EvolutionStore(str(tmp_path / "skills"))
 
-        signals = await SignalDetector().detect([
+        signals = SignalDetector().detect([
             {"role": "tool", "name": "bash", "content": "Error: EACCES permission denied"},
         ])
 
@@ -430,7 +426,7 @@ class TestOnlineEvolutionE2E:
         )
 
         optimizer = SkillExperienceOptimizer(llm=llm, model="mock", language="en")
-        signals = await SignalDetector().detect([
+        signals = SignalDetector().detect([
             {"role": "tool", "name": "bash", "content": "Error: timeout"},
         ])
         ctx = EvolutionContext(

@@ -576,6 +576,16 @@ class LegacyTrajectory:
         return messages
 
 
+def trajectory_steps(trajectory: Trajectory) -> List[TrajectoryStep]:
+    """Project OTLP spans to ``TrajectoryStep`` read models.
+
+    Prefer this over ``to_legacy_trajectory`` when only steps are needed.
+    For a full ``LegacyTrajectory`` compatibility view, use
+    ``to_legacy_trajectory``.
+    """
+    return _otlp_legacy_steps(trajectory.otlp_trace)
+
+
 def to_legacy_trajectory(trajectory: Union[Trajectory, LegacyTrajectory]) -> LegacyTrajectory:
     """Return a detached step-based compatibility view."""
     if isinstance(trajectory, LegacyTrajectory):

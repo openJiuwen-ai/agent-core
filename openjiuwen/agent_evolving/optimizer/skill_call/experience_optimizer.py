@@ -727,7 +727,7 @@ def _fix_json_text(text: str) -> str:
     """Apply common fixes to malformed JSON produced by LLMs."""
     text = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.MULTILINE)
     text = re.sub(r"```\s*$", "", text, flags=re.MULTILINE)
-    text = re.sub(r"//[^\n]*", "", text)
+    text = re.sub(r"(?<!:)//[^\n]*", "", text)
     text = re.sub(r",\s*([}\]])", r"\1", text)
     return text.strip()
 
@@ -930,6 +930,16 @@ class SkillExperienceOptimizer(BaseOptimizer):
         self._model = model
         self._language = language
         self._two_stage = two_stage
+
+    @property
+    def llm(self) -> Any:
+        """Get the configured LLM client."""
+        return self._llm
+
+    @property
+    def model(self) -> str:
+        """Get the configured model name."""
+        return self._model
 
     @staticmethod
     def default_targets() -> List[str]:

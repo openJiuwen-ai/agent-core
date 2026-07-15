@@ -33,6 +33,7 @@ from openjiuwen.agent_evolving.trajectory.types import (
     Updates,
     to_legacy_trajectory,
     trajectory_from_legacy,
+    trajectory_steps,
 )
 
 __all__ = [
@@ -47,6 +48,7 @@ __all__ = [
     "Updates",
     "to_legacy_trajectory",
     "trajectory_from_legacy",
+    "trajectory_steps",
     "TrajectoryBuilder",
     "TrajectoryExtractor",
     "TracerTrajectoryExtractor",

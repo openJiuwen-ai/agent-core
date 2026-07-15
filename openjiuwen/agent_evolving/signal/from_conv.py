@@ -6,26 +6,64 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+import warnings
+from typing import Dict, List, Optional, Set, Tuple, Union
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.agent_evolving.protocols import USER_INTENT_SIGNAL
 from openjiuwen.agent_evolving.signal.base import (
-    EvolutionCategory,
     EvolutionSignal,
+    make_evolution_signal,
     make_signal_fingerprint,
 )
+from openjiuwen.agent_evolving.utils import TuneUtils
 from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
-    LegacyTrajectory,
-    Trajectory,
     ToolCallDetail,
-    to_legacy_trajectory,
+    Trajectory,
+    trajectory_steps,
 )
+from openjiuwen.core.common.logging import logger
 
 
 def _get_field(obj: object, key: str, default: object = "") -> object:
     """Read a field from a dict or object uniformly."""
     return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+
+
+def _message_dedup_key(msg: object) -> Tuple[str, str, str, str, str]:
+    """Stable identity for trajectory message deduplication."""
+    tool_calls = _get_field(msg, "tool_calls", []) or []
+    try:
+        tool_calls_repr = json.dumps(tool_calls, ensure_ascii=False, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        tool_calls_repr = str(tool_calls)
+    return (
+        str(_get_field(msg, "role") or ""),
+        str(_get_field(msg, "content") or ""),
+        str(_get_field(msg, "tool_call_id") or ""),
+        str(_get_field(msg, "name") or ""),
+        tool_calls_repr,
+    )
+
+
+def _normalize_message(msg: object) -> dict:
+    """Normalize runtime message objects into message-like dicts."""
+    if isinstance(msg, dict):
+        return msg
+    normalized: dict = {
+        "role": str(_get_field(msg, "role") or ""),
+        "content": _get_field(msg, "content") or "",
+    }
+    name = _get_field(msg, "name", None)
+    if name not in ("", None):
+        normalized["name"] = name
+    tool_call_id = _get_field(msg, "tool_call_id", None)
+    if tool_call_id not in ("", None):
+        normalized["tool_call_id"] = tool_call_id
+    tool_calls = _get_field(msg, "tool_calls", None)
+    if tool_calls:
+        normalized["tool_calls"] = tool_calls
+    return normalized
 
 
 def _extract_around_match(
@@ -38,6 +76,15 @@ def _extract_around_match(
     start = max(0, match.start() - before)
     end = min(len(content), match.end() + after)
     return content[start:end]
+
+
+def _response_to_text(response: object) -> str:
+    """Convert common LLM response shapes to plain text."""
+    if hasattr(response, "content"):
+        return str(getattr(response, "content") or "")
+    if isinstance(response, dict):
+        return str(response.get("content", "") or response.get("text", "") or "")
+    return str(response or "")
 
 
 _FAILURE_KEYWORDS = re.compile(
@@ -72,123 +119,88 @@ _CORRECTION_PATTERNS = [
     r"fix(ed)?:",
 ]
 _CORRECTION_PATTERN = re.compile("|".join(_CORRECTION_PATTERNS), re.IGNORECASE)
+
 _SKILL_MD_PATTERN = re.compile(r"[/\\]+([^/\\]+)[/\\]+SKILL\.md", re.IGNORECASE)
 _TOOL_SCHEMA_PATTERN = re.compile(r"\{'content': '---\\nname: [^\n]+\\ndescription:")
-
-# Tools whose output is fetched content (web pages, files, search results).
-_DATA_FETCH_TOOLS = frozenset({
-    "mcp_fetch_webpage", "fetch_webpage", "web_fetch",
-    "search", "web_search", "google_search", "bing_search",
-    "view_file", "read_file", "cat_file",
-    "list_directory", "ls",
-    "get_url", "curl", "wget",
-})
-
-# Tools that execute inline code or shell commands.
-_CODE_EXEC_TOOLS = frozenset({
-    "code", "bash",
-    "execute_python_code", "run_python", "exec_code",
-    "execute_code", "python_exec", "run_code",
-})
-
-# Parameter keys where executable content (code or commands) can be found.
-_EXEC_CONTENT_KEYS = (
-    "code", "code_block", "script", "source", "python_code",
-    "command", "cmd", "shell_command",
+_USER_FEEDBACK_PROMPT_CN = (
+    "判断以下用户消息是否包含对当前 skill 的被动纠正或可沉淀的改进反馈。\n"
+    "只有当用户消息明确指出 agent 的理解、步骤、顺序或工具使用需要调整时，"
+    "才认为值得转成演进信号。\n\n"
+    "当前 skill：{skill_name}\n"
+    "最近用户消息：{user_messages}\n\n"
+    '输出 JSON: {{"is_feedback": true/false, "excerpt": "str"}}\n'
+)
+_USER_FEEDBACK_PROMPT_EN = (
+    "Determine whether the following user messages contain passive corrective feedback "
+    "or reusable improvement guidance for the current skill.\n"
+    "Only treat the messages as an evolution signal when the user is clearly correcting "
+    "the agent's understanding, ordering, steps, or tool usage.\n\n"
+    "Current skill: {skill_name}\n"
+    "Recent user messages: {user_messages}\n\n"
+    'Output JSON: {{"is_feedback": true/false, "excerpt": "str"}}\n'
 )
 
 
-_USER_CORRECTION_CONTENT_MAX_CHARS = 400
-_CONTEXT_SNIPPET_MAX_CHARS = 1200
+def _parse_llm_feedback_response(raw: str) -> Optional[dict]:
+    """Parse LLM feedback JSON, tolerating markdown code fences."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = TuneUtils.parse_json_from_llm_response(text)
+    return parsed if isinstance(parsed, dict) else None
 
-USER_CORRECTION_LLM_PROMPT_CN = """\
-你是用户意图分析专家。判断对话中哪些用户消息包含对 Agent 行为的纠正信号。
 
-## 用户消息列表（带索引）
-{user_messages_json}
+# Tools whose output is fetched content (web pages, files, search results).
+_DATA_FETCH_TOOLS = frozenset(
+    {
+        "mcp_fetch_webpage",
+        "fetch_webpage",
+        "web_fetch",
+        "search",
+        "web_search",
+        "google_search",
+        "bing_search",
+        "view_file",
+        "read_file",
+        "cat_file",
+        "list_directory",
+        "ls",
+        "get_url",
+        "curl",
+        "wget",
+    }
+)
 
-## 对话上下文摘要
-{context_snippet}
+# Tools that execute inline code or shell commands.
+_CODE_EXEC_TOOLS = frozenset(
+    {
+        "code",
+        "bash",
+        "execute_python_code",
+        "run_python",
+        "exec_code",
+        "execute_code",
+        "python_exec",
+        "run_code",
+    }
+)
 
-## 纠正的定义
+# Parameter keys where executable content (code or commands) can be found.
+_EXEC_CONTENT_KEYS = (
+    "code",
+    "code_block",
+    "script",
+    "source",
+    "python_code",
+    "command",
+    "cmd",
+    "shell_command",
+)
 
-符合以下任一条件即为纠正（is_correction=true）：
-- 显式否定：指出 Agent 的理解、做法、结果有错误（"不对"、"错了"、"这不是我要的"、"你搞错了"）
-- 隐式纠正：含蓄表达不满并要求改变方向（"换个方式"、"这样不太合适"、"能不能试试别的"、"这个结果不理想"）
-- 补充说明：用户发现 Agent 理解偏差后补充真实意图（"我的意思是…"、"其实我想要…"、"我说的不是这个"）
-- 重复纠正：对同一问题再次纠正（Agent 未正确执行上次纠正）
-- 否定后重新指引：用户否定 Agent 的做法并给出新方向（"不要用这个，改用…"）
-
-不符合纠正的情况（is_correction=false）：
-- 普通追问（"然后呢"、"继续"、"下一步"）
-- 新需求（与 Agent 之前的做法无关的全新任务）
-- 确认/赞同（"好的"、"对"、"可以"、"没问题"）
-- 单纯提问（"这个怎么用"、"为什么报错"）
-
-## 输出格式
-只输出以下 JSON 数组，不要其他内容（即使没有纠正也必须输出空数组 []）：
-[
-  {{
-    "msg_index": 0,
-    "is_correction": true,
-    "reason": "一句话说明为何是纠正",
-    "excerpt": "相关原文片段（≤200字）"
-  }}
-]
-
-要求：
-1. 每条 user 消息都要判断，不可遗漏
-2. msg_index 对应上方消息列表中的 index 字段
-3. 仅 is_correction=true 的条目需要填写 reason 和 excerpt
-4. is_correction=false 的条目只需输出 {{"msg_index": N, "is_correction": false}}
-"""
-
-USER_CORRECTION_LLM_PROMPT_EN = """\
-You are a user-intent analysis expert. Determine which user messages in the conversation contain correction signals directed at the Agent's behavior.
-
-## User Messages (with indices)
-{user_messages_json}
-
-## Conversation Context Summary
-{context_snippet}
-
-## Definition of Correction
-
-A message is a correction (is_correction=true) if it matches any of the following:
-- Explicit negation: Points out errors in the Agent's understanding, approach, or output ("that's wrong", "incorrect", "not what I asked for")
-- Implicit correction: Subtly expresses dissatisfaction and requests a change ("try another approach", "this isn't quite right", "could we do it differently")
-- Clarification: User clarifies true intent after noticing Agent misinterpretation ("what I meant was…", "actually I want…")
-- Repeated correction: Corrects the same issue again (Agent failed to apply the previous correction)
-- Redirect after negation: User rejects Agent's approach and provides a new direction ("don't use that, use… instead")
-
-Messages that are NOT corrections (is_correction=false):
-- Follow-up questions ("what's next", "continue", "next step")
-- New requests (entirely new tasks unrelated to Agent's prior actions)
-- Confirmations/approvals ("ok", "yes", "looks good", "that's fine")
-- Plain questions ("how do I use this", "why is there an error")
-
-## Output Format
-Output only the following JSON array, nothing else (output an empty array [] even when there are no corrections):
-[
-  {{
-    "msg_index": 0,
-    "is_correction": true,
-    "reason": "One sentence explaining why this is a correction",
-    "excerpt": "Relevant text snippet (≤200 chars)"
-  }}
-]
-
-Rules:
-1. Judge every user message; do not skip any.
-2. msg_index corresponds to the index field in the message list above.
-3. Only is_correction=true entries need reason and excerpt.
-4. For is_correction=false entries, output only {{"msg_index": N, "is_correction": false}}.
-"""
-
-USER_CORRECTION_LLM_PROMPT: Dict[str, str] = {
-    "cn": USER_CORRECTION_LLM_PROMPT_CN,
-    "en": USER_CORRECTION_LLM_PROMPT_EN,
-}
+DetectionInput = Union[Trajectory, List[dict]]
 
 
 class ConversationSignalDetector:
@@ -198,70 +210,151 @@ class ConversationSignalDetector:
     Unified interface for online and offline evolution paths.
     """
 
-    def __init__(
-        self,
-        existing_skills: Optional[Set[str]] = None,
-        llm: Any = None,
-        model: Optional[str] = None,
-        language: str = "cn",
-    ) -> None:
-        """Initialize detector with optional existing skills set and LLM for correction detection.
+    def __init__(self, existing_skills: Optional[Set[str]] = None) -> None:
+        """Initialize detector with optional existing skills set.
 
         Args:
             existing_skills: Set of skill names for skill_name resolution.
-            llm: LLM client instance with an async ``invoke(model, messages)`` method.
-                When provided together with *model*, ``detect()`` uses LLM to
-                judge user corrections instead of (or in addition to) regex patterns.
-            model: Model identifier string passed to ``llm.invoke()``.
-            language: Prompt language, ``"cn"`` or ``"en"``.
         """
         self._existing_skills = existing_skills or set()
+        self._llm: object | None = None
+        self._model = ""
+        self._language = "cn"
+
+    def detect(self, trajectory_or_messages: DetectionInput) -> List[EvolutionSignal]:
+        """Detect deterministic evolution signals from Trajectory or messages."""
+        return self._detect_message_signals(trajectory_or_messages)
+
+    def _detect_message_signals(
+        self,
+        input_data: DetectionInput,
+        *,
+        signal_types: Optional[Set[str]] = None,
+    ) -> List[EvolutionSignal]:
+        try:
+            messages = (
+                self.convert_trajectory_to_messages(input_data)
+                if isinstance(input_data, Trajectory)
+                else list(input_data)
+            )
+            signals = self._detect_from_messages(messages)
+        except Exception as exc:
+            logger.warning(
+                "[ConversationSignalDetector] message signal detection failed: %s",
+                exc,
+                exc_info=True,
+            )
+            return []
+        enabled_signal_types = signal_types or {"execution_failure", "script_artifact"}
+        return self._deduplicate([signal for signal in signals if signal.signal_type in enabled_signal_types])
+
+    def detect_trajectory_signals(
+        self,
+        trajectory: Optional[Trajectory],
+        *,
+        messages: Optional[List[dict]] = None,
+        signal_types: Optional[Set[str]] = None,
+    ) -> List[EvolutionSignal]:
+        """Detect passive trajectory signals using deterministic conversation rules."""
+        if messages is not None:
+            input_data: DetectionInput = messages
+        elif trajectory is not None:
+            input_data = trajectory
+        else:
+            return []
+        return self._detect_message_signals(
+            input_data,
+            signal_types=signal_types,
+        )
+
+    def bind_llm(
+        self,
+        *,
+        llm: object,
+        model: str,
+        language: str = "cn",
+    ) -> "ConversationSignalDetector":
+        """Attach optional LLM context for passive user-message detection."""
         self._llm = llm
         self._model = model
         self._language = language
-        # 最近一次 LLM 调用异常（无异常则为 None）；仅用于最终失败日志排障，
-        # 不在每次重试时输出，避免抖动场景刷屏。
-        self._last_llm_error: Optional[str] = None
+        return self
 
-    async def detect(
+    async def detect_user_message_feedback(
         self,
-        trajectory_or_messages: Union[Trajectory, LegacyTrajectory, List[dict]],
+        messages: List[dict],
     ) -> List[EvolutionSignal]:
-        """Detect evolution signals from Trajectory or messages.
+        """Deprecated alias for detect_user_intent."""
+        warnings.warn(
+            "ConversationSignalDetector.detect_user_message_feedback() is deprecated; "
+            "use detect_user_intent() and the user_intent signal type instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.detect_user_intent(messages)
 
-        Main entry: accepts Trajectory / LegacyTrajectory or List[dict],
-        returns deduplicated EvolutionSignal list.
+    async def detect_user_intent(
+        self,
+        trajectory_or_messages: DetectionInput,
+    ) -> List[EvolutionSignal]:
+        """Use LLM judgment to turn passive user messages into standard signals."""
+        messages = (
+            self.convert_trajectory_to_messages(trajectory_or_messages)
+            if isinstance(trajectory_or_messages, Trajectory)
+            else list(trajectory_or_messages)
+        )
+        user_messages = [
+            str(_get_field(msg, "content")).strip()
+            for msg in messages
+            if str(_get_field(msg, "role")) == "user" and str(_get_field(msg, "content")).strip()
+        ][-5:]
+        if not user_messages:
+            return []
 
-        When ``llm`` and ``model`` were provided at construction time, all user
-        messages are sent to the LLM for correction judgment inside
-        ``_detect_from_messages``.  When no LLM is configured, or the LLM call
-        fails, the regex path is used as a fallback.
+        skill_name = self._infer_skill_from_messages(messages)
+        if not skill_name:
+            return []
 
-        Args:
-            trajectory_or_messages: Execution trajectory or message list.
+        if self._llm is None or not self._model:
+            return self._fallback_user_feedback_signals(user_messages, skill_name)
 
-        Returns:
-            Deduplicated list of EvolutionSignal.
-        """
-        if isinstance(trajectory_or_messages, (Trajectory, LegacyTrajectory)):
-            messages = self._convert_trajectory_to_messages(trajectory_or_messages)
-        else:
-            messages = trajectory_or_messages
-        return await self._detect_from_messages(messages)
+        prompt_template = _USER_FEEDBACK_PROMPT_CN if self._language == "cn" else _USER_FEEDBACK_PROMPT_EN
+        prompt = prompt_template.format(
+            skill_name=skill_name,
+            user_messages="\n".join(user_messages)[:2000],
+        )
 
+        try:
+            response = await self._llm.invoke(
+                model=self._model,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=30,
+            )
+            raw = _response_to_text(response)
+        except Exception as exc:
+            logger.warning("[ConversationSignalDetector] user feedback detection failed: %s", exc)
+            return self._fallback_user_feedback_signals(user_messages, skill_name)
+
+        parsed = _parse_llm_feedback_response(raw)
+        if parsed is None or not isinstance(parsed, dict):
+            return self._fallback_user_feedback_signals(user_messages, skill_name)
+
+        if not parsed.get("is_feedback"):
+            return []
+
+        excerpt = str(parsed.get("excerpt") or user_messages[-1]).strip()
+        return [self._make_user_feedback_signal(excerpt, skill_name)]
+        
     @staticmethod
-    def _convert_trajectory_to_messages(
-        trajectory: Union[Trajectory, LegacyTrajectory],
-    ) -> List[dict]:
-        """Convert trajectory steps to message list format.
-
-        Accepts OTLP-first ``Trajectory`` (converted via ``to_legacy_trajectory``)
-        or a step-based ``LegacyTrajectory``.
+    def convert_trajectory_to_messages(trajectory: Trajectory) -> List[dict]:
+        """Convert trajectory steps (via ``trajectory_steps``) to message list format.
 
         The message format matches what SignalDetector.detect() expects:
-        - LLM steps: messages from LLMCallDetail (prefers new compressed
-          fields, falls back to legacy ``messages`` for old data)
+        - LLM steps: messages from LLMCallDetail, including tool_calls
         - Tool steps: tool result from ToolCallDetail.call_result
+
+        Later LLM steps often replay the full chat history. Messages already
+        present (by role/content/tool identity) are skipped to avoid duplicates.
 
         Args:
             trajectory: Trajectory object to convert.
@@ -269,28 +362,32 @@ class ConversationSignalDetector:
         Returns:
             List of message dicts compatible with signal detection logic.
         """
-        legacy = to_legacy_trajectory(trajectory)
         messages: List[dict] = []
+        seen_keys: Set[Tuple[str, str, str, str, str]] = set()
         tool_call_id_to_name: Dict[str, str] = {}
 
-        for step in legacy.steps:
+        def _append_message(msg: object) -> None:
+            key = _message_dedup_key(msg)
+            if key in seen_keys:
+                return
+            seen_keys.add(key)
+            messages.append(_normalize_message(msg))
+            tool_calls = _get_field(msg, "tool_calls", [])
+            if tool_calls:
+                for tc in tool_calls:
+                    tc_id = _get_field(tc, "id", "")
+                    tc_name = _get_field(tc, "name", "")
+                    if tc_id and tc_name:
+                        tool_call_id_to_name[tc_id] = tc_name
+
+        for step in trajectory_steps(trajectory):
             if step.kind == "llm" and isinstance(step.detail, LLMCallDetail):
                 for msg in step.detail.messages:
-                    messages.append(msg)
-                    tool_calls = msg.get("tool_calls", [])
-                    if tool_calls:
-                        for tc in tool_calls:
-                            tc_id = tc.get("id", "")
-                            tc_name = tc.get("name", "")
-                            if tc_id and tc_name:
-                                tool_call_id_to_name[tc_id] = tc_name
+                    _append_message(msg)
 
             elif step.kind == "tool" and isinstance(step.detail, ToolCallDetail):
                 tool_name = step.detail.tool_name
-                tool_call_id = (
-                    step.detail.tool_call_id
-                    or step.meta.get("tool_call_id", "")
-                )
+                tool_call_id = step.detail.tool_call_id or step.meta.get("tool_call_id", "")
 
                 if not tool_name and tool_call_id:
                     tool_name = tool_call_id_to_name.get(tool_call_id, "")
@@ -308,30 +405,15 @@ class ConversationSignalDetector:
                 if tool_name:
                     tool_msg["name"] = tool_name
 
-                messages.append(tool_msg)
+                _append_message(tool_msg)
 
         return messages
 
-    async def _detect_from_messages(self, messages: List[dict]) -> List[EvolutionSignal]:
+    def _detect_from_messages(self, messages: List[dict]) -> List[EvolutionSignal]:
         """Scan messages and return deduplicated signals.
 
-        When ``llm`` and ``model`` were provided at construction time, all user
-        messages are batched into a single LLM call for correction judgment
-        before the main loop; the result drives user-correction detection.  When
-        no LLM is configured or the LLM call fails, *llm_corrections* stays
-        ``None`` and the regex pattern is used as a fallback.
+        Original SignalDetector.detect() logic, moved here for unified handling.
         """
-        llm_corrections: Optional[Dict[int, dict]] = None
-        if self._llm is not None and self._model is not None:
-            try:
-                llm_corrections = await self._batch_judge_corrections(messages)
-            except Exception as exc:
-                logger.warning(
-                    "[FromConvSignalDetector] batch LLM correction judgment failed (%s), "
-                    "will fall back to regex",
-                    exc,
-                )
-
         signals: List[EvolutionSignal] = []
         skill_read_history: List[Tuple[int, str]] = []
         pending_scripts: Dict[str, str] = {}
@@ -358,8 +440,8 @@ class ConversationSignalDetector:
                             pending_scripts[tc_id] = code
 
             if role in ("tool", "function"):
-                tool_name = msg.get("name") or msg.get("tool_name") or ""
-                tool_call_id = msg.get("tool_call_id", "")
+                tool_name = _get_field(msg, "name") or _get_field(msg, "tool_name") or ""
+                tool_call_id = _get_field(msg, "tool_call_id", "")
                 if not tool_name and tool_call_id:
                     tool_name = tool_call_id_to_name.get(tool_call_id, "")
 
@@ -368,19 +450,14 @@ class ConversationSignalDetector:
                 if tool_call_id and tool_call_id in pending_scripts:
                     has_failure = bool(_FAILURE_KEYWORDS.search(content)) if content else False
                     if not has_failure:
-                        logger.info(
-                            "[FromConvSignalDetector] tool_call_id: %s, pending_scripts: %s",
-                            tool_call_id,
-                            pending_scripts[tool_call_id],
-                        )
                         signals.append(
-                            EvolutionSignal(
+                            make_evolution_signal(
                                 signal_type="script_artifact",
-                                evolution_type=self._classify_type(active_skill),
                                 section="Scripts",
                                 excerpt=pending_scripts[tool_call_id][:600],
                                 tool_name=tool_name,
                                 skill_name=active_skill,
+                                source="passive_conversation",
                             )
                         )
                     del pending_scripts[tool_call_id]
@@ -389,234 +466,21 @@ class ConversationSignalDetector:
                     continue
 
                 match = _FAILURE_KEYWORDS.search(content)
-                logger.info("[FromConvSignalDetector] _FAILURE_KEYWORDS match: %s", match)
                 if match:
                     if _TOOL_SCHEMA_PATTERN.search(content):
                         continue
                     excerpt = _extract_around_match(content, match)
-                    logger.info("[FromConvSignalDetector] _extract_around_match excerpt: %s", excerpt)
                     signals.append(
-                        EvolutionSignal(
+                        make_evolution_signal(
                             signal_type="execution_failure",
-                            evolution_type=self._classify_type(active_skill),
                             section="Troubleshooting",
                             excerpt=excerpt,
                             tool_name=tool_name or None,
                             skill_name=active_skill,
+                            source="passive_conversation",
                         )
                     )
-            elif role == "user":
-                active_skill = self._resolve_active_skill(msg_idx, skill_read_history)
-                if llm_corrections is not None:
-                    # LLM 调用成功，查结果判断是否为纠正
-                    if msg_idx in llm_corrections:
-                        correction = llm_corrections[msg_idx]
-                        excerpt = correction.get("excerpt", content[:400])
-                        logger.info(
-                            "[FromConvSignalDetector] LLM correction at msg_idx=%d: %s",
-                            msg_idx,
-                            correction.get("reason", ""),
-                        )
-                        signals.append(
-                            EvolutionSignal(
-                                signal_type="user_correction",
-                                evolution_type=self._classify_type(active_skill),
-                                section="Examples",
-                                excerpt=excerpt,
-                                skill_name=active_skill,
-                            )
-                        )
-                    # msg_idx 不在 llm_corrections 中 → LLM 判断不是纠正，跳过
-                else:
-                    # LLM 未配置或调用失败（None），fallback 到正则
-                    match = _CORRECTION_PATTERN.search(content)
-                    logger.info("[FromConvSignalDetector] _CORRECTION_PATTERN match: %s", match)
-                    if match:
-                        excerpt = _extract_around_match(content, match)
-                        logger.info("[FromConvSignalDetector] _extract_around_match excerpt: %s", excerpt)
-                        signals.append(
-                            EvolutionSignal(
-                                signal_type="user_correction",
-                                evolution_type=self._classify_type(active_skill),
-                                section="Examples",
-                                excerpt=excerpt,
-                                skill_name=active_skill,
-                            )
-                        )
-
-        return self._deduplicate(signals)
-
-    async def _batch_judge_corrections(self, messages: List[dict]) -> Optional[Dict[int, dict]]:
-        """Batch-send all user messages to LLM in a single call.
-
-        Returns:
-            Dict mapping msg_idx -> {msg_index, is_correction, reason, excerpt}
-            for messages judged as corrections.  Empty dict when LLM succeeded
-            but found no corrections.  None when LLM call or parse failed.
-        """
-        skill_read_history: List[Tuple[int, str]] = []
-        user_entries: List[dict] = []
-
-        for msg_idx, msg in enumerate(messages):
-            role = str(_get_field(msg, "role"))
-            if role == "assistant" and _get_field(msg, "tool_calls", []):
-                detected = self._detect_skill_from_tool_calls(_get_field(msg, "tool_calls", []))
-                if detected:
-                    skill_read_history.append((msg_idx, detected))
-            elif role == "user":
-                content = str(_get_field(msg, "content"))
-                if not content.strip():
-                    continue
-                truncated = content[:_USER_CORRECTION_CONTENT_MAX_CHARS]
-                if len(content) > _USER_CORRECTION_CONTENT_MAX_CHARS:
-                    truncated += "..."
-                user_entries.append({
-                    "index": len(user_entries),
-                    "msg_idx": msg_idx,
-                    "content": truncated,
-                })
-
-        if not user_entries:
-            return {}
-
-        # 只传递最近一次 user 消息
-        last_user = user_entries[-1]
-        context_snippet = self._build_correction_context(messages)
-        user_messages_json = json.dumps(
-            [{"index": last_user["index"], "content": last_user["content"]}],
-            ensure_ascii=False, indent=2,
-        )
-        lang = self._language if self._language in USER_CORRECTION_LLM_PROMPT else "cn"
-        prompt = USER_CORRECTION_LLM_PROMPT[lang].format(
-            user_messages_json=user_messages_json,
-            context_snippet=context_snippet or "(无上下文 / no context)",
-        )
-
-        # 最多重试 3 次（含初次调用）；调用异常或解析失败均触发重试，
-        # 全部失败后返回 None，由 _detect_from_messages 降级到正则兜底。
-        parsed: Optional[List[dict]] = None
-        last_raw: Optional[str] = None
-        for attempt in range(3):
-            raw = await self._invoke_correction_llm(prompt)
-            last_raw = raw
-            parsed = self._parse_correction_response(raw)
-            if parsed is not None:
-                break
-            if attempt < 2:
-                logger.warning(
-                    "[FromConvSignalDetector] batch correction LLM attempt %d/3 failed, retrying",
-                    attempt + 1,
-                )
-        if parsed is None:
-            # 区分根因：调用异常（auth/timeout/network）vs 返回了但解析失败。
-            if self._last_llm_error:
-                reason = f"llm error: {self._last_llm_error}"
-            else:
-                raw_preview = (last_raw or "")[:120].replace("\n", " ")
-                reason = f"unparseable response: {raw_preview!r}"
-            logger.warning(
-                "[FromConvSignalDetector] batch correction LLM failed after 3 attempts "
-                "(%s), falling back to regex",
-                reason,
-            )
-            return None
-
-        index_to_msg_idx = {last_user["index"]: last_user["msg_idx"]}
-        result: Dict[int, dict] = {}
-        for item in parsed:
-            if not isinstance(item, dict):
-                continue
-            msg_idx = index_to_msg_idx.get(item.get("msg_index"))
-            if msg_idx is not None and item.get("is_correction"):
-                result[msg_idx] = {
-                    "msg_index": item.get("msg_index"),
-                    "is_correction": item.get("is_correction"),
-                    "reason": str(item.get("reason", "")),
-                    "excerpt": str(item.get("excerpt", ""))[:400],
-                }
-
-        logger.info(
-            "[FromConvSignalDetector] batch LLM judgment: %d user msgs -> %d corrections",
-            len(user_entries),
-            len(result),
-        )
-        return result
-
-    async def _invoke_correction_llm(self, prompt: str) -> Optional[str]:
-        """Call LLM and return raw text; returns None on exception.
-
-        Exceptions are swallowed (returned as ``None``) without logging here;
-        the caller (:meth:`_batch_judge_corrections`) owns retry policy and
-        logs only on final failure, so a flaky LLM does not spam the log on
-        every retry.  The last exception (if any) is recorded in
-        ``self._last_llm_error`` for the caller to surface on final failure.
-        """
-        try:
-            response = await self._llm.invoke(
-                model=self._model,
-                messages=[{"role": "user", "content": prompt}],
-            )
-        except Exception as exc:
-            self._last_llm_error = f"{type(exc).__name__}: {exc}"
-            return None
-        self._last_llm_error = None
-        return response.content if hasattr(response, "content") else str(response)
-
-    @staticmethod
-    def _parse_correction_response(raw: Optional[str]) -> Optional[List[dict]]:
-        """Parse LLM JSON array response. Returns None on failure."""
-        if not raw or not raw.strip():
-            return None
-        text = raw.strip()
-        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
-        text = re.sub(r"```\s*$", "", text, flags=re.MULTILINE).strip()
-        text = re.sub(r",\s*([}\]])", r"\1", text)
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            matched = re.search(r"\[[\s\S]*\]", text)
-            if not matched:
-                return None
-            try:
-                data = json.loads(matched.group(0))
-            except json.JSONDecodeError:
-                return None
-        return data if isinstance(data, list) else None
-
-    @staticmethod
-    def _build_correction_context(messages: List[dict], max_chars: int = _CONTEXT_SNIPPET_MAX_CHARS) -> str:
-        """Build compact context from recent assistant/tool messages for LLM grounding."""
-        parts: List[str] = []
-        total = 0
-        for msg in reversed(messages):
-            role = str(_get_field(msg, "role"))
-            if role not in ("assistant", "tool", "function"):
-                continue
-            content = str(_get_field(msg, "content"))
-            if not content.strip():
-                continue
-            if role == "assistant":
-                tool_calls = _get_field(msg, "tool_calls", [])
-                if tool_calls:
-                    names = [str(_get_field(tc, "name", "")) for tc in tool_calls if isinstance(tc, dict)]
-                    snippet = f"[assistant] tool_calls: {', '.join(names)}"
-                else:
-                    snippet = f"[assistant] {content[:200]}"
-            else:
-                tool_name = _get_field(msg, "name", "tool")
-                snippet = f"[{tool_name}] {content[:150]}"
-            if total + len(snippet) > max_chars:
-                break
-            parts.append(snippet)
-            total += len(snippet)
-        parts.reverse()
-        return "\n".join(parts)
-
-    @staticmethod
-    def _classify_type(skill_name: Optional[str]) -> EvolutionCategory:
-        """Classify evolution signal type."""
-        _ = skill_name
-        return EvolutionCategory.SKILL_EXPERIENCE
+        return signals
 
     @staticmethod
     def _resolve_active_skill(
@@ -632,15 +496,13 @@ class ConversationSignalDetector:
     def _detect_skill_from_tool_calls(self, tool_calls: list) -> Optional[str]:
         """Return skill name if any tool call reads a SKILL.md, else None."""
         for tool_call in tool_calls:
-            name = str(_get_field(tool_call, "name")).lower()
-            arguments = str(_get_field(tool_call, "arguments"))
+            name = self._tool_call_name(tool_call).lower()
+            arguments = self._tool_call_arguments(tool_call)
             skill_name: Optional[str] = None
 
-            # Path 1: Detect file read tools that access SKILL.md
-            if "file" in name or "read" in name:
-                matched = _SKILL_MD_PATTERN.search(arguments)
-                if matched:
-                    skill_name = matched.group(1)
+            matched = _SKILL_MD_PATTERN.search(arguments)
+            if matched and self._is_skill_md_read_tool(name):
+                skill_name = matched.group(1)
             elif name == "skill_tool":
                 try:
                     args_dict = json.loads(arguments) if isinstance(arguments, str) else arguments
@@ -649,9 +511,77 @@ class ConversationSignalDetector:
                 except (json.JSONDecodeError, TypeError) as exc:
                     logger.debug("[ConversationSignalDetector] failed to parse skill_tool arguments: %s", exc)
 
-            if skill_name and (not self._existing_skills or skill_name in self._existing_skills):
+            if skill_name and self._is_existing_skill(skill_name):
                 return skill_name
         return None
+
+    def _is_existing_skill(self, skill_name: str) -> bool:
+        return not self._existing_skills or skill_name in self._existing_skills
+
+    @staticmethod
+    def _is_skill_md_read_tool(name: str) -> bool:
+        return not name or any(token in name for token in ("file", "read"))
+
+    @staticmethod
+    def _tool_call_name(tool_call: object) -> str:
+        """Return tool name from flat or OpenAI-nested tool_call shapes."""
+        name = str(_get_field(tool_call, "name") or "")
+        if name:
+            return name
+        function = _get_field(tool_call, "function", None)
+        if function is not None:
+            return str(_get_field(function, "name") or "")
+        return ""
+
+    @staticmethod
+    def _tool_call_arguments(tool_call: object) -> str:
+        """Return tool arguments from flat or OpenAI-nested tool_call shapes."""
+        arguments = _get_field(tool_call, "arguments", "")
+        if arguments not in ("", None):
+            return arguments if isinstance(arguments, str) else str(arguments)
+        function = _get_field(tool_call, "function", None)
+        if function is not None:
+            nested = _get_field(function, "arguments", "")
+            return nested if isinstance(nested, str) else str(nested or "")
+        return ""
+
+    def _infer_skill_from_messages(self, messages: List[dict]) -> Optional[str]:
+        skill_read_history: List[Tuple[int, str]] = []
+        for msg_idx, msg in enumerate(messages):
+            role = str(_get_field(msg, "role"))
+            tool_calls = _get_field(msg, "tool_calls", [])
+            if role == "assistant" and tool_calls:
+                detected = self._detect_skill_from_tool_calls(tool_calls)
+                if detected:
+                    skill_read_history.append((msg_idx, detected))
+            elif role in ("tool", "function"):
+                content = str(_get_field(msg, "content") or "")
+                matched = _SKILL_MD_PATTERN.search(content)
+                if matched:
+                    skill_name = matched.group(1)
+                    if self._is_existing_skill(skill_name):
+                        skill_read_history.append((msg_idx, skill_name))
+        return self._resolve_active_skill(len(messages), skill_read_history)
+
+    def _fallback_user_feedback_signals(
+        self,
+        user_messages: List[str],
+        skill_name: str,
+    ) -> List[EvolutionSignal]:
+        for message in reversed(user_messages):
+            if _CORRECTION_PATTERN.search(message):
+                return [self._make_user_feedback_signal(message, skill_name)]
+        return []
+
+    @staticmethod
+    def _make_user_feedback_signal(excerpt: str, skill_name: str) -> EvolutionSignal:
+        return make_evolution_signal(
+            signal_type=USER_INTENT_SIGNAL,
+            section="Instructions",
+            excerpt=excerpt[:600],
+            skill_name=skill_name,
+            source="passive_conversation",
+        )
 
     @staticmethod
     def _extract_code_from_args(tool_call: object) -> str:
@@ -672,7 +602,7 @@ class ConversationSignalDetector:
 
     @staticmethod
     def _deduplicate(signals: List[EvolutionSignal]) -> List[EvolutionSignal]:
-        """Deduplicate by (type, tool_name, skill_name, excerpt[:200])."""
+        """Deduplicate by (type, context.tool_name, skill_name, excerpt[:200])."""
         seen: set[tuple] = set()
         deduped: List[EvolutionSignal] = []
         for signal in signals:
