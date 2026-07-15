@@ -397,7 +397,8 @@ class StatusCode(Enum):
                                            "condition edge is invalid, source_id={source_id}, error='{reason}'")
     PREGEL_GRAPH_SUPER_STEP_EXECUTION_ERROR = (
         112104,
-        "pregel graph super step execution error, step={step}, reason='{reason}'",
+        "pregel graph super step execution error, "
+        "step={step}, reason='{reason}'",
     )
 
     # =========================
