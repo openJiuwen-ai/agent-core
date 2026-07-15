@@ -25,6 +25,9 @@ from openjiuwen.auto_harness.infra.parsers import (
 from openjiuwen.auto_harness.infra.ci_gate_runner import (
     decode_stdout,
 )
+from openjiuwen.auto_harness.infra.best_of_n import (
+    BestOfNController,
+)
 from openjiuwen.auto_harness.infra.runtime_extension_static_checks import (
     ExtStaticCheckResult,
     check_ruff,
@@ -422,6 +425,76 @@ def _start_fix_loop(
     return fix_task, chunk_queue, fix_done, last_ci_result
 
 
+def _start_best_of_n(
+    *,
+    config: "AutoHarnessConfig",
+    task: "OptimizationTask",
+    agent: "DeepAgent | None",
+    ci_gate: "CIGateRunner",
+    best_of_n_ctrl: BestOfNController,
+    msg_factory: Any,
+    workspace: str,
+) -> tuple[asyncio.Task[Any], asyncio.Queue[Any], asyncio.Event, dict[str, Any]]:
+    """启动 best-of-N 任务，返回流式输出通道。"""
+    chunk_queue: asyncio.Queue[Any] = asyncio.Queue()
+    last_ci_result: dict[str, Any] = {}
+
+    async def _emit_message(text: str) -> None:
+        await chunk_queue.put(msg_factory(text))
+
+    async def _attempt_factory(clone_path: Path, seed: int) -> None:
+        os.chdir(str(clone_path))
+        if agent is None:
+            return
+        strategies = [
+            "CI 检查失败。请修复代码以通过所有检查（注重正确性）。",
+            "CI 检查失败。请最小化修改代码——改动的行数越少越好。",
+            "CI 检查失败。请仔细修复代码——考虑所有边界情况。",
+        ]
+        strategy = strategies[seed % len(strategies)]
+        await _emit_message(
+            f"[BestOfN] 尝试 {seed + 1}/{best_of_n_ctrl._n} — {strategy}"
+        )
+        prompt = f"{strategy}\n\n原始任务: {task.description}"
+        async for chunk in agent.stream({"query": prompt}):
+            await chunk_queue.put(chunk)
+
+    async def _ci_runner() -> Any:
+        result = await ci_gate.run("all")
+        last_ci_result.clear()
+        last_ci_result.update(result)
+        return _CIResult(
+            passed=result.get("passed", False),
+            errors=result.get("errors", ""),
+        )
+
+    fix_done = asyncio.Event()
+
+    async def _run_best_of_n() -> Any:
+        try:
+            result = await best_of_n_ctrl.run(
+                workspace=Path(workspace),
+                attempt_factory=_attempt_factory,
+                ci_runner=_ci_runner,
+            )
+            success = result.success or (
+                result.best is not None
+                and result.best.score.tests_passed > 0
+            )
+            best_idx = result.best.attempt_index if result.best else None
+            await _emit_message(
+                "[BestOfN] "
+                f"{'成功' if success else '耗尽'}"
+                f" (最佳尝试={best_idx})"
+            )
+            return success, result
+        finally:
+            fix_done.set()
+
+    fix_task = asyncio.create_task(_run_best_of_n())
+    return fix_task, chunk_queue, fix_done, last_ci_result
+
+
 class VerifyStage(TaskStage):
     """Abstract base for all verify stages."""
 
@@ -480,21 +553,41 @@ class MetaVerifyStage(VerifyStage):
 
         fix_errors = ""
         if not ci_result.get("passed"):
-            messages.append("CI 未通过，启动修复循环")
-            yield ctx.message("CI 未通过，启动修复循环")
-            fix_task, chunk_queue, fix_done, last_ci_result = _start_fix_loop(
-                config=ctx.orchestrator.config,
-                task=ctx.task,
-                agent=(
-                    ctx.runtime.fix_agent
-                    or ctx.runtime.task_agent
-                ),
-                git=ctx.orchestrator.git,
-                ci_gate=ctx.orchestrator.ci_gate,
-                fix_loop_ctrl=ctx.orchestrator.fix_loop,
-                msg_factory=ctx.orchestrator.message_output,
-                extra_rails=ctx.orchestrator.stream_rails or None,
-            )
+            if ctx.orchestrator.config.best_of_n_enabled:
+                messages.append("CI 未通过，启动 Best-of-N 多尝试修复")
+                yield ctx.message("CI 未通过，启动 Best-of-N 多尝试修复")
+                fix_task, chunk_queue, fix_done, last_ci_result = (
+                    _start_best_of_n(
+                        config=ctx.orchestrator.config,
+                        task=ctx.task,
+                        agent=(
+                            ctx.runtime.fix_agent
+                            or ctx.runtime.task_agent
+                        ),
+                        ci_gate=ctx.orchestrator.ci_gate,
+                        best_of_n_ctrl=ctx.orchestrator.best_of_n,
+                        msg_factory=ctx.orchestrator.message_output,
+                        workspace=ctx.runtime.wt_path,
+                    )
+                )
+            else:
+                messages.append("CI 未通过，启动修复循环")
+                yield ctx.message("CI 未通过，启动修复循环")
+                fix_task, chunk_queue, fix_done, last_ci_result = (
+                    _start_fix_loop(
+                        config=ctx.orchestrator.config,
+                        task=ctx.task,
+                        agent=(
+                            ctx.runtime.fix_agent
+                            or ctx.runtime.task_agent
+                        ),
+                        git=ctx.orchestrator.git,
+                        ci_gate=ctx.orchestrator.ci_gate,
+                        fix_loop_ctrl=ctx.orchestrator.fix_loop,
+                        msg_factory=ctx.orchestrator.message_output,
+                        extra_rails=ctx.orchestrator.stream_rails or None,
+                    )
+                )
             while not fix_done.is_set() or not chunk_queue.empty():
                 try:
                     chunk = await asyncio.wait_for(

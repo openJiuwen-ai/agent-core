@@ -21,6 +21,9 @@ from openjiuwen.auto_harness.experience.experience_store import (
 from openjiuwen.auto_harness.infra.ci_gate_runner import (
     CIGateRunner,
 )
+from openjiuwen.auto_harness.infra.best_of_n import (
+    BestOfNController,
+)
 from openjiuwen.auto_harness.infra.fix_loop import (
     FixLoopController,
 )
@@ -159,6 +162,12 @@ class AutoHarnessOrchestrator:
             ),
             phase2_max_retries=(
                 config.fix_phase2_max_retries
+            ),
+        )
+        self.best_of_n = BestOfNController(
+            n_attempts=config.best_of_n_attempts,
+            timeout_per_attempt=(
+                config.best_of_n_timeout_per_attempt
             ),
         )
         self.worktree_mgr = WorktreeManager(config)

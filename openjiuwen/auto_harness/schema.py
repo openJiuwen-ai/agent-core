@@ -560,6 +560,11 @@ class AutoHarnessConfig:
     fix_phase1_max_retries: int = 10
     fix_phase2_max_retries: int = 9
 
+    # ---- Best of N ----
+    best_of_n_enabled: bool = False
+    best_of_n_attempts: int = 3
+    best_of_n_timeout_per_attempt: float = 600.0
+
     # ---- 安全 ----
     immutable_files: List[str] = field(
         default_factory=list
