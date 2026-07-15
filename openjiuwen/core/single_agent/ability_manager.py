@@ -1071,7 +1071,7 @@ class AbilityManager:
                     continue
 
                 error_msg = f"Ability execution error: {str(result)}"
-                logger.error(error_msg)
+                logger.error(error_msg, exception=result)
 
                 # Trigger TOOL_CALL_ERROR event for observability
                 # This only affects telemetry collection, not business logic
@@ -1339,7 +1339,7 @@ class AbilityManager:
                 raise
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
-                logger.error(error_msg)
+                logger.error(error_msg, exception=e)
                 raise self._build_execution_error(
                     tool_call,
                     error_msg,
@@ -1358,7 +1358,7 @@ class AbilityManager:
                 return await self._run_workflow(workflow, workflow_id, tool_args, session, tool_call)
             except Exception as e:
                 error_msg = f"Workflow execution error: {str(e)}"
-                logger.error(error_msg)
+                logger.error(error_msg, exception=e)
                 raise self._build_execution_error(tool_call, error_msg) from e
         elif tool_name in self._agents:
             # Execute sub-Agent - get instance from Runner.resource_mgr
@@ -1423,7 +1423,7 @@ class AbilityManager:
                 result = await Runner.run_agent(agent=agent, inputs=tool_args, session=child_session)
             except Exception as e:
                 error_msg = f"Agent execution error: {str(e)}"
-                logger.error(error_msg)
+                logger.error(error_msg, exception=e)
                 raise self._build_execution_error(
                     tool_call,
                     error_msg,
@@ -1468,7 +1468,7 @@ class AbilityManager:
                 raise
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
-                logger.error(error_msg)
+                logger.error(error_msg, exception=e)
                 raise self._build_execution_error(
                     tool_call,
                     error_msg,
