@@ -917,6 +917,18 @@ class AutoHarnessConfig:
                     fl["phase2_max_retries"]
                 )
 
+        # best_of_n section
+        bn = data.get("best_of_n", {})
+        if isinstance(bn, dict):
+            if "enabled" in bn:
+                cfg.best_of_n_enabled = bool(bn["enabled"])
+            if "attempts" in bn:
+                cfg.best_of_n_attempts = int(bn["attempts"])
+            if "timeout_per_attempt" in bn:
+                cfg.best_of_n_timeout_per_attempt = float(
+                    bn["timeout_per_attempt"]
+                )
+
         agent_cfg = data.get("agent", {})
         if isinstance(agent_cfg, dict):
             for key, value in agent_cfg.items():
