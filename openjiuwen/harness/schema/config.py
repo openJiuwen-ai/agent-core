@@ -23,6 +23,9 @@ from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.workspace.workspace import (
     Workspace,
 )
+from openjiuwen.harness.multi_rollout.config import (
+    MultiRolloutConfig,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -252,6 +255,11 @@ class DeepAgentConfig:
     # Filesystem sandbox: when True, file ops are restricted to workspace/project root.
     # Subagents inherit the stricter of their own spec and this value.
     restrict_to_work_dir: bool = True
+
+    # Multi-rollout: spawn N parallel attempts for the same task.
+    multi_rollout: "MultiRolloutConfig" = field(
+        default_factory=lambda: MultiRolloutConfig()
+    )
 
 
 @dataclass
