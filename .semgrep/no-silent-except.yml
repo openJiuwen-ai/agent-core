@@ -53,5 +53,5 @@ rules:
         - openjiuwen/core/graph/pregel/engine.py
         - openjiuwen/core/single_agent/ability_manager.py
         - openjiuwen/core/runner/drunner/server_adapter/mq_server_adapter.py
-        - openjiuwen/harness/task_loop/*
-        - tests/*
+        - openjiuwen/harness/task_loop/**
+        - tests/**
