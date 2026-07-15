@@ -36,6 +36,7 @@ def _get_exception_class_registry() -> Dict[str, Type]:
         "ContextError": _errors.ContextError,
         "RunnerError": _errors.RunnerError,
         "CryptError": _errors.CryptError,
+        "StoreError": _errors.StoreError,
     }
 
 
@@ -47,6 +48,10 @@ KEYWORD_RULES = [
     (("CALL", "INVOKE_LLM", "MODEL", "REMOTE"), "FrameworkError"),
 
     (("TIMEOUT", "EXECUTE", "EXECUTION", "RUNTIME", "PROCESS", "STREAM", "RESPONSE"), "ExecutionError"),
+
+    # Lowest priority: only names no earlier rule claimed resolve to StoreError,
+    # so adding it does not remap any existing StatusCode.
+    (("STORE", "CHECKPOINTER"), "StoreError"),
 ]
 
 RANGE_RULES = [
@@ -75,6 +80,7 @@ _MANUAL_OVERRIDES_RAW = {
     "AGENT_RL_REWARD_NOT_FOUND": "ValidationError",
     "COMMON_ENCRYPTION_ERROR": "CryptError",
     "COMMON_DECRYPTION_ERROR": "CryptError",
+    "PREGEL_GRAPH_SUPER_STEP_EXECUTION_ERROR": "GraphError",
 }
 
 # Build the actual mapping only for StatusCode members that exist in the current enum.
