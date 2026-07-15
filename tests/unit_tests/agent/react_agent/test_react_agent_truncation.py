@@ -344,8 +344,10 @@ class TestTruncationRetryIntegration(unittest.IsolatedAsyncioTestCase):
         assert truncation_frames[0].payload["truncated_content"] == "Truncated partial..."
         assert truncation_frames[0].payload["phase"] == "retry_attempt"
 
-    async def test_truncation_retry_doubles_output_tokens(self):
-        """_max_tokens_override should equal output_tokens * 2 during retry."""
+    async def test_truncation_retry_uses_output_tokens(self):
+        """Retry max_tokens should equal the truncated output_tokens,
+        not output_tokens*2, preventing BadRequest on models with
+        a max_tokens ceiling (e.g. deepseek-v3.2 max 32768)."""
         truncated_msg = AssistantMessage(
             content="Truncated...",
             finish_reason="length",
@@ -379,7 +381,69 @@ class TestTruncationRetryIntegration(unittest.IsolatedAsyncioTestCase):
 
         assert mock_llm.call_count == 2
         retry_kwargs = captured_kwargs[1]
-        assert retry_kwargs.get("max_tokens") == 10000
+        assert retry_kwargs.get("max_tokens") == 5000
+
+    async def test_truncation_retry_injects_failure_reason_into_context(self):
+        """Before retry, _inject_truncation_notice is called so the
+        truncated AssistantMessage and TRUNCATION_NOTICE UserMessage
+        are added to context, giving the model context about why it failed."""
+        truncated_msg = AssistantMessage(
+            content="Truncated partial output...",
+            finish_reason="length",
+            usage_metadata=UsageMetadata(
+                model_name="mock-model",
+                output_tokens=5000,
+            ),
+        )
+        successful_msg = AssistantMessage(
+            content="Complete response after retry",
+            finish_reason="stop",
+        )
+
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([truncated_msg, successful_msg])
+
+        add_messages_calls = []
+        self.mock_context.add_messages = AsyncMock(
+            side_effect=lambda msg, **kw: add_messages_calls.append((msg, kw)),
+        )
+
+        with patch.object(self.agent, "_get_llm", return_value=mock_llm):
+            await self.agent.invoke(
+                {"query": "long story"},
+                session=self.mock_session,
+            )
+
+        from openjiuwen.core.foundation.llm import UserMessage
+
+        truncation_assistant_calls = [
+            (msg, kw) for msg, kw in add_messages_calls
+            if isinstance(msg, AssistantMessage)
+            and msg.finish_reason == "length"
+            and msg.content == "Truncated partial output..."
+        ]
+        assert len(truncation_assistant_calls) >= 1, \
+            "Truncated AssistantMessage must be injected before retry"
+
+        truncation_notice_calls = [
+            (msg, kw) for msg, kw in add_messages_calls
+            if isinstance(msg, UserMessage)
+            and "[TRUNCATION_NOTICE]" in (msg.content or "")
+        ]
+        assert len(truncation_notice_calls) >= 1, \
+            "TRUNCATION_NOTICE UserMessage must be injected before retry"
+
+        assistant_idx = None
+        notice_idx = None
+        for i, (msg, kw) in enumerate(add_messages_calls):
+            if isinstance(msg, AssistantMessage) and msg.finish_reason == "length" and msg.content == "Truncated partial output...":
+                assistant_idx = i
+            if isinstance(msg, UserMessage) and "[TRUNCATION_NOTICE]" in (msg.content or ""):
+                notice_idx = i
+
+        assert assistant_idx is not None and notice_idx is not None
+        assert notice_idx == assistant_idx + 1, \
+            "TRUNCATION_NOTICE must immediately follow truncated AssistantMessage"
 
     async def test_truncation_retry_count_limited_to_one(self):
         """Only one retry attempt is allowed (_truncation_retry_count < 1).
@@ -634,7 +698,7 @@ class TestTruncationRetryIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_truncated_output_tokens_fallback_when_usage_metadata_missing(self):
         """When usage_metadata is missing, _max_tokens_override falls back
-        to 16384 * 2 = 32768."""
+        to the default output_tokens value (16384), not 16384*2."""
         truncated_msg = AssistantMessage(
             content="Truncated without metadata...",
             finish_reason="length",
@@ -664,4 +728,4 @@ class TestTruncationRetryIntegration(unittest.IsolatedAsyncioTestCase):
 
         assert mock_llm.call_count == 2
         retry_kwargs = captured_kwargs[1]
-        assert retry_kwargs.get("max_tokens") == 32768
+        assert retry_kwargs.get("max_tokens") == 16384

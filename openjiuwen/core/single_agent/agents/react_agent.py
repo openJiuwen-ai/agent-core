@@ -1449,6 +1449,39 @@ class ReActAgent(BaseAgent):
         ctx.extra[RESUME_START_ITERATION_KEY] = resume_iteration + 1
         return None
 
+    async def _inject_truncation_notice(
+        self,
+        ai_message: AssistantMessage,
+        context: ModelContext,
+        ctx: AgentCallbackContext,
+    ) -> None:
+        """Inject the truncated AssistantMessage and a TRUNCATION_NOTICE
+        UserMessage into context so the model knows its previous response
+        was truncated and can adjust accordingly."""
+        await context.add_messages(
+            AssistantMessage(
+                content=ai_message.content or "",
+                tool_calls=ai_message.tool_calls,
+                reasoning_content=getattr(ai_message, "reasoning_content", None),
+                usage_metadata=ai_message.usage_metadata,
+                finish_reason=ai_message.finish_reason,
+            ),
+            system_messages=ctx.extra.get("_active_system_messages") or [],
+            tools=ctx.extra.get("_active_tools") or [],
+        )
+        await context.add_messages(
+            UserMessage(
+                content=(
+                    "[TRUNCATION_NOTICE] Your previous response was "
+                    "truncated due to output length limits. Please "
+                    "continue from where you left off, or provide a "
+                    "more concise response."
+                ),
+            ),
+            system_messages=ctx.extra.get("_active_system_messages") or [],
+            tools=ctx.extra.get("_active_tools") or [],
+        )
+
     def _extract_user_text(self, user_input: Any) -> str:
         """Extract plain text from user_input (supports InteractiveInput or str)."""
         from openjiuwen.core.session import InteractiveInput
@@ -1755,7 +1788,8 @@ class ReActAgent(BaseAgent):
                                     getattr(ai_message.usage_metadata, "output_tokens", 16384)
                                     or 16384
                                 )
-                                ctx.extra["_max_tokens_override"] = _truncated_output_tokens * 2
+                                ctx.extra["_max_tokens_override"] = _truncated_output_tokens
+                                await self._inject_truncation_notice(ai_message, context, ctx)
                                 ai_message = await self._call_model(
                                     ctx,
                                     context,
@@ -1786,29 +1820,7 @@ class ReActAgent(BaseAgent):
                                     _session_id,
                                     iteration + 1,
                                 )
-                                await context.add_messages(
-                                    AssistantMessage(
-                                        content=ai_message.content or "",
-                                        tool_calls=ai_message.tool_calls,
-                                        reasoning_content=getattr(ai_message, "reasoning_content", None),
-                                        usage_metadata=ai_message.usage_metadata,
-                                        finish_reason=ai_message.finish_reason,
-                                    ),
-                                    system_messages=ctx.extra.get("_active_system_messages") or [],
-                                    tools=ctx.extra.get("_active_tools") or [],
-                                )
-                                await context.add_messages(
-                                    UserMessage(
-                                        content=(
-                                            "[TRUNCATION_NOTICE] Your previous response was "
-                                            "truncated due to output length limits. Please "
-                                            "continue from where you left off, or provide a "
-                                            "more concise response."
-                                        ),
-                                    ),
-                                    system_messages=ctx.extra.get("_active_system_messages") or [],
-                                    tools=ctx.extra.get("_active_tools") or [],
-                                )
+                                await self._inject_truncation_notice(ai_message, context, ctx)
                                 await session.write_stream(OutputSchema(
                                     type="truncation_retry",
                                     index=0,
