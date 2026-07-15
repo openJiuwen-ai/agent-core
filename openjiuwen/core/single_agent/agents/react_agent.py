@@ -843,6 +843,12 @@ class ReActAgent(BaseAgent):
         if _max_tokens_override is not None:
             extra_kwargs["max_tokens"] = _max_tokens_override
 
+        # Optional per-call overrides from BEFORE_MODEL_CALL rails
+        # (e.g. thinking/extra_body). Pop once per iteration; no-op if absent.
+        # Core never depends on upstream products — unknown/malformed payloads
+        # are ignored so swarm-less / old-rail deployments keep working.
+        extra_kwargs = self._apply_llm_call_kwargs(ctx, extra_kwargs)
+
         if not ctx.extra.get("_streaming"):
             logger.debug(
                 "[ReActAgent] llm.invoke start session_id=%s message_count=%s tool_count=%s",
@@ -951,6 +957,101 @@ class ReActAgent(BaseAgent):
                 payload={"usage_metadata": ai_message.usage_metadata.model_dump(), "result_type": "answer"},
             ))
         return ai_message
+
+    # Key consumed once per model call. Rails may write this before invoke/stream;
+    # unknown producers are fine — merge is best-effort and never raises.
+    _LLM_CALL_KWARGS_KEY = "llm_call_kwargs"
+    # Security: only thinking-related request overrides are accepted from rails.
+    _ALLOWED_LLM_CALL_KWARG_KEYS = frozenset({"extra_body", "reasoning_effort"})
+    _ALLOWED_EXTRA_BODY_KEYS = frozenset(
+        {"thinking", "enable_thinking", "reasoning_effort"}
+    )
+
+    @staticmethod
+    def _deep_merge_dicts(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+        """Shallow-copy merge with recursive merge for nested dict values (e.g. extra_body)."""
+        result: Dict[str, Any] = dict(base)
+        for key, value in overlay.items():
+            existing = result.get(key)
+            if isinstance(existing, dict) and isinstance(value, dict):
+                result[key] = ReActAgent._deep_merge_dicts(existing, value)
+            else:
+                result[key] = value
+        return result
+
+    @classmethod
+    def _filter_llm_call_kwargs(
+            cls,
+            per_call: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], List[str]]:
+        """Whitelist top-level and ``extra_body`` subkeys; drop the rest.
+
+        Allowed top-level: ``extra_body``, ``reasoning_effort``.
+        Allowed ``extra_body`` keys: ``thinking``, ``enable_thinking``,
+        ``reasoning_effort``.
+        """
+        filtered: Dict[str, Any] = {}
+        dropped: List[str] = []
+        for key, value in per_call.items():
+            if key not in cls._ALLOWED_LLM_CALL_KWARG_KEYS:
+                dropped.append(str(key))
+                continue
+            if key == "extra_body":
+                if not isinstance(value, dict):
+                    dropped.append("extra_body")
+                    continue
+                body: Dict[str, Any] = {}
+                for sub_key, sub_val in value.items():
+                    if sub_key in cls._ALLOWED_EXTRA_BODY_KEYS:
+                        body[sub_key] = sub_val
+                    else:
+                        dropped.append(f"extra_body.{sub_key}")
+                if body:
+                    filtered[key] = body
+                continue
+            filtered[key] = value
+        return filtered, dropped
+
+    def _apply_llm_call_kwargs(
+            self,
+            ctx: AgentCallbackContext,
+            extra_kwargs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Pop and merge ``ctx.extra['llm_call_kwargs']`` into call kwargs.
+
+        Defensive by design:
+        - Missing / empty / non-dict payloads are ignored (backward compatible).
+        - Only allowlisted keys are merged (thinking-related overrides).
+        - Any exception is logged and swallowed so core never breaks when
+          only core is upgraded and no rail writes this key.
+        """
+        try:
+            extra = getattr(ctx, "extra", None)
+            if not isinstance(extra, dict):
+                return extra_kwargs
+            per_call = extra.pop(self._LLM_CALL_KWARGS_KEY, None)
+            if not isinstance(per_call, dict) or not per_call:
+                return extra_kwargs
+            safe, dropped = self._filter_llm_call_kwargs(per_call)
+            if dropped:
+                logger.warning(
+                    "[ReActAgent] llm_call_kwargs dropped non-allowlisted keys=%s",
+                    dropped,
+                )
+            if not safe:
+                return extra_kwargs
+            merged = self._deep_merge_dicts(extra_kwargs, safe)
+            logger.debug(
+                "[ReActAgent] llm_call_kwargs merged keys=%s",
+                sorted(safe.keys()),
+            )
+            return merged
+        except Exception as exc:
+            logger.warning(
+                "[ReActAgent] llm_call_kwargs merge ignored: %s",
+                exc,
+            )
+            return extra_kwargs
 
     @staticmethod
     def _render_system_messages(
