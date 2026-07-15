@@ -42,7 +42,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence, TypeVar, overload
 
-from .errors import WorkflowAborted, WorkflowError
+from .errors import EngineError, WorkflowAborted
 from .journal import call_signature, key_str
 from .progress import ProgressKind, WorkflowProgressEvent
 from .schema import coerce, resolve_schema
@@ -248,7 +248,7 @@ def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
         The merged, validated, ``None``-stripped options dict.
 
     Raises:
-        WorkflowError: If any key is outside the allowed set.
+        EngineError: If any key is outside the allowed set.
     """
     merged: dict = {}
     for key, value in (options or {}).items():
@@ -260,7 +260,7 @@ def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
     allowed = _ENGINE_OPTIONS | getattr(rt.backend, "KNOWN_OPTIONS", frozenset())
     unknown = sorted(k for k in merged if k not in allowed)
     if unknown:
-        raise WorkflowError(
+        raise EngineError(
             f"unknown option(s) {unknown}; allowed: {sorted(allowed)}"
         )
     return merged
@@ -325,7 +325,7 @@ async def agent(
     # whitelists every key against ``_ENGINE_OPTIONS | backend.KNOWN_OPTIONS``.
     opts = _build_opts(rt, {"label": label, "phase": phase, "schema": schema}, options)
     if opts.get("isolation") not in (None, "worktree"):
-        raise WorkflowError("agent(options={'isolation': ...}) only supports 'worktree'")
+        raise EngineError("agent(options={'isolation': ...}) only supports 'worktree'")
     json_schema, model_cls = resolve_schema(opts.get("schema"))
 
     ks = key_str(_path.get() + (("call", _next_ordinal()),))
@@ -590,7 +590,7 @@ class AgentSession:
         """
         rt = _rt.get()
         if notify and schema is not None:
-            raise WorkflowError("send(notify=True) is text-only; don't also pass a schema")
+            raise EngineError("send(notify=True) is text-only; don't also pass a schema")
         # Phase is run-global orchestration state: the active phase() wins, so a
         # session naturally spans phases; fall back to the session's own default.
         phase_val = rt.current_phase if rt.current_phase is not None else self._phase
@@ -814,7 +814,7 @@ async def parallel(thunks: Sequence[Callable[[], Awaitable]]) -> list:
     base = _path.get()
     thunks = list(thunks)
     if len(thunks) > _MAX_FANOUT:
-        raise WorkflowError(
+        raise EngineError(
             f"parallel() got {len(thunks)} thunks; the per-call limit is "
             f"{_MAX_FANOUT}. Split into batches instead of one giant fan-out."
         )
@@ -840,7 +840,7 @@ async def pipeline(items: Sequence, *stages: Callable) -> list:
     base = _path.get()
     items = list(items)
     if len(items) > _MAX_FANOUT:
-        raise WorkflowError(
+        raise EngineError(
             f"pipeline() got {len(items)} items; the per-call limit is "
             f"{_MAX_FANOUT}. Split into batches instead of one giant fan-out."
         )
@@ -991,5 +991,5 @@ async def _invoke_loaded(loaded, args: Any) -> Any:
     """
     run_fn = getattr(loaded.module, "run", None)
     if not inspect.iscoroutinefunction(run_fn):
-        raise WorkflowError(f"{loaded.path}: must define `async def run(args)`")
+        raise EngineError(f"{loaded.path}: must define `async def run(args)`")
     return await (run_fn(args) if _arity(run_fn) >= 1 else run_fn())

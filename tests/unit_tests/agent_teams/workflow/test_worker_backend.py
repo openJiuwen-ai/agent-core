@@ -180,9 +180,9 @@ async def run(args):
     return await agent("task", label="w", options={"isolation": "container"})
 '''
     import pytest
-    from openjiuwen.agent_teams.workflow.engine.errors import WorkflowError
+    from openjiuwen.agent_teams.workflow.engine.errors import EngineError
 
-    with pytest.raises(WorkflowError, match="only supports 'worktree'"):
+    with pytest.raises(EngineError, match="only supports 'worktree'"):
         asyncio.run(run_workflow(_write(tmp_path, script), backend=_FakeWorkerBackend(model=None)))
 
 

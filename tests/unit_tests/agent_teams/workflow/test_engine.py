@@ -331,17 +331,17 @@ def test_agent_accepts_isolation_and_agent_type(tmp_path):
 
 def test_parallel_rejects_fan_out_beyond_cap(tmp_path):
     """A single parallel() above the per-call cap is an explicit error, not silent truncation."""
-    from openjiuwen.agent_teams.workflow.engine.errors import WorkflowError
+    from openjiuwen.agent_teams.workflow.engine.errors import EngineError
 
     script = _write(tmp_path, "over_par.py", _OVERLIMIT_PARALLEL_SCRIPT)
-    with pytest.raises(WorkflowError):
+    with pytest.raises(EngineError):
         asyncio.run(run_workflow(script, backend=MockBackend()))
 
 
 def test_pipeline_rejects_fan_out_beyond_cap(tmp_path):
     """A single pipeline() above the per-call cap is an explicit error too."""
-    from openjiuwen.agent_teams.workflow.engine.errors import WorkflowError
+    from openjiuwen.agent_teams.workflow.engine.errors import EngineError
 
     script = _write(tmp_path, "over_pipe.py", _OVERLIMIT_PIPELINE_SCRIPT)
-    with pytest.raises(WorkflowError):
+    with pytest.raises(EngineError):
         asyncio.run(run_workflow(script, backend=MockBackend()))

@@ -36,7 +36,7 @@ from .seam import (
 # Harness re-exports (engine internals exposed under the public name). These are
 # eager because importing this module already imports the engine package.
 from .backends import AgentBackend, AgentResult, MockBackend
-from .errors import LintError, MetaError, SchemaError, WorkflowError
+from .errors import EngineError, LintError, MetaError, SchemaError
 from .journal import Journal
 from .loader import LoadedWorkflow, load_workflow_source
 from .primitives import AgentSession, HumanSession
@@ -280,7 +280,7 @@ __all__ = [
     "AgentBackend",
     "AgentResult",
     "MockBackend",
-    "WorkflowError",
+    "EngineError",
     "MetaError",
     "LintError",
     "SchemaError",
