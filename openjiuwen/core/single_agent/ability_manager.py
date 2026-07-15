@@ -36,6 +36,21 @@ from openjiuwen.core.single_agent.tool_batch_concurrency import ToolBatchConcurr
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
 
 
+def illegal_tool_call_reason(tool_call: Any) -> Optional[str]:
+    """Return a short reason if the model tool_call must not enter the execute loop.
+
+    Empty name / missing tool_call_id corrupt permission persist, pairing, and
+    downstream ModelArts validation — discard before BEFORE_TOOL_CALL rails.
+    """
+    name = str(getattr(tool_call, "name", None) or "").strip()
+    tid = str(getattr(tool_call, "id", None) or "").strip()
+    if not name:
+        return "empty_tool_name"
+    if not tid:
+        return "empty_tool_call_id"
+    return None
+
+
 def _extract_tool_metadata(result: Any) -> Dict[str, Any]:
     """Extract ToolMessage metadata only from genuine ToolOutput instances.
 
@@ -654,6 +669,7 @@ class AbilityManager:
         rails may have raised. The caller is responsible for propagating
         ``tool_ctx.consume_force_finish()`` back to its own context.
         """
+        illegal_reason = illegal_tool_call_reason(tool_call)
         tool_ctx = AgentCallbackContext(
             agent=parent_ctx.agent,
             inputs=ToolCallInputs(
@@ -668,6 +684,26 @@ class AbilityManager:
         )
         if parent_ctx.steering_queue is not None:
             tool_ctx.bind_steering_queue(parent_ctx.steering_queue)
+
+        if illegal_reason:
+            from openjiuwen.harness.tools import ToolOutput
+
+            error_msg = (
+                f"[illegal_tool_call] discarded before execution: "
+                f"reason={illegal_reason} name={getattr(tool_call, 'name', '')!r} "
+                f"tool_call_id={getattr(tool_call, 'id', '')!r}"
+            )
+            logger.warning(error_msg)
+            tool_result = ToolOutput(success=False, error=error_msg)
+            tool_message = ToolMessage(
+                content=error_msg,
+                tool_call_id=getattr(tool_call, "id", "") or "",
+                metadata={"is_error": True, "illegal_tool_call": illegal_reason},
+            )
+            if isinstance(tool_ctx.inputs, ToolCallInputs):
+                tool_ctx.inputs.tool_result = tool_result
+                tool_ctx.inputs.tool_msg = tool_message
+            return tool_result, tool_message, tool_ctx
 
         async def _run_railed() -> Tuple[Any, ToolMessage]:
             return await self._railed_execute_single_tool_call(
