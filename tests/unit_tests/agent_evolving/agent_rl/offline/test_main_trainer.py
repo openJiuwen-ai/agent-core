@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 pytest.importorskip("torch")
+pytest.importorskip("tensordict")
 
 if "omegaconf" not in sys.modules:
     sys.modules["omegaconf"] = MagicMock()
