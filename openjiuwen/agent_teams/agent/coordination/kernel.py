@@ -233,6 +233,12 @@ class CoordinationKernel:
         if self._scheduler is not None and team_row_present:
             await self._scheduler.activate()
         self._lifecycle_state = "running"
+        # Warm / cold resume: a lifecycle pause left this member's round
+        # suspended at a clean boundary. Now that the session, stream and
+        # event bus are back, continue it in place instead of idling until a
+        # new message arrives. Runs last, once the kernel is fully live, and
+        # is a no-op when there is nothing suspended to resume.
+        await self.resume_paused_round()
 
     def _build_wake_callback(self):
         """Compose the bus wake callback: coordination first, scheduler second.
@@ -264,10 +270,6 @@ class CoordinationKernel:
         if self._scheduler is None:
             return
         await self._scheduler.activate()
-        # Warm resume: a lifecycle pause left this member's round suspended at a
-        # clean boundary. Now that the session, stream and event bus are back,
-        # continue it in place instead of idling until a new message arrives.
-        await self.resume_paused_round()
 
     async def pause(self) -> None:
         # Idempotent: ignore if not currently running. Pause is only a valid
