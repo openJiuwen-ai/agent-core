@@ -269,9 +269,29 @@ class TeamHarness:
             await self._native.abort(immediate=immediate)
 
     async def pause(self) -> None:
-        """Pause the active round; the next send restarts it (no-op when idle)."""
+        """Pause the active round at its nearest inner iteration boundary.
+
+        The round stays resumable in place (see :meth:`resume`). A no-op when no
+        run cycle is live.
+        """
         if self._is_cycle_active():
             await self._native.pause()
+
+    async def resume(self, *, query: str | None = None) -> None:
+        """Continue a paused round in place, from its preserved context.
+
+        A no-op when no run cycle is live. ``query`` drives a cold resume after
+        the native was rebuilt (see :meth:`NativeHarness.resume`).
+        """
+        if self._is_cycle_active():
+            await self._native.resume(query=query)
+
+    @property
+    def paused_query(self) -> Optional[str]:
+        """The paused round's originating query, or None when not paused."""
+        if self._native is None:
+            return None
+        return self._native.paused_query
 
     def _is_cycle_active(self) -> bool:
         """Return whether a run cycle is live (native started, not yet stopped).

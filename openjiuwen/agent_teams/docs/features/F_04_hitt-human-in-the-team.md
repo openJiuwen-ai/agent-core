@@ -97,7 +97,7 @@ await Runner.register_human_agent_inbound(
 
 - **唯一输入源**：用户经 `interact()` 投递的内容。其它成员的消息**不会**进入 avatar 的 LLM 上下文。
 - **不主动发声**：avatar 没有 `send_message` 工具。需要回复团队时由用户输入 `"$<name> @<member> ...`" 显式路由，inbox 用人类成员身份代发。
-- **不自主认领任务**：avatar 没有 `claim_task` 工具。任务必须由 leader 经 `update_task(assignee=<human-member>)` 指派；进入 `CLAIMED` 状态后 leader 不能 cancel / 不能 reassign（HITT 任务锁），完成与否完全取决于人类。
+- **不自主认领任务**：avatar 没有 `claim_task` 工具。任务必须由 leader 经 `update_task(assignee=<human-member>)` 指派；进入 `CLAIMED` 状态后 leader 不能 cancel / 不能 reassign（HITT 任务锁），完成与否取决于人类。**该锁只在这个人类仍在团队中时成立**——leader 用 `shutdown_member` 请他退队后锁即解除，其遗留任务退化成普通遗留任务（可 cancel / reassign）；否则踢掉一个不响应的人类会把他手上的任务永久搁浅。当前判定以 `S_07` 运行约束 3 为准。
 
 ### 工具集差集
 
@@ -134,7 +134,7 @@ await Runner.register_human_agent_inbound(
 
 - 与 Teammate 完全对齐：`UNSTARTED → BUSY/READY` 流转、支持 `shutdown_member` / `restart`、参与 session checkpoint。
 - 不需要 `prompt` / `initial_message`：avatar 起进程后 idle，只在 inbox 入站时才被驱动。
-- 协调 dispatcher 对 `HUMAN_AGENT` role **静音**所有自动触发 LLM 的事件：`POLL_TASK` / `POLL_MAILBOX` / `TASK_CLAIMED`（针对自己）/ stale-claim 自纠等，仅放行 `CLEANED`（团队收尾）/ `MEMBER_SHUTDOWN`（自身收尾）/ `MEMBER_CANCELED`（取消）/ `STANDBY`（暂停 poll timer）。`MEMBER_SHUTDOWN` 的收摊不打断控制者当前回合：有 in-flight round 且非 force 时不动它，靠那一轮 round-end 自检 close_stream；只有空闲或 force 才直接 `shutdown_self`。最新白名单与收摊策略以 `S_03_coordination-protocol.md` 机制 10 为准。
+- 协调 dispatcher 对 `HUMAN_AGENT` role **静音**所有自动触发 LLM 的事件：`POLL_TASK` / `POLL_MAILBOX` / `TASK_CLAIMED`（针对自己）/ stale-claim 自纠等，仅放行 `CLEANED`（团队收尾）/ `MEMBER_SHUTDOWN`（自身收尾）/ `MEMBER_CANCELED`（取消）/ `STANDBY`（暂停 poll timer）。`MEMBER_SHUTDOWN` 的收摊不打断控制者当前回合：有 in-flight round 时不动它，靠那一轮 round-end 自检 close_stream；空闲则不唤醒 harness、直接落 SHUTDOWN；`force` 立即 teardown。**这套收摊规则后来被推广成所有非 leader 角色共用（human-agent 专属分支 `_shutdown_human_agent` 已删除），且改为读 DB status 而非读事件**——最新白名单以 `S_03` 机制 10 为准，收摊策略以 `S_03` 机制 18 为准。
 
 ### 唯一解析点
 

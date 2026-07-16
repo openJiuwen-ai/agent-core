@@ -74,6 +74,7 @@ class TeamToolInput(ConstructionInput):
     member_name: str = context_field(attr="member_name", default="", description="Member name.")
     language: str = context_field(attr="language", default="cn", description="Resolved language code.")
     teammate_mode: str = param_field(default="build_mode", description="Member execution mode.")
+    dispatch_mode: str = param_field(default="autonomous", description="How tasks reach members.")
     lifecycle: str = param_field(default="temporary", description="Team lifecycle (temporary / persistent).")
     exclude_tools: list[str] = param_field(default_factory=list, description="Tool names to exclude.")
     qualify_ids: bool = param_field(default=False, description="Suffix tool ids per member (inprocess spawn).")
@@ -104,6 +105,7 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         team_backend=backend,
         role=inp.role,
         teammate_mode=inp.teammate_mode,
+        dispatch_mode=inp.dispatch_mode,
         lifecycle=inp.lifecycle,
         language=inp.language,
         on_teammate_created=get_on_teammate_created(context),
@@ -133,10 +135,11 @@ class TeamPolicyInput(ConstructionInput):
     role: str = context_field(attr="role", default="leader", description="Team role value.")
     member_name: str = context_field(attr="member_name", default="", description="Member name.")
     language: str = context_field(attr="language", default="cn", description="Resolved language code.")
-    persona: str = param_field(default="", description="Member persona.")
+    prompt: str = param_field(default="", description="Member-private working agreement (own prompt only).")
     lifecycle: str = param_field(default="temporary", description="Team lifecycle.")
     teammate_mode: str = param_field(default="build_mode", description="Member execution mode.")
     team_mode: str = param_field(default="default", description="Team operating mode.")
+    dispatch_mode: str = param_field(default="autonomous", description="How tasks reach members.")
     base_prompt: Optional[str] = param_field(default=None, description="User-supplied base system prompt.")
     team_workspace_mount: Optional[str] = param_field(default=None, description="Team workspace mount path.")
     team_workspace_path: Optional[str] = param_field(default=None, description="Team workspace root path.")
@@ -160,12 +163,13 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
     inp = TeamPolicyInput.resolve(params, context)
     return TeamPolicyRail(
         role=TeamRole(inp.role),
-        persona=inp.persona,
+        member_prompt=inp.prompt,
         member_name=inp.member_name or None,
         lifecycle=inp.lifecycle,
         teammate_mode=inp.teammate_mode,
         language=inp.language,
         team_mode=inp.team_mode,
+        dispatch_mode=inp.dispatch_mode,
         base_prompt=inp.base_prompt,
         team_workspace_mount=inp.team_workspace_mount,
         team_workspace_path=inp.team_workspace_path,

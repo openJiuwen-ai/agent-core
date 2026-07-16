@@ -21,7 +21,6 @@ from pydantic import BaseModel, Field, ValidationError
 
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.tools.database.config import DatabaseConfig
-from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 
@@ -57,9 +56,17 @@ class TeamJoinDescriptor(BaseModel):
         language: Team runtime language (``"cn"`` or ``"en"``) used to render
             inbound message / task-board text consistently with in-process
             members.
+        dispatch_mode: How tasks reach members — ``"autonomous"`` or
+            ``"scheduled"``. Orthogonal to both ``role`` and ``scope``. A
+            ``"member"``-scope connection resolves its tool set against this,
+            so an external CLI member gets the same tools as its in-process
+            peers (its system prompt is already rendered per dispatch mode at
+            spawn time). The leader name a scheduled member's ``send_message``
+            targets is not carried here — the backend reads it from the shared
+            ``team_info`` DB row (``TeamBackend.resolve_leader_member_name``).
         db_config: Team database connection. For cross-process use this must
-            be a file-backed sqlite ``connection_string``; the in-memory
-            backend (``MemoryDatabaseConfig``) is single-process only and is
+            be a file-backed sqlite ``connection_string``; a sqlite
+            ``:memory:`` connection string is single-process only and is
             intended for tests.
         transport_config: Messager transport config used by the external
             client. ``external_publish_url`` is the Gateway relay WebSocket
@@ -72,7 +79,8 @@ class TeamJoinDescriptor(BaseModel):
     role: str = "teammate"
     scope: Literal["operator", "member"] = "operator"
     language: str = "cn"
-    db_config: DatabaseConfig | MemoryDatabaseConfig = Field(default_factory=DatabaseConfig)
+    dispatch_mode: Literal["autonomous", "scheduled"] = "autonomous"
+    db_config: DatabaseConfig = Field(default_factory=DatabaseConfig)
     transport_config: MessagerTransportConfig = Field(default_factory=MessagerTransportConfig)
 
     def to_json(self) -> str:

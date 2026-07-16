@@ -87,7 +87,7 @@ async def test_leader_single_iteration_trace_via_runner(in_memory_exporter: InMe
         "leader": {
             "member_name": "leader",
             "display_name": "TeamLeader",
-            "persona": "You are a helpful assistant. Answer briefly.",
+            "desc": "You are a helpful assistant. Answer briefly.",
         },
         "agents": {
             "leader": {

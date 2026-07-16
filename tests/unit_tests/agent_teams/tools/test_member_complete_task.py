@@ -134,7 +134,7 @@ async def test_reject_when_assignee_is_someone_else(tool, caller_task_manager, o
     assert OTHER_NAME in (result.error or "")
     assert HUMAN_NAME in (result.error or "")
     refreshed = await caller_task_manager.get(task.task_id)
-    assert refreshed.status == TaskStatus.CLAIMED.value
+    assert refreshed.status == TaskStatus.IN_PROGRESS.value
 
 
 @pytest.mark.asyncio

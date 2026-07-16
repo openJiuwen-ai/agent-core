@@ -122,7 +122,7 @@ class FakeTeamAgent:
                 "context": {
                     "role": "leader",
                     "member_name": "leader",
-                    "persona": "leader",
+                    "desc": "leader",
                     "team_spec": {
                         "team_name": self.team_name,
                         "display_name": self.team_name,
@@ -888,7 +888,6 @@ async def test_team_agent_resume_for_new_session_rebinds_only_live_teammates():
         card=leader_card,
         spec=TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="persistent_team"),
         ctx=ctx,
-        role_policy="",
         language="en",
     )
 
@@ -896,7 +895,7 @@ async def test_team_agent_resume_for_new_session_rebinds_only_live_teammates():
     fake_backend = SimpleNamespace(
         team_name="persistent_team",
         db=fake_db,
-        list_members=AsyncMock(
+        list_member_roster=AsyncMock(
             return_value=[
                 SimpleNamespace(member_name="leader", status="ready"),
                 SimpleNamespace(member_name="worker_busy", status="busy"),
@@ -949,7 +948,6 @@ async def test_team_agent_recover_for_existing_session_rebinds_live_teammates():
         card=leader_card,
         spec=TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="persistent_team"),
         ctx=ctx,
-        role_policy="",
         language="en",
     )
 
@@ -957,7 +955,7 @@ async def test_team_agent_recover_for_existing_session_rebinds_live_teammates():
     fake_backend = SimpleNamespace(
         team_name="persistent_team",
         db=fake_db,
-        list_members=AsyncMock(
+        list_member_roster=AsyncMock(
             return_value=[
                 SimpleNamespace(member_name="leader", status="ready"),
                 SimpleNamespace(member_name="worker_busy", status="busy"),
@@ -1015,7 +1013,7 @@ def test_team_agent_recover_from_session_restores_session_id():
             "context": {
                 "role": "leader",
                 "member_name": "leader",
-                "persona": "leader",
+                "desc": "leader",
                 "team_spec": {
                     "team_name": "persistent_team",
                     "display_name": "persistent_team",
@@ -1057,7 +1055,7 @@ def test_team_agent_recover_from_session_builds_leader_member_handle():
             "context": {
                 "role": "leader",
                 "member_name": "leader",
-                "persona": "leader",
+                "desc": "leader",
                 "team_spec": {
                     "team_name": "persistent_team",
                     "display_name": "persistent_team",

@@ -15,7 +15,7 @@ from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
-from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
+from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
 from openjiuwen.core.common.exception.errors import BaseError
 
 
@@ -99,7 +99,7 @@ def _ctx(member: str = "dev-1", cli_agent: str = "claude") -> TeamRuntimeContext
         member_name=member,
         cli_agent=cli_agent,
         team_spec=TeamSpec(team_name="ext_team", display_name="Ext", language="en"),
-        db_config=MemoryDatabaseConfig(),
+        db_config=DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"),
         messager_config=MessagerTransportConfig(
             backend="inprocess",
             team_name="ext_team",

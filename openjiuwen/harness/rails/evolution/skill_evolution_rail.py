@@ -94,6 +94,23 @@ _FUZZY_REVIEW_PROMPT_EN = (
     "Check recent context for reusable Skill lessons; this is not a request to handle the current error.\n"
     f"{EVOLUTION_FUZZY_REVIEW_RULES_EN}"
 )
+_EVAL_SNIPPET_MAX_MESSAGES = 20
+_EVAL_SNIPPET_POST_PRESENT_MAX_CHARS = 800
+
+
+def _normalize_skill_relative_file_path(relative_file_path: str) -> str:
+    """Canonical relative path for the primary skill entry file (``SKILL.md``)."""
+    raw = (relative_file_path or "").strip()
+    if not raw:
+        return "SKILL.md"
+    normalized = raw.replace("\\", "/").removeprefix("./")
+    if "/" in normalized:
+        prefix, base = normalized.rsplit("/", 1)
+    else:
+        prefix, base = "", normalized
+    if "." not in base and base.casefold() == "skill":
+        return f"{prefix}/SKILL.md" if prefix else "SKILL.md"
+    return raw
 
 
 class EvolutionReviewScopeBuilder:
@@ -131,7 +148,10 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
     priority = 80
     _DEFAULT_MEMBER_ROLE = "teammate"
     _SKILL_MD_RE = re.compile(r"[/\\]([^/\\]+)[/\\]SKILL\.md", re.IGNORECASE)
+    _SKILL_MD_FILE_READ_TOOLS = frozenset({"read", "read_file", "read_file_stream"})
     _EXPERIENCE_RECORD_HEADING_RE = re.compile(r"#+\s*\[([A-Za-z0-9_-]+)\]")
+    # SKILL.md Evolution Index links look like: evolution/instructions.md#ev_037dea95
+    _EXPERIENCE_INDEX_ID_RE = re.compile(r"(?:#|/)(ev_[A-Za-z0-9_-]+)\b")
     _SUBJECT_LABELS: dict[str, str] = {
         "skill": "skill",
         "swarm-skill": "swarm skill",
@@ -155,6 +175,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
         evaluate_llm_policy: LLMInvokePolicy = EVALUATE_LLM_POLICY,
         simplify_llm_policy: LLMInvokePolicy = SIMPLIFY_LLM_POLICY,
+        two_stage: bool = False,
         review_agent_max_iterations: int = 10,
         sharing_config: Optional[Dict[str, Any]] = None,
         disabled_skills: Optional[Union[str, List[str]]] = None,
@@ -204,6 +225,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             model,
             language,
             generate_records_llm_policy=generate_records_llm_policy,
+            two_stage=two_stage,
         )
         self._scorer = ExperienceScorer(
             llm,
@@ -218,6 +240,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         # Optimizer path (for _auto_save=False): memory-staged records until user approval
         self._skill_ops: Dict[str, SkillExperienceOperator] = {}  # skill_name -> operator
         self._generate_records_llm_policy = generate_records_llm_policy
+        self._two_stage = two_stage
         self._evaluate_llm_policy = evaluate_llm_policy
         self._simplify_llm_policy = simplify_llm_policy
         self._evolution_total_timeout_secs = evolution_total_timeout_secs
@@ -302,6 +325,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         language: str,
         *,
         generate_records_llm_policy: LLMInvokePolicy,
+        two_stage: bool,
     ):
         """Build the optimizer used by the online evolution updater."""
         return SkillExperienceOptimizer(
@@ -309,6 +333,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             model,
             language,
             generate_records_llm_policy=generate_records_llm_policy,
+            two_stage=two_stage,
         )
 
     def _make_experience_manager(self) -> ExperienceManager:
@@ -494,6 +519,11 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         return self._evolution_total_timeout_secs
 
     @property
+    def two_stage(self) -> bool:
+        """Whether experience generation uses the analyzer + formatter pipeline."""
+        return self._two_stage
+
+    @property
     def evolution_config(self) -> Dict[str, Any]:
         """Get the effective evolution configuration."""
         return {
@@ -501,6 +531,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             "evaluate_llm_policy": self.evaluate_llm_policy,
             "simplify_llm_policy": self.simplify_llm_policy,
             "evolution_total_timeout_secs": self.evolution_total_timeout_secs,
+            "two_stage": self.two_stage,
         }
 
     @property
@@ -711,31 +742,64 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         )
 
     async def _on_after_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Track explicit experience detail reads without modifying tool results.
+        """Track experiences exposed to the agent without modifying tool results.
 
-        SKILL.md reads are index discovery only. BODY experiences are counted
-        as presented only when a detail file under evolution/*.md is read and
-        the returned content includes concrete record headings.
+        Presentation sources (either counts as presented for later scoring):
+        1. Reading a detail file under ``evolution/*.md`` with concrete record headings.
+        2. Reading ``SKILL.md`` / ``skill_tool`` default entry that contains the Evolution
+           Index summaries (agents often follow the summary without opening detail files).
         """
         inputs = ctx.inputs
         if not isinstance(inputs, ToolCallInputs):
             return
+        await self._track_presented_from_tool_call(ctx, inputs)
 
-        skill_name = self._detect_experience_detail_read(inputs)
-        if not skill_name:
+    async def _track_presented_from_tool_call(
+        self,
+        ctx: AgentCallbackContext,
+        inputs: ToolCallInputs,
+    ) -> None:
+        """Record presented experience IDs from detail reads or SKILL.md index reads."""
+        session = ctx.session if hasattr(ctx, "session") else None
+        content = self._extract_tool_content(inputs)
+
+        detail_skill = self._detect_experience_detail_read(inputs)
+        if detail_skill:
+            record_ids = self._extract_presented_record_ids(content)
+            if not record_ids:
+                return
+            await self._experience_tracker.record_presented_records(
+                session=session,
+                skill_name=detail_skill,
+                presentation_snippet="",
+                record_ids=record_ids,
+            )
             return
 
-        content = self._extract_tool_content(inputs)
-        record_ids = self._extract_presented_record_ids(content)
+        index_skill = self._detect_skill_index_read(inputs)
+        if not index_skill:
+            return
+
+        record_ids = self._extract_index_record_ids(content)
         if not record_ids:
             return
-
-        session = ctx.session if hasattr(ctx, "session") else None
         await self._experience_tracker.record_presented_records(
             session=session,
-            skill_name=skill_name,
-            presentation_snippet=content,
+            skill_name=index_skill,
+            presentation_snippet="",
             record_ids=record_ids,
+        )
+
+    async def _evaluate_presented_entries(
+        self,
+        presented_entries: list[tuple[str, Any, str]],
+        messages: list[dict],
+    ) -> None:
+        """Evaluate presented experiences using conversation snippets rebuilt at after_invoke."""
+        await self._experience_tracker.evaluate_presented(
+            presented_entries,
+            messages=messages,
+            build_snippet=self._build_evaluation_snippet,
         )
 
     async def run_evolution(
@@ -767,6 +831,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 session = ctx.session if hasattr(ctx, "session") else None
                 presented_entries = self._experience_tracker.consume_eval_state(session)
             else:
+                logger.warning("[SkillEvolutionRail] run_evolution abort: no snapshot and no ctx")
                 return
 
             logger.info("[SkillEvolutionRail] collected %d messages", len(messages))
@@ -780,7 +845,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                     "cancelled",
                     "no conversation messages available; cancelling regular skill evolution review",
                 )
-                await self._experience_tracker.evaluate_presented(presented_entries)
+                await self._evaluate_presented_entries(presented_entries, messages)
                 return
 
             all_skill_names = self._evolution_store.list_skill_names()
@@ -843,8 +908,10 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                         "no skill usage of a regular skill or actionable evolution signal detected; "
                         "cancelling regular skill evolution review"
                     )
+                # Evaluate before emitting terminal "cancelled": host watchers treat
+                # cancelled as cycle end and must not race with scoring.
+                await self._evaluate_presented_entries(presented_entries, messages)
                 self._emit_progress("cancelled", message)
-                await self._experience_tracker.evaluate_presented(presented_entries)
                 return
 
             attributed_signal_count = sum(len(skill_signals) for skill_signals in skill_groups.values())
@@ -864,6 +931,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 )
 
             # Evolve existing skills (when signals are attributed to known skills)
+            deferred_cancelled: List[tuple[str, str]] = []
             for skill_name, skill_signals in skill_groups.items():
                 generated = await self._evolve_skill_with_sharing(
                     skill_name=skill_name,
@@ -875,13 +943,19 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                     requires_approval=not self._auto_save,
                 )
                 if not generated:
-                    self._emit_progress(
-                        "cancelled",
-                        f"attributed optimizer signal for '{skill_name}' produced no reusable evolution records",
-                        skill_name=skill_name,
+                    deferred_cancelled.append(
+                        (
+                            skill_name,
+                            f"attributed optimizer signal for '{skill_name}' "
+                            "produced no reusable evolution records",
+                        )
                     )
 
-            await self._experience_tracker.evaluate_presented(presented_entries)
+            # Score presented experiences before any terminal cancelled progress
+            # (host watcher treats cancelled as cycle end).
+            await self._evaluate_presented_entries(presented_entries, messages)
+            for skill_name, message in deferred_cancelled:
+                self._emit_progress("cancelled", message, skill_name=skill_name)
         except Exception as exc:
             logger.warning("[SkillEvolutionRail] auto evolution failed: %s", exc)
 
@@ -1226,7 +1300,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             messages=messages,
             trajectory=trajectory,
             user_query=user_query,
-            metadata={},
+            metadata={"language": self._language},
             source="experience_updater",
         )
 
@@ -1399,6 +1473,30 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             record_ids.append(record_id)
         return record_ids
 
+    @classmethod
+    def _extract_index_record_ids(cls, content: str) -> list[str]:
+        """Extract experience IDs from SKILL.md Evolution Index summaries/links."""
+        if not content:
+            return []
+        section = content
+        start = content.find("<!-- evolution-index-start -->")
+        end = content.find("<!-- evolution-index-end -->")
+        if start != -1 and end != -1 and end > start:
+            section = content[start:end]
+        elif "Evolution Experiences" in content:
+            section_start = content.find("Evolution Experiences")
+            section = content[section_start:]
+
+        seen: set[str] = set()
+        record_ids: list[str] = []
+        for match in cls._EXPERIENCE_INDEX_ID_RE.finditer(section):
+            record_id = match.group(1)
+            if record_id in seen:
+                continue
+            seen.add(record_id)
+            record_ids.append(record_id)
+        return record_ids
+
     @staticmethod
     def _is_experience_detail_relative_path(relative_path: str) -> bool:
         """Return True when a skill-relative path points at a persisted experience detail."""
@@ -1442,6 +1540,29 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             return None
         return self._skill_for_experience_detail_file(file_path)
 
+    def _detect_skill_index_read(self, inputs: ToolCallInputs) -> Optional[str]:
+        """Return skill name when the tool call loads SKILL.md (Evolution Index)."""
+        tool_name = str(inputs.tool_name or "")
+        args = self._extract_tool_args(inputs.tool_args)
+
+        if tool_name == "skill_tool":
+            skill_name = str(args.get("skill_name", "") or "").strip()
+            relative_path = str(args.get("relative_file_path") or "SKILL.md").strip()
+            if skill_name and self._is_skill_md_path(relative_path):
+                return skill_name
+            return None
+
+        if not self._is_skill_md_file_read_tool(tool_name):
+            return None
+
+        file_path = str(args.get("file_path", "") or "").strip()
+        if not file_path:
+            return None
+        matched = self._SKILL_MD_RE.search(file_path)
+        if not matched:
+            return None
+        return matched.group(1)
+
     def _skill_for_experience_detail_file(self, file_path: str) -> Optional[str]:
         try:
             read_path = Path(file_path).expanduser().resolve()
@@ -1465,6 +1586,80 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             if self._is_experience_detail_relative_path(str(relative)):
                 return skill_name
         return None
+
+    @classmethod
+    def _parse_tool_args_dict(cls, arguments: Any) -> dict[str, Any]:
+        return cls._extract_tool_args(arguments)
+
+    @classmethod
+    def _is_skill_md_path(cls, relative_path: str) -> bool:
+        normalized = _normalize_skill_relative_file_path(relative_path)
+        norm = normalized.replace("\\", "/").removeprefix("./").lower()
+        return norm == "skill.md" or norm.endswith("/skill.md")
+
+    @classmethod
+    def _find_skill_load_anchor(cls, messages: List[dict], skill_name: str) -> int:
+        """Return the index of the last SKILL.md load for *skill_name*, or -1."""
+        anchor = -1
+        for index, msg in enumerate(messages):
+            role = msg.get("role", "")
+            if role != "assistant":
+                continue
+            for tool_call in msg.get("tool_calls", []) or []:
+                tool = str(tool_call.get("name") or "").lower()
+                arguments = tool_call.get("arguments", "")
+                if tool == "skill_tool":
+                    args = cls._parse_tool_args_dict(arguments)
+                    if str(args.get("skill_name") or "").strip() != skill_name:
+                        continue
+                    rel = _normalize_skill_relative_file_path(str(args.get("relative_file_path") or ""))
+                    if cls._is_skill_md_path(rel):
+                        anchor = index
+                elif cls._is_skill_md_file_read_tool(tool):
+                    file_path = cls._extract_file_path(arguments)
+                    matched = cls._SKILL_MD_RE.search(file_path)
+                    if matched and matched.group(1) == skill_name:
+                        anchor = index
+        return anchor
+
+    @classmethod
+    def _is_skill_md_file_read_tool(cls, tool_name: str) -> bool:
+        """True for known filesystem read tools that may load SKILL.md by path."""
+        return tool_name.lower() in cls._SKILL_MD_FILE_READ_TOOLS
+
+    @classmethod
+    def _format_messages_snippet(
+        cls,
+        messages: List[dict],
+        *,
+        start: int = 0,
+        max_messages: int = _EVAL_SNIPPET_MAX_MESSAGES,
+        max_content_chars: int = _EVAL_SNIPPET_POST_PRESENT_MAX_CHARS,
+    ) -> str:
+        """Format conversation messages into a scorer-friendly snippet."""
+        lines: List[str] = []
+        window = messages[start:][-max_messages:]
+        for msg in window:
+            role = msg.get("role", "unknown")
+            content = str(msg.get("content") or "")[:max_content_chars]
+            if content:
+                lines.append(f"[{role}] {content}")
+            if role == "assistant":
+                for tool_call in msg.get("tool_calls", []) or []:
+                    tool = str(tool_call.get("name") or "")
+                    args = str(tool_call.get("arguments") or "")[:max_content_chars]
+                    if tool:
+                        lines.append(f"[assistant/tool_call] {tool} {args}")
+        return "\n".join(lines)
+
+    @classmethod
+    def _build_evaluation_snippet(cls, messages: List[dict], skill_name: str) -> str:
+        """Build post-presentation snippet: from last SKILL.md load through turn end."""
+        if not messages:
+            return ""
+        anchor = cls._find_skill_load_anchor(messages, skill_name)
+        start = anchor if anchor >= 0 else max(0, len(messages) - _EVAL_SNIPPET_MAX_MESSAGES)
+        return cls._format_messages_snippet(messages, start=start)
 
     @classmethod
     def _parse_messages(cls, messages: List[Any]) -> List[dict]:

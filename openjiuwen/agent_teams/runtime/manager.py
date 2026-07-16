@@ -524,7 +524,7 @@ class TeamRuntimeManager:
 
         async def _member_exists(name: str) -> bool:
             """Roster predicate backed by the live team backend."""
-            return await backend.get_member(name) is not None
+            return await backend.member_exists(name)
 
         return await resolve_targets(payloads, member_exists=_member_exists)
 

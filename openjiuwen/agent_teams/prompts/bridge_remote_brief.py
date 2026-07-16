@@ -6,14 +6,14 @@
 A bridge agent pairs a local jiuwen teammate with an external
 independent agent. The remote needs to know two things to be useful:
 
-1. **Who it is** — the persona it should adopt, plus the contract that
-   it's an executor (not a planner) whose text output will be passed
-   verbatim by the bridge to the team.
+1. **Who it is** — the ``prompt`` it should adopt as its own system
+   prompt, plus the contract that it's an executor (not a planner) whose
+   text output will be passed verbatim by the bridge to the team.
 2. **What's around it** — a short roster summary of the team it's
-   plugged into, so it can address members by name when relevant.
+   plugged into (peers' ``desc``), so it can address members by name.
 
 Both come from this module as pure-text strings. The framework calls
-``adapter.connect(bridge_persona=..., team_overview=...)`` once per
+``adapter.connect(prompt=..., team_overview=...)`` once per
 bridge member at lifecycle start; the adapter then forwards them to
 the remote via whatever the underlying protocol supports
 (A2A AgentCard, ACP init message, CLI ``--system`` flag, etc.).
@@ -33,7 +33,7 @@ from openjiuwen.agent_teams.schema.team import TeamRole
 
 __all__ = [
     "MemberSummary",
-    "build_bridge_persona",
+    "build_bridge_brief",
     "build_team_overview",
 ]
 
@@ -50,16 +50,21 @@ class MemberSummary:
 
     member_name: str
     role: TeamRole
-    persona: str = ""
+    desc: str = ""
 
 
-def build_bridge_persona(*, member_name: str, persona: str, language: str = "cn") -> str:
-    """Build the ``bridge_persona`` text handed to ``adapter.connect``.
+def build_bridge_brief(*, member_name: str, prompt: str, language: str = "cn") -> str:
+    """Build the briefing text handed to ``adapter.connect``.
+
+    The remote agent is this bridge member's own execution brain, so its
+    briefing is the member's private ``prompt`` (the member's own system
+    prompt), NOT the public ``desc`` that peers see in the roster.
 
     Args:
         member_name: Bridge member name (identity the remote should
             adopt).
-        persona: Persona text from ``BridgeMemberSpec.persona``.
+        prompt: Private prompt text from ``BridgeMemberSpec.prompt`` — the
+            role / system prompt the remote adopts to act as this member.
         language: ``"cn"`` (default) or ``"en"``.
 
     Returns:
@@ -67,7 +72,7 @@ def build_bridge_persona(*, member_name: str, persona: str, language: str = "cn"
     """
     if language == "en":
         return (
-            f"You are {member_name} (persona: {persona}).\n"
+            f"You are {member_name}.\n{prompt}\n"
             f"You are the EXECUTOR backing a bridge_agent member of the "
             f"same name on a jiuwen team. Each turn you receive a message "
             f"from the team, perform the requested work (code, analysis, "
@@ -80,7 +85,7 @@ def build_bridge_persona(*, member_name: str, persona: str, language: str = "cn"
             f"messages, claiming/completing tasks)."
         )
     return (
-        f"你是 {member_name}（人设：{persona}）。\n"
+        f"你是 {member_name}。\n{prompt}\n"
         f"你是 jiuwen 团队中同名 bridge_agent 成员的**实际执行者**。"
         f"每次你将收到一段来自团队的消息文本，请直接**执行**对应工作"
         f"（如代码、分析、答案）并返回执行结果文本。你的回复会被 bridge "
@@ -125,8 +130,8 @@ def _overview_header(*, team_name: str, language: str) -> str:
 
 
 def _format_member_line(m: MemberSummary, *, language: str) -> str:
-    persona = m.persona or ("(no persona)" if language == "en" else "（无人设）")
-    return f"- {m.member_name} ({m.role.value}): {persona}"
+    desc = m.desc or ("(no desc)" if language == "en" else "（无描述）")
+    return f"- {m.member_name} ({m.role.value}): {desc}"
 
 
 def _overview_footer(*, language: str) -> str:

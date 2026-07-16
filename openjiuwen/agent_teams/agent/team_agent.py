@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -368,6 +369,34 @@ class TeamAgent(BaseAgent):
 
     def is_agent_running(self) -> bool:
         return self._is_agent_running()
+
+    def idle_seconds(self) -> float | None:
+        """Return seconds this member has been continuously idle, or None.
+
+        Reads the process-local idle clock stamped by
+        ``StreamController._map_state`` when the runtime settled into IDLE.
+        ``None`` means the member is mid-round (BUSY) or has never settled,
+        which is exactly what callers want: a busy member is by definition
+        not stalled.
+        """
+        idle_since = self._state.idle_since
+        if idle_since is None:
+            return None
+        return time.monotonic() - idle_since
+
+    def refresh_idle_baseline(self) -> None:
+        """Re-base the idle clock so a pause window is not counted as idle.
+
+        A member that was already idle when the team paused keeps its
+        ``idle_since`` stamp while the monotonic clock advances across the
+        whole pause — and, being idle, it has no paused round to resume, so
+        it never re-enters IDLE to re-stamp itself. Without this re-base the
+        first poll after resume would see a huge fabricated idle span. A busy
+        member holds ``idle_since is None`` and is left alone; a cold start
+        begins with ``None`` too, making this a no-op there.
+        """
+        if self._state.idle_since is not None:
+            self._state.idle_since = time.monotonic()
 
     def has_in_flight_round(self) -> bool:
         return self._has_in_flight_round()
@@ -948,7 +977,7 @@ class TeamAgent(BaseAgent):
         card = agent_spec.card or AgentCard(
             id=card_id,
             name=context.member_name or "unknown",
-            description=f"Teammate: {context.persona}" if context.persona else "Teammate",
+            description=f"Teammate: {context.desc}" if context.desc else "Teammate",
         )
         agent = cls(card)
         agent.configure(spec, context)
@@ -959,10 +988,13 @@ class TeamAgent(BaseAgent):
         ctx = await self._spawn_manager.build_context_from_db(teammate_id)
         if ctx is None:
             return
-        teammate = await self._configurator.team_backend.get_member(teammate_id)
+        # No first-start message: a member's DB ``prompt`` is its private
+        # system-prompt addendum (carried on ``ctx.member_prompt``), not a
+        # startup instruction. Members come up subscribed-only and receive
+        # real work from the leader via send_message / task assignment.
         await self.spawn_teammate(
             ctx,
-            initial_message=teammate.prompt if teammate else None,
+            initial_message=None,
             session=self.session_id,
             spawn_config=SpawnConfig(health_check_timeout=30, health_check_interval=50),
         )
@@ -974,8 +1006,8 @@ class TeamAgent(BaseAgent):
         ``setup_team_backend(on_team_cleaned=...)``. ``clean_team`` runs
         synchronously inside the leader's DeepAgent round, so setting the
         flag here guarantees it is visible before
-        ``StreamController._run_one_round``'s finally block evaluates
-        terminal conditions — no reliance on the racy ``TeamCleanedEvent``
+        ``StreamController._on_idle_settled`` evaluates terminal
+        conditions — no reliance on the racy ``TeamCleanedEvent``
         bus handler, which the leader deliberately ignores (see
         ``coordination/handlers/agent_lifecycle.py::on_cleaned``).
         """
@@ -992,6 +1024,9 @@ class TeamAgent(BaseAgent):
 
         self._state.team_cleaned = False
         await self._persist_team_db_state(TEAM_DB_STATE_CREATED)
+        # F_62: build_team may have chosen scheduled dispatch — arm the
+        # scheduler now, before any teammate spawn or task creation.
+        await self._coordination.notify_team_built()
 
     async def _persist_team_db_state(self, db_state: str) -> None:
         """Persist the team DB lifecycle state into the active checkpoint."""
