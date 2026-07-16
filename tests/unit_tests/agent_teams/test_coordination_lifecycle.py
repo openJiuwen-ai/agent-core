@@ -43,7 +43,10 @@ class _StubSession:
         return self.state.get(key)
 
 
-def _make_kernel_host(memory_manager: object | None = None) -> SimpleNamespace:
+def _make_kernel_host(
+    memory_manager: object | None = None,
+    messager: object | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         member_name="leader-1",
         role=TeamRole.LEADER,
@@ -58,7 +61,7 @@ def _make_kernel_host(memory_manager: object | None = None) -> SimpleNamespace:
             ),
         ),
         infra=SimpleNamespace(
-            messager=None,
+            messager=messager,
             team_backend=None,
         ),
         spawn_manager=SimpleNamespace(
@@ -373,6 +376,20 @@ async def test_stop_extracts_memory_when_stopping_from_running():
 
     memory_manager.extract_after_round.assert_awaited_once()
     memory_manager.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_stop_closes_messager_transport():
+    """Direct stop closes the current host's messager transport."""
+    messager = SimpleNamespace(stop=AsyncMock())
+    host = _make_kernel_host(messager=messager)
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    await kernel.stop()
+
+    messager.stop.assert_awaited_once()
 
 
 @pytest.mark.asyncio
