@@ -8,8 +8,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/coordination/` |
-| 最近一次修订日期 | 2026-07-14 |
-| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md`、`F_14_human-agent-team-event-rendering.md` |
+| 最近一次修订日期 | 2026-07-16 |
+| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md`、`F_14_human-agent-team-event-rendering.md`、`F_65_runtime-idle-clock-stall-nudge.md` |
 
 ## 范围 / 边界
 
@@ -43,7 +43,7 @@
 6. **fan-out 顺序由 `EventDispatcher.__init__` 元组顺序决定**：`(lifecycle, member, message, task_board, stale_task, team_completion, workflow[, reliability])` 即 framework 注册顺序；同 priority（默认 0）下 Python `list.sort` 稳定，因此 `MEMBER_SHUTDOWN` 上 `MemberHandler.on_member_event` 永远先于 `MessageHandler.on_member_shutdown_drain`，`POLL_TASK` 上 stale-task handler 的 `on_poll_task` 永远先于 `TeamCompletionHandler.on_poll_task`。task_board / stale_task 的**类**按构造参数 `dispatch_mode` 查字面量表选定（F_62：`TaskBoardHandler` / `StaleTaskHandler` 为自主模式，`ScheduledTaskBoardHandler` / `ScheduledStaleTaskHandler` 为调度模式，未知值 KeyError）——模式是静态 spec 配置，选择只发生在构造期，handler 方法内无模式分支。
 7. **handler 之间不直接互调**。跨域响应必须通过让两个 handler 各自注册同一个 `event_key`、走 framework fan-out 实现。
 8. **`AsyncCallbackFramework.trigger` 的异常语义是吞 + 续跑**：普通 `Exception` 被框架 log + continue，仅 `AbortError` 上抛。handler 必须自己用 `team_logger.error("...", exc_info=True)` 记录关键失败，**禁止依赖 framework swallow 当作隐式错误处理**。
-9. **stale-claim nudge 是 self-only**（F_53）：每个成员在 `POLL_TASK` 上只扫自己认领的任务并喂自己的 loop（`deliver_input(use_steer=False)`，body 只带 task_id + title），leader 不跨进程催他人。因此不再有跨 handler 共享的 throttle——`_last_stale_nudge` / `_last_pending_nudge` 都是 `StaleTaskHandler` 私有，各自节流本进程内同一 task 的重复 nudge。
+9. **stale-claim nudge 是 self-only**（F_53）：每个成员在 `POLL_TASK` 上只扫自己认领的任务并喂自己的 loop（`deliver_input(use_steer=False)`，body 只带 task_id + title），leader 不跨进程催他人。自催连续 `_STALE_CLAIM_ESCALATE_STREAK`（3）个窗口无效时，由**停滞成员自己** `send_message` 上报 leader（成员→leader，与 F_53 砍掉的 leader→成员方向相反，故不违反其设计），leader 据此问询 / 改派 / 换人（F_65）。因此不再有跨 handler 共享的 throttle——`_last_stale_nudge` / `_last_pending_nudge` / `_stale_claim_streak` / `_escalated_claims` 都是 `StaleTaskHandler` 私有，各自节流本进程内同一 task 的重复 nudge。
 10. **`HUMAN_AGENT` 角色禁止自主轮询与自主任务板巡视，但接收针对自己的团队事件（渲染成给控制者的通知）**：human-agent 的 `EventBus` 自构造起就不启动周期 poll timer（`EventBus._start_poll_tasks` 按 `_periodic_poll_enabled = role != HUMAN_AGENT` 跳过），所以 `InnerEventType.POLL_TASK` / `InnerEventType.POLL_MAILBOX` 对 human-agent 根本不会被产生；dispatch 入口对这两个 inner event 的 human-agent 短路是双保险（防御性）。transport 事件白名单分两组：**生命周期组** `TeamEvent.CLEANED` / `TeamEvent.MEMBER_SHUTDOWN` / `TeamEvent.MEMBER_CANCELED` / `TeamEvent.STANDBY`（驱动 avatar 自身收摊 / standby，不涉自主 round）；**F_14 团队事件组** `TeamEvent.MESSAGE` / `TeamEvent.BROADCAST` / `TeamEvent.TASK_CLAIMED`（进 avatar harness 后由 `MessageHandler._format_message` / `TaskBoardHandler.on_task_claimed` 的 role-aware 分支渲染成 `hitt.msg_received_for_human` / `hitt.task_assigned_to_self_human`，即"给控制者的通知"，avatar prompt 严格禁止自主行动）。其余事件保持静音——尤其是任务板巡视事件（`TASK_CREATED` / `TASK_UPDATED` / ... → `_nudge_idle_agent`）和 stale-claim self-nudge（human-agent 不轮询，自然也不会产生），它们会驱使 avatar 自主扫描任务板找活。配套：`TASK_CLAIMED` 里"指派给别人"的认领对 human-agent **不** fall-through 到任务板 nudge（`TaskBoardHandler.on_task_claimed` 在 `is_self_human` 时早退），只有指派给 avatar 自己的认领才 deliver。其中 `MEMBER_SHUTDOWN` 放行是因为 avatar 要靠它排空邮箱并收摊（收摊规则见机制 18，与 teammate 同一套，**不再有 human-agent 专属分支**）。
 11. **dispatch 前置检查 `is_agent_ready()`**：未就绪时直接 return，handler 不会被触发。
 12. **`SHUTDOWN` inner 事件是 EventBus 自身的停机信号**，仅由 `EventBus.stop()` 写入；handler 不监听该事件。
@@ -67,6 +67,8 @@
     结果是 **`MemberHandler._shutdown_human_agent` 这个 human-agent 专属分支被删除**，`on_member_shutdown_drain` 的 `role == TEAMMATE` 限制也一并删除（BRIDGE_AGENT 随之纳入同一条路径）。
 19. **给真实人类的输出与喂 avatar harness 是两条独立的路，且前者不受后者影响**。leader 侧 `MessageHandler._notify_human_agent_inbound` 把团队消息推给控制者回调，这条路**不经过** avatar 的 harness，因此机制 18 跳过 harness 唤醒**永远不会**让真人少收一条消息。其收件人按**可达**（`TeamBackend.reachable_human_agent_names` / `is_reachable_human_agent`，即 status ∉ `MEMBER_UNREACHABLE_STATUSES` = {`SHUTDOWN`}）筛选，**不是**裸 role：已彻底退场的人类，其控制者不该再收团队广播。**但 `SHUTDOWN_REQUESTED` 必须留在收件人里**——`shutdown_member` 先写状态再发通知，若在 request 处就切断投递，唯一送不到的恰恰是"你已被移出团队"这条通知。这与任务锁的阈值（`MEMBER_DEPARTED_STATUSES` = {`SHUTDOWN_REQUESTED`, `SHUTDOWN`}，见 `S_07` 运行约束 3）**故意不同**：锁在「leader 已放手」时就该松开，投递要到「人真的没了」才该停。两个阈值定义在 `schema/status.py`，改动前先读那里的注释。
 
+20. **自主模式的停滞计时一律读运行时 idle 时钟，绝不读 DB `task.updated_at`**（F_65）。`TeamAgentState.idle_since`（`time.monotonic()`，**进程本地、内存态、不持久化**）由 `StreamController._map_state` 在 READY/BUSY 边写入（`IDLE →` 打戳、`RUNNING →` 清空），handler 经 `AgentRoundController.idle_seconds()` 读取，`kernel.start` 调 `TeamAgent.refresh_idle_baseline()` 在每个 run cycle 入口、event bus 恢复 `POLL_TASK` **之前**重置基线。三条理由：(a) pause 冻结 `updated_at` 而墙钟继续走，`now - updated_at` 在长 pause→resume 后必然报出假停滞；(b) 成员状态列本就不落时间戳（`TeamMember.updated_at` 只随名册变更 bump），DB 层无从回答"READY 了多久"；(c) `idle_seconds()` 在忙时为 `None`，使"正在干活的成员被判停滞"在类型层面不可表达。**仅 `refresh_idle_baseline` 覆盖 idle-across-pause 这一路**：pause 时正忙的成员 `idle_since` 本就是 `None`，其 round 续跑后自然重新打戳。**调度模式仍读 `updated_at`**（F_65 范围外；同款 pause 缺陷记为已知遗留），二者的隔离靠 `ScheduledStaleTaskHandler` 覆写 `_check_stale_claimed_tasks` / `_self_nudge_stale_claim` 钉住旧实现，自主基类内不留 `updated_at` 痕迹。
+
 ## 接口契约
 
 ### 三类窄 Protocol
@@ -78,6 +80,7 @@ class AgentRoundController(Protocol):
 
     def is_agent_ready(self) -> bool: ...
     def is_agent_running(self) -> bool: ...
+    def idle_seconds(self) -> float | None: ...   # F_65；None = 忙 / 从未 settle
     def has_in_flight_round(self) -> bool: ...
     def has_pending_interrupt(self) -> bool: ...
 
@@ -255,7 +258,7 @@ class BaseCoordinationHandler:
 | `MemberHandler` | 6 个 `MEMBER_*`：`SPAWNED` / `RESTARTED` / `STATUS_CHANGED` / `EXECUTION_CHANGED` / `SHUTDOWN` / `CANCELED` | 无 | `on_member_event` 按 role 分流到 `_handle_leader_member_event` / `_handle_teammate_member_event`；leader 只观测/记录成员生命周期，**不再** stale-claim 跨进程 nudge（F_53 把 stale-claim 收敛为 self-only）；非 leader 仅对自身事件反应：`MEMBER_CANCELED` 触发 `_round.cancel_agent`，`MEMBER_SHUTDOWN` **仅在 `force` 时** `_lifecycle.shutdown_self()`（角色无关）。graceful shutdown 不在此 teardown——走 `MessageHandler` 的 drain + harness-input 闸门（机制 18） |
 | `MessageHandler` | `TeamEvent.MESSAGE` / `TeamEvent.BROADCAST` / `InnerEventType.POLL_MAILBOX` / `TeamEvent.MEMBER_SHUTDOWN`（fan-out） | 无 | `on_message_or_broadcast`：leader 在 MESSAGE 上 `_ack_user_bound_message` + `_notify_human_agent_inbound`（收件人按**可达**筛选，见机制 19），所有 role 接着 `_poll.resume_polls` + `_process_unread_messages`；`on_poll_mailbox` 周期 sweep；`on_member_shutdown_drain` 非 leader 给自己 drain（`use_steer=True`，不再限 teammate）。**三条路统一先过 `_harness_input_blocked` 闸门**（机制 18）：已 `SHUTDOWN` 丢弃投递，`SHUTDOWN_REQUESTED` 且无 in-flight round 则直接 `shutdown_self()` 不唤醒 harness |
 | `TaskBoardHandler` | `TeamEvent.TASK_CLAIMED` / `TASK_REVOKED` / `TASK_CANCELLED` / `TASK_UPDATED` + 4 个 board `TASK_*`：`CREATED` / `COMPLETED` / `UNBLOCKED` / `RELEASED` | 无 | `on_task_claimed`：targeted 自身 → `deliver_input`；非自身 → 走 `on_task_board_event` 兜底（防 idle leader 错过 board 变更；teammate 在下一句的过滤下被挡掉，实际只 nudge leader）。`on_task_board_event` → `_nudge_idle_agent`：**leader 每个 board 事件都巡视全部未完成任务；teammate 只被 `_TEAMMATE_NUDGE_EVENTS`（`CREATED` / `UNBLOCKED` / `RELEASED`——会扩大 claimable 池的三类）唤醒，且只渲染 claimable（pending+未指派）任务，别人 in-flight 的 claimed 任务不喂给 teammate**；`resume_polls` 对每个事件都触发（过滤只砍 nudge、不停 poll）。leader 全部任务终结时按 lifecycle 喂 all-done prompt。`TASK_RELEASED` 由 `TeamTaskManager.reset`（成员清理 / leader 改指派）发布，把被释放回 pending 的任务重新播给 idle teammate。`on_task_revoked` / `on_task_cancelled` / `on_task_updated`（F_54 / F_56）：任务被从某成员手里动了（改派 / 取消 / 改内容）时，`TeamTaskManager` 发对应事件并带 `member_name`（受影响成员），精准投给该成员 → self 分支 `deliver_input(use_steer=True)`（撤回=改派走了，停手；取消=任务没了，停手；变更=view_task 重看后继续、任务仍归你）。改派经 `TeamTaskManager.reassign` 的 DAO 原子 CAS 交换 assignee（任务全程 CLAIMED），**不发 `TASK_RELEASED`**（F_56，消除对空闲 teammate 的 spurious 唤醒 + reset→assign 抢占窗口）；`on_task_revoked` 非自身忽略，`on_task_cancelled` / `on_task_updated` 非自身 fall-through 到 `on_task_board_event`（leader 巡视兜底，与 `on_task_claimed` 一致） |
-| `StaleTaskHandler` | `InnerEventType.POLL_TASK` | `_last_stale_nudge` + `_last_pending_nudge: dict[str, float]`（均私有） | `on_poll_task` → `_check_stale_claimed_tasks` + `_check_stale_pending_tasks`。stale claim（**self-only**）：只扫本成员自己认领、`task.updated_at` 超过 `_STALE_CLAIM_SECONDS` (10min) 的任务 → `_self_nudge_stale_claim` → `deliver_input(use_steer=False)`，body 只带 task_id + title（详情让成员自查 view_task），leader **不再** 跨进程催他人。stale pending（仅 leader）：超过 `_STALE_PENDING_SECONDS` (10min) 自喂 minimal prompt（同样 id+title、非 steer）、由 LLM 决定如何分派。见 F_53 |
+| `StaleTaskHandler` | `InnerEventType.POLL_TASK` | `_last_stale_nudge` / `_last_pending_nudge: dict[str, float]` + `_stale_claim_streak: dict[str, int]` + `_escalated_claims: set[str]`（均私有） | `on_poll_task` → `_check_stale_claimed_tasks` + `_check_stale_pending_tasks`；两者的停滞时长都取自 `self._round.idle_seconds()`（不变量 20，**非** `task.updated_at`），阈值取自 spec 的 `stale_claim_idle_timeout` / `stale_pending_idle_timeout`（各默认 600s）。stale claim（**self-only**）：本成员 idle 超阈值且仍持有 `{PLANNING, IN_PROGRESS}` 任务（**排除 `IN_REVIEW`**——author 等 reviewer 裁决是正常 idle）→ `_self_nudge_idle_claim` → `deliver_input(use_steer=False)`，body 只带 task_id + title + idle 分钟；连续 `_STALE_CLAIM_ESCALATE_STREAK`(3) 个窗口自催无效 → `_escalate_stale_claim` 由该成员 `send_message` 上报 leader（每任务只报一次，记账随任务离开 owned-active 集 GC）。stale pending（仅 leader）：leader 自己 idle 超阈值 **且** 存在**无 assignee** 的 PENDING **且** roster 中至少一个非 leader 成员 READY（全员忙 = 正常排队，不催）→ 自喂 minimal prompt（id+title、非 steer）、由 LLM 决定如何分派。见 F_53 / F_65 |
 | `TeamCompletionHandler` | `InnerEventType.POLL_TASK` / `TeamEvent.TASK_LIST_DRAINED` / `TeamEvent.TEAM_COMPLETED` | `_team_completed_emitted: bool` + `_completion_callbacks: list`（私有） | `on_poll_task`：leader 且 idle 时评估 `TeamBackend.is_team_completed()`（任务全终态 + 成员全 settled + 无任何未读消息，含广播），按上升沿发 `TEAM_COMPLETED`、下降沿重新武装；**persistent 团队额外调 `self._lifecycle.conclude_completed_round(...)` 结束 leader 流触发 auto-pause（temporary 不调，靠 clean_team 收尾）**。`rearm()`：清上升沿幂等标志，`kernel.start`（冷启动 / resume / recover）每次调一次，使每个 run cycle 独立判定完成。`on_task_list_drained`：记日志 + fire `_completion_callbacks`（`TeamAgent` 在 deepagent 建好后经 `register_completion_callback` 把 `TeamSkillRail.notify_team_completed` 注册进来，注册表非空即 gate）。`on_team_completed`：消费记日志。`POLL_TASK` 与 `StaleTaskHandler` 共享 event_key，注册靠后 → fan-out 在其之后 |
 
 ### CoordinationKernel
@@ -341,17 +344,31 @@ leader-only。遍历 spawn_manager 持有的 live teammate handle，跳过 `UNST
 
 ## 数据结构
 
-### stale-nudge throttle 字典
+### 运行时 idle 时钟（F_65）
 
 ```python
-# Both private to StaleTaskHandler — stale-claim nudge is self-only (F_53),
+# agent/state.py — TeamAgentState（跨 operator 象限）
+idle_since: Optional[float] = None   # time.monotonic()；None = 忙 / 从未 settle
+```
+
+- **进程本地、内存态、不持久化**，也**不来自 DB**：见不变量 20 的三条理由。
+- 写：`StreamController._map_state`（`IDLE →` 打戳 / `RUNNING →` 清空）。读：`TeamAgent.idle_seconds()`，经 `AgentRoundController` 暴露给 handler。重置：`TeamAgent.refresh_idle_baseline()`，由 `kernel.start` 在 event bus 恢复 poll **之前**调用。
+- 生命周期与 round 绑定，不跨 run cycle 携带语义：冷启动天然为 `None`；热 resume 由 `refresh_idle_baseline` 把仍 idle 的成员重新起算。
+
+### stale-nudge 记账字典
+
+```python
+# All private to StaleTaskHandler — stale-claim nudge is self-only (F_53),
 # so there is no cross-handler shared throttle any more.
 self._last_stale_nudge: dict[str, float] = {}    # claimed:  task_id -> last-nudge wall-clock seconds
 self._last_pending_nudge: dict[str, float] = {}  # pending (leader only): same
+self._stale_claim_streak: dict[str, int] = {}    # task_id -> consecutive fruitless stale windows
+self._escalated_claims: set[str] = set()         # task_ids already reported to the leader
 ```
 
-- 只有 `POLL_TASK` 一条触发路径（成员扫自己的 claimed 任务），同一 task 在 `_STALE_CLAIM_SECONDS` (10min) 内只 nudge 一次。
-- GC：`StaleTaskHandler._check_stale_claimed_tasks` 每次 sweep 时基于"当前本成员 relevant claimed task 集"做差集清理，避免无限增长。
+- 只有 `POLL_TASK` 一条触发路径（成员扫自己的活跃任务），同一 task 在 `stale_claim_idle_timeout`（默认 10min）内只 nudge 一次。**节流用墙钟秒（`time.time`），停滞判定用 idle 时钟**——两者单位与用途不同，不要混。
+- `_stale_claim_streak` 累计的是"该任务被催了几个窗口"，成员中途忙一下不清零；只在任务离开 owned-active 集时 GC（否则偶尔动一下就永远升级不了 leader）。`_escalated_claims` 保证同一停滞只上报一次。
+- GC：`_check_stale_claimed_tasks` 每次 sweep 基于"当前本成员 relevant active task 集"对四个字典/集合做差集清理，避免无限增长。
 
 `_last_pending_nudge` 是 leader 自用，因为 stale-pending 仅 leader 观察。
 

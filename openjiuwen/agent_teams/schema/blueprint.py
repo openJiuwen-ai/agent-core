@@ -329,6 +329,27 @@ class TeamAgentSpec(BaseModel):
     covering reviewers that never vote, which the round ceiling alone
     cannot catch. Consumed only by the leader-side scheduler. See F_62.
     """
+    stale_claim_idle_timeout: int = 600
+    """Autonomous dispatch: seconds a member may sit idle holding active work.
+
+    A member that stays runtime-IDLE this long while still owning a
+    ``PLANNING`` / ``IN_PROGRESS`` task gets a nudge fed back into its own
+    loop to keep pushing; if consecutive windows keep finding it idle the
+    stall is escalated to the leader, who can reassign or intervene.
+    Measured off the member's process-local idle clock
+    (``TeamAgentState.idle_since``), never DB ``updated_at`` — see F_65.
+    Ignored under scheduled dispatch. See F_65.
+    """
+    stale_pending_idle_timeout: int = 600
+    """Autonomous dispatch: seconds the leader may sit idle on unclaimed work.
+
+    Once the leader has been runtime-IDLE this long while unassigned
+    ``PENDING`` tasks exist *and* at least one non-leader member is READY,
+    it self-prompts to assign them — the free-member precondition keeps the
+    prompt away from a team whose members are simply all busy. Measured off
+    the leader's process-local idle clock, never DB ``updated_at``.
+    Ignored under scheduled dispatch. See F_65.
+    """
     transport: Optional[TransportSpec] = None
     """Pluggable transport layer specification.
 
@@ -551,6 +572,23 @@ class TeamAgentSpec(BaseModel):
         if self.review_stall_timeout <= 0:
             raise ValueError(
                 f"review_stall_timeout must be > 0 seconds, got {self.review_stall_timeout}",
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_stall_settings(self) -> "TeamAgentSpec":
+        """Range-check the autonomous stall-nudge thresholds (F_65).
+
+        The stale-task sweep consumes these as-is, so a non-positive window
+        must fail at spec time rather than turn every poll into a nudge.
+        """
+        if self.stale_claim_idle_timeout <= 0:
+            raise ValueError(
+                f"stale_claim_idle_timeout must be > 0 seconds, got {self.stale_claim_idle_timeout}",
+            )
+        if self.stale_pending_idle_timeout <= 0:
+            raise ValueError(
+                f"stale_pending_idle_timeout must be > 0 seconds, got {self.stale_pending_idle_timeout}",
             )
         return self
 

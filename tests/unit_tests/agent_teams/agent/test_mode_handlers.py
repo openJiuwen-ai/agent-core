@@ -9,7 +9,7 @@ mode), never inside a handler method.
 """
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -32,9 +32,9 @@ from openjiuwen.agent_teams.schema.events import (
     TaskSubmittedForReviewEvent,
     TeamEvent,
 )
-from openjiuwen.agent_teams.schema.status import MemberMode
+from openjiuwen.agent_teams.schema.status import MemberMode, MemberStatus
 from openjiuwen.agent_teams.schema.task import TaskGraphSpec
-from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.schema.team import MemberRosterEntry, TeamRole
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.agent_teams.tools.models import _get_task_model
@@ -72,12 +72,18 @@ class FakeHost:
 
     def __init__(self):
         self.delivered: list = []
+        # Autonomous stall detection reads the member's idle clock (F_65);
+        # None models a busy member, a float models seconds spent idle.
+        self.idle: float | None = None
 
     def is_agent_ready(self) -> bool:
         return True
 
     def is_agent_running(self) -> bool:
         return False
+
+    def idle_seconds(self) -> float | None:
+        return self.idle
 
     def has_in_flight_round(self) -> bool:
         return False
@@ -118,13 +124,28 @@ def _blueprint(member_name: str, role: TeamRole):
         role=role,
         lifecycle="temporary",
         team_spec=SimpleNamespace(dispatch_mode="autonomous"),
-        spec=SimpleNamespace(reliability=None),
+        spec=SimpleNamespace(
+            reliability=None,
+            stale_claim_idle_timeout=600,
+            stale_pending_idle_timeout=600,
+        ),
     )
 
 
 def _infra(db, bus, member_name: str) -> TeamInfra:
     infra = TeamInfra()
     infra.task_manager = TeamTaskManager(team_name=TEAM, member_name=member_name, db=db, messager=bus)
+    # The autonomous stale-pending sweep asks the roster whether anyone is
+    # free before prompting the leader, and stall escalation resolves the
+    # leader by name — both go through the backend.
+    backend = MagicMock()
+    backend.list_member_roster = AsyncMock(
+        return_value=[
+            MemberRosterEntry(member_name="dev-1", display_name="Dev", status=MemberStatus.READY.value),
+        ],
+    )
+    backend.resolve_leader_member_name = AsyncMock(return_value=LEADER)
+    infra.team_backend = backend
     return infra
 
 
@@ -225,11 +246,12 @@ async def test_scheduled_poll_skips_leader_pending_sweep(db, bus):
     host, poll = FakeHost(), FakePoll()
     blueprint = _blueprint(LEADER, TeamRole.LEADER)
     infra = _infra(db, bus, LEADER)
-    graph = await infra.task_manager.add_graph(
-        [TaskGraphSpec(title="w", content="c", task_id="t1", assignee="dev-1")]
-    )
+    # Unclaimed work — autonomous dispatch creates tasks without an assignee.
+    graph = await infra.task_manager.add_graph([TaskGraphSpec(title="w", content="c", task_id="t1")])
     assert graph.ok
-    await _age_task(db, "t1", seconds=3600)
+    # The leader has been idle past stale_pending_idle_timeout, and the roster
+    # (see _infra) reports a free teammate: exactly the autonomous stall.
+    host.idle = 700
     tick = InnerEventMessage(event_type=InnerEventType.POLL_TASK)
 
     autonomous = StaleTaskHandler(host, blueprint, infra, poll)
@@ -239,7 +261,49 @@ async def test_scheduled_poll_skips_leader_pending_sweep(db, bus):
     host.delivered.clear()
     scheduled = ScheduledStaleTaskHandler(host, blueprint, infra, poll)
     await scheduled.on_poll_task(tick)
-    assert host.delivered == []  # queued PENDING(assignee) is normal here
+    assert host.delivered == []  # scheduled never runs the pending sweep at all
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stall_thresholds_come_from_the_spec(db, bus):
+    """Stall thresholds are per-team tunables read off the spec (F_65)."""
+    host, poll = FakeHost(), FakePoll()
+    blueprint = _blueprint(LEADER, TeamRole.LEADER)
+    blueprint.spec.stale_claim_idle_timeout = 120
+    blueprint.spec.stale_pending_idle_timeout = 300
+    infra = _infra(db, bus, LEADER)
+
+    handler = StaleTaskHandler(host, blueprint, infra, poll)
+
+    assert handler._idle_claim_seconds == 120.0
+    assert handler._idle_pending_seconds == 300.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_scheduled_claim_sweep_still_reads_updated_at(db, bus):
+    """Scheduled dispatch keeps the pre-F_65 ``updated_at`` claim sweep.
+
+    Re-basing scheduled onto the runtime idle clock was deliberately out of
+    F_65's scope. The sweep must therefore still fire off an aged task row
+    even though no idle clock is reported at all (``host.idle is None``) —
+    a state that vetoes the autonomous sweep outright.
+    """
+    host, poll = FakeHost(), FakePoll()
+    blueprint = _blueprint("dev-1", TeamRole.TEAMMATE)
+    infra = _infra(db, bus, "dev-1")
+    graph = await infra.task_manager.add_graph([TaskGraphSpec(title="w", content="c", task_id="t9")])
+    assert graph.ok
+    claimed = await infra.task_manager.claim("t9")
+    assert claimed.ok
+    await _age_task(db, "t9", seconds=3600)
+    host.idle = None
+
+    scheduled = ScheduledStaleTaskHandler(host, blueprint, infra, poll)
+    await scheduled.on_poll_task(InnerEventMessage(event_type=InnerEventType.POLL_TASK))
+
+    assert len(host.delivered) == 1
 
 
 @pytest.mark.asyncio

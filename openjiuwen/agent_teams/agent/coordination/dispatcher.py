@@ -73,6 +73,15 @@ class AgentRoundController(Protocol):
         """Return whether the agent is in an active round."""
         ...
 
+    def idle_seconds(self) -> float | None:
+        """Return seconds since this member last settled into runtime IDLE.
+
+        ``None`` while the member is mid-round or has never settled. Measured
+        off a process-local monotonic clock re-based on resume, so a paused
+        team never inflates it.
+        """
+        ...
+
     def has_in_flight_round(self) -> bool:
         """Return whether an agent round is scheduled and not yet finalized."""
         ...

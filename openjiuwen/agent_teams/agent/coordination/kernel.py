@@ -204,6 +204,15 @@ class CoordinationKernel:
                 )
 
         await host.update_status(MemberStatus.READY)
+        # Re-base the idle clock before the poll timers come back. A member
+        # that was already idle when the team paused keeps its idle stamp
+        # while the monotonic clock runs through the entire pause window, and
+        # — having no suspended round to resume — never re-enters IDLE to
+        # re-stamp itself. Without this the first POLL_TASK of this run cycle
+        # would read the whole pause as idle time and fire a bogus stall
+        # nudge. No-op on a cold start (idle_since is None) and for a member
+        # that paused mid-round (idle_since is None while BUSY).
+        host.refresh_idle_baseline()
         if not self._event_bus.is_running:
             if self._dispatcher is None:
                 raise RuntimeError("CoordinationKernel.start() requires setup() before start()")
