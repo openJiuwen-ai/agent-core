@@ -35,18 +35,14 @@ from openjiuwen.agent_evolving.optimizer.skill_call import (
 from openjiuwen.agent_evolving.signal import (
     SignalDetector,
     EvolutionSignal,
-    EvolutionCategory,
     make_signal_fingerprint,
 )
 from openjiuwen.agent_evolving.trajectory import (
-    LegacyTrajectory,
     Trajectory,
     TrajectoryStore,
 )
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.active_skill_bodies import normalize_skill_relative_file_path
-from openjiuwen.core.context_engine.qa_block.registry import load_registry
-from openjiuwen.core.context_engine.qa_block.store import QABlockStore
 from openjiuwen.core.operator.skill_call import SkillCallOperator
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.sys_operation import SysOperation
@@ -57,10 +53,6 @@ _MAX_PROCESSED_SIGNAL_KEYS = 500
 _EVAL_SNIPPET_MAX_MESSAGES = 20
 _EVAL_SNIPPET_MAX_CONTENT_CHARS = 200
 _EVAL_SNIPPET_POST_PRESENT_MAX_CHARS = 800
-# Cap on how many recent history QA blocks are loaded for evolution context.
-# Bounds memory/disk-IO/token cost in long sessions; only the most recent N
-# blocks (by qa_index) participate in evolution signal detection.
-_MAX_QA_HISTORY_BLOCKS = 20
 _UI_SUMMARY_RECORD_PREVIEW_CHARS = 400
 _UI_SUMMARY_SIGNAL_PREVIEW_CHARS = 280
 _UI_SUMMARY_LLM_MAX_ATTEMPTS = 3
@@ -412,11 +404,7 @@ class SkillEvolutionRail(EvolutionRail):
             # after_invoke from the full conversation (see _build_evaluation_snippet).
             await self._track_presented_records(ctx, skill_name, "")
 
-    async def run_evolution(
-        self,
-        trajectory: Union[Trajectory, LegacyTrajectory],
-        ctx: AgentCallbackContext,
-    ) -> None:
+    async def run_evolution(self, trajectory: Trajectory, ctx: AgentCallbackContext) -> None:
         """Run skill evolution based on the collected trajectory.
 
         This is called by EvolutionRail.after_invoke after the trajectory is saved.
@@ -424,8 +412,7 @@ class SkillEvolutionRail(EvolutionRail):
         to align with EvolutionRail's design pattern.
 
         Args:
-            trajectory: Complete trajectory for this conversation
-                (OTLP Trajectory preferred; LegacyTrajectory also accepted)
+            trajectory: Complete OTLP trajectory for this conversation
             ctx: Callback context
         """
         logger.info("[SkillEvolutionRail] run_evolution called, auto_scan=%s", self._auto_scan)
@@ -435,7 +422,7 @@ class SkillEvolutionRail(EvolutionRail):
             return
 
         try:
-            parsed_messages = await self._collect_parsed_messages(ctx)
+            parsed_messages = await self._collect_parsed_messages(trajectory)
             logger.info("[SkillEvolutionRail] collected %d parsed messages", len(parsed_messages))
             if not parsed_messages:
                 logger.info("[SkillEvolutionRail] no parsed messages, skipping")
@@ -444,23 +431,41 @@ class SkillEvolutionRail(EvolutionRail):
             skill_names = self._evolution_store.list_skill_names()
             logger.info("[SkillEvolutionRail] found %d local skills", len(skill_names))
 
-            signals = await self._detect_signals(parsed_messages, skill_names)
-            logger.info("[SkillEvolutionRail] detected %d signal(s)", len(signals))
+            detector = SignalDetector(
+                existing_skills={name for name in skill_names if self._evolution_store.skill_exists(name)}
+            ).bind_llm(
+                llm=self._evolver.llm,
+                model=self._evolver.model,
+                language=self._language,
+            )
+            detected = detector.detect_trajectory_signals(
+                trajectory,
+                signal_types={"execution_failure", "script_artifact"},
+            )
+            try:
+                feedback_signals = await detector.detect_user_intent(trajectory)
+            except Exception as _fb_exc:
+                logger.warning(
+                    "[SkillEvolutionRail] user feedback signal detection failed: %s",
+                    _fb_exc,
+                )
+                feedback_signals = []
+            if feedback_signals:
+                logger.info(
+                    "[SkillEvolutionRail] detected %d user feedback signal(s)",
+                    len(feedback_signals),
+                )
+                detected = [*detected, *feedback_signals]
 
-            if not signals:
-                primary_skill = self._infer_primary_skill(parsed_messages, skill_names)
-                logger.info("[SkillEvolutionRail] no signals, inferred primary skill: %s", primary_skill)
-                if primary_skill:
-                    signals = [
-                        EvolutionSignal(
-                            signal_type="conversation_review",
-                            evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
-                            section="",
-                            excerpt="[Auto] No rule-based signals. Analyze conversation for implicit experiences.",
-                            skill_name=primary_skill,
-                        )
-                    ]
-                # Continue to new skill detection when no signals and no primary skill
+            signals: List[EvolutionSignal] = []
+            for signal in detected:
+                fp = make_signal_fingerprint(signal)
+                if fp not in self._processed_signal_keys:
+                    self._processed_signal_keys.add(fp)
+                    signals.append(signal)
+            if len(self._processed_signal_keys) > _MAX_PROCESSED_SIGNAL_KEYS:
+                self._processed_signal_keys.clear()
+            logger.info("[SkillEvolutionRail] detected %d signal(s)", len(signals))
 
             attributed_skills = {s.skill_name for s in signals if s.skill_name}
             unattributed = [s for s in signals if not s.skill_name]
@@ -475,10 +480,30 @@ class SkillEvolutionRail(EvolutionRail):
                     continue
                 skill_groups.setdefault(signal.skill_name, []).append(signal)
 
-            # Branch 1: Evolve existing skills (when signals are attributed to known skills)
-            existing_skill_processed = False
+            if not skill_groups:
+                if signals:
+                    message = (
+                        "detected evolution signals but no skill could be attributed; "
+                        "cancelling skill evolution review"
+                    )
+                else:
+                    message = (
+                        "no skill usage or actionable evolution signal detected; "
+                        "cancelling skill evolution review"
+                    )
+                logger.info("[SkillEvolutionRail] %s", message)
+                await self._trigger_async_evaluation(ctx, parsed_messages)
+                return
+
+            attributed_signal_count = sum(len(skill_signals) for skill_signals in skill_groups.values())
+            logger.info(
+                "[SkillEvolutionRail] detected %d signal(s) attributed to %d skill(s)",
+                attributed_signal_count,
+                len(skill_groups),
+            )
+
+            # Evolve existing skills (when signals are attributed to known skills)
             for skill_name, skill_signals in skill_groups.items():
-                existing_skill_processed = True
                 if self._auto_save:
                     # Auto-save path: persist immediately without user approval
                     records = await self._generate_experience_for_skill(
@@ -507,20 +532,6 @@ class SkillEvolutionRail(EvolutionRail):
                     )
                     if has_staged:
                         await self._emit_generated_records(ctx, skill_name)
-
-            # Branch 2: Detect new skill creation (only when no existing skill was processed)
-            logger.info(
-                "[SkillEvolutionRail] existing_skill_processed=%s, "
-                "new_skill_detection=%s",
-                existing_skill_processed,
-                self._new_skill_detection,
-            )
-            if not existing_skill_processed and self._new_skill_detection:
-                logger.info("[SkillEvolutionRail] checking for new skill creation opportunity")
-                should_propose = await self._should_propose_new_skill(parsed_messages)
-                logger.info("[SkillEvolutionRail] new_skill_conditions_met=%s", should_propose)
-                if should_propose:
-                    await self._emit_new_skill_create_suggestion(ctx)
 
             # Trigger async evaluation if interval reached
             await self._trigger_async_evaluation(ctx, parsed_messages)
@@ -894,180 +905,51 @@ class SkillEvolutionRail(EvolutionRail):
             skill_name,
         )
 
-    async def _load_qa_block_history(self, ctx: AgentCallbackContext) -> List[dict]:
-        """Load historical QA block messages from disk for evolution context.
-
-        Reads completed QA blocks (``is_history=True``) from the QA Block
-        filesystem store and returns their messages as parsed dicts, ordered
-        chronologically by ``qa_index``.
-
-        Returns an empty list when the QA Block system is unavailable
-        (no workspace, no session, empty registry, or I/O errors).
-        """
-        if self.workspace is None:
-            logger.debug("[SkillEvolutionRail] workspace not available, skip QA history")
-            return []
-        if ctx.session is None:
-            logger.debug("[SkillEvolutionRail] session not available, skip QA history")
+    async def _collect_parsed_messages(
+        self,
+        trajectory: Optional[Trajectory],
+    ) -> List[dict]:
+        """Convert trajectory steps into parsed message dicts for evolution."""
+        if trajectory is None:
             return []
 
-        try:
-            registry = load_registry(ctx.session)
-            if not registry.blocks:
-                logger.debug("[SkillEvolutionRail] no QA blocks in registry")
-                return []
-
-            all_history = sorted(
-                [e for e in registry.blocks.values() if e.is_history],
-                key=lambda e: e.qa_index,
-            )
-            total_history_blocks = len(all_history)
-            # Keep only the most recent N blocks to bound memory/IO/token cost.
-            history_blocks = all_history[-_MAX_QA_HISTORY_BLOCKS:]
-            if not history_blocks:
-                logger.debug("[SkillEvolutionRail] no history blocks found")
-                return []
-
-            session_id = ctx.session.get_session_id()
-            store = QABlockStore(
-                workspace_root=str(self.workspace.root_path),
-                session_id=session_id,
-                sys_operation=self.sys_operation,
-            )
-
-            all_messages: list[Any] = []
-            loaded_count = 0
-            for entry in history_blocks:
-                try:
-                    messages = await store.read_l0(entry.qa_id)
-                    if messages:
-                        all_messages.extend(messages)
-                        loaded_count += 1
-                except Exception as exc:
-                    logger.warning(
-                        "[SkillEvolutionRail] read QA block %s failed: %s",
-                        entry.qa_id, exc,
-                    )
-
-            result = self._parse_messages(all_messages)
-            logger.debug(
-                "[SkillEvolutionRail] loaded %d QA history message(s) "
-                "from %d block(s) (capped to last %d of %d total history blocks)",
-                len(result), loaded_count,
-                _MAX_QA_HISTORY_BLOCKS, total_history_blocks,
-            )
-            return result
-
-        except Exception as exc:
-            logger.warning(
-                "[SkillEvolutionRail] QA block history loading failed: %s", exc,
-            )
-            return []
-
-    async def _collect_parsed_messages(self, ctx: AgentCallbackContext) -> List[dict]:
-        messages: List[Any] = []
-
-        # 1) preferred path: context directly carried on callback context
-        if ctx.context is not None:
-            try:
-                messages = list(ctx.context.get_messages())
-            except Exception as exc:
-                logger.debug("[SkillEvolutionRail] read ctx.context messages failed: %s", exc)
-
-        # 2) fallback for DeepAgent outer AFTER_INVOKE hooks: load from inner context engine
-        if not messages and ctx.session is not None:
-            agent_obj = ctx.agent
-            inner_agent = getattr(agent_obj, "_react_agent", None)
-            if inner_agent is not None and hasattr(inner_agent, "context_engine"):
-                try:
-                    context = await inner_agent.context_engine.create_context(session=ctx.session)
-                    messages = list(context.get_messages())
-                except Exception as exc:
-                    logger.debug(
-                        "[SkillEvolutionRail] load messages from inner context_engine failed: %s",
-                        exc,
-                    )
-
-        parsed_messages = self._parse_messages(messages)
+        parsed_messages = SignalDetector.convert_trajectory_to_messages(trajectory)
         logger.debug(
-            "[SkillEvolutionRail] _parse_messages result full content:\n%s",
+            "[SkillEvolutionRail] trajectory parsed_messages full content:\n%s",
             parsed_messages,
         )
         logger.info(
-            "[SkillEvolutionRail] buffer messages: %d (before QA history prepend)",
+            "[SkillEvolutionRail] buffer messages from trajectory: %d",
             len(parsed_messages),
         )
-
-        # 3) prepend QA block history for full cross-QA conversation context
-        try:
-            logger.debug("[SkillEvolutionRail] loading QA block history...")
-            qa_history = await self._load_qa_block_history(ctx)
-            logger.info(
-                "[SkillEvolutionRail] QA block history loaded: %d messages",
-                len(qa_history),
-            )
-            logger.debug(
-                "[SkillEvolutionRail] QA block history full content:\n%s",
-                qa_history,
-            )
-            if qa_history:
-                merged = qa_history + parsed_messages
-                before_dedup = len(merged)
-                parsed_messages = self._dedup_messages(merged)
-                removed = before_dedup - len(parsed_messages)
-                logger.debug(
-                    "[SkillEvolutionRail] merged parsed_messages full content (after dedup):\n%s",
-                    parsed_messages,
-                )
-                logger.info(
-                    "[SkillEvolutionRail] prepended %d QA history messages "
-                    "to %d buffer messages, before dedup: %d, "
-                    "removed %d duplicates, after dedup: %d",
-                    len(qa_history),
-                    before_dedup - len(qa_history),
-                    before_dedup,
-                    removed,
-                    len(parsed_messages),
-                )
-        except Exception as exc:
-            logger.warning(
-                "[SkillEvolutionRail] QA history prepend failed, "
-                "proceeding with buffer only: %s", exc,
-            )
-
         return parsed_messages
 
-    async def _detect_signals(
-        self,
-        parsed_messages: List[dict],
-        skill_names: List[str],
-    ) -> List[EvolutionSignal]:
-        existing_skills = {name for name in skill_names if self._evolution_store.skill_exists(name)}
-        detector = SignalDetector(
-            existing_skills=existing_skills,
-            llm=self._optimizer_llm,
-            model=self._optimizer_model,
-            language=self._optimizer_language,
-        )
-        detected = await detector.detect(parsed_messages)
+    @staticmethod
+    def _tool_call_name(tool_call: Any) -> str:
+        """Return tool name from flat or OpenAI-nested tool_call dicts."""
+        if not isinstance(tool_call, dict):
+            return ""
+        name = str(tool_call.get("name") or "")
+        if name:
+            return name
+        function = tool_call.get("function")
+        if isinstance(function, dict):
+            return str(function.get("name") or "")
+        return ""
 
-        new_signals: List[EvolutionSignal] = []
-        for signal in detected:
-            fp = make_signal_fingerprint(signal)
-            if fp not in self._processed_signal_keys:
-                self._processed_signal_keys.add(fp)
-                new_signals.append(signal)
-
-        if len(self._processed_signal_keys) > _MAX_PROCESSED_SIGNAL_KEYS:
-            self._processed_signal_keys.clear()
-
-        if new_signals:
-            logger.info(
-                "[SkillEvolutionRail] detected %d new signal(s), filtered=%d",
-                len(new_signals),
-                len(detected) - len(new_signals),
-            )
-        return new_signals
+    @staticmethod
+    def _tool_call_arguments(tool_call: Any) -> str:
+        """Return tool arguments from flat or OpenAI-nested tool_call dicts."""
+        if not isinstance(tool_call, dict):
+            return ""
+        arguments = tool_call.get("arguments", "")
+        if arguments not in ("", None):
+            return arguments if isinstance(arguments, str) else str(arguments)
+        function = tool_call.get("function")
+        if isinstance(function, dict):
+            nested = function.get("arguments", "")
+            return nested if isinstance(nested, str) else str(nested or "")
+        return ""
 
     def _infer_primary_skill(
         self,
@@ -1083,9 +965,22 @@ class SkillEvolutionRail(EvolutionRail):
             if role in ("tool", "function"):
                 texts.append(msg.get("content", ""))
             elif role == "assistant":
-                texts.extend(tc.get("arguments", "") for tc in msg.get("tool_calls", []))
+                for tc in msg.get("tool_calls", []) or []:
+                    arguments = self._tool_call_arguments(tc)
+                    if arguments:
+                        texts.append(arguments)
+                    # skill_tool also carries skill_name directly
+                    if self._tool_call_name(tc).lower() == "skill_tool":
+                        try:
+                            args = json.loads(arguments) if isinstance(arguments, str) else {}
+                        except (json.JSONDecodeError, TypeError):
+                            args = {}
+                        if isinstance(args, dict):
+                            sn = str(args.get("skill_name") or "").strip()
+                            if sn and sn in skill_set:
+                                hits[sn] = hits.get(sn, 0) + 1
             for text in texts:
-                for matched in self._SKILL_MD_RE.finditer(text):
+                for matched in self._SKILL_MD_RE.finditer(str(text)):
                     name = matched.group(1)
                     if name in skill_set:
                         hits[name] = hits.get(name, 0) + 1
@@ -1316,37 +1211,6 @@ class SkillEvolutionRail(EvolutionRail):
         return str(file_path) if file_path else ""
 
     @classmethod
-    def _parse_messages(cls, messages: List[Any]) -> List[dict]:
-        result: List[dict] = []
-        for message in messages:
-            if isinstance(message, dict):
-                result.append(message)
-                continue
-
-            role = getattr(message, "role", "")
-            content = str(getattr(message, "content", "") or "")
-
-            item: dict = {"role": role, "content": content}
-
-            tool_calls = getattr(message, "tool_calls", None)
-            if tool_calls:
-                item["tool_calls"] = [
-                    {
-                        "id": getattr(tool_call, "id", ""),
-                        "name": getattr(tool_call, "name", ""),
-                        "arguments": getattr(tool_call, "arguments", ""),
-                    }
-                    for tool_call in tool_calls
-                ]
-
-            name = getattr(message, "name", None)
-            if name:
-                item["name"] = name
-
-            result.append(item)
-        return result
-
-    @classmethod
     def _find_skill_load_anchor(cls, messages: List[dict], skill_name: str) -> int:
         """Return the index of the last SKILL.md load for *skill_name*, or -1."""
         anchor = -1
@@ -1410,33 +1274,6 @@ class SkillEvolutionRail(EvolutionRail):
         anchor = cls._find_skill_load_anchor(messages, skill_name)
         start = anchor if anchor >= 0 else max(0, len(messages) - _EVAL_SNIPPET_MAX_MESSAGES)
         return cls._format_messages_snippet(messages, start=start)
-
-    @staticmethod
-    def _dedup_messages(messages: List[dict]) -> List[dict]:
-        """Remove duplicate messages while preserving order (keep first occurrence).
-
-        Fingerprint is based on (role, content, tool_calls, name).
-        """
-        seen: set = set()
-        result: List[dict] = []
-        for msg in messages:
-            # Build a stable fingerprint. content may be a str or a list
-            # (OpenAI multimodal parts, e.g. [{"type": "text", "text": "..."}]);
-            # json.dumps(sort_keys=True) keeps the fingerprint stable regardless
-            # of dict key ordering, matching how tool_calls is fingerprinted.
-            fp_parts = [
-                msg.get("role", ""),
-                json.dumps(msg.get("content", ""), sort_keys=True, ensure_ascii=False),
-                msg.get("name", ""),
-            ]
-            tool_calls = msg.get("tool_calls")
-            if tool_calls:
-                fp_parts.append(json.dumps(tool_calls, sort_keys=True, ensure_ascii=False))
-            fingerprint = "||".join(str(p) for p in fp_parts)
-            if fingerprint not in seen:
-                seen.add(fingerprint)
-                result.append(msg)
-        return result
 
     # Session-level state isolation helpers
     def _get_session_presented_records(
@@ -1583,7 +1420,7 @@ class SkillEvolutionRail(EvolutionRail):
         try:
             eval_messages = parsed_messages
             if not eval_messages:
-                eval_messages = await self._collect_parsed_messages(ctx)
+                return
 
             by_skill_records: Dict[str, List[EvolutionRecord]] = {}
             seen_ids: Dict[str, Set[str]] = {}
@@ -1669,10 +1506,9 @@ class SkillEvolutionRail(EvolutionRail):
         # Check tool diversity
         unique_tools = set()
         for call in tool_calls:
-            if isinstance(call, dict):
-                name = call.get("name", "")
-                if name:
-                    unique_tools.add(name)
+            name = self._tool_call_name(call)
+            if name:
+                unique_tools.add(name)
 
         logger.info(
             "[SkillEvolutionRail] unique_tools=%d, diversity_threshold=%d",

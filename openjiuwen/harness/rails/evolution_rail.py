@@ -17,11 +17,10 @@ Core design:
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 from openjiuwen.agent_evolving.trajectory import (
     InMemoryTrajectoryStore,
-    LegacyTrajectory,
     LLMCallDetail,
     ToolCallDetail,
     Trajectory,
@@ -520,11 +519,7 @@ class EvolutionRail(DeepAgentRail):
         """
         pass
 
-    async def run_evolution(
-        self,
-        trajectory: Union[Trajectory, LegacyTrajectory],
-        ctx: AgentCallbackContext,
-    ) -> None:
+    async def run_evolution(self, trajectory: Trajectory, ctx: AgentCallbackContext) -> None:
         """Called after conversation round ends.
 
         trajectory contains the complete trajectory for this round,
@@ -532,7 +527,7 @@ class EvolutionRail(DeepAgentRail):
 
         Args:
             trajectory: Complete trajectory for this conversation round
-                (OTLP Trajectory preferred; LegacyTrajectory also accepted)
+                (OTLP Trajectory)
             ctx: Callback context with agent, session, etc.
         """
         pass

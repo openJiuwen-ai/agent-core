@@ -6,8 +6,8 @@ from typing import List, Optional
 
 from openjiuwen.agent_evolving.dataset import EvaluatedCase
 from openjiuwen.agent_evolving.signal.base import (
-    EvolutionCategory,
     EvolutionSignal,
+    make_evolution_signal,
 )
 
 
@@ -34,12 +34,12 @@ def from_evaluated_case(
 
     signal_type = "low_score" if case.score == 0 else "evaluated"
 
-    return EvolutionSignal(
+    return make_evolution_signal(
         signal_type=signal_type,
-        evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
         section="Troubleshooting",
         excerpt=f"score={case.score:.2f}",
         skill_name=operator_id or None,
+        source="offline_evaluation",
         context={
             "question": str(case.case.inputs),
             "label": str(case.case.label),

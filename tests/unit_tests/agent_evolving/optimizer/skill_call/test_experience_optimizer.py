@@ -469,6 +469,39 @@ class TestFixJsonText:
         import json
         assert json.loads(fixed) == [{"a": 1}]
 
+    @staticmethod
+    def test_preserves_https_urls_inside_strings():
+        text = '''```json
+{"content": "curl https://api.open-meteo.com/v1/forecast?x=1", "candidates": []}
+```'''
+        fixed = _fix_json_text(text)
+        import json
+        data = json.loads(fixed)
+        assert "https://api.open-meteo.com/v1/forecast?x=1" in data["content"]
+
+    @staticmethod
+    def test_parse_analyzer_response_with_https_in_content():
+        raw = '''```json
+{
+  "root_causes": [{"failure_type": "skill_instruction_gap", "confidence": 0.85, "evidence": ["x"], "should_evolve": true}],
+  "candidates": [{
+    "action": "append",
+    "target": "body",
+    "section": "Troubleshooting",
+    "content": "use `curl https://api.open-meteo.com/v1/forecast`",
+    "merge_target": "ev_ff6047b7",
+    "priority": 1
+  }]
+}
+```'''
+        from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
+            _parse_analyzer_response,
+        )
+        data = _parse_analyzer_response(raw)
+        assert data is not None
+        assert len(data["candidates"]) == 1
+        assert "https://" in data["candidates"][0]["content"]
+
 
 class TestExtractJson:
     @staticmethod
