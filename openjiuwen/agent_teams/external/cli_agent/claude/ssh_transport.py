@@ -15,6 +15,7 @@ from openjiuwen.agent_teams.external.descriptor import TEAM_JOIN_ENV
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
+from openjiuwen.core.common.logging import team_logger
 
 _REMOTE_CONNECTION_LOST = 255
 
@@ -30,7 +31,7 @@ def _load_asyncssh() -> Any:
             reason="asyncssh is not installed; install openjiuwen with the ssh extra",
             cause=exc,
         )
-        raise AssertionError  # pragma: no cover - raise_error always raises
+        raise AssertionError("raise_error should have raised") from exc
     return asyncssh
 
 
@@ -102,7 +103,7 @@ def build_claude_sdk_ssh_transport(
                     reason=str(exc),
                     cause=exc,
                 )
-                raise AssertionError  # pragma: no cover - raise_error always raises
+                raise AssertionError("raise_error should have raised") from exc
 
         async def write(self, data: str) -> None:
             """Write raw SDK protocol data to remote Claude stdin."""
@@ -157,8 +158,8 @@ def build_claude_sdk_ssh_transport(
             if process is not None:
                 try:
                     process.stdin.write_eof()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    team_logger.warning("Failed to close remote Claude stdin: {}", exc)
                 if process.exit_status is None:
                     try:
                         process.terminate()
@@ -208,7 +209,7 @@ def build_claude_sdk_ssh_transport(
                     reason=str(exc),
                     cause=exc,
                 )
-                raise AssertionError  # pragma: no cover - raise_error always raises
+                raise AssertionError("raise_error should have raised") from exc
             return self._conn
 
         async def _wait_process(self, process: Any | None = None) -> int:
@@ -218,7 +219,8 @@ def build_claude_sdk_ssh_transport(
                 return 0
             try:
                 await target.wait()
-            except Exception:
+            except Exception as exc:
+                team_logger.warning("Failed to wait for remote Claude process: {}", exc)
                 return _REMOTE_CONNECTION_LOST
             exit_status = getattr(target, "exit_status", None)
             if exit_status is None:

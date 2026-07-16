@@ -147,7 +147,9 @@ async def external_cli_spawn(
     base_query = initial_message or ""
     # Backends that accept the system prompt as a launch arg already carry it;
     # others get it prepended to their first user message.
-    if base_query and system_prompt and backend is not None and not backend.injects_system_prompt_via_arg:
+    has_launch_prompt = bool(base_query and system_prompt)
+    needs_prompt_prepend = backend is not None and not backend.injects_system_prompt_via_arg
+    if has_launch_prompt and needs_prompt_prepend:
         query = f"{system_prompt}\n\n---\n\n{base_query}"
     else:
         query = base_query

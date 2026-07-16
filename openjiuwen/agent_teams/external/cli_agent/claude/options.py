@@ -30,7 +30,7 @@ def load_claude_sdk() -> Any:
             reason="claude external CLI members require the claude-agent-sdk dependency",
             cause=exc,
         )
-        raise AssertionError  # pragma: no cover - raise_error always raises
+        raise AssertionError("raise_error should have raised") from exc
     return claude_agent_sdk
 
 
