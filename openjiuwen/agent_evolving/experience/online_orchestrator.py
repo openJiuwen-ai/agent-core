@@ -13,6 +13,7 @@ from openjiuwen.agent_evolving.experience.types import (
     EvolutionContext,
     OnlineEvolutionResult,
 )
+from openjiuwen.agent_evolving.optimizer.skill_call.tool_call_chain import build_tool_call_chain
 from openjiuwen.agent_evolving.protocols import EXPERIENCES_TARGET, USER_INTENT_SIGNAL
 from openjiuwen.agent_evolving.signal import EvolutionSignal, EvolutionTarget, get_signal_source
 from openjiuwen.agent_evolving.trajectory import Trajectory
@@ -173,15 +174,18 @@ class OnlineEvolutionOrchestrator:
             skill_name,
             EvolutionTarget.SCRIPT,
         )
+        message_list = list(messages or [])
+        language = str((metadata or {}).get("language") or "cn")
         return EvolutionContext(
             skill_name=skill_name,
             signals=list(signals),
-            messages=list(messages or []),
+            messages=message_list,
             user_query=user_query,
             skill_content=skill_content,
             existing_desc_records=existing_desc_records,
             existing_body_records=existing_body_records,
             existing_script_records=existing_script_records,
+            tool_call_chain=build_tool_call_chain(message_list, language=language),
             trajectory=trajectory,
             metadata=dict(metadata or {}),
         )

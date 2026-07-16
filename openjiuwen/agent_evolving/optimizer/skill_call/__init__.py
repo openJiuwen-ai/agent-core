@@ -3,7 +3,9 @@
 """SkillExperienceOptimizer package."""
 
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import SkillExperienceOptimizer
+from openjiuwen.agent_evolving.optimizer.skill_call.tool_call_chain import build_tool_call_chain
 
 __all__ = [
     "SkillExperienceOptimizer",
+    "build_tool_call_chain",
 ]
