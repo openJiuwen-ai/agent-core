@@ -147,6 +147,67 @@ def test_batch_interact_action_calls_code_executor_and_parses_result() -> None:
     assert "Nationality" in observed["js_code"]
 
 
+def test_batch_interact_action_logs_failed_click_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged: list[tuple[str, tuple[Any, ...]]] = []
+
+    def capture_log(message: str, *args: Any) -> None:
+        logged.append((message, args))
+
+    async def fake_code_executor(_js_code: str) -> dict[str, Any]:
+        actionability = {
+            "visible": True,
+            "enabled": True,
+            "stable": None,
+            "receives_events": True,
+            "probe_status": {"animation_frames": {"status": "timeout"}},
+        }
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "ok": False,
+                            "error": "locator.click timed out",
+                            "failed_step": {
+                                "index": 0,
+                                "op": "click",
+                                "ok": False,
+                                "actionability": actionability,
+                            },
+                            "completed_steps": [
+                                {
+                                    "index": 0,
+                                    "op": "click",
+                                    "ok": False,
+                                    "actionability": actionability,
+                                }
+                            ],
+                            "elapsed_ms": 5000,
+                        }
+                    ),
+                }
+            ]
+        }
+
+    monkeypatch.setattr(controller, "browser_agent_log_info", capture_log)
+    controller.register_example_actions()
+    controller.bind_code_executor(fake_code_executor)
+
+    result = _run(
+        controller.run_action(
+            "browser_batch_interact",
+            steps=[{"op": "click", "selector": "#submit"}],
+        )
+    )
+
+    diagnostic_logs = [entry for entry in logged if "click_diagnostics" in entry[0]]
+    assert result["ok"] is False
+    assert len(diagnostic_logs) == 1
+    assert diagnostic_logs[0][1][1:5] == (True, True, None, True)
+    assert '"animation_frames":{"status":"timeout"}' in diagnostic_logs[0][1][5]
+
+
 def test_batch_interact_action_reports_truncated_steps() -> None:
     observed: dict[str, Any] = {}
 
@@ -307,3 +368,91 @@ def test_batch_interact_script_runs_against_playwright_like_form_stub(tmp_path: 
     assert ["click", "text", "Singapore (SIN)", 3000] in payload["calls"]
     assert any(call[0] == "selectOption" and call[3] == {"label": "Singapore"} for call in payload["calls"])
     assert ["setChecked", "label", "Male", True, 3000] in payload["calls"]
+
+
+def test_batch_interact_failed_click_reports_stalled_animation_frames(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed; skipping generated JavaScript execution smoke test")
+
+    js_function = _build_batch_interact_script(
+        {
+            "steps": [{"op": "click", "selector": "#submit"}],
+            "timeout_ms": 5000,
+            "wait_after_each_ms": 0,
+            "continue_on_error": False,
+        }
+    )
+    runner = tmp_path / "run_failed_click_diagnostics.js"
+    runner.write_text(
+        textwrap.dedent(
+            f"""
+            const fn = ({js_function});
+
+            class FakeLocator {{
+              first() {{ return this; }}
+              async click() {{ throw new Error('locator.click: Timeout 5000ms exceeded.'); }}
+              async count() {{ return 1; }}
+              async isVisible() {{ return true; }}
+              async isEnabled() {{ return true; }}
+              async boundingBox() {{ return {{ x: 10, y: 20, width: 30, height: 40 }}; }}
+              async evaluate(fn) {{
+                if (String(fn).includes('requestAnimationFrame')) {{
+                  return new Promise(() => {{}});
+                }}
+                return {{
+                  document_visibility: 'visible',
+                  document_hidden: false,
+                  viewport: {{ width: 800, height: 600 }},
+                  scroll: {{ x: 0, y: 0 }},
+                  in_viewport: true,
+                  click_point: {{ x: 25, y: 40 }},
+                  receives_events: true,
+                  hit_target: {{ tag: 'button', id: 'submit', role: 'button', classes: '' }},
+                  element: {{
+                    tag: 'button', id: 'submit', role: 'button', classes: '',
+                    aria_checked: null, aria_disabled: null, aria_expanded: null, tabindex: null,
+                  }},
+                  animations: [],
+                }};
+              }}
+            }}
+
+            const locator = new FakeLocator();
+            const page = {{
+              locator: () => locator,
+              waitForTimeout: async () => new Promise((resolve) => setImmediate(resolve)),
+              evaluate: async () => 'Visible text',
+              url: () => 'https://example.test/form',
+              title: async () => 'Example form',
+            }};
+
+            fn(page).then((result) => {{
+              console.log(JSON.stringify(result));
+            }}).catch((error) => {{
+              console.error(error && error.stack ? error.stack : String(error));
+              process.exit(1);
+            }});
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [node, str(runner)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    result = json.loads(completed.stdout)
+    diagnostics = result["failed_step"]["actionability"]
+
+    assert result["ok"] is False
+    assert diagnostics["attached"] is True
+    assert diagnostics["visible"] is True
+    assert diagnostics["enabled"] is True
+    assert diagnostics["stable"] is None
+    assert diagnostics["receives_events"] is True
+    assert diagnostics["page"]["document_visibility"] == "visible"
+    assert diagnostics["animation_frames"] is None
+    assert diagnostics["probe_status"]["animation_frames"] == {"status": "timeout"}

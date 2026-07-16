@@ -40,7 +40,7 @@ from openjiuwen.harness.prompts.tools.task_tool import GENERAL_PURPOSE_AGENT_DES
 from openjiuwen.harness.tools import create_vision_tools, is_free_search_enabled
 
 import logging
-browser_agent_logger = logging.getLogger("jiuwenswarm.browser_agent")
+browser_agent_logger = logging.getLogger("openjiuwen.browser_agent")
 
 def _collect_disabled_skills_from_state(skills_dirs: list[str]) -> list[str]:
     """Read skills_state.json from each skills_dir and collect disabled skill names."""

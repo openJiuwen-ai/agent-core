@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, List, Optional
 import logging
 import time
 
-browser_agent_logger = logging.getLogger("jiuwenswarm.browser_agent")
+browser_agent_logger = logging.getLogger("openjiuwen.browser_agent")
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent

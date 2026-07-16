@@ -105,7 +105,7 @@ from openjiuwen.harness.workspace.workspace import Workspace
 
 import logging
 
-browser_agent_logger = logging.getLogger("jiuwenswarm.browser_agent")
+browser_agent_logger = logging.getLogger("openjiuwen.browser_agent")
 
 # Events bridged to the inner ReActAgent.
 _BRIDGE_EVENTS = frozenset(

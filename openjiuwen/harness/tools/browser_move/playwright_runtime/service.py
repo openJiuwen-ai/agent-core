@@ -42,7 +42,8 @@ _ctx_observer_request_id: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 
 import logging
-browser_agent_logger = logging.getLogger("jiuwenswarm.browser_agent")
+
+browser_agent_logger = logging.getLogger("openjiuwen.browser_agent")
 
 @dataclass
 class BrowserTaskProgressState:
