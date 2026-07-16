@@ -14,6 +14,15 @@ from openjiuwen.agent_teams.tools.locales import Translator
 # delivery time, so the schema stays stable across leader renames and never
 # leaks a specific identity.
 LEADER_ROLE_RECIPIENT = "leader"
+
+# Upper bound on ``content`` length, in characters. Past this size the body
+# is an artifact, not a message, and belongs in a file under the shared team
+# workspace with the message carrying only its path plus a summary. Counted
+# in characters rather than tokens: no tokenizer dependency, no per-language
+# branch, and the bound only has to be the right order of magnitude. Roughly
+# one screenful of Chinese; ordinary instructions, replies and summaries land
+# far below it.
+MAX_CONTENT_CHARS = 2000
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
@@ -54,6 +63,7 @@ class _SendMessageBase(TeamTool, ABC):
             )
         )
         self.message_manager = message_manager
+        self.t = t
         self._team = team
         self._on_teammate_created = on_teammate_created
         self.card.input_params = {
@@ -73,6 +83,9 @@ class _SendMessageBase(TeamTool, ABC):
 
         if not content:
             return ToolOutput(success=False, error="'content' is required")
+        oversize = self._reject_oversize_content(content)
+        if oversize:
+            return oversize
 
         try:
             return await self._dispatch(to_raw, content, summary)
@@ -84,6 +97,35 @@ class _SendMessageBase(TeamTool, ABC):
     async def _dispatch(self, to_raw: Any, content: str, summary: str) -> ToolOutput:
         """Route the request to a delivery primitive based on ``to``."""
         ...
+
+    def _reject_oversize_content(self, content: str) -> ToolOutput | None:
+        """Bounce an artifact-sized body back so it moves to a file handoff.
+
+        Sits in ``invoke``, ahead of ``_dispatch``, so one check covers every
+        variant and every recipient — unicast, multicast, broadcast and the
+        user alike — and also catches MCP clients, which reach ``invoke``
+        without ever validating against the schema. The rule is about the
+        shape of the content, so no recipient earns an exemption: the user
+        reads a handed-off path through their own assistant agent.
+
+        Args:
+            content: The stripped message body.
+
+        Returns:
+            A failure ``ToolOutput`` telling the caller to write a file first,
+            or ``None`` when the body is within bounds.
+        """
+        if len(content) <= MAX_CONTENT_CHARS:
+            return None
+        return ToolOutput(
+            success=False,
+            error=self.t(
+                "send_message",
+                "error_content_too_long",
+                actual=len(content),
+                limit=MAX_CONTENT_CHARS,
+            ),
+        )
 
     async def _broadcast(self, content: str, summary: str) -> ToolOutput:
         await self._auto_start_members()

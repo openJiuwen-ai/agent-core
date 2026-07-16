@@ -253,6 +253,11 @@ STRINGS: dict[str, str] = {
     ),
     "send_message.content": "消息内容，应包含明确的行动指引或信息",
     "send_message.summary": "5-10 词摘要，用于消息预览和日志",
+    "send_message.error_content_too_long": (
+        "'content' 过长（{actual} 字符，上限 {limit}）：这个体量的内容是产物，不是消息。"
+        "先用 write_file 把正文写到团队共享工作空间 .team/ 下的文件，再重发本消息，"
+        "content 里只写文件路径加一两句摘要。不要为了绕过本限制而把正文拆成多条消息。"
+    ),
     # ===== send_message_scheduled (scheduled-mode member variant) ==============
     # send_message_scheduled._desc lives in descs/cn/send_message_scheduled.md
     # ``content`` / ``summary`` are reused verbatim from the send_message keys
