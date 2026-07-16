@@ -1,36 +1,40 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Rail that configures and injects context engine processors."""
+
 from __future__ import annotations
 
 import json
-from typing import List, Tuple, Union, Dict, Any
+from typing import Any, Dict, List, Tuple, Union
 
 from pydantic import BaseModel
 
-from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
-from openjiuwen.core.foundation.llm import ModelRequestConfig
 from openjiuwen.core.context_engine import (
-    MessageSummaryOffloaderConfig,
-    DialogueCompressorConfig,
     CurrentRoundCompressorConfig,
+    DialogueCompressorConfig,
     FullCompactProcessorConfig,
+    MessageSummaryOffloaderConfig,
     MicroCompactProcessorConfig,
     ReasoningToolLoopCompactProcessorConfig,
     ToolResultBudgetProcessorConfig,
 )
+from openjiuwen.core.context_engine.context.session_memory_manager import (
+    SessionMemoryConfig,
+    SessionMemoryManager,
+)
 from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
     RoundLevelCompressorConfig,
 )
-from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig, SessionMemoryManager
+from openjiuwen.core.foundation.llm import ModelRequestConfig
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.harness.prompts.sections.reload import build_reload_section
+from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.state import (
-    DeepAgentState,
     _SESSION_RUNTIME_ATTR,
     _SESSION_STATE_KEY,
+    DeepAgentState,
 )
-from openjiuwen.harness.prompts.sections.reload import build_reload_section
 
 
 class ContextProcessorRail(DeepAgentRail):
@@ -48,16 +52,16 @@ class ContextProcessorRail(DeepAgentRail):
     priority = 85
 
     def __init__(
-            self,
-            processors: Union[
-                Tuple[str, BaseModel],
-                Tuple[str, Dict],
-                List[Tuple[str, BaseModel]],
-                List[Tuple[str, Dict]],
-                None,
-            ] = None,
-            preset: bool = True,
-            session_memory: SessionMemoryConfig | Dict[str, Any] | None = None,
+        self,
+        processors: Union[
+            Tuple[str, BaseModel],
+            Tuple[str, Dict],
+            List[Tuple[str, BaseModel]],
+            List[Tuple[str, Dict]],
+            None,
+        ] = None,
+        preset: bool = True,
+        session_memory: SessionMemoryConfig | Dict[str, Any] | None = None,
     ):
         """Initialize ContextProcessorRail.
 
@@ -91,8 +95,8 @@ class ContextProcessorRail(DeepAgentRail):
 
     @staticmethod
     def _merge_config_with_overrides(
-            base_config: BaseModel,
-            overrides: Dict,
+        base_config: BaseModel,
+        overrides: Dict,
     ) -> BaseModel:
         if not overrides:
             return base_config
@@ -102,12 +106,12 @@ class ContextProcessorRail(DeepAgentRail):
 
     @staticmethod
     def _merge_processors(
-            base: List[Tuple[str, BaseModel]],
-            overrides: List[Tuple[str, Union[BaseModel, Dict]]],
-            model_config=None,
-            model_client_config=None,
+        base: List[Tuple[str, BaseModel]],
+        overrides: List[Tuple[str, Union[BaseModel, Dict]]],
+        model_config=None,
+        model_client_config=None,
     ) -> List[Tuple[str, BaseModel]]:
-        override_map: Dict[str, Union[BaseModel, Dict]] = {key: cfg for key, cfg in overrides}
+        override_map: Dict[str, Union[BaseModel, Dict]] = dict(overrides)
         base_override_keys = {key for key, _ in base if key in override_map}
 
         def _build_merged_cfg(key: str, override_cfg: Union[BaseModel, Dict], base_cfg: BaseModel = None) -> BaseModel:
@@ -147,9 +151,9 @@ class ContextProcessorRail(DeepAgentRail):
         return result
 
     def _build_preset_processors(
-            self,
-            model_config=None,
-            model_client_config=None,
+        self,
+        model_config=None,
+        model_client_config=None,
     ) -> List[Tuple[str, BaseModel]]:
         if model_config is not None:
             model_cfg = ModelRequestConfig.model_copy(model_config)
@@ -161,21 +165,15 @@ class ContextProcessorRail(DeepAgentRail):
                     "ToolResultBudgetProcessor",
                     ToolResultBudgetProcessorConfig(),
                 ),
-                (
-                    "MicroCompactProcessor",
-                    MicroCompactProcessorConfig()
-                ),
+                ("MicroCompactProcessor", MicroCompactProcessorConfig()),
                 (
                     "ReasoningToolLoopCompactProcessor",
                     ReasoningToolLoopCompactProcessorConfig(),
                 ),
                 (
                     "FullCompactProcessor",
-                    FullCompactProcessorConfig(
-                        model=model_config,
-                        model_client=model_client_config
-                    ),
-                )
+                    FullCompactProcessorConfig(model=model_config, model_client=model_client_config),
+                ),
             ]
         else:
             presets: List[Tuple[str, BaseModel]] = [
@@ -221,7 +219,7 @@ class ContextProcessorRail(DeepAgentRail):
                         keep_recent_messages=6,
                         model=model_cfg,
                         model_client=model_client_config,
-                    )
+                    ),
                 ),
             ]
         return presets
@@ -258,6 +256,11 @@ class ContextProcessorRail(DeepAgentRail):
             )
 
         config.context_processors = all_processors
+        processor_paths = ", ".join(
+            f"{name}={processor_config.__class__.__module__}.{processor_config.__class__.__qualname__}"
+            for name, processor_config in all_processors
+        )
+        logger.info("context processors initialized: %s", processor_paths)
 
         self._all_processors = all_processors
         context_engine_config = getattr(config, "context_engine_config", None)
@@ -272,7 +275,6 @@ class ContextProcessorRail(DeepAgentRail):
         config = getattr(getattr(agent, "react_agent", None), "_config", None)
         if config is not None:
             config.context_processors = []
-
 
         if self._system_prompt_builder is not None:
             self._system_prompt_builder.remove_section("offload")
@@ -363,7 +365,7 @@ class ContextProcessorRail(DeepAgentRail):
     @staticmethod
     async def fix_incomplete_tool_context(ctx: AgentCallbackContext) -> None:
         """Validate and fix incomplete context messages before entering ReAct loop."""
-        from openjiuwen.core.foundation.llm import ToolMessage, AssistantMessage
+        from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage
 
         try:
             context = ctx.context
@@ -387,14 +389,16 @@ class ContextProcessorRail(DeepAgentRail):
                 if not tool_calls:
                     return
                 for tc in tool_calls:
-                    arguments = getattr(tc, "arguments", '{}')
+                    arguments = getattr(tc, "arguments", "{}")
                     arguments = ContextProcessorRail._ensure_json_arguments(arguments)
                     if hasattr(tc, "arguments"):
                         tc.arguments = arguments
-                    tool_id_cache.append({
-                        "tool_call_id": getattr(tc, "id", ""),
-                        "tool_name": getattr(tc, "name", ""),
-                    })
+                    tool_id_cache.append(
+                        {
+                            "tool_call_id": getattr(tc, "id", ""),
+                            "tool_name": getattr(tc, "name", ""),
+                        }
+                    )
 
             async def _flush_pending_tools() -> None:
                 nonlocal tool_message_cache
@@ -402,11 +406,13 @@ class ContextProcessorRail(DeepAgentRail):
                     await context.add_messages(tool_msg)
                 tool_message_cache = {}
                 for tc in tool_id_cache:
-                    await context.add_messages(ToolMessage(
-                        content=f"[Tool execution interrupted] Tool {tc['tool_name']}\
+                    await context.add_messages(
+                        ToolMessage(
+                            content=f"[Tool execution interrupted] Tool {tc['tool_name']}\
                          was interrupted by user during execution, no result available.",
-                        tool_call_id=tc["tool_call_id"],
-                    ))
+                            tool_call_id=tc["tool_call_id"],
+                        )
+                    )
                 tool_id_cache.clear()
 
             for msg in popped:
@@ -434,6 +440,7 @@ class ContextProcessorRail(DeepAgentRail):
                 await _flush_pending_tools()
         except Exception as e:
             import traceback
+
             logger.warning("Failed to fix incomplete tool context: %s\n%s", e, traceback.format_exc())
 
     # ============================================================================

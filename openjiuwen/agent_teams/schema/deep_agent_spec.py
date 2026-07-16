@@ -457,6 +457,17 @@ class DeepAgentSpec(BaseModel):
     completion_timeout: float = 600.0
     progressive_tool: Optional[ProgressiveToolSpec] = None
     approval_required_tools: Optional[list[str]] = None
+    context_engine_config: Optional[Any] = None
+    """Context engine configuration forwarded to ``DeepAgentConfig``.
+
+    When set, this is passed to ``resolve_deep_agent_parts()`` and ultimately to
+    ``DeepAgentConfig.context_engine_config``, which the inner ReAct agent
+    reads to configure context compression (``context_window_tokens``,
+    compressor thresholds, etc.).
+
+    JSON-serializable — typically a dict matching ``ContextEngineConfig``
+    or the model itself when used in-process.
+    """
 
     def _resolve_tools(
         self,
@@ -555,6 +566,7 @@ class DeepAgentSpec(BaseModel):
             restrict_to_work_dir=self.restrict_to_sandbox,
             auto_create_workspace=self.auto_create_workspace,
             completion_timeout=self.completion_timeout,
+            context_engine_config=self.context_engine_config,
             **self._progressive_tool_kwargs(),
         )
 

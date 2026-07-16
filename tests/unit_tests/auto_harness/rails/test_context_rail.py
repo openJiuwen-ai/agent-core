@@ -45,10 +45,13 @@ def test_auto_harness_context_rail_init_keeps_context_processors():
     rail.init(agent)
 
     processors = dict(agent.react_agent._config.context_processors)
-    assert "DialogueCompressor" in processors
-    assert "MessageSummaryOffloader" in processors
-    assert "CurrentRoundCompressor" in processors
-    assert "RoundLevelCompressor" in processors
+    assert list(processors) == [
+        "MessageSummaryOffloader",
+        "ReasoningToolLoopCompactProcessor",
+        "DialogueCompressor",
+        "CurrentRoundCompressor",
+        "RoundLevelCompressor",
+    ]
 
 
 @pytest.mark.asyncio
@@ -60,9 +63,7 @@ async def test_auto_harness_context_rail_skips_prompt_section_injection():
 
     ctx = AgentCallbackContext(
         agent=agent,
-        inputs=ModelCallInputs(
-            messages=[{"role": "user", "content": "test"}]
-        ),
+        inputs=ModelCallInputs(messages=[{"role": "user", "content": "test"}]),
         session=None,
     )
     await rail.before_model_call(ctx)
