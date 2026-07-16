@@ -1644,7 +1644,7 @@ async def test_team_after_tool_call_records_skill_tool_evolution_detail_read(tmp
     rail._experience_tracker.record_presented_records.assert_awaited_once_with(
         session=session,
         skill_name="team-skill-a",
-        presentation_snippet="### [ev_body] Coordinate reviewers",
+        presentation_snippet="",
         record_ids=["ev_body"],
     )
 
@@ -1681,7 +1681,7 @@ async def test_team_after_tool_call_records_read_file_evolution_detail_read(tmp_
     rail._experience_tracker.record_presented_records.assert_awaited_once_with(
         session=session,
         skill_name="team-skill-a",
-        presentation_snippet="### [ev_body] Coordinate reviewers",
+        presentation_snippet="",
         record_ids=["ev_body"],
     )
 
@@ -1722,7 +1722,7 @@ async def test_team_auto_scan_false_still_records_evolution_detail_read(tmp_path
     rail._experience_tracker.record_presented_records.assert_awaited_once_with(
         session=session,
         skill_name="team-skill-a",
-        presentation_snippet="### [ev_body] Coordinate reviewers",
+        presentation_snippet="",
         record_ids=["ev_body"],
     )
 
@@ -1736,9 +1736,10 @@ async def test_team_run_evolution_evaluates_presented_entries_when_no_skill_dete
         rail._trajectory_source = None
         rail._detect_used_team_skill = Mock(return_value=None)
         rail._experience_tracker = Mock()
-        rail._experience_tracker.evaluate_presented = AsyncMock()
+        rail._evaluate_presented_entries = AsyncMock()
         record = _make_record("team-skill-a")
         presented_entries = [("team-skill-a", record, "snippet")]
+        messages = [{"role": "user", "content": "hello"}]
 
         await rail.run_evolution(
             trajectory_from_steps(
@@ -1754,12 +1755,12 @@ async def test_team_run_evolution_evaluates_presented_entries_when_no_skill_dete
                     steps=[],
                     source="online",
                 ),
-                "messages": [{"role": "user", "content": "hello"}],
+                "messages": messages,
                 "presented_entries": presented_entries,
             },
         )
 
-        rail._experience_tracker.evaluate_presented.assert_awaited_once_with(presented_entries)
+        rail._evaluate_presented_entries.assert_awaited_once_with(presented_entries, messages)
         events = _progress_events(await rail.drain_pending_host_events())
         stages = [event.payload["evolution_meta"]["stage"] for event in events]
         contents = [event.payload["content"] for event in events]

@@ -30,6 +30,7 @@ class EvolutionContext:
     user_query: str = ""
     trajectory: Trajectory | None = None
     existing_script_records: List[EvolutionRecord] = field(default_factory=list)
+    tool_call_chain: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
