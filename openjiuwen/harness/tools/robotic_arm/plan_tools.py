@@ -46,7 +46,9 @@ REPORT_PLAN_TOOL_CARD = ToolCard(
                     "properties": {
                         "id": {
                             "type": "string",
-                            "description": "Stable short id for this sub-task, e.g. 's1'. Keep the same id across turns.",
+                            "description": (
+                                "Stable short id for this sub-task, e.g. 's1'. Keep the same id across turns."
+                            ),
                         },
                         "description": {
                             "type": "string",

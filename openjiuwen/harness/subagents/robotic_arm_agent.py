@@ -8,7 +8,7 @@ Use ``factory_name="robotic_arm_agent"`` on :class:`SubAgentConfig` so
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.llm.model import Model
@@ -24,18 +24,15 @@ from openjiuwen.harness.tools.robotic_arm.config import RoboticArmRuntimeSetting
 from openjiuwen.harness.tools.robotic_arm.plan_tools import build_plan_tools
 from openjiuwen.harness.tools.robotic_arm.rails_factory import build_robotic_arm_rails
 
+if TYPE_CHECKING:
+    from openjiuwen.harness.workspace.workspace import Workspace
+
 try:
     from openjiuwen.harness.prompts import resolve_language
 except ImportError:
 
     def resolve_language(language: Optional[str] = None) -> str:  # type: ignore[misc]
         return language if language in {"cn", "en"} else "cn"
-
-
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from openjiuwen.harness.workspace.workspace import Workspace
 
 DEFAULT_ROBOTIC_ARM_DESCRIPTION_EN = (
     "Dedicated robotic-arm subagent: decomposes a manipulation goal into sub-tasks and grounds each "

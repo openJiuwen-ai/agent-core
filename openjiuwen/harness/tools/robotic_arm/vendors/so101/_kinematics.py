@@ -50,6 +50,7 @@ def backproject_pixel(
     px: int,
     py: int,
     depth_raw: np.ndarray,
+    *,
     camera_matrix: np.ndarray,
     depth_scale: float,
     extrinsics_cm: np.ndarray,
@@ -103,7 +104,8 @@ def in_workspace(target_m: np.ndarray, workspace_min: Sequence[float], workspace
 def approach_from_elevation(target_m: np.ndarray, elevation_deg: float) -> np.ndarray:
     """Gripper approach direction: horizontal component points from the robot
     base toward ``target_m``, vertical component is set by ``elevation_deg``
-    (0 = horizontal approach, 90 = straight down)."""
+    (0 = horizontal approach, 90 = straight down).
+    """
     elevation = np.deg2rad(np.clip(elevation_deg, 0, 90))
     horizontal = np.array([target_m[0], target_m[1], 0.0])
     norm = np.linalg.norm(horizontal)
@@ -124,7 +126,8 @@ def check_reachability(
     point_m: np.ndarray, ik_solver: "IKSolver", elevation_deg: float = 90, roll_deg: float = 0
 ) -> dict:
     """Used by the ReKep constraint-generation VLM (injected as ``check_reachability`` in
-    its sandboxed exec namespace) to verify an approach point before committing to it."""
+    its sandboxed exec namespace) to verify an approach point before committing to it.
+    """
     approach = approach_from_elevation(point_m, elevation_deg)
     result = ik_solver.solve(point_m, approach_dir=approach, roll_override=np.deg2rad(roll_deg))
     err_cm = result.error_m * 100
@@ -135,7 +138,8 @@ def check_keypoint_reachability(
     keypoints_3d: np.ndarray, ik_solver: "IKSolver", elevations: Sequence[float] = (90, 60, 45, 30, 0)
 ) -> list[dict]:
     """Per-keypoint IK error at a range of approach elevations, for the reachability
-    report that gets injected into the constraint-generation prompt."""
+    report that gets injected into the constraint-generation prompt.
+    """
     report = []
     for i, kp in enumerate(keypoints_3d):
         errors = {}
@@ -223,7 +227,8 @@ class IKSolver:
     ) -> IKResult:
         """Levenberg-Marquardt-style IK via ``scipy.optimize.minimize`` with soft
         joint-limit penalties and multiple random restarts (more robust near
-        joint limits than a single ``ikpy`` analytic solve)."""
+        joint limits than a single ``ikpy`` analytic solve).
+        """
         from scipy.optimize import minimize
 
         target_m = np.asarray(target_m, dtype=float)
@@ -298,7 +303,8 @@ class IKSolver:
     @staticmethod
     def joints_to_action(joints: np.ndarray) -> dict:
         """Convert the 7-element joint vector (index 0/6 are the fixed base/tip
-        links) into the ``lerobot`` degree-based action dict for SO-101's 5 servos."""
+        links) into the ``lerobot`` degree-based action dict for SO-101's 5 servos.
+        """
         deg = np.rad2deg(joints[1:6])
         return {
             "shoulder_pan.pos": float(deg[0]),
