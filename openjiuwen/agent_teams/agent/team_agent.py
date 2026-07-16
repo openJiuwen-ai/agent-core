@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -368,6 +369,34 @@ class TeamAgent(BaseAgent):
 
     def is_agent_running(self) -> bool:
         return self._is_agent_running()
+
+    def idle_seconds(self) -> float | None:
+        """Return seconds this member has been continuously idle, or None.
+
+        Reads the process-local idle clock stamped by
+        ``StreamController._map_state`` when the runtime settled into IDLE.
+        ``None`` means the member is mid-round (BUSY) or has never settled,
+        which is exactly what callers want: a busy member is by definition
+        not stalled.
+        """
+        idle_since = self._state.idle_since
+        if idle_since is None:
+            return None
+        return time.monotonic() - idle_since
+
+    def refresh_idle_baseline(self) -> None:
+        """Re-base the idle clock so a pause window is not counted as idle.
+
+        A member that was already idle when the team paused keeps its
+        ``idle_since`` stamp while the monotonic clock advances across the
+        whole pause — and, being idle, it has no paused round to resume, so
+        it never re-enters IDLE to re-stamp itself. Without this re-base the
+        first poll after resume would see a huge fabricated idle span. A busy
+        member holds ``idle_since is None`` and is left alone; a cold start
+        begins with ``None`` too, making this a no-op there.
+        """
+        if self._state.idle_since is not None:
+            self._state.idle_since = time.monotonic()
 
     def has_in_flight_round(self) -> bool:
         return self._has_in_flight_round()

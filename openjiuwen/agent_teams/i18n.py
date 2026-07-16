@@ -68,6 +68,15 @@ STRINGS: dict[str, dict[str, str]] = {
             "[催促] 你已认领的任务 [{task_id}] {title}（认领于 {time_info}）仍未完成。"
             "如需回顾详情请用 view_task；请继续推进，完成后用 claim_task(status='completed') 标记完成。"
         ),
+        # agent/coordination/handlers/stale_task.py — idle-clock stall nudges (autonomous, F_65)
+        "dispatcher.stale_idle_claim_self": (
+            "[催促] 你持有任务 [{task_id}] {title}，但已空闲 {minutes} 分钟未推进。"
+            "如需回顾详情请用 view_task；请继续推进，完成后用 claim_task(status='completed') 标记完成。"
+        ),
+        "dispatcher.stale_idle_claim_escalate": (
+            "[停滞上报] 我持有任务 [{task_id}] {title}，但已连续空闲 {minutes} 分钟未推进"
+            "（多次自我催促无效）。请评估是否需要问询、改派或更换成员。"
+        ),
         # agent/dispatcher.py — task assignment notification
         "dispatcher.task_assigned_to_self": (
             "[任务指派] 任务 [{task_id}] 已指派给你，请通过 view_task 工具查看任务详情并执行。"
@@ -284,6 +293,17 @@ STRINGS: dict[str, dict[str, str]] = {
             "[Nudge] Your claimed task [{task_id}] {title} (claimed {time_info}) is still open. "
             "Use view_task to review the details; keep pushing it forward and call "
             "claim_task(status='completed') when done."
+        ),
+        # agent/coordination/handlers/stale_task.py — idle-clock stall nudges (autonomous, F_65)
+        "dispatcher.stale_idle_claim_self": (
+            "[Nudge] You hold task [{task_id}] {title} but have been idle for {minutes} minute(s) "
+            "without progressing it. Use view_task to review the details; keep pushing it forward "
+            "and call claim_task(status='completed') when done."
+        ),
+        "dispatcher.stale_idle_claim_escalate": (
+            "[Stall report] I hold task [{task_id}] {title} but have been idle for {minutes} "
+            "minute(s) without progressing it (repeated self-nudges did not help). Please consider "
+            "checking in, reassigning, or replacing the assignee."
         ),
         # agent/dispatcher.py — task assignment notification
         "dispatcher.task_assigned_to_self": (

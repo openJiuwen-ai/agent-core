@@ -53,6 +53,7 @@ from openjiuwen.agent_teams.schema.events import (
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.message_template import ExpandedMessage
 from openjiuwen.agent_teams.schema.team import (
+    MemberRosterEntry,
     TeamCompletionSnapshot,
     TeamMemberSpec,
     TeamRole,
@@ -1512,15 +1513,40 @@ def _make_pending_task(
     *,
     updated_at: int | None,
     title: str = "Pending work",
+    assignee: str | None = None,
 ):
     task = MagicMock()
     task.task_id = task_id
     task.title = title
     task.content = f"Work on {task_id}"
     task.status = "pending"
-    task.assignee = None
+    task.assignee = assignee
     task.updated_at = updated_at
     return task
+
+
+def _set_idle(agent: TeamAgent, seconds: float) -> None:
+    """Put the member's runtime idle clock ``seconds`` into the past.
+
+    Autonomous stall detection reads this process-local clock rather than
+    ``task.updated_at`` (F_65), so this is what drives the sweeps.
+    """
+    agent._state.idle_since = time.monotonic() - seconds
+
+
+def _set_busy(agent: TeamAgent) -> None:
+    """Mark the member mid-round: a busy member has no idle clock at all."""
+    agent._state.idle_since = None
+
+
+def _stub_free_roster(agent: TeamAgent, *, free: bool = True) -> None:
+    """Give the leader a roster with (or without) an idle teammate on it."""
+    status = MemberStatus.READY.value if free else MemberStatus.BUSY.value
+    backend = MagicMock()
+    backend.list_member_roster = AsyncMock(
+        return_value=[MemberRosterEntry(member_name="dev-1", display_name="Dev", status=status)],
+    )
+    agent._configurator.team_backend = backend
 
 
 @pytest.mark.asyncio
@@ -1533,8 +1559,8 @@ async def test_stale_claim_leader_ignores_other_members_claim():
     leader neither messages the assignee nor feeds its own loop.
     """
     agent = _make_leader()
-    # updated_at at wall clock 0 → ancient → well past the threshold.
     stale_task = _make_claimed_task("task-1", assignee="dev-1", updated_at=0)
+    _set_idle(agent, 700)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale_task])
@@ -1544,10 +1570,11 @@ async def test_stale_claim_leader_ignores_other_members_claim():
 
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
 
-    # The scan sweeps the three owned in-flight nodes: PLANNING, IN_PROGRESS,
-    # IN_REVIEW. Either way it stays self-only and never touches a teammate.
+    # Only the two conditions the member itself is expected to push are
+    # swept. IN_REVIEW is excluded: an author idle while reviewers decide is
+    # waiting by design, not stalling (F_65).
     surveyed = {c.kwargs.get("status") for c in agent._configurator.task_manager.list_tasks.await_args_list}
-    assert surveyed == {"planning", "in_progress", "in_review"}
+    assert surveyed == {"planning", "in_progress"}
     agent._configurator.message_manager.send_message.assert_not_called()
     agent.deliver_input.assert_not_called()
     assert "task-1" not in agent._coordination.dispatcher.stale_task._last_stale_nudge
@@ -1556,17 +1583,17 @@ async def test_stale_claim_leader_ignores_other_members_claim():
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_stale_claim_leader_self_nudges_own_claim():
-    """A leader holding its own stale claim self-nudges, id + title only.
+    """A leader idle on its own active task self-nudges, id + title only.
 
     Delivery is an append (``use_steer=False``) and the body must not
     dump the full task content — the member reads details via view_task.
     """
     agent = _make_leader()
     own_task = _make_claimed_task("task-1", assignee="leader-1", updated_at=0)
+    _set_idle(agent, 700)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
-    agent._is_agent_running = lambda: False
     agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
@@ -1581,14 +1608,14 @@ async def test_stale_claim_leader_self_nudges_own_claim():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_stale_claim_fresh_task_does_not_nudge():
-    """A task just claimed (updated_at ≈ now) is under the threshold and skipped."""
+async def test_stale_claim_recently_idle_does_not_nudge():
+    """A member that only just went idle is under the threshold and skipped."""
     agent = _make_leader()
-    fresh_ms = int(time.time() * 1000)
-    fresh_task = _make_claimed_task("task-2", assignee="leader-1", updated_at=fresh_ms)
+    own_task = _make_claimed_task("task-2", assignee="leader-1", updated_at=0)
+    _set_idle(agent, 5)
 
     agent._configurator.task_manager = MagicMock()
-    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[fresh_task])
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
     agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
@@ -1599,10 +1626,35 @@ async def test_stale_claim_fresh_task_does_not_nudge():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_stale_claim_busy_member_is_never_stalled():
+    """A member mid-round is never nudged, however ancient its task row is.
+
+    ``updated_at`` is 0 (epoch) here, which the pre-F_65 sweep would have
+    read as a huge stall. Only the idle clock decides now, and a busy member
+    has none — "busy" is simply unrepresentable as a stall.
+    """
+    agent = _make_teammate()
+    agent._state.team_member = None
+    own_task = _make_claimed_task("task-4", assignee="dev-1", updated_at=0)
+    _set_busy(agent)
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
+    agent.deliver_input = AsyncMock()
+
+    await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
+
+    agent.deliver_input.assert_not_called()
+    assert "task-4" not in agent._coordination.dispatcher.stale_task._last_stale_nudge
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_stale_claim_throttles_follow_up_polls():
     """After one nudge, follow-up polls in the same window do not re-nudge."""
     agent = _make_leader()
     stale_task = _make_claimed_task("task-1b", assignee="leader-1", updated_at=0)
+    _set_idle(agent, 700)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale_task])
@@ -1617,14 +1669,14 @@ async def test_stale_claim_throttles_follow_up_polls():
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_stale_claim_self_nudge_when_idle():
-    """Teammate nudges itself via start_agent when idle on a stale self-claim."""
+    """Teammate feeds its own loop when idle on a self-owned active task."""
     agent = _make_teammate()
     agent._state.team_member = None
     own_task = _make_claimed_task("task-3", assignee="dev-1", updated_at=0)
+    _set_idle(agent, 700)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
-    agent._is_agent_running = lambda: False
     agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
@@ -1636,64 +1688,88 @@ async def test_stale_claim_self_nudge_when_idle():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_stale_claim_self_nudge_appends_when_running():
-    """A running self-owned stale task is appended, never steered.
+async def test_stale_claim_escalates_to_leader_after_repeated_windows():
+    """Self-nudging that never lands escalates the stall to the leader once.
 
-    The nudge only tells the member to keep pushing the very task its
-    running round is already working, so it must go in as a follow-up
-    (``use_steer=False``) instead of interrupting that round.
+    The stalled member reports *itself* to the leader — the leader neither
+    polls member state nor reaches across processes to nudge it (F_53).
     """
     agent = _make_teammate()
     agent._state.team_member = None
-    own_task = _make_claimed_task("task-4", assignee="dev-1", updated_at=0)
+    own_task = _make_claimed_task("task-7", assignee="dev-1", updated_at=0)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
-    agent._is_agent_running = lambda: True
+    backend = MagicMock()
+    backend.resolve_leader_member_name = AsyncMock(return_value="leader-1")
+    agent._configurator.team_backend = backend
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.send_message = AsyncMock()
     agent.deliver_input = AsyncMock()
 
-    await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
+    handler = agent._coordination.dispatcher.stale_task
+    # Each window: idle past the threshold, sweep, then drop the throttle so
+    # the next sweep counts as the next consecutive window.
+    for _ in range(handler._STALE_CLAIM_ESCALATE_STREAK):
+        _set_idle(agent, 700)
+        handler._last_stale_nudge.clear()
+        await handler._check_stale_claimed_tasks()
 
-    agent.deliver_input.assert_awaited_once()
-    content = agent.deliver_input.await_args.args[0]
-    assert agent.deliver_input.await_args.kwargs.get("use_steer") is False
-    assert "task-4" in content
+    assert handler._stale_claim_streak["task-7"] == handler._STALE_CLAIM_ESCALATE_STREAK
+    agent._configurator.message_manager.send_message.assert_awaited_once()
+    kwargs = agent._configurator.message_manager.send_message.await_args.kwargs
+    assert kwargs["to_member_name"] == "leader-1"
+    assert kwargs["from_member_name"] == "dev-1"
+    assert "task-7" in kwargs["content"]
+
+    # A further stale window must not re-report the same stall.
+    _set_idle(agent, 700)
+    handler._last_stale_nudge.clear()
+    await handler._check_stale_claimed_tasks()
+    agent._configurator.message_manager.send_message.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_stale_claim_throttle_drops_unrelated_entries():
-    """Throttle entries for tasks no longer claimed are cleaned up."""
+    """Bookkeeping for tasks that left the owned-active set is cleaned up."""
     agent = _make_leader()
     still_claimed = _make_claimed_task("task-5", assignee="leader-1", updated_at=0)
+    _set_idle(agent, 700)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[still_claimed])
     agent.deliver_input = AsyncMock()
 
-    agent._coordination.dispatcher.stale_task._last_stale_nudge["task-5"] = 0.0
-    agent._coordination.dispatcher.stale_task._last_stale_nudge["task-6"] = 0.0
+    handler = agent._coordination.dispatcher.stale_task
+    handler._last_stale_nudge["task-5"] = 0.0
+    handler._last_stale_nudge["task-6"] = 0.0
+    handler._stale_claim_streak["task-6"] = 2
+    handler._escalated_claims.add("task-6")
 
-    await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
+    await handler._check_stale_claimed_tasks()
 
-    assert "task-6" not in agent._coordination.dispatcher.stale_task._last_stale_nudge
-    assert "task-5" in agent._coordination.dispatcher.stale_task._last_stale_nudge
+    assert "task-6" not in handler._last_stale_nudge
+    assert "task-6" not in handler._stale_claim_streak
+    assert "task-6" not in handler._escalated_claims
+    assert "task-5" in handler._last_stale_nudge
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_stale_pending_leader_self_nudges_with_hint():
-    """Leader self-prompts about stale pending tasks so its LLM picks targets.
+    """An idle leader self-prompts about unclaimed work while someone is free.
 
     The prompt lists tasks by id + title only (no content dump) and is
     appended rather than steered.
     """
     agent = _make_leader()
     stale = _make_pending_task("p-1", updated_at=0, title="Argue for ACP")
+    _set_idle(agent, 700)
+    _stub_free_roster(agent)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
-    agent._is_agent_running = lambda: False
     agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
@@ -1712,39 +1788,80 @@ async def test_stale_pending_leader_self_nudges_with_hint():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_stale_pending_leader_appends_when_running():
-    """A running leader still receives the hint, appended (never steered)."""
+async def test_stale_pending_skipped_when_every_member_is_busy():
+    """Unclaimed work with nobody free is a normal queue, not a stall.
+
+    Prompting the leader here would be noise: there is no free member to
+    hand the work to, so the queue is exactly what it should be.
+    """
     agent = _make_leader()
-    stale = _make_pending_task("p-2", updated_at=0)
+    stale = _make_pending_task("p-6", updated_at=0)
+    _set_idle(agent, 700)
+    _stub_free_roster(agent, free=False)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
-    agent._is_agent_running = lambda: True
     agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
 
-    agent.deliver_input.assert_awaited_once()
-    content = agent.deliver_input.await_args.args[0]
-    assert agent.deliver_input.await_args.kwargs.get("use_steer") is False
-    assert "p-2" in content
+    agent.deliver_input.assert_not_called()
+    assert "p-6" not in agent._coordination.dispatcher.stale_task._last_pending_nudge
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_stale_pending_fresh_task_skipped():
-    """A pending task whose updated_at is recent should not trigger a nudge."""
+async def test_stale_pending_skips_already_assigned_task():
+    """A PENDING task that already has an assignee is nobody's stall."""
     agent = _make_leader()
-    fresh = _make_pending_task("p-3", updated_at=int(time.time() * 1000))
+    assigned = _make_pending_task("p-7", updated_at=0, assignee="dev-1")
+    _set_idle(agent, 700)
+    _stub_free_roster(agent)
 
     agent._configurator.task_manager = MagicMock()
-    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[fresh])
-    agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[assigned])
+    agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
 
-    agent._start_agent.assert_not_called()
+    agent.deliver_input.assert_not_called()
+    assert "p-7" not in agent._coordination.dispatcher.stale_task._last_pending_nudge
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_pending_busy_leader_skipped():
+    """A leader mid-round is not prompted: it is not idle on the work."""
+    agent = _make_leader()
+    stale = _make_pending_task("p-2", updated_at=0)
+    _set_busy(agent)
+    _stub_free_roster(agent)
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
+    agent.deliver_input = AsyncMock()
+
+    await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
+
+    agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_pending_recently_idle_leader_skipped():
+    """A leader that only just went idle is under the threshold and skipped."""
+    agent = _make_leader()
+    stale = _make_pending_task("p-3", updated_at=0)
+    _set_idle(agent, 5)
+    _stub_free_roster(agent)
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
+    agent.deliver_input = AsyncMock()
+
+    await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
+
+    agent.deliver_input.assert_not_called()
     assert "p-3" not in agent._coordination.dispatcher.stale_task._last_pending_nudge
 
 
@@ -1754,10 +1871,11 @@ async def test_stale_pending_throttled_after_first_nudge():
     """Follow-up polls inside the same window should not re-nudge."""
     agent = _make_leader()
     stale = _make_pending_task("p-4", updated_at=0)
+    _set_idle(agent, 700)
+    _stub_free_roster(agent)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
-    agent._is_agent_running = lambda: False
     agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
@@ -1773,16 +1891,57 @@ async def test_stale_pending_teammate_skips_check():
     agent = _make_teammate()
     agent._state.team_member = None
     stale = _make_pending_task("p-5", updated_at=0)
+    _set_idle(agent, 700)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
-    agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
+    agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
 
     agent._configurator.task_manager.list_tasks.assert_not_called()
-    agent._start_agent.assert_not_called()
+    agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_refresh_idle_baseline_prevents_false_stall_after_resume():
+    """Resuming a team must not bill the pause window as idle time.
+
+    A member already idle when the team paused keeps its idle stamp while the
+    monotonic clock runs through the entire pause, and — having no suspended
+    round to resume — never re-enters IDLE to re-stamp itself. ``kernel.start``
+    re-bases the clock, so the first poll after resume measures a fresh idle
+    span instead of the whole pause (F_65).
+    """
+    agent = _make_leader()
+    own_task = _make_claimed_task("task-8", assignee="leader-1", updated_at=0)
+    # Idle since long before the pause: without a re-base this reads as a
+    # two-hour stall the instant polling comes back.
+    _set_idle(agent, 7200)
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
+    agent.deliver_input = AsyncMock()
+
+    agent.refresh_idle_baseline()
+
+    assert agent.idle_seconds() < 1
+    await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
+    agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_refresh_idle_baseline_leaves_a_busy_member_alone():
+    """A member paused mid-round has no idle clock; re-basing must not start one."""
+    agent = _make_leader()
+    _set_busy(agent)
+
+    agent.refresh_idle_baseline()
+
+    assert agent._state.idle_since is None
+    assert agent.idle_seconds() is None
 
 
 @pytest.mark.asyncio

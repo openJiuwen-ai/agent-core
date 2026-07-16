@@ -9,7 +9,7 @@
 | 象限 | 文件 | 含义 |
 |---|---|---|
 | **静态数据** | `blueprint.py` | `TeamAgentBlueprint`，frozen dataclass。构造时确定的配置，整个生命周期不变（spec、role、member_name、desc、prompt 等） |
-| **运行时可变状态** | `state.py` | `TeamAgentState`。**只放跨 operator 的字段**——operator 内部状态（spawn_manager 的 spawned_handles、coordination 的 subscribed_topics 等）留在 operator 自己里 |
+| **运行时可变状态** | `state.py` | `TeamAgentState`。**只放跨 operator 的字段**——operator 内部状态（spawn_manager 的 spawned_handles、coordination 的 subscribed_topics 等）留在 operator 自己里。典型跨 operator 例：`team_cleaned`（tool/clean 路径写、stream round-end 读）、`idle_since`（stream operator 写、coordination 的 stale sweep 读，见 [[F_65_runtime-idle-clock-stall-nudge]]） |
 | **每实例资源** | `resources.py` | `PrivateAgentResources`。这个 TeamAgent 独占的资源（DeepAgent、worktree manager、memory manager 等）。每个 member 一份 |
 | **每进程基础设施** | `infra.py` | `TeamInfra`。**进程内**所有 member 共享的资源（messager、db、team_backend 等）。leader 和 teammate 在不同进程，所以 "共享" 是 per-process 而不是跨实例单例。也持有 tiny-agent 资源：`tiny_agent_model_resolver`（model_name→TeamModelConfig）+ `tiny_agents`（team-scoped tiny agent 按名缓存，`stop`/`shutdown` 时 dispose）。见 `tiny_agent.py` / F_45 |
 
@@ -27,7 +27,7 @@
 | `spawn_manager.py` | `SpawnManager` | teammate 进程生命周期：拉起 / 心跳 / 重启 / 取消。`restart_teammate`（容错 / 切 session）以 `initial_message=None` re-spawn——**恢复不 replay 首启指令**，见下方"初始消息只首启注入" |
 | `recovery_manager.py` | `RecoveryManager` | 团队级容错：成员崩溃恢复、状态对齐 |
 | `session_manager.py` | `SessionManager` | session checkpoint 读写、生命周期 |
-| `stream_controller.py` | `StreamController` | runtime（NativeHarness/CLI runtime）输出转发 + 状态映射层。`start()` 挂 `_forward_outputs`（消费 `runtime.outputs()`→`_tag_chunk`→stream_queue+observers）+ 经 `subscribe(on_state=, on_round=)` 注册 phase/round 回调；不再驱动 round / 排 pending / 自重启（单 supervisor 模型接管）。`_map_state` RUNNING→BUSY、IDLE→READY+`_on_idle_settled`；`_map_round` 走 EXECUTION_TRANSITIONS；transient retry（181001）在 `_handle_retry` swallow+重驱，exhausted/non-retryable 转发不再 raise；自动升级 chunk 为 `TeamOutputSchema` 并 `add_chunk_observer` fan-out；`emit_completion_and_close` 发完成标记 + 关流；`_on_idle_settled` 经注入的 `request_completion_poll_callback` 触发 leader 完成评估 |
+| `stream_controller.py` | `StreamController` | runtime（NativeHarness/CLI runtime）输出转发 + 状态映射层。`start()` 挂 `_forward_outputs`（消费 `runtime.outputs()`→`_tag_chunk`→stream_queue+observers）+ 经 `subscribe(on_state=, on_round=)` 注册 phase/round 回调；不再驱动 round / 排 pending / 自重启（单 supervisor 模型接管）。`_map_state` RUNNING→BUSY、IDLE→READY+`_on_idle_settled`，并在这条边上维护 `state.idle_since`（IDLE 打戳 / RUNNING 清空）——自主停滞检测的计时源，见 [[F_65_runtime-idle-clock-stall-nudge]]；`_map_round` 走 EXECUTION_TRANSITIONS；transient retry（181001）在 `_handle_retry` swallow+重驱，exhausted/non-retryable 转发不再 raise；自动升级 chunk 为 `TeamOutputSchema` 并 `add_chunk_observer` fan-out；`emit_completion_and_close` 发完成标记 + 关流；`_on_idle_settled` 经注入的 `request_completion_poll_callback` 触发 leader 完成评估 |
 
 ## coordination/ — 唤醒循环
 

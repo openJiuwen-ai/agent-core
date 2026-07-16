@@ -8,8 +8,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/scheduling/` |
-| 最近一次修订日期 | 2026-07-14 |
-| 关联 feature | `F_62_scheduled-dispatch-runtime-and-review-voting.md`、`F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染） |
+| 最近一次修订日期 | 2026-07-16 |
+| 关联 feature | `F_62_scheduled-dispatch-runtime-and-review-voting.md`、`F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染）、`F_65_runtime-idle-clock-stall-nudge.md`（自主模式改用 idle 时钟后，本模式 stale 计时的钉住策略与遗留） |
 
 ## 范围 / 边界
 
@@ -50,6 +50,12 @@
     `PENDING(assignee)` 是常态）；自主模式类保持原实现。装配规则：`EventDispatcher` 构造期
     按静态 spec 模式查字面量类表装配（未知值 KeyError），每个角色相同、运行期不变。
     **handler 方法内禁止出现 dispatch_mode 分支。**
+15. **调度模式的 stale 计时仍读 `task.updated_at`**（F_65 范围外）：自主模式已改用运行时
+    idle 时钟（`S_03` 不变量 20），调度模式则由 `ScheduledStaleTaskHandler` **覆写**
+    `_check_stale_claimed_tasks` / `_self_nudge_stale_claim` 钉住 pre-F_65 实现（活跃集含
+    `IN_REVIEW`、阈值 `_STALE_CLAIM_SECONDS`=10min），使自主基类切换不波及本模式。代价是
+    同款缺陷仍在：成员 idle 跨长 pause 后 resume，其活跃任务会被 `now - updated_at` 误判为
+    stale。迁移到 idle 时钟是 `F_65_runtime-idle-clock-stall-nudge.md` 记录的已知遗留。
 
 ## 接口契约
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import time
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -271,10 +272,17 @@ class StreamController:
         ``RUNNING`` → BUSY, ``IDLE`` → READY (and round-chain-end settling).
         ``PAUSING`` / ``PAUSED`` / ``TERMINATED`` leave member status to the
         lifecycle layer.
+
+        This edge is also where ``TeamAgentState.idle_since`` — the member's
+        process-local idle clock feeding the stale-task sweep — is started
+        and cleared. Pause-adjacent phases stay untouched here; the resume
+        path re-bases the clock via ``TeamAgent.refresh_idle_baseline()``.
         """
         if new is HarnessState.RUNNING:
+            self._state.idle_since = None
             await self._update_status(MemberStatus.BUSY)
         elif new is HarnessState.IDLE:
+            self._state.idle_since = time.monotonic()
             await self._update_status(MemberStatus.READY)
             await self._on_idle_settled()
 
