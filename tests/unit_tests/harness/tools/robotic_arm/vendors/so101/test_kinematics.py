@@ -32,7 +32,14 @@ def test_backproject_pixel_matches_frame_backprojection() -> None:
     depth_raw = np.full((480, 640), 1000, dtype=np.uint16)  # 1.0 m everywhere
 
     frame_points = kinematics.backproject_frame(depth_raw, camera_matrix, depth_scale, extrinsics_cm)
-    pixel_point = kinematics.backproject_pixel(320, 240, depth_raw, camera_matrix, depth_scale, extrinsics_cm)
+    pixel_point = kinematics.backproject_pixel(
+        320,
+        240,
+        depth_raw,
+        camera_matrix=camera_matrix,
+        depth_scale=depth_scale,
+        extrinsics_cm=extrinsics_cm,
+    )
 
     assert pixel_point is not None
     np.testing.assert_allclose(pixel_point, frame_points[240, 320], atol=1e-9)
@@ -43,7 +50,12 @@ def test_backproject_pixel_matches_frame_backprojection() -> None:
 def test_backproject_pixel_rejects_invalid_depth() -> None:
     camera_matrix = np.array([[500.0, 0, 320.0], [0, 500.0, 240.0], [0, 0, 1]])
     depth_raw = np.zeros((480, 640), dtype=np.uint16)
-    assert kinematics.backproject_pixel(320, 240, depth_raw, camera_matrix, 0.001, np.eye(4)) is None
+    assert (
+        kinematics.backproject_pixel(
+            320, 240, depth_raw, camera_matrix=camera_matrix, depth_scale=0.001, extrinsics_cm=np.eye(4)
+        )
+        is None
+    )
 
 
 def test_in_workspace() -> None:

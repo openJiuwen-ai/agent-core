@@ -84,7 +84,9 @@ def _update_held_keypoints(
 
 @SubTaskExecutorRegistry.register("so101_rekep")
 class So101RekepExecutor:
-    """Full ReKep pipeline per sub_task: SO-101 hardware I/O + keypoints + VLM constraints + single-subgoal solve/execute."""
+    """Full ReKep pipeline per sub_task: SO-101 hardware I/O + keypoints + VLM constraints +
+    single-subgoal solve/execute.
+    """
 
     def __init__(
         self,
@@ -339,14 +341,16 @@ class So101RekepExecutor:
             try:
                 pipeline.stop()
             except Exception:
-                pass
+                tool_logger.warning("[So101RekepExecutor] pipeline stop after failed capture also failed")
             return None, None
 
-    def reset_camera(self) -> None:
+    @staticmethod
+    def reset_camera() -> None:
         """Kill macOS processes that can hold the RealSense camera open, then
-        hardware-reset the device -- run before each retry in ``_retry_capture``."""
-        subprocess.run(["killall", "VDCAssistant"], capture_output=True)
-        subprocess.run(["killall", "AppleCameraAssistant"], capture_output=True)
+        hardware-reset the device -- run before each retry in ``_retry_capture``.
+        """
+        subprocess.run(["/usr/bin/killall", "VDCAssistant"], capture_output=True)
+        subprocess.run(["/usr/bin/killall", "AppleCameraAssistant"], capture_output=True)
         try:
             import pyrealsense2 as rs
 

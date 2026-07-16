@@ -47,6 +47,7 @@ def _project_keypoints(
 def solve_subgoal(
     constraints: Sequence[ConstraintFn],
     keypoints: np.ndarray,
+    *,
     workspace_min: Sequence[float],
     workspace_max: Sequence[float],
     initial_ee: np.ndarray,

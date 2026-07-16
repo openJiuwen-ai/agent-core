@@ -121,11 +121,11 @@ def _safe_wrap(fn):
 def generate_constraints(
     overlay_rgb: np.ndarray,
     task: str,
+    *,
     num_keypoints: int,
     keypoints_3d: np.ndarray,
     ik_solver: IKSolver,
     vlm: VlmClient,
-    *,
     max_tokens: int = 3000,
 ) -> dict[str, Any]:
     """Query the VLM to translate ``task`` (one sub_task's description) into
