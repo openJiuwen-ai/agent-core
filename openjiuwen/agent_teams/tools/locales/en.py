@@ -366,6 +366,13 @@ STRINGS: dict[str, str] = {
     ),
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",
+    "send_message.error_content_too_long": (
+        "'content' is too long ({actual} chars, limit {limit}): a body this size is an "
+        "artifact, not a message. Write it to a file under the shared team workspace "
+        ".team/ with write_file, then resend this message carrying only the file path "
+        "plus a one- or two-sentence summary. Do not split the body across several "
+        "messages to get around this limit."
+    ),
     # ===== send_message_scheduled (scheduled-mode member variant) ==============
     # send_message_scheduled._desc lives in descs/en/send_message_scheduled.md
     # ``content`` / ``summary`` are reused verbatim from the send_message keys

@@ -19,8 +19,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-07-14 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md |
+| 最近一次修订日期 | 2026-07-16 |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md |
 
 ## 范围 / 边界
 
@@ -222,6 +222,19 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     工具描述按模式在构建期装配、每套一份、互不混写；`build_team` 的运行时开关只有
     `enable_hitt` / `enable_task_verification`（后者是提示词驱动的"验证预期"开关，覆盖值
     随 spec 记录的 `dispatch_mode` 一起写进 `team_info` 行——行是记录，spec 是运行时真相）。
+22. **`send_message` 的 `content` 有硬上限，超限即拒、且提示如何改走文件通道**（F_64）。
+    `tool_message.MAX_CONTENT_CHARS`（当前 2000）以**字符**计——不依赖 tokenizer、不按语言
+    分支，这个界只需量级正确。校验落在 `_SendMessageBase.invoke` 里、**`_dispatch` 之前**：
+    一处覆盖两个形态与全部三条投递路径（unicast / multicast / broadcast），也覆盖不校验
+    schema 的 MCP 客户端（`mcp/server.py` 直接 `invoke`）。**这是通道纪律的执法，不是防
+    DoS**——提示词说"成型产物落盘、消息只传路径"，但只有拒绝才真正阻止 LLM 把整份报告塞进
+    消息；错误文案必须给出可执行的下一步（`write_file` → `.team/` → 重发路径 + 摘要），
+    只说"太长"会让 LLM 原地重试或把正文拆成多条消息。
+    **没有收件人豁免**——规则约束的是内容形态，不是收件人，`user` 也一样受限（用户经自己的
+    助手 agent 读交接文件）。校验因此不看 `to`，是一条纯粹的长度判断。
+    上限值同时出现在共用片段 `descs/<lang>/fragments/artifact_handoff_policy.md` 里——
+    让 LLM 事先知道界在哪，省掉一次撞墙往返；`test_tool_message.py` 断言描述里的数字与
+    常量一致，防止两者漂移。
 
 ## 接口契约
 
