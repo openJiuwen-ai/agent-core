@@ -14,6 +14,7 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.semantic_widgets i
     build_dropdown_probe_js,
     build_dropdown_select_js,
     build_form_fields_probe_js,
+    build_semantic_form_fill_js,
 )
 
 
@@ -54,6 +55,7 @@ def test_dropdown_probe_js_contains_compact_option_collection_and_clamped_params
 def test_dropdown_select_js_contains_atomic_typing_and_selection() -> None:
     js_code = build_dropdown_select_js(
         field_selector="#destination",
+        field_label="Destination",
         query="Kuala",
         option_text="Kuala Lumpur",
         exact=True,
@@ -63,11 +65,36 @@ def test_dropdown_select_js_contains_atomic_typing_and_selection() -> None:
 
     assert "page.keyboard.type" in js_code
     assert "clickLikeUser(element)" in js_code
+    assert ".select2-results__option" in js_code
+    assert "dropdown_closed" in js_code
+    assert "verified" in js_code
     assert '"field_selector": "#destination"' in js_code
+    assert '"field_label": "Destination"' in js_code
     assert '"exact": true' in js_code
     assert '"timeout_ms": 30000' in js_code
     assert '"wait_after_type_ms": 5000' in js_code
     assert "process.platform" not in js_code
+    assert "el.dispatchEvent(new MouseEvent('click'" not in js_code
+
+
+def test_dropdown_select_js_supports_additive_native_multi_select_and_failure_identity() -> None:
+    js_code = build_dropdown_select_js(
+        field_selector="select.js-example-basic-multiple",
+        option_texts=["Alabama", "Hawaii"],
+        exact=True,
+        preserve_existing=True,
+        selection_mode="add",
+    )
+
+    assert '"option_texts": ["Alabama", "Hawaii"]' in js_code
+    assert '"preserve_existing": true' in js_code
+    assert '"selection_mode": "add"' in js_code
+    assert "field.multiple" in js_code
+    assert "selected_values" in js_code
+    assert "selected_texts" in js_code
+    assert "preserved_values" in js_code
+    assert "target_family" in js_code
+    assert "dropdown_option_not_found" in js_code
 
 
 def test_form_fields_probe_js_collects_compact_field_metadata() -> None:
@@ -88,6 +115,23 @@ def test_form_fields_probe_js_collects_compact_field_metadata() -> None:
     assert "document.body.innerText" not in js_code
     assert "process.platform" not in js_code
 
+
+
+def test_semantic_form_fill_js_matches_fields_without_broad_dom_dump() -> None:
+    js_code = build_semantic_form_fill_js(
+        fields={"given name": "Alex", "surname": "Tan"},
+        max_fields=999,
+        viewport_only=False,
+        clear_existing=True,
+    )
+
+    assert "scoreField" in js_code
+    assert "setNativeValue" in js_code
+    assert "selector_hint" in js_code
+    assert '"max_fields": 200' in js_code
+    assert '"viewport_only": false' in js_code
+    assert "document.body.innerText" not in js_code
+    assert "process.platform" not in js_code
 
 def test_calendar_probe_js_normalizes_days_and_months() -> None:
     js_code = build_calendar_probe_js(max_days=999, viewport_only=True, query="2026-07-15")
@@ -113,12 +157,34 @@ def test_calendar_select_js_contains_exact_iso_date_selection_and_navigation() -
     )
 
     assert "targetIso" in js_code
-    assert "day.date === targetIso" in js_code
+    assert "day.date === payload.target_iso" in js_code
     assert "!day.disabled" in js_code
     assert "findMonthNavButton" in js_code
     assert '"date": "2026-07-15"' in js_code
     assert '"max_month_clicks": 60' in js_code
     assert '"timeout_ms": 30000' in js_code
+    assert "closeCalendarOverlay" in js_code
+    assert "calendar_closed" in js_code
+    assert "visible_calendar_count" in js_code
+    assert "selectNativeCalendarPart" in js_code
+    assert "native_year_month_select" in js_code
+    assert "field_matches_target" in js_code
+    assert "selected_date_not_persisted_after_cleanup" in js_code
+    assert "calendar_overlay_still_open_after_selection" in js_code
+    assert "page.keyboard.press('Escape')" in js_code
+    assert ".ui-datepicker-year" in js_code
+    assert ".ui-datepicker-month" in js_code
+    assert "jquery_ui_set_date" in js_code
+    assert "datepicker('setDate'" in js_code
+    assert "datepicker('hide'" in js_code
+    assert "finalizeFailure" in js_code
+    assert "directResult.ok || directResult.field_matches_target" in js_code
+    assert js_code.index("preResetState = await closeCalendarOverlay()") < js_code.index(
+        "directInputAttempted = true"
+    )
+    assert js_code.index("directInputAttempted = true") < js_code.index(
+        "await target.click({ timeout })"
+    )
     assert "process.platform" not in js_code
 
 
@@ -148,6 +214,32 @@ def test_runtime_probe_form_fields_parses_executor_json_and_captures_generated_c
     assert '"max_fields": 160' in captured["js_code"]
     assert '"include_options": false' in captured["js_code"]
 
+
+
+def test_runtime_fill_form_semantic_parses_executor_json_and_captures_generated_code() -> None:
+    runtime = _make_runtime()
+    runtime.ensure_runtime_ready = _async_noop
+    captured = {}
+
+    async def fake_executor(js_code: str) -> str:
+        captured["js_code"] = js_code
+        return '{"ok": true, "filled": [{"field": "given name", "selector_hint": "#given"}], "failed": []}'
+
+    runtime._code_executor = fake_executor
+
+    result = _run(
+        runtime.fill_form_semantic(
+            fields={"given name": "Alex"},
+            max_fields=500,
+            viewport_only=False,
+            clear_existing=True,
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["filled"][0]["selector_hint"] == "#given"
+    assert '"max_fields": 200' in captured["js_code"]
+    assert '"given name": "Alex"' in captured["js_code"]
 
 def test_runtime_probe_dropdown_parses_executor_json_and_captures_generated_code() -> None:
     runtime = _make_runtime()
@@ -186,6 +278,7 @@ def test_runtime_select_dropdown_option_parses_executor_json() -> None:
     result = _run(
         runtime.select_dropdown_option(
             field_selector="#origin",
+            field_label="Origin",
             query="Singapore",
             option_text="Singapore",
             exact=True,
@@ -197,7 +290,38 @@ def test_runtime_select_dropdown_option_parses_executor_json() -> None:
     assert result["ok"] is True
     assert result["selected"]["text"] == "Singapore"
     assert '"field_selector": "#origin"' in captured["js_code"]
+    assert '"field_label": "Origin"' in captured["js_code"]
     assert '"exact": true' in captured["js_code"]
+
+
+def test_runtime_select_dropdown_option_passes_atomic_multi_select_params() -> None:
+    runtime = _make_runtime()
+    runtime.ensure_runtime_ready = _async_noop
+    captured = {}
+
+    async def fake_executor(js_code: str) -> str:
+        captured["js_code"] = js_code
+        return (
+            '{"ok": true, "multiple": true, "selected_values": ["AL", "HI"], '
+            '"selected_texts": ["Alabama", "Hawaii"]}'
+        )
+
+    runtime._code_executor = fake_executor
+
+    result = _run(
+        runtime.select_dropdown_option(
+            field_selector="select.js-example-basic-multiple",
+            option_texts=["Alabama", "Hawaii"],
+            exact=True,
+            preserve_existing=True,
+            selection_mode="add",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["selected_values"] == ["AL", "HI"]
+    assert '"option_texts": ["Alabama", "Hawaii"]' in captured["js_code"]
+    assert '"preserve_existing": true' in captured["js_code"]
 
 
 def test_runtime_probe_calendar_parses_executor_json() -> None:
@@ -255,12 +379,14 @@ def test_runtime_semantic_tools_report_missing_code_executor() -> None:
     runtime._code_executor = None
 
     fields = _run(runtime.probe_form_fields())
+    fill_form = _run(runtime.fill_form_semantic(fields={"email": "test@example.com"}))
     dropdown = _run(runtime.probe_dropdown())
     calendar = _run(runtime.probe_calendar())
     select_dropdown = _run(runtime.select_dropdown_option(query="Singapore"))
     select_calendar = _run(runtime.select_calendar_date(date="2026-07-15"))
 
     assert fields == {"ok": False, "error": "browser_code_executor_not_ready", "fields": []}
+    assert fill_form == {"ok": False, "error": "browser_code_executor_not_ready", "filled": [], "failed": []}
     assert dropdown == {"ok": False, "error": "browser_code_executor_not_ready", "options": []}
     assert calendar == {"ok": False, "error": "browser_code_executor_not_ready", "days": []}
     assert select_dropdown == {"ok": False, "error": "browser_code_executor_not_ready"}

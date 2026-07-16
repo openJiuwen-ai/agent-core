@@ -131,7 +131,7 @@ def test_calendar_select_js_contains_exact_iso_date_selection_and_navigation() -
     )
 
     assert "targetIso" in js_code
-    assert "day.date === targetIso" in js_code
+    assert "day.date === payload.target_iso" in js_code
     assert "!day.disabled" in js_code
     assert "findMonthNavButton" in js_code
     assert '"date": "2026-07-15"' in js_code

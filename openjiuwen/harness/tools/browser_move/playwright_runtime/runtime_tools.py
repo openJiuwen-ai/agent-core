@@ -244,17 +244,21 @@ _PROBE_DROPDOWN_PARAMS: Dict[str, Any] = {
 }
 
 _SELECT_DROPDOWN_DESC = (
-    "Atomically select one option from a dropdown/autocomplete/combobox. Use for dynamic option "
-    "lists instead of repeated browser_click/browser_type turns. Optionally pass field_selector to "
-    "focus and type query before selection; otherwise it selects from the currently open dropdown. "
-    "Verifies by returning the selected option text and selector hint."
+    "Atomically select one or more options from a dropdown/autocomplete/combobox. Use for dynamic option "
+    "lists instead of repeated browser_click/browser_type turns. It supports native selects, Select2, "
+    "custom comboboxes, and additive native multi-select widgets. Pass field_selector or field_label to identify "
+    "the field, then query/option_text or option_texts for the choices. It returns selection and verification metadata."
 )
 _SELECT_DROPDOWN_PARAMS: Dict[str, Any] = {
     "type": "object",
     "properties": {
         "field_selector": {
             "type": "string",
-            "description": "Optional selector for the input/combobox field to focus before typing.",
+            "description": "Optional selector for the native select, input, combobox, or visible trigger.",
+        },
+        "field_label": {
+            "type": "string",
+            "description": "Optional visible field label when no stable selector is available.",
         },
         "query": {
             "type": "string",
@@ -264,9 +268,23 @@ _SELECT_DROPDOWN_PARAMS: Dict[str, Any] = {
             "type": "string",
             "description": "Desired visible option text. Defaults to query when omitted.",
         },
+        "option_texts": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional list of visible option texts for atomic native multi-select selection.",
+        },
         "exact": {
             "type": "boolean",
             "description": "When true, require exact text match. Default false.",
+        },
+        "preserve_existing": {
+            "type": "boolean",
+            "description": "For native multi-selects, preserve existing selections. Default true.",
+        },
+        "selection_mode": {
+            "type": "string",
+            "enum": ["add", "replace"],
+            "description": "For native multi-selects, add to or replace existing selections. Default add.",
         },
         "timeout_ms": {
             "type": "integer",
@@ -309,7 +327,7 @@ _SELECT_CALENDAR_DESC = (
     "Atomically set/select an exact ISO date from a date input or open calendar widget. "
     "Use this for travel/booking calendars and date-of-birth calendars instead of clicking month/day refs. "
     "It opens field_selector if provided, optionally tries direct input, navigates previous/next months, "
-    "clicks the matching enabled date cell, and returns verification metadata."
+    "clicks the matching enabled date cell, closes the calendar overlay, and returns verification metadata."
 )
 _SELECT_CALENDAR_PARAMS: Dict[str, Any] = {
     "type": "object",
@@ -975,9 +993,15 @@ class BrowserSelectDropdownOptionTool(Tool):
         try:
             result = await self._runtime.select_dropdown_option(
                 field_selector=str(inputs.get("field_selector") or ""),
+                field_label=str(inputs.get("field_label") or ""),
                 query=str(inputs.get("query") or ""),
                 option_text=str(inputs.get("option_text") or ""),
+                option_texts=[str(item) for item in inputs.get("option_texts", []) if str(item).strip()]
+                if isinstance(inputs.get("option_texts"), list)
+                else None,
                 exact=_coerce_bool(inputs.get("exact"), False),
+                preserve_existing=_coerce_bool(inputs.get("preserve_existing"), True),
+                selection_mode=str(inputs.get("selection_mode") or "add"),
                 timeout_ms=inputs.get("timeout_ms", 5000),
                 wait_after_type_ms=inputs.get("wait_after_type_ms", 250),
             )

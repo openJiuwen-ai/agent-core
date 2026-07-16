@@ -21,6 +21,7 @@ _FIELD_VALUE_KEYS = {
     "data-testid",
     "field",
     "field_selector",
+    "field_label",
     "id",
     "label",
     "name",

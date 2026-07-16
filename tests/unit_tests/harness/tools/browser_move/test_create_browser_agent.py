@@ -22,6 +22,9 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     BrowserRunGuardrails,
     RuntimeSettings,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime.mcp_usage_limiter import (
+    BrowserMcpUsageLimiter,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
     BrowserRuntimeRail,
 )
@@ -136,7 +139,9 @@ def test_default_wiring_main_agent_has_browser_runtime_rail() -> None:
         create_browser_agent(_fake_model(), settings=_fake_settings())
 
     rails = calls[0].get("rails", [])
-    assert any(isinstance(rail, BrowserRuntimeRail) for rail in rails)
+    browser_rails = [rail for rail in rails if isinstance(rail, BrowserRuntimeRail)]
+    assert len(browser_rails) == 1
+    assert isinstance(browser_rails[0].mcp_usage_limiter, BrowserMcpUsageLimiter)
 
 
 def test_default_wiring_windows_browser_probe_and_snapshot_results() -> None:
@@ -157,6 +162,9 @@ def test_default_wiring_windows_browser_probe_and_snapshot_results() -> None:
     assert config.tool_names == [
         "browser_probe_interactives",
         "browser_probe_cards",
+        "browser_probe_form_fields",
+        "browser_probe_dropdown",
+        "browser_probe_calendar",
         "browser_snapshot",
     ]
     assert config.keep_last_k == 1

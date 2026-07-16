@@ -439,6 +439,7 @@ def test_select_dropdown_option_tool_uses_runtime_api() -> None:
         tool.invoke(
             {
                 "field_selector": "#destination",
+                "field_label": "Destination",
                 "query": "Kuala",
                 "option_text": "Kuala Lumpur",
                 "exact": "true",
@@ -450,9 +451,13 @@ def test_select_dropdown_option_tool_uses_runtime_api() -> None:
 
     runtime.select_dropdown_option.assert_called_once_with(
         field_selector="#destination",
+        field_label="Destination",
         query="Kuala",
         option_text="Kuala Lumpur",
+        option_texts=None,
         exact=True,
+        preserve_existing=True,
+        selection_mode="add",
         timeout_ms=7000,
         wait_after_type_ms=100,
     )

@@ -15,6 +15,7 @@ from openjiuwen.core.common.logging.browser_context import (
     reset_browser_agent_log_context,
     set_browser_agent_log_context,
 )
+from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
@@ -32,6 +33,7 @@ from .browser_logging import (
 )
 from .browser_tools import ensure_browser_runtime_client_patch
 from .config import BrowserInstanceConfig, BrowserRunGuardrails
+from .mcp_usage_limiter import BrowserMcpUsageLimiter
 from .probes import build_card_probe_js, build_interactive_probe_js
 from .semantic_widgets import (
     build_calendar_probe_js,
@@ -651,9 +653,13 @@ class BrowserAgentRuntime:
         self,
         *,
         field_selector: str = "",
+        field_label: str = "",
         query: str = "",
         option_text: str = "",
+        option_texts: list[str] | None = None,
         exact: bool = False,
+        preserve_existing: bool = True,
+        selection_mode: str = "add",
         timeout_ms: int = 5000,
         wait_after_type_ms: int = 250,
     ) -> Dict[str, Any]:
@@ -665,9 +671,13 @@ class BrowserAgentRuntime:
 
         js_code = build_dropdown_select_js(
             field_selector=field_selector,
+            field_label=field_label,
             query=query,
             option_text=option_text,
+            option_texts=option_texts,
             exact=exact,
+            preserve_existing=preserve_existing,
+            selection_mode=selection_mode,
             timeout_ms=timeout_ms,
             wait_after_type_ms=wait_after_type_ms,
         )
@@ -942,6 +952,7 @@ class BrowserRuntimeRail(AgentRail):
     def __init__(self, runtime: BrowserAgentRuntime) -> None:
         super().__init__()
         self._runtime = runtime
+        self._mcp_usage_limiter = BrowserMcpUsageLimiter()
         self._status_logger = (
             BrowserSubagentStatusLogger()
             if is_browser_subagent_status_log_enabled()
@@ -952,6 +963,17 @@ class BrowserRuntimeRail(AgentRail):
             self._status_logger is not None,
             type(self._status_logger).__name__ if self._status_logger is not None else None,
         )
+        browser_agent_log_info(
+            "[BROWSER_MCP_LIMIT] attached "
+            "boundary=browser_runtime_rail.before_tool_call enabled=%s raw_streak_limit=%s",
+            self._mcp_usage_limiter.enabled,
+            self._mcp_usage_limiter.raw_streak_limit,
+        )
+
+    @property
+    def mcp_usage_limiter(self) -> BrowserMcpUsageLimiter:
+        """Return the limiter used by the live DeepAgent browser dispatch rail."""
+        return self._mcp_usage_limiter
 
     def _emit_status(self, method_name: str, ctx: AgentCallbackContext) -> None:
         if self._status_logger is None:
@@ -973,6 +995,13 @@ class BrowserRuntimeRail(AgentRail):
             )
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        self._mcp_usage_limiter.reset()
+        browser_agent_log_info(
+            "[BROWSER_MCP_LIMIT] runtime_active "
+            "boundary=browser_runtime_rail.before_tool_call enabled=%s raw_streak_limit=%s",
+            self._mcp_usage_limiter.enabled,
+            self._mcp_usage_limiter.raw_streak_limit,
+        )
         if isinstance(getattr(ctx, "extra", None), dict):
             ctx.extra[_BROWSER_LOG_CONTEXT_TOKEN_KEY] = set_browser_agent_log_context(True)
         self._emit_status("before_invoke", ctx)
@@ -1075,19 +1104,62 @@ class BrowserRuntimeRail(AgentRail):
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         self._emit_status("before_tool_call", ctx)
+        if ctx.extra.get("_skip_tool"):
+            return
+        inputs = getattr(ctx, "inputs", None)
+        tool_name = str(getattr(inputs, "tool_name", "") or "").strip()
+        tool_args = getattr(inputs, "tool_args", None)
+        blocked_reason = self._mcp_usage_limiter.blocked_reason(tool_name, tool_args)
+        if not blocked_reason:
+            return
+
+        payload = self._mcp_usage_limiter.blocked_payload(
+            tool_name,
+            blocked_reason,
+            tool_args,
+        )
+        tool_call = getattr(inputs, "tool_call", None)
+        tool_call_id = getattr(tool_call, "id", "") if tool_call is not None else ""
+        ctx.extra["_skip_tool"] = True
+        inputs.tool_result = payload
+        inputs.tool_msg = ToolMessage(
+            content=json.dumps(payload, ensure_ascii=False),
+            tool_call_id=tool_call_id,
+        )
+        browser_agent_log_warning(
+            "[BROWSER_MCP_LIMIT] blocked "
+            "boundary=browser_runtime_rail.before_tool_call tool=%s reason=%s target_family=%s",
+            tool_name,
+            payload.get("reason"),
+            payload.get("target_family") or "",
+        )
 
     async def on_tool_exception(self, ctx: AgentCallbackContext) -> None:
         self._emit_status("on_tool_exception", ctx)
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         self._emit_status("after_tool_call", ctx)
+        inputs = getattr(ctx, "inputs", None)
+        tool_name = str(getattr(inputs, "tool_name", "") or "").strip()
+        tool_args = getattr(inputs, "tool_args", None)
+        raw_tool_result = getattr(inputs, "tool_result", None)
+        limiter_event = self._mcp_usage_limiter.record_result(
+            tool_name,
+            raw_tool_result,
+            tool_args,
+        )
+        if limiter_event == "semantic_failure_recorded":
+            browser_agent_log_info(
+                "[BROWSER_MCP_LIMIT] semantic_failure_recorded "
+                "boundary=browser_runtime_rail.after_tool_call tool=%s target_family=%s",
+                tool_name,
+                self._mcp_usage_limiter.last_semantic_failure_target_family,
+            )
+
         session = getattr(ctx, "session", None)
-        if session is None:
+        if session is None or not self._is_browser_progress_tool(tool_name):
             return
-        tool_name = str(getattr(getattr(ctx, "inputs", None), "tool_name", "") or "").strip()
-        if not self._is_browser_progress_tool(tool_name):
-            return
-        tool_result = self._normalize_tool_result(getattr(getattr(ctx, "inputs", None), "tool_result", None))
+        tool_result = self._normalize_tool_result(raw_tool_result)
         session_id = session.get_session_id()
         self._runtime.service.record_tool_progress(
             session_id=session_id,
