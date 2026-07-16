@@ -144,22 +144,7 @@ async def external_cli_spawn(
     teammate = _TeamAgent(card)
     teammate.configure(spec, ctx, member_runtime=runtime)
 
-    # The default join prompt must NOT tell the member to "wait": a streaming
-    # CLI (e.g. claude) takes that literally and holds the turn open polling,
-    # which idles the whole round until the leader's first task arrives. Tell
-    # it to check once and end the turn promptly when there is no work yet —
-    # the team will message it when a task is assigned.
-    default_join_query = (
-        "You have joined the team. Call read_inbox once now. If you already have "
-        "an assigned task, complete it fully: claim_task to take it, do the work, "
-        "then claim_task again with status=\"completed\" and send_message to report. "
-        "If there is no task yet, just acknowledge briefly and END YOUR TURN now — "
-        "do NOT wait, poll, or loop; the team will message you when there is work."
-    )
-    if resume_external_backend and initial_message is None:
-        base_query = ""
-    else:
-        base_query = initial_message or default_join_query
+    base_query = initial_message or ""
     # Backends that accept the system prompt as a launch arg already carry it;
     # others get it prepended to their first user message.
     if base_query and system_prompt and backend is not None and not backend.injects_system_prompt_via_arg:

@@ -219,6 +219,7 @@ class ExternalTeamClient:
             real_tools = create_team_tools(
                 role="teammate",
                 agent_team=backend,
+                teammate_mode=self._descriptor.teammate_mode,
                 dispatch_mode=self._descriptor.dispatch_mode,
                 lang=self._descriptor.language,
             )

@@ -53,6 +53,7 @@ def descriptor_from_context(ctx: TeamRuntimeContext) -> TeamJoinDescriptor:
     team_name = team_spec.team_name
     language = team_spec.language or "cn"
     dispatch_mode = team_spec.dispatch_mode or "autonomous"
+    teammate_mode = team_spec.teammate_mode or "build_mode"
     session_id = get_session_id()
     if not session_id:
         raise_error(
@@ -75,10 +76,11 @@ def descriptor_from_context(ctx: TeamRuntimeContext) -> TeamJoinDescriptor:
         scope="member",
         language=language,
         # The CLI's tools (MCP server -> ExternalTeamClient -> create_team_tools)
-        # and its system prompt (rendered at spawn) are two separate chains;
-        # both must resolve against the same dispatch mode or the member gets a
-        # prompt describing tools it does not have.
+        # and its system prompt (rendered at spawn) are separate chains; both
+        # must resolve against the same mode axes or the member gets a prompt
+        # describing tools it does not have.
         dispatch_mode=dispatch_mode,
+        teammate_mode=teammate_mode,
         db_config=ctx.db_config,
         transport_config=transport,
     )
