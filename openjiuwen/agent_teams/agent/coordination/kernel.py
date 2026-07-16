@@ -514,6 +514,9 @@ class CoordinationKernel:
         # not always follow a ``finalize_round`` (e.g. external stop_team).
         if host.resources.harness is not None:
             await host.resources.harness.dispose()
+        messager = host.infra.messager
+        if messager is not None:
+            await messager.stop()
         host.session_manager.release_session()
         # See pause(): team_member status update for the agent's own
         # ``team_member`` handle is owned by
