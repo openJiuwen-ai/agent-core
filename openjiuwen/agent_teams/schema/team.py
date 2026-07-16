@@ -290,6 +290,12 @@ class TeamSpec(BaseModel):
     ``TeamRuntimeContext`` (external CLI member spawn) resolve the same
     tool set and prompt as in-process members.
     """
+    teammate_mode: str = "build_mode"
+    """How teammates execute tasks — mirrors ``TeamAgentSpec.teammate_mode``.
+
+    Carried on the runtime spec so external CLI member MCP tools expose the
+    same plan/build-mode tool set described by the spawned system prompt.
+    """
     metadata: dict = Field(default_factory=dict)
     model_pool: list[ModelPoolEntry] = Field(default_factory=list)
     """Optional pool of LLM endpoints shared by every team member.

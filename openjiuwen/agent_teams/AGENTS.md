@@ -212,7 +212,7 @@ messager，不经本地 avatar 代理。与 F_07 bridge（本地完整 DeepAgent
 "自主一等成员"。
 
 - `external/descriptor.py`：`TeamJoinDescriptor`（session/team/member + role + language +
-  db_config + transport_config）+ `TEAM_JOIN_ENV` 环境变量（`OPENJIUWEN_TEAM_JOIN`）。
+  dispatch_mode + teammate_mode + db_config + transport_config）+ `TEAM_JOIN_ENV` 环境变量（`OPENJIUWEN_TEAM_JOIN`）。
   团队拉起外部 agent 时注入，或运维下发给独立服务。
 **两个场景，按 `descriptor.scope` 首次连接时分化（F_26）**——`scope` 与 team `role` 正交：
 

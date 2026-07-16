@@ -80,11 +80,11 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 7. **每条 ToolCard 描述都过 Translator**。工具构造器拿到的是同一个
    `t: Translator` 闭包，`ToolCard.description` 必须由 `t(name)` 提供，
    不许在构造器里写硬编码字面量。
-8. **审批工具的角色门控**：`approve_plan` /
-   `approve_tool` 只在 `teammate_mode == "plan_mode"` 才进入 leader 工具集；
-   `build_mode` 下默认不包含。但当 `team_permissions_enabled=True` 时，
-   `approve_tool` 在 `build_mode` 下也保留——leader 需用它解决 teammate ASK interrupt。
-   `teammate_mode` 不影响 teammate / human_agent 的工具集。
+8. **计划与审批工具的模式门控**：`approve_plan` 只在
+   `teammate_mode == "plan_mode"` 才进入 leader 工具集；`submit_plan` 只在
+   `teammate_mode == "plan_mode"` 才进入 teammate 工具集；`build_mode` 下默认不包含。
+   但当 `team_permissions_enabled=True` 时，`approve_tool` 在 `build_mode` 下也保留——
+   leader 需用它解决 teammate ASK interrupt。human_agent 工具集不受实际影响。
 9. **`exclude_tools` 是减法，不是注册口**。它从角色集合里**移除**给定名字，
    不能通过它注册新工具。新工具靠的是工厂里的静态 `all_tools` 字典。
 10. **角色集合互相对称**：
@@ -262,7 +262,7 @@ def create_team_tools(
 | `role` | `"leader"` / `"teammate"` / `"human_agent"` | 决定基础工具集——分别为 `LEADER_TOOLS` / `MEMBER_TOOLS_BY_DISPATCH[dispatch_mode]` / `HUMAN_AGENT_TOOLS`。其它字符串当作 teammate 走（落入 else 分支）。新增角色必须显式补一个集合常量，不要靠 fall-through。 |
 | `dispatch_mode` | `"autonomous"` / `"scheduled"` | 任务如何到达成员。选择 `create_task` / `send_message` 的形态、`member_complete_task` 的 desc_key，以及成员工具集。未知值抛 `KeyError`。见不变量 18。 |
 | `agent_team` | `TeamBackend` | 后端句柄，所有写操作（`build_team` / `spawn_*` / 任务 / 消息）通过它走，不绕过去直接打数据库或 messager。 |
-| `teammate_mode` | `"build_mode"` / `"plan_mode"` | 仅 leader 角色相关：非 plan_mode 时把 `approve_plan` / `approve_tool` 从 allowed 集合里减掉。 |
+| `teammate_mode` | `"build_mode"` / `"plan_mode"` | plan_mode 门禁。非 plan_mode 时从 allowed 集合里减掉 `approve_plan` / `submit_plan`，且未启用 team permissions 时也减掉 `approve_tool`。 |
 | `on_teammate_created` | `Callable[[str], Awaitable[None]]` | leader 用 `send_message` 时若发现成员未启动，自动 startup 的回调；不传则没有 auto-start 行为。teammate / human_agent 不消费这个回调。 |
 | `model_config_allocator` | `Callable[[str \| None], Allocation \| None]` | leader 的 `spawn_teammate` 调它选 model；不传则 spawn 出来的 teammate 无 allocation，由后端兜底。teammate 不消费。 |
 | `exclude_tools` | `set[str]` 或 `None` | **减法**——从该角色 allowed 集合里再减一遍。不存在于 allowed 的名字静默忽略（因为减法对空集是恒等）。 |
@@ -350,14 +350,18 @@ worktree 隔离只通过 spawn 时的 `isolation="worktree"` 由 leader / 宿主
 ### `teammate_mode` 的精确门禁
 
 ```python
-if role == "leader" and teammate_mode != "plan_mode":
-    allowed = allowed - {"approve_plan", "approve_tool"}
+if teammate_mode != "plan_mode":
+    excluded = {"approve_plan", "submit_plan"}
+    if not team_permissions_enabled:
+        excluded.add("approve_tool")
+    allowed = allowed - excluded
 ```
 
-- 只对 `role == "leader"` 生效。
-- `teammate_mode` 取 `"plan_mode"` 时 leader 拿到全套审批工具；其它取值
-  （含默认 `"build_mode"`）一律剥离这两个工具。
-- teammate / human_agent 不受此门禁影响——他们本来就不在 leader 集合里。
+- `teammate_mode` 取 `"plan_mode"` 时 leader 拿到计划审批工具，teammate 拿到
+  `submit_plan`。
+- 其它取值（含默认 `"build_mode"`）剥离计划相关工具；`approve_tool` 在 team
+  permissions 开启时保留给 leader 处理成员 ASK 中断。
+- human_agent 不受此门禁的实际影响——它本来就不在这些集合里。
 
 ### `create_task` 的依赖表示契约（F_55）
 
