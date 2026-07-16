@@ -17,6 +17,7 @@ from openjiuwen.agent_evolving.trajectory import (
     to_legacy_trajectory,
 )
 from openjiuwen.agent_evolving.trajectory.semconv import (
+    LEGACY_STEP_META,
     OJ_AGENT_INVOKE_TYPE,
     OJ_RL_COMPLETION_TOKEN_IDS,
     OJ_RL_LOGPROBS,
@@ -25,7 +26,7 @@ from openjiuwen.agent_evolving.trajectory.semconv import (
     OJ_WORKFLOW_COMPONENT_TYPE,
     TRAJECTORY_INVOKE_TYPE,
 )
-from openjiuwen.agent_evolving.trajectory.span_codec import to_otlp_value
+from openjiuwen.agent_evolving.trajectory.span_codec import otlp_value_to_python, to_otlp_value
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -546,3 +547,192 @@ class TestEvolutionRailOtlpMerge(IsolatedAsyncioTestCase):
         self.assertEqual(merged_step.prompt_token_ids, [10, 20])
         self.assertEqual(merged_step.completion_token_ids, [30, 40])
         self.assertEqual(merged_step.logprobs, [-0.4, -0.5])
+
+    @staticmethod
+    def _otlp_trace_with_spans(*spans: dict) -> dict:
+        return {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": []},
+                    "scopeSpans": [{"spans": list(spans)}],
+                }
+            ],
+        }
+
+    def test_merge_matches_multiple_spans_in_llm_tool_llm_order(self):
+        """Multi-span traces should align builder steps by kind order (llm-tool-llm)."""
+        rail = EvolutionRail(trajectory_store=self.store)
+        rail._builder = TrajectoryBuilder(session_id="session-multi", source="online")
+        rail._builder.record_step(TrajectoryStep(kind="llm", reward=0.1, meta={"turn": 1}))
+        rail._builder.record_step(
+            TrajectoryStep(
+                kind="tool",
+                detail={"tool_name": "read_file"},
+                meta={"tool_call_id": "call-1"},
+            )
+        )
+        rail._builder.record_step(TrajectoryStep(kind="llm", reward=0.8, meta={"turn": 2}))
+
+        trajectory = Trajectory(
+            otlp_trace=self._otlp_trace_with_spans(
+                {
+                    "traceId": "0" * 32,
+                    "spanId": "1" * 16,
+                    "name": "agent.model",
+                    "attributes": [{"key": TRAJECTORY_INVOKE_TYPE, "value": to_otlp_value("llm")}],
+                    "status": {"code": "STATUS_CODE_OK"},
+                },
+                {
+                    "traceId": "0" * 32,
+                    "spanId": "2" * 16,
+                    "name": "tool.read_file",
+                    "attributes": [{"key": TRAJECTORY_INVOKE_TYPE, "value": to_otlp_value("plugin")}],
+                    "status": {"code": "STATUS_CODE_OK"},
+                },
+                {
+                    "traceId": "0" * 32,
+                    "spanId": "3" * 16,
+                    "name": "agent.model",
+                    "attributes": [{"key": TRAJECTORY_INVOKE_TYPE, "value": to_otlp_value("llm")}],
+                    "status": {"code": "STATUS_CODE_OK"},
+                },
+            )
+        )
+
+        merged = to_legacy_trajectory(rail._merge_builder_otlp_attributes(trajectory))
+        self.assertEqual([step.kind for step in merged.steps], ["llm", "tool", "llm"])
+        self.assertEqual(merged.steps[0].reward, 0.1)
+        self.assertEqual(merged.steps[0].meta["turn"], 1)
+        self.assertEqual(merged.steps[1].meta["tool_call_id"], "call-1")
+        self.assertEqual(merged.steps[2].reward, 0.8)
+        self.assertEqual(merged.steps[2].meta["turn"], 2)
+
+    def test_merge_noop_when_otlp_trace_is_empty_dict(self):
+        """Empty otlp_trace dict should skip merge and keep the trajectory unchanged."""
+        rail = EvolutionRail(trajectory_store=self.store)
+        rail._builder = TrajectoryBuilder(session_id="session-empty-otlp", source="online")
+        rail._builder.record_step(TrajectoryStep(kind="llm", reward=0.5))
+        trajectory = Trajectory(otlp_trace={})
+
+        merged = rail._merge_builder_otlp_attributes(trajectory)
+        self.assertIs(merged, trajectory)
+        self.assertEqual(merged.otlp_trace, {})
+
+    def test_set_otlp_span_attr_overwrite_true_replaces_existing_value(self):
+        """overwrite=True (LEGACY_STEP_META path) should replace an existing attribute."""
+        attributes = [{"key": LEGACY_STEP_META, "value": to_otlp_value({"old": True})}]
+        EvolutionRail._set_otlp_span_attr(
+            attributes,
+            LEGACY_STEP_META,
+            {"new": True, "turn_id": 2},
+            overwrite=True,
+        )
+        self.assertEqual(len(attributes), 1)
+        self.assertEqual(attributes[0]["key"], LEGACY_STEP_META)
+        self.assertEqual(
+            otlp_value_to_python(attributes[0]["value"]),
+            {"new": True, "turn_id": 2},
+        )
+
+    def test_merge_noop_when_builder_has_no_steps(self):
+        """Merge should be a no-op when the builder exists but has no steps."""
+        rail = EvolutionRail(trajectory_store=self.store)
+        rail._builder = TrajectoryBuilder(session_id="session-empty-builder", source="online")
+        trajectory = Trajectory(
+            otlp_trace=self._otlp_trace_with_spans(
+                {
+                    "traceId": "0" * 32,
+                    "spanId": "4" * 16,
+                    "name": "agent.model",
+                    "attributes": [
+                        {"key": TRAJECTORY_INVOKE_TYPE, "value": to_otlp_value("llm")},
+                        {"key": OJ_RL_REWARD, "value": to_otlp_value(0.3)},
+                    ],
+                    "status": {"code": "STATUS_CODE_OK"},
+                }
+            )
+        )
+
+        merged = rail._merge_builder_otlp_attributes(trajectory)
+        self.assertIs(merged, trajectory)
+        legacy = to_legacy_trajectory(merged)
+        self.assertEqual(len(legacy.steps), 1)
+        self.assertEqual(legacy.steps[0].reward, 0.3)
+
+    def test_build_trajectory_falls_back_to_builder_when_otlp_trace_is_none(self):
+        """When trace trajectory has no otlp_trace, fall back to builder-only projection."""
+        rail = EvolutionRail(trajectory_store=self.store)
+        rail._builder = TrajectoryBuilder(session_id="session-fallback-build", source="online")
+        rail._builder.record_step(
+            TrajectoryStep(
+                kind="llm",
+                detail=LLMCallDetail(
+                    model="fallback-model",
+                    messages=[{"role": "user", "content": "hi"}],
+                    response={"role": "assistant", "content": "ok"},
+                ),
+                reward=0.7,
+            )
+        )
+
+        original_build = rail._build_trace_trajectory
+        rail._build_trace_trajectory = lambda ctx, finalize=False: Trajectory(otlp_trace=None)
+        try:
+            ctx = AgentCallbackContext(
+                agent=MockAgent(card=MockAgentCard(id="test_agent")),
+                event=AgentCallbackEvent.AFTER_INVOKE,
+                inputs=InvokeInputs(query="q", conversation_id="session-fallback-build"),
+            )
+            built = rail._build_trajectory(ctx, finalize=True)
+        finally:
+            rail._build_trace_trajectory = original_build
+
+        self.assertIsNotNone(built)
+        legacy = to_legacy_trajectory(built)
+        self.assertEqual(len(legacy.steps), 1)
+        self.assertEqual(legacy.steps[0].kind, "llm")
+        self.assertEqual(legacy.steps[0].reward, 0.7)
+
+    async def test_after_invoke_releases_trace_even_when_builder_is_none(self):
+        """after_invoke must still release the bound trace when builder was cleared."""
+        rail = EvolutionRail(trajectory_store=self.store)
+        rail._active_trace_id = "trace-bound"
+        rail._builder = None
+        released: list[tuple[str, str]] = []
+
+        def _release(trace_id, *, consumer_id):
+            released.append((trace_id, consumer_id))
+
+        rail.trajectory_state_manager.release_trace = _release
+        ctx = AgentCallbackContext(
+            agent=MockAgent(card=MockAgentCard(id="test_agent")),
+            event=AgentCallbackEvent.AFTER_INVOKE,
+            inputs=InvokeInputs(query="q", conversation_id="conv-release"),
+        )
+        await rail.after_invoke(ctx)
+
+        self.assertEqual(released, [("trace-bound", rail.trajectory_consumer_id)])
+        self.assertIsNone(rail._active_trace_id)
+        self.assertIsNone(rail._builder)
+
+    async def test_after_invoke_prefers_active_trace_id_over_ctx(self):
+        """Release must use the before_invoke-bound _active_trace_id when ctx differs."""
+        rail = EvolutionRail(trajectory_store=self.store)
+        rail._active_trace_id = "trace-A"
+        rail._builder = TrajectoryBuilder(session_id="conv-priority", source="online")
+        released: list[str] = []
+
+        def _release(trace_id, *, consumer_id):
+            released.append(trace_id)
+
+        rail.trajectory_state_manager.release_trace = _release
+        rail._trace_id_from_ctx = lambda ctx: "trace-B"  # type: ignore[method-assign]
+        ctx = AgentCallbackContext(
+            agent=MockAgent(card=MockAgentCard(id="test_agent")),
+            event=AgentCallbackEvent.AFTER_INVOKE,
+            inputs=InvokeInputs(query="q", conversation_id="conv-priority"),
+        )
+        await rail.after_invoke(ctx)
+
+        self.assertEqual(released, ["trace-A"])
+        self.assertIsNone(rail._active_trace_id)

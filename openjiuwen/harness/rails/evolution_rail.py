@@ -291,11 +291,14 @@ class EvolutionRail(DeepAgentRail):
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         """Finalize trajectory, save it, and trigger run_evolution."""
-        if self._builder is None:
-            return
-
-        trace_id = self._trace_id_from_ctx(ctx) or self._active_trace_id
+        # Prefer the trace bound in before_invoke; always release in finally even
+        # when builder is missing / early-return, so process-wide state cannot
+        # accumulate after abnormal invoke paths.
+        trace_id = self._active_trace_id or self._trace_id_from_ctx(ctx)
         try:
+            if self._builder is None:
+                return
+
             trajectory = self._build_trajectory(ctx, finalize=True)
             if trajectory is None:
                 return
@@ -331,7 +334,7 @@ class EvolutionRail(DeepAgentRail):
     ) -> Optional[Trajectory]:
         """Build OTLP-first trajectory, falling back to builder projection."""
         trace_trajectory = self._build_trace_trajectory(ctx, finalize=finalize) if ctx is not None else None
-        if trace_trajectory is not None:
+        if trace_trajectory is not None and trace_trajectory.otlp_trace:
             return self._merge_builder_otlp_attributes(trace_trajectory)
 
         if self._builder is None:
