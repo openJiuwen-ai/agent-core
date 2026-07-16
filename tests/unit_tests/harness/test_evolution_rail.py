@@ -10,10 +10,22 @@ from unittest import IsolatedAsyncioTestCase
 
 from openjiuwen.agent_evolving.trajectory import (
     InMemoryTrajectoryStore,
-    LegacyTrajectory,
+    LLMCallDetail,
     Trajectory,
+    TrajectoryBuilder,
+    TrajectoryStep,
     to_legacy_trajectory,
 )
+from openjiuwen.agent_evolving.trajectory.semconv import (
+    OJ_AGENT_INVOKE_TYPE,
+    OJ_RL_COMPLETION_TOKEN_IDS,
+    OJ_RL_LOGPROBS,
+    OJ_RL_PROMPT_TOKEN_IDS,
+    OJ_RL_REWARD,
+    OJ_WORKFLOW_COMPONENT_TYPE,
+    TRAJECTORY_INVOKE_TYPE,
+)
+from openjiuwen.agent_evolving.trajectory.span_codec import to_otlp_value
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -390,7 +402,147 @@ class TestEvolutionRailCustomEvolution(IsolatedAsyncioTestCase):
 
         # Verify evolution was called with trajectory
         self.assertEqual(len(self.evolution_calls), 1)
-        traj = to_legacy_trajectory(self.evolution_calls[0])
-        self.assertIsInstance(self.evolution_calls[0], LegacyTrajectory)
+        received = self.evolution_calls[0]
+        self.assertIsInstance(received, Trajectory)
+        self.assertIsNotNone(received.otlp_trace)
+        traj = to_legacy_trajectory(received)
         self.assertEqual(traj.session_id, "conv_custom")
         self.assertEqual(len(traj.steps), 1)
+
+
+class TestEvolutionRailOtlpMerge(IsolatedAsyncioTestCase):
+    """Tests for OTLP span attribute merge in EvolutionRail."""
+
+    def setUp(self):
+        self.store = InMemoryTrajectoryStore()
+        self.rail = EvolutionRail(trajectory_store=self.store)
+
+    def test_otlp_span_step_kind_uses_shared_fallback_classification(self):
+        """Fallback-only OTLP spans should be classified the same as trajectory projection."""
+        cases = [
+            (
+                {"attributes": [{"key": TRAJECTORY_INVOKE_TYPE, "value": to_otlp_value("llm")}]},
+                "llm",
+            ),
+            (
+                {"attributes": [{"key": OJ_AGENT_INVOKE_TYPE, "value": to_otlp_value("plugin")}]},
+                "tool",
+            ),
+            (
+                {"attributes": [{"key": OJ_WORKFLOW_COMPONENT_TYPE, "value": to_otlp_value("Tool")}]},
+                "tool",
+            ),
+            (
+                {"name": "llm.call", "attributes": []},
+                "llm",
+            ),
+            (
+                {"name": "tool.read_file", "attributes": []},
+                "tool",
+            ),
+        ]
+
+        for span, expected in cases:
+            with self.subTest(span=span):
+                self.assertEqual(EvolutionRail._otlp_span_step_kind(span), expected)
+
+    def test_trace_trajectory_merges_builder_fields_for_fallback_classified_span(self):
+        """Builder RL fields should merge onto spans identified by invoke-type fallback attrs."""
+        rail = EvolutionRail(trajectory_store=self.store)
+        rail._builder = TrajectoryBuilder(session_id="session-fallback", source="online")
+        rail._builder.record_step(
+            TrajectoryStep(
+                kind="llm",
+                detail=LLMCallDetail(
+                    model="fallback-model",
+                    messages=[{"role": "user", "content": "hello"}],
+                    response={"role": "assistant", "content": "hi"},
+                ),
+                reward=0.9,
+                prompt_token_ids=[1, 2],
+                completion_token_ids=[3, 4],
+                logprobs=[-0.1, -0.2],
+                meta={"turn_id": 1},
+            )
+        )
+        trajectory = Trajectory(
+            otlp_trace={
+                "resourceSpans": [
+                    {
+                        "resource": {"attributes": []},
+                        "scopeSpans": [
+                            {
+                                "spans": [
+                                    {
+                                        "traceId": "0" * 32,
+                                        "spanId": "1" * 16,
+                                        "name": "agent.model",
+                                        "attributes": [
+                                            {"key": TRAJECTORY_INVOKE_TYPE, "value": to_otlp_value("llm")},
+                                        ],
+                                        "status": {"code": "STATUS_CODE_OK"},
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        merged_step = to_legacy_trajectory(rail._merge_builder_otlp_attributes(trajectory)).steps[0]
+
+        self.assertEqual(merged_step.reward, 0.9)
+        self.assertEqual(merged_step.prompt_token_ids, [1, 2])
+        self.assertEqual(merged_step.completion_token_ids, [3, 4])
+        self.assertEqual(merged_step.logprobs, [-0.1, -0.2])
+        self.assertEqual(merged_step.meta["turn_id"], 1)
+
+    def test_trace_trajectory_keeps_existing_otlp_rl_fields_when_merging_builder_fields(self):
+        """Trace-provided RL fields should stay authoritative over builder fallback fields."""
+        rail = EvolutionRail(trajectory_store=self.store)
+        rail._builder = TrajectoryBuilder(session_id="session-existing-rl", source="online")
+        rail._builder.record_step(
+            TrajectoryStep(
+                kind="llm",
+                reward=0.9,
+                prompt_token_ids=[1, 2],
+                completion_token_ids=[3, 4],
+                logprobs=[-0.1, -0.2],
+            )
+        )
+        trajectory = Trajectory(
+            otlp_trace={
+                "resourceSpans": [
+                    {
+                        "resource": {"attributes": []},
+                        "scopeSpans": [
+                            {
+                                "spans": [
+                                    {
+                                        "traceId": "0" * 32,
+                                        "spanId": "2" * 16,
+                                        "name": "agent.model",
+                                        "attributes": [
+                                            {"key": TRAJECTORY_INVOKE_TYPE, "value": to_otlp_value("llm")},
+                                            {"key": OJ_RL_REWARD, "value": to_otlp_value(0.4)},
+                                            {"key": OJ_RL_PROMPT_TOKEN_IDS, "value": to_otlp_value([10, 20])},
+                                            {"key": OJ_RL_COMPLETION_TOKEN_IDS, "value": to_otlp_value([30, 40])},
+                                            {"key": OJ_RL_LOGPROBS, "value": to_otlp_value([-0.4, -0.5])},
+                                        ],
+                                        "status": {"code": "STATUS_CODE_OK"},
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        merged_step = to_legacy_trajectory(rail._merge_builder_otlp_attributes(trajectory)).steps[0]
+
+        self.assertEqual(merged_step.reward, 0.4)
+        self.assertEqual(merged_step.prompt_token_ids, [10, 20])
+        self.assertEqual(merged_step.completion_token_ids, [30, 40])
+        self.assertEqual(merged_step.logprobs, [-0.4, -0.5])

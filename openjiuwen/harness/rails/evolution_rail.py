@@ -29,9 +29,20 @@ from openjiuwen.agent_evolving.trajectory import (
     TrajectoryStep,
     TrajectoryStore,
     ensure_otlp_handlers_registered,
-    to_legacy_trajectory,
     trajectory_from_legacy,
 )
+from openjiuwen.agent_evolving.trajectory.semconv import (
+    LEGACY_STEP_META,
+    OJ_RL_COMPLETION_TOKEN_IDS,
+    OJ_RL_LOGPROBS,
+    OJ_RL_PROMPT_TOKEN_IDS,
+    OJ_RL_REWARD,
+)
+from openjiuwen.agent_evolving.trajectory.span_codec import (
+    otlp_value_to_python,
+    to_otlp_value,
+)
+from openjiuwen.agent_evolving.trajectory.types import _otlp_legacy_step_kind as _otlp_step_kind
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.tracer.span import SpanManager
@@ -280,20 +291,18 @@ class EvolutionRail(DeepAgentRail):
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         """Finalize trajectory, save it, and trigger run_evolution."""
-        try:
-            if self._builder is None:
-                return
+        if self._builder is None:
+            return
 
+        trace_id = self._trace_id_from_ctx(ctx) or self._active_trace_id
+        try:
             trajectory = self._build_trajectory(ctx, finalize=True)
             if trajectory is None:
                 return
 
             self._trajectory_store.save(trajectory)
-            await self.run_evolution(to_legacy_trajectory(trajectory), ctx)
+            await self.run_evolution(trajectory, ctx)
         finally:
-            # Always release even when builder is missing / early-return, so
-            # process-wide state cannot accumulate after abnormal invoke paths.
-            trace_id = self._active_trace_id or self._trace_id_from_ctx(ctx)
             if trace_id is not None:
                 self.trajectory_state_manager.release_trace(
                     trace_id,
@@ -322,41 +331,91 @@ class EvolutionRail(DeepAgentRail):
     ) -> Optional[Trajectory]:
         """Build OTLP-first trajectory, falling back to builder projection."""
         trace_trajectory = self._build_trace_trajectory(ctx, finalize=finalize) if ctx is not None else None
-        if trace_trajectory is not None and trace_trajectory.otlp_trace:
-            legacy = self._merge_builder_step_projection(to_legacy_trajectory(trace_trajectory))
-            return trajectory_from_legacy(legacy, otlp_trace=trace_trajectory.otlp_trace)
+        if trace_trajectory is not None:
+            return self._merge_builder_otlp_attributes(trace_trajectory)
 
         if self._builder is None:
             return None
         return trajectory_from_legacy(self._builder.build())
 
-    def _merge_builder_step_projection(self, legacy: LegacyTrajectory) -> LegacyTrajectory:
-        """Overlay builder-collected step fields onto an OTLP-derived legacy view."""
-        if self._builder is None or not self._builder.steps:
-            return legacy
+    def _merge_builder_otlp_attributes(self, trajectory: Trajectory) -> Trajectory:
+        """Merge builder-only RL fields into trace-backed OTLP span attributes."""
+        if self._builder is None or not self._builder.steps or not isinstance(trajectory.otlp_trace, dict):
+            return trajectory
 
         builder_steps = list(self._builder.steps)
-        if not legacy.steps:
-            legacy.steps = builder_steps
-            return legacy
-
-        for index, target_step in enumerate(legacy.steps):
-            if index >= len(builder_steps):
-                break
-            source_step = builder_steps[index]
-            if target_step.kind != source_step.kind:
+        builder_index = 0
+        for span in self._iter_otlp_spans(trajectory.otlp_trace):
+            span_kind = self._otlp_span_step_kind(span)
+            if span_kind is None:
                 continue
-            if source_step.reward is not None and target_step.reward is None:
-                target_step.reward = source_step.reward
-            if source_step.prompt_token_ids is not None and target_step.prompt_token_ids is None:
-                target_step.prompt_token_ids = source_step.prompt_token_ids
-            if source_step.completion_token_ids is not None and target_step.completion_token_ids is None:
-                target_step.completion_token_ids = source_step.completion_token_ids
-            if source_step.logprobs is not None and target_step.logprobs is None:
-                target_step.logprobs = source_step.logprobs
-            for key, value in source_step.meta.items():
-                target_step.meta.setdefault(key, deepcopy(value))
-        return legacy
+            while builder_index < len(builder_steps) and builder_steps[builder_index].kind != span_kind:
+                builder_index += 1
+            if builder_index >= len(builder_steps):
+                break
+
+            source_step = builder_steps[builder_index]
+            builder_index += 1
+            attributes = span.setdefault("attributes", [])
+            self._set_otlp_span_attr(attributes, OJ_RL_REWARD, source_step.reward, overwrite=False)
+            self._set_otlp_span_attr(
+                attributes,
+                OJ_RL_PROMPT_TOKEN_IDS,
+                deepcopy(source_step.prompt_token_ids),
+                overwrite=False,
+            )
+            self._set_otlp_span_attr(
+                attributes,
+                OJ_RL_COMPLETION_TOKEN_IDS,
+                deepcopy(source_step.completion_token_ids),
+                overwrite=False,
+            )
+            self._set_otlp_span_attr(attributes, OJ_RL_LOGPROBS, deepcopy(source_step.logprobs), overwrite=False)
+
+            if source_step.meta:
+                legacy_meta = self._get_otlp_span_attr(attributes, LEGACY_STEP_META)
+                merged_meta = dict(legacy_meta) if isinstance(legacy_meta, dict) else {}
+                for key, value in source_step.meta.items():
+                    if value is not None:
+                        merged_meta.setdefault(key, deepcopy(value))
+                self._set_otlp_span_attr(attributes, LEGACY_STEP_META, merged_meta)
+        return trajectory
+
+    @staticmethod
+    def _iter_otlp_spans(otlp_trace: dict) -> list[dict]:
+        spans: list[dict] = []
+        for resource_span in otlp_trace.get("resourceSpans") or []:
+            for scope_span in resource_span.get("scopeSpans") or []:
+                spans.extend(scope_span.get("spans") or [])
+        return spans
+
+    @staticmethod
+    def _get_otlp_span_attr(attributes: list[dict], key: str) -> Any:
+        for item in attributes or []:
+            if isinstance(item, dict) and item.get("key") == key:
+                return otlp_value_to_python(item.get("value") or {})
+        return None
+
+    @staticmethod
+    def _set_otlp_span_attr(attributes: list[dict], key: str, value: Any, *, overwrite: bool = True) -> None:
+        if value is None:
+            return
+        encoded = {"key": key, "value": to_otlp_value(value)}
+        for item in attributes:
+            if isinstance(item, dict) and item.get("key") == key:
+                if overwrite:
+                    item.update(encoded)
+                return
+        attributes.append(encoded)
+
+    @classmethod
+    def _otlp_span_step_kind(cls, span: dict) -> Optional[str]:
+        attrs = {
+            item.get("key"): otlp_value_to_python(item.get("value") or {})
+            for item in span.get("attributes") or []
+            if isinstance(item, dict) and item.get("key")
+        }
+        return _otlp_step_kind(span, attrs)
 
     def _build_trace_trajectory(
         self,
@@ -470,7 +529,7 @@ class EvolutionRail(DeepAgentRail):
 
         Args:
             trajectory: Complete trajectory for this conversation round
-                (LegacyTrajectory preferred; OTLP Trajectory also accepted)
+                (OTLP Trajectory preferred; LegacyTrajectory also accepted)
             ctx: Callback context with agent, session, etc.
         """
         pass
