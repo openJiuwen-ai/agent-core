@@ -1796,7 +1796,12 @@ class SkillEvolutionRail(EvolutionRail):
             )
 
     async def rollback_skill(self, skill_name: str, version: Optional[str] = None) -> bool:
-        """Rollback skill to an archived version (no approval required)."""
+        """Rollback skill to an archived version (no approval required).
+
+        ``version`` may be a body archive filename (``SKILL.1.0.0.md``) or a bare
+        SemVer string (``1.0.0``). When omitted, the newest body archive by mtime
+        is used.
+        """
         store = self._evolution_store
         archive = store.get_skill_archive_dir(skill_name)
         if archive is None:
@@ -1804,14 +1809,18 @@ class SkillEvolutionRail(EvolutionRail):
             return False
 
         if version:
-            body_archive = store.get_skill_archive_file(skill_name, version)
+            body_name = store.normalize_body_archive_name(version)
+            if body_name is None:
+                logger.warning("[SkillEvolutionRail] invalid archive version for %s: %s", skill_name, version)
+                return False
+            body_archive = store.get_skill_archive_file(skill_name, body_name)
             if body_archive is None:
                 logger.warning("[SkillEvolutionRail] invalid archive version for %s: %s", skill_name, version)
                 return False
         else:
             body_files = sorted(
-                [f for f in archive.iterdir() if f.name.startswith("SKILL.v")],
-                key=lambda p: p.name,
+                [f for f in archive.iterdir() if f.is_file() and store.is_body_archive_filename(f.name)],
+                key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
             if not body_files:

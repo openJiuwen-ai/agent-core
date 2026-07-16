@@ -17,6 +17,10 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionTarget,
     UsageStats,
 )
+from openjiuwen.agent_evolving.checkpointing.versioning import (
+    aggregate_version_bump,
+    bump_semver,
+)
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.sys_operation import SysOperation
 
@@ -871,6 +875,7 @@ class EvolutionStore:
         skill_md_content = f"""---
 name: {name}
 description: {description}
+version: 1.0.0
 ---
 
 # {name}
@@ -923,28 +928,142 @@ description: {description}
         return ""
 
     @staticmethod
+    def _extract_version_from_skill_md(content: str) -> Optional[str]:
+        """Extract version from SKILL.md YAML front-matter."""
+        if not content.startswith("---"):
+            return None
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            return None
+        front_matter = parts[1]
+        for line in front_matter.strip().split("\n"):
+            if line.startswith("version:"):
+                value = line.split(":", 1)[1].strip().strip('"').strip("'")
+                return value or None
+        return None
+
+    async def _resolve_current_version(self, skill_dir: Path, evo_log: EvolutionLog) -> str:
+        """Resolve current skill version: frontmatter -> evolutions.json -> 1.0.0."""
+        skill_md_path = self._find_skill_md(skill_dir)
+        if skill_md_path is not None:
+            content = await self._read_file_text(skill_md_path)
+            frontmatter_version = self._extract_version_from_skill_md(content)
+            if frontmatter_version:
+                return frontmatter_version
+        if evo_log.version:
+            return evo_log.version
+        return "1.0.0"
+
+    async def bump_version_for_rebuild(self, name: str) -> Optional[str]:
+        """Aggregate experience types and bump SemVer once for a rebuild.
+
+        Returns the new version string, or None when there are no entries to classify.
+        """
+        skill_dir = self._resolve_skill_dir(name)
+        if skill_dir is None:
+            return None
+
+        evo_log = await self._load_full_evolution_log(name)
+        level = aggregate_version_bump(evo_log.entries)
+        if level is None:
+            return None
+
+        current = await self._resolve_current_version(skill_dir, evo_log)
+        new_version = bump_semver(current, level)
+        evo_log.version = new_version
+        evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
+        await self._set_skill_md_version(skill_dir, new_version)
+        await self._save_evolution_log(name, evo_log, skill_dir=skill_dir)
+        logger.info(
+            "[EvolutionStore] rebuild bumped skill=%s version %s -> %s (%s)",
+            name,
+            current,
+            new_version,
+            level.value,
+        )
+        return new_version
+
+    async def _set_skill_md_version(self, skill_dir: Path, version: str) -> None:
+        """Write or update ``version:`` in SKILL.md YAML front-matter."""
+        skill_md_path = self._find_skill_md(skill_dir)
+        if skill_md_path is None:
+            return
+
+        content = await self._read_file_text(skill_md_path)
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                front_matter = parts[1]
+                body = parts[2]
+                lines = front_matter.strip("\n").split("\n") if front_matter.strip("\n") else []
+                updated = False
+                for idx, line in enumerate(lines):
+                    if line.startswith("version:"):
+                        lines[idx] = f"version: {version}"
+                        updated = True
+                        break
+                if not updated:
+                    lines.append(f"version: {version}")
+                new_front = "\n".join(lines)
+                new_content = f"---\n{new_front}\n---{body}"
+                await self._write_file_text(skill_md_path, new_content)
+                return
+
+        # No front-matter: insert a minimal version block at the top.
+        new_content = f"---\nversion: {version}\n---\n{content}"
+        await self._write_file_text(skill_md_path, new_content)
+
+    @staticmethod
     def _archive_dir(skill_dir: Path) -> Path:
         archive = skill_dir / "archive"
         archive.mkdir(parents=True, exist_ok=True)
         return archive
 
     @staticmethod
-    def _ts_suffix() -> str:
-        return datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
+    def _archive_paths(archive: Path, version: str) -> Tuple[Path, Path]:
+        """Return body/evolutions archive paths for a SemVer key."""
+        return archive / f"SKILL.{version}.md", archive / f"evolutions.{version}.json"
 
     @staticmethod
-    def _archive_paths(archive: Path, suffix: str) -> Tuple[Path, Path]:
-        return archive / f"SKILL.v{suffix}.md", archive / f"evolutions.v{suffix}.json"
+    def body_archive_name_for_version(version: str) -> str:
+        """Map a SemVer string to the body archive filename."""
+        return f"SKILL.{version}.md"
 
-    def _available_archive_suffix(self, archive: Path, suffix: Optional[str] = None) -> str:
-        base = suffix or self._ts_suffix()
-        candidate = base
-        for index in range(100):
-            body_path, evo_path = self._archive_paths(archive, candidate)
-            if not body_path.exists() and not evo_path.exists():
-                return candidate
-            candidate = f"{base}_{index + 1:02d}"
-        raise RuntimeError(f"No available archive suffix under {archive}")
+    @classmethod
+    def normalize_body_archive_name(cls, version_or_name: str) -> Optional[str]:
+        """Accept ``SKILL.1.0.0.md`` or bare ``1.0.0``; reject invalid paths."""
+        if not version_or_name or not cls.is_valid_skill_archive_name(version_or_name):
+            return None
+        if version_or_name.endswith(".md") and version_or_name.startswith("SKILL."):
+            if version_or_name == "SKILL.md":
+                return None
+            return version_or_name
+        if "/" in version_or_name or "\\" in version_or_name or version_or_name.endswith(".md"):
+            return None
+        return cls.body_archive_name_for_version(version_or_name)
+
+    @staticmethod
+    def is_body_archive_filename(archive_name: str) -> bool:
+        return (
+            archive_name.startswith("SKILL.")
+            and archive_name.endswith(".md")
+            and archive_name != "SKILL.md"
+        )
+
+    def _archive_version_exists(self, archive: Path, version: str) -> bool:
+        body_path, evo_path = self._archive_paths(archive, version)
+        return body_path.exists() or evo_path.exists()
+
+    async def _resolve_archive_version(
+        self,
+        name: str,
+        skill_dir: Path,
+        version: Optional[str] = None,
+    ) -> str:
+        if version:
+            return version
+        evo_log = await self._load_full_evolution_log(name)
+        return await self._resolve_current_version(skill_dir, evo_log)
 
     @staticmethod
     def is_valid_skill_archive_name(archive_name: str) -> bool:
@@ -955,49 +1074,32 @@ description: {description}
     def paired_evolution_archive_name(cls, body_archive_name: str) -> Optional[str]:
         if not cls.is_valid_skill_archive_name(body_archive_name):
             return None
-        if not body_archive_name.startswith("SKILL.v") or not body_archive_name.endswith(".md"):
+        if not cls.is_body_archive_filename(body_archive_name):
             return None
-        suffix = body_archive_name.removeprefix("SKILL.").removesuffix(".md")
-        return f"evolutions.{suffix}.json"
+        version_key = body_archive_name.removeprefix("SKILL.").removesuffix(".md")
+        if not version_key:
+            return None
+        return f"evolutions.{version_key}.json"
 
     def resolve_paired_evolution_archive(self, name: str, body_archive_name: str) -> Optional[Path]:
         """Resolve the evolution archive paired with a body archive filename."""
         paired_name = self.paired_evolution_archive_name(body_archive_name)
         if paired_name is None:
             return None
-        exact = self.get_skill_archive_file(name, paired_name)
-        if exact is not None:
-            return exact
-
-        archive = self.get_skill_archive_dir(name)
-        if archive is None:
-            return None
-        body_suffix = body_archive_name.removeprefix("SKILL.").removesuffix(".md")
-        candidates = [
-            path
-            for path in archive.iterdir()
-            if path.is_file() and path.name.startswith("evolutions.v") and path.name.endswith(".json")
-        ]
-        if not candidates:
-            return None
-
-        body_day = body_suffix[:8] if len(body_suffix) >= 8 else body_suffix
-
-        def _distance(path: Path) -> tuple[int, int, str]:
-            evo_suffix = path.name.removeprefix("evolutions.").removesuffix(".json")
-            same_day = 0 if evo_suffix[:8] == body_day else 1
-            if evo_suffix >= body_suffix:
-                return (same_day, 0, evo_suffix)
-            inverted = "".join(chr(255 - ord(char)) for char in evo_suffix)
-            return (same_day, 1, inverted)
-
-        return min(candidates, key=_distance)
+        return self.get_skill_archive_file(name, paired_name)
 
     async def _archive_current_state(self, name: str, skill_dir: Path) -> Tuple[Optional[str], Optional[str]]:
         archive = self._archive_dir(skill_dir)
-        suffix = self._available_archive_suffix(archive)
-        body_archive = await self._archive_skill_body_at(name, skill_dir, suffix)
-        evo_archive = await self._archive_evolutions_at(skill_dir, suffix)
+        version = await self._resolve_archive_version(name, skill_dir)
+        if self._archive_version_exists(archive, version):
+            logger.warning(
+                "[EvolutionStore] archive skipped for skill=%s version=%s (already exists)",
+                name,
+                version,
+            )
+            return None, None
+        body_archive = await self._archive_skill_body_at(name, skill_dir, version)
+        evo_archive = await self._archive_evolutions_at(skill_dir, version)
         return body_archive, evo_archive
 
     async def archive_current_state(self, name: str) -> Tuple[Optional[str], Optional[str]]:
@@ -1006,52 +1108,76 @@ description: {description}
             return None, None
         return await self._archive_current_state(name, skill_dir)
 
-    async def _archive_skill_body_at(self, name: str, skill_dir: Path, suffix: str) -> Optional[str]:
+    async def _archive_skill_body_at(self, name: str, skill_dir: Path, version: str) -> Optional[str]:
         md_path = self._find_skill_md(skill_dir)
         if md_path is None:
             return None
         archive = self._archive_dir(skill_dir)
-        dest, _ = self._archive_paths(archive, suffix)
+        dest, _ = self._archive_paths(archive, version)
+        if dest.exists():
+            logger.warning(
+                "[EvolutionStore] archive body skipped for skill=%s version=%s (already exists)",
+                name,
+                version,
+            )
+            return None
         content = await self._read_file_text(md_path)
         await self._write_file_text(dest, content)
         logger.info("[EvolutionStore] archived %s -> %s for skill=%s", md_path.name, dest.name, name)
         return dest.name
 
-    async def _archive_evolutions_at(self, skill_dir: Path, suffix: str) -> Optional[str]:
+    async def _archive_evolutions_at(self, skill_dir: Path, version: str) -> Optional[str]:
         evo_path = skill_dir / _EVOLUTION_FILENAME
         if not evo_path.is_file():
             return None
         archive = self._archive_dir(skill_dir)
-        _, dest = self._archive_paths(archive, suffix)
+        _, dest = self._archive_paths(archive, version)
+        if dest.exists():
+            logger.warning(
+                "[EvolutionStore] archive evolutions skipped for version=%s (already exists)",
+                version,
+            )
+            return None
         content = await self._read_file_text(evo_path)
         await self._write_file_text(dest, content)
         logger.info("[EvolutionStore] archived evolutions -> %s", dest.name)
         return dest.name
 
-    async def archive_skill_body(self, name: str, suffix: Optional[str] = None) -> Optional[str]:
+    async def archive_skill_body(self, name: str, version: Optional[str] = None) -> Optional[str]:
         skill_dir = self._resolve_skill_dir(name)
         if skill_dir is None:
             return None
-        archive = self._archive_dir(skill_dir)
-        archive_suffix = suffix if suffix is not None else self._available_archive_suffix(archive)
-        return await self._archive_skill_body_at(name, skill_dir, archive_suffix)
+        archive_version = await self._resolve_archive_version(name, skill_dir, version)
+        return await self._archive_skill_body_at(name, skill_dir, archive_version)
 
-    async def archive_evolutions(self, name: str, suffix: Optional[str] = None) -> Optional[str]:
+    async def archive_evolutions(self, name: str, version: Optional[str] = None) -> Optional[str]:
         skill_dir = self._resolve_skill_dir(name)
         if skill_dir is None:
             return None
         evo_path = skill_dir / _EVOLUTION_FILENAME
         if not evo_path.is_file():
             return None
-        archive = self._archive_dir(skill_dir)
-        archive_suffix = suffix if suffix is not None else self._available_archive_suffix(archive)
-        return await self._archive_evolutions_at(skill_dir, archive_suffix)
+        archive_version = await self._resolve_archive_version(name, skill_dir, version)
+        return await self._archive_evolutions_at(skill_dir, archive_version)
 
-    async def clear_evolutions(self, name: str) -> None:
+    async def clear_evolutions(self, name: str, *, retain_version: Optional[str] = None) -> None:
+        skill_dir = self._resolve_skill_dir(name)
+        if retain_version:
+            version = retain_version
+        elif skill_dir is not None:
+            evo_log = await self._load_full_evolution_log(name)
+            version = await self._resolve_current_version(skill_dir, evo_log)
+        else:
+            version = "1.0.0"
         empty_log = EvolutionLog.empty(skill_id=name)
-        await self._save_evolution_log(name, empty_log)
+        empty_log.version = version
+        await self._save_evolution_log(name, empty_log, skill_dir=skill_dir)
         await self.render_evolution_markdown(name)
-        logger.info("[EvolutionStore] cleared evolutions for skill=%s", name)
+        logger.info(
+            "[EvolutionStore] cleared evolutions for skill=%s (version=%s)",
+            name,
+            version,
+        )
 
     def list_archives(self, name: str) -> List[str]:
         skill_dir = self._resolve_skill_dir(name)

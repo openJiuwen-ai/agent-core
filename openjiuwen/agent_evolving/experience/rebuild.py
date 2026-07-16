@@ -67,9 +67,9 @@ class ExperienceRebuildService:
         return context
 
     async def complete_rebuild(self, rebuild_context: dict[str, Any]) -> bool:
-        """Clear live evolution log after rebuild succeeds.
+        """Bump SemVer from evolution entries, then clear live evolution log.
 
-        Only clears when ``archive_path`` is present (evolutions were archived during prepare).
+        Only runs when ``archive_path`` is present (evolutions were archived during prepare).
         Returns True when cleared, False when skipped.
         """
         archive_path = rebuild_context.get("archive_path")
@@ -78,7 +78,8 @@ class ExperienceRebuildService:
         skill_name = str(rebuild_context.get("skill_name") or "").strip()
         if not skill_name:
             return False
-        await self._store.clear_evolutions(skill_name)
+        new_version = await self._store.bump_version_for_rebuild(skill_name)
+        await self._store.clear_evolutions(skill_name, retain_version=new_version)
         return True
 
 
