@@ -296,6 +296,67 @@ async def test_resume_paused_round_is_noop_without_a_marker():
     host.stream_controller.resume_agent.assert_not_awaited()
 
 
+def _arm_kernel_for_start(host: SimpleNamespace) -> CoordinationKernel:
+    """Wire the minimum a ``start`` call needs, short of a real setup().
+
+    ``start`` returns early without an event bus, so the bus and dispatcher
+    are stubbed as already-running: this test targets the tail of ``start``,
+    not bus construction.
+    """
+    host.session_manager.bind_session = AsyncMock()
+    host.resources.harness.start = AsyncMock()
+    host.stream_controller.start = AsyncMock()
+    host.update_status = AsyncMock()
+    host.refresh_idle_baseline = MagicMock()
+    host.infra.workspace_manager = None
+    host.infra.workspace_initialized = True
+    host.blueprint = SimpleNamespace(spec=SimpleNamespace(workspace=None))
+
+    kernel = CoordinationKernel(host)
+    kernel._event_bus = SimpleNamespace(is_running=True, start=AsyncMock())
+    kernel._dispatcher = SimpleNamespace(team_completion=SimpleNamespace(rearm=MagicMock()))
+    return kernel
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_start_resumes_a_round_left_paused():
+    """``start`` must continue the round a lifecycle pause suspended.
+
+    Regression guard. The resume call used to live in ``notify_team_built``,
+    which returns early when there is no scheduler — so an **autonomous** team
+    (no scheduler, ever) resumed into silence and silently dropped the work it
+    was suspended mid-way through, despite four docs and the method's own
+    docstring promising ``start`` resumes it. The other ``resume_paused_round``
+    tests call the method directly and so could never catch that; this one
+    drives ``start`` itself.
+    """
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.session_manager.team_session = session
+    host.resources.harness.state = HarnessState.PAUSED
+    kernel = _arm_kernel_for_start(host)
+
+    await kernel.start(session)
+
+    host.stream_controller.resume_agent.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_start_leaves_an_unpaused_round_alone():
+    """A member with nothing suspended is not driven by ``start``."""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.session_manager.team_session = session
+    host.resources.harness.state = HarnessState.IDLE
+    kernel = _arm_kernel_for_start(host)
+
+    await kernel.start(session)
+
+    host.stream_controller.resume_agent.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_stop_extracts_memory_when_stopping_from_running():
