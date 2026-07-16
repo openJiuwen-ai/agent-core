@@ -65,8 +65,18 @@ class EvolutionPatch:
     script_filename: Optional[str] = None
     script_language: Optional[str] = None
     script_purpose: Optional[str] = None
+    keywords: Optional[List[str]] = None
+    summary: Optional[str] = None
 
-    _OPTIONAL_FIELDS = ("skip_reason", "merge_target", "script_filename", "script_language", "script_purpose")
+    _OPTIONAL_FIELDS = (
+        "skip_reason",
+        "merge_target",
+        "script_filename",
+        "script_language",
+        "script_purpose",
+        "keywords",
+        "summary",
+    )
 
     def to_dict(self) -> dict:
         payload = {
@@ -98,7 +108,21 @@ class EvolutionPatch:
             script_filename=data.get("script_filename"),
             script_language=data.get("script_language"),
             script_purpose=data.get("script_purpose"),
+            keywords=data.get("keywords"),
+            summary=data.get("summary"),
         )
+
+
+@dataclass
+class EvolutionRecordSpec:
+    """Named inputs for creating an ``EvolutionRecord`` via ``make``."""
+
+    source: str
+    context: str
+    change: EvolutionPatch
+    score: float = 0.6
+    skill_version: Optional[str] = None
+    summary: Optional[str] = None
 
 
 @dataclass
@@ -114,25 +138,20 @@ class EvolutionRecord:
     score: float = 0.6
     usage_stats: Optional[UsageStats] = None
     skill_version: Optional[str] = None
+    summary: Optional[str] = None
 
     @classmethod
-    def make(
-        cls,
-        source: str,
-        context: str,
-        change: EvolutionPatch,
-        score: float = 0.6,
-        skill_version: Optional[str] = None,
-    ) -> "EvolutionRecord":
+    def make(cls, spec: EvolutionRecordSpec) -> "EvolutionRecord":
         return cls(
             id=f"ev_{uuid.uuid4().hex[:8]}",
-            source=source,
+            source=spec.source,
             timestamp=datetime.now(tz=timezone.utc).isoformat(),
-            context=context,
-            change=change,
-            score=score,
+            context=spec.context,
+            change=spec.change,
+            score=spec.score,
             usage_stats=UsageStats(),
-            skill_version=skill_version,
+            skill_version=spec.skill_version,
+            summary=spec.summary,
         )
 
     def to_dict(self) -> dict:
@@ -149,6 +168,8 @@ class EvolutionRecord:
             payload["usage_stats"] = self.usage_stats.to_dict()
         if self.skill_version is not None:
             payload["skill_version"] = self.skill_version
+        if self.summary:
+            payload["summary"] = self.summary
         return payload
 
     @classmethod
@@ -165,6 +186,7 @@ class EvolutionRecord:
             score=data.get("score", 0.6),
             usage_stats=usage_stats,
             skill_version=data.get("skill_version"),
+            summary=data.get("summary"),
         )
 
     @property
@@ -277,6 +299,7 @@ class EvolutionContext:
     existing_desc_records: List[EvolutionRecord]
     existing_body_records: List[EvolutionRecord]
     tool_call_chain: str = ""
+    user_query: str = ""
 
 
 __all__ = [
@@ -284,6 +307,7 @@ __all__ = [
     "UsageStats",
     "EvolutionPatch",
     "EvolutionRecord",
+    "EvolutionRecordSpec",
     "EvolutionLog",
     "EvolveCheckpoint",
     "PendingChange",

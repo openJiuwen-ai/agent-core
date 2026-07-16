@@ -1218,8 +1218,9 @@ class SkillEvolutionRail(EvolutionRail):
             role = msg.get("role", "")
             if role == "assistant":
                 for tool_call in msg.get("tool_calls", []) or []:
-                    tool = str(tool_call.get("name") or "").lower()
-                    arguments = tool_call.get("arguments", "")
+                    # Support both flat and OpenAI-nested tool_call shapes.
+                    tool = cls._tool_call_name(tool_call).lower()
+                    arguments = cls._tool_call_arguments(tool_call)
                     if tool == "skill_tool":
                         args = cls._parse_tool_args_dict(arguments)
                         if str(args.get("skill_name") or "").strip() != skill_name:
@@ -1260,8 +1261,9 @@ class SkillEvolutionRail(EvolutionRail):
                 lines.append(f"[{role}] {content}")
             if role == "assistant":
                 for tool_call in msg.get("tool_calls", []) or []:
-                    tool = str(tool_call.get("name") or "")
-                    args = str(tool_call.get("arguments") or "")[:max_content_chars]
+                    # Support both flat and OpenAI-nested tool_call shapes.
+                    tool = cls._tool_call_name(tool_call)
+                    args = cls._tool_call_arguments(tool_call)[:max_content_chars]
                     if tool:
                         lines.append(f"[assistant/tool_call] {tool} {args}")
         return "\n".join(lines)
@@ -1464,9 +1466,24 @@ class SkillEvolutionRail(EvolutionRail):
                 if updates:
                     await self._evolution_store.update_record_scores(skill_name, updates)
                     logger.info(
-                        "[SkillEvolutionRail] async evaluation updated %d record(s) for skill=%s",
+                        "[SkillEvolutionRail] async evaluation updated %d record(s) for skill=%s "
+                        "results=%s usage=%s",
                         len(updates),
                         skill_name,
+                        [
+                            {
+                                "record_id": item.get("record_id"),
+                                "used": item.get("used"),
+                                "positive": item.get("positive"),
+                                "negative": item.get("negative"),
+                            }
+                            for item in eval_results
+                            if item.get("record_id") in updates
+                        ],
+                        {
+                            record_id: payload.get("usage_stats")
+                            for record_id, payload in updates.items()
+                        },
                     )
         except Exception as exc:
             logger.warning("[SkillEvolutionRail] async evaluation failed: %s", exc, exc_info=True)

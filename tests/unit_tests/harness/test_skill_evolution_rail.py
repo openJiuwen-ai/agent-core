@@ -14,6 +14,7 @@ from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionPatch,
     EvolutionRecord,
+    EvolutionRecordSpec,
     EvolutionTarget,
 )
 from openjiuwen.agent_evolving.signal import (
@@ -49,14 +50,16 @@ def _make_rail(tmp_path, *, auto_scan: bool = True, auto_save: bool = True) -> S
 
 def _make_record(skill_name: str, *, content: str = "experience content") -> EvolutionRecord:
     return EvolutionRecord.make(
-        source=f"signal:{skill_name}",
-        context="ctx",
-        change=EvolutionPatch(
-            section="Troubleshooting",
-            action="append",
-            content=content,
-            target=EvolutionTarget.BODY,
-        ),
+        EvolutionRecordSpec(
+            source=f"signal:{skill_name}",
+            context="ctx",
+            change=EvolutionPatch(
+                section="Troubleshooting",
+                action="append",
+                content=content,
+                target=EvolutionTarget.BODY,
+            ),
+        )
     )
 
 
@@ -1762,6 +1765,56 @@ def test_build_evaluation_snippet_anchors_after_skill_load(tmp_path):
     snippet = SkillEvolutionRail._build_evaluation_snippet(messages, "my_skill")
     assert "after load reply" in snippet
     assert "before load" not in snippet
+
+
+def test_build_evaluation_snippet_supports_openai_nested_tool_calls():
+    """Nested function.name/arguments must appear in scorer snippets and anchors."""
+    messages = [
+        {"role": "user", "content": "郑州的天气"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_skill",
+                    "type": "function",
+                    "function": {
+                        "name": "skill_tool",
+                        "arguments": '{"skill_name":"weather","relative_file_path":"SKILL.md"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "content": "Skill weather body experience about uv_index",
+            "tool_call_id": "call_skill",
+        },
+        {
+            "role": "assistant",
+            "content": "查询紫外线",
+            "tool_calls": [
+                {
+                    "id": "call_bash",
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": (
+                            '{"command":"curl -s \\"https://api.open-meteo.com/v1/forecast?'
+                            'latitude=34.7&longitude=113.6&current=uv_index\\""}'
+                        ),
+                    },
+                }
+            ],
+        },
+    ]
+
+    assert SkillEvolutionRail._find_skill_load_anchor(messages, "weather") == 1
+    snippet = SkillEvolutionRail._build_evaluation_snippet(messages, "weather")
+    assert "[assistant/tool_call] skill_tool" in snippet
+    assert "[assistant/tool_call] bash" in snippet
+    assert "uv_index" in snippet
+    assert "郑州的天气" not in snippet
 
 
 def test_find_skill_load_anchor_uses_assistant_tool_call_not_substring_tool_content():

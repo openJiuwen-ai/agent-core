@@ -14,6 +14,7 @@ import pytest
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionPatch,
     EvolutionRecord,
+    EvolutionRecordSpec,
     EvolutionTarget,
     UsageStats,
 )
@@ -40,15 +41,17 @@ def _make_record(
     skill_version: str | None = None,
 ) -> EvolutionRecord:
     record = EvolutionRecord.make(
-        source="test",
-        context="ctx",
-        change=EvolutionPatch(
-            section="Troubleshooting",
-            action="append",
-            content="test content",
-            target=EvolutionTarget.BODY,
-        ),
-        score=score,
+        EvolutionRecordSpec(
+            source="test",
+            context="ctx",
+            change=EvolutionPatch(
+                section="Troubleshooting",
+                action="append",
+                content="test content",
+                target=EvolutionTarget.BODY,
+            ),
+            score=score,
+        )
     )
     if usage_stats is not None:
         record.usage_stats = usage_stats
@@ -398,18 +401,65 @@ class TestExperienceScorerUpdateLlm:
 
 
 class TestExperienceScorerFormatHelpers:
-    def test_format_presented_experiences(self):
+    def test_format_presented_experiences_falls_back_to_content(self):
         record = _make_record()
         record.id = "ev_test01"
         result = ExperienceScorer._format_presented_experiences([record])
         assert "ev_test01" in result
         assert "test content" in result
 
+    def test_format_presented_experiences_prefers_summary(self):
+        record = _make_record()
+        record.id = "ev_test01"
+        record.summary = "when timeout, retry with backoff"
+        record.change.keywords = ["TimeoutError", "retry", "backoff"]
+        result = ExperienceScorer._format_presented_experiences([record])
+        assert "ev_test01" in result
+        assert "when timeout, retry with backoff" in result
+        assert "TimeoutError" in result
+        assert "test content" not in result
+
+    def test_format_presented_experiences_uses_change_summary(self):
+        record = _make_record()
+        record.id = "ev_test01"
+        record.change.summary = "prefer change.summary when record.summary missing"
+        result = ExperienceScorer._format_presented_experiences([record])
+        assert "prefer change.summary when record.summary missing" in result
+        assert "test content" not in result
+
     def test_format_scored_experiences(self):
         stats = UsageStats(times_presented=3, times_used=2)
         record = _make_record(score=0.75, usage_stats=stats)
         record.id = "ev_test02"
+        record.summary = "summary for scored list"
         result = ExperienceScorer._format_scored_experiences([record])
         assert "ev_test02" in result
         assert "0.75" in result
         assert "presented=3" in result
+        assert "summary for scored list" in result
+        assert "test content" not in result
+
+    def test_eval_prompt_mentions_summary_presentation(self):
+        from openjiuwen.agent_evolving.optimizer.skill_call.experience_scorer import (
+            EXPERIENCE_EVAL_PROMPT_CN,
+            EXPERIENCE_EVAL_PROMPT_EN,
+        )
+
+        assert "summary" in EXPERIENCE_EVAL_PROMPT_CN.lower()
+        assert "Evolution Index" in EXPERIENCE_EVAL_PROMPT_CN
+        assert "summary" in EXPERIENCE_EVAL_PROMPT_EN.lower()
+        assert "Evolution Index" in EXPERIENCE_EVAL_PROMPT_EN
+
+
+class TestExperienceScorerParseLlmJson:
+    def test_preserves_https_urls_while_stripping_comments(self):
+        raw = """
+        [
+          // trailing comment after URL must not truncate it
+          {"content": "see https://api.example.com/docs", "reason": "ok"},
+        ]
+        """
+        result = ExperienceScorer._parse_llm_json(raw)
+        assert result is not None
+        assert result[0]["content"] == "see https://api.example.com/docs"
+        assert result[0]["reason"] == "ok"

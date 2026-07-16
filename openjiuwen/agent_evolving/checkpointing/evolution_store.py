@@ -23,7 +23,6 @@ from openjiuwen.core.sys_operation import SysOperation
 _EVOLUTION_FILENAME = "evolutions.json"
 _TOTAL_WARNING_THRESHOLD = 30
 _MAX_INJECT_DESC = 5
-_INDEX_TOP_N = 3
 _LANG_TO_EXT = {
     "python": "py",
     "javascript": "js",
@@ -387,8 +386,11 @@ class EvolutionStore:
         ]
         for record in records:
             parts = record.change.content.split("\n", 1) if record.change.content else [""]
-            lines.append(f"### [{record.id}] {parts[0]}")
-            if len(parts) > 1 and parts[1].strip():
+            lines.append(f'<a id="{record.id}"></a>')
+            lines.append(f"### [{record.id}] {self._record_summary(record)}")
+            if record.summary and record.change.content.strip():
+                lines.append(record.change.content.rstrip())
+            elif len(parts) > 1 and parts[1].strip():
                 lines.append(parts[1].rstrip())
             applied_tag = " | applied" if record.applied else ""
             lines.extend(
@@ -438,7 +440,6 @@ class EvolutionStore:
             return
 
         body_count = desc_count = script_count = 0
-        section_counts: Dict[str, int] = {}
         for record in entries:
             target = record.change.target
             if target == EvolutionTarget.BODY:
@@ -447,38 +448,16 @@ class EvolutionStore:
                 desc_count += 1
             elif target == EvolutionTarget.SCRIPT:
                 script_count += 1
-            if target != EvolutionTarget.SCRIPT:
-                section_counts[record.change.section] = section_counts.get(record.change.section, 0) + 1
 
         total = len(entries)
         parts = ", ".join(
             f"{v} {k}" for k, v in [("body", body_count), ("description", desc_count), ("script", script_count)] if v
         )
 
-        # Top N high-score experiences
-        scored = sorted(
-            [e for e in entries if e.score >= 0.5],
-            key=lambda e: e.score,
-            reverse=True,
-        )
-        top = scored[:_INDEX_TOP_N]
-        top_n_lines: List[str] = []
-        if top:
-            top_n_lines.append("### Top Experiences")
-            top_n_lines.append("")
-            for record in top:
-                content_preview = record.change.content.split("\n")[0][:80]
-                top_n_lines.append(f"- [{record.id}] (score={record.score:.2f}) {content_preview}")
-            top_n_lines.append("")
-
-        table_lines: List[str] = []
-        for section, cnt in sorted(section_counts.items()):
-            filename = section.lower().replace(" ", "_") + ".md"
-            table_lines.append(f"| {section} | {cnt} | [→ evolution/{filename}](evolution/{filename}) |")
-        if script_count:
-            table_lines.append(
-                f"| Scripts | {script_count} | [→ evolution/scripts/_index.md](evolution/scripts/_index.md) |"
-            )
+        narrative_entries = [record for record in entries if record.change.target != EvolutionTarget.SCRIPT]
+        script_entries = [record for record in entries if record.change.target == EvolutionTarget.SCRIPT]
+        experience_index_lines = self._format_experience_index_table(narrative_entries)
+        script_table_lines = self._format_script_assets_table(script_entries)
 
         now = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
         index_block = "\n".join(
@@ -486,13 +465,24 @@ class EvolutionStore:
                 "<!-- evolution-index-start -->",
                 "## Evolution Experiences",
                 "",
+                (
+                    "Use this section as an index of lessons learned from previous executions. "
+                    "Before applying this skill, check whether the current task matches any listed experience "
+                    "summary. If it matches, read the linked detail section first and use the guidance while "
+                    "planning and executing the task."
+                ),
+                "",
+                (
+                    "For narrative guidance, read the relevant `evolution/*.md#...` detail section. "
+                    "For reusable helper code, first review `evolution/scripts/_index.md`, then inspect "
+                    "the specific script source before adapting or running it. Scripts are implementation "
+                    "aids, not mandatory steps."
+                ),
+                "",
                 f"This skill has accumulated **{total}** evolution experiences ({parts}).",
                 "",
-                *top_n_lines,
-                "| Type | Count | Details |",
-                "|------|-------|---------|",
-                *table_lines,
-                "",
+                *experience_index_lines,
+                *script_table_lines,
                 f"*Last updated: {now}*",
                 "<!-- evolution-index-end -->",
             ]
@@ -505,6 +495,76 @@ class EvolutionStore:
             content = content.rstrip() + "\n\n" + index_block + "\n"
 
         await self._write_file_text(skill_md_path, content)
+
+    @staticmethod
+    def _section_filename(section: str) -> str:
+        return section.lower().replace(" ", "_") + ".md"
+
+    @classmethod
+    def _record_summary(cls, record: EvolutionRecord) -> str:
+        if record.summary:
+            return cls._normalize_summary_text(record.summary)
+        if record.change.target == EvolutionTarget.SCRIPT and record.change.script_purpose:
+            return cls._normalize_summary_text(record.change.script_purpose)
+        first_line = record.change.content.splitlines()[0] if record.change.content else ""
+        return cls._normalize_summary_text(first_line) or record.id
+
+    @staticmethod
+    def _normalize_summary_text(text: str, max_chars: int = 96) -> str:
+        value = text.strip()
+        value = re.sub(r"^#{1,6}\s*", "", value)
+        value = value.replace("|", " ")
+        value = re.sub(r"\s+", " ", value).strip()
+        if len(value) > max_chars:
+            return value[: max_chars - 3].rstrip() + "..."
+        return value
+
+    @classmethod
+    def _format_experience_index_table(cls, records: List[EvolutionRecord]) -> List[str]:
+        if not records:
+            return []
+
+        ordered = sorted(records, key=lambda record: record.timestamp, reverse=True)
+        ordered = sorted(ordered, key=lambda record: record.score, reverse=True)
+        ordered = sorted(ordered, key=lambda record: record.change.section)
+        lines = [
+            "### Experience Index",
+            "",
+            "| Summary | Type | Score | Detail |",
+            "|---------|------|-------|--------|",
+        ]
+        for record in ordered:
+            detail_path = f"evolution/{cls._section_filename(record.change.section)}#{record.id}"
+            lines.append(
+                f"| {cls._record_summary(record)} | {record.change.section} | {record.score:.2f} | "
+                f"[{detail_path}]({detail_path}) |"
+            )
+        lines.append("")
+        return lines
+
+    @classmethod
+    def _format_script_assets_table(cls, records: List[EvolutionRecord]) -> List[str]:
+        if not records:
+            return []
+
+        ordered = sorted(records, key=lambda record: record.timestamp, reverse=True)
+        ordered = sorted(ordered, key=lambda record: record.score, reverse=True)
+        lines = [
+            "### Script Assets",
+            "",
+            "| Summary | Language | Score | Index | Source |",
+            "|---------|----------|-------|-------|--------|",
+        ]
+        for record in ordered:
+            filename = record.change.script_filename or record.id
+            source = f"evolution/scripts/{filename}"
+            lines.append(
+                f"| {cls._record_summary(record)} | {record.change.script_language or 'unknown'} | "
+                f"{record.score:.2f} | [evolution/scripts/_index.md](evolution/scripts/_index.md) | "
+                f"[{source}]({source}) |"
+            )
+        lines.append("")
+        return lines
 
     async def format_desc_experience_text(self, name: str, max_items: int = _MAX_INJECT_DESC) -> str:
         pending = await self.get_pending_records(name, EvolutionTarget.DESCRIPTION)
