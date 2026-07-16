@@ -77,12 +77,16 @@ class SessionModelContext(ModelContext):
         )
         self._processor_lock = asyncio.Lock()
         self._active_compression_in_progress = False
+        self._last_context_window_access_at: float | None = None
         self._kv_cache_manager = KVCacheManager(session_id) if config.enable_kv_cache_release else None
         self._offload_message_buffer = OffloadMessageBuffer()
-        self._offload_message_buffer.set_sys_operation(sys_operation)
+        self._configure_offload_message_buffer()
+
+    def _configure_offload_message_buffer(self) -> None:
+        self._offload_message_buffer.set_sys_operation(self._sys_operation)
         self._offload_message_buffer.set_workspace_info(
-            workspace.root_path if workspace else "",
-            session_id
+            self._workspace.root_path if self._workspace else "",
+            self._session_id,
         )
 
     def __len__(self):
@@ -93,6 +97,19 @@ class SessionModelContext(ModelContext):
 
     def context_id(self) -> str:
         return self._context_id
+
+    def last_context_window_access_at(self) -> float | None:
+        return self._last_context_window_access_at
+
+    def set_last_context_window_access_at(self, timestamp: float) -> None:
+        self._last_context_window_access_at = timestamp
+
+    def context_window_tokens(self) -> int:
+        return ContextUtils.resolve_context_max(
+            model_name=self._model_name,
+            fallback_context_window_tokens=self._context_window_tokens,
+            model_context_window_tokens=self._model_context_window_tokens,
+        )
 
     def workspace_dir(self) -> str:
         if self._workspace:
@@ -175,11 +192,19 @@ class SessionModelContext(ModelContext):
             self._active_compression_in_progress = True
             history_start = len(self._processor_state_recorder.history())
             kwargs.setdefault("sys_operation", self._sys_operation)
-            processors = self._select_processors(processor_types=processor_types)
+            offload_processors = self._select_processors(
+                processor_types=processor_types,
+                offload_only=True,
+            )
+            compression_processors = self._select_processors(
+                processor_types=processor_types,
+                compression_only=True,
+            )
+            processors = [*offload_processors, *compression_processors]
             if not processors:
                 logger.info(
-                    "skip active compression because no matching compression processor is available; "
-                    "possible reasons: no compression processor is registered on this context, "
+                    "skip active compression because no matching compact processor is available; "
+                    "possible reasons: no offload/compression processor is registered on this context, "
                     "or requested processor_types do not overlap with registered compression processors; "
                     f"requested={processor_types}, "
                     f"registered={[processor.processor_type() for processor in self._processors]}"
@@ -212,11 +237,8 @@ class SessionModelContext(ModelContext):
                     history_start=history_start,
                 )
 
-            changed, _ = await self._run_add_processors(
-                [],
-                force=True,
-                processor_types=processor_types,
-                compression_only=True,
+            changed = await self._run_active_compression_processors(
+                processors,
                 **kwargs,
             )
             if changed:
@@ -266,11 +288,7 @@ class SessionModelContext(ModelContext):
     async def clear_messages(self, with_history: bool = True):
         self.pop_messages(len(self), with_history=with_history)
         self._offload_message_buffer = OffloadMessageBuffer()
-        self._offload_message_buffer.set_sys_operation(self._sys_operation)
-        self._offload_message_buffer.set_workspace_info(
-            self._workspace.root_path if self._workspace else "",
-            self._session_id
-        )
+        self._configure_offload_message_buffer()
         return
 
     @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="window")
@@ -317,6 +335,7 @@ class SessionModelContext(ModelContext):
                 operation_id = None
                 started_at = None
                 before_messages = None
+                started_emitted = False
                 try:
                     if await processor.trigger_get_context_window(self, window):
                         logger.info(f"trigger context processor {processor.processor_type()} on GET")
@@ -346,6 +365,7 @@ class SessionModelContext(ModelContext):
                                 context_max=context_max,
                             )
                         )
+                        started_emitted = True
                         event, window = await processor.on_get_context_window(self, window, **kwargs)
                         status = "completed" if event is not None else "noop"
                         await self._build_and_emit_compression_state(
@@ -368,6 +388,24 @@ class SessionModelContext(ModelContext):
                                 compression_usage=getattr(event, "compression_usage", None),
                             )
                         )
+                except asyncio.CancelledError:
+                    if started_emitted:
+                        await self._build_and_emit_processor_cancelled_state(
+                            operation_id=operation_id,
+                            phase="get_context_window",
+                            trigger="passive",
+                            processor=processor,
+                            before_messages=before_messages or list(window.context_messages),
+                            after_messages=list(window.context_messages),
+                            started_at=started_at,
+                            force=False,
+                            context_max=ContextUtils.resolve_context_max(
+                                model_name=self._resolve_context_model_name(kwargs),
+                                fallback_context_window_tokens=self._context_window_tokens,
+                                model_context_window_tokens=self._model_context_window_tokens,
+                            ),
+                        )
+                    raise
                 except Exception as e:
                     await self._build_and_emit_compression_state(
                         ContextProcessorStateInput(
@@ -589,6 +627,7 @@ class SessionModelContext(ModelContext):
             operation_id = None
             started_at = None
             before_messages = None
+            started_emitted = False
             phase = "active_compress" if force else "add_messages"
             trigger = kwargs.get("compression_trigger") or ("manual" if force else "passive")
             try:
@@ -624,6 +663,7 @@ class SessionModelContext(ModelContext):
                             context_max=context_max,
                         )
                     )
+                    started_emitted = True
                     event, messages_to_add = await processor.on_add_messages(
                         self,
                         messages_to_add,
@@ -654,6 +694,24 @@ class SessionModelContext(ModelContext):
                     )
                     if event is not None:
                         changed = True
+            except asyncio.CancelledError:
+                if started_emitted:
+                    await self._build_and_emit_processor_cancelled_state(
+                        operation_id=operation_id,
+                        phase=phase,
+                        trigger=trigger,
+                        processor=processor,
+                        before_messages=before_messages or self.get_messages() + messages_to_add,
+                        after_messages=self.get_messages() + messages_to_add,
+                        started_at=started_at,
+                        force=force,
+                        context_max=ContextUtils.resolve_context_max(
+                            model_name=self._resolve_context_model_name(kwargs),
+                            fallback_context_window_tokens=self._context_window_tokens,
+                            model_context_window_tokens=self._model_context_window_tokens,
+                        ),
+                    )
+                raise
             except Exception as e:
                 await self._build_and_emit_compression_state(
                     ContextProcessorStateInput(
@@ -683,12 +741,208 @@ class SessionModelContext(ModelContext):
                 )
         return changed, messages_to_add
 
+    async def _run_active_compression_processors(
+            self,
+            processors: List[ContextProcessor],
+            **kwargs,
+    ) -> bool:
+        changed = False
+        window = ContextWindow(
+            system_messages=[],
+            context_messages=self.get_messages(),
+            tools=[],
+        )
+        trigger = kwargs.get("compression_trigger") or "manual"
+        for processor in processors:
+            operation_id = None
+            started_at = None
+            before_messages = None
+            started_emitted = False
+            use_window_hook = self._processor_overrides_get_context_window(processor)
+            is_offload_processor = ContextUtils.is_offload_processor(processor)
+            should_check_active_trigger = (
+                use_window_hook
+                and (
+                    is_offload_processor
+                    or processor.processor_type() == "DialogueCompressor"
+                )
+            )
+            try:
+                if should_check_active_trigger:
+                    should_run = await processor.trigger_get_context_window(self, window, **kwargs)
+                    if not should_run:
+                        logger.info(
+                            "skip active processor %s because trigger conditions are not met",
+                            processor.processor_type(),
+                        )
+                        continue
+                logger.info(
+                    "force trigger context processor %s on %s",
+                    processor.processor_type(),
+                    "GET" if use_window_hook else "ADD",
+                )
+                operation_id = uuid.uuid4().hex
+                started_at = time.time()
+                before_messages = list(window.context_messages if use_window_hook else self.get_messages())
+                context_max = ContextUtils.resolve_context_max(
+                    model_name=self._resolve_context_model_name(kwargs),
+                    fallback_context_window_tokens=self._context_window_tokens,
+                    model_context_window_tokens=self._model_context_window_tokens,
+                )
+                await self._build_and_emit_compression_state(
+                    ContextProcessorStateInput(
+                        operation_id=operation_id,
+                        status="started",
+                        phase="active_compress",
+                        trigger=trigger,
+                        processor=processor,
+                        reason="processor_triggered",
+                        before_messages=before_messages,
+                        after_messages=None,
+                        started_at=started_at,
+                        ended_at=None,
+                        error=None,
+                        messages_to_modify=[],
+                        force=True,
+                        context_max=context_max,
+                    )
+                )
+                started_emitted = True
+
+                if use_window_hook:
+                    event, window = await processor.on_get_context_window(
+                        self,
+                        window,
+                        force=True,
+                        **kwargs,
+                    )
+                    if event is not None:
+                        ContextUtils.validate_and_fix_context_window(window)
+                        self.set_messages(window.context_messages)
+                    after_messages = list(window.context_messages)
+                else:
+                    event, _ = await processor.on_add_messages(
+                        self,
+                        [],
+                        force=True,
+                        **kwargs,
+                    )
+                    after_messages = self.get_messages()
+                    window.context_messages = after_messages
+
+                status = "completed" if event is not None else "noop"
+                await self._build_and_emit_compression_state(
+                    ContextProcessorStateInput(
+                        operation_id=operation_id,
+                        status=status,
+                        phase="active_compress",
+                        trigger=trigger,
+                        processor=processor,
+                        reason="processor_completed" if event is not None else "processor_noop",
+                        before_messages=before_messages,
+                        after_messages=after_messages,
+                        started_at=started_at,
+                        ended_at=time.time(),
+                        error=None,
+                        messages_to_modify=list(getattr(event, "messages_to_modify", []) or []),
+                        force=True,
+                        context_max=context_max,
+                        compact_summary=str(getattr(event, "compact_summary", "") or ""),
+                        compression_usage=getattr(event, "compression_usage", None),
+                    )
+                )
+                if event is not None:
+                    changed = True
+            except asyncio.CancelledError:
+                if started_emitted:
+                    await self._build_and_emit_processor_cancelled_state(
+                        operation_id=operation_id,
+                        phase="active_compress",
+                        trigger=trigger,
+                        processor=processor,
+                        before_messages=before_messages or self.get_messages(),
+                        after_messages=list(window.context_messages if use_window_hook else self.get_messages()),
+                        started_at=started_at,
+                        force=True,
+                        context_max=ContextUtils.resolve_context_max(
+                            model_name=self._resolve_context_model_name(kwargs),
+                            fallback_context_window_tokens=self._context_window_tokens,
+                            model_context_window_tokens=self._model_context_window_tokens,
+                        ),
+                    )
+                raise
+            except Exception as e:
+                await self._build_and_emit_compression_state(
+                    ContextProcessorStateInput(
+                        operation_id=operation_id or uuid.uuid4().hex,
+                        status="failed",
+                        phase="active_compress",
+                        trigger=trigger,
+                        processor=processor,
+                        reason="processor_error",
+                        before_messages=before_messages or self.get_messages(),
+                        after_messages=self.get_messages(),
+                        started_at=started_at or time.time(),
+                        ended_at=time.time(),
+                        error=str(e),
+                        messages_to_modify=[],
+                        force=True,
+                        context_max=ContextUtils.resolve_context_max(
+                            model_name=self._resolve_context_model_name(kwargs),
+                            fallback_context_window_tokens=self._context_window_tokens,
+                            model_context_window_tokens=self._model_context_window_tokens,
+                        ),
+                    )
+                )
+                logger.warning(
+                    "Failed to actively compress context by using processor %s, reason: %s",
+                    processor.processor_type(),
+                    str(e),
+                )
+        return changed
+
+    @staticmethod
+    def _processor_overrides_get_context_window(processor: ContextProcessor) -> bool:
+        return type(processor).on_get_context_window is not ContextProcessor.on_get_context_window
+
     async def _build_and_emit_compression_state(
             self,
             state_input: ContextProcessorStateInput,
     ) -> None:
         state = self._processor_state_recorder.build_state(state_input)
         await self._processor_state_recorder.emit(self, state)
+
+    async def _build_and_emit_processor_cancelled_state(
+            self,
+            *,
+            operation_id: str,
+            phase: str,
+            trigger: str,
+            processor: ContextProcessor,
+            before_messages: list[BaseMessage],
+            after_messages: list[BaseMessage],
+            started_at: float,
+            force: bool,
+            context_max: Optional[int],
+    ) -> None:
+        await self._build_and_emit_compression_state(
+            ContextProcessorStateInput(
+                operation_id=operation_id,
+                status="failed",
+                phase=phase,
+                trigger=trigger,
+                processor=processor,
+                reason="processor_cancelled",
+                before_messages=before_messages,
+                after_messages=after_messages,
+                started_at=started_at,
+                ended_at=time.time(),
+                error="cancelled",
+                messages_to_modify=[],
+                force=force,
+                context_max=context_max,
+            )
+        )
 
     def _build_active_compression_result(
             self,
@@ -725,6 +979,7 @@ class SessionModelContext(ModelContext):
             *,
             processor_types: List[str] = None,
             compression_only: bool = False,
+            offload_only: bool = False,
     ) -> List[ContextProcessor]:
         processors = list(self._processors or [])
         if processor_types is not None:
@@ -732,6 +987,11 @@ class SessionModelContext(ModelContext):
             processors = [
                 processor for processor in processors
                 if processor.processor_type() in processor_types
+            ]
+        if offload_only:
+            processors = [
+                processor for processor in processors
+                if ContextUtils.is_offload_processor(processor)
             ]
         if compression_only:
             processors = [
@@ -747,6 +1007,7 @@ class SessionModelContext(ModelContext):
         return {
             "messages": self._message_buffer.get_back(),
             "offload_messages": self._offload_message_buffer.get_all(),
+            "last_context_window_access_at": self._last_context_window_access_at,
         }
 
     def load_state(self, state: Dict[str, Any]):
@@ -755,14 +1016,14 @@ class SessionModelContext(ModelContext):
         ContextUtils.validate_messages(messages)
         messages = ContextUtils.ensure_context_message_ids(messages)
         self._message_buffer.rebulid(messages)
+        last_access_at = context_state.get("last_context_window_access_at")
+        self._last_context_window_access_at = (
+            float(last_access_at) if isinstance(last_access_at, (int, float)) else None
+        )
         offload_messages = context_state.get("offload_messages")
         self._offload_message_buffer = OffloadMessageBuffer()
         if offload_messages:
             for _, msg_list in offload_messages.items():
                 ContextUtils.validate_messages(msg_list)
             self._offload_message_buffer = OffloadMessageBuffer(offload_messages)
-        self._offload_message_buffer.set_sys_operation(self._sys_operation)
-        self._offload_message_buffer.set_workspace_info(
-            self._workspace.root_path if self._workspace else "",
-            self._session_id
-        )
+        self._configure_offload_message_buffer()

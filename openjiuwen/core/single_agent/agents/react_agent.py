@@ -314,12 +314,11 @@ class ReActAgentConfig(BaseModel):
             self,
             max_context_message_num: Optional[int] = None,
             default_window_round_num: Optional[int] = None,
-            enable_reload: bool = False,
             enable_kv_cache_release: bool = False,
     ) -> 'ReActAgentConfig':
         """
         Configure the context-engine parameters that control how conversation history
-        is truncated, offloaded and reloaded.
+        is truncated and offloaded.
 
         Parameters
         ----------
@@ -331,11 +330,6 @@ class ReActAgentConfig(BaseModel):
             user message → final assistant reply without tool calls).  When set,
             it takes precedence over `default_window_message_num`.  Must be > 0
             if given.
-        enable_reload : bool, default False
-            Whether the agent is allowed to **automatically reload** messages that
-            were previously off-loaded (via hints such as `[[OFFLOAD:...]]`).
-            Enable this if you want the model to retrieve long content on demand;
-            disable it to keep hints as plain text.
         enable_kv_cache_release : bool, default False
             Whether to release GPU KV-cache for offloaded messages via the
             inference backend (e.g. InferenceAffinity).  Matches
@@ -344,7 +338,6 @@ class ReActAgentConfig(BaseModel):
         self.context_engine_config = ContextEngineConfig(
             max_context_message_num=max_context_message_num,
             default_window_round_num=default_window_round_num,
-            enable_reload=enable_reload,
             enable_kv_cache_release=enable_kv_cache_release,
         )
         return self
@@ -519,6 +512,36 @@ class ReActAgent(BaseAgent):
         """Create default configuration"""
         return ReActAgentConfig()
 
+    @staticmethod
+    def _resolve_context_engine_model_name(config: ReActAgentConfig) -> str:
+        candidates = (
+            getattr(config, "model_name", None),
+            getattr(getattr(config, "model_config_obj", None), "model_name", None),
+            getattr(getattr(config, "model_client_config", None), "model_name", None),
+        )
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return ""
+
+    @classmethod
+    def _with_context_engine_model_name(cls, config: ReActAgentConfig) -> ReActAgentConfig:
+        context_config = config.context_engine_config
+        if getattr(context_config, "model_name", None):
+            return config
+
+        model_name = cls._resolve_context_engine_model_name(config)
+        if not model_name:
+            return config
+
+        return config.model_copy(
+            update={
+                "context_engine_config": context_config.model_copy(
+                    update={"model_name": model_name}
+                )
+            }
+        )
+
     def configure(self, config: ReActAgentConfig) -> 'BaseAgent':
         """Set configuration
 
@@ -532,6 +555,7 @@ class ReActAgent(BaseAgent):
             After config update, context_engine and memory_scope
             will be updated accordingly
         """
+        config = self._with_context_engine_model_name(config)
         old_config = self._config
         self._config = config
 
