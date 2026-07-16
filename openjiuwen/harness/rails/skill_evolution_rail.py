@@ -425,7 +425,7 @@ class SkillEvolutionRail(EvolutionRail):
 
         Args:
             trajectory: Complete trajectory for this conversation
-                (LegacyTrajectory preferred; OTLP Trajectory also accepted)
+                (OTLP Trajectory preferred; LegacyTrajectory also accepted)
             ctx: Callback context
         """
         logger.info("[SkillEvolutionRail] run_evolution called, auto_scan=%s", self._auto_scan)
