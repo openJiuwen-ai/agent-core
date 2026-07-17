@@ -59,7 +59,7 @@ def test_prepare_rebuild_context_archives_filters_and_keeps_evolution_log():
     skipped = _make_record("skipped experience", score=0.9, skip_reason="duplicate")
     store = Mock()
     store.skill_exists.return_value = True
-    store.archive_current_state = AsyncMock(return_value=("SKILL.1.0.0.md", "evolutions.1.0.0.json"))
+    store.archive_current_state = AsyncMock(return_value=("SKILL.v1.0.0.md", "evolutions.v1.0.0.json"))
     store.load_evolution_log = AsyncMock(return_value=Mock(entries=[high, low, skipped]))
     store.clear_evolutions = AsyncMock()
     rebuild_service = ExperienceRebuildService(store=store)
@@ -101,7 +101,7 @@ def test_prepare_rebuild_context_uses_subject_envelope():
     record = _make_record("good experience", score=0.8)
     store = Mock()
     store.skill_exists.return_value = True
-    store.archive_current_state = AsyncMock(return_value=("SKILL.1.0.0.md", "evolutions.1.0.0.json"))
+    store.archive_current_state = AsyncMock(return_value=("SKILL.v1.0.0.md", "evolutions.v1.0.0.json"))
     store.load_evolution_log = AsyncMock(return_value=Mock(entries=[record]))
     store.clear_evolutions = AsyncMock()
 
@@ -132,7 +132,7 @@ def test_complete_rebuild_clears_when_archive_path_present():
 
     cleared = asyncio.run(
         rebuild_service.complete_rebuild(
-            {"skill_name": "skill-a", "archive_path": "evolutions.1.0.0.json"},
+            {"skill_name": "skill-a", "archive_path": "evolutions.v1.0.0.json"},
         )
     )
 
@@ -209,7 +209,7 @@ async def test_complete_rebuild_bumps_patch_from_all_entries(tmp_path: Path):
     rebuild_service = ExperienceRebuildService(store=store)
 
     cleared = await rebuild_service.complete_rebuild(
-        {"skill_name": "skill-a", "archive_path": "evolutions.1.0.0.json"},
+        {"skill_name": "skill-a", "archive_path": "evolutions.v1.0.0.json"},
     )
 
     assert cleared is True
@@ -263,7 +263,7 @@ async def test_complete_rebuild_bumps_minor_when_any_instruction(tmp_path: Path)
     rebuild_service = ExperienceRebuildService(store=store)
 
     cleared = await rebuild_service.complete_rebuild(
-        {"skill_name": "skill-a", "archive_path": "evolutions.1.0.5.json"},
+        {"skill_name": "skill-a", "archive_path": "evolutions.v1.0.5.json"},
     )
 
     assert cleared is True
@@ -285,7 +285,7 @@ async def test_complete_rebuild_no_bump_when_no_entries(tmp_path: Path):
     rebuild_service = ExperienceRebuildService(store=store)
 
     cleared = await rebuild_service.complete_rebuild(
-        {"skill_name": "skill-a", "archive_path": "evolutions.2.0.0.json"},
+        {"skill_name": "skill-a", "archive_path": "evolutions.v2.0.0.json"},
     )
 
     assert cleared is True
@@ -336,7 +336,7 @@ async def test_complete_rebuild_uses_llm_classification(tmp_path: Path):
     rebuild_service = ExperienceRebuildService(store=store, llm=llm, model="test-model")
 
     cleared = await rebuild_service.complete_rebuild(
-        {"skill_name": "skill-a", "archive_path": "evolutions.1.0.0.json"},
+        {"skill_name": "skill-a", "archive_path": "evolutions.v1.0.0.json"},
     )
 
     assert cleared is True
@@ -373,7 +373,7 @@ async def test_complete_rebuild_changelog_idempotent_same_version(tmp_path: Path
     )
     rebuild_service = ExperienceRebuildService(store=store)
     await rebuild_service.complete_rebuild(
-        {"skill_name": "skill-a", "archive_path": "evolutions.1.0.0.json"},
+        {"skill_name": "skill-a", "archive_path": "evolutions.v1.0.0.json"},
     )
     first = (skill_dir / "changelog.md").read_text(encoding="utf-8")
     assert first.count("## [1.0.1]") == 1
@@ -413,5 +413,5 @@ def test_prepare_rebuild_context_injects_resolved_paths_for_external_skill(tmp_p
     assert archive_dir.is_dir()
     archived_bodies = list(archive_dir.glob("SKILL.*.md"))
     assert len(archived_bodies) == 1
-    assert archived_bodies[0].name == "SKILL.1.0.0.md"
+    assert archived_bodies[0].name == "SKILL.v1.0.0.md"
     assert archived_bodies[0].read_text(encoding="utf-8") == "# Downloaded\n"

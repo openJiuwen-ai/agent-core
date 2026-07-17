@@ -1081,32 +1081,41 @@ version: 1.0.0
         return archive
 
     @staticmethod
-    def _archive_paths(archive: Path, version: str) -> Tuple[Path, Path]:
-        """Return body/evolutions archive paths for a SemVer key."""
-        return archive / f"SKILL.{version}.md", archive / f"evolutions.{version}.json"
+    def _archive_version_key(version: str) -> str:
+        """Normalize a SemVer string to archive key ``vMAJOR.MINOR.PATCH``."""
+        text = (version or "").strip()
+        if text[:1] in ("v", "V"):
+            text = text[1:].strip()
+        return f"v{text}"
 
-    @staticmethod
-    def body_archive_name_for_version(version: str) -> str:
+    @classmethod
+    def _archive_paths(cls, archive: Path, version: str) -> Tuple[Path, Path]:
+        """Return body/evolutions archive paths for a SemVer key."""
+        key = cls._archive_version_key(version)
+        return archive / f"SKILL.{key}.md", archive / f"evolutions.{key}.json"
+
+    @classmethod
+    def body_archive_name_for_version(cls, version: str) -> str:
         """Map a SemVer string to the body archive filename."""
-        return f"SKILL.{version}.md"
+        return f"SKILL.{cls._archive_version_key(version)}.md"
 
     @classmethod
     def normalize_body_archive_name(cls, version_or_name: str) -> Optional[str]:
-        """Accept ``SKILL.1.0.0.md`` or bare ``1.0.0``; reject invalid paths."""
+        """Accept ``SKILL.v1.0.0.md`` or bare ``1.0.0``; reject invalid paths."""
         if not version_or_name or not cls.is_valid_skill_archive_name(version_or_name):
             return None
-        if version_or_name.endswith(".md") and version_or_name.startswith("SKILL."):
-            if version_or_name == "SKILL.md":
+        if version_or_name.endswith(".md"):
+            if not cls.is_body_archive_filename(version_or_name):
                 return None
             return version_or_name
-        if "/" in version_or_name or "\\" in version_or_name or version_or_name.endswith(".md"):
+        if "/" in version_or_name or "\\" in version_or_name:
             return None
         return cls.body_archive_name_for_version(version_or_name)
 
     @staticmethod
     def is_body_archive_filename(archive_name: str) -> bool:
         return (
-            archive_name.startswith("SKILL.")
+            archive_name.startswith("SKILL.v")
             and archive_name.endswith(".md")
             and archive_name != "SKILL.md"
         )
