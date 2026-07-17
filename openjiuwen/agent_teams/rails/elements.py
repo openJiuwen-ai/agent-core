@@ -4,9 +4,10 @@
 """Manifest declarations for the built-in team rails.
 
 The six team rails (tool / policy / workspace / tool-approval / plan-mode /
-reliability) are declared here as ``@harness_element`` factories so they
-assemble through the same provider path as every other DeepAgent capability —
-no more hand-``new`` + ``TeamHarness.build`` named params + closure ``add_rail``.
+reliability) plus ``core.observability`` are declared here as
+``@harness_element`` factories so they assemble through the same provider
+path as every other DeepAgent capability — no more hand-``new`` +
+``TeamHarness.build`` named params + closure ``add_rail``.
 
 Construction split (mirrors swarm's param-vs-context convention):
 - **params** (``param_field``): serializable static config the configurator
@@ -24,7 +25,6 @@ cached. State that must survive a rebuild lives in a reused object injected on
 the build context (e.g. ``reliability_components``) and passed into the fresh
 rail's constructor. Returning ``None`` gates the rail out for this member.
 """
-
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -51,13 +51,15 @@ from openjiuwen.agent_teams.rails.team_context import (
 
 # Element names (the RailSpec ``type`` values). The team rails live under the
 # ``core.team.*`` namespace — the ``core.`` layer prefix plus a ``team`` group —
-# parallel to a platform's ``swarm.*`` namespace.
+# parallel to a platform's ``swarm.*`` namespace. ``core.observability`` is a
+# team-layer rail (team_name / TeamRole / session_id) declared alongside them.
 TEAM_TOOL = "core.team.tool"
 TEAM_POLICY = "core.team.policy"
 TEAM_WORKSPACE = "core.team.workspace"
 TEAM_TOOL_APPROVAL = "core.team.tool_approval"
 TEAM_PLAN_MODE = "core.team.plan_mode"
 TEAM_RELIABILITY = "core.team.reliability"
+OBSERVABILITY = "core.observability"
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +321,29 @@ def build_team_reliability_rail(params: dict[str, Any], context: Any) -> Any:
     return reliability_rail_from_components(components)
 
 
+# ---------------------------------------------------------------------------
+# core.observability — ObservabilityRail
+# ---------------------------------------------------------------------------
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=OBSERVABILITY,
+    description="Creates per-iteration agent spans for observability tracing.",
+)
+def build_observability_rail(params: dict[str, Any], context: Any) -> Any:
+    """Build an ObservabilityRail when observability is initialized.
+
+    Delegates to ``maybe_observability_rail`` so the "is observability on"
+    guard lives in one place. Returns ``None`` when observability is not
+    initialized, making this a safe unconditional addition to any spec's
+    ``rails`` list — the provider handles the on/off logic itself.
+    """
+    from openjiuwen.agent_teams.observability.rail import maybe_observability_rail
+
+    return maybe_observability_rail()
+
+
 __all__ = [
     "TEAM_TOOL",
     "TEAM_POLICY",
@@ -326,4 +351,5 @@ __all__ = [
     "TEAM_TOOL_APPROVAL",
     "TEAM_PLAN_MODE",
     "TEAM_RELIABILITY",
+    "OBSERVABILITY",
 ]

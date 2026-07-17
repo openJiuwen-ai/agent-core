@@ -10,12 +10,9 @@ import types
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.auto_harness.infra.runtime_manifest import load_runtime_manifest
 from openjiuwen.auto_harness.schema import (
     RuntimeExtensionArtifact,
-)
-from openjiuwen.harness.harness_config.loader import (
-    HarnessConfigLoader,
-    ResolvedHarnessConfig,
 )
 
 _OFFICIAL_PREFIX = "openjiuwen.extensions.harness."
@@ -28,11 +25,11 @@ def load_runtime_rails(
     session_id: str,
 ) -> list[type[Any]]:
     """Load rail classes declared by a runtime extension manifest."""
-    resolved = _load_runtime_config(runtime_ext)
+    config = load_runtime_manifest(runtime_ext.config_path)
     rails: list[type[Any]] = []
     for spec in (
-        resolved.config.resources.rails
-        if resolved.config.resources
+        config.resources.rails
+        if config.resources
         else []
     ):
         if spec.type != "package":
@@ -56,11 +53,11 @@ def load_runtime_tools(
     session_id: str,
 ) -> list[type[Any]]:
     """Load tool classes declared by a runtime extension manifest."""
-    resolved = _load_runtime_config(runtime_ext)
+    config = load_runtime_manifest(runtime_ext.config_path)
     tools: list[type[Any]] = []
     for spec in (
-        resolved.config.resources.tools
-        if resolved.config.resources
+        config.resources.tools
+        if config.resources
         else []
     ):
         if spec.type != "package":
@@ -86,8 +83,8 @@ def load_runtime_skill_dirs(
     Resolves relative dirs from ``resources.skills.dirs``
     against the extension root.
     """
-    resolved = _load_runtime_config(runtime_ext)
-    resources = resolved.config.resources
+    config = load_runtime_manifest(runtime_ext.config_path)
+    resources = config.resources
     if not resources or not resources.skills:
         return []
     root = Path(runtime_ext.runtime_path).resolve()
@@ -97,14 +94,6 @@ def load_runtime_skill_dirs(
         if skill_path.is_dir():
             dirs.append(str(skill_path))
     return dirs
-
-
-def _load_runtime_config(
-    runtime_ext: RuntimeExtensionArtifact,
-) -> ResolvedHarnessConfig:
-    return HarnessConfigLoader.load(
-        runtime_ext.config_path,
-    )
 
 
 def _load_runtime_class(

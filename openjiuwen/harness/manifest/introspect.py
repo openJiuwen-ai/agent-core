@@ -16,7 +16,7 @@ import importlib
 import inspect
 from typing import Any, Callable
 
-from openjiuwen.agent_teams.harness.manifest.models import ElementKind, InterfaceMethod
+from openjiuwen.harness.manifest.models import ElementKind, InterfaceMethod
 
 # Internal rail plumbing that is not a user-facing lifecycle hook.
 _RAIL_INTERNAL_METHODS = frozenset({"get_callbacks"})
@@ -167,3 +167,13 @@ def class_tool_adapter(cls: type) -> Callable[..., Any]:
         return cls(**kwargs)
 
     return _build
+
+
+__all__ = [
+    "factory_ref",
+    "resolve_factory",
+    "interface_methods_from_class",
+    "default_interface_methods",
+    "class_rail_adapter",
+    "class_tool_adapter",
+]
