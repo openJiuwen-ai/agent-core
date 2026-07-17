@@ -909,13 +909,13 @@ class TestTagNoticeInclusion:
         assert TeamSectionName.ATTACHMENT_NOTICE in names
 
     @pytest.mark.level1
-    def test_external_cli_prompt_has_inbound_tags_no_attachment_notice(self):
+    def test_external_cli_prompt_has_inbound_tags_and_attachment_notice(self):
         # build_team_member_system_prompt is the external CLI path: it must carry
-        # the inbound-tag notice (external CLI now renders <team-inbound> XML) but
-        # not the attachment notice (external CLI has no attachment channel).
+        # both inbound-tag notice and attachment notice because external CLI
+        # receives rendered team context through runtime input.
         prompt = build_team_member_system_prompt(role=TeamRole.LEADER, member_name="l", language="cn")
         assert "team-inbound" in prompt
-        assert "prompt-attachment" not in prompt
+        assert "prompt-attachment" in prompt
 
     @pytest.mark.asyncio
     @pytest.mark.level1
