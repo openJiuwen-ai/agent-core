@@ -66,8 +66,10 @@ _SCRIPT_PATH = _HERE / "resources" / "party_planner.py"
 _WORKDIR = _HERE / ".e2e_workdir"
 _SCRIPT_REL = "../resources/party_planner.py"
 
-# Only the qwen flash model for now (first entry of config_llm_local.yaml).
-_MODEL_NAME = "qwen3.6-flash"
+# The model comes from config_llm_local.yaml's first `models:` entry — hard-coding
+# a name here drifts the moment that file points at a different endpoint (and the
+# request then fails with a model the endpoint has never heard of).
+_MODEL_NAME_FALLBACK = "deepseek-v4-flash"
 
 # Fail fast if the leader never launches the workflow within this window after
 # the runtime is ready (instead of waiting out the whole-run ceiling).
@@ -111,10 +113,12 @@ def _wire_model_env() -> None:
         llm_cfg = yaml.safe_load(f)
     api_base = llm_cfg["api_base"]
     api_key = llm_cfg["api_key"]
+    models = llm_cfg.get("models") or []
+    model_name = models[0] if models else _MODEL_NAME_FALLBACK
     os.environ.setdefault("API_BASE", api_base)
     os.environ.setdefault("LEADER_API_KEY", api_key)
     os.environ.setdefault("TEAMMATE_API_KEY", api_key)
-    os.environ.setdefault("MODEL_NAME", _MODEL_NAME)
+    os.environ.setdefault("MODEL_NAME", model_name)
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +156,9 @@ class _SwarmflowProbe:
         # agent_completed counts keyed by the agent's label — lets a caller prove
         # e.g. how many concurrent sub-workflows actually ran.
         self.agent_completed: dict[str, int] = {}
+        # Text of every ``log()`` the script emitted — how a script reports its
+        # own view of the run (e.g. the token budget it saw) back to a verifier.
+        self.logs: list[str] = []
 
     async def drain(self, monitor: "object") -> None:
         """Consume ``monitor.workflow_events()`` until the run terminates."""
@@ -171,6 +178,11 @@ class _SwarmflowProbe:
                 label = payload.get("label")
                 if label:
                     self.agent_completed[label] = self.agent_completed.get(label, 0) + 1
+            elif kind == "log":
+                text = payload.get("text")
+                if text:
+                    self.logs.append(text)
+                    test_logger.info("[swarmflow] log: %s", text)
             elif kind == "human_prompt":
                 await self._answer_human(payload)
             elif kind == "human_replied":
