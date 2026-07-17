@@ -449,6 +449,22 @@ class TeamAgentSpec(BaseModel):
     swarmflow_concurrency: ConcurrencyLimits = Field(default_factory=ConcurrencyLimits)
     """Three-layer Swarmflow concurrency caps (L1/L2/L3). Used when ``enable_swarmflow``."""
 
+    swarmflow_budget: Optional[int] = None
+    """Token ceiling for this leader's Swarmflow runs; ``None`` (default) is unbounded.
+
+    A hard ceiling, not a hint: workers report the token usage their model
+    client returns, and once the ceiling is reached the in-flight ones are cut
+    short at their next model call and no further ``agent()`` starts. Scripts
+    read it as ``budget.total`` and poll ``budget.remaining()`` to wind down on
+    their own before the cut.
+
+    It is deliberately *not* a ``swarmflow()`` tool argument: a spend limit is
+    the operator's call, not something the leader should pick per invocation.
+    Counted per leader across all its runs (matching ``budget``'s documented
+    "shared across the main loop and all workflows" semantics), so concurrent
+    runs draw down one pool rather than getting a ceiling each.
+    """
+
     enable_permissions: bool = False
     """Team-specific permission control."""
 
@@ -644,6 +660,7 @@ class TeamAgentSpec(BaseModel):
         self._validate_bridge_consistency()
         if self.enable_swarmflow:
             validate_swarmflow_concurrency(self.swarmflow_concurrency)
+            self._validate_swarmflow_budget()
 
         resolved_language = resolve_language(self.language)
         for role_spec in self.agents.values():
@@ -781,6 +798,24 @@ class TeamAgentSpec(BaseModel):
             )
         reason = f"{cause}; resolve by either: {tail}"
         raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID, reason=reason)
+
+    def _validate_swarmflow_budget(self) -> None:
+        """Reject a non-positive ``swarmflow_budget`` (a run with no headroom).
+
+        Zero or negative would exhaust the ceiling before the first ``agent()``,
+        making every run fail identically — a config mistake worth catching at
+        build time rather than at the first gate.
+        """
+        if self.swarmflow_budget is None or self.swarmflow_budget >= 1:
+            return
+
+        from openjiuwen.core.common.exception.codes import StatusCode
+        from openjiuwen.core.common.exception.errors import raise_error
+
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason=f"swarmflow_budget must be >= 1 when set (got {self.swarmflow_budget})",
+        )
 
     def _validate_reserved_names(self) -> None:
         """Reject user-declared members that collide with reserved names.
