@@ -42,7 +42,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence, TypeVar, overload
 
-from .errors import WorkflowAborted, WorkflowError
+from .errors import BudgetExhausted, WorkflowAborted, WorkflowError
 from .journal import call_signature, key_str
 from .progress import ProgressKind, WorkflowProgressEvent
 from .schema import coerce, resolve_schema
@@ -192,6 +192,23 @@ def _check_abort(rt) -> None:
     ev = rt.abort_event
     if ev is not None and ev.is_set():
         raise WorkflowAborted()
+
+
+def _check_budget(rt) -> None:
+    """Raise ``BudgetExhausted`` when the run has burned its token ceiling.
+
+    The run's hard ceiling, checked once per ``agent()`` / session ``send()``,
+    at the entry gate only: a call already paid for must reach its journal
+    record, or a resume would rerun (and re-pay for) it.
+
+    This gate alone cannot hold the line — one agent's own loop can burn the
+    whole budget long before it returns here. It is the backend's rails that
+    stop an agent mid-loop; this stops the *next* one from starting.
+    """
+    if rt.budget.exhausted:
+        raise BudgetExhausted(
+            f"token budget exhausted: {rt.budget.spent}/{rt.budget.total}"
+        )
 
 
 def _emit_agent_started(
@@ -373,6 +390,7 @@ async def agent(
         return result
 
     _check_abort(rt)  # entry gate: a paused run starts no new agent()
+    _check_budget(rt)  # entry gate: a run out of tokens starts no new agent()
 
     if rt.spawn_count >= rt.spawn_limit:
         rt.log_sink(f"[wf] spawn limit {rt.spawn_limit} reached; skipping {opts.get('label')!r}")
@@ -452,7 +470,8 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
                 f"[wf] agent {label!r} attempt {attempt}/{attempts} failed: {str(e)}"
             )
             continue
-        rt.tokens_spent += res.tokens
+        # No token accounting here: the backend already billed this call to the
+        # shared ledger as its model calls returned (``AgentBackend.bind_budget``).
         if res.skipped:
             detail = "backend declined (skipped)"
             rt.log_sink(f"[wf] agent {label!r} skipped")
@@ -659,6 +678,7 @@ class AgentSession:
                 return None if notify else result
 
             _check_abort(rt)  # entry gate: a paused run starts no new turn
+            _check_budget(rt)  # entry gate: a run out of tokens starts no new turn
 
             req = _TurnRequest(
                 prompt=prompt,
@@ -964,20 +984,24 @@ def log(message: Any) -> None:
 
 
 class _Budget:
-    """Reads the active run's budget via the contextvar — importable & run-agnostic."""
+    """Reads the active run's ledger via the contextvar — importable & run-agnostic.
+
+    Live rather than end-of-call: the ledger is written by the backend as each
+    model call returns, so a script polling ``remaining()`` sees the burn of
+    every agent currently in flight, not just the ones that have returned.
+    """
 
     @property
     def total(self) -> int | None:
-        return _rt.get().budget_total
+        return _rt.get().budget.total
 
     @staticmethod
     def spent() -> int:
-        return _rt.get().tokens_spent
+        return _rt.get().budget.spent
 
     @staticmethod
     def remaining() -> int | None:
-        rt = _rt.get()
-        return None if rt.budget_total is None else rt.budget_total - rt.tokens_spent
+        return _rt.get().budget.remaining()
 
 
 #: Importable singleton: `from swarmflow import budget` then `budget.spent()`.
