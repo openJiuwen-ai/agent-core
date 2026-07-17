@@ -20,7 +20,7 @@ Self-verifying: exits non-zero if the run finished for any reason other than the
 budget, or if the budget was never actually spent.
 
 Run directly (needs a real model endpoint, see config_llm_local.yaml):
-    python tests/system_tests/agent_swarm/agent_team_swarmflow_budget_e2e.py
+    python tests/system_tests/agent_swarm/swarmflow/agent_team_swarmflow_budget_e2e.py
 """
 
 from __future__ import annotations
@@ -32,7 +32,8 @@ import uuid
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_HERE))  # sibling base module
+sys.path.insert(0, str(_HERE.parent))  # _e2e_utils (shared, stays in agent_swarm/)
 
 # Importing the main swarmflow E2E as a harness also applies its module-level
 # setup (logging, openjiuwen home, env defaults) — same as the concurrent E2E.

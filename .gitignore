@@ -278,3 +278,6 @@ tests/system_tests/config_llm_local.yaml
 
 # context_evolver unit test store, written next to the test
 tests/unit_tests/extensions/context_evolver/memory_file/
+
+/.codex/
+/.agents/

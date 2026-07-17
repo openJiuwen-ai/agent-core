@@ -27,7 +27,7 @@ interruption; the deterministic proof of that lives in
 ``test_avatar_session_backend.py::test_abort_all_...``.
 
 Run directly (needs a real model endpoint, see config_llm_local.yaml):
-    python tests/system_tests/agent_swarm/agent_team_swarmflow_pause_resume_runner_e2e.py
+    python tests/system_tests/agent_swarm/swarmflow/agent_team_swarmflow_pause_resume_runner_e2e.py
 """
 
 from __future__ import annotations
@@ -41,23 +41,24 @@ from pathlib import Path
 
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))
-sys.path.insert(0, str(_HERE.parent))
+sys.path.insert(0, str(_HERE))  # sibling swarmflow E2Es
+sys.path.insert(0, str(_HERE.parent))  # _e2e_utils
+sys.path.insert(0, str(_HERE.parent.parent))  # llm_config
 
 from openjiuwen.agent_teams import paths
 from openjiuwen.agent_teams.interaction.payload import HumanAgentMessage
 from openjiuwen.agent_teams.paths import configure_openjiuwen_home
 from openjiuwen.agent_teams.runtime.background_task_controller import BackgroundTaskController
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
-from openjiuwen.core.common.logging.log_config import configure_log, configure_log_config
+from openjiuwen.core.common.logging.log_config import configure_log_config
 from openjiuwen.core.common.logging.loguru.constant import DEFAULT_INNER_LOG_CONFIG
 from openjiuwen.core.runner.runner import Runner
 
-from _e2e_utils import load_team_config
+from _e2e_utils import configure_logging_into, load_team_config
 from llm_config import load_llm_config
 from tests.test_logger import logger as test_logger
 
-_LOG_CONFIG_PATH = _HERE / "logging.yaml"
+_LOG_CONFIG_PATH = _HERE.parent / "logging.yaml"
 _TEAM_CONFIG_PATH = _HERE / "config_swarmflow.yaml"
 _SCRIPT_PATH = _HERE / "resources" / "party_planner.py"
 _WORKDIR = _HERE / ".e2e_workdir_pause"
@@ -77,8 +78,11 @@ _NARRATION_QUIESCE_S = 6.0
 _NARRATION_MAX_S = 90.0
 _TEARDOWN = os.getenv("SWARMFLOW_E2E_TEARDOWN", "1").strip().lower() not in ("0", "false", "no")
 
+# Pin every sink under the scratch dir, so the whole run's log — framework and
+# test alike — lands in one place regardless of what gets logged before the
+# chdir below. See ``configure_logging_into``.
 if _LOG_CONFIG_PATH.is_file():
-    configure_log(str(_LOG_CONFIG_PATH))
+    configure_logging_into(_LOG_CONFIG_PATH, _WORKDIR / "logs")
 else:
     configure_log_config(DEFAULT_INNER_LOG_CONFIG)
 

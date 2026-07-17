@@ -19,7 +19,7 @@ human turns were prompted and answered, and the run completed (not failed),
 exiting non-zero on any failure.
 
 Run directly (needs a real model endpoint, see config_llm_local.yaml):
-    python tests/system_tests/agent_swarm/agent_team_swarmflow_e2e.py
+    python tests/system_tests/agent_swarm/swarmflow/agent_team_swarmflow_e2e.py
 """
 
 from __future__ import annotations
@@ -32,30 +32,30 @@ import uuid
 from pathlib import Path
 
 
-# Ensure _e2e_utils / llm_config are importable regardless of working directory.
+# This suite lives in its own directory; the modules it shares with the other
+# agent_swarm E2Es stay where they are, so reach them by walking up:
+# ``_e2e_utils`` in agent_swarm/, ``llm_config`` in system_tests/.
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))
-sys.path.insert(0, str(_HERE.parent))
+sys.path.insert(0, str(_HERE))  # sibling swarmflow E2Es (imported as a harness)
+sys.path.insert(0, str(_HERE.parent))  # _e2e_utils
+sys.path.insert(0, str(_HERE.parent.parent))  # llm_config
 
 from openjiuwen.agent_teams import paths
 from openjiuwen.agent_teams.interaction.payload import HumanAgentMessage
 from openjiuwen.agent_teams.paths import configure_openjiuwen_home
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
-from openjiuwen.core.common.logging.log_config import (
-    configure_log,
-    configure_log_config,
-)
+from openjiuwen.core.common.logging.log_config import configure_log_config
 from openjiuwen.core.common.logging.loguru.constant import DEFAULT_INNER_LOG_CONFIG
 from openjiuwen.core.runner.runner import Runner
 
-from _e2e_utils import load_team_config
+from _e2e_utils import configure_logging_into, load_team_config
 from llm_config import load_llm_config
 from tests.test_logger import logger as test_logger
 
 # ---------------------------------------------------------------------------
 # Paths / config
 # ---------------------------------------------------------------------------
-_LOG_CONFIG_PATH = _HERE / "logging.yaml"
+_LOG_CONFIG_PATH = _HERE.parent / "logging.yaml"
 _TEAM_CONFIG_PATH = _HERE / "config_swarmflow.yaml"
 _SCRIPT_PATH = _HERE / "resources" / "party_planner.py"
 # We run from a dedicated scratch dir (gitignored) so the team's runtime
@@ -83,8 +83,11 @@ _NARRATION_MAX_S = 90.0
 # disk by the time the workflow completes, so it survives either way.
 _TEARDOWN = os.getenv("SWARMFLOW_E2E_TEARDOWN", "1").strip().lower() not in ("0", "false", "no")
 
+# Pin every sink under the scratch dir, so the whole run's log — framework and
+# test alike — lands in one place regardless of what gets logged before the
+# chdir below. See ``configure_logging_into``.
 if _LOG_CONFIG_PATH.is_file():
-    configure_log(str(_LOG_CONFIG_PATH))
+    configure_logging_into(_LOG_CONFIG_PATH, _WORKDIR / "logs")
 else:
     configure_log_config(DEFAULT_INNER_LOG_CONFIG)
 
