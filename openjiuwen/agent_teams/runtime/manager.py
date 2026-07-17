@@ -741,6 +741,14 @@ class TeamRuntimeManager:
 
         db = get_shared_db(db_config)
         await db.initialize()
+        from openjiuwen.agent_teams.external.cli_agent.session_cleanup import cleanup_external_cli_backend_sessions
+
+        for session_id in session_ids:
+            await cleanup_external_cli_backend_sessions(
+                session_id=session_id,
+                team_names=[team_name],
+                db=db,
+            )
         for session_id in session_ids:
             await db.drop_session_tables_by_id(session_id)
             if not await remove_session_worktrees(team_name, session_id):
@@ -806,6 +814,13 @@ class TeamRuntimeManager:
 
         db = get_shared_db(release_info.db_config)
         await db.initialize()
+        from openjiuwen.agent_teams.external.cli_agent.session_cleanup import cleanup_external_cli_backend_sessions
+
+        await cleanup_external_cli_backend_sessions(
+            session_id=session_id,
+            team_names=release_info.team_names,
+            db=db,
+        )
         await db.drop_session_tables_by_id(session_id)
         for team_name in release_info.team_names:
             if not await remove_session_worktrees(team_name, session_id):

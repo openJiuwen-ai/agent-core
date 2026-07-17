@@ -18,6 +18,7 @@ def test_descriptor_json_roundtrip_preserves_fields():
         member_name="dev-1",
         role="leader",
         language="en",
+        teammate_mode="plan_mode",
         db_config=DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string="/tmp/team.db"),
     )
 
@@ -28,6 +29,7 @@ def test_descriptor_json_roundtrip_preserves_fields():
     assert restored.member_name == "dev-1"
     assert restored.role == "leader"
     assert restored.language == "en"
+    assert restored.teammate_mode == "plan_mode"
     assert restored.db_config.connection_string == "/tmp/team.db"
 
 

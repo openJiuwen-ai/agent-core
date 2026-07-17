@@ -668,6 +668,7 @@ class TeamAgentSpec(BaseModel):
             leader_member_name=self.leader.member_name,
             language=resolved_language,
             dispatch_mode=self.dispatch_mode,
+            teammate_mode=str(self.teammate_mode),
             model_pool=team_pool,
             model_pool_strategy=team_strategy,
             external_messager_config=external_messager_config,
