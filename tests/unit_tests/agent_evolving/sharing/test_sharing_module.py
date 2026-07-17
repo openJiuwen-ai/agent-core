@@ -330,6 +330,32 @@ async def test_search_skills_and_install(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_install_skill_rejects_unsafe_hub_metadata_name(tmp_path):
+    backend = LocalFileBackend(hub_path=tmp_path / "hub")
+    publisher_root = tmp_path / "publisher"
+    skill_dir = _write_skill_dir(publisher_root, "safe-skill")
+    package = pack_skill_directory(skill_dir)
+    skill_id = "sk_unsafe_name"
+    await backend.upload_skill_package(
+        skill_id,
+        package,
+        SkillPackageMeta(
+            skill_id=skill_id,
+            skill_name="../outside",
+            description="unsafe metadata regression fixture",
+        ),
+    )
+    installer_root = tmp_path / "consumer" / "skills"
+    client = ExperienceHubClient(backend, EvolutionStore(str(installer_root)))
+
+    installed = await client.install_skill(skill_id)
+
+    assert installed is None
+    assert not (tmp_path / "consumer" / "outside").exists()
+    assert not installer_root.exists() or not any(installer_root.iterdir())
+
+
+@pytest.mark.asyncio
 async def test_share_stager_drops_execution_failure_without_successful_tool(tmp_path):
     backend = LocalFileBackend(hub_path=tmp_path / "hub")
     sharer = ExperienceSharer(backend=backend, local_cache_dir=None)
