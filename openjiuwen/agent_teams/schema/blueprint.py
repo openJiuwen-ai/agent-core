@@ -32,7 +32,11 @@ from openjiuwen.agent_teams.constants import (
 )
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.memory import TeamMemoryConfig
-from openjiuwen.agent_teams.models.pool import ModelPoolEntry, ModelRouterConfig
+from openjiuwen.agent_teams.models.pool import (
+    IntelliRouterConfig,
+    ModelPoolEntry,
+    ModelRouterConfig,
+)
 from openjiuwen.agent_teams.reliability.config import ReliabilityConfig
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
@@ -243,8 +247,8 @@ class TeamAgentSpec(BaseModel):
     at ``build()`` time so allocators reachable from runtime context
     see the same pool.
 
-    Mutually exclusive with ``model_router``: configure one or the other,
-    never both.
+    Mutually exclusive with ``model_router`` and ``model_intelli_router``:
+    configure at most one of the three.
     """
     model_router: Optional[ModelRouterConfig] = None
     """Optional single-endpoint router configuration.
@@ -257,18 +261,42 @@ class TeamAgentSpec(BaseModel):
     machinery (``resolve_member_model``, ``inherit_pool_ids``,
     ``update_model_pool``) keeps working against the flat pool view.
 
-    Mutually exclusive with ``model_pool``. The first declared model
-    name acts as the team's default — ``RouterAllocator.allocate()``
-    with no hint returns it, so the leader can run without an explicit
-    ``leader.model_name``.
+    Mutually exclusive with ``model_pool`` and ``model_intelli_router``.
+    The first declared model name acts as the team's default —
+    ``RouterAllocator.allocate()`` with no hint returns it, so the
+    leader can run without an explicit ``leader.model_name``.
     """
-    model_pool_strategy: Literal["round_robin", "by_model_name", "router"] = "round_robin"
+    model_intelli_router: Optional[IntelliRouterConfig] = None
+    """Optional client-side reliable-router configuration.
+
+    Use this when reliability should come from the *client* rather than
+    from spreading members across endpoints: ``IntelliRouterModelClient``
+    wraps ``intelli_router.ReliableRouter``, which retries and fails over
+    across the declared deployments on every request, honouring per-
+    deployment tpm / rpm budgets and (optionally) health checks.
+
+    At ``build()`` time the config expands into ``TeamSpec.model_pool``
+    (one entry per logical model name, each carrying the full deployment
+    list) and ``model_pool_strategy`` is set to ``"intelli_router"``, so
+    all downstream machinery (``resolve_member_model``,
+    ``inherit_pool_ids``, ``update_model_pool``) keeps working against
+    the flat pool view.
+
+    Mutually exclusive with ``model_pool`` and ``model_router``. The
+    first resolved model name — ``"*"`` (unified routing) unless
+    ``model_names`` overrides the order — is the team default, so a
+    leader without an explicit ``leader.model_name`` gets the broadest
+    failover.
+    """
+    model_pool_strategy: Literal["round_robin", "by_model_name", "router", "intelli_router"] = "round_robin"
     """Allocation strategy applied to ``model_pool``.
 
     Mirrors ``TeamSpec.model_pool_strategy`` and propagates to it at
     ``build()`` time. See ``TeamSpec.model_pool_strategy`` for the
-    semantics of each option. When ``model_router`` is set, ``build()``
-    forces this to ``"router"`` regardless of the configured value.
+    semantics of each option. When ``model_router`` or
+    ``model_intelli_router`` is set, ``build()`` forces this to
+    ``"router"`` / ``"intelli_router"`` respectively, regardless of the
+    configured value.
     """
     team_mode: Literal["default", "predefined", "hybrid"] | None = None
     """Team operating mode.
@@ -535,17 +563,28 @@ class TeamAgentSpec(BaseModel):
 
     @model_validator(mode="after")
     def _validate_pool_router_exclusive(self) -> "TeamAgentSpec":
-        """Reject configs that set both ``model_pool`` and ``model_router``.
+        """Reject configs that set more than one model-pool source.
 
-        The two fields describe overlapping concerns — a flat list of
-        endpoints versus a router-shaped declaration that expands into
-        the same kind of list. Allowing both leaves the strategy and
-        the materialized pool ambiguous, so we surface the conflict
+        ``model_pool`` / ``model_router`` / ``model_intelli_router``
+        describe overlapping concerns — a flat list of endpoints versus
+        two router-shaped declarations that each expand into the same
+        kind of list. Allowing more than one leaves both the strategy
+        and the materialized pool ambiguous, so we surface the conflict
         early instead of silently picking one.
         """
-        if self.model_router is not None and self.model_pool:
+        configured = [
+            name
+            for name, value in (
+                ("model_pool", bool(self.model_pool)),
+                ("model_router", self.model_router is not None),
+                ("model_intelli_router", self.model_intelli_router is not None),
+            )
+            if value
+        ]
+        if len(configured) > 1:
             raise ValueError(
-                "model_pool and model_router are mutually exclusive; configure one or the other",
+                f"model_pool, model_router and model_intelli_router are mutually exclusive; "
+                f"configure exactly one (got: {configured})",
             )
         return self
 
@@ -667,13 +706,18 @@ class TeamAgentSpec(BaseModel):
             if role_spec.language is None:
                 role_spec.language = resolved_language
 
-        # ``model_router`` is a convenience input that expands into the
-        # flat ``model_pool`` view at build time. Doing the expansion here
-        # keeps every downstream component (resolver, pool refresh, DB
-        # ref lookup) on a single code path — they only ever see entries.
+        # ``model_router`` / ``model_intelli_router`` are convenience
+        # inputs that expand into the flat ``model_pool`` view at build
+        # time. Doing the expansion here keeps every downstream component
+        # (resolver, pool refresh, DB ref lookup) on a single code path —
+        # they only ever see entries.
+        team_strategy: Literal["round_robin", "by_model_name", "router", "intelli_router"]
         if self.model_router is not None:
             team_pool = self.model_router.to_pool_entries()
-            team_strategy: Literal["round_robin", "by_model_name", "router"] = "router"
+            team_strategy = "router"
+        elif self.model_intelli_router is not None:
+            team_pool = self.model_intelli_router.to_pool_entries()
+            team_strategy = "intelli_router"
         else:
             team_pool = list(self.model_pool)
             team_strategy = self.model_pool_strategy
@@ -773,9 +817,10 @@ class TeamAgentSpec(BaseModel):
 
         available_names = sorted({entry.model_name for entry in team_spec.model_pool})
         strategy = team_spec.model_pool_strategy
+        name_routed = strategy in ("router", "intelli_router")
         leader_name = self.leader.model_name
         if leader_name and leader_name not in available_names:
-            scope = "router" if strategy == "router" else "pool"
+            scope = "router" if name_routed else "pool"
             cause = (
                 f"leader.model_name='{leader_name}' is not present in the {scope} (available names: {available_names})"
             )
@@ -784,7 +829,7 @@ class TeamAgentSpec(BaseModel):
         else:
             cause = "the allocator did not produce a model for the leader"
 
-        if strategy == "router":
+        if name_routed:
             tail = (
                 f"(1) leave leader.model_name unset to fall back on the router's first declared name, "
                 f"(2) set leader.model_name to one of {available_names}, "

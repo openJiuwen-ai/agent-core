@@ -6,24 +6,30 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/models/` |
-| 最近一次修订日期 | 2026-05-16 |
-| 关联 feature | — |
+| 最近一次修订日期 | 2026-07-17 |
+| 关联 feature | F_16_by-model-name-allocator-list-serialisation.md、F_67_intelli-router-allocation-strategy.md |
 
 ## 范围 / 边界
 
 本规约只管 **`agent_teams/models/` 这一层的多模型部署原语**：池条目的字段
-契约、池刷新时的 `model_id` 继承策略、三种分配策略的语义、Allocator 协议、
-单端点 router 便利配置如何展开成统一的池视图、空池兜底如何回到 per-agent
+契约、池刷新时的 `model_id` 继承策略、四种分配策略的语义、Allocator 协议、
+两种 router 便利配置（单端点 `ModelRouterConfig` / 客户端可靠路由
+`IntelliRouterConfig`）如何展开成统一的池视图、空池兜底如何回到 per-agent
 模型配置。
 
 **不管**的事情：
 
 - `TeamSpec.model_pool` / `TeamAgentSpec.model_pool` / `model_pool_strategy`
-  / `model_router` 字段在 schema 层的声明位置——那是 `schema/blueprint.py`
-  与 `schema/team.py` 的事，本规约只规定从这些字段构造出来的运行时形态。
+  / `model_router` / `model_intelli_router` 字段在 schema 层的声明位置——那是
+  `schema/blueprint.py` 与 `schema/team.py` 的事，本规约只规定从这些字段
+  构造出来的运行时形态。
 - `TeamModelConfig` / `ModelClientConfig` / `ModelRequestConfig` 的内部字段——
   那是 `core/foundation/llm` 的事，本规约只规定 `to_team_model_config()`
   的物化路径。
+- `IntelliRouterModelClient` / `intelli_router.ReliableRouter` 的路由策略、
+  重试与健康检查语义——那是 `core/foundation/llm` 与第三方包的事。本规约只
+  规定 `IntelliRouterConfig` 如何展开成池视图、以及 `metadata.client` 上那组
+  `intelli_router_*` 键的生成规则。
 - 把 allocator 接进 `TeamAgent._setup_agent` 的具体集成、leader/teammate
   spawn 时怎么调用 `allocate()`——那是 `agent/` 子系统的事，本规约只规定
   allocator 暴露给调用方的协议方法。
@@ -63,12 +69,55 @@
 
 6. **Router 策略下 `model_name` 必须全池唯一**。`RouterAllocator` 构造
    时校验，重复直接 `ValueError`；`ModelRouterConfig._validate_model_names`
-   在 spec 层提前拦下用户便利路径上的重复/空白名。
+   在 spec 层提前拦下用户便利路径上的重复/空白名。`intelli_router` 继承
+   同一条约束（`IntelliRouterAllocator` 是 `RouterAllocator` 的子类）。
 
-7. **`model_pool` 与 `model_router` 在 `TeamAgentSpec` 上互斥**。同时
-   配置直接 `ValueError`。strategy `"router"` 也允许由用户手动配 pool
-   + 把 strategy 设成 `"router"` 触发——但条目唯一性约束相同，由
-   `RouterAllocator` 在构造时强制。
+7. **`model_pool` / `model_router` / `model_intelli_router` 在
+   `TeamAgentSpec` 上三者互斥**。配置超过一个直接 `ValueError`（报错列出
+   实际配了哪几个）。strategy `"router"` / `"intelli_router"` 也允许由用户
+   手动配 pool + 设 strategy 触发——但条目约束相同，由对应 allocator 在
+   构造时强制。
+
+13. **`intelli_router` 策略下每条 entry 携带的 deployment 列表必须完全
+    相同且是全量**，且 `api_provider` 恒为 `"intelli_router"`。
+
+    这条**不是**"顺手复制一份"，而是 router 共享的**前提**，破坏它会静默
+    超配额：`IntelliRouterModelClient` 按 client-config 缓存
+    `ReliableRouter`，其 cache key 由 **deployment 列表 + 路由旋钮**算出，
+    **不含 `model_name` / `client_id`**。各 entry 的 deployments 逐字相同
+    → 命中同一个 router → failover 状态、健康检查、per-deployment 的
+    tpm/rpm 配额**全团队共享**。
+
+    反过来，"每条 entry 只带自己那个模型的 deployment"这个看似自然的优化
+    会让 key 发散 → 每个成员各建一个 router → **各自独立计 rpm/tpm**：
+    4 人团队实际花掉声明配额的 4 倍，且谁都不知道别人已经发现某个
+    deployment 挂了。单测
+    `test_intelli_router_all_entries_share_one_router_cache_key` 钉死此点
+    （mutation 验证过：按 model_name 过滤 deployments 立即变红）。
+
+    成员之间**该有的差异在 request config 上**——pin 的 `model_name` 在
+    `ModelRequestConfig` 里，不在 client config 里。因此每个成员各有一个
+    **薄** `IntelliRouterModelClient` 包装（`client_id` 逐个不同，符合预期），
+    重的东西只有一份。
+
+    entry 自身的 `api_key` / `api_base_url` 恒为空串（凭证是 per-deployment
+    的；该 provider 不在 foundation 层的顶层凭证校验集合内）。
+    `IntelliRouterAllocator` 构造时校验 provider 与 deployments 非空，
+    针对用户手写 pool 的路径。
+
+14. **多端点可靠性只能由一层拥有**。`round_robin` / `by_model_name` /
+    `router` 把成员摊到多个端点上（allocator 负责可用性）；`intelli_router`
+    把多端点整个下沉给客户端 router（client 负责可用性）。两者是**替代**
+    关系，不是叠加——池里放多条 intelli_router entry 再套 `round_robin`
+    是两层都做负载均衡，属设计退化。
+
+15. **`IntelliRouterDeployment.api_base` 不含 `/v1`**。这是全仓唯一与
+    `ModelClientConfig.api_base`（指向 OpenAI 兼容 API 根、通常以 `/v1`
+    结尾）**约定相反**的字段：intelli_router 的 provider adapter 自行拼接
+    `f"{api_base}/v1/chat/completions"`。传入带 `/v1` 的值得到
+    `/v1/v1/...` → 404，且上游错误处理在未 `read()` 流式响应时读 body，
+    抛出的是 `ResponseNotRead` 而非 404——真实错误被吞掉。框架**不**自动
+    剥离该后缀（静默改用户输入更难查），由调用方转换。
 
 8. **池条目的显式字段优先于 `metadata.client` / `metadata.request`**。
    `to_team_model_config()` 物化时，`api_key` / `api_base_url` /
@@ -147,6 +196,74 @@ api_provider, deepcopy(metadata))`，展开成 `list[ModelPoolEntry]`；
 `"router"`，下游所有路径（`resolve_member_model` / `inherit_pool_ids`
 / `update_model_pool`）一律走 pool 视图，没有 router 专用分支。
 
+### `IntelliRouterDeployment` / `IntelliRouterConfig` （pydantic BaseModel）
+
+```python
+class IntelliRouterDeployment(BaseModel):
+    model_name: str
+    api_key: str
+    api_base: str          # provider ROOT —— 不含 /v1，见不变量 15
+    id: str | None = None
+    provider: str = "openai"
+    tpm: int | None = None
+    rpm: int | None = None
+    tags: list[str] = []
+    timeout: float | None = None
+    verify_ssl: bool | None = None
+
+    def to_deployment_dict(self) -> dict: ...
+
+
+class IntelliRouterConfig(BaseModel):
+    deployments: list[IntelliRouterDeployment] = Field(min_length=1)
+    model_names: list[str] | None = None
+    strategy: str = "simple-shuffle"
+    num_retries: int = 3
+    timeout: float = 30.0
+    strategy_kwargs: dict = {}
+    enable_health_check: bool = False
+    health_check_interval: float = 300.0
+    enable_observability: bool = False
+    web_dashboard_port: int = 0
+    verify_ssl: bool = True
+    metadata: dict = {}
+
+    def resolved_model_names(self) -> list[str]: ...
+    def to_pool_entries(self) -> list[ModelPoolEntry]: ...
+```
+
+`to_deployment_dict()`：必填 `(model_name, api_key, api_base, provider,
+tags)` 恒输出；`id` / `tpm` / `rpm` / `timeout` / `verify_ssl` **为 None 时
+省略该键**，让客户端套用自己的兜底——尤其 `verify_ssl`，客户端只在键缺失时
+才回退到 router 级取值（`dep_cfg.get("verify_ssl", config.verify_ssl)`）。
+
+`resolved_model_names()`：`model_names` 显式给出则原样返回（保序）；否则
+推导为 `["*"] + distinct(deployment model_names, 保序)`。**首元素是团队
+默认**（`allocate(None)` 取 `pool[0]`）。
+
+`model_names` 字段约束（`@model_validator(mode="after")`，仅在显式给出时生效）：
+
+- 非空、元素非空白、元素唯一（同 `ModelRouterConfig`）。
+- **每个名字必须是 `"*"` 或某条 deployment 的 `model_name`**——否则展开出的
+  entry 分配给成员后，router 在请求期才发现路由不到；能在 spec 层拦下的
+  错误不留到运行期。
+
+`to_pool_entries()`：每个逻辑 name 一条 entry，`api_provider` 写死
+`"intelli_router"`、`api_key` / `api_base_url` 为空串、`metadata.client`
+合并进这组生成键（**生成键覆盖用户在 metadata.client 里的同名键**）：
+
+| 键 | 来源 |
+|---|---|
+| `intelli_router_deployments` | `[dep.to_deployment_dict() for dep in deployments]`（**全量，每条 entry 都一样**） |
+| `intelli_router_strategy` / `_num_retries` / `_timeout` / `_strategy_kwargs` | 同名字段 |
+| `intelli_router_enable_health_check` / `_health_check_interval` | 同名字段 |
+| `intelli_router_enable_observability` / `_web_dashboard_port` | 同名字段 |
+| `verify_ssl` | router 级 `verify_ssl`（非 `intelli_router_` 前缀——它是 `ModelClientConfig` 的一等字段） |
+
+`TeamAgentSpec.build()` 调用它并把 `model_pool_strategy` 设成
+`"intelli_router"`；与 `model_router` 同理，下游一律走 pool 视图，
+**没有 intelli_router 专用分支**。
+
 ### `inherit_pool_ids`
 
 ```python
@@ -203,13 +320,19 @@ class ModelAllocator(Protocol):
 - `load_state_dict(state)`：必须容忍缺键、未知键、`pool_digest` 不
   匹配；不抛异常。
 
-### 三种内置策略
+### 四种内置策略
 
 | 类 | `allocate(None)` | `allocate(name)` | 持久化字段 | 备注 |
 |---|---|---|---|---|
 | `RoundRobinModelAllocator` | 推进 `_index`，返回下一条 | 同上（忽略 name） | `index` + `pool_digest` | 全 pool 线性轮转，name-agnostic |
 | `ByModelNameAllocator` | `None` | 取 group → 推进 group 内 `_inner_indexes[name]` → 返回 | `counters`（list of `{model_name, index}`）+ `pool_digest`；`load_state_dict` 兼容读旧 `inner_indexes`（dict）格式 | 缺 name 或 name 未在池中 → `None`，调用方走 per-agent 兜底。`counters` 用 list 而非 `dict[model_name, int]`，是因为 model_name 可能含 `.` / `[`（如 `"glm-5.1"`），而 session 持久化层把这类字符当 nested-path 解读 |
 | `RouterAllocator` | 返回 `pool[0]` 作为团队默认模型 | name 唯一映射 → 命中即返回；未命中 → `None` | 仅 `pool_digest` | 构造时校验池非空 + name 唯一；`load_state_dict` no-op |
+| `IntelliRouterAllocator`（`RouterAllocator` 子类） | 同父类：返回 `pool[0]`——`to_pool_entries` 把 `"*"`（统一路由）排首位，故 leader 默认取到可用性最高的一档 | 同父类 | 同父类（仅 `pool_digest`） | **分配语义与父类逐字相同**，差异仅在 entry 的含义（一整个 deployment 列表 vs 一个远端端点）——那是池怎么建的属性，不是怎么分配的属性。子类只增加构造期校验：每条 entry 的 `api_provider == "intelli_router"` 且 `metadata.client.intelli_router_deployments` 非空 |
+
+`IntelliRouterAllocator` 用继承而非复制实现：intelli_router pool **就是**
+一种 router pool，只不过那个"单端点"在客户端。为让两个策略"看起来对称"
+而复制一遍 `_by_name` 查找 + 首条兜底 + digest-only state，是用重复代码换
+视觉整齐。
 
 `pool_digest` 由 `_pool_digest` 计算：每条 entry 取
 `(model_name, api_base_url)`，按池序拼接 sha1。凭证 / metadata 变更
@@ -233,6 +356,7 @@ def build_model_allocator(
   `"round_robin"` → `RoundRobinModelAllocator`
   `"by_model_name"` → `ByModelNameAllocator`
   `"router"` → `RouterAllocator`
+  `"intelli_router"` → `IntelliRouterAllocator`
   其它 → `ValueError`（不静默回退）。
 - `spec` 形参当前未使用，保留给未来需要 per-agent metadata 的策略。
 
@@ -285,22 +409,31 @@ def resolve_member_model(
 上查到 entry，自然拿到该 entry 当前的 `model_id`——凭证轮换后旧
 client 不会被再次命中（签名变了 → uuid 变了 → cache miss）。
 
-### `model_router` 与 `model_pool` 的关系
+### `model_pool` / `model_router` / `model_intelli_router` 的关系
 
-`TeamAgentSpec` 暴露两条用户输入：
+`TeamAgentSpec` 暴露三条互斥的用户输入：
 
 - `model_pool: list[ModelPoolEntry]`：完整声明，每条独立凭证。
 - `model_router: Optional[ModelRouterConfig]`：单端点便利输入，一份
-  凭证 + name 列表。
+  凭证 + name 列表。**可靠性归 allocator**（把成员摊到多个 name 上）。
+- `model_intelli_router: Optional[IntelliRouterConfig]`：客户端可靠路由
+  输入，一组 deployment + 路由旋钮。**可靠性归 client**（router 在请求期
+  跨 deployment 重试 / failover / 限流感知）。
 
-`@model_validator` 拒绝同时配置；`build()` 时把 `model_router`
-通过 `to_pool_entries()` 展开成 `model_pool` 并把
-`model_pool_strategy` 设成 `"router"`。下游全部走 pool 视图，没有
-router 专用分支。
+`@model_validator` 拒绝配置超过一个（报错列出实际配了哪几个）；`build()`
+时把对应 router 通过 `to_pool_entries()` 展开成 `model_pool` 并把
+`model_pool_strategy` 设成 `"router"` / `"intelli_router"`。下游全部走
+pool 视图，没有 router 专用分支。
 
-用户也可手动 `model_pool=[...] + model_pool_strategy="router"`，但
-`RouterAllocator` 构造时强制每条 name 唯一——重复直接 `ValueError`，
-不允许"先看看运行起来什么样"。
+用户也可手动 `model_pool=[...] + model_pool_strategy="router"`（或
+`"intelli_router"`），但对应 allocator 构造时强制约束——`router` 强制 name
+唯一，`intelli_router` 额外强制 provider 与 deployments 非空——重复/错配
+直接 `ValueError`，不允许"先看看运行起来什么样"。
+
+**选哪一个**：`model_router` 与 `model_intelli_router` 不是"新旧"关系，而是
+可靠性归属不同的两层（见不变量 14）。上游本来就是单端点网关（OpenRouter /
+LiteLLM proxy）→ `model_router`；要在多个独立端点/凭证之间做请求级容错 →
+`model_intelli_router`。**不要叠加**。
 
 ### 空池兜底
 
