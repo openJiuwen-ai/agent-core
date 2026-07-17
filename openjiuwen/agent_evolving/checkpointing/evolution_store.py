@@ -1092,12 +1092,17 @@ version: 1.0.0
         archive = self._archive_dir(skill_dir)
         version = await self._resolve_archive_version(name, skill_dir)
         if self._archive_version_exists(archive, version):
+            body_path, evo_path = self._archive_paths(archive, version)
             logger.warning(
                 "[EvolutionStore] archive skipped for skill=%s version=%s (already exists)",
                 name,
                 version,
             )
-            return None, None
+            # Return existing names so rebuild can proceed past the archive gate.
+            return (
+                body_path.name if body_path.exists() else None,
+                evo_path.name if evo_path.exists() else None,
+            )
         body_archive = await self._archive_skill_body_at(name, skill_dir, version)
         evo_archive = await self._archive_evolutions_at(skill_dir, version)
         return body_archive, evo_archive

@@ -137,14 +137,36 @@ def test_complete_rebuild_clears_when_archive_path_present():
     store.clear_evolutions.assert_awaited_once_with("skill-a", retain_version="1.0.1")
 
 
-def test_complete_rebuild_skips_when_archive_path_missing():
+def test_complete_rebuild_proceeds_when_archive_path_missing():
+    """Archive skip (already exists) must not permanently block bump/clear."""
+    store = Mock()
+    store.bump_version_for_rebuild = AsyncMock(return_value="1.0.1")
+    store.clear_evolutions = AsyncMock()
+    rebuild_service = ExperienceRebuildService(store=store)
+
+    cleared = asyncio.run(
+        rebuild_service.complete_rebuild({"skill_name": "skill-a", "archive_path": None}),
+    )
+
+    assert cleared is True
+    store.bump_version_for_rebuild.assert_awaited_once_with("skill-a")
+    store.clear_evolutions.assert_awaited_once_with("skill-a", retain_version="1.0.1")
+
+
+def test_complete_rebuild_skips_when_archive_error():
     store = Mock()
     store.bump_version_for_rebuild = AsyncMock()
     store.clear_evolutions = AsyncMock()
     rebuild_service = ExperienceRebuildService(store=store)
 
     cleared = asyncio.run(
-        rebuild_service.complete_rebuild({"skill_name": "skill-a", "archive_path": None}),
+        rebuild_service.complete_rebuild(
+            {
+                "skill_name": "skill-a",
+                "archive_path": None,
+                "archive_error": RuntimeError("archive failed"),
+            },
+        ),
     )
 
     assert cleared is False

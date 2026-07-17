@@ -388,8 +388,9 @@ class TestEvolutionStoreArchive:
         store = EvolutionStore(str(root))
 
         body_archive, evo_archive = await store.archive_current_state("skill-a")
-        assert body_archive is None
-        assert evo_archive is None
+        # Skip rewrite but return existing names so rebuild is not blocked.
+        assert body_archive == "SKILL.1.0.0.md"
+        assert evo_archive == "evolutions.1.0.0.json"
         assert (archive / "SKILL.1.0.0.md").read_text(encoding="utf-8") == "# Already archived\n"
 
     @staticmethod

@@ -69,11 +69,13 @@ class ExperienceRebuildService:
     async def complete_rebuild(self, rebuild_context: dict[str, Any]) -> bool:
         """Bump SemVer from evolution entries, then clear live evolution log.
 
-        Only runs when ``archive_path`` is present (evolutions were archived during prepare).
+        Archive during prepare is a safety step, not a gate for bump/clear.
+        Skip only when archive explicitly failed (``archive_error``), so a
+        prior partial failure that left the version already archived cannot
+        permanently block rebuild.
         Returns True when cleared, False when skipped.
         """
-        archive_path = rebuild_context.get("archive_path")
-        if not archive_path:
+        if rebuild_context.get("archive_error") is not None:
             return False
         skill_name = str(rebuild_context.get("skill_name") or "").strip()
         if not skill_name:
