@@ -101,7 +101,7 @@ def test_schema_path_prefers_natural_text_over_json(tmp_path):
     """When schema capture succeeds and invoke also returns narration, prefer narration."""
 
     class _NarratingWorker(TeamWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
             if has_schema and tools:
                 tools[0].captured = {"answer": f"done::{member_name}"}
                 tools[0].called = True
@@ -537,7 +537,7 @@ def test_agent_emits_failed_when_worker_backend_raises(tmp_path):
     from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
 
     class _FailingWorkerBackend(_FakeWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
             raise BackendError(
                 "worker 'wf-w-0' failed: [181001] model call failed, reason: ReadError"
             )

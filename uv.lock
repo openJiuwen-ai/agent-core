@@ -234,9 +234,9 @@ name = "aiologic"
 version = "0.16.0"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
 dependencies = [
-    { name = "sniffio" },
-    { name = "typing-extensions" },
-    { name = "wrapt" },
+    { name = "sniffio", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "wrapt", marker = "python_full_version < '3.13'" },
 ]
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/a8/13/50b91a3ea6b030d280d2654be97c48b6ed81753a50286ee43c646ba36d3c/aiologic-0.16.0.tar.gz", hash = "sha256:c267ccbd3ff417ec93e78d28d4d577ccca115d5797cdbd16785a551d9658858f" }
 wheels = [
@@ -1017,8 +1017,8 @@ name = "culsans"
 version = "0.11.0"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
 dependencies = [
-    { name = "aiologic" },
-    { name = "typing-extensions" },
+    { name = "aiologic", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/d9/e3/49afa1bc180e0d28008ec6bcdf82a4072d1c7a41032b5b759b60814ca4b0/culsans-0.11.0.tar.gz", hash = "sha256:0b43d0d05dce6106293d114c86e3fb4bfc63088cfe8ff08ed3fe36891447fe33" }
 wheels = [
@@ -1829,7 +1829,7 @@ wheels = [
 [[package]]
 name = "intelli-router"
 version = "0.1.0"
-source = { git = "https://gitcode.com/openJiuwen/agent-protocol.git?subdirectory=intelli_router&rev=feature%2FintelliRouter#6f0378aa2ef9c4177317942b1b0f2e6d1716ac8c" }
+source = { git = "https://gitcode.com/openJiuwen/agent-protocol.git?subdirectory=intelli_router&rev=09b2035ce98a6dc78b3c7ad1011cc2d38ea4fc78#09b2035ce98a6dc78b3c7ad1011cc2d38ea4fc78" }
 dependencies = [
     { name = "httpx" },
 ]
@@ -2920,6 +2920,9 @@ gaussdb = [
 gaussvector = [
     { name = "psycopg2-binary" },
 ]
+intelli-router = [
+    { name = "intelli-router" },
+]
 jiuwen-memory = [
     { name = "httpx" },
     { name = "jiuwenmemory" },
@@ -3000,9 +3003,6 @@ dev = [
 docs = [
     { name = "autodoc-pydantic" },
 ]
-intelli-router = [
-    { name = "intelli-router" },
-]
 lint = [
     { name = "codespell" },
     { name = "httpx" },
@@ -3055,6 +3055,7 @@ requires-dist = [
     { name = "gitcode-api", specifier = ">=1.2.20" },
     { name = "httpx", marker = "extra == 'jiuwen-memory'", specifier = ">=0.24" },
     { name = "httpx", marker = "extra == 'online-rl'", specifier = ">=0.24" },
+    { name = "intelli-router", marker = "extra == 'intelli-router'", git = "https://gitcode.com/openJiuwen/agent-protocol.git?subdirectory=intelli_router&rev=09b2035ce98a6dc78b3c7ad1011cc2d38ea4fc78" },
     { name = "jiuwenmemory", marker = "extra == 'jiuwen-memory'", specifier = ">=0.1.0" },
     { name = "json-repair", specifier = ">=0.55.0" },
     { name = "loguru", specifier = ">=0.7.3" },
@@ -3106,7 +3107,7 @@ requires-dist = [
     { name = "uiautomator2", marker = "extra == 'mobile-gui'", specifier = ">=3.2.0" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'online-rl'" },
 ]
-provides-extras = ["all-a2a", "pulsar", "elasticsearch", "redis", "sqlite", "postgres", "mysql", "gaussdb", "pgvector", "gaussvector", "chromadb", "obs", "zmq", "sandbox", "mem0", "jiuwen-memory", "agentarts", "claude", "ssh", "observability", "mobile-gui", "online-rl", "all-mq", "all-storage", "all-vector", "cli", "default", "all"]
+provides-extras = ["all-a2a", "pulsar", "elasticsearch", "redis", "sqlite", "postgres", "mysql", "gaussdb", "pgvector", "gaussvector", "chromadb", "obs", "zmq", "sandbox", "mem0", "jiuwen-memory", "agentarts", "claude", "ssh", "observability", "mobile-gui", "online-rl", "all-mq", "all-storage", "all-vector", "cli", "intelli-router", "default", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -3129,7 +3130,6 @@ dev = [
     { name = "uvicorn", specifier = ">=0.32.0" },
 ]
 docs = [{ name = "autodoc-pydantic", specifier = ">=2.2.0" }]
-intelli-router = [{ name = "intelli-router", git = "https://gitcode.com/openJiuwen/agent-protocol.git?subdirectory=intelli_router&rev=feature%2FintelliRouter" }]
 lint = [
     { name = "codespell", specifier = ">=2.2.4" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -4947,8 +4947,8 @@ name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
 dependencies = [
-    { name = "cryptography" },
-    { name = "jeepney" },
+    { name = "cryptography", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "jeepney", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be" }
 wheels = [
@@ -5079,23 +5079,23 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "alabaster" },
-    { name = "babel" },
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-    { name = "docutils" },
-    { name = "imagesize" },
-    { name = "jinja2" },
-    { name = "packaging" },
-    { name = "pygments" },
-    { name = "requests" },
-    { name = "roman-numerals" },
-    { name = "snowballstemmer" },
-    { name = "sphinxcontrib-applehelp" },
-    { name = "sphinxcontrib-devhelp" },
-    { name = "sphinxcontrib-htmlhelp" },
-    { name = "sphinxcontrib-jsmath" },
-    { name = "sphinxcontrib-qthelp" },
-    { name = "sphinxcontrib-serializinghtml" },
+    { name = "alabaster", marker = "python_full_version < '3.12'" },
+    { name = "babel", marker = "python_full_version < '3.12'" },
+    { name = "colorama", marker = "python_full_version < '3.12' and sys_platform == 'win32'" },
+    { name = "docutils", marker = "python_full_version < '3.12'" },
+    { name = "imagesize", marker = "python_full_version < '3.12'" },
+    { name = "jinja2", marker = "python_full_version < '3.12'" },
+    { name = "packaging", marker = "python_full_version < '3.12'" },
+    { name = "pygments", marker = "python_full_version < '3.12'" },
+    { name = "requests", marker = "python_full_version < '3.12'" },
+    { name = "roman-numerals", marker = "python_full_version < '3.12'" },
+    { name = "snowballstemmer", marker = "python_full_version < '3.12'" },
+    { name = "sphinxcontrib-applehelp", marker = "python_full_version < '3.12'" },
+    { name = "sphinxcontrib-devhelp", marker = "python_full_version < '3.12'" },
+    { name = "sphinxcontrib-htmlhelp", marker = "python_full_version < '3.12'" },
+    { name = "sphinxcontrib-jsmath", marker = "python_full_version < '3.12'" },
+    { name = "sphinxcontrib-qthelp", marker = "python_full_version < '3.12'" },
+    { name = "sphinxcontrib-serializinghtml", marker = "python_full_version < '3.12'" },
 ]
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/42/50/a8c6ccc36d5eacdfd7913ddccd15a9cee03ecafc5ee2bc40e1f168d85022/sphinx-9.0.4.tar.gz", hash = "sha256:594ef59d042972abbc581d8baa577404abe4e6c3b04ef61bd7fc2acbd51f3fa3" }
 wheels = [
@@ -5115,23 +5115,23 @@ resolution-markers = [
     "python_full_version == '3.12.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "alabaster" },
-    { name = "babel" },
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-    { name = "docutils" },
-    { name = "imagesize" },
-    { name = "jinja2" },
-    { name = "packaging" },
-    { name = "pygments" },
-    { name = "requests" },
-    { name = "roman-numerals" },
-    { name = "snowballstemmer" },
-    { name = "sphinxcontrib-applehelp" },
-    { name = "sphinxcontrib-devhelp" },
-    { name = "sphinxcontrib-htmlhelp" },
-    { name = "sphinxcontrib-jsmath" },
-    { name = "sphinxcontrib-qthelp" },
-    { name = "sphinxcontrib-serializinghtml" },
+    { name = "alabaster", marker = "python_full_version >= '3.12'" },
+    { name = "babel", marker = "python_full_version >= '3.12'" },
+    { name = "colorama", marker = "python_full_version >= '3.12' and sys_platform == 'win32'" },
+    { name = "docutils", marker = "python_full_version >= '3.12'" },
+    { name = "imagesize", marker = "python_full_version >= '3.12'" },
+    { name = "jinja2", marker = "python_full_version >= '3.12'" },
+    { name = "packaging", marker = "python_full_version >= '3.12'" },
+    { name = "pygments", marker = "python_full_version >= '3.12'" },
+    { name = "requests", marker = "python_full_version >= '3.12'" },
+    { name = "roman-numerals", marker = "python_full_version >= '3.12'" },
+    { name = "snowballstemmer", marker = "python_full_version >= '3.12'" },
+    { name = "sphinxcontrib-applehelp", marker = "python_full_version >= '3.12'" },
+    { name = "sphinxcontrib-devhelp", marker = "python_full_version >= '3.12'" },
+    { name = "sphinxcontrib-htmlhelp", marker = "python_full_version >= '3.12'" },
+    { name = "sphinxcontrib-jsmath", marker = "python_full_version >= '3.12'" },
+    { name = "sphinxcontrib-qthelp", marker = "python_full_version >= '3.12'" },
+    { name = "sphinxcontrib-serializinghtml", marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/cd/bd/f08eb0f4eed5c83f1ba2a3bd18f7745a2b1525fad70660a1c00224ec468a/sphinx-9.1.0.tar.gz", hash = "sha256:7741722357dd75f8190766926071fed3bdc211c74dd2d7d4df5404da95930ddb" }
 wheels = [

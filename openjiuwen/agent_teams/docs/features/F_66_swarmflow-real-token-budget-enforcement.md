@@ -95,7 +95,7 @@ BudgetLedger (engine/budget.py)   ← 每个 leader 一个，所有 run 共享
 | 账本构造后传两遍（backend 一份、`run_workflow` 一份） | 同一个对象传两处，参数不一致就是静默错账。改成 `run_workflow` 单点 `bind_budget` 注入 |
 | `AgentBackend` 用类属性存账本 | 可变类属性跨实例共享，经典 bug。走 `__init__` + `bind_budget` |
 | 保留 `_estimate_tokens` 做「无 usage 时的兜底」 | 天花板的含义会随 provider 是否上报 usage 而变。不上报就记 0，宁可不管也不要管错 |
-| E2E 直连 `run_swarmflow` 传 budget | 违反 `README_swarmflow_e2e.md` 铁律（必须从 team 入口驱动 leader），且绕过整条配置链——链断了测不出来 |
+| E2E 直连 `run_swarmflow` 传 budget | 违反 E2E 套件 README 铁律（`tests/system_tests/agent_swarm/swarmflow/README.md`）（必须从 team 入口驱动 leader），且绕过整条配置链——链断了测不出来 |
 
 ## 顺带修掉的阻塞性 bug：`async_tasks_list` 的 null schema
 

@@ -11,7 +11,7 @@ module configures logging / openjiuwen_home / model env, and its ``_wire_model_e
 / ``_run_team`` / ``_SwarmflowProbe`` drive the leader stream and progress probe.
 
 Run directly (needs a real model endpoint, see config_llm_local.yaml):
-    python tests/system_tests/agent_swarm/agent_team_swarmflow_concurrent_e2e.py
+    python tests/system_tests/agent_swarm/swarmflow/agent_team_swarmflow_concurrent_e2e.py
 """
 
 from __future__ import annotations
@@ -23,7 +23,8 @@ import uuid
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_HERE))  # sibling base module
+sys.path.insert(0, str(_HERE.parent))  # _e2e_utils (shared, stays in agent_swarm/)
 
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.core.runner.runner import Runner

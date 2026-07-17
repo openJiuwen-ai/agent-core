@@ -572,15 +572,12 @@ class TeamAgentSpec(BaseModel):
         and the materialized pool ambiguous, so we surface the conflict
         early instead of silently picking one.
         """
-        configured = [
-            name
-            for name, value in (
-                ("model_pool", bool(self.model_pool)),
-                ("model_router", self.model_router is not None),
-                ("model_intelli_router", self.model_intelli_router is not None),
-            )
-            if value
-        ]
+        candidates = (
+            ("model_pool", bool(self.model_pool)),
+            ("model_router", self.model_router is not None),
+            ("model_intelli_router", self.model_intelli_router is not None),
+        )
+        configured = [name for name, value in candidates if value]
         if len(configured) > 1:
             raise ValueError(
                 f"model_pool, model_router and model_intelli_router are mutually exclusive; "

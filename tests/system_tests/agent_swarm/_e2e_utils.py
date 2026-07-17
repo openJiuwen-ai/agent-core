@@ -25,6 +25,7 @@ from openjiuwen.agent_teams.monitor import (
 )
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging.log_config import configure_log_config
 from openjiuwen.core.runner.runner import Runner
 
 OnRuntimeReady = Callable[[str, str], Awaitable[None]]
@@ -51,6 +52,35 @@ def load_team_config(path: Path) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
     return expand_env_vars(raw)
+
+
+def configure_logging_into(config_path: Path, log_dir: Path) -> None:
+    """Apply ``config_path``'s logging config with every sink pinned to ``log_dir``.
+
+    The config's sink targets are relative (``./logs/jiuwen.log``), so each one
+    resolves against whatever the cwd happens to be *when that sink first
+    opens*. An E2E chdirs into its scratch dir partway through startup, and a
+    logger is only built on first use — so any logger touched before the chdir
+    pins its file to the launch directory while every later one lands in the
+    scratch dir, splitting one run's log across two trees and leaving the
+    verdict somewhere the docs don't mention.
+
+    Rewriting the targets to absolute paths removes the ordering dependency
+    rather than relying on nobody logging too early.
+
+    Args:
+        config_path: A logging YAML with a top-level ``logging:`` section.
+        log_dir: Directory every sink writes into. Created by the log backend
+            on first write; only the file names from the config are kept.
+    """
+    with open(config_path, "r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f)
+    config = raw["logging"]
+    for sink in (config.get("sinks") or {}).values():
+        target = sink.get("target")
+        if target:
+            sink["target"] = str(log_dir / Path(target).name)
+    configure_log_config(config)
 
 
 # ---------------------------------------------------------------------------

@@ -11,9 +11,16 @@
 | `agent_team_swarmflow_e2e.py` | 主用例：leader 经 `swarmflow` 工具跑 `resources/party_planner.py`，覆盖**全部原语**（无状态 `agent` / 有状态 `agent_session` / 无状态 `human` / 有状态 `human_session` / `pipeline` / `parallel` / 嵌套 `workflow`）。自动应答 human 提问，断言 6 阶段 + 完成。 |
 | `agent_team_swarmflow_concurrent_e2e.py` | 并发回归：`resources/concurrent_invites.py` 用 `parallel` 并发发起 3 个嵌套子工作流，断言全部跑完（防 `wf_depth` 并发跳过回归）。复用主用例的 `_run_team` / `_SwarmflowProbe`。 |
 | `agent_team_swarmflow_budget_e2e.py` | 预算回归：`resources/budget_guard.py` 一路跑到 token 天花板。断言**真实**用量（来自 `usage_metadata`，非估算）终止了脚本、且不是撞循环上界。复用主用例的 `_run_team` / `_SwarmflowProbe`。见 `F_66`。 |
+| `agent_team_swarmflow_pause_resume_runner_e2e.py` | pause/resume 回归：跑到中途经 `BackgroundTaskController` 暂停再恢复，断言 journal 前缀续跑、不重跑已完成的 `agent()`。见 `F_43`。 |
 | `config_swarmflow.yaml` | 最小 team spec：`enable_swarmflow: true` + leader/teammate，模型走 `${API_BASE}`/`${*_API_KEY}`/`${MODEL_NAME}` 占位符。 |
 | `config_swarmflow_budget.yaml` | 同上 + `swarmflow_budget: 6000`（token 硬天花板）。 |
 | `resources/*.py` | swarmflow 脚本（被测对象，非测试代码）。嵌套子工作流用 `__file__` 定位同目录兄弟，**与 cwd 无关**。 |
+
+本套件独占 `agent_swarm/swarmflow/` 一个目录；**共享**的东西留在外面、按层级往上找：
+`_e2e_utils.py` + `logging.yaml` 在 `agent_swarm/`（9 个非 swarmflow 用例也在用），
+`llm_config.py` 在 `system_tests/`。所以每个用例开头有三条 `sys.path.insert`——别删。
+scratch 目录（`.e2e_workdir*/` / `openjiuwen_home/` / `logs/`）落在本目录下，由
+`agent_swarm/.gitignore` 的无前导斜杠模式递归覆盖。
 
 **核心思路**：不直接调引擎，而是从**公共 team facade** `Runner.run_agent_team_streaming`
 驱动 leader，让它真的去调 `swarmflow` 工具——这才是"从 team 入口"的端到端。
@@ -32,7 +39,7 @@ cd tests/system_tests && cp config_llm_local.example.yaml config_llm_local.yaml
 `<endpoint>/<model>` 定位（也是区分"同一模型挂在多个 endpoint"的唯一写法）：
 
 ```bash
-OPENJIUWEN_E2E_MODEL=gateway/GLM-5.1 python tests/system_tests/agent_swarm/agent_team_swarmflow_e2e.py
+OPENJIUWEN_E2E_MODEL=gateway/GLM-5.1 python tests/system_tests/agent_swarm/swarmflow/agent_team_swarmflow_e2e.py
 OPENJIUWEN_E2E_MODEL=gateway python ...    # 该 endpoint 的首个模型
 ```
 
@@ -42,8 +49,10 @@ OPENJIUWEN_E2E_MODEL=gateway python ...    # 该 endpoint 的首个模型
 ```bash
 source .venv/bin/activate
 export PYTHONPATH=.:$PYTHONPATH
-python tests/system_tests/agent_swarm/agent_team_swarmflow_e2e.py
-python tests/system_tests/agent_swarm/agent_team_swarmflow_concurrent_e2e.py
+python tests/system_tests/agent_swarm/swarmflow/agent_team_swarmflow_e2e.py
+python tests/system_tests/agent_swarm/swarmflow/agent_team_swarmflow_concurrent_e2e.py
+python tests/system_tests/agent_swarm/swarmflow/agent_team_swarmflow_budget_e2e.py
+python tests/system_tests/agent_swarm/swarmflow/agent_team_swarmflow_pause_resume_runner_e2e.py
 ```
 
 - **依赖**：team 无条件注入 observability rail，需装 `opentelemetry`：
@@ -77,14 +86,22 @@ python tests/system_tests/agent_swarm/agent_team_swarmflow_concurrent_e2e.py
 ## 怎么观测 / 定位问题
 
 ### 日志在哪
-`logging.yaml` 把 console sink 重定向到 **`./logs/jiuwen_console.log`（相对 cwd，写时解析）**，
-**不在 stdout**。因为用例 chdir 到 `.e2e_workdir/`，所以实际路径是：
+`logging.yaml` 把 sink 重定向到文件、**不在 stdout**。用例启动时经
+`_e2e_utils.configure_logging_into` 把每个 sink 钉到 **scratch 目录下的绝对路径**，
+所以整轮日志（框架的 + `test_logger` 的判定行）都在一处：
 
 ```
-tests/system_tests/agent_swarm/.e2e_workdir/logs/jiuwen_console.log
+tests/system_tests/agent_swarm/swarmflow/.e2e_workdir/logs/jiuwen_console.log
+（pause/resume 用例是 .e2e_workdir_pause/logs/）
 ```
 
 终端只看得到 import 期的早期日志，之后全进文件——别以为"卡住了"。
+
+> **别把 sink 路径改回相对**。`logging.yaml` 里写的是 `./logs/...`，而 sink 是**首次使用时**
+> 才打开的——用例中途 chdir 进 scratch 目录，于是 chdir 前被碰过的 logger 把文件钉在启动
+> 目录、之后的钉在 scratch 目录，同一轮日志裂成两棵树（`[budget] E2E PASSED` 这类判定行就
+> 曾经躺在仓库根 `logs/` 里，而 README 指向另一处）。钉绝对路径是为了根除这个时序依赖，
+> 不是多此一举。
 
 ### 盯日志的纪律
 - **后台跑 + 实时 tail**，别用 `cmd | tail`（会缓冲到进程结束才出，像假死）。

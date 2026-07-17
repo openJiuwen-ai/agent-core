@@ -39,6 +39,21 @@ from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import TeamSpec
 
+# ``spec.build()`` materializes an ``IntelliRouterModelClient`` which requires
+# the optional ``intelli_router`` package. Tests that only inspect config
+# objects stay green without it; tests that drive a real ``build()`` skip.
+try:
+    import intelli_router  # noqa: F401
+
+    _HAS_INTELLI_ROUTER = True
+except ImportError:
+    _HAS_INTELLI_ROUTER = False
+
+_requires_intelli_router = pytest.mark.skipif(
+    not _HAS_INTELLI_ROUTER,
+    reason="intelli_router package not installed; install with 'pip install openjiuwen[intelli-router]'",
+)
+
 
 def _make_pool(n: int) -> list[ModelPoolEntry]:
     return [
@@ -1679,6 +1694,7 @@ def test_spec_rejects_intelli_router_with_model_router():
         )
 
 
+@_requires_intelli_router
 def test_build_intelli_router_expands_pool_and_forces_strategy():
     spec = TeamAgentSpec(
         agents={"leader": DeepAgentSpec()},
@@ -1694,6 +1710,7 @@ def test_build_intelli_router_expands_pool_and_forces_strategy():
     assert [e.model_name for e in team_spec.model_pool] == ["*", "fast", "smart"]
 
 
+@_requires_intelli_router
 def test_build_intelli_router_leader_defaults_to_unified_routing():
     """Leader without model_name gets "*" — the broadest failover."""
     spec = TeamAgentSpec(
@@ -1708,6 +1725,7 @@ def test_build_intelli_router_leader_defaults_to_unified_routing():
     assert leader_model.model_client_config.client_provider == INTELLI_ROUTER_PROVIDER
 
 
+@_requires_intelli_router
 def test_build_intelli_router_honors_explicit_leader_model_name():
     from openjiuwen.agent_teams.schema.blueprint import LeaderSpec
 
