@@ -151,13 +151,16 @@ class MemberSpecBase(BaseModel):
     prompt: str = ""
     model_name: Optional[str] = None
     """Optional pool model_name to allocate from when ``TeamSpec.model_pool``
-    is configured with ``by_model_name`` or ``router`` strategy.
+    is configured with the ``by_model_name``, ``router``, or
+    ``intelli_router`` strategy.
 
     Forwarded to ``ModelAllocator.allocate`` at ``build_team`` time so
     this member draws an endpoint from the named group (``by_model_name``)
-    or the named router entry (``router``). Ignored by the ``round_robin``
-    strategy. ``None`` (default) means the member uses its per-agent model
-    (or, under ``router``, the router's first declared model_name).
+    or the named router entry (``router`` / ``intelli_router``). Ignored
+    by the ``round_robin`` strategy. ``None`` (default) means the member
+    uses its per-agent model — or, under ``router`` /``intelli_router``,
+    the first declared model_name (for ``intelli_router`` that is the
+    ``"*"`` unified-routing entry unless ``model_names`` reorders it).
     """
 
 
@@ -306,7 +309,7 @@ class TeamSpec(BaseModel):
     empty (default), members fall back to their per-agent model config
     declared in ``TeamAgentSpec.agents`` and behavior is unchanged.
     """
-    model_pool_strategy: Literal["round_robin", "by_model_name", "router"] = "round_robin"
+    model_pool_strategy: Literal["round_robin", "by_model_name", "router", "intelli_router"] = "round_robin"
     """Allocation strategy applied to ``model_pool`` entries.
 
     * ``round_robin`` (default): linear rotation across every entry in
@@ -323,6 +326,14 @@ class TeamSpec(BaseModel):
       ``TeamAgentSpec.model_router`` is configured; the pool is then the
       flat expansion of that router. Lookup-by-name semantics; no hint
       yields the first declared name as the default.
+    * ``intelli_router``: client-side reliable router
+      (``IntelliRouterAllocator``) where each entry carries a whole
+      deployment list and ``IntelliRouterModelClient`` owns retry,
+      failover, and load balancing across those deployments. Set
+      automatically when ``TeamAgentSpec.model_intelli_router`` is
+      configured. Same lookup-by-name semantics as ``router``, but
+      members are not spread across endpoints — they share the
+      deployment list and the client picks per request.
     """
     external_messager_config: Optional[MessagerTransportConfig] = None
     """Transport used by an external CLI member's MCP client."""
