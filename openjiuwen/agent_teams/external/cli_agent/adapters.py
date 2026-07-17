@@ -33,10 +33,6 @@ from openjiuwen.core.common.exception.errors import raise_error
 
 # ---- input framing strategies ----
 INPUT_TEXT = "text"
-# Claude Code stream-json: one NDJSON user message per turn on stdin.
-INPUT_CLAUDE_STREAM_JSON = "claude_stream_json"
-# Back-compat alias (kept for importers that referenced the old name).
-INPUT_STREAM_JSON = INPUT_CLAUDE_STREAM_JSON
 # Codex proto: one JSONL "submission" per turn on stdin.
 INPUT_CODEX_PROTO = "codex_proto"
 
@@ -47,8 +43,6 @@ INPUT_CODEX_PROTO = "codex_proto"
 # its environment (which carries OPENJIUWEN_TEAM_JOIN), so each member's
 # server binds to that member's identity automatically.
 MCP_INJECT_NONE = "none"
-# Claude Code: pass an inline JSON config via ``--mcp-config <json>``.
-MCP_INJECT_CLAUDE_FLAG = "claude_flag"
 # Codex: set config keys via repeated ``-c mcp_servers.<name>.<key>=<value>``.
 MCP_INJECT_CODEX_OVERRIDE = "codex_override"
 # Concurrent external members can make the Python MCP server cold start exceed
@@ -65,11 +59,6 @@ MCP_INJECT_HERMES_ADD = "hermes_add"
 # ---- system-prompt injection strategies ----
 # How to give the member a per-member system prompt (its role / prompt).
 SYSTEM_PROMPT_NONE = "none"
-# Claude Code: pass the prompt via ``--append-system-prompt <text>`` so it
-# survives the whole long-lived process. CLIs without a system-prompt flag use
-# ``SYSTEM_PROMPT_NONE``; the spawn path then prepends the prompt to the
-# member's first user message instead (proven, CLI-agnostic).
-SYSTEM_PROMPT_CLAUDE_APPEND = "claude_append"
 # Codex: inject the prompt as the developer-message layer via
 # ``-c developer_instructions=<json>`` (additive — keeps codex's own base
 # instructions). Verified accepted by ``codex exec --strict-config``.
@@ -77,8 +66,6 @@ SYSTEM_PROMPT_CODEX_DEVELOPER = "codex_developer"
 
 # ---- turn-completion strategies ----
 COMPLETION_NONE = "none"
-# Claude Code stream-json: final event line is {"type": "result", ...}.
-COMPLETION_RESULT_JSON = "result_json"
 # Codex proto (legacy): an event line whose msg.type == "task_complete".
 COMPLETION_CODEX_TASK_COMPLETE = "codex_task_complete"
 # Codex exec --json: a JSONL event line whose type == "turn.completed".
@@ -92,12 +79,12 @@ class CliAgentAdapter:
     """How to launch and talk to one third-party CLI agent.
 
     Attributes:
-        name: Adapter key (``claude`` / ``codex`` / ...).
+        name: Adapter key (``codex`` / ``gemini`` / ...).
         command: Full launch argv (binary + flags).
         input_format: Input framing strategy (see ``INPUT_*``).
         completion: Turn-completion strategy (see ``COMPLETION_*``).
         structured_output: Whether stdout is a structured JSON event stream
-            (claude / codex / gemini). When ``True`` :meth:`summarize_output_line`
+            (codex / gemini). When ``True`` :meth:`summarize_output_line`
             extracts assistant text / tool descriptors from each event for
             observability; when ``False`` each plain-text line is the narration.
         supports_stdin_injection: Whether mid-turn stdin writes are observed.
@@ -130,9 +117,7 @@ class CliAgentAdapter:
         env_strip_prefixes: Env-var name prefixes to remove from the spawned
             CLI's environment. Used to drop a *parent* agent session's markers
             so the child runs as a fresh, independent instance instead of a
-            nested one — e.g. launching a claude member from inside a Claude
-            Code session would otherwise inherit ``CLAUDECODE`` /
-            ``CLAUDE_CODE_*`` and make the child behave as a nested claude.
+            nested one.
             Empty (default) keeps the full inherited environment.
     """
 
@@ -193,8 +178,6 @@ class CliAgentAdapter:
 
     def format_input(self, text: str) -> str:
         """Frame one turn's input text for writing to the CLI stdin."""
-        if self.input_format == INPUT_CLAUDE_STREAM_JSON:
-            return json.dumps({"type": "user", "message": {"role": "user", "content": text}})
         if self.input_format == INPUT_CODEX_PROTO:
             return json.dumps(
                 {
@@ -206,8 +189,6 @@ class CliAgentAdapter:
 
     def is_turn_complete(self, line: str) -> bool:
         """Return whether a stdout ``line`` signals the current turn is done."""
-        if self.completion == COMPLETION_RESULT_JSON:
-            return _json_field_equals(line, ("type",), "result")
         if self.completion == COMPLETION_CODEX_TASK_COMPLETE:
             return _json_field_equals(line, ("msg", "type"), "task_complete") or _json_field_equals(
                 line, ("type",), "task_complete"
@@ -224,13 +205,12 @@ class CliAgentAdapter:
 
         Used for observability (logging) and optional team-stream surfacing of
         what the external CLI is doing. For plain-text CLIs the line itself is
-        the narration; for structured-output CLIs (claude / codex / gemini JSON
+        the narration; for structured-output CLIs (codex / gemini JSON
         streams) it pulls assistant text or a tool descriptor from the event and
         skips lifecycle / turn-boundary events. Returns ``None`` when there is
         nothing worth surfacing. Never raises.
 
-        Best-effort across CLI JSON schemas: the assistant-text and tool shapes
-        are confidently handled for claude; codex / gemini events fall through
+        Best-effort across CLI JSON schemas; codex / gemini events fall through
         to defensive generic field extraction (VERIFY against real output).
         """
         text = line.strip()
@@ -264,9 +244,6 @@ class CliAgentAdapter:
             return []
         binary = server_command[0]
         args = list(server_command[1:])
-        if self.mcp_inject == MCP_INJECT_CLAUDE_FLAG:
-            config = {"mcpServers": {server_name: {"command": binary, "args": args}}}
-            return ["--mcp-config", json.dumps(config)]
         if self.mcp_inject == MCP_INJECT_CODEX_OVERRIDE:
             # Codex parses ``-c key=value`` values as TOML/JSON, so quote the
             # string and JSON-encode the args list. Dotted keys must use a
@@ -331,8 +308,6 @@ class CliAgentAdapter:
         """
         if not text:
             return []
-        if self.system_prompt_inject == SYSTEM_PROMPT_CLAUDE_APPEND:
-            return ["--append-system-prompt", text]
         if self.system_prompt_inject == SYSTEM_PROMPT_CODEX_DEVELOPER:
             # codex parses the -c value as TOML; a JSON-encoded string is a
             # valid TOML basic string and safely escapes newlines / quotes.
@@ -351,7 +326,7 @@ class CliAgentAdapter:
 # Max length of a surfaced output summary; longer narration is truncated.
 _SUMMARY_LIMIT = 500
 # Structured-output event types that carry no surfaceable narration (session /
-# turn lifecycle markers across the claude / codex / gemini JSON schemas).
+# turn lifecycle markers across the codex / gemini JSON schemas).
 _LIFECYCLE_EVENT_TYPES = frozenset(
     {
         "result",
@@ -369,10 +344,10 @@ _LIFECYCLE_EVENT_TYPES = frozenset(
 def _summarize_event(event: dict[str, Any]) -> str | None:
     """Pull a short narration summary from one structured-output event.
 
-    Tries, in order: claude assistant ``message.content`` blocks (text +
-    tool_use names), codex ``item`` text / command fields, then generic
-    top-level text fields (gemini and friends). Returns ``None`` for lifecycle
-    events or events with no surfaceable text.
+    Tries, in order: assistant ``message.content`` blocks (text + tool_use
+    names), codex ``item`` text / command fields, then generic top-level text
+    fields (gemini and friends). Returns ``None`` for lifecycle events or
+    events with no surfaceable text.
     """
     if event.get("type") in _LIFECYCLE_EVENT_TYPES:
         return None
@@ -395,7 +370,7 @@ def _summarize_event(event: dict[str, Any]) -> str | None:
 
 
 def _summarize_content_blocks(content: Any) -> str | None:
-    """Summarize a claude assistant ``content`` block list (text + tool_use)."""
+    """Summarize an assistant ``content`` block list (text + tool_use)."""
     if not isinstance(content, list):
         return None
     parts: list[str] = []
@@ -431,34 +406,6 @@ def _json_field_equals(line: str, path: tuple[str, ...], expected: str) -> bool:
 # conventions where known. NOT validated against the real binaries — verify
 # command, input framing and completion detection per CLI version.
 _BUILTIN: dict[str, CliAgentAdapter] = {
-    # Claude Code — high confidence. `--print` is non-interactive;
-    # `--input-format stream-json` reads NDJSON user messages from stdin
-    # continuously (supports mid-turn injection); `--output-format
-    # stream-json` (with `--verbose`) emits NDJSON events whose final per-turn
-    # event is {"type": "result", ...}; `--dangerously-skip-permissions`
-    # auto-approves tool use.
-    "claude": CliAgentAdapter(
-        name="claude",
-        command=(
-            "claude",
-            "--print",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--dangerously-skip-permissions",
-        ),
-        input_format=INPUT_CLAUDE_STREAM_JSON,
-        completion=COMPLETION_RESULT_JSON,
-        structured_output=True,
-        mcp_inject=MCP_INJECT_CLAUDE_FLAG,
-        system_prompt_inject=SYSTEM_PROMPT_CLAUDE_APPEND,
-        # Drop a parent Claude Code session's markers so a claude member
-        # spawned from inside another claude runs as a fresh top-level
-        # instance, not a degraded nested one.
-        env_strip_prefixes=("CLAUDECODE", "CLAUDE_CODE_"),
-    ),
     # Codex CLI (>= 0.13x) — `codex exec --json` runs one prompt
     # non-interactively, streams JSONL events, and exits (one-shot, so it runs
     # under the re-invoke runtime). The prompt is the trailing positional argv;
@@ -589,19 +536,14 @@ __all__ = [
     "available_adapters",
     "build_adapter",
     "INPUT_TEXT",
-    "INPUT_CLAUDE_STREAM_JSON",
-    "INPUT_STREAM_JSON",
     "INPUT_CODEX_PROTO",
     "COMPLETION_NONE",
-    "COMPLETION_RESULT_JSON",
     "COMPLETION_CODEX_TASK_COMPLETE",
     "COMPLETION_CODEX_JSON",
     "MCP_INJECT_NONE",
-    "MCP_INJECT_CLAUDE_FLAG",
     "MCP_INJECT_CODEX_OVERRIDE",
     "MCP_INJECT_GEMINI_ADD",
     "MCP_INJECT_HERMES_ADD",
     "SYSTEM_PROMPT_NONE",
-    "SYSTEM_PROMPT_CLAUDE_APPEND",
     "SYSTEM_PROMPT_CODEX_DEVELOPER",
 ]

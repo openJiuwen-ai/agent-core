@@ -266,13 +266,10 @@ class TeamBackend:
         # ``REMOTE_UNAVAILABLE_SENTINEL`` so the bridge degrades to a
         # normal teammate.
         self._bridge_adapters: dict[str, BridgeProtocolAdapter] = {}
-        # External-CLI member registry: member_name -> cli_agent adapter
-        # name. A member listed here is driven by a third-party CLI
-        # subprocess (ExternalCliRuntime) instead of a local DeepAgent.
-        # Consulted by ``SpawnManager.build_context_from_db`` to set
-        # ``ctx.cli_agent`` so the spawn path picks the external-CLI route.
-        # In-memory (per-process), mirroring the bridge spec registry; a
-        # cross-process cold recovery re-seeds from predefined declarations.
+        # External-CLI member registry: member_name -> cli_agent backend name.
+        # A member listed here is driven by an external backend instead of a
+        # local DeepAgent. Runtime recovery restores this process-local index
+        # from ``TeamMember.options["cli_agent"]``.
         self._external_cli_specs: dict[str, str] = {}
         # Static per-CLI launch configs from the spec, keyed by cli_agent
         # name. The non-empty key set is the capability ceiling: spawning an
@@ -348,6 +345,7 @@ class TeamBackend:
         allocation: Optional["Allocation"] = None,
         role: TeamRole = TeamRole.TEAMMATE,
         isolation: Optional[str] = None,
+        cli_agent: Optional[str] = None,
         permissions_override: Optional[dict[str, str]] = None,
     ) -> MemberOpResult:
         """Create a team member record in the database.
@@ -373,6 +371,9 @@ class TeamBackend:
                 Defaults to ``TEAMMATE`` for the ordinary teammate
                 spawn paths; ``spawn_human_agent`` overrides with
                 ``HUMAN_AGENT`` so the role survives cold recovery.
+            cli_agent: External CLI backend name for external members.
+                Persisted so stopped or cold-recovered teams can rebuild
+                member runtime routing without relying on process memory.
             permissions_override: Flat ``{tool_name: level_string}`` dict
                 from ``spawn_teammate.permissions``.  Only tightening
                 rules are valid (see ``narrow_permissions``).  Persisted
@@ -393,6 +394,7 @@ class TeamBackend:
 
         options = build_member_options(
             model_ref=allocation.to_db_ref() if allocation is not None else None,
+            cli_agent=cli_agent,
             worktree_isolation=isolation,
             permissions_override=permissions_override,
         )
@@ -1697,12 +1699,24 @@ class TeamBackend:
     # External-CLI member support
     # ------------------------------------------------------------------
 
+    async def restore_external_cli_specs_from_db(self) -> None:
+        """Restore external CLI member routing from persisted member options."""
+        from openjiuwen.agent_teams.tools.member_options import get_member_cli_agent
+
+        members = await self.db.member.get_team_members(self.team_name)
+        restored: dict[str, str] = {}
+        for member in members:
+            cli_agent = get_member_cli_agent(member)
+            if cli_agent:
+                restored[member.member_name] = cli_agent
+        self._external_cli_specs.update(restored)
+
     def is_external_cli_agent(self, member_name: str) -> bool:
         """Return whether ``member_name`` is driven by an external CLI."""
         return member_name in self._external_cli_specs
 
     def get_external_cli_agent(self, member_name: str) -> Optional[str]:
-        """Return the cli_agent adapter name for a member, or ``None``."""
+        """Return the cli_agent backend name for a member, or ``None``."""
         return self._external_cli_specs.get(member_name)
 
     def external_cli_agent_names(self) -> frozenset[str]:
@@ -1739,7 +1753,7 @@ class TeamBackend:
         Args:
             member_name: Unique member identifier.
             display_name: Human-readable label.
-            cli_agent: Adapter name (``"claude"`` / ``"codex"`` / ...); see
+            cli_agent: External CLI backend name (``"claude"`` / ``"codex"`` / ...); see
                 ``agent_teams/external/cli_agent/adapters.py``.
             desc: Public description stored on the member row (roster view).
                 Optional; defaults to empty.
@@ -1749,10 +1763,10 @@ class TeamBackend:
                 the external CLI); accepted for signature symmetry.
 
         Returns:
-            ``MemberOpResult`` — failure if the adapter is unknown or the
+            ``MemberOpResult`` — failure if the backend name is unknown or the
             underlying ``spawn_member`` rejects the registration.
         """
-        from openjiuwen.agent_teams.external.cli_agent.adapters import available_adapters
+        from openjiuwen.agent_teams.external.cli_agent.backends import available_backends, is_known_backend
 
         if not prompt:
             return MemberOpResult.fail("spawn_external_cli_agent requires non-empty 'prompt'")
@@ -1765,8 +1779,8 @@ class TeamBackend:
                 f"cli_agent '{cli_agent}' is not declared in TeamAgentSpec.external_cli_agents "
                 f"(declared: {declared}); add a static config entry for it first"
             )
-        if cli_agent not in available_adapters():
-            return MemberOpResult.fail(f"Unknown cli_agent '{cli_agent}'; known: {', '.join(available_adapters())}")
+        if not is_known_backend(cli_agent):
+            return MemberOpResult.fail(f"Unknown cli_agent '{cli_agent}'; known: {', '.join(available_backends())}")
 
         member_card = AgentCard(
             id=f"{self.team_name}_{member_name}",
@@ -1786,6 +1800,7 @@ class TeamBackend:
             execution_status=ExecutionStatus.IDLE,
             mode=self.teammate_mode,
             role=TeamRole.TEAMMATE,
+            cli_agent=cli_agent,
         )
         if not result.ok:
             self._external_cli_specs.pop(member_name, None)

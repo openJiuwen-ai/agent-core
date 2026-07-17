@@ -49,6 +49,7 @@ def _ctx(
     cli_agent: str = "generic",
     messager_config: MessagerTransportConfig | None = None,
     use_external_transport: bool = True,
+    teammate_mode: str = "build_mode",
 ) -> TeamRuntimeContext:
     external_messager_config = None
     if use_external_transport:
@@ -65,6 +66,7 @@ def _ctx(
             team_name="ext_team",
             display_name="Ext",
             language="en",
+            teammate_mode=teammate_mode,
             external_messager_config=external_messager_config,
         ),
         db_config=DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"),
@@ -89,6 +91,7 @@ def test_descriptor_from_context_carries_identity():
     assert descriptor.member_name == "dev-1"
     assert descriptor.role == "teammate"
     assert descriptor.language == "en"
+    assert descriptor.teammate_mode == "build_mode"
     transport = descriptor.transport_config
     assert transport.backend == "hybrid"
     assert transport.external_publish_url == _EVENT_WS_URL
@@ -98,6 +101,18 @@ def test_descriptor_from_context_carries_identity():
     assert transport.pubsub_subscribe_addr is None
     assert transport.listen_addrs == []
     assert transport.metadata == {}
+
+
+@pytest.mark.level0
+def test_descriptor_from_context_carries_teammate_mode():
+    ctx = _ctx(member="dev-1", teammate_mode="plan_mode")
+    token = set_session_id("sess-1")
+    try:
+        descriptor = descriptor_from_context(ctx)
+    finally:
+        reset_session_id(token)
+
+    assert descriptor.teammate_mode == "plan_mode"
 
 
 @pytest.mark.level0

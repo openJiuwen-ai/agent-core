@@ -1,31 +1,16 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Transport abstraction for launching and driving a CLI agent process.
+"""Transport abstraction for launching and driving local CLI agent processes.
 
 A :class:`ProcessTransport` turns a launch argv into a :class:`ProcessLike`
-object — the remote-process analogue of :func:`asyncio.create_subprocess_exec`.
-The team's external-CLI runtime (:class:`ExternalCliRuntime`) drives whatever
-the transport returns through the small :class:`ProcessLike` /
-:class:`StdinLike` contract below; it never knows whether the CLI runs locally
-or over ssh.
+object, matching the subset of :func:`asyncio.create_subprocess_exec` used by
+the generic external-CLI runtime. The runtime drives the returned process
+through the small :class:`ProcessLike` / :class:`StdinLike` contract below.
 
-Two concrete transports live alongside this module:
-
-* :class:`LocalTransport` (``local.py``) — wraps
-  :func:`asyncio.create_subprocess_exec`, returns a native
-  ``asyncio.subprocess.Process`` which already satisfies
-  :class:`ProcessLike` with zero adaptation.
-* :class:`SshTransport` (``ssh.py``) — drives a long-lived remote CLI over an
-  ssh connection; an internal adapter shapes asyncssh's ``SSHClientProcess``
-  into :class:`ProcessLike`.
-
-This module deliberately stays transport-agnostic: it defines only the three
-Protocols and imports no concrete transport. Selecting
-which transport to use is the caller's job (``build_cli_runtime``), not a
-factory here — there are only two transports today and the dispatch key is a
-single optional ``ssh_transport`` field; a registry/factory would be
-speculative until a third transport appears.
+The generic CLI backend currently supports only :class:`LocalTransport`
+(``local.py``). SDK-backed agents can provide their own transport
+implementations outside this package.
 """
 
 from __future__ import annotations
@@ -50,8 +35,8 @@ class StreamReaderLike(Protocol):
 class StdinLike(Protocol):
     """Writer contract :class:`StdinPipeInjector` depends on.
 
-    Five methods — the local :class:`asyncio.StreamWriter` and the ssh
-    transport's adapted stdin writer both satisfy it. ``can_write_eof`` is
+    Five methods are required so subprocess-style stdin writers can satisfy
+    the runtime contract. ``can_write_eof`` is
     required: :meth:`StdinPipeInjector.aclose` calls it to decide whether to
     write EOF before closing the underlying stream.
     """
@@ -87,9 +72,7 @@ class ProcessLike(Protocol):
     iterator by the spawn path), ``returncode`` (premature-EOF detection),
     synchronous ``terminate`` and async ``wait`` (release on ``aclose``).
 
-    A native ``asyncio.subprocess.Process`` satisfies this with no adaptation;
-    the ssh transport wraps asyncssh's ``SSHClientProcess`` into an adapter
-    that does.
+    A native ``asyncio.subprocess.Process`` satisfies this with no adaptation.
     """
 
     @property
@@ -125,10 +108,8 @@ class ProcessLike(Protocol):
 class ProcessTransport(Protocol):
     """Launch a CLI argv into a :class:`ProcessLike` process object.
 
-    Implementations that need a connection (ssh) build it lazily on the first
-    ``run`` call and reuse it on subsequent calls within the same transport
-    instance — so one member maps to one long-lived connection. ``aclose``
-    releases that connection (no-op for local).
+    ``aclose`` releases transport resources. For the local transport this is a
+    no-op.
     """
 
     async def run(

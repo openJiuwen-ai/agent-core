@@ -236,8 +236,9 @@ class ExternalCliAgentSpec(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     cli_agent: str
-    """Adapter kind identifier (``"claude"`` / ``"codex"`` / ``"openclaw"`` /
-    ``"hermes"``). Selects the built-in adapter and is the value passed to
+    """External agent kind identifier (``"claude"`` / ``"codex"`` /
+    ``"openclaw"`` / ``"hermes"``). ``"claude"`` selects the SDK backend;
+    other values select built-in CLI adapters. This is the value passed to
     ``spawn_member(cli_agent=...)``. See ``agent_teams/external/cli_agent``."""
 
     command: Optional[list[str]] = None
@@ -252,7 +253,7 @@ class ExternalCliAgentSpec(BaseModel):
     inject_mcp: bool = True
     """Whether the spawn path auto-registers the team MCP server with the CLI
     so it gets the team collaboration tools (read_inbox / claim_task / ...).
-    Injection is CLI-specific (claude ``--mcp-config``, codex
+    Injection is backend-specific (Claude SDK MCP options, codex
     ``-c mcp_servers...``); adapters without an injection strategy ignore it."""
 
     mcp_server_command: list[str] = Field(default_factory=lambda: ["openjiuwen-team-mcp"])
@@ -288,6 +289,12 @@ class TeamSpec(BaseModel):
     Carried on the runtime spec so paths that only see a
     ``TeamRuntimeContext`` (external CLI member spawn) resolve the same
     tool set and prompt as in-process members.
+    """
+    teammate_mode: str = "build_mode"
+    """How teammates execute tasks — mirrors ``TeamAgentSpec.teammate_mode``.
+
+    Carried on the runtime spec so external CLI member MCP tools expose the
+    same plan/build-mode tool set described by the spawned system prompt.
     """
     metadata: dict = Field(default_factory=dict)
     model_pool: list[ModelPoolEntry] = Field(default_factory=list)
@@ -351,8 +358,9 @@ class TeamRuntimeContext(BaseModel):
     worktree_path: Optional[str] = None
     """Absolute cwd override for a teammate running in an isolated worktree."""
     cli_agent: Optional[str] = None
-    """When set, this teammate is driven by an external CLI agent (the named
-    adapter, e.g. ``"claude"`` / ``"codex"``) instead of a local DeepAgent.
+    """When set, this teammate is driven by an external agent backend (e.g.
+    ``"claude"`` SDK or a named CLI adapter like ``"codex"``) instead of a
+    local DeepAgent.
 
     The spawn path launches the CLI as a subprocess and the configurator
     builds an ``ExternalCliRuntime`` in place of ``TeamHarness``. ``None``
