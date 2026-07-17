@@ -63,8 +63,8 @@ class SkillCreationSignal:
 class SkillCreationSignalDetector:
     """Detect Skill creation signals from trajectory tool windows."""
 
+    @staticmethod
     def collect_metrics(
-        self,
         builder: TrajectoryBuilder | None,
         *,
         raw_tool_call_watermark: int = 0,

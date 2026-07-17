@@ -181,6 +181,7 @@ async def test_team_skill_rail_generates_and_persists_patch_after_completion(tmp
         skills_dir=str(skills_dir),
         llm=_MockLLM(),
         model="mock-model",
+        signal_trigger=True,
         auto_save=False,
         async_evolution=False,
         review_runtime=EvolutionReviewRuntime(),
