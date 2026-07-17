@@ -12,7 +12,7 @@ from openjiuwen.core.context_engine.qa_block.schema import (
     QA_ID_METADATA_KEY,
     SOURCE_QA_ID_METADATA_KEY,
 )
-from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, SystemMessage, UserMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, SystemMessage, ToolMessage, UserMessage
 
 if TYPE_CHECKING:
     from openjiuwen.core.context_engine.base import ModelContext
@@ -89,6 +89,61 @@ def extract_final_answer(messages: list[BaseMessage]) -> str:
         if text:
             return text
     return ""
+
+
+def _tool_call_brief(message: BaseMessage) -> str:
+    """One-line brief of an assistant tool-call: 'tool_name(arg_excerpt)'."""
+    tool_calls = getattr(message, "tool_calls", None) or []
+    parts: list[str] = []
+    for tc in tool_calls:
+        name = getattr(tc, "name", "") or ""
+        args = getattr(tc, "arguments", "") or ""
+        if isinstance(args, str) and len(args) > 120:
+            args = args[:120] + "…"
+        parts.append(f"{name}({args})")
+    return "; ".join(parts)
+
+
+def build_compaction_corpus(
+    messages: list[BaseMessage],
+    *,
+    per_tool_max_chars: int = 600,
+    max_tool_results: int = 12,
+) -> str:
+    """Build a corpus string for L1 summarization.
+
+    Unlike extract_user_query + extract_final_answer (首尾两端 only), this
+    includes one-line briefs of every tool_call and truncated tool_result
+    bodies, so parallel sub-task outputs (e.g. multi-bank deep research) are
+    not silently dropped from the compaction summary.
+    """
+    user_query = extract_user_query(messages)
+    final_answer = extract_final_answer(messages)
+    chunks: list[str] = [f"Q: {user_query}", f"A: {final_answer}"]
+
+    tool_results_seen = 0
+    for message in messages:
+        # assistant tool calls -> brief
+        if isinstance(message, AssistantMessage):
+            tool_calls = getattr(message, "tool_calls", None)
+            if tool_calls:
+                brief = _tool_call_brief(message)
+                if brief:
+                    chunks.append(f"[tool_call] {brief}")
+                continue
+        # tool results -> truncated body
+        if isinstance(message, ToolMessage):
+            if tool_results_seen >= max_tool_results:
+                continue
+            text = _message_text(message).strip()
+            if not text:
+                continue
+            if len(text) > per_tool_max_chars:
+                text = text[:per_tool_max_chars] + "…"
+            chunks.append(f"[tool_result] {text}")
+            tool_results_seen += 1
+
+    return "\n".join(chunks)
 
 
 def message_id_range(messages: list[BaseMessage]) -> tuple[str, str] | None:
