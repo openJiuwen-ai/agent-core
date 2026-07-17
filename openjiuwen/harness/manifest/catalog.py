@@ -7,23 +7,23 @@ The ``harness_element`` declaration is the single source of truth: it records a
 serializable :class:`HarnessElementDescriptor` for a factory function (used as a
 decorator) or a class builder (passed via ``builder=``). Registration into the
 provider registries is driven separately from this catalog by
-``openjiuwen.agent_teams.harness.manifest.registration.register_from_catalog``,
-so metadata and registration never drift.
+``openjiuwen.harness.manifest.registration.register_from_catalog``, so metadata
+and registration never drift.
 """
 
 from __future__ import annotations
 
 from typing import Any, Callable
 
-from openjiuwen.agent_teams.harness.manifest.inputs import (
+from openjiuwen.harness.manifest.inputs import (
     ConstructionInput,
     EmptyInput,
 )
-from openjiuwen.agent_teams.harness.manifest.introspect import (
+from openjiuwen.harness.manifest.introspect import (
     default_interface_methods,
     factory_ref,
 )
-from openjiuwen.agent_teams.harness.manifest.models import (
+from openjiuwen.harness.manifest.models import (
     ElementKind,
     HarnessElementDescriptor,
     InterfaceMethod,
@@ -115,3 +115,11 @@ def harness_element(
     if builder is not None:
         return record(builder)
     return record
+
+
+__all__ = [
+    "add_descriptor",
+    "get_catalog",
+    "list_elements",
+    "harness_element",
+]

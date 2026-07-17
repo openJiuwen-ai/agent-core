@@ -1242,6 +1242,77 @@ def test_create_subagent_uses_code_agent_factory(tmp_path) -> None:
     assert Path(call_kwargs["workspace"].root_path).name == "sub_session_id"
 
 
+def test_create_subagent_passes_configured_runtime_fields(tmp_path) -> None:
+    workspace_root = tmp_path / "parent_workspace"
+    subagent_config = SubAgentConfig(
+        agent_card=AgentCard(name="reviewer", description="reviewer"),
+        system_prompt="Review strictly.",
+        factory_name=CODE_AGENT_FACTORY_NAME,
+        factory_kwargs={"sandbox": True},
+        enable_task_loop=True,
+        max_iterations=5,
+        enable_plan_mode=True,
+        parallel_tool_calls=False,
+        restrict_to_work_dir=True,
+        prompt_mode="concise",
+        language="en",
+    )
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path=str(workspace_root)),
+        restrict_to_work_dir=False,
+        subagents=[subagent_config],
+    )
+    factory_result = object()
+
+    with patch(
+        "openjiuwen.harness.subagents.code_agent.create_code_agent",
+        return_value=factory_result,
+    ) as mock_create_code_agent:
+        sub = parent.create_subagent("reviewer", "sub_session_id")
+
+    assert sub is factory_result
+    call_kwargs = mock_create_code_agent.call_args.kwargs
+    assert call_kwargs["enable_task_loop"] is True
+    assert call_kwargs["max_iterations"] == 5
+    assert call_kwargs["enable_plan_mode"] is True
+    assert call_kwargs["parallel_tool_calls"] is False
+    assert call_kwargs["restrict_to_work_dir"] is True
+    assert call_kwargs["prompt_mode"] == "concise"
+    assert call_kwargs["language"] == "en"
+    assert call_kwargs["sandbox"] is True
+
+
+def test_create_subagent_keeps_parent_work_dir_restriction_when_stricter(tmp_path) -> None:
+    workspace_root = tmp_path / "parent_workspace"
+    subagent_config = SubAgentConfig(
+        agent_card=AgentCard(name="reviewer", description="reviewer"),
+        system_prompt="Review strictly.",
+        factory_name=CODE_AGENT_FACTORY_NAME,
+        restrict_to_work_dir=False,
+    )
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path=str(workspace_root)),
+        restrict_to_work_dir=True,
+        subagents=[subagent_config],
+    )
+    factory_result = object()
+
+    with patch(
+        "openjiuwen.harness.subagents.code_agent.create_code_agent",
+        return_value=factory_result,
+    ) as mock_create_code_agent:
+        sub = parent.create_subagent("reviewer", "sub_session_id")
+
+    assert sub is factory_result
+    assert mock_create_code_agent.call_args.kwargs["restrict_to_work_dir"] is True
+
+
 def test_create_subagent_uses_research_agent_factory(tmp_path) -> None:
     workspace_root = tmp_path / "parent_workspace"
     parent = create_deep_agent(

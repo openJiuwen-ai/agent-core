@@ -67,3 +67,10 @@ class HarnessElementDescriptor(BaseModel):
     input_schema: dict[str, Any] = {}
     input_model_ref: str | None = None
     interface_methods: list[InterfaceMethod] = []
+
+
+__all__ = [
+    "ElementKind",
+    "HarnessElementDescriptor",
+    "InterfaceMethod",
+]

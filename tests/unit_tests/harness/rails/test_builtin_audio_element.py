@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from openjiuwen.agent_teams.rails import builtin_elements
+from openjiuwen.harness.manifest import builtin_elements
 
 
 class _Context:

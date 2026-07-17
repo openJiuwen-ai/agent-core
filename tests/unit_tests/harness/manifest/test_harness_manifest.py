@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from openjiuwen.agent_teams.harness.manifest import (
+from openjiuwen.harness.manifest import (
     ConstructionInput,
     ElementKind,
     HarnessElementDescriptor,
@@ -30,7 +30,8 @@ from openjiuwen.agent_teams.harness.manifest import (
     register_from_catalog,
     resolve_factory,
 )
-from openjiuwen.agent_teams.schema.deep_agent_spec import (
+from openjiuwen.harness.manifest.introspect import class_rail_adapter
+from openjiuwen.harness.schema.deep_agent_spec import (
     _RAIL_PROVIDER_REGISTRY,
     _SUBAGENT_PROVIDER_REGISTRY,
     _TOOL_PROVIDER_REGISTRY,
@@ -150,8 +151,6 @@ def test_resolve_falls_back_to_defaults_when_absent_or_none() -> None:
 
 def test_class_rail_adapter_injects_language_only_when_accepted() -> None:
     """Language is injected for a rail that accepts it, skipped otherwise."""
-    from openjiuwen.agent_teams.harness.manifest.introspect import class_rail_adapter
-
     with_lang = class_rail_adapter(_FakeRailWithLang)({}, _FakeCtx(language="fr"))
     assert isinstance(with_lang, _FakeRailWithLang)
     assert with_lang.language == "fr"
