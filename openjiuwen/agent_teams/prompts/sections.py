@@ -742,9 +742,10 @@ def build_team_static_sections(
     sections = [section for section in builders if section is not None]
     # Every team member — in-process or external CLI — receives inbound messages
     # and framework events as <team-inbound> / <team-event> XML, so the inbound
-    # tag notice is always included. The attachment notice is in-process only:
-    # external CLI members have no PromptAttachmentManager (they pull team state
-    # via MCP tools), so it is gated behind include_attachment_notice.
+    # tag notice is always included. The attachment notice is gated by caller:
+    # native members receive prompt attachments from PromptAttachmentManager,
+    # while external members receive the same rendered blocks through their
+    # runtime input channel.
     if include_attachment_notice:
         sections.append(build_team_attachment_notice_section(language=language))
     sections.append(build_team_inbound_tags_section(language=language))
@@ -790,6 +791,7 @@ def build_team_member_system_prompt(
         language=language,
         hitt_enabled=hitt_enabled,
         expose_human_agents_to_teammates=expose_human_agents_to_teammates,
+        include_attachment_notice=True,
     )
     builder = SystemPromptBuilder(language=language)
     for section in sections:

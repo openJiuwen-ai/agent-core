@@ -221,6 +221,7 @@ class CoordinationKernel:
             team_name = host.team_name
             if team_name and not self._subscribed_topics:
                 await self.subscribe_transport(team_name)
+        await self._event_bus.enqueue(InnerEventMessage(event_type=InnerEventType.REFRESH_TEAM_CONTEXT))
         # Re-arm the team-completion rising-edge guard on every start (cold
         # start / resume / recover) so each run cycle evaluates completion
         # independently — a resumed persistent team can conclude again.

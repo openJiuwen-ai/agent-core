@@ -6,6 +6,10 @@ from __future__ import annotations
 import asyncio
 import time
 from types import SimpleNamespace
+from typing import (
+    Any,
+    AsyncIterator,
+)
 from unittest.mock import (
     AsyncMock,
     MagicMock,
@@ -22,6 +26,7 @@ from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.agent.team_agent import (
     TeamAgent,
 )
+from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     LeaderSpec,
@@ -30,7 +35,9 @@ from openjiuwen.agent_teams.schema.blueprint import (
 from openjiuwen.agent_teams.schema.events import (
     BroadcastEvent,
     EventMessage,
+    MemberCanceledEvent,
     MemberShutdownEvent,
+    MemberSpawnedEvent,
     MemberStatusChangedEvent,
     MessageEvent,
     TaskCancelledEvent,
@@ -1994,6 +2001,245 @@ def _make_member_status_handler(
         poll_ctrl=SimpleNamespace(),
     )
     return backend, handler
+
+
+class _FakeExternalRuntime(CliRuntimeBase):
+    """Minimal external runtime used only for isinstance checks in tests."""
+
+    async def _drive(self, inputs: dict[str, Any]) -> AsyncIterator[Any]:
+        """Yield no chunks."""
+        if False:
+            yield inputs
+
+    async def steer(self, content: str) -> None:
+        """Accept a steer no-op."""
+        return None
+
+    async def follow_up(self, content: str) -> None:
+        """Accept a follow-up no-op."""
+        return None
+
+    async def _abort_turn(self) -> None:
+        """Abort no-op."""
+        return None
+
+    async def aclose(self) -> None:
+        """Close no-op."""
+        return None
+
+
+def _make_external_member_context_handler(*, harness: Any) -> tuple[MagicMock, SimpleNamespace, MemberHandler]:
+    backend = MagicMock()
+    backend.team_name = "test-team"
+    backend.get_team_info = AsyncMock(
+        return_value=SimpleNamespace(
+            team_name="test-team",
+            display_name="Test Team",
+            desc="Build a useful thing",
+        )
+    )
+    backend.list_members = AsyncMock(
+        return_value=[
+            SimpleNamespace(
+                member_name="claude-1",
+                display_name="Claude One",
+                desc="External implementer",
+                role=TeamRole.TEAMMATE.value,
+            ),
+            SimpleNamespace(
+                member_name="reviewer-1",
+                display_name="Reviewer",
+                desc="Reviews changes",
+                role=TeamRole.TEAMMATE.value,
+            ),
+        ]
+    )
+    host = SimpleNamespace(
+        harness=harness,
+        deliver_input=AsyncMock(),
+        cancel_agent=AsyncMock(),
+        shutdown_self=AsyncMock(),
+    )
+    handler = MemberHandler(
+        host=host,
+        blueprint=SimpleNamespace(
+            role=TeamRole.TEAMMATE,
+            lifecycle="persistent",
+            member_name="claude-1",
+            language="cn",
+            spec=SimpleNamespace(expose_human_agents_to_teammates=False),
+        ),
+        infra=TeamInfra(team_backend=backend),
+        poll_ctrl=SimpleNamespace(),
+    )
+    return backend, host, handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_external_member_receives_team_context_on_roster_event():
+    """External members receive native-shaped team context through steer."""
+    backend, host, handler = _make_external_member_context_handler(
+        harness=_FakeExternalRuntime(member_name="claude-1"),
+    )
+    event = EventMessage.from_event(MemberSpawnedEvent(team_name="test-team", member_name="reviewer-1"))
+
+    await handler.on_member_event(event)
+
+    backend.get_team_info.assert_awaited_once_with()
+    backend.list_members.assert_awaited_once_with()
+    host.deliver_input.assert_awaited_once()
+    content = host.deliver_input.await_args.args[0]
+    assert content.startswith("<system-reminder>")
+    assert '<prompt-attachment type="team_info">' in content
+    assert '<prompt-attachment type="team_members">' in content
+    assert "test-team" in content
+    assert "reviewer-1" in content
+    assert "member_name=claude-1" not in content
+    assert host.deliver_input.await_args.kwargs == {"use_steer": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_external_member_skips_team_context_after_runtime_stops():
+    """Roster refresh events after shutdown must not steer a stopped runtime."""
+    runtime = _FakeExternalRuntime(member_name="claude-1")
+    await runtime.stop()
+    backend, host, handler = _make_external_member_context_handler(harness=runtime)
+    event = EventMessage.from_event(
+        MemberShutdownEvent(
+            team_name="test-team",
+            member_name="reviewer-1",
+            force=False,
+        )
+    )
+
+    await handler.on_member_event(event)
+
+    backend.get_team_info.assert_not_awaited()
+    backend.list_members.assert_not_awaited()
+    host.deliver_input.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_external_member_context_refresh_warns_on_delivery_failure():
+    """A failed external context refresh is non-fatal during shutdown races."""
+    backend, host, handler = _make_external_member_context_handler(
+        harness=_FakeExternalRuntime(member_name="claude-1"),
+    )
+    host.deliver_input.side_effect = BrokenPipeError("channel closed")
+    event = EventMessage.from_event(MemberSpawnedEvent(team_name="test-team", member_name="reviewer-1"))
+
+    await handler.on_member_event(event)
+
+    backend.get_team_info.assert_awaited_once_with()
+    backend.list_members.assert_awaited_once_with()
+    host.deliver_input.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_external_member_context_refresh_warns_on_build_failure():
+    """A failed context build is non-fatal and never falls into peer shutdown."""
+    backend, host, handler = _make_external_member_context_handler(
+        harness=_FakeExternalRuntime(member_name="claude-1"),
+    )
+    backend.get_team_info.side_effect = RuntimeError("db unavailable")
+    event = EventMessage.from_event(
+        MemberShutdownEvent(
+            team_name="test-team",
+            member_name="reviewer-1",
+            force=True,
+        )
+    )
+
+    await handler.on_member_event(event)
+
+    backend.get_team_info.assert_awaited_once_with()
+    backend.list_members.assert_not_awaited()
+    host.deliver_input.assert_not_awaited()
+    host.shutdown_self.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_native_member_does_not_receive_team_context_on_roster_event():
+    """Native members already receive team context through prompt attachments."""
+    backend, host, handler = _make_external_member_context_handler(harness=object())
+    event = EventMessage.from_event(MemberSpawnedEvent(team_name="test-team", member_name="reviewer-1"))
+
+    await handler.on_member_event(event)
+
+    backend.get_team_info.assert_not_awaited()
+    backend.list_members.assert_not_awaited()
+    host.deliver_input.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_external_member_does_not_receive_team_context_for_own_status_event():
+    """Own status events are lifecycle noise, not useful roster updates."""
+    backend, host, handler = _make_external_member_context_handler(
+        harness=_FakeExternalRuntime(member_name="claude-1"),
+    )
+    event = EventMessage.from_event(
+        MemberStatusChangedEvent(
+            team_name="test-team",
+            member_name="claude-1",
+            old_status=MemberStatus.UNSTARTED.value,
+            new_status=MemberStatus.READY.value,
+        )
+    )
+
+    await handler.on_member_event(event)
+
+    backend.get_team_info.assert_not_awaited()
+    backend.list_members.assert_not_awaited()
+    host.deliver_input.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_external_member_does_not_receive_team_context_on_peer_status_event():
+    """Peer status changes are too frequent to steer full roster context."""
+    backend, host, handler = _make_external_member_context_handler(
+        harness=_FakeExternalRuntime(member_name="claude-1"),
+    )
+    event = EventMessage.from_event(
+        MemberStatusChangedEvent(
+            team_name="test-team",
+            member_name="reviewer-1",
+            old_status=MemberStatus.UNSTARTED.value,
+            new_status=MemberStatus.READY.value,
+        )
+    )
+
+    await handler.on_member_event(event)
+
+    backend.get_team_info.assert_not_awaited()
+    backend.list_members.assert_not_awaited()
+    host.deliver_input.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_external_member_cancel_self_does_not_steer_team_context():
+    """Self-cancel remains a lifecycle action, not a team-context refresh."""
+    _, host, handler = _make_external_member_context_handler(
+        harness=_FakeExternalRuntime(member_name="claude-1"),
+    )
+    event = EventMessage.from_event(
+        MemberCanceledEvent(
+            team_name="test-team",
+            member_name="claude-1",
+        )
+    )
+
+    await handler.on_member_event(event)
+
+    host.cancel_agent.assert_awaited_once_with()
+    host.deliver_input.assert_not_awaited()
 
 
 @pytest.mark.asyncio

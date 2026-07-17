@@ -316,7 +316,7 @@ def _arm_kernel_for_start(host: SimpleNamespace) -> CoordinationKernel:
     host.blueprint = SimpleNamespace(spec=SimpleNamespace(workspace=None))
 
     kernel = CoordinationKernel(host)
-    kernel._event_bus = SimpleNamespace(is_running=True, start=AsyncMock())
+    kernel._event_bus = SimpleNamespace(is_running=True, start=AsyncMock(), enqueue=AsyncMock())
     kernel._dispatcher = SimpleNamespace(team_completion=SimpleNamespace(rearm=MagicMock()))
     return kernel
 
@@ -342,6 +342,10 @@ async def test_start_resumes_a_round_left_paused():
 
     await kernel.start(session)
 
+    kernel._event_bus.enqueue.assert_awaited_once()
+    event = kernel._event_bus.enqueue.await_args.args[0]
+    assert isinstance(event, InnerEventMessage)
+    assert event.event_type == InnerEventType.REFRESH_TEAM_CONTEXT
     host.stream_controller.resume_agent.assert_awaited_once_with()
 
 

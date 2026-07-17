@@ -55,7 +55,7 @@ def test_static_sections_leader_includes_workflow_and_lifecycle():
 @pytest.mark.level0
 def test_static_sections_exclude_dynamic_info_and_members():
     # Dynamic info / members sections depend on live DB state and are NOT part
-    # of the static spawn-time prompt (the member fetches the roster via MCP).
+    # of static sections; they are attached at delivery time.
     sections = build_team_static_sections(
         role=TeamRole.LEADER,
         member_prompt="x",
@@ -90,3 +90,16 @@ def test_member_system_prompt_nonempty_without_private_prompt():
         language="en",
     )
     assert prompt.strip()
+
+
+@pytest.mark.level0
+def test_member_system_prompt_includes_attachment_notice():
+    prompt = build_team_member_system_prompt(
+        role=TeamRole.TEAMMATE,
+        member_prompt="",
+        member_name="dev-1",
+        language="en",
+    )
+    assert "prompt-attachment" in prompt
+    assert "team_members" in prompt
+    assert "team_info" in prompt
