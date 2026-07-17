@@ -359,6 +359,8 @@ class SkillEvolutionRail(EvolutionRail):
 
     def update_llm(self, llm: Any, model: str) -> None:
         """Hot-update LLM client and model."""
+        self._optimizer_llm = llm
+        self._optimizer_model = model
         self._evolver.update_llm(llm, model)
         self._scorer.update_llm(llm, model)
 

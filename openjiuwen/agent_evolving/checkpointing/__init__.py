@@ -17,6 +17,13 @@ from openjiuwen.agent_evolving.checkpointing.types import (
 from openjiuwen.agent_evolving.checkpointing.store_file import FileCheckpointStore
 from openjiuwen.agent_evolving.checkpointing.evolution_store import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.manager import DefaultCheckpointManager, CheckpointManager
+from openjiuwen.agent_evolving.checkpointing.changelog import (
+    CHANGELOG_CATEGORIES,
+    CHANGELOG_FILENAME,
+    ClassifiedChangelogEntry,
+    classify_records_for_changelog,
+    empty_changelog_template,
+)
 from openjiuwen.agent_evolving.checkpointing.versioning import (
     VersionBump,
     aggregate_version_bump,
@@ -41,6 +48,11 @@ __all__ = [
     "EvolutionStore",
     "CheckpointManager",
     "DefaultCheckpointManager",
+    "CHANGELOG_CATEGORIES",
+    "CHANGELOG_FILENAME",
+    "ClassifiedChangelogEntry",
+    "classify_records_for_changelog",
+    "empty_changelog_template",
     "VersionBump",
     "aggregate_version_bump",
     "bump_semver",

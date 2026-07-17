@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -123,6 +125,8 @@ def test_prepare_rebuild_context_uses_subject_envelope():
 def test_complete_rebuild_clears_when_archive_path_present():
     store = Mock()
     store.bump_version_for_rebuild = AsyncMock(return_value="1.0.1")
+    store.load_evolution_log = AsyncMock(return_value=Mock(entries=[]))
+    store.append_changelog_for_rebuild = AsyncMock(return_value=True)
     store.clear_evolutions = AsyncMock()
     rebuild_service = ExperienceRebuildService(store=store)
 
@@ -134,6 +138,7 @@ def test_complete_rebuild_clears_when_archive_path_present():
 
     assert cleared is True
     store.bump_version_for_rebuild.assert_awaited_once_with("skill-a")
+    store.append_changelog_for_rebuild.assert_awaited_once()
     store.clear_evolutions.assert_awaited_once_with("skill-a", retain_version="1.0.1")
 
 
@@ -141,6 +146,8 @@ def test_complete_rebuild_proceeds_when_archive_path_missing():
     """Archive skip (already exists) must not permanently block bump/clear."""
     store = Mock()
     store.bump_version_for_rebuild = AsyncMock(return_value="1.0.1")
+    store.load_evolution_log = AsyncMock(return_value=Mock(entries=[]))
+    store.append_changelog_for_rebuild = AsyncMock(return_value=True)
     store.clear_evolutions = AsyncMock()
     rebuild_service = ExperienceRebuildService(store=store)
 
@@ -156,6 +163,7 @@ def test_complete_rebuild_proceeds_when_archive_path_missing():
 def test_complete_rebuild_skips_when_archive_error():
     store = Mock()
     store.bump_version_for_rebuild = AsyncMock()
+    store.append_changelog_for_rebuild = AsyncMock()
     store.clear_evolutions = AsyncMock()
     rebuild_service = ExperienceRebuildService(store=store)
 
@@ -171,6 +179,7 @@ def test_complete_rebuild_skips_when_archive_error():
 
     assert cleared is False
     store.bump_version_for_rebuild.assert_not_called()
+    store.append_changelog_for_rebuild.assert_not_called()
     store.clear_evolutions.assert_not_called()
 
 
@@ -209,6 +218,10 @@ async def test_complete_rebuild_bumps_patch_from_all_entries(tmp_path: Path):
     assert evo_log.version == "1.0.1"
     skill_md = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
     assert "version: 1.0.1" in skill_md
+    changelog = (skill_dir / "changelog.md").read_text(encoding="utf-8")
+    assert "## [1.0.1]" in changelog
+    assert "Unreleased" not in changelog
+    assert "关联经验" in changelog
 
 
 @pytest.mark.asyncio
@@ -280,6 +293,100 @@ async def test_complete_rebuild_no_bump_when_no_entries(tmp_path: Path):
     assert evo_log.entries == []
     assert evo_log.version == "2.0.0"
     assert "version: 2.0.0" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert not (skill_dir / "changelog.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_complete_rebuild_uses_llm_classification(tmp_path: Path):
+    root = tmp_path / "skills"
+    skill_dir = root / "skill-a"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: skill-a\ndescription: d\nversion: 1.0.0\n---\n\n# Skill\n",
+        encoding="utf-8",
+    )
+    store = EvolutionStore(str(root))
+    record = EvolutionRecord.make(
+        source="execution_failure",
+        context="ctx",
+        change=EvolutionPatch(
+            section="Troubleshooting",
+            action="append",
+            content="timeout fallback broken",
+            target=EvolutionTarget.BODY,
+        ),
+    )
+    await store.append_record("skill-a", record)
+
+    llm = AsyncMock()
+    llm.invoke = AsyncMock(
+        return_value=SimpleNamespace(
+            content=json.dumps(
+                [
+                    {
+                        "id": record.id,
+                        "category": "Fixed",
+                        "summary": "修复工具调用超时后回退逻辑失效问题",
+                    }
+                ],
+                ensure_ascii=False,
+            )
+        )
+    )
+    rebuild_service = ExperienceRebuildService(store=store, llm=llm, model="test-model")
+
+    cleared = await rebuild_service.complete_rebuild(
+        {"skill_name": "skill-a", "archive_path": "evolutions.1.0.0.json"},
+    )
+
+    assert cleared is True
+    llm.invoke.assert_awaited()
+    changelog = (skill_dir / "changelog.md").read_text(encoding="utf-8")
+    assert "### Fixed" in changelog
+    assert "修复工具调用超时后回退逻辑失效问题" in changelog
+    assert f"(关联经验 {record.id})" in changelog
+    assert "Unreleased" not in changelog
+
+
+@pytest.mark.asyncio
+async def test_complete_rebuild_changelog_idempotent_same_version(tmp_path: Path):
+    root = tmp_path / "skills"
+    skill_dir = root / "skill-a"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nversion: 1.0.0\n---\n\n# Skill\n",
+        encoding="utf-8",
+    )
+    store = EvolutionStore(str(root))
+    await store.append_record(
+        "skill-a",
+        EvolutionRecord.make(
+            source="execution_failure",
+            context="ctx",
+            change=EvolutionPatch(
+                section="Troubleshooting",
+                action="append",
+                content="fix once",
+                target=EvolutionTarget.BODY,
+            ),
+        ),
+    )
+    rebuild_service = ExperienceRebuildService(store=store)
+    await rebuild_service.complete_rebuild(
+        {"skill_name": "skill-a", "archive_path": "evolutions.1.0.0.json"},
+    )
+    first = (skill_dir / "changelog.md").read_text(encoding="utf-8")
+    assert first.count("## [1.0.1]") == 1
+
+    # Force rewrite attempt for same version with empty entries (no bump path).
+    wrote = await store.append_changelog_for_rebuild(
+        "skill-a",
+        "1.0.1",
+        [],
+    )
+    assert wrote is False
+    second = (skill_dir / "changelog.md").read_text(encoding="utf-8")
+    assert second == first
 
 
 def test_prepare_rebuild_context_injects_resolved_paths_for_external_skill(tmp_path: Path):

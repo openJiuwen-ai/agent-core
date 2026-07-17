@@ -253,6 +253,10 @@ class TestEvolutionStoreVersionBump:
         assert "version: 1.0.0" in skill_md
         evo_log = await store.load_full_evolution_log("new-skill")
         assert evo_log.version == "1.0.0"
+        changelog = (skill_dir / "changelog.md").read_text(encoding="utf-8")
+        assert changelog.startswith("# Changelog")
+        assert "Unreleased" not in changelog
+        assert "## [" not in changelog
 
 
 class TestEvolutionStoreArchive:

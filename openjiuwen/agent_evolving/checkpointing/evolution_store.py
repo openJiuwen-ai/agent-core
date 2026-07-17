@@ -10,6 +10,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from openjiuwen.agent_evolving.checkpointing.changelog import (
+    CHANGELOG_FILENAME,
+    ClassifiedChangelogEntry,
+    empty_changelog_template,
+    merge_changelog_for_release,
+    utc_today_iso,
+)
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionPatch,
     EvolutionRecord,
@@ -25,6 +32,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.sys_operation import SysOperation
 
 _EVOLUTION_FILENAME = "evolutions.json"
+_CHANGELOG_FILENAME = CHANGELOG_FILENAME
 _TOTAL_WARNING_THRESHOLD = 30
 _MAX_INJECT_DESC = 5
 _LANG_TO_EXT = {
@@ -893,12 +901,65 @@ version: 1.0.0
         evo_dir = skill_dir / "evolution"
         evo_dir.mkdir(parents=True, exist_ok=True)
 
+        # Initialize changelog.md (header only; versions appended on rebuild)
+        changelog_path = skill_dir / _CHANGELOG_FILENAME
+        await self._write_file_text(changelog_path, empty_changelog_template())
+
         logger.info(
             "[EvolutionStore] created new skill '%s' at %s",
             name,
             skill_dir,
         )
         return skill_dir
+
+    async def append_changelog_for_rebuild(
+        self,
+        name: str,
+        version: str,
+        classified_entries: List[ClassifiedChangelogEntry],
+        *,
+        release_date: Optional[str] = None,
+    ) -> bool:
+        """Insert a version section into changelog.md for a rebuild release.
+
+        Returns True when the file was updated, False when skipped (missing
+        skill dir, empty version, or version section already present).
+        """
+        skill_dir = self._resolve_skill_dir(name)
+        if skill_dir is None:
+            return False
+        version_text = (version or "").strip()
+        if not version_text:
+            return False
+
+        changelog_path = skill_dir / _CHANGELOG_FILENAME
+        existing = ""
+        if changelog_path.exists():
+            existing = await self._read_file_text(changelog_path)
+
+        day = release_date or utc_today_iso()
+        updated = merge_changelog_for_release(
+            existing,
+            version_text,
+            classified_entries,
+            release_date=day,
+        )
+        if updated is None:
+            logger.info(
+                "[EvolutionStore] changelog already has version %s for skill=%s; skip",
+                version_text,
+                name,
+            )
+            return False
+
+        await self._write_file_text(changelog_path, updated)
+        logger.info(
+            "[EvolutionStore] wrote changelog version %s for skill=%s (%d entries)",
+            version_text,
+            name,
+            len(classified_entries),
+        )
+        return True
 
     async def list_skill_names_with_descriptions(self) -> List[Tuple[str, str]]:
         """List all skills with their descriptions.

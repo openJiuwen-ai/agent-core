@@ -5,8 +5,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional, Sequence
 
+from openjiuwen.agent_evolving.checkpointing.changelog import (
+    classify_records_for_changelog,
+)
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
 from openjiuwen.agent_evolving.experience.draft_schema import normalize_subject
 from openjiuwen.core.common.logging import logger
@@ -15,8 +18,25 @@ from openjiuwen.core.common.logging import logger
 class ExperienceRebuildService:
     """Prepare deterministic rebuild context without generating the rebuilt skill body."""
 
-    def __init__(self, *, store: Any) -> None:
+    def __init__(
+        self,
+        *,
+        store: Any,
+        llm: Any = None,
+        model: Optional[str] = None,
+        language: str = "cn",
+        classify_fn: Optional[Callable[[Sequence[EvolutionRecord]], Any]] = None,
+    ) -> None:
         self._store = store
+        self._llm = llm
+        self._model = model
+        self._language = language
+        self._classify_fn = classify_fn
+
+    def update_llm(self, llm: Any, model: str) -> None:
+        """Refresh LLM client used for changelog classification."""
+        self._llm = llm
+        self._model = model
 
     async def prepare_rebuild_context(
         self,
@@ -67,7 +87,7 @@ class ExperienceRebuildService:
         return context
 
     async def complete_rebuild(self, rebuild_context: dict[str, Any]) -> bool:
-        """Bump SemVer from evolution entries, then clear live evolution log.
+        """Bump SemVer from evolution entries, write changelog, then clear live log.
 
         Archive during prepare is a safety step, not a gate for bump/clear.
         Skip only when archive explicitly failed (``archive_error``), so a
@@ -81,8 +101,34 @@ class ExperienceRebuildService:
         if not skill_name:
             return False
         new_version = await self._store.bump_version_for_rebuild(skill_name)
+        if new_version:
+            await self._write_changelog_for_rebuild(skill_name, new_version)
         await self._store.clear_evolutions(skill_name, retain_version=new_version)
         return True
+
+    async def _write_changelog_for_rebuild(self, skill_name: str, new_version: str) -> None:
+        """Classify live evolution entries and append a version section to changelog.md."""
+        append_changelog = getattr(self._store, "append_changelog_for_rebuild", None)
+        if not callable(append_changelog):
+            return
+        try:
+            evo_log = await self._store.load_evolution_log(skill_name)
+            entries = getattr(evo_log, "entries", None) or []
+            classified = await classify_records_for_changelog(
+                entries,
+                llm=self._llm,
+                model=self._model,
+                language=self._language,
+                classify_fn=self._classify_fn,
+            )
+            await append_changelog(skill_name, new_version, classified)
+        except Exception as exc:
+            logger.warning(
+                "[ExperienceRebuildService] changelog update failed for '%s' v%s: %s",
+                skill_name,
+                new_version,
+                exc,
+            )
 
 
 def _resolve_skill_paths_from_store(store: Any, skill_name: str) -> tuple[Optional[str], Optional[str]]:
