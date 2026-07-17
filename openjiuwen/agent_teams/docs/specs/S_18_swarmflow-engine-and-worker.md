@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/`（engine / backends / observer / schema / runner / tool_swarmflow）、`schema/team.py`、`schema/events.py`、`schema/blueprint.py`、`agent/team_agent.py`、`agent/coordination/handlers/workflow.py`、`rails/team_policy_rail.py`、`prompts/sections.py` |
-| 最近一次修订日期 | 2026-07-03 |
-| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md` |
+| 最近一次修订日期 | 2026-07-16 |
+| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md` |
 
 ## 范围 / 边界
 
@@ -40,6 +40,18 @@
 - **嵌套 workflow 的深度守卫是 per-task，不是全局**：`workflow()` 的递归封顶用 `primitives._wf_depth`（**contextvar**，`_MAX_WORKFLOW_DEPTH=1`），不是共享 `Runtime` 计数器。contextvar 随 asyncio Task 按值拷贝，故 `parallel`/`pipeline` 各分支继承父深度、推进自己的副本——**同层并发的多个 `workflow()` 全部放行**（并发子工作流），而真正的递归（子工作流 `run()` 内再调 `workflow()`，同一 Task）看到已自增的深度被拦（返回 `None` + 日志）。曾用共享 int 会把"嵌套深度"与"并发数"混为一谈，导致并发兄弟 `workflow()` 被静默跳过。详见 `F_39`。
 - **单次 fan-out 上限**：`parallel(thunks)` / `pipeline(items, ...)` 入口校验长度 ≤ `_MAX_FANOUT`（4096），超出抛 `WorkflowError`——显式报错而非静默截断（对齐参考工具的单次上限）。
 - **`agent()` 的 CC 对齐参数（接口就位、执行留空）**：`agent(..., isolation='worktree', agent_type=...)` 经 `_ENGINE_OPTIONS` 接受并透传至 backend，但参考引擎暂不据其改变执行（不起 worktree 隔离、不解析具名专家 agent），`call_signature` 暂不纳入二者。对齐 Claude Code Workflow 工具表面，便于脚本针对完整 API 编写。详见 `F_42`。
+
+## Token 预算（`BudgetLedger`，`F_66`）
+
+- **账本是共享对象，不是计数字段**：`Runtime.budget: BudgetLedger`（`total` / `spent` / `remaining()` / `exhausted`）取代了旧的 `budget_total: int | None` + `tokens_spent: int`。`int` 不可变、传不进 backend 装的 rail，天花板也就无从执行——形状换成可共享引用才有下文。`BudgetLedger` 住 `engine/budget.py`（纯计数器 + 天花板，零业务耦合，与 `admission.py` 同性质，不破铁律 1）。
+- **单写者：backend 记账，引擎只读**。`run_workflow` 在跑之前调 `AgentBackend.bind_budget(rt.budget)` 一次性注入；此后**只有 backend 写账本**。引擎**不再**累加 `AgentResult.tokens`（那行已删）——一次 `agent()` 是一整圈 agent 循环，引擎只看得见首尾，累加它等于把 backend 已记的账再记一遍。`AgentResult.tokens` 因此退化为**单次调用成本的如实上报**（无人累加）。
+- **数字必须来自模型返回值**：`SwarmflowBudgetRail`（`workflow/backends/budget_rail.py`，业务层）读 `AssistantMessage.usage_metadata`（`total_tokens`，缺失时回落 `input_tokens + output_tokens`）。provider 不报 usage 就记 **0，不猜**——按长度估算会让天花板的含义随 provider 而变。`MockBackend` 无模型可问，用自己的估算喂账本（离线确定性）。
+- **两级执法，缺一不可**：
+  - **rail（主力）**：backend 给每个 worker / avatar harness 挂一个 `SwarmflowBudgetRail`。`after_model_call` 记账、超了 `ctx.request_force_finish` **就地终止该 round**；`before_model_call` 挡下付不起的调用（专治并发——账本共享，兄弟 worker 烧干预算时本 worker 立刻被挡）。用 force-finish 而非抛异常：超预算是钱花完了，不是坏了，已做的工作照常返回。
+  - **引擎（兜底）**：`_check_budget(rt)` 紧挨 `_check_abort(rt)`，只在 `agent()` / `AgentSession.send()` **入口**，`raise BudgetExhausted`。**不做 pre-journal 检查**（与 `_check_abort` 不同）：钱已经花了的调用必须落 journal，否则 resume 会重跑并再付一次。
+- **`BudgetExhausted` 是 `BaseException`**（与 `WorkflowAborted` 同理由：能被 `except Exception` 吞掉的天花板不叫天花板，须穿透 `parallel` / `pipeline` 分支体）。但语义相反——abort 可恢复（resume 重跑），exhausted 是**终态**（重跑只会撞同一个 gate），故 `SwarmflowTool.run_background` 单独捕获它转成 `BackendError`，让 async-tool runtime 注入 leader 读得到的失败；直接放 `BaseException` 上去会静默杀掉 task。
+- **允许小幅越界**：一次调用的用量只有返回后才入账，最后那次可以把 `spent` 顶过 `total`；`remaining()` 因此 clamp 到 0，不返回负数。要不越界就得预知成本——不可能。
+- **作用域是 leader，不是 run**：账本由 `agent_configurator` 在 `role==LEADER and enable_swarmflow` 时建一个，经 `inject_team_handles(SWARMFLOW_BUDGET)` → `TeamToolRail` → `create_team_tools` → `SwarmflowTool` → `run_swarmflow(budget=)` 下发（与 `swarmflow_concurrency` 完全平行的链路）。并发 run 抽同一个池，对齐工具描述里 `spent()`「跨主循环 + 所有工作流共享」的语义。配置入口是 `TeamAgentSpec.swarmflow_budget: int | None`（build 期校验 `>= 1`，与 `validate_swarmflow_concurrency` 同层）；**不是 `swarmflow()` 工具入参**——花钱上限是部署方的决定，不该由 leader 每次现编。
 
 ## WORKER 不变量（`TeamRole.WORKER`）
 
