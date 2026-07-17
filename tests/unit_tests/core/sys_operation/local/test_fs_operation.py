@@ -5,6 +5,7 @@ import asyncio
 import os
 import random
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -14,11 +15,12 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from filelock import Timeout as FileLockTimeout
+from filelock import ReadWriteLock, Timeout as FileLockTimeout
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
+from openjiuwen.core.sys_operation.local._async_read_write_lock import _ManagedReadWriteLock
 from openjiuwen.core.sys_operation.local.fs_operation import FsOperation
 from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
 
@@ -861,25 +863,48 @@ async def test_same_path_reuses_process_shared_lock(work_dir):
     """Equivalent paths share one coordinator and one singleton lock object."""
     file_path = Path(work_dir) / "shared_lock_target.txt"
 
-    first = ReadWriteLockManager.get_lock(file_path)
-    second = ReadWriteLockManager.get_lock(file_path.parent / "." / file_path.name)
+    async with FsOperation._file_lock(file_path, "read", timeout=1.0):
+        first = ReadWriteLockManager.get_lock(file_path)
+        second = ReadWriteLockManager.get_lock(file_path.parent / "." / file_path.name)
 
-    assert first is second
-    assert first.file_lock is second.file_lock
+        assert first is second
+        assert first.file_lock is second.file_lock
+
+
+def test_read_lock_supports_sqlite_without_schema_alias(work_dir, monkeypatch):
+    """Read locking falls back to sqlite_master on SQLite versions before 3.33."""
+    lock_file = Path(work_dir) / "legacy_sqlite_lock.db"
+
+    def legacy_configure(lock, mode, _timeout, *, blocking, start_time):
+        del blocking, start_time
+        assert mode == "read"
+        lock._con.execute("BEGIN TRANSACTION;").close()
+        raise sqlite3.OperationalError("no such table: sqlite_schema")
+
+    monkeypatch.setattr(ReadWriteLock, "_configure_and_begin", legacy_configure)
+    lock = _ManagedReadWriteLock(lock_file, is_singleton=False)
+    try:
+        lock.acquire_read(timeout=0, blocking=False)
+        lock.release()
+    finally:
+        lock.close()
 
 
 @pytest.mark.asyncio
-async def test_lock_is_reused_after_last_local_lease(work_dir):
-    """An idle lock remains usable until the process-wide manager stops."""
+async def test_last_local_lease_closes_process_shared_lock(work_dir):
+    """The last local lease detaches and closes the process-shared lock."""
     file_path = Path(work_dir) / "recreated_lock_target.txt"
-    lock = ReadWriteLockManager.get_lock(file_path)
+    lock_file = ReadWriteLockManager.get_lock_file(file_path)
 
     async with FsOperation._file_lock(file_path, "write", timeout=1.0):
-        pass
-    async with FsOperation._file_lock(file_path, "write", timeout=1.0):
-        pass
+        lock = ReadWriteLockManager.get_lock(file_path)
 
-    assert ReadWriteLockManager.get_lock(file_path) is lock
+    assert lock._closed
+    assert lock_file not in ReadWriteLockManager._locks
+
+    async with FsOperation._file_lock(file_path, "write", timeout=1.0):
+        replacement = ReadWriteLockManager.get_lock(file_path)
+        assert replacement is not lock
 
 
 @pytest.mark.asyncio
@@ -991,16 +1016,17 @@ finally:
 
 @pytest.mark.asyncio
 async def test_idle_lock_cleanup_deletes_database(work_dir, monkeypatch):
-    """The last local lease schedules its database for deletion without closing the shared lock."""
+    """Idle cleanup deletes a closed database after acquiring it exclusively."""
     monkeypatch.setattr(ReadWriteLockManager, "_idle_ttl", 0.0)
     file_path = Path(work_dir) / "idle_lock_target.txt"
     lock_file = ReadWriteLockManager.get_lock_file(file_path)
 
     async with FsOperation._file_lock(file_path, "write", timeout=1.0):
-        pass
+        lock = ReadWriteLockManager.get_lock(file_path)
 
     assert lock_file.exists()
-    assert ReadWriteLockManager._locks[lock_file].lease_count == 0
+    assert lock_file not in ReadWriteLockManager._locks
+    assert lock._closed
 
     await ReadWriteLockManager.cleanup_expired_locks()
 
@@ -1008,8 +1034,156 @@ async def test_idle_lock_cleanup_deletes_database(work_dir, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stopping_cleanup_performs_final_expired_lock_scan(work_dir, monkeypatch):
-    """Stopping the cleanup task performs one final scan of expired databases."""
+async def test_due_lock_databases_are_processed_in_deadline_order(rw_lock_dir, monkeypatch):
+    """Due databases are considered from the oldest heap deadline to the newest."""
+    monkeypatch.setattr(ReadWriteLockManager, "_idle_ttl", 0.0)
+    newest = rw_lock_dir / "newest.db"
+    oldest = rw_lock_dir / "oldest.db"
+    middle = rw_lock_dir / "middle.db"
+    processed = []
+
+    for lock_file in (newest, oldest, middle):
+        lock_file.touch()
+
+    async def record_delete(_cls, lock_file):
+        processed.append(lock_file)
+        lock_file.unlink()
+        return True
+
+    monkeypatch.setattr(ReadWriteLockManager, "_try_delete_database", classmethod(record_delete))
+    now = asyncio.get_running_loop().time()
+    ReadWriteLockManager._schedule_idle_lock(newest, now - 1.0)
+    ReadWriteLockManager._schedule_idle_lock(oldest, now - 3.0)
+    ReadWriteLockManager._schedule_idle_lock(middle, now - 2.0)
+
+    await ReadWriteLockManager.cleanup_expired_locks()
+
+    assert processed == [oldest, middle, newest]
+
+
+@pytest.mark.asyncio
+async def test_repeated_lock_use_keeps_one_cleanup_entry_per_database(work_dir, monkeypatch):
+    """Repeated leases do not grow the cleanup heap for the same database."""
+    monkeypatch.setattr(ReadWriteLockManager, "_idle_ttl", 60.0)
+    file_path = Path(work_dir) / "repeated_cleanup_target.txt"
+    lock_file = ReadWriteLockManager.get_lock_file(file_path)
+
+    for _ in range(32):
+        async with FsOperation._file_lock(file_path, "write", timeout=1.0):
+            pass
+
+    assert ReadWriteLockManager._idle_deadlines.keys() == {lock_file}
+    assert len(ReadWriteLockManager._idle_heap) == 1
+
+
+@pytest.mark.asyncio
+async def test_due_cleanup_rechecks_latest_database_mtime(work_dir, monkeypatch):
+    """A due heap entry is postponed when another process refreshed its mtime."""
+    monkeypatch.setattr(ReadWriteLockManager, "_idle_ttl", 60.0)
+    file_path = Path(work_dir) / "refreshed_cleanup_target.txt"
+    lock_file = ReadWriteLockManager.get_lock_file(file_path)
+
+    async with FsOperation._file_lock(file_path, "write", timeout=1.0):
+        pass
+
+    ReadWriteLockManager._idle_heap[0] = (asyncio.get_running_loop().time() - 1.0, lock_file)
+    ReadWriteLockManager._idle_deadlines[lock_file] = ReadWriteLockManager._idle_heap[0][0]
+    await ReadWriteLockManager.cleanup_expired_locks()
+
+    assert lock_file.exists()
+    assert ReadWriteLockManager._idle_deadlines[lock_file] > asyncio.get_running_loop().time()
+
+
+@pytest.mark.asyncio
+async def test_idle_lock_cleanup_evicts_multiple_cached_locks(work_dir, monkeypatch):
+    """Last leases close all resources before cleanup removes their databases."""
+    monkeypatch.setattr(ReadWriteLockManager, "_idle_ttl", 0.0)
+    locks = []
+    lock_files = []
+
+    for index in range(32):
+        file_path = Path(work_dir) / f"idle_lock_target_{index}.txt"
+        lock_files.append(ReadWriteLockManager.get_lock_file(file_path))
+        async with FsOperation._file_lock(file_path, "write", timeout=1.0):
+            locks.append(ReadWriteLockManager.get_lock(file_path))
+
+    assert not ReadWriteLockManager._locks
+    assert all(lock._closed for lock in locks)
+
+    await ReadWriteLockManager.cleanup_expired_locks()
+
+    assert all(not lock_file.exists() for lock_file in lock_files)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_skips_active_local_lock(work_dir, monkeypatch):
+    """Cleanup leaves a database in place while a local business lease is active."""
+    monkeypatch.setattr(ReadWriteLockManager, "_idle_ttl", 0.0)
+    file_path = Path(work_dir) / "active_cleanup_target.txt"
+    lock_file = ReadWriteLockManager.get_lock_file(file_path)
+
+    async with FsOperation._file_lock(file_path, "read", timeout=1.0):
+        await ReadWriteLockManager.cleanup_expired_locks()
+        assert lock_file.exists()
+
+    await ReadWriteLockManager.cleanup_expired_locks()
+    assert not lock_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_skips_other_process_reader(work_dir, monkeypatch):
+    """Cleanup cannot delete a database while another process holds its read lock."""
+    monkeypatch.setattr(ReadWriteLockManager, "_idle_ttl", 0.0)
+    file_path = Path(work_dir) / "cross_process_cleanup_target.txt"
+    lock_file = ReadWriteLockManager.get_lock_file(file_path)
+    child_code = """
+import sys
+from openjiuwen.core.sys_operation.local._async_read_write_lock import _ManagedReadWriteLock
+
+lock = _ManagedReadWriteLock(sys.argv[1], is_singleton=False)
+lock.acquire_read()
+print("acquired", flush=True)
+sys.stdin.readline()
+lock.release()
+lock.close()
+"""
+
+    async with FsOperation._file_lock(file_path, "write", timeout=1.0):
+        pass
+
+    process = await asyncio.to_thread(
+        subprocess.Popen,
+        [sys.executable, "-c", child_code, str(lock_file)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout is not None
+        while (line := await asyncio.to_thread(process.stdout.readline)) != "acquired\n":
+            if not line:
+                pytest.fail(f"Reader subprocess exited before acquiring the lock, returncode={process.poll()}")
+        await ReadWriteLockManager.cleanup_expired_locks()
+        assert lock_file.exists()
+
+        assert process.stdin is not None
+        process.stdin.write("release\n")
+        process.stdin.flush()
+        assert await asyncio.to_thread(process.wait, 1.0) == 0
+
+        await ReadWriteLockManager.cleanup_expired_locks()
+        assert not lock_file.exists()
+    finally:
+        if process.stdin is not None:
+            process.stdin.close()
+        if process.poll() is None:
+            process.kill()
+            await asyncio.to_thread(process.wait, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_stopping_cleanup_processes_final_due_locks(work_dir, monkeypatch):
+    """Stopping the cleanup task processes final due heap entries."""
     monkeypatch.setattr(ReadWriteLockManager, "_idle_ttl", 0.0)
     file_path = Path(work_dir) / "final_cleanup_lock_target.txt"
     lock_file = ReadWriteLockManager.get_lock_file(file_path)
