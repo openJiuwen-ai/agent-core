@@ -255,3 +255,26 @@ images/
 *.bin
 *.sqlite3
 tests/system_tests/config_llm_local.yaml
+
+# Harness workspace scaffolding that unit tests write to the repo root when they
+# run from it instead of a scratch dir (copies of the templates under
+# openjiuwen/harness/prompts/workspace_content/).
+# Root-anchored with a leading "/" on purpose: every one of these names is also a
+# real tracked path (memory/, skills/, context/, agents/, and the AGENT.md /
+# SOUL.md templates themselves), and an unanchored rule matches at any depth --
+# it would silently ignore new files added under those source directories.
+/AGENT.md
+/HEARTBEAT.md
+/IDENTITY.md
+/SOUL.md
+/USER.md
+/agents/
+/coding_memory/
+/context/
+/memory/
+/messages/
+/skills/
+/todo/
+
+# context_evolver unit test store, written next to the test
+tests/unit_tests/extensions/context_evolver/memory_file/
