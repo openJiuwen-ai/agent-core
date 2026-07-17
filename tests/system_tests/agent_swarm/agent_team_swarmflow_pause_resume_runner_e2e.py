@@ -39,10 +39,10 @@ import time
 import uuid
 from pathlib import Path
 
-import yaml
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_HERE.parent))
 
 from openjiuwen.agent_teams import paths
 from openjiuwen.agent_teams.interaction.payload import HumanAgentMessage
@@ -54,15 +54,14 @@ from openjiuwen.core.common.logging.loguru.constant import DEFAULT_INNER_LOG_CON
 from openjiuwen.core.runner.runner import Runner
 
 from _e2e_utils import load_team_config
+from llm_config import load_llm_config
 from tests.test_logger import logger as test_logger
 
 _LOG_CONFIG_PATH = _HERE / "logging.yaml"
 _TEAM_CONFIG_PATH = _HERE / "config_swarmflow.yaml"
-_LLM_CONFIG_PATH = _HERE.parent / "config_llm_local.yaml"
 _SCRIPT_PATH = _HERE / "resources" / "party_planner.py"
 _WORKDIR = _HERE / ".e2e_workdir_pause"
 _SCRIPT_REL = "../resources/party_planner.py"
-_MODEL_NAME = "qwen3.6-flash"
 
 # The six phases party_planner runs, each with a distinct primitive type. The run
 # pauses/resumes exactly once per phase, so by completion every feature point has
@@ -89,13 +88,19 @@ configure_openjiuwen_home(str(_HERE / "openjiuwen_home"))
 
 
 def _wire_model_env() -> None:
-    """Populate API_BASE / *_API_KEY / MODEL_NAME from the local LLM config."""
-    with open(_LLM_CONFIG_PATH, "r", encoding="utf-8") as f:
-        llm_cfg = yaml.safe_load(f)
-    os.environ.setdefault("API_BASE", llm_cfg["api_base"])
-    os.environ.setdefault("LEADER_API_KEY", llm_cfg["api_key"])
-    os.environ.setdefault("TEAMMATE_API_KEY", llm_cfg["api_key"])
-    os.environ.setdefault("MODEL_NAME", _MODEL_NAME)
+    """Populate API_BASE / *_API_KEY / MODEL_NAME from the local LLM config.
+
+    Endpoint and model are resolved together from one ref, so they cannot
+    disagree — this used to pin a model name of its own while taking the
+    endpoint from the config, which fails outright once the two point at
+    different vendors. Override with ``OPENJIUWEN_E2E_MODEL=<endpoint>/<model>``.
+    """
+    model = load_llm_config().resolve()
+    test_logger.info("[swarmflow] model: %s (%s)", model.ref, model.api_base)
+    os.environ.setdefault("API_BASE", model.api_base)
+    os.environ.setdefault("LEADER_API_KEY", model.api_key)
+    os.environ.setdefault("TEAMMATE_API_KEY", model.api_key)
+    os.environ.setdefault("MODEL_NAME", model.model)
 
 
 def _human_answer(prompt: str) -> str:

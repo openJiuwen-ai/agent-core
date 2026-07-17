@@ -20,7 +20,24 @@
 
 ## 怎么跑
 
-需要**真实模型端点**（默认从 `tests/system_tests/config_llm_local.yaml` 读 qwen flash）。
+需要**真实模型端点**：从 `tests/system_tests/config_llm_local.yaml` 读。该文件被
+gitignore（含真实密钥），首次使用从模板复制：
+
+```bash
+cd tests/system_tests && cp config_llm_local.example.yaml config_llm_local.yaml
+# 然后填真实 host / key
+```
+
+默认取**首个 endpoint 的首个模型**。想临时换模型**不用改配置**——用
+`<endpoint>/<model>` 定位（也是区分"同一模型挂在多个 endpoint"的唯一写法）：
+
+```bash
+OPENJIUWEN_E2E_MODEL=gateway/GLM-5.1 python tests/system_tests/agent_swarm/agent_team_swarmflow_e2e.py
+OPENJIUWEN_E2E_MODEL=gateway python ...    # 该 endpoint 的首个模型
+```
+
+整份配置换位置用 `OPENJIUWEN_E2E_LLM_CONFIG`。格式与 API 见
+`tests/system_tests/llm_config.py`。
 
 ```bash
 source .venv/bin/activate
@@ -106,7 +123,8 @@ Runner.interact_agent_team(
 
 ## 预期 PASS 基线
 
-模型取 `config_llm_local.yaml` 的 `models:` 首项（不要在测试里写死模型名——该文件换端点时会漂）。
+模型取 `config_llm_local.yaml` 首个 endpoint 的首个模型（不要在测试里写死模型名——
+该文件换端点时会漂：`pause_resume` 用例就曾写死 `qwen3.6-flash` 而端点指向 deepseek）。
 
 - 主用例：`verified: phases=6 human_prompts=7 human_replies=7` → `E2E PASSED`；
   `structured_output` 调用 ≈ 17 次（每轮 ~1 次）；`supervisor crashed` / `InvalidStateError` = 0。

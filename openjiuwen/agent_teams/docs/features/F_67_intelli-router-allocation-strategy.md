@@ -196,14 +196,36 @@ TeamSpec.model_pool: list[ModelPoolEntry]  +  model_pool_strategy="intelli_route
   `intelli_router` 可选依赖 + 真实端点。实跑结果：
 
   ```
-  pool entries: 4 (每条都带全部 5 个 deployment)
+  endpoints: ['deepseek', 'deepseek-backup', 'gateway']  (from config_llm_local.yaml)
+  deployments: 4  (由端点配置生成，非 yaml 硬编码)
+  pool entries: 4 (每条都带全部 4 个 deployment)
   leader team_leader -> *                  (unified routing across all deployments)
-  member alice       -> deepseek-v4-flash  (routes within 2 deployments)
+  member alice       -> deepseek-v4-flash  (routes within 2 deployments ← 双 key failover)
   member bob         -> Qwen3.7-Plus       (routes within 1 deployment)
   member carol       -> GLM-5.2            (routes within 1 deployment)
   unknown model_name -> None
   → 三名成员各自的模型均成功应答，leader 汇总完成，0 次 execution failure
   ```
+
+  端点来自 `tests/system_tests/config_llm_local.yaml`（loader 见
+  `tests/system_tests/llm_config.py`）：团队 yaml 只声明 roster 与
+  `model_names`，deployments 由 e2e 从"配置中服务这些模型的每个 endpoint"生成，
+  故凭证不落在团队 yaml，且往端点配置里加一个 key / host 就能自动扩大本用例的
+  部署面。`llm_config.ModelEndpoint.router_api_base` 负责剥 `/v1`（见决策 6）。
+
+  该端点配置本次一并重构（原先是 `config_llm_local{,_2,_3}.yaml` 三份平铺的
+  `{api_base, api_key, models}`，无 provider 字段、无法表达多 provider）：合并为
+  单文件的 `endpoints:` 列表，每项含 `name / provider / api_base / api_key /
+  models`，同时表达"一 key 多模型"（gateway）与"多 endpoint 同模型"（failover
+  peers）。`ModelRef` + `LlmConfig.resolve()` 提供 `<endpoint>/<model>` 坐标
+  （`OPENJIUWEN_E2E_MODEL` 可覆盖），因为 endpoint 名不足以定位模型、模型名也不足以
+  区分挂在多个 endpoint 上的同名模型。解析顺序为"整体当 endpoint → 整体当 model →
+  按首个 `/` 切分"，因为 OpenRouter 风格模型名本身含 `/`（`z-ai/glm-5.1`），先切分
+  会把它读成 endpoint `z-ai`。五个 swarmflow / intelli_router e2e 全部迁移到该
+  loader，顺带修掉 `pause_resume` 写死 `qwen3.6-flash` 却从配置取 deepseek 端点的
+  既有漂移。真实文件被 gitignore（含密钥），故新增入库模板
+  `config_llm_local.example.yaml`，并让 loader 对旧格式给出迁移提示——本地文件不会
+  随提交更新。
 
   E2E 用 `lifecycle: temporary` 而非 `persistent`：leader 完成即拆队，脚本
   自行退出（persistent 会 pause 等待下一轮输入而挂住），且每次运行从干净

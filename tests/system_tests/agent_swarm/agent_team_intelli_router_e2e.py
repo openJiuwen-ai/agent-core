@@ -35,15 +35,12 @@ Requires the optional IntelliRouter dependency:
     uv pip install "intelli-router @ git+https://gitcode.com/openJiuwen/agent-protocol.git\
 @feature/intelliRouter#subdirectory=intelli_router"
 
-Endpoint configuration is read from the sibling model configs — no
-credentials live in this file:
-    ../config_llm_local.yaml    — DeepSeek endpoint, key #1
-    ../config_llm_local_2.yaml  — DeepSeek endpoint, key #2 (failover peer)
-    ../config_llm_local_3.yaml  — OpenAI-compatible multi-model gateway
-
-Override any of them by exporting the variables the YAML interpolates:
-    IR_DEEPSEEK_BASE / IR_DEEPSEEK_KEY_1 / IR_DEEPSEEK_KEY_2
-    IR_GATEWAY_BASE  / IR_GATEWAY_KEY
+Endpoints come from ``../config_llm_local.yaml`` (see ``llm_config.py``); no
+credentials live in this file or in ``config_intelli_router.yaml``. The team
+YAML declares only the roster and which model names to offer — the deployments
+behind those names are generated from every endpoint in the config that serves
+them, so adding a key or a host there widens this test's fleet for free.
+Point OPENJIUWEN_E2E_LLM_CONFIG at another file to run elsewhere.
 """
 
 from __future__ import annotations
@@ -54,11 +51,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-# Ensure _e2e_utils is importable regardless of working directory
+# Ensure _e2e_utils / llm_config are importable regardless of working directory
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_HERE.parent))
 
 from openjiuwen.agent_teams.models import INTELLI_ROUTER_UNIFIED_MODEL
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
@@ -70,14 +66,10 @@ from openjiuwen.core.common.logging.loguru.constant import DEFAULT_INNER_LOG_CON
 from openjiuwen.core.runner.runner import Runner
 
 from _e2e_utils import consume_stream, load_team_config
+from llm_config import DEFAULT_CONFIG_PATH, LlmConfig, load_llm_config
 
 _LOG_CONFIG_PATH = _HERE / "logging.yaml"
 _TEAM_CONFIG_PATH = _HERE / "config_intelli_router.yaml"
-
-# Sibling model configs supplying real endpoints (see module docstring).
-_DEEPSEEK_CONFIG_1 = _HERE.parent / "config_llm_local.yaml"
-_DEEPSEEK_CONFIG_2 = _HERE.parent / "config_llm_local_2.yaml"
-_GATEWAY_CONFIG = _HERE.parent / "config_llm_local_3.yaml"
 
 if _LOG_CONFIG_PATH.is_file():
     configure_log(str(_LOG_CONFIG_PATH))
@@ -88,63 +80,33 @@ os.environ.setdefault("LLM_SSL_VERIFY", "false")
 os.environ.setdefault("IS_SENSITIVE", "false")
 
 _EXPECTED_LEADER_MODEL = INTELLI_ROUTER_UNIFIED_MODEL
-_EXPECTED_TEAMMATE_MODELS = {
-    "alice": "deepseek-v4-flash",
-    "bob": "Qwen3.7-Plus",
-    "carol": "GLM-5.2",
-}
 
 
 # ---------------------------------------------------------------------------
-# Endpoint wiring
+# Endpoint wiring — deployments are generated from config_llm_local.yaml
 # ---------------------------------------------------------------------------
-def _read_llm_config(path: Path) -> dict[str, Any]:
-    """Load one ``config_llm_local*.yaml``, or return {} when absent."""
-    if not path.is_file():
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+def _build_deployments(cfg: LlmConfig, model_names: list[str]) -> list[dict]:
+    """Render one deployment per (endpoint, model) pair the config offers.
 
+    Every endpoint declaring one of ``model_names`` contributes a deployment,
+    so a model backed by two keys yields two deployments and the router can
+    fail over between them. Widening the fleet is then a config edit, not a
+    code change.
 
-def _to_router_base(api_base: str) -> str:
-    """Drop the ``/v1`` suffix an openjiuwen ``api_base`` carries.
+    ``"*"`` is skipped: it is a routing directive (use every deployment), not
+    a model any endpoint serves.
 
-    The sibling configs are written for openjiuwen's own clients, whose
-    ``api_base`` points at the OpenAI-compatible API root and so ends in
-    ``/v1``. IntelliRouter's adapters append that path themselves, so the
-    same value would produce ``/v1/v1/chat/completions``. See
-    ``IntelliRouterDeployment.api_base``.
+    Raises:
+        ValueError: when the config serves none of the requested models —
+            better here than as a 404 from an endpoint that never heard of it.
     """
-    return api_base.rstrip("/").removesuffix("/v1")
-
-
-def _export_endpoints() -> None:
-    """Seed the ``IR_*`` variables the team YAML interpolates.
-
-    Values already present in the environment win, so a caller can point
-    the run at different endpoints without editing any YAML.
-    """
-    deepseek_1 = _read_llm_config(_DEEPSEEK_CONFIG_1)
-    deepseek_2 = _read_llm_config(_DEEPSEEK_CONFIG_2)
-    gateway = _read_llm_config(_GATEWAY_CONFIG)
-
-    defaults = {
-        "IR_DEEPSEEK_BASE": _to_router_base(deepseek_1.get("api_base", "")),
-        "IR_DEEPSEEK_KEY_1": deepseek_1.get("api_key", ""),
-        # Falls back to key #1 when the second config is missing; the router
-        # then has one deployment for that model instead of two.
-        "IR_DEEPSEEK_KEY_2": deepseek_2.get("api_key") or deepseek_1.get("api_key", ""),
-        "IR_GATEWAY_BASE": _to_router_base(gateway.get("api_base", "")),
-        "IR_GATEWAY_KEY": gateway.get("api_key", ""),
-    }
-    missing = [name for name, value in defaults.items() if not value and not os.environ.get(name)]
-    if missing:
-        print(f"[!] No endpoint value for: {', '.join(missing)}")
-        print(f"    Populate {_DEEPSEEK_CONFIG_1.name} / {_GATEWAY_CONFIG.name} or export the variables.")
-        sys.exit(1)
-    for name, value in defaults.items():
-        if value:
-            os.environ.setdefault(name, value)
+    wanted = [m for m in model_names if m != INTELLI_ROUTER_UNIFIED_MODEL]
+    cfg.require(*wanted)
+    deployments: list[dict] = []
+    for model in wanted:
+        for endpoint in cfg.endpoints_for(model):
+            deployments.append(endpoint.router_deployment(model, rpm=60, timeout=60.0, tags=[endpoint.name]))
+    return deployments
 
 
 def _require_intelli_router() -> None:
@@ -214,13 +176,16 @@ def _verify_allocation(spec: TeamAgentSpec) -> None:
     assert leader_model == _EXPECTED_LEADER_MODEL, f"leader got {leader_model!r}"
     print(f"  leader  {'team_leader':<8} -> {leader_model:<20} (unified routing across all deployments)")
 
+    pinned = {m.model_name for m in spec.predefined_members}
+    assert len(pinned) == len(spec.predefined_members), f"teammates must pin distinct models, got {pinned}"
+
     for member in spec.predefined_members:
         alloc = allocator.allocate(model_name=member.model_name)
         assert alloc is not None, f"{member.member_name} allocated nothing"
-        expected = _EXPECTED_TEAMMATE_MODELS[member.member_name]
-        assert alloc.entry.model_name == expected, f"{member.member_name} got {alloc.entry.model_name!r}"
+        assert alloc.entry.model_name == member.model_name, f"{member.member_name} got {alloc.entry.model_name!r}"
         deployments = alloc.entry.metadata["client"]["intelli_router_deployments"]
-        peers = [d["id"] for d in deployments if d["model_name"] == expected]
+        peers = [d["id"] for d in deployments if d["model_name"] == member.model_name]
+        assert peers, f"{member.member_name} pinned {member.model_name!r} with no deployment behind it"
         print(
             f"  member  {member.member_name:<8} -> {alloc.entry.model_name:<20} "
             f"(routes within {len(peers)} deployment(s): {', '.join(peers)})"
@@ -243,10 +208,16 @@ def _verify_allocation(spec: TeamAgentSpec) -> None:
 # ---------------------------------------------------------------------------
 async def main() -> None:
     _require_intelli_router()
-    _export_endpoints()
 
     cfg = load_team_config(_TEAM_CONFIG_PATH)
     runtime_cfg: dict[str, Any] = cfg.pop("runtime", {})
+
+    # The team YAML declares which model names to offer; the deployments behind
+    # them come from the endpoint config, so credentials never live in the team
+    # file and a new key there widens this run's fleet on its own.
+    llm_cfg = load_llm_config()
+    router_cfg = cfg["model_intelli_router"]
+    router_cfg["deployments"] = _build_deployments(llm_cfg, router_cfg["model_names"])
     spec = TeamAgentSpec.model_validate(cfg)
 
     print("=" * 74)
@@ -255,6 +226,7 @@ async def main() -> None:
     print()
     print(f"  team_name : {spec.team_name}")
     print(f"  roster    : team_leader + {[m.member_name for m in spec.predefined_members]}")
+    print(f"  endpoints : {[e.name for e in llm_cfg.endpoints]}  (from {DEFAULT_CONFIG_PATH.name})")
     print()
     print("IntelliRouter:")
     _print_pool_summary(spec)

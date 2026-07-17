@@ -31,11 +31,11 @@ import time
 import uuid
 from pathlib import Path
 
-import yaml
 
-# Ensure _e2e_utils is importable regardless of working directory.
+# Ensure _e2e_utils / llm_config are importable regardless of working directory.
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_HERE.parent))
 
 from openjiuwen.agent_teams import paths
 from openjiuwen.agent_teams.interaction.payload import HumanAgentMessage
@@ -49,6 +49,7 @@ from openjiuwen.core.common.logging.loguru.constant import DEFAULT_INNER_LOG_CON
 from openjiuwen.core.runner.runner import Runner
 
 from _e2e_utils import load_team_config
+from llm_config import load_llm_config
 from tests.test_logger import logger as test_logger
 
 # ---------------------------------------------------------------------------
@@ -56,7 +57,6 @@ from tests.test_logger import logger as test_logger
 # ---------------------------------------------------------------------------
 _LOG_CONFIG_PATH = _HERE / "logging.yaml"
 _TEAM_CONFIG_PATH = _HERE / "config_swarmflow.yaml"
-_LLM_CONFIG_PATH = _HERE.parent / "config_llm_local.yaml"
 _SCRIPT_PATH = _HERE / "resources" / "party_planner.py"
 # We run from a dedicated scratch dir (gitignored) so the team's runtime
 # scaffolding (identity / memory / skills / logs written to cwd) never pollutes
@@ -65,11 +65,6 @@ _SCRIPT_PATH = _HERE / "resources" / "party_planner.py"
 # nested workflow resolves its sibling via __file__, so it is cwd-independent.
 _WORKDIR = _HERE / ".e2e_workdir"
 _SCRIPT_REL = "../resources/party_planner.py"
-
-# The model comes from config_llm_local.yaml's first `models:` entry — hard-coding
-# a name here drifts the moment that file points at a different endpoint (and the
-# request then fails with a model the endpoint has never heard of).
-_MODEL_NAME_FALLBACK = "deepseek-v4-flash"
 
 # Fail fast if the leader never launches the workflow within this window after
 # the runtime is ready (instead of waiting out the whole-run ceiling).
@@ -108,17 +103,21 @@ def _wire_model_env() -> None:
 
     ``config_swarmflow.yaml`` references these via ``${VAR}`` placeholders, so
     they must exist before the spec is validated.
+
+    Endpoint and model are resolved together from one ref, so they cannot
+    disagree — hard-coding a model name here drifts the moment the config
+    points somewhere else, and the request then fails with a model the
+    endpoint has never heard of. Defaults to the config's first model;
+    override without editing YAML::
+
+        OPENJIUWEN_E2E_MODEL=gateway/GLM-5.1 python ..._e2e.py
     """
-    with open(_LLM_CONFIG_PATH, "r", encoding="utf-8") as f:
-        llm_cfg = yaml.safe_load(f)
-    api_base = llm_cfg["api_base"]
-    api_key = llm_cfg["api_key"]
-    models = llm_cfg.get("models") or []
-    model_name = models[0] if models else _MODEL_NAME_FALLBACK
-    os.environ.setdefault("API_BASE", api_base)
-    os.environ.setdefault("LEADER_API_KEY", api_key)
-    os.environ.setdefault("TEAMMATE_API_KEY", api_key)
-    os.environ.setdefault("MODEL_NAME", model_name)
+    model = load_llm_config().resolve()
+    test_logger.info("[swarmflow] model: %s (%s)", model.ref, model.api_base)
+    os.environ.setdefault("API_BASE", model.api_base)
+    os.environ.setdefault("LEADER_API_KEY", model.api_key)
+    os.environ.setdefault("TEAMMATE_API_KEY", model.api_key)
+    os.environ.setdefault("MODEL_NAME", model.model)
 
 
 # ---------------------------------------------------------------------------
