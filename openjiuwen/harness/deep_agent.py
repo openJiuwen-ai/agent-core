@@ -8,6 +8,8 @@ import importlib
 import os
 import sys
 import uuid
+import warnings
+from dataclasses import replace
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -37,7 +39,7 @@ from openjiuwen.core.controller.schema.event import (
 )
 from openjiuwen.core.controller.schema.task import TaskStatus
 from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
-from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -53,9 +55,6 @@ from openjiuwen.core.single_agent.rail.base import (
     RunKind,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.harness.harness_config.loader import (
-    HarnessConfigLoader,
-)
 from openjiuwen.harness.image_modality_probe import probe_image_support
 from openjiuwen.harness.rails import DeepAgentRail
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
@@ -104,6 +103,14 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 )
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.identity import build_identity_section
+from openjiuwen.harness.resources import (
+    LoadRecord,
+    find_expert_harness_manifest,
+    load_expert_harness_spec,
+)
+from openjiuwen.harness.resources.expert_harness_parts import ExpertHarnessParts, ResolvedSkill
+from openjiuwen.harness.schema.build_context import BuildContext
+from openjiuwen.harness.schema.expert_harness_spec import ExpertHarnessSpec
 from openjiuwen.harness.workspace.workspace import Workspace
 
 # Events bridged to the inner ReActAgent.
@@ -160,6 +167,7 @@ class DeepAgent(BaseAgent):
         self._stream_process_task: Optional[asyncio.Task] = None
         self._auto_invoke_scheduled: bool = False
         self._bound_session_id: Optional[str] = None
+        self._load_records: dict[str, LoadRecord] = {}
         self._session_toolkit: SessionToolkit | None = None
         self._pending_harness_configs: List[str] = []
         self.prompt_attachment_manager: PromptAttachmentManager = PromptAttachmentManager()
@@ -421,6 +429,24 @@ class DeepAgent(BaseAgent):
                 rail.system_prompt_builder = builder
             if hasattr(rail, "_system_prompt_builder"):
                 setattr(rail, "_system_prompt_builder", builder)
+
+    def apply_prompt_builder_to_react_agent(self) -> None:
+        """Re-render the current system_prompt_builder into the inner ReActAgent.
+
+        Public entry point for resource binding targets after a prompt section
+        mutation: rebuilds ``react_agent.config.prompt_template`` from the
+        builder's current output and reconfigures the ReActAgent, then syncs
+        every prompt participant to the same builder reference via
+        :meth:`_sync_prompt_builder_references`. Keeps the binding target from
+        touching ``react_agent.config`` / ``react_agent.configure`` directly.
+        """
+        builder = self.system_prompt_builder
+        if builder is None or self._react_agent is None:
+            return
+        new_react_config = self._react_agent.config.model_copy()
+        new_react_config.prompt_template = [{"role": "system", "content": builder.build()}]
+        self._react_agent.configure(new_react_config)
+        self._sync_prompt_builder_references()
 
     def _queue_pending_rails(self, config: DeepAgentConfig) -> None:
         """Append config-driven rails to _pending_rails for lazy registration."""
@@ -1271,6 +1297,34 @@ class DeepAgent(BaseAgent):
             return []
         return [rail for rail in (*self._pending_rails, *self._registered_rails) if isinstance(rail, rail_types)]
 
+    def find_rail_by_name(self, name: str) -> Optional[AgentRail]:
+        """Return a pending or registered rail by its materialized class name."""
+        return next(
+            (
+                rail
+                for rail in (*self._pending_rails, *self._registered_rails)
+                if type(rail).__name__ == name
+            ),
+            None,
+        )
+
+    def find_pending_rails_by_type(self, rail_type: type) -> List[AgentRail]:
+        """Return pending rails matching the given type."""
+        return [rail for rail in self._pending_rails if isinstance(rail, rail_type)]
+
+    def is_pending_rail(self, rail: AgentRail) -> bool:
+        """Return True when rail is queued for lazy registration."""
+        return rail in self._pending_rails
+
+    def is_registered_rail(self, rail: AgentRail) -> bool:
+        """Return True when rail is registered in the active runtime."""
+        return rail in self._registered_rails
+
+    def remove_pending_rail(self, rail: AgentRail) -> "DeepAgent":
+        """Remove a specific rail from the pending queue by object identity."""
+        self._pending_rails = [queued for queued in self._pending_rails if queued is not rail]
+        return self
+
     def strip_rails_by_type(self, rail_types: tuple[type, ...]) -> int:
         """Remove queued rails by type and mark registered ones as stale.
 
@@ -1325,347 +1379,186 @@ class DeepAgent(BaseAgent):
         rail.uninit(self)
         return self
 
-    async def load_harness_config(
+    async def load_expert_harness(
         self,
-        config_path: str,
-    ) -> list[str]:
-        """Hot-load resources from a harness_config.yaml.
+        path: str,
+        *,
+        context: BuildContext | None = None,
+    ) -> LoadRecord:
+        """Hot-load a file-backed ExpertHarness package.
 
-        Parses the config and registers any declared rails,
-        tools, and skills onto this agent instance.
+        Reads the manifest at ``path`` into an ExpertHarnessSpec, then delegates
+        to ``load_expert_harness_from_spec``.
+        """
+        try:
+            spec = load_expert_harness_spec(path)
+        except Exception as exc:
+            raise build_error(
+                StatusCode.DEEPAGENT_LOAD_EXPERT_HARNESS_ERROR,
+                error_msg=str(exc),
+                cause=exc,
+            ) from exc
+        return await self.load_expert_harness_from_spec(spec, context=context)
+
+    async def load_expert_harness_from_spec(
+        self,
+        spec: ExpertHarnessSpec,
+        *,
+        context: BuildContext | None = None,
+    ) -> LoadRecord:
+        """Hot-load an in-memory ExpertHarnessSpec via resolve Parts + apply_hot."""
+        try:
+            if context is not None:
+                ctx = context.derive()
+                ctx.extras = dict(ctx.extras)
+            else:
+                ctx = BuildContext(
+                    language=self.deep_config.language or "cn",
+                    workspace=self.deep_config.workspace,
+                    member_card_id=self.card.id,
+                )
+            ctx.extras.setdefault(
+                "source_root",
+                (spec.source.root if spec.source else ".") or ".",
+            )
+            ctx.extras["_parent_model"] = self.deep_config.model
+
+            from openjiuwen.harness.resources.expert_harness_parts import (
+                resolve_expert_harness_parts,
+            )
+            from openjiuwen.harness.expert_harness_runtime import apply_expert_harness_hot
+
+            parts = resolve_expert_harness_parts(spec, ctx)
+            source_uri = None
+            if spec.source is not None:
+                source_uri = spec.source.uri or spec.source.root
+            record = LoadRecord(
+                source_uri=source_uri,
+                refs=await apply_expert_harness_hot(self, parts),
+            )
+            self._load_records[record.load_id] = record.model_copy(deep=True)
+            return record
+        except Exception as exc:
+            raise build_error(
+                StatusCode.DEEPAGENT_LOAD_EXPERT_HARNESS_ERROR,
+                error_msg=str(exc),
+                cause=exc,
+            ) from exc
+
+    async def load_expert_harness_ability(
+        self,
+        *,
+        tools: Tool | ToolCard | list[Tool | ToolCard] | None = None,
+        rails: AgentRail | list[AgentRail] | None = None,
+        skills: ResolvedSkill | list[ResolvedSkill] | None = None,
+    ) -> LoadRecord:
+        """Hot-load pre-built tools / rails / skills onto this agent.
+
+        Accepts already-constructed instances only. Assembles
+        ``ExpertHarnessParts`` and delegates to ``apply_expert_harness_hot``.
+        Unload via :meth:`unload_expert_harness`.
+        """
+        try:
+            from openjiuwen.harness.expert_harness_runtime import apply_expert_harness_hot
+
+            def _as_ability_list(value):
+                if value is None:
+                    return []
+                if isinstance(value, list):
+                    return [item for item in value if item is not None]
+                return [value]
+
+            parts = ExpertHarnessParts(
+                tools=_as_ability_list(tools),
+                rails=_as_ability_list(rails),
+                skills=_as_ability_list(skills),
+            )
+            record = LoadRecord(refs=await apply_expert_harness_hot(self, parts))
+            self._load_records[record.load_id] = record.model_copy(deep=True)
+            return record
+        except Exception as exc:
+            raise build_error(
+                StatusCode.DEEPAGENT_LOAD_EXPERT_HARNESS_ERROR,
+                error_msg=str(exc),
+                cause=exc,
+            ) from exc
+
+    async def unload_expert_harness(self, record: LoadRecord) -> list[str]:
+        """Unload resources produced by a successful ExpertHarness load.
+
+        Resolves ``record.load_id`` against this agent's ``_load_records`` ledger.
+        Unknown / already-unloaded ids are a no-op. Only the ledger-owned refs
+        are applied; the caller's ``record.refs`` are ignored.
+        """
+        try:
+            from openjiuwen.harness.expert_harness_runtime import unapply_expert_harness_hot
+
+            owned = self._load_records.get(record.load_id)
+            if owned is None:
+                return []
+            labels = await unapply_expert_harness_hot(self, owned.refs)
+            self._load_records.pop(record.load_id, None)
+            return labels
+        except Exception as exc:
+            raise build_error(
+                StatusCode.DEEPAGENT_LOAD_EXPERT_HARNESS_ERROR,
+                error_msg=str(exc),
+                cause=exc,
+            ) from exc
+
+    async def load_harness_config(self, config_path: str) -> list[str]:
+        """Deprecated hot-load entry. Use :meth:`load_expert_harness` instead.
 
         Args:
-            config_path: Absolute path to harness_config.yaml.
+            config_path: Path to a harness_config.yaml manifest or its parent
+                directory. Resolved the same way as ``load_expert_harness``.
 
         Returns:
-            List of human-readable names of loaded resources.
+            List of human-readable resource labels (same shape the old
+            implementation returned).
         """
-        from openjiuwen.harness.harness_config.builder import (
-            _resolve_rails,
-            _resolve_tools,
+        warnings.warn(
+            "DeepAgent.load_harness_config is deprecated; "
+            "use load_expert_harness instead.",
+            DeprecationWarning,
+            stacklevel=2,
         )
+        record = await self.load_expert_harness(config_path)
+        return self._load_record_labels(record)
 
-        resolved = HarnessConfigLoader.load(config_path)
-        resources = resolved.config.resources
-        if not resources:
-            return []
+    async def unload_harness_config(self, config_path: str) -> list[str]:
+        """Deprecated unload entry. Use :meth:`unload_expert_harness` instead.
 
-        loaded: list[str] = []
-        config_path_obj = Path(config_path).resolve()
-        runtime_ext = self._runtime_extension_artifact_for_config(
-            config_path_obj,
-            resources,
-        )
-
-        # Rails
-        if resources.rails:
-            if runtime_ext is not None:
-                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
-                    load_runtime_rails,
-                )
-
-                rail_classes = load_runtime_rails(
-                    runtime_ext,
-                    session_id=self._runtime_extension_session_id(),
-                )
-                rails = [rail_cls() for rail_cls in rail_classes]
-            else:
-                rails = _resolve_rails(resources)
-            for rail in rails:
-                await self.register_rail(rail)
-                loaded.append(
-                    f"rail:{type(rail).__name__}"
-                )
-
-        # Tools
-        if resources.tools:
-            if runtime_ext is not None:
-                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
-                    load_runtime_tools,
-                )
-
-                tool_classes = load_runtime_tools(
-                    runtime_ext,
-                    session_id=self._runtime_extension_session_id(),
-                )
-                tools = [tool_cls() for tool_cls in tool_classes]
-            else:
-                sys_op = self.deep_config.sys_operation
-                tools = _resolve_tools(
-                    resources, sys_op
-                )
-            for tool in tools:
-                existing = Runner.resource_mgr.get_tool(
-                    tool.card.id
-                )
-                if existing is None:
-                    Runner.resource_mgr.add_tool(tool)
-                self.ability_manager.add(tool.card)
-                loaded.append(
-                    f"tool:{type(tool).__name__}"
-                )
-
-        # Skills
-        if resources.skills and resources.skills.dirs:
-            from openjiuwen.harness.rails.skills.skill_use_rail import (
-                SkillUseRail,
-            )
-
-            if runtime_ext is not None:
-                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
-                    load_runtime_skill_dirs,
-                )
-
-                skill_dirs = load_runtime_skill_dirs(runtime_ext)
-            else:
-                source_dir = config_path_obj.parent
-                skill_dirs = [
-                    str((source_dir / d).resolve())
-                    for d in resources.skills.dirs
-                ]
-            # Try appending to existing SkillUseRail
-            # Check both _registered_rails (already initialized) and
-            # _pending_rails (queued during configure() but not yet initialized)
-            existing_skill_rail: (
-                SkillUseRail | None
-            ) = None
-            for r in (*self._registered_rails, *self._pending_rails):
-                if isinstance(r, SkillUseRail):
-                    existing_skill_rail = r
-                    break
-            if existing_skill_rail is not None:
-                cur = existing_skill_rail.skills_dir
-                if isinstance(cur, str):
-                    existing_skill_rail.skills_dir = [
-                        *skill_dirs,
-                        cur,
-                    ]
-                else:
-                    existing = list(cur)
-                    existing = [
-                        d
-                        for d in existing
-                        if d not in skill_dirs
-                    ]
-                    existing_skill_rail.skills_dir = [
-                        *skill_dirs,
-                        *existing,
-                    ]
-                existing_skill_rail.enable_cache = False
-                # Ensure sys_operation is set for reading SKILL.md files
-                if existing_skill_rail.sys_operation is None:
-                    existing_skill_rail.set_sys_operation(
-                        self.deep_config.sys_operation
-                    )
-                await existing_skill_rail.reload_skills()
-            else:
-                mode = (
-                    resources.skills.mode or "all"
-                )
-                new_rail = SkillUseRail(
-                    skills_dir=skill_dirs,
-                    skill_mode=mode,
-                )
-                await self.register_rail(new_rail)
-                await new_rail.reload_skills()
-            for sd in skill_dirs:
-                loaded.append(f"skill_dir:{sd}")
-
-        return loaded
-
-    async def unload_harness_config(
-        self,
-        config_path: str,
-    ) -> list[str]:
-        """Unload resources declared in a harness_config.yaml.
-
-        Parses the config and removes rails, tools, and skill directories
-        that match the declarations in the config file.
-
-        This method does NOT track which resources were previously loaded.
-        Instead, it re-parses the config file and removes matching resources
-        by type/name/module. This means:
-        - Rails are removed by matching type (class name and module)
-        - Tools are removed by matching card.id and card.name
-        - Skill dirs are removed from SkillUseRail if present
+        Locates the ``LoadRecord`` previously produced by ``load_harness_config``
+        via ``_load_records`` (keyed by the resolved manifest path),
+        then delegates to ``unload_expert_harness``. Returns an empty list when
+        no matching record is found, mirroring the old "no-op on missing" behavior.
 
         Args:
-            config_path: Absolute path to harness_config.yaml.
-
-        Returns:
-            List of human-readable names of unloaded resources.
-
-        Raises:
-            FileNotFoundError: If the config file does not exist.
-            ValueError: If parsing the config fails.
+            config_path: Path originally passed to ``load_harness_config``.
         """
-        config_path_obj = Path(config_path).resolve()
-        if not config_path_obj.exists():
-            raise FileNotFoundError(
-                f"Harness config file not found: {config_path_obj}"
-            )
-
-        resolved = HarnessConfigLoader.load(config_path)
-        resources = resolved.config.resources
-        if not resources:
-            return []
-
-        unloaded: list[str] = []
-        runtime_ext = self._runtime_extension_artifact_for_config(
-            config_path_obj,
-            resources,
+        warnings.warn(
+            "DeepAgent.unload_harness_config is deprecated; "
+            "use unload_expert_harness instead.",
+            DeprecationWarning,
+            stacklevel=2,
         )
+        try:
+            resolved = str(find_expert_harness_manifest(config_path))
+        except FileNotFoundError:
+            return []
+        target_record: LoadRecord | None = None
+        for record in self._load_records.values():
+            if record.source_uri == resolved:
+                target_record = record
+                break
+        if target_record is None:
+            return []
+        return await self.unload_expert_harness(target_record)
 
-        # Unload rails
-        if resources.rails:
-            rail_types_to_remove: set[type] = set()
-            if runtime_ext is not None:
-                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
-                    load_runtime_rails,
-                )
-
-                rail_classes = load_runtime_rails(
-                    runtime_ext,
-                    session_id=self._runtime_extension_session_id(),
-                )
-                rail_types_to_remove = set(rail_classes)
-            else:
-                for spec in resources.rails:
-                    if spec.type == "builtin" and spec.name:
-                        from openjiuwen.harness.harness_config.builder import (
-                            _BUILTIN_RAIL_REGISTRY,
-                            _load_dotted_path,
-                        )
-                        dotted = _BUILTIN_RAIL_REGISTRY.get(spec.name)
-                        if dotted:
-                            rail_types_to_remove.add(_load_dotted_path(dotted))
-                    elif spec.type == "package" and spec.module and spec.class_name:
-                        dotted = f"{spec.module}.{spec.class_name}"
-                        from openjiuwen.harness.harness_config.builder import (
-                            _load_dotted_path,
-                        )
-                        rail_types_to_remove.add(_load_dotted_path(dotted))
-                    elif spec.type == "entry_point" and spec.name:
-                        from openjiuwen.harness.harness_config.builder import (
-                            _load_from_entry_point,
-                        )
-                        rail_types_to_remove.add(
-                            _load_from_entry_point(spec.name, "openjiuwen.rail")
-                        )
-
-            for rail in list(self._registered_rails):
-                if type(rail) in rail_types_to_remove:
-                    await self.unregister_rail(rail)
-                    unloaded.append(f"rail:{type(rail).__name__}")
-
-        # Unload tools
-        if resources.tools:
-            tool_ids_to_remove: list[str] = []
-            tool_names_to_remove: list[str] = []
-            if runtime_ext is not None:
-                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
-                    load_runtime_tools,
-                )
-
-                tool_classes = load_runtime_tools(
-                    runtime_ext,
-                    session_id=self._runtime_extension_session_id(),
-                )
-                for cls in tool_classes:
-                    # Instantiate to get card info
-                    tool_instance = cls()
-                    tool_ids_to_remove.append(tool_instance.card.id)
-                    tool_names_to_remove.append(tool_instance.card.name)
-            else:
-                for spec in resources.tools:
-                    if spec.type == "builtin":
-                        from openjiuwen.harness.harness_config.builder import (
-                            _BUILTIN_TOOL_GROUPS,
-                        )
-                        names = spec.names or ([spec.name] if spec.name else [])
-                        for group in names:
-                            entry = _BUILTIN_TOOL_GROUPS.get(group)
-                            if entry:
-                                module_path, class_names, _ = entry
-                                mod = importlib.import_module(module_path)
-                                for cls_name in class_names:
-                                    cls = getattr(mod, cls_name)
-                                    tool_instance = cls()
-                                    tool_ids_to_remove.append(tool_instance.card.id)
-                                    tool_names_to_remove.append(tool_instance.card.name)
-                    elif spec.type == "package" and spec.module and spec.class_name:
-                        from openjiuwen.harness.harness_config.builder import (
-                            _load_dotted_path,
-                        )
-                        cls = _load_dotted_path(f"{spec.module}.{spec.class_name}")
-                        tool_instance = cls()
-                        tool_ids_to_remove.append(tool_instance.card.id)
-                        tool_names_to_remove.append(tool_instance.card.name)
-                    elif spec.type == "entry_point" and spec.name:
-                        from openjiuwen.harness.harness_config.builder import (
-                            _load_from_entry_point,
-                        )
-                        cls = _load_from_entry_point(spec.name, "openjiuwen.tool")
-                        tool_instance = cls()
-                        tool_ids_to_remove.append(tool_instance.card.id)
-                        tool_names_to_remove.append(tool_instance.card.name)
-
-            for tool_id in tool_ids_to_remove:
-                Runner.resource_mgr.remove_tool(tool_id)
-                unloaded.append(f"tool_id:{tool_id}")
-
-            for tool_name in tool_names_to_remove:
-                self.ability_manager.remove(tool_name)
-                unloaded.append(f"tool:{tool_name}")
-
-        # Unload skill dirs
-        if resources.skills and resources.skills.dirs:
-            from openjiuwen.harness.rails.skills.skill_use_rail import (
-                SkillUseRail,
-            )
-
-            if runtime_ext is not None:
-                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
-                    load_runtime_skill_dirs,
-                )
-
-                skill_dirs = load_runtime_skill_dirs(runtime_ext)
-            else:
-                source_dir = config_path_obj.parent
-                skill_dirs = [
-                    str((source_dir / d).resolve())
-                    for d in resources.skills.dirs
-                ]
-
-            for r in self._registered_rails:
-                if isinstance(r, SkillUseRail):
-                    cur = r.skills_dir
-                    if isinstance(cur, str):
-                        if cur in skill_dirs:
-                            r.skills_dir = []
-                    else:
-                        remaining = [
-                            d for d in cur if d not in skill_dirs
-                        ]
-                        r.skills_dir = remaining
-
-                    # Force clear cache for removed skill dirs
-                    if not r.skills_dir:
-                        r.clear_skills()
-                    else:
-                        # Temporarily disable cache to force refresh, then restore
-                        original_cache = r.enable_cache
-                        r.enable_cache = False
-                        try:
-                            await r.reload_skills()
-                        finally:
-                            r.enable_cache = original_cache
-                    break
-
-            for sd in skill_dirs:
-                unloaded.append(f"skill_dir:{sd}")
-
-        return unloaded
+    @staticmethod
+    def _load_record_labels(record: LoadRecord) -> list[str]:
+        return [f"{ref.kind.value}:{ref.identity}" for ref in record.refs]
 
     def _runtime_extension_session_id(self) -> str:
         """Return a stable namespace key for runtime extension imports."""
@@ -1674,45 +1567,6 @@ class DeepAgent(BaseAgent):
             or self.card.id
             or self.card.name
             or "deep_agent"
-        )
-
-    @staticmethod
-    def _runtime_extension_artifact_for_config(
-        config_path: Path,
-        resources: Any,
-    ) -> Any | None:
-        """Build runtime extension metadata for auto-harness package configs.
-
-        Runtime extensions are stored outside the installed Python package but
-        still declare modules under ``openjiuwen.extensions.harness.<name>``.
-        The normal harness_config package resolver cannot import those modules,
-        so they must be loaded through the runtime extension loader.
-        """
-        extension_name = config_path.parent.name
-        prefix = f"openjiuwen.extensions.harness.{extension_name}"
-        modules: list[str] = []
-        for spec in [
-            *(resources.rails or []),
-            *(resources.tools or []),
-        ]:
-            module = getattr(spec, "module", None)
-            if (
-                getattr(spec, "type", None) == "package"
-                and isinstance(module, str)
-            ):
-                modules.append(module)
-        if not any(
-            module == prefix or module.startswith(f"{prefix}.")
-            for module in modules
-        ):
-            return None
-
-        from openjiuwen.auto_harness.schema import RuntimeExtensionArtifact
-
-        return RuntimeExtensionArtifact(
-            extension_name=extension_name,
-            runtime_path=str(config_path.parent),
-            config_path=str(config_path),
         )
 
     def enqueue_harness_config(
@@ -1728,11 +1582,11 @@ class DeepAgent(BaseAgent):
         while self._pending_harness_configs:
             path = self._pending_harness_configs.pop(0)
             try:
-                loaded = await self.load_harness_config(path)
+                record = await self.load_expert_harness(path)
                 logger.info(
                     "Auto-loaded harness config %s: %s",
                     path,
-                    loaded,
+                    self._load_record_labels(record),
                 )
             except Exception:
                 logger.exception(

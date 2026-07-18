@@ -577,7 +577,6 @@ def _bare_team_agent(allocator):
         card=card,
         spec=spec,
         ctx=ctx,
-        role_policy="",
         language="en",
     )
     agent._configurator.model_allocator = allocator
@@ -657,7 +656,6 @@ def test_persist_leader_config_omits_allocator_state_when_no_pool():
         card=card,
         spec=spec,
         ctx=ctx,
-        role_policy="",
         language="en",
     )
     agent._configurator.model_allocator = None
@@ -685,7 +683,7 @@ def test_team_member_spec_carries_model_name_for_pool_allocation():
     member = TeamMemberSpec(
         member_name="dev1",
         display_name="Dev 1",
-        persona="backend",
+        desc="backend",
         model_name="claude",
     )
     assert member.model_name == "claude"

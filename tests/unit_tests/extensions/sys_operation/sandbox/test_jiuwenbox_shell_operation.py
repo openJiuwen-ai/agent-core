@@ -24,6 +24,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import OperationMode, SandboxGatewayConfig, SysOperation, SysOperationCard
 from openjiuwen.core.sys_operation.config import ContainerScope, PreDeployLauncherConfig, SandboxIsolationConfig
+from openjiuwen.extensions.sys_operation.sandbox.providers.jiuwenbox import build_jiuwenbox_http_client
 from openjiuwen.core.sys_operation.result import ExecuteCmdStreamResult
 
 
@@ -86,7 +87,7 @@ def server_endpoint() -> str:
 @pytest_asyncio.fixture(name="sys_op")
 async def sys_op_fixture(server_endpoint, monkeypatch) -> AsyncIterator[SysOperation]:
     base_url = _normalize_endpoint(server_endpoint)
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         create_resp = client.post("/api/v1/sandboxes", json={"command": LONG_RUNNING_COMMAND})
         assert create_resp.status_code == 201, create_resp.text
         sandbox_id = create_resp.json()["id"]
@@ -275,7 +276,7 @@ async def test_excluded_commands_pre_routes_to_host_not_sandbox(
     host_marker = tmp_path / f"jiuwenbox_local_route_{marker}.txt"
     payload = "local-via-pre-route"
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         create_resp = client.post("/api/v1/sandboxes", json={"command": LONG_RUNNING_COMMAND})
         assert create_resp.status_code == 201, create_resp.text
         sandbox_id = create_resp.json()["id"]
@@ -333,7 +334,7 @@ async def test_non_excluded_command_still_runs_in_sandbox(
     sandbox_path = f"/tmp/jiuwenbox_in_sandbox_{marker}.txt"
     payload = "runs-in-sandbox"
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         create_resp = client.post("/api/v1/sandboxes", json={"command": LONG_RUNNING_COMMAND})
         assert create_resp.status_code == 201, create_resp.text
         sandbox_id = create_resp.json()["id"]
@@ -384,7 +385,7 @@ async def test_fallback_on_failure_does_not_rerun_locally_on_sandbox_nonzero_exi
     marker = uuid4().hex[:8]
     host_marker = tmp_path / f"jiuwenbox_no_local_rerun_{marker}.txt"
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         create_resp = client.post("/api/v1/sandboxes", json={"command": LONG_RUNNING_COMMAND})
         assert create_resp.status_code == 201, create_resp.text
         sandbox_id = create_resp.json()["id"]
@@ -433,7 +434,7 @@ async def test_no_fallback_when_flag_off_keeps_failure_in_sandbox_only(
     marker = uuid4().hex[:8]
     host_marker = tmp_path / f"jiuwenbox_no_fallback_{marker}.txt"
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         create_resp = client.post("/api/v1/sandboxes", json={"command": LONG_RUNNING_COMMAND})
         assert create_resp.status_code == 201, create_resp.text
         sandbox_id = create_resp.json()["id"]

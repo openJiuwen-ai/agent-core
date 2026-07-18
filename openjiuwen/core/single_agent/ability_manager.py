@@ -340,6 +340,20 @@ class AbilityManager:
 
         return add_single_ability(ability)
 
+    @staticmethod
+    def qualify_tool_id(card: ToolCard, owner_id: Optional[str]) -> str:
+        """Return the registry id for a tool given its card and owning agent id.
+
+        Stateless tools keep their bare ``card.id`` (shared singleton across
+        agents). Stateful tools are qualified as ``f"{card.name}_{owner_id}"``
+        so each agent owns an independent registration. Falls back to
+        ``card.name`` when ``card.id`` is empty, and to the bare id when
+        ``owner_id`` is missing (no per-agent qualification).
+        """
+        if card.stateless or not owner_id:
+            return card.id or card.name
+        return f"{card.name}_{owner_id}"
+
     def add_ability(self, card: ToolCard, resource: Tool) -> AddAbilityResult:
         """Register an executable tool ability (card + concrete instance).
 
@@ -372,7 +386,7 @@ class AbilityManager:
             return self.add(card)
 
         if self._owner_id:
-            card.id = f"{card.name}_{self._owner_id}"
+            card.id = self.qualify_tool_id(card, self._owner_id)
         Runner.resource_mgr.add_tool(resource, refresh=True)
         return self.add(card)
 

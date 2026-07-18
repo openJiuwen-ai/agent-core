@@ -298,17 +298,19 @@ class EnterPlanModeTool(Tool):
         agent = self._agent_ref
         session = kwargs.get("session")
         state = agent.load_state(session)
+        lang = _plan_mode_tool_language(self._language)
+        workspace_root = agent.deep_config.workspace.root_path
 
         if state.plan_mode.plan_slug:
-            existing_path = resolve_plan_file_path(
-                agent.deep_config.workspace.root_path,
+            plan_path = resolve_plan_file_path(
+                workspace_root,
                 state.plan_mode.plan_slug,
             )
-            if existing_path.exists():
-                lang = _plan_mode_tool_language(self._language)
-                return _ENTER_PLAN_EXISTS_MSG[lang].format(plan_path=existing_path)
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            if plan_path.exists():
+                return _ENTER_PLAN_EXISTS_MSG[lang].format(plan_path=plan_path)
+            return _ENTER_PLAN_CREATED_MSG[lang].format(plan_path=plan_path)
 
-        workspace_root = agent.deep_config.workspace.root_path
         slug = get_or_create_plan_slug(workspace_root)
         plan_path = resolve_plan_file_path(workspace_root, slug)
         plan_path.parent.mkdir(parents=True, exist_ok=True)
@@ -316,7 +318,6 @@ class EnterPlanModeTool(Tool):
         state.plan_mode.plan_slug = slug
         agent.save_state(session, state)
 
-        lang = _plan_mode_tool_language(self._language)
         return _ENTER_PLAN_CREATED_MSG[lang].format(plan_path=plan_path)
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:

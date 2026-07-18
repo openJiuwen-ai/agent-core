@@ -63,6 +63,7 @@ class TeamToolRail(DeepAgentRail):
         team_backend: "TeamBackend",
         role: str,
         teammate_mode: str = "build_mode",
+        dispatch_mode: str = "autonomous",
         lifecycle: str = "temporary",
         language: str = "cn",
         on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
@@ -83,6 +84,7 @@ class TeamToolRail(DeepAgentRail):
         self._team_backend = team_backend
         self._role = role
         self._teammate_mode = teammate_mode
+        self._dispatch_mode = dispatch_mode
         self._lifecycle = lifecycle
         self._language = language
         self._on_teammate_created = on_teammate_created
@@ -115,6 +117,7 @@ class TeamToolRail(DeepAgentRail):
             role=self._role,
             agent_team=self._team_backend,
             teammate_mode=self._teammate_mode,
+            dispatch_mode=self._dispatch_mode,
             lifecycle=self._lifecycle,
             on_teammate_created=self._on_teammate_created,
             model_config_allocator=self._model_config_allocator,

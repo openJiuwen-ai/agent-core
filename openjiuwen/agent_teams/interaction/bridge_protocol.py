@@ -53,7 +53,7 @@ class BridgeProtocolAdapter(Protocol):
     Lifecycle (managed by the SDK that owns the bridge member):
 
     1. :meth:`connect` — open transport, brief the remote with the
-       bridge ``persona`` + a short team overview. Called once per
+       bridge ``prompt`` + a short team overview. Called once per
        bridge member after spawn. Exceptions abort bridge setup.
     2. :meth:`relay` — fired by the framework on every team-side
        mailbox event addressed to the bridge. One text turn out,
@@ -73,7 +73,7 @@ class BridgeProtocolAdapter(Protocol):
         *,
         member_name: str,
         adapter_config: dict[str, object],
-        bridge_persona: str,
+        prompt: str,
         team_overview: str,
     ) -> None:
         """Open transport and brief the remote agent.
@@ -86,12 +86,13 @@ class BridgeProtocolAdapter(Protocol):
             adapter_config: Verbatim ``BridgeMemberSpec.adapter_config``
                 from the spec. Adapter implementations decide their
                 own schema.
-            bridge_persona: The persona the remote should adopt. Comes
-                from ``BridgeMemberSpec.persona`` (same persona the
-                team sees, ensuring identity is consistent across the
-                two sides).
+            prompt: The private prompt the remote adopts as its own
+                system prompt. Comes from ``BridgeMemberSpec.prompt`` —
+                the remote is this member's execution brain, so it
+                receives the member's private prompt, not the public
+                ``desc`` that peers see.
             team_overview: Short text — team name, roster summary,
-                each member's role + brief persona — for the remote
+                each member's role + brief desc — for the remote
                 to reference when crafting replies. NOT the full
                 jiuwen system prompt; just enough context for the
                 remote to know who it's talking to and about.

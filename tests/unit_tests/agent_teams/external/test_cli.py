@@ -74,7 +74,7 @@ async def test_cli_member_claim_then_complete(team_db, make_descriptor, capsys):
     )
     assert await cli._run(*_member(make_descriptor, "claim_task", "t1", "claimed")) == 0
     assert "t1" in capsys.readouterr().out
-    assert (await team_db.task.get_task("t1")).status == TaskStatus.CLAIMED.value
+    assert (await team_db.task.get_task("t1")).status == TaskStatus.IN_PROGRESS.value
 
     assert await cli._run(*_member(make_descriptor, "claim_task", "t1", "completed")) == 0
     capsys.readouterr()

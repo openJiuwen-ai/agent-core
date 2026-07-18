@@ -1,6 +1,6 @@
 审批或拒绝成员提交的执行计划。**仅在团队 `teammate_mode=plan_mode` 时暴露给 Leader**；build_mode 下成员不提交计划，此工具不会出现在工具列表中。
 
-Leader 调用后，系统会向成员发送审批结果；批准时，已认领的计划任务从 `claimed` 推进到可执行状态 `plan_approved`；拒绝时，任务保持 `claimed`，成员应根据反馈修改后重新提交。
+Leader 调用后，系统会向成员发送审批结果；批准时，计划任务从计划闸 `planning` 推进到执行状态 `in_progress`；拒绝时，任务保持 `planning`，成员应根据反馈修改后重新提交。
 
 | 参数 | 用法 |
 |---|---|
