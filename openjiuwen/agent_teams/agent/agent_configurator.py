@@ -26,7 +26,6 @@ from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.paths import (
     team_memory_dir as default_team_memory_dir,
 )
-from openjiuwen.agent_teams.prompts import role_policy
 from openjiuwen.agent_teams.runtime.team_plan import is_team_plan_enabled
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec, SysOperationSpec, WorkspaceSpec
@@ -259,7 +258,6 @@ class AgentConfigurator:
             card=self._card,
             spec=spec,
             ctx=ctx,
-            role_policy=role_policy(ctx.role, language=resolved_language),
             language=resolved_language,
         )
         self._spawn_payload_builder = SpawnPayloadBuilder(spec, ctx)
@@ -521,6 +519,7 @@ class AgentConfigurator:
                 type=TEAM_TOOL,
                 params={
                     "teammate_mode": teammate_mode,
+                    "dispatch_mode": spec.dispatch_mode,
                     "lifecycle": spec.lifecycle,
                     "exclude_tools": exclude,
                     "qualify_ids": spec.spawn_mode == "inprocess",
@@ -531,10 +530,11 @@ class AgentConfigurator:
             RailSpec(
                 type=TEAM_POLICY,
                 params={
-                    "persona": ctx.persona or "",
+                    "prompt": ctx.prompt or "",
                     "lifecycle": spec.lifecycle,
                     "teammate_mode": teammate_mode,
                     "team_mode": _resolve_team_mode(spec),
+                    "dispatch_mode": spec.dispatch_mode,
                     "base_prompt": agent_spec.system_prompt,
                     "team_workspace_mount": team_workspace_mount,
                     "team_workspace_path": team_workspace_path,
@@ -666,7 +666,7 @@ class AgentConfigurator:
             swarmflow_worker_base_spec = base_specs.get("teammate") or base_specs.get("leader")
             # Human-session avatars derive from the human_agent spec; fall back to
             # the worker base spec so human_session still works when no dedicated
-            # human_agent spec is configured (it just lacks human-tuned persona).
+            # human_agent spec is configured (it just lacks human-tuned desc).
             swarmflow_human_base_spec = base_specs.get("human_agent") or swarmflow_worker_base_spec
 
             # Workers also need the observability rail for agent spans.
@@ -844,8 +844,11 @@ class AgentConfigurator:
             predefined_members=spec.predefined_members or None,
             model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
             leader_allocation=self.leader_allocation if is_leader else None,
+            leader_prompt=ctx.prompt if is_leader else "",
             enable_hitt=spec.enable_hitt,
             enable_bridge=spec.enable_bridge,
+            dispatch_mode=spec.dispatch_mode,
+            enable_task_verification=spec.enable_task_verification,
             external_cli_agents=spec.external_cli_agents,
             on_before_team_cleaned=on_before_team_cleaned,
             on_team_cleaned=on_team_cleaned,
@@ -912,10 +915,6 @@ class AgentConfigurator:
     @property
     def ctx(self) -> Optional[TeamRuntimeContext]:
         return self._blueprint.ctx if self._blueprint else None
-
-    @property
-    def role_policy(self) -> str:
-        return self._blueprint.role_policy if self._blueprint else ""
 
     @property
     def team_spec(self) -> Optional[TeamSpec]:

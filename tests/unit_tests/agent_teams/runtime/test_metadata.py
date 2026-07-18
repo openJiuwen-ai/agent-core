@@ -6,9 +6,13 @@ from __future__ import annotations
 from openjiuwen.agent_teams.runtime.metadata import (
     TEAM_DB_STATE_CREATED,
     TEAM_DB_STATE_KEY,
+    TEAM_PENDING_RESUME_KEY,
     TEAMS_KEY,
+    clear_pending_resume,
+    merge_pending_resume,
     merge_team_db_state,
     merge_team_namespace,
+    read_pending_resume,
     read_team_db_state,
     read_team_names_in_session,
     read_team_namespace,
@@ -119,3 +123,35 @@ def test_remove_team_namespace_drops_bucket():
 def test_remove_team_namespace_returns_false_when_absent():
     session = _StubSession()
     assert remove_team_namespace(session, "alpha") is False
+
+
+def test_pending_resume_roundtrip():
+    session = _StubSession()
+    assert read_pending_resume(session, "alpha") is None
+    merge_pending_resume(session, "alpha", {"query": "do the thing"})
+    assert read_pending_resume(session, "alpha") == {"query": "do the thing"}
+
+
+def test_clear_pending_resume_drops_only_that_key():
+    session = _StubSession()
+    write_team_namespace(session, "alpha", {"spec": {"team_name": "alpha"}})
+    merge_team_db_state(session, "alpha", TEAM_DB_STATE_CREATED)
+    merge_pending_resume(session, "alpha", {"query": "q"})
+
+    assert clear_pending_resume(session, "alpha") is True
+    assert read_pending_resume(session, "alpha") is None
+    # The rest of the bucket survives the clear.
+    assert read_team_db_state(session, "alpha") == TEAM_DB_STATE_CREATED
+    assert read_team_namespace(session, "alpha")["spec"] == {"team_name": "alpha"}
+
+
+def test_clear_pending_resume_returns_false_when_absent():
+    session = _StubSession()
+    write_team_namespace(session, "alpha", {"spec": {}})
+    assert clear_pending_resume(session, "alpha") is False
+
+
+def test_read_pending_resume_ignores_non_dict_payload():
+    session = _StubSession()
+    write_team_namespace(session, "alpha", {TEAM_PENDING_RESUME_KEY: "nope"})
+    assert read_pending_resume(session, "alpha") is None

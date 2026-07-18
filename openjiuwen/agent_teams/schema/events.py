@@ -90,10 +90,19 @@ class TeamEvent:
     TASK_PLAN_RESPONSE = "task_plan_response"
     TASK_UPDATED = "task_updated"
     TASK_CLAIMED = "task_claimed"
+    TASK_STARTED = "task_started"
     TASK_COMPLETED = "task_completed"
     TASK_CANCELLED = "task_cancelled"
     TASK_UNBLOCKED = "task_unblocked"
+    TASK_RELEASED = "task_released"
+    TASK_REVOKED = "task_revoked"
     TASK_LIST_DRAINED = "task_list_drained"
+    # Verify gate (F_59): author submits for review, reviewer passes / fails
+    TASK_SUBMITTED_FOR_REVIEW = "task_submitted_for_review"
+    TASK_VERIFIED = "task_verified"
+    TASK_REVISION_REQUESTED = "task_revision_requested"
+    # Review voting (F_62): a reviewer recorded a vote; verdict pending
+    TASK_REVIEW_VOTE = "task_review_vote"
 
     # Swarmflow orchestration progress (a swarmflow run feeding the spectator leader)
     WORKFLOW_PROGRESS = "workflow_progress"
@@ -219,7 +228,7 @@ class TaskCreatedEvent(BaseEventMessage):
 class TaskPlanRequestEvent(BaseEventMessage):
     """Event published when a member submits an execution plan for approval."""
     task_id: str = Field(..., description="Task unique identifier")
-    status: str = Field(default="claimed", description="Task status after submission")
+    status: str = Field(default="planning", description="Task status after submission")
     plan_id: Optional[str] = Field(default=None, description="Member plan submission identifier")
     member_plan_md: Optional[str] = Field(default=None, description="Path to submitted member plan")
     tool_call_id: str = Field(default="", description="submit_plan tool call ID when available")
@@ -245,6 +254,16 @@ class TaskClaimedEvent(BaseEventMessage):
     task_id: str = Field(..., description="Task unique identifier")
 
 
+class TaskStartedEvent(BaseEventMessage):
+    """Event published when a scheduled task begins execution.
+
+    Distinct from ``TaskClaimedEvent`` (ownership/assignment): in scheduled
+    dispatch a task is assigned at PENDING and only later moves to IN_PROGRESS
+    when the scheduler dispatches it to the assignee.
+    """
+    task_id: str = Field(..., description="Task unique identifier")
+
+
 class TaskCompletedEvent(BaseEventMessage):
     """Event published when a task is completed"""
     task_id: str = Field(..., description="Task unique identifier")
@@ -258,6 +277,78 @@ class TaskCancelledEvent(BaseEventMessage):
 class TaskUnblockedEvent(BaseEventMessage):
     """Event published when a task becomes unblocked"""
     task_id: str = Field(..., description="Task unique identifier")
+
+
+class TaskReleasedEvent(BaseEventMessage):
+    """Event published when a claimed task is reset back to pending.
+
+    Fired by ``TeamTaskManager.reset`` when a member's claim is released
+    (member cancellation / leader reassignment). The task re-enters the
+    claimable pool, so idle teammates are nudged the same way they are
+    for a ``TASK_UNBLOCKED`` event.
+    """
+    task_id: str = Field(..., description="Task unique identifier")
+
+
+class TaskRevokedEvent(BaseEventMessage):
+    """Event published when a member's claimed task is reassigned away.
+
+    Fired by ``TeamTaskManager.reassign`` and carries the *former*
+    assignee in ``member_name``. Distinct from ``TASK_RELEASED`` (which
+    tells idle teammates the task re-entered the claimable pool): this is
+    a targeted notice to the member who lost the task, so its dispatcher
+    can steer that member off the now-foreign work. The new assignee is
+    notified separately via ``TASK_CLAIMED``.
+    """
+    task_id: str = Field(..., description="Task unique identifier")
+
+
+class TaskSubmittedForReviewEvent(BaseEventMessage):
+    """Event published when an author submits a task for verification.
+
+    Fired by ``TeamTaskManager.complete`` when the completed task carries
+    reviewers (``IN_PROGRESS -> IN_REVIEW``). ``member_name`` is the author.
+    The framework dispatches / notifies the reviewers listed in ``reviewer``.
+    """
+    task_id: str = Field(..., description="Task unique identifier")
+    reviewer: list[str] = Field(default_factory=list, description="Reviewer member names to notify")
+
+
+class TaskVerifiedEvent(BaseEventMessage):
+    """Event published when a reviewer passes a task (IN_REVIEW -> COMPLETED).
+
+    ``member_name`` is the author (the task's assignee), so the completion
+    unblocks downstream tasks the same way a direct completion does.
+    """
+    task_id: str = Field(..., description="Task unique identifier")
+
+
+class TaskRevisionRequestedEvent(BaseEventMessage):
+    """Event published when a reviewer fails a task (IN_REVIEW -> IN_PROGRESS).
+
+    Rework loop: ``member_name`` is the author, who still holds the task and is
+    steered back to revise it; ``feedback`` carries the reviewer's guidance.
+    """
+    task_id: str = Field(..., description="Task unique identifier")
+    feedback: str = Field(default="", description="Reviewer feedback directing the rework")
+
+
+class TaskReviewVoteEvent(BaseEventMessage):
+    """Event published when a reviewer records a vote (scheduled dispatch).
+
+    Under scheduled dispatch ``verify_task`` only persists the vote — the
+    task stays ``IN_REVIEW`` and the leader-side scheduler tallies votes and
+    settles the verdict. ``member_name`` is the author (consistent with the
+    other verify-gate events); ``reviewer`` is the voter. The counts snapshot
+    the tally after this vote so observers need no extra read.
+    """
+    task_id: str = Field(..., description="Task unique identifier")
+    reviewer: str = Field(..., description="Member who cast this vote")
+    decision: str = Field(..., description="Vote decision: pass or fail")
+    review_round: int = Field(..., description="Review round the vote belongs to")
+    pass_count: int = Field(..., description="Distinct reviewers currently voting pass in this round")
+    fail_count: int = Field(..., description="Distinct reviewers currently voting fail in this round")
+    reviewer_count: int = Field(..., description="Total reviewers assigned to the task")
 
 
 class TaskListDrainedEvent(BaseEventMessage):
@@ -380,9 +471,16 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.TASK_PLAN_RESPONSE: TaskPlanResponseEvent,
     TeamEvent.TASK_UPDATED: TaskUpdatedEvent,
     TeamEvent.TASK_CLAIMED: TaskClaimedEvent,
+    TeamEvent.TASK_STARTED: TaskStartedEvent,
     TeamEvent.TASK_COMPLETED: TaskCompletedEvent,
     TeamEvent.TASK_CANCELLED: TaskCancelledEvent,
     TeamEvent.TASK_UNBLOCKED: TaskUnblockedEvent,
+    TeamEvent.TASK_RELEASED: TaskReleasedEvent,
+    TeamEvent.TASK_REVOKED: TaskRevokedEvent,
+    TeamEvent.TASK_SUBMITTED_FOR_REVIEW: TaskSubmittedForReviewEvent,
+    TeamEvent.TASK_VERIFIED: TaskVerifiedEvent,
+    TeamEvent.TASK_REVISION_REQUESTED: TaskRevisionRequestedEvent,
+    TeamEvent.TASK_REVIEW_VOTE: TaskReviewVoteEvent,
     TeamEvent.TASK_LIST_DRAINED: TaskListDrainedEvent,
     TeamEvent.WORKFLOW_PROGRESS: WorkflowProgressTeamEvent,
     TeamEvent.WORKTREE_CREATED: WorktreeCreatedEvent,

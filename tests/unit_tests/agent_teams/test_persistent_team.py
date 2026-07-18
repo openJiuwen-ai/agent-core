@@ -166,7 +166,7 @@ class TestPersistentTeamBuildTeam:
             TeamMemberSpec(
                 member_name="dev-1",
                 display_name="Developer",
-                persona="Backend dev",
+                desc="Backend dev",
             ),
         ]
         return TeamBackend(

@@ -103,6 +103,26 @@ class ContextUtils:
     """
 
     @staticmethod
+    def _get_positive_int_by_model_name(mapping: Optional[Dict[str, int]], model_name: str) -> Optional[int]:
+        if not mapping:
+            return None
+
+        value = mapping.get(model_name)
+        if isinstance(value, int) and value > 0:
+            return value
+
+        normalized_model_name = model_name.lower()
+        for candidate_model_name, candidate_value in mapping.items():
+            if not isinstance(candidate_model_name, str):
+                continue
+            if candidate_model_name.lower() != normalized_model_name:
+                continue
+            if isinstance(candidate_value, int) and candidate_value > 0:
+                return candidate_value
+
+        return None
+
+    @staticmethod
     def _parse_openrouter_model(model: Any) -> Optional[tuple[str, int]]:
         if not isinstance(model, dict):
             return None
@@ -262,15 +282,19 @@ class ContextUtils:
             return fallback_context_window_tokens
 
         if isinstance(model_name, str) and model_name:
-            if model_context_window_tokens:
-                value = model_context_window_tokens.get(model_name)
-                if isinstance(value, int) and value > 0:
-                    return value
-            builtin = MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS.get(model_name)
-            if isinstance(builtin, int) and builtin > 0:
+            value = ContextUtils._get_positive_int_by_model_name(model_context_window_tokens, model_name)
+            if value is not None:
+                return value
+
+            builtin = ContextUtils._get_positive_int_by_model_name(MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS, model_name)
+            if builtin is not None:
                 return builtin
-            openrouter = _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS.get(model_name)
-            if isinstance(openrouter, int) and openrouter > 0:
+
+            openrouter = ContextUtils._get_positive_int_by_model_name(
+                _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS,
+                model_name,
+            )
+            if openrouter is not None:
                 return openrouter
 
         return DEFAULT_CONTEXT_MAX_TOKENS
@@ -283,6 +307,15 @@ class ContextUtils:
             "compressor" in processor_type
             or "compact" in processor_type
             or ".processor.compressor." in module_name
+        )
+
+    @staticmethod
+    def is_offload_processor(processor: Any) -> bool:
+        processor_type = processor.processor_type().lower()
+        module_name = processor.__class__.__module__.lower()
+        return (
+            "offload" in processor_type
+            or ".processor.offloader." in module_name
         )
 
     @staticmethod
@@ -325,38 +358,6 @@ class ContextUtils:
             raise IndexError("Invalid start/end index")
 
         return messages[:start_index] + target_messages + messages[end_index + 1:]
-
-    @staticmethod
-    def format_reloaded_messages(
-            offload_handle: str,
-            messages: List[BaseMessage]
-    ):
-        """
-        Format a list of reloaded messages into a human-readable string for LLM consumption.
-
-        This method creates a structured text representation of messages that were
-        previously offloaded and have now been retrieved. The formatted output
-        includes the offload handle for traceability and each message serialized
-        as JSON for structured parsing by the model.
-
-        Args:
-            offload_handle: The unique identifier of the offloaded content being
-                restored. Used to correlate the reloaded content with its original
-                offload marker (e.g., [[OFFLOAD: handle=xxx, type=...]]).
-            messages: List of BaseMessage objects that have been retrieved from
-                external storage and need to be presented back to the LLM.
-
-        Returns:
-            A formatted string containing the handle reference and serialized
-            messages, suitable for injection back into the conversation context.
-        """
-        formatted_content = f"reload messages with handle={offload_handle}:\n"
-        for i, msg in enumerate(messages, 1):
-            formatted_content += f"message {i}: "
-            formatted_content += json.dumps(msg.model_dump(), ensure_ascii=False)
-            if i != len(messages):
-                formatted_content += "\n"
-        return formatted_content
 
     @staticmethod
     def find_all_dialogue_round(messages: List[BaseMessage]) -> List[List[Optional[int]]]:

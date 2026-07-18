@@ -2,7 +2,7 @@
 
 ## 何时使用
 
-- Leader 通过 `update_task(assignee=<你的 member_name>)` 把任务派给你（任务进入 `claimed` 状态、assignee 指向你）之后，你完成了实际工作，调用本工具把状态推进到 `completed`。
+- Leader 通过 `update_task(assignee=<你的 member_name>)` 把任务派给你（任务进入 `in_progress` 状态、assignee 指向你）之后，你完成了实际工作，调用本工具把状态推进到 `completed`。
 - 仅适用于「assignee 等于你自己」的任务；其他任务调用会报错。
 
 ## 输入
@@ -20,4 +20,4 @@
 
 - `Task '<id>' not found`：任务不存在。
 - `Task '<id>' is assigned to '<other>', not '<you>'; you can only complete tasks assigned to yourself`：任务不是指派给你的。
-- 其它（来自 task_manager.complete）：当前任务状态不允许完成（例如已 cancelled、未 claimed 等）。
+- 其它（来自 task_manager.complete）：当前任务状态不允许完成（例如已 cancelled、尚未进入 in_progress 等）。
