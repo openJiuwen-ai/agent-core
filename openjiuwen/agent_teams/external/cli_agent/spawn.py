@@ -148,6 +148,7 @@ async def build_cli_runtime(
     ctx: TeamRuntimeContext,
     *,
     cwd: str | None = None,
+    add_dirs: tuple[str, ...] = (),
     command_override: tuple[str, ...] | None = None,
     inject_mcp: bool = True,
     mcp_server_name: str = "openjiuwen-team",
@@ -169,6 +170,7 @@ async def build_cli_runtime(
     Args:
         ctx: Member runtime context; ``ctx.cli_agent`` names the backend.
         cwd: Working directory for the subprocess(es).
+        add_dirs: Extra directories exposed to SDK backends that support them.
         command_override: Optional full launch argv (e.g. an absolute path).
         inject_mcp: When True (default), configure the backend to register the
             team MCP server so the CLI gets the team collaboration tools.
@@ -214,6 +216,7 @@ async def build_cli_runtime(
         return build_claude_runtime(
             member_name=ctx.member_name or "",
             cwd=cwd,
+            add_dirs=add_dirs,
             env=env,
             inject_mcp=inject_mcp,
             mcp_server_name=mcp_server_name,

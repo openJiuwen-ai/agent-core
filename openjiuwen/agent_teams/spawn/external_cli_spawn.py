@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import os
 from typing import TYPE_CHECKING, Any, Optional
 
 from openjiuwen.agent_teams.external.cli_agent.backends import backend_for
 from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_runtime
+from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
 from openjiuwen.core.common.logging import team_logger
@@ -69,6 +71,61 @@ async def _build_member_system_prompt(
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
     )
     return prompt or None
+
+
+def _path_value(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _same_path(left: str, right: str) -> bool:
+    return os.path.normcase(os.path.normpath(left)) == os.path.normcase(os.path.normpath(right))
+
+
+def _append_extra_dir(result: list[str], path: str | None, *, cwd: str | None) -> None:
+    if path is None:
+        return
+    if cwd is not None and _same_path(path, cwd):
+        return
+    if any(_same_path(path, existing) for existing in result):
+        return
+    result.append(path)
+
+
+def _team_workspace_path(spec: "TeamAgentSpec", team_name: str) -> str:
+    workspace = spec.workspace
+    if workspace is not None and workspace.root_path:
+        return workspace.root_path
+    return str(team_home(team_name) / "team-workspace")
+
+
+def _build_context_project_dir(spec: "TeamAgentSpec") -> str | None:
+    build_context = spec.build_context
+    if build_context is None:
+        return None
+    return _path_value(getattr(build_context, "project_dir", None))
+
+
+def _resolve_external_paths(
+    spec: "TeamAgentSpec",
+    ctx: "TeamRuntimeContext",
+    *,
+    configured_cwd: str | None,
+    team_name: str,
+) -> tuple[str, tuple[str, ...]]:
+    """Resolve cwd and extra Claude-accessible directories for an external member."""
+    explicit_cwd = _path_value(configured_cwd)
+    worktree_path = _path_value(ctx.worktree_path)
+    project_dir = _build_context_project_dir(spec)
+    team_workspace = _team_workspace_path(spec, team_name)
+    cwd = explicit_cwd or worktree_path or project_dir or team_workspace
+
+    extra_dirs: list[str] = []
+    for path in (explicit_cwd, worktree_path, project_dir, team_workspace):
+        _append_extra_dir(extra_dirs, path, cwd=cwd)
+    return cwd, tuple(extra_dirs)
 
 
 async def external_cli_spawn(
@@ -123,9 +180,16 @@ async def external_cli_spawn(
             break
 
     if cli_cfg is not None:
+        cwd, add_dirs = _resolve_external_paths(
+            spec,
+            ctx,
+            configured_cwd=cli_cfg.cwd,
+            team_name=team_name,
+        )
         runtime = await build_cli_runtime(
             ctx,
-            cwd=cli_cfg.cwd,
+            cwd=cwd,
+            add_dirs=add_dirs,
             command_override=tuple(cli_cfg.command) if cli_cfg.command else None,
             inject_mcp=cli_cfg.inject_mcp,
             mcp_server_command=tuple(cli_cfg.mcp_server_command),
@@ -135,8 +199,16 @@ async def external_cli_spawn(
             resume_external_backend=resume_external_backend,
         )
     else:
+        cwd, add_dirs = _resolve_external_paths(
+            spec,
+            ctx,
+            configured_cwd=None,
+            team_name=team_name,
+        )
         runtime = await build_cli_runtime(
             ctx,
+            cwd=cwd,
+            add_dirs=add_dirs,
             system_prompt=system_prompt,
             resume_external_backend=resume_external_backend,
         )
