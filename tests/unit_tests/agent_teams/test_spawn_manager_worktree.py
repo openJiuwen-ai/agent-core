@@ -117,6 +117,7 @@ def _member(**overrides) -> SimpleNamespace:
         "role": TeamRole.TEAMMATE.value,
         "status": MemberStatus.READY.value,
         "desc": "developer",
+        "prompt": None,
         "options": None,
     }
     data.update(overrides)

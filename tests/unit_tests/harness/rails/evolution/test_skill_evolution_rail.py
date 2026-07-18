@@ -2627,40 +2627,147 @@ def test_tracker_session_helpers_with_none_session(tmp_path):
 
 
 # =============================================================================
-# Fix #2: Presented records carry per-presentation snippet
+# Async evaluation snippet (rebuilt at after_invoke from full conversation)
 # =============================================================================
 
 
+def test_build_evaluation_snippet_anchors_after_skill_load(tmp_path):
+    """Snippet starts at last SKILL.md load and includes subsequent assistant/tool turns."""
+    messages = [
+        {"role": "user", "content": "before load"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": "skill_tool",
+                    "arguments": '{"skill_name":"my_skill","relative_file_path":"SKILL"}',
+                }
+            ],
+        },
+        {"role": "tool", "name": "skill_tool", "content": "SKILL body for my_skill"},
+        {"role": "assistant", "content": "after load reply"},
+    ]
+    snippet = SkillEvolutionRail._build_evaluation_snippet(messages, "my_skill")
+    assert "after load reply" in snippet
+    assert "before load" not in snippet
+
+
+def test_find_skill_load_anchor_uses_assistant_tool_call_not_substring_tool_content():
+    """tool/function responses must not set anchor via skill_name substring match."""
+    messages = [
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": "skill_tool",
+                    "arguments": '{"skill_name":"test","relative_file_path":"SKILL"}',
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "skill_tool",
+            "content": "latest testing results (no exact skill_name field here)",
+        },
+        {"role": "assistant", "content": "done"},
+    ]
+    anchor = SkillEvolutionRail._find_skill_load_anchor(messages, "test")
+    assert anchor == 1
+
+
+def test_find_skill_load_anchor_not_overwritten_by_later_substring_false_positive():
+    """A later tool response containing skill_name as substring must not move the anchor."""
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": "skill_tool",
+                    "arguments": '{"skill_name":"test","relative_file_path":"SKILL"}',
+                }
+            ],
+        },
+        {"role": "tool", "name": "skill_tool", "content": "SKILL body"},
+        {"role": "assistant", "content": "correct post-load context"},
+        {
+            "role": "tool",
+            "name": "skill_tool",
+            "content": "contest leaderboard update",
+        },
+    ]
+    anchor = SkillEvolutionRail._find_skill_load_anchor(messages, "test")
+    assert anchor == 0
+    snippet = SkillEvolutionRail._build_evaluation_snippet(messages, "test")
+    assert "correct post-load context" in snippet
+    assert snippet.index("correct post-load context") < snippet.index("contest")
+
+
+def test_find_skill_load_anchor_read_file_path(tmp_path):
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": "read_file",
+                    "arguments": '{"file_path":"/workspace/skills/invoice-parser/SKILL.md"}',
+                }
+            ],
+        },
+        {"role": "tool", "name": "read_file", "content": "# Invoice parser"},
+    ]
+    anchor = SkillEvolutionRail._find_skill_load_anchor(messages, "invoice-parser")
+    assert anchor == 0
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["read_all", "file_upload", "bread_crumb", "profile_reader"],
+)
+def test_find_skill_load_anchor_rejects_non_file_read_tools(tool_name):
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": tool_name,
+                    "arguments": '{"file_path":"/skills/my-skill/SKILL.md"}',
+                }
+            ],
+        },
+    ]
+    assert SkillEvolutionRail._find_skill_load_anchor(messages, "my-skill") == -1
+
+
 def test_tracker_session_presented_records_store_snippet(tmp_path):
-    """Each entry stored in session must include the presentation-time snippet."""
+    """Session entries may carry placeholder snippets; evaluation rebuilds from messages."""
     rail = _make_rail(tmp_path)
     telemetry = rail._experience_tracker
     session = SimpleNamespace()
 
     record = _make_record("sk")
-    telemetry.set_session_presented_records(session, [("sk", record, "my_snippet")])
+    telemetry.set_session_presented_records(session, [("sk", record, "")])
 
     entries = telemetry.get_session_presented_records(session)
     assert len(entries) == 1
     skill_name, stored_record, snippet = entries[0]
     assert skill_name == "sk"
     assert stored_record is record
-    assert snippet == "my_snippet"
+    assert snippet == ""
 
 
 @pytest.mark.asyncio
-async def test_tracker_evaluation_uses_per_record_snippet(tmp_path):
-    """Scorer must be called with the snippet bound to each record, not current messages."""
+async def test_tracker_evaluation_builds_snippet_from_messages(tmp_path):
+    """Scorer must use snippet rebuilt from messages, not session placeholders."""
     rail = _make_rail(tmp_path)
     telemetry = rail._experience_tracker
 
     record_a = _make_record("skill_a")
     record_b = _make_record("skill_b")
 
-    # Two records from different conversations with different snippets
     presented_entries = [
-        ("skill_a", record_a, "snippet_from_turn_1"),
-        ("skill_b", record_b, "snippet_from_turn_2"),
+        ("skill_a", record_a, ""),
+        ("skill_b", record_b, "stale_snippet_should_be_ignored"),
     ]
 
     captured_snippets: list[str] = []
@@ -2677,11 +2784,32 @@ async def test_tracker_evaluation_uses_per_record_snippet(tmp_path):
         eval_interval=rail._eval_interval,
     )
 
-    await telemetry.evaluate_presented(presented_entries)
+    messages = [
+        {"role": "user", "content": "unrelated preamble"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": "skill_tool",
+                    "arguments": '{"skill_name":"skill_a","relative_file_path":"SKILL"}',
+                }
+            ],
+        },
+        {"role": "tool", "name": "skill_tool", "content": "SKILL body skill_a"},
+        {"role": "assistant", "content": "post-present skill_a behavior"},
+    ]
 
-    # Must have evaluated with the stored snippets, not the current messages
-    assert "snippet_from_turn_1" in captured_snippets
-    assert "snippet_from_turn_2" in captured_snippets
+    await telemetry.evaluate_presented(
+        presented_entries,
+        messages=messages,
+        build_snippet=SkillEvolutionRail._build_evaluation_snippet,
+    )
+
+    assert len(captured_snippets) == 2
+    assert not any("stale_snippet" in s for s in captured_snippets)
+    skill_a_snippet = captured_snippets[0]
+    assert "post-present skill_a behavior" in skill_a_snippet
+    assert "unrelated preamble" not in skill_a_snippet
 
 
 @pytest.mark.asyncio
@@ -2713,10 +2841,11 @@ async def test_run_evolution_evaluates_presented_entries_from_snapshot(tmp_path)
     rail = _make_rail(tmp_path)
     record = _make_record("skill-a")
     presented_entries = [("skill-a", record, "snippet")]
-    rail._experience_tracker.evaluate_presented = AsyncMock()
+    rail._evaluate_presented_entries = AsyncMock()
     rail._evolution_store.list_skill_names = Mock(return_value=[])
     rail._infer_primary_skill = Mock(return_value=None)
 
+    messages = [{"role": "user", "content": "hello"}]
     detector = Mock()
     detector.bind_llm.return_value = detector
     detector.detect_trajectory_signals = Mock(return_value=[])
@@ -2726,12 +2855,12 @@ async def test_run_evolution_evaluates_presented_entries_from_snapshot(tmp_path)
             None,
             snapshot={
                 "trajectory": None,
-                "messages": [{"role": "user", "content": "hello"}],
+                "messages": messages,
                 "presented_entries": presented_entries,
             },
         )
 
-    rail._experience_tracker.evaluate_presented.assert_awaited_once_with(presented_entries)
+    rail._evaluate_presented_entries.assert_awaited_once_with(presented_entries, messages)
 
 
 # =============================================================================
@@ -2887,7 +3016,7 @@ async def test_after_tool_call_records_skill_tool_evolution_detail_read(tmp_path
     rail._experience_tracker.record_presented_records.assert_awaited_once_with(
         session=session,
         skill_name="my_skill",
-        presentation_snippet="# Troubleshooting\n\n### [ev_body] Fix the parser\nDetails",
+        presentation_snippet="",
         record_ids=["ev_body"],
     )
 
@@ -2914,7 +3043,7 @@ async def test_after_tool_call_records_read_file_evolution_detail_read(tmp_path)
     rail._experience_tracker.record_presented_records.assert_awaited_once_with(
         session=session,
         skill_name="my_skill",
-        presentation_snippet="     7\t### [ev_body] Fix the parser\n     8\tDetails",
+        presentation_snippet="",
         record_ids=["ev_body"],
     )
 

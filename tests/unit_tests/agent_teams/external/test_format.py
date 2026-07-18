@@ -67,10 +67,14 @@ def _task(
 @pytest.mark.level0
 def test_render_message_direct(lang_en):
     out = render_message(_message("m1", "leader", "hello", broadcast=False), now_ms=_NOW_MS)
-    assert "m1" in out
-    assert "leader" in out
+    # Rendered as <team-inbound> XML, mirroring the in-process dispatcher.
+    assert out.startswith("<team-inbound ")
+    assert 'message_id="m1"' in out
+    assert 'from="leader"' in out
+    assert 'type="direct"' in out
     assert "hello" in out
-    assert "direct message" in out
+    # A non-human member gets a reply-hint note.
+    assert '<team-note kind="reply-hint">' in out
     # Send time is rendered as absolute + relative diff.
     assert "3m ago" in out
 
@@ -78,7 +82,21 @@ def test_render_message_direct(lang_en):
 @pytest.mark.level0
 def test_render_message_broadcast(lang_en):
     out = render_message(_message("m2", "leader", "all hands", broadcast=True), now_ms=_NOW_MS)
-    assert "broadcast" in out
+    assert 'type="broadcast"' in out
+
+
+@pytest.mark.level0
+def test_render_message_human_agent_is_controller_notification(lang_en):
+    out = render_message(
+        _message("m3", "leader", "please review", broadcast=False),
+        is_human_agent=True,
+        now_ms=_NOW_MS,
+    )
+    # A human-agent avatar sees the message as a controller notification with
+    # the load-bearing hitt-silence constraint, not a reply-hint.
+    assert 'for="controller"' in out
+    assert '<team-note kind="hitt-silence">' in out
+    assert '<team-note kind="reply-hint">' not in out
 
 
 @pytest.mark.level0
@@ -117,6 +135,16 @@ def test_render_task_board_filters_terminal_and_marks_assignment(lang_en):
     assert "t2" not in out
     assert "t4" not in out
     assert "→ dev-1" in out
+
+
+@pytest.mark.level0
+def test_render_task_board_wraps_in_team_event(lang_en):
+    out = render_task_board([_task("t1", "pending", None)], is_leader=True, now_ms=_NOW_MS)
+    # The board is a single <team-event kind="task-board"> block, matching the
+    # in-process TaskBoardHandler.
+    assert out.startswith('<team-event kind="task-board">')
+    assert out.rstrip().endswith("</team-event>")
+    assert "t1" in out
 
 
 @pytest.mark.level0

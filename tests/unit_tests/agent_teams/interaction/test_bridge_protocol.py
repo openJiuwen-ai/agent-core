@@ -62,11 +62,11 @@ class _ConformingAdapter:
         *,
         member_name: str,
         adapter_config: dict[str, object],
-        bridge_persona: str,
+        prompt: str,
         team_overview: str,
     ) -> None:
         """Open transport."""
-        del member_name, adapter_config, bridge_persona, team_overview
+        del member_name, adapter_config, prompt, team_overview
 
     async def relay(self, *, member_name: str, text: str) -> str:
         """One text turn out, one text turn back."""
@@ -85,11 +85,11 @@ class _MissingRelayAdapter:
         *,
         member_name: str,
         adapter_config: dict[str, object],
-        bridge_persona: str,
+        prompt: str,
         team_overview: str,
     ) -> None:
         """Open transport."""
-        del member_name, adapter_config, bridge_persona, team_overview
+        del member_name, adapter_config, prompt, team_overview
 
     async def close(self) -> None:
         """Idempotent teardown."""

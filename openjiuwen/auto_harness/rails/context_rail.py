@@ -18,13 +18,12 @@ from openjiuwen.harness.rails.context_engineer.context_processor_rail import (
 )
 
 
-class AutoHarnessContextRail(
-    ContextProcessorRail
-):
+class AutoHarnessContextRail(ContextProcessorRail):
     """Context processor rail without workspace/context prompt injection."""
 
     async def before_model_call(
-        self, ctx: AgentCallbackContext,
+        self,
+        ctx: AgentCallbackContext,
     ) -> None:
         """Do not inject workspace/tools/context prompt sections."""
         return

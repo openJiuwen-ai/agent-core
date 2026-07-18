@@ -12,6 +12,7 @@ only narrates mid-run milestones (started / phase).
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any
 from unittest.mock import patch
 
@@ -193,9 +194,10 @@ def test_swarmflow_launched_message_distinguishes_run_id_from_task_id():
     tool = _tool(_FakeHarness())
     run_id = "wf_abc123def456"
     task_id = "wxyz1234"
-    mapped = tool.format_launched_message(run_id=run_id, task_id=task_id)
+    mapped = tool.format_launched_message(run_id=run_id, task_id=task_id, script_path="/tmp/flow.py")
     assert run_id in mapped
     assert task_id in mapped
+    assert "/tmp/flow.py" in mapped
     assert run_id != task_id
 
 
@@ -248,17 +250,27 @@ def test_swarmflow_tool_rejects_unsupported_sources():
         assert "not supported yet" in (out.error or ""), (src, out.error)
 
 
-def test_swarmflow_tool_launches_inline_script():
-    """Inline ``script`` source is wired: it launches like ``script_path``."""
-    harness = _FakeHarness()
-    tool = _tool(harness)
-    out = asyncio.run(tool.invoke({"script": "META = {'name': 'x'}\nasync def run(args):\n    return 1\n"}))
-    assert out.success is True
-    assert out.data["status"] == "launched"
-    assert out.data["run_id"].startswith("wf_")
-    assert len(harness.launched) == 1
-    # launched description marks the inline source (no path yet at launch time)
-    assert harness.launched[0][2] == "swarmflow: <inline script>"
+def test_swarmflow_tool_launches_inline_script(tmp_path):
+    """Inline ``script`` is materialised at invoke; the receipt reports its path."""
+    from openjiuwen.agent_teams import paths
+
+    paths.configure_openjiuwen_home(tmp_path)
+    try:
+        harness = _FakeHarness()
+        tool = _tool(harness)
+        out = asyncio.run(tool.invoke({"script": "META = {'name': 'x'}\nasync def run(args):\n    return 1\n"}))
+        assert out.success is True
+        assert out.data["status"] == "launched"
+        assert out.data["run_id"].startswith("wf_")
+        # inline source is written to disk; the receipt carries the absolute path
+        script_path = out.data["script_path"]
+        assert script_path.endswith(os.path.join("workflows", "x", "script.py"))
+        assert os.path.isfile(script_path)
+        assert len(harness.launched) == 1
+        assert harness.launched[0][2] == f"swarmflow: {script_path}"
+        assert script_path in tool.map_result(out)
+    finally:
+        paths.reset_openjiuwen_home()
 
 
 def test_swarmflow_tool_refuses_when_concurrent_cap_reached():
@@ -369,7 +381,7 @@ def test_swarmflow_leader_messages_use_i18n_per_language():
     ):
         set_language(lang)
         tool = _tool(_FakeHarness(), language=lang)
-        launched = tool.format_launched_message(run_id=run_id, task_id=task_id)
+        launched = tool.format_launched_message(run_id=run_id, task_id=task_id, script_path="/tmp/flow.py")
         assert run_id in launched and task_id in launched
 
         completed = tool.format_completed_injection("2 phases, 3 agents", run_id=run_id)

@@ -47,6 +47,38 @@ class MemberStatus(str, Enum):
     ERROR = "error"
 
 
+# There are two thresholds on a member's way out, and they are deliberately
+# NOT the same one. Conflating them is how a departing member ends up either
+# stranding its work or never being told it was removed.
+#
+# MEMBER_DEPARTED_STATUSES — the leader has released the member: shutdown is
+# requested, or the member is already gone. Guards that protect a member's
+# in-flight work lift here, at the *request*, not at the terminal state. The
+# HITT task lock (``UpdateTaskTool``) is the one that matters: an avatar wedged
+# mid-round may never reach SHUTDOWN, so waiting for the terminal state would
+# strand the task it holds forever — nobody left to finish it, and the leader
+# forbidden from touching it.
+#
+# MEMBER_UNREACHABLE_STATUSES — the member is actually gone. Message delivery
+# stops only here, NOT at the request: ``TeamBackend.shutdown_member`` writes
+# SHUTDOWN_REQUESTED *before* it sends the shutdown notice, so a member that is
+# merely on its way out must still be delivered to. Cut delivery at the request
+# and the one message that never arrives is the notice saying it was removed —
+# for a human member, that notice is what its controller reads.
+#
+# PAUSED / STOPPED / ERROR / RESTARTING are in neither set: those members still
+# belong to the team and are expected back, so both the work guards and the
+# delivery path keep treating them as ordinary members.
+MEMBER_DEPARTED_STATUSES: frozenset[MemberStatus] = frozenset(
+    {
+        MemberStatus.SHUTDOWN_REQUESTED,
+        MemberStatus.SHUTDOWN,
+    }
+)
+
+MEMBER_UNREACHABLE_STATUSES: frozenset[MemberStatus] = frozenset({MemberStatus.SHUTDOWN})
+
+
 # State transition table for MemberStatus
 MEMBER_TRANSITIONS: Dict[MemberStatus, List[MemberStatus]] = {
     MemberStatus.UNSTARTED: [
@@ -209,45 +241,78 @@ EXECUTION_TRANSITIONS: Dict[ExecutionStatus, List[ExecutionStatus]] = {
 
 
 class TaskStatus(Enum):
-    """Task status enum for team tasks
+    """Task status enum for team tasks.
+
+    States name a *condition* the task rests in ("the task IS ___"); the
+    events that move between them (claim / start / submit / approve / verify)
+    are transitions, not states. The two optional gates — ``PLANNING``
+    (before execution) and ``IN_REVIEW`` (after execution) — are structurally
+    identical mirrors: a member submits an artifact, an actor decides, pass
+    advances and fail loops back.
+
+    Both dispatch modes converge on the same execution condition: a teammate
+    self-``claim`` (autonomous) and the scheduler ``start`` (scheduled) are
+    two transitions into the *same* ``IN_PROGRESS`` state — the mode
+    difference belongs to the transition, not the state. "Assigned but not yet
+    started" (scheduled) stays representable as ``PENDING`` with an assignee.
 
     States:
-        PENDING: Task is waiting to be claimed
-        CLAIMED: Task has been claimed by a member
-        PLAN_APPROVED: Task plan has been approved (only for PLAN_MODE members)
-        COMPLETED: Task has been completed
-        CANCELLED: Task was cancelled
-        BLOCKED: Task is blocked due to dependencies
+        PENDING: To do — waiting to be claimed (autonomous) or assigned-but-
+            not-yet-started (scheduled, when it carries an assignee).
+        BLOCKED: Dependencies unmet.
+        PLANNING: Plan gate — the member is preparing a plan and awaiting
+            leader approval (optional, PLAN_MODE only).
+        IN_PROGRESS: Executing. Unifies the former CLAIMED / STARTED /
+            PLAN_APPROVED execution nodes.
+        IN_REVIEW: Verify gate — the member submitted results and a reviewer
+            is verifying them (optional, present when the task has reviewers).
+        COMPLETED: Terminal — verified / accepted.
+        CANCELLED: Terminal.
     """
     PENDING = "pending"
-    CLAIMED = "claimed"
-    PLAN_APPROVED = "plan_approved"
+    BLOCKED = "blocked"
+    PLANNING = "planning"
+    IN_PROGRESS = "in_progress"
+    IN_REVIEW = "in_review"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
-    BLOCKED = "blocked"
 
 
-# State transition table for TaskStatus
+# State transition table for TaskStatus. A single superset covering both
+# dispatch modes and both optional gates. Which path a task walks is decided by
+# which method acts on it (claim/start into IN_PROGRESS, submit_plan into
+# PLANNING, member_complete into IN_REVIEW/COMPLETED), not by branching on
+# dispatch mode. ``PLANNING`` and ``IN_REVIEW`` are the two mirror gates, each
+# with a self / back-edge for its rework loop.
 TASK_TRANSITIONS: Dict[TaskStatus, List[TaskStatus]] = {
     TaskStatus.PENDING: [
-        TaskStatus.CLAIMED,
+        TaskStatus.PLANNING,      # plan_mode: reserve for planning
+        TaskStatus.IN_PROGRESS,   # claim (autonomous) / start (scheduled)
         TaskStatus.BLOCKED,
-        TaskStatus.CANCELLED,
-    ],
-    TaskStatus.CLAIMED: [
-        TaskStatus.PLAN_APPROVED,
-        TaskStatus.COMPLETED,
-        TaskStatus.CANCELLED,
-        TaskStatus.BLOCKED,
-        TaskStatus.PENDING,
-    ],
-    TaskStatus.PLAN_APPROVED: [
-        TaskStatus.COMPLETED,
-        TaskStatus.PENDING,
         TaskStatus.CANCELLED,
     ],
     TaskStatus.BLOCKED: [
         TaskStatus.PENDING,
+        TaskStatus.CANCELLED,
+    ],
+    TaskStatus.PLANNING: [
+        TaskStatus.PLANNING,      # submit / reject rework loop
+        TaskStatus.IN_PROGRESS,   # approve_plan
+        TaskStatus.PENDING,       # reset
+        TaskStatus.BLOCKED,
+        TaskStatus.CANCELLED,
+    ],
+    TaskStatus.IN_PROGRESS: [
+        TaskStatus.IN_REVIEW,     # member_complete_task (has reviewer)
+        TaskStatus.COMPLETED,     # member_complete_task (no reviewer)
+        TaskStatus.PENDING,       # reset
+        TaskStatus.BLOCKED,
+        TaskStatus.CANCELLED,
+    ],
+    TaskStatus.IN_REVIEW: [
+        TaskStatus.COMPLETED,     # verify pass
+        TaskStatus.IN_PROGRESS,   # verify fail — rework loop
+        TaskStatus.PENDING,       # reset
         TaskStatus.CANCELLED,
     ],
     TaskStatus.COMPLETED: [],

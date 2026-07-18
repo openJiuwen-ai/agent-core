@@ -5,7 +5,7 @@
 
 Covers:
 - Capability ceiling enforcement (``enable_bridge``).
-- ``spawn_bridge_agent`` happy path + persona requirement.
+- ``spawn_bridge_agent`` happy path + prompt requirement.
 - ``_bridge_member_specs`` indexing from predefined + dynamic spawn.
 - ``set_bridge_adapter`` / ``get_bridge_adapter`` registration surface.
 - ``bridge_enabled`` / ``is_bridge_agent`` / ``bridge_agent_names``
@@ -122,7 +122,7 @@ async def test_predefined_bridge_indexed_at_init(db, messager):
     spec = BridgeMemberSpec(
         member_name="codex",
         display_name="Codex",
-        persona="reviewer",
+        desc="reviewer",
         protocol="codex",
     )
     backend = _make_backend(db=db, messager=messager, predefined_members=[spec])
@@ -145,7 +145,7 @@ async def test_spawn_bridge_agent_fails_when_disabled(db, messager):
     result = await backend.spawn_bridge_agent(
         member_name="codex",
         display_name="Codex",
-        persona="reviewer",
+        prompt="reviewer",
     )
     assert result.ok is False
     assert "disabled" in result.reason
@@ -153,15 +153,15 @@ async def test_spawn_bridge_agent_fails_when_disabled(db, messager):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_spawn_bridge_agent_requires_persona(db, messager):
+async def test_spawn_bridge_agent_requires_prompt(db, messager):
     backend = _make_backend(db=db, messager=messager)
     result = await backend.spawn_bridge_agent(
         member_name="codex",
         display_name="Codex",
-        persona="",
+        prompt="",
     )
     assert result.ok is False
-    assert "persona" in result.reason
+    assert "prompt" in result.reason
 
 
 @pytest.mark.asyncio
@@ -172,7 +172,7 @@ async def test_spawn_bridge_agent_registers_index_and_db(db, messager):
     result = await backend.spawn_bridge_agent(
         member_name="codex",
         display_name="Codex",
-        persona="senior python reviewer",
+        prompt="senior python reviewer",
         mailbox_inject_mode=BridgeMailboxInjectMode.REPHRASE,
         protocol="codex",
         adapter_config={"endpoint": "stdio://codex"},
@@ -197,13 +197,13 @@ async def test_spawn_bridge_agent_duplicate_fails(db, messager):
     r1 = await backend.spawn_bridge_agent(
         member_name="codex",
         display_name="Codex",
-        persona="r",
+        prompt="r",
     )
     assert r1.ok
     r2 = await backend.spawn_bridge_agent(
         member_name="codex",
         display_name="Codex Again",
-        persona="r2",
+        prompt="r2",
     )
     assert r2.ok is False
     assert "already exists" in r2.reason
@@ -222,11 +222,11 @@ class _StubAdapter:
         *,
         member_name: str,
         adapter_config: dict[str, object],
-        bridge_persona: str,
+        prompt: str,
         team_overview: str,
     ) -> None:
         """Open transport."""
-        del member_name, adapter_config, bridge_persona, team_overview
+        del member_name, adapter_config, prompt, team_overview
 
     async def relay(self, *, member_name: str, text: str) -> str:
         """Return canned reply."""
@@ -253,7 +253,7 @@ async def test_set_bridge_adapter_round_trip(db, messager):
     await backend.spawn_bridge_agent(
         member_name="codex",
         display_name="Codex",
-        persona="r",
+        prompt="r",
     )
     assert backend.get_bridge_adapter("codex") is None
     adapter = _StubAdapter()
@@ -273,7 +273,7 @@ async def test_set_bridge_adapter_none_clears(db, messager):
     await backend.spawn_bridge_agent(
         member_name="codex",
         display_name="Codex",
-        persona="r",
+        prompt="r",
     )
     backend.set_bridge_adapter("codex", _StubAdapter())
     backend.set_bridge_adapter("codex", None)
@@ -291,7 +291,7 @@ async def test_build_team_with_predefined_bridge_persists(db, messager):
     spec = BridgeMemberSpec(
         member_name="codex",
         display_name="Codex",
-        persona="r",
+        desc="r",
         protocol="codex",
     )
     backend = _make_backend(db=db, messager=messager, predefined_members=[spec])
@@ -314,7 +314,7 @@ async def test_build_team_skips_predefined_bridge_when_disabled(db, messager):
     spec = BridgeMemberSpec(
         member_name="codex",
         display_name="Codex",
-        persona="r",
+        desc="r",
     )
     backend = _make_backend(db=db, messager=messager, predefined_members=[spec])
     await backend.build_team(

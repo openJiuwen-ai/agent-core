@@ -8,7 +8,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TypeVar
+from typing import NamedTuple, TypeVar
 
 from sqlalchemy import event, inspect
 from sqlalchemy.exc import OperationalError
@@ -28,6 +28,7 @@ from openjiuwen.agent_teams.tools.models import (
     TEAM_STATIC_TABLES_TO_CLEAR,
     _get_message_model,
     _get_message_read_status_model,
+    _get_review_vote_model,
     _get_task_dependency_model,
     _get_task_model,
     _sanitize_session_id_for_table,
@@ -50,31 +51,65 @@ _T = TypeVar("_T")
 _DB_RETRY_ATTEMPTS = 3
 _DB_RETRY_BASE_DELAY = 0.5
 
+# Watchdog for one DbSessions block (connection checkout + every statement
+# inside the ``async with``). The pool guards checkout with its own
+# ``pool_timeout``, but a statement submitted to a wedged driver thread
+# awaits its result with no timeout at all — a hang there is invisible and
+# permanent. Team DB transactions are small (single-row reads / batched
+# mailbox flushes), so 30s is far beyond any legitimate block; hitting it
+# means the driver is stuck, and a loud TimeoutError beats an eternal hang.
+_DB_SESSION_WATCHDOG_SECONDS = 30.0
+
 
 class DbSessions:
     """Read/write session provider with process-wide write serialisation.
 
-    SQLite permits a single writer at a time (a database-level lock). In
-    the in-process team runtime every member shares one engine and one
-    connection pool, so a process-wide ``asyncio.Lock`` funnels all writes
-    through one logical writer slot. Writers therefore never contend on the
-    SQLite lock — no busy-timeout back-off pinning a checked-out connection
-    — and the remaining pool connections stay free for concurrent WAL
-    reads. This mirrors SQLite's own concurrency model (serialised writes +
-    concurrent readers) instead of fighting it with a pool of would-be
-    parallel writers.
+    SQLite permits a single writer at a time (a database-level lock), so a
+    process-wide ``asyncio.Lock`` funnels every write through one logical
+    writer slot — writers never contend on the SQLite lock. For file-backed
+    SQLite the reads and writes run on *separate* engines (a dedicated
+    single-writer pool + a larger reader pool), so a slow write never starves
+    reader-connection availability. For ``:memory:`` and PostgreSQL / MySQL the
+    two factories are the same object (no split), and ``read()`` / ``write()``
+    still differ only by whether the write lock is held.
     """
 
-    def __init__(self, session_local: async_sessionmaker) -> None:
-        """Bind the shared session factory and create the write lock."""
-        self._session_local = session_local
+    def __init__(
+        self,
+        write_session_local: async_sessionmaker,
+        read_session_local: async_sessionmaker | None = None,
+    ) -> None:
+        """Bind the write / read session factories and create the write lock.
+
+        Args:
+            write_session_local: Session factory bound to the writer engine.
+            read_session_local: Session factory bound to the reader engine.
+                Defaults to ``write_session_local`` when no split exists
+                (``:memory:`` / PostgreSQL / MySQL).
+        """
+        self._write_session_local = write_session_local
+        self._read_session_local = read_session_local or write_session_local
         self._write_lock = asyncio.Lock()
 
     @asynccontextmanager
     async def read(self) -> AsyncIterator[AsyncSession]:
-        """Yield a session for read-only work; the write lock is not held."""
-        async with self._session_local() as session:
-            yield session
+        """Yield a session for read-only work; the write lock is not held.
+
+        The whole block runs under ``_DB_SESSION_WATCHDOG_SECONDS`` so a
+        wedged driver surfaces as a loud ``TimeoutError`` instead of hanging
+        the caller forever.
+        """
+        try:
+            async with asyncio.timeout(_DB_SESSION_WATCHDOG_SECONDS):
+                async with self._read_session_local() as session:
+                    yield session
+        except TimeoutError:
+            team_logger.warning(
+                "DbSessions.read() exceeded the %.0fs watchdog; "
+                "the DB driver may be wedged",
+                _DB_SESSION_WATCHDOG_SECONDS,
+            )
+            raise
 
     @asynccontextmanager
     async def write(self) -> AsyncIterator[AsyncSession]:
@@ -84,10 +119,23 @@ class DbSessions:
         ``write()`` or it will deadlock. Compose multi-step writes inside a
         single ``write()`` block, and keep the lock on the outermost public
         method when one write helper delegates to another.
+
+        The session block (not the lock wait — writers legitimately queue
+        behind each other) runs under ``_DB_SESSION_WATCHDOG_SECONDS`` so a
+        wedged driver surfaces as a loud ``TimeoutError``.
         """
         async with self._write_lock:
-            async with self._session_local() as session:
-                yield session
+            try:
+                async with asyncio.timeout(_DB_SESSION_WATCHDOG_SECONDS):
+                    async with self._write_session_local() as session:
+                        yield session
+            except TimeoutError:
+                team_logger.warning(
+                    "DbSessions.write() exceeded the %.0fs watchdog; "
+                    "the DB driver may be wedged",
+                    _DB_SESSION_WATCHDOG_SECONDS,
+                )
+                raise
 
 
 async def retry_on_locked(
@@ -163,9 +211,8 @@ def _ensure_team_member_role_column(sync_conn) -> None:
         return
 
     # Hard-coded "teammate" to keep this module free of the
-    # ``schema.team`` import (which would close a circular dependency
-    # back through ``tools.memory_database``). Keep in sync with
-    # ``TeamRole.TEAMMATE`` if that enum value ever changes.
+    # ``schema.team`` import (which would close a circular dependency).
+    # Keep in sync with ``TeamRole.TEAMMATE`` if that enum value ever changes.
     default_role = "teammate"
     sync_conn.exec_driver_sql(f"ALTER TABLE team_member ADD COLUMN role TEXT NOT NULL DEFAULT '{default_role}'")
     team_logger.info(
@@ -208,6 +255,29 @@ def _ensure_team_member_options_column(sync_conn) -> None:
     team_logger.info("Migrated legacy team_member table: dropped model_ref_json column")
 
 
+def _ensure_team_info_capability_columns(sync_conn) -> None:
+    """Backfill the F_62 capability columns on pre-existing ``team_info`` tables.
+
+    ``dispatch_mode`` / ``enable_task_verification`` store the per-instance
+    effective values chosen at ``build_team`` time. Legacy rows default to
+    the pre-F_62 behavior (autonomous, no verification expectation).
+    """
+    inspector = inspect(sync_conn)
+    if "team_info" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("team_info")}
+    if "dispatch_mode" not in columns:
+        sync_conn.exec_driver_sql(
+            "ALTER TABLE team_info ADD COLUMN dispatch_mode TEXT NOT NULL DEFAULT 'autonomous'"
+        )
+        team_logger.info("Migrated legacy team_info table: added dispatch_mode column")
+    if "enable_task_verification" not in columns:
+        sync_conn.exec_driver_sql(
+            "ALTER TABLE team_info ADD COLUMN enable_task_verification BOOLEAN NOT NULL DEFAULT 0"
+        )
+        team_logger.info("Migrated legacy team_info table: added enable_task_verification column")
+
+
 def _ensure_message_protocol_column(sync_conn) -> None:
     """Backfill the ``protocol`` column on pre-existing per-session message tables.
 
@@ -233,100 +303,314 @@ def _ensure_message_protocol_column(sync_conn) -> None:
         )
 
 
+def _ensure_message_meta_column(sync_conn) -> None:
+    """Backfill the ``meta`` column on pre-existing per-session message tables.
+
+    Same reason as ``_ensure_message_protocol_column``: ``create_all`` never
+    alters a live table. Legacy rows get NULL meta, which the delivery path
+    reads as "plain message, render content verbatim" — the pre-F_63 behavior.
+    """
+    inspector = inspect(sync_conn)
+    for table_name in inspector.get_table_names():
+        if not table_name.startswith("team_message_"):
+            continue
+        columns = {col["name"] for col in inspector.get_columns(table_name)}
+        if "meta" in columns:
+            continue
+        sync_conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN meta TEXT")
+        team_logger.info("Migrated legacy message table %s: added meta column", table_name)
 
 
-async def initialize_engine(
+def _ensure_dynamic_table_indexes(sync_conn) -> None:
+    """Rebuild per-session dynamic-table indexes to the current scheme (A1/A2/D4).
+
+    ``__table__.create(checkfirst=True)`` never alters an existing table, so a
+    persistent team's tables keep whatever indexes they were born with. Bring
+    them up to the current design:
+      - A1: drop the dead ``team_name`` index on every dynamic table — a
+        per-session table has ~1 distinct team_name, so the index never helps
+        a read and only costs a B-tree write per INSERT.
+      - A2 (message tables): drop the four weak single-column indexes
+        (``to_member_name`` / ``timestamp`` / ``broadcast`` / ``is_read``) and
+        create the two composites the real queries use (``*_inbox`` /
+        ``*_bcast_ts``), kept in sync with ``models._get_message_model``.
+      - D4 (task tables): drop the standalone ``assignee`` index (folded into
+        the composite ``*_assignee_status`` for get_tasks_by_assignee) and the
+        dead ``updated_at`` index (no query filters/orders by it). ``status``
+        keeps its standalone index.
+
+    Every statement is idempotent (``IF EXISTS`` / ``IF NOT EXISTS``), so a
+    table already on the new scheme is a cheap no-op.
+    """
+    inspector = inspect(sync_conn)
+    for table_name in inspector.get_table_names():
+        is_message = table_name.startswith("team_message_")
+        is_dependency = table_name.startswith("team_task_dependency_")
+        is_task = table_name.startswith("team_task_") and not is_dependency
+        if not (is_message or is_dependency or is_task):
+            continue
+
+        index_names = {idx["name"] for idx in inspector.get_indexes(table_name)}
+
+        team_name_index = f"ix_{table_name}_team_name"
+        if team_name_index in index_names:
+            sync_conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{team_name_index}"')
+            team_logger.info("Migrated %s: dropped dead team_name index", table_name)
+
+        if is_task:
+            legacy_task_indexes = [f"ix_{table_name}_assignee", f"ix_{table_name}_updated_at"]
+            assignee_status_index = f"ix_{table_name}_assignee_status"
+            needs_task_migration = (
+                bool(index_names & set(legacy_task_indexes)) or assignee_status_index not in index_names
+            )
+            if needs_task_migration:
+                for legacy in legacy_task_indexes:
+                    sync_conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{legacy}"')
+                sync_conn.exec_driver_sql(
+                    f'CREATE INDEX IF NOT EXISTS "{assignee_status_index}" ON "{table_name}" (assignee, status)'
+                )
+                team_logger.info(
+                    "Migrated task table %s: folded assignee into (assignee, status), dropped dead updated_at index",
+                    table_name,
+                )
+
+            # F_59: add the verify-gate ``reviewer`` column to pre-existing tables.
+            task_columns = {c["name"] for c in inspector.get_columns(table_name)}
+            if "reviewer" not in task_columns:
+                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN reviewer TEXT')
+                team_logger.info("Migrated task table %s: added reviewer column", table_name)
+
+            # F_62: review voting — round counter + per-task round ceiling.
+            if "review_round" not in task_columns:
+                sync_conn.exec_driver_sql(
+                    f'ALTER TABLE "{table_name}" ADD COLUMN review_round INTEGER NOT NULL DEFAULT 0'
+                )
+                team_logger.info("Migrated task table %s: added review_round column", table_name)
+            if "max_review_rounds" not in task_columns:
+                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN max_review_rounds INTEGER')
+                team_logger.info("Migrated task table %s: added max_review_rounds column", table_name)
+
+            # F_59: fold the legacy execution states into the condition-named
+            # IN_PROGRESS. claimed / started / plan_approved were all "a member
+            # is executing it"; map them uniformly. Distinguishing an unapproved
+            # plan-mode claim into PLANNING would need the plan index and is a
+            # best-effort refinement deferred (rare, and the row is still
+            # completable via the normal flow once re-owned).
+            legacy_status_result = sync_conn.exec_driver_sql(
+                f"UPDATE \"{table_name}\" SET status='in_progress' "
+                "WHERE status IN ('claimed', 'started', 'plan_approved')"
+            )
+            migrated_rows = legacy_status_result.rowcount or 0
+            if migrated_rows > 0:
+                team_logger.info(
+                    "Migrated task table %s: folded %d legacy execution-status row(s) into in_progress",
+                    table_name,
+                    migrated_rows,
+                )
+            continue
+
+        if not is_message:
+            continue
+
+        legacy_message_indexes = [
+            f"ix_{table_name}_to_member_name",
+            f"ix_{table_name}_timestamp",
+            f"ix_{table_name}_broadcast",
+            f"ix_{table_name}_is_read",
+        ]
+        inbox_index = f"ix_{table_name}_inbox"
+        bcast_index = f"ix_{table_name}_bcast_ts"
+        needs_migration = bool(index_names & set(legacy_message_indexes)) or inbox_index not in index_names
+        if not needs_migration:
+            continue
+
+        for legacy in legacy_message_indexes:
+            sync_conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{legacy}"')
+        sync_conn.exec_driver_sql(
+            f'CREATE INDEX IF NOT EXISTS "{inbox_index}" ON "{table_name}" (to_member_name, is_read, timestamp)'
+        )
+        sync_conn.exec_driver_sql(
+            f'CREATE INDEX IF NOT EXISTS "{bcast_index}" ON "{table_name}" (broadcast, timestamp)'
+        )
+        team_logger.info("Migrated message table %s: rebuilt to composite indexes", table_name)
+
+
+class SqlEngines(NamedTuple):
+    """Engines + session factories returned by ``initialize_engine``.
+
+    For file-backed SQLite the write and read engines are distinct — a
+    dedicated single-writer pool plus a larger reader pool — so a slow write
+    never starves reader-connection availability. For ``:memory:`` /
+    PostgreSQL / MySQL the read fields alias the write ones (no split).
+    """
+
+    write_engine: AsyncEngine
+    read_engine: AsyncEngine
+    write_session_local: async_sessionmaker
+    read_session_local: async_sessionmaker
+
+
+def _attach_sqlite_pragmas(
+    engine: AsyncEngine,
+    *,
+    in_memory: bool,
+    enable_wal: bool,
+    cache_size_kb: int,
+    mmap_size_bytes: int,
+    wal_autocheckpoint: int,
+) -> None:
+    """Attach the per-connection PRAGMA tuning to a SQLite engine.
+
+    A ``:memory:`` db already lives in RAM, so the page-cache / mmap tuning is
+    skipped there. ``cache_size=-<kb>`` is a KiB page cache (negative form);
+    ``temp_store=MEMORY`` keeps sorts / transient B-trees off disk;
+    ``mmap_size`` maps file bytes for read I/O; ``synchronous=NORMAL`` is the
+    safe high-throughput WAL pairing; ``wal_autocheckpoint`` bounds WAL growth
+    before a commit triggers a checkpoint. ``journal_mode=WAL`` is a persistent
+    database-level setting applied once on first connect.
+    """
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_pragmas(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        if not in_memory:
+            cursor.execute("PRAGMA temp_store=MEMORY")
+            cursor.execute(f"PRAGMA cache_size=-{cache_size_kb}")
+            cursor.execute(f"PRAGMA mmap_size={mmap_size_bytes}")
+            if enable_wal:
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute(f"PRAGMA wal_autocheckpoint={wal_autocheckpoint}")
+        cursor.close()
+
+    if enable_wal and not in_memory:
+
+        @event.listens_for(engine.sync_engine, "first_connect")
+        def _set_wal(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.close()
+
+
+def _build_file_sqlite_engine(
+    conn_str: str,
     config: DatabaseConfig,
-) -> tuple[AsyncEngine, async_sessionmaker]:
-    """Create and configure the async engine and session factory.
+    *,
+    pool_size: int,
+    cache_size_kb: int,
+    wal_autocheckpoint: int,
+) -> AsyncEngine:
+    """Build one file-backed SQLite engine with pool + PRAGMA tuning.
+
+    Used to build both the single-writer engine and the reader engine over the
+    same file. ``max_overflow=0`` keeps checkout timeouts surfacing real
+    session leaks instead of masking them; ``pool_pre_ping`` is dropped because
+    a local SQLite file connection does not silently die like a network socket.
+    ``wal_autocheckpoint`` is passed explicitly (not read from config) so the
+    writer engine can disable in-commit checkpointing (0) when a background
+    checkpointer is running while the reader keeps the configured value.
+    """
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{conn_str}",
+        echo=False,
+        future=True,
+        poolclass=AsyncAdaptedQueuePool,
+        pool_size=pool_size,
+        max_overflow=0,
+        pool_timeout=10,
+        connect_args={
+            "timeout": config.db_timeout,
+            "check_same_thread": False,
+        },
+    )
+    _attach_sqlite_pragmas(
+        engine,
+        in_memory=False,
+        enable_wal=config.db_enable_wal,
+        cache_size_kb=cache_size_kb,
+        mmap_size_bytes=config.mmap_size_mb * 1024 * 1024,
+        wal_autocheckpoint=wal_autocheckpoint,
+    )
+    return engine
+
+
+async def run_wal_checkpoint_passive(engine: AsyncEngine) -> None:
+    """Run one PASSIVE WAL checkpoint on a dedicated connection.
+
+    ``wal_checkpoint(PASSIVE)`` never waits on readers or the writer — it moves
+    whatever committed WAL frames it can into the main database file and
+    returns — so it is safe to run off the app write lock on a separate
+    connection. The background checkpointer calls this to keep WAL growth (and
+    thus the in-commit checkpoint stalls it would otherwise cause) off the
+    writer's commit path.
+    """
+    async with engine.connect() as conn:
+        await conn.exec_driver_sql("PRAGMA wal_checkpoint(PASSIVE)")
+
+
+async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
+    """Create and configure the async engine(s) and session factories.
+
+    File-backed SQLite gets a read/write split: writes are serialised by the
+    app-level lock onto a small single-writer pool, and reads run on a separate,
+    larger reader pool so a slow write never starves reader-connection
+    availability. ``:memory:`` (one shared StaticPool connection) and
+    PostgreSQL / MySQL use a single engine for both.
 
     Args:
         config: Database configuration.
 
     Returns:
-        Tuple of (engine, session_factory).
+        A ``SqlEngines`` bundle. ``read_engine`` / ``read_session_local`` alias
+        the write fields when there is no split.
     """
     db_type = config.db_type
-    engine: AsyncEngine
 
     if db_type == DatabaseType.SQLITE:
         conn_str = config.connection_string
         in_memory = conn_str == ":memory:"
-        if not in_memory:
-            db_path = Path(conn_str).expanduser()
-            conn_str = str(db_path)
-            if not db_path.parent.exists():
-                db_path.parent.mkdir(parents=True, exist_ok=True)
-
         if in_memory:
-            engine = create_async_engine(
+            # A single shared connection *is* the database — no split possible.
+            write_engine = create_async_engine(
                 "sqlite+aiosqlite:///:memory:",
                 echo=False,
                 future=True,
                 poolclass=StaticPool,
                 connect_args={"check_same_thread": False},
             )
-        else:
-            # SQLite allows a single writer at a time. Writes are
-            # serialised in the application layer (see ``DbSessions.write``),
-            # so only one connection is ever on the write path and the
-            # remaining pool connections serve concurrent WAL reads —
-            # matching SQLite's own model instead of fighting it with a pool
-            # of would-be parallel writers. ``max_overflow=0`` keeps checkout
-            # timeouts surfacing real session leaks instead of masking them
-            # with unbounded growth; ``pool_timeout`` is short because, with
-            # writes serialised, a checkout that cannot be satisfied quickly
-            # signals a real problem rather than transient write-lock
-            # contention. ``pool_pre_ping`` is dropped: a local SQLite file
-            # connection does not silently die the way a network socket can,
-            # so pinging every checkout is pure waste.
-            engine = create_async_engine(
-                f"sqlite+aiosqlite:///{conn_str}",
-                echo=False,
-                future=True,
-                poolclass=AsyncAdaptedQueuePool,
-                pool_size=5,
-                max_overflow=0,
-                pool_timeout=10,
-                connect_args={
-                    "timeout": config.db_timeout,
-                    "check_same_thread": False,
-                },
+            _attach_sqlite_pragmas(
+                write_engine,
+                in_memory=True,
+                enable_wal=config.db_enable_wal,
+                cache_size_kb=config.write_cache_size_kb,
+                mmap_size_bytes=config.mmap_size_mb * 1024 * 1024,
+                wal_autocheckpoint=config.wal_autocheckpoint,
             )
-
-        @event.listens_for(engine.sync_engine, "connect")
-        def set_sqlite_pragma(dbapi_connection, connection_record):
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
-            if not in_memory:
-                # Connection-level read / I/O tuning for the file-backed
-                # store (a :memory: db already lives in RAM, so a page cache
-                # and mmap add nothing). temp_store=MEMORY keeps sorts and
-                # transient B-trees off disk; cache_size=-65536 is a 64MB
-                # page cache (negative = KiB); mmap_size maps up to 256MB of
-                # the file for read I/O. All three are upper bounds — a small
-                # team.db only uses what it needs.
-                cursor.execute("PRAGMA temp_store=MEMORY")
-                cursor.execute("PRAGMA cache_size=-65536")
-                cursor.execute("PRAGMA mmap_size=268435456")
-                if config.db_enable_wal:
-                    # synchronous=NORMAL is the safe, high-throughput
-                    # pairing for WAL: a power loss loses at most the last
-                    # un-checkpointed transaction and never corrupts the
-                    # database, while avoiding the per-commit fsync that FULL
-                    # forces. Connection-scoped, set on every connect —
-                    # unlike journal_mode, a persistent database-level
-                    # setting applied once on first connect.
-                    cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.close()
-
-        if config.db_enable_wal and not in_memory:
-
-            @event.listens_for(engine.sync_engine, "first_connect")
-            def set_sqlite_wal(dbapi_connection, connection_record):
-                cursor = dbapi_connection.cursor()
-                cursor.execute("PRAGMA journal_mode=WAL")
-                cursor.close()
+            read_engine = write_engine
+        else:
+            db_path = Path(conn_str).expanduser()
+            conn_str = str(db_path)
+            if not db_path.parent.exists():
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+            # When a background checkpointer runs (wal_checkpoint_interval_s > 0)
+            # the writer disables in-commit auto-checkpoint (0) so no commit
+            # ever stalls on a checkpoint; the reader never commits, so its
+            # value is moot — keep the configured one.
+            writer_autocheckpoint = 0 if config.wal_checkpoint_interval_s > 0 else config.wal_autocheckpoint
+            write_engine = _build_file_sqlite_engine(
+                conn_str,
+                config,
+                pool_size=config.write_pool_size,
+                cache_size_kb=config.write_cache_size_kb,
+                wal_autocheckpoint=writer_autocheckpoint,
+            )
+            read_engine = _build_file_sqlite_engine(
+                conn_str,
+                config,
+                pool_size=config.read_pool_size,
+                cache_size_kb=config.read_cache_size_kb,
+                wal_autocheckpoint=config.wal_autocheckpoint,
+            )
 
     elif db_type == DatabaseType.POSTGRESQL:
         conn_str = config.connection_string.strip()
@@ -339,7 +623,7 @@ async def initialize_engine(
         if not conn_str.startswith("postgresql+asyncpg://"):
             raise ValueError("PostgreSQL connection_string must use postgresql+asyncpg:// scheme")
 
-        engine = create_async_engine(
+        write_engine = create_async_engine(
             conn_str,
             echo=False,
             future=True,
@@ -348,6 +632,7 @@ async def initialize_engine(
             pool_pre_ping=True,
             pool_recycle=1800,
         )
+        read_engine = write_engine
 
     elif db_type == DatabaseType.MYSQL:
         conn_str = config.connection_string.strip()
@@ -358,7 +643,7 @@ async def initialize_engine(
         elif not conn_str.startswith("mysql+aiomysql://"):
             raise ValueError("MySQL connection_string must use mysql:// or mysql+aiomysql:// scheme")
 
-        engine = create_async_engine(
+        write_engine = create_async_engine(
             conn_str,
             echo=False,
             future=True,
@@ -367,22 +652,34 @@ async def initialize_engine(
             pool_pre_ping=True,
             pool_recycle=1800,
         )
+        read_engine = write_engine
     else:
         raise NotImplementedError(f"Database type {config.db_type} not yet implemented")
 
-    session_local = async_sessionmaker(
-        bind=engine,
+    write_session_local = async_sessionmaker(
+        bind=write_engine,
         class_=AsyncSession,
         expire_on_commit=False,
         autoflush=False,
     )
+    if read_engine is write_engine:
+        read_session_local = write_session_local
+    else:
+        read_session_local = async_sessionmaker(
+            bind=read_engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+            autoflush=False,
+        )
 
-    async with engine.begin() as conn:
+    # DDL + migrations run on the writer engine (they are writes).
+    async with write_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
         await conn.run_sync(_ensure_team_member_role_column)
         await conn.run_sync(_ensure_team_member_options_column)
+        await conn.run_sync(_ensure_team_info_capability_columns)
 
-    return engine, session_local
+    return SqlEngines(write_engine, read_engine, write_session_local, read_session_local)
 
 
 async def create_cur_session_tables(engine: AsyncEngine) -> None:
@@ -402,11 +699,14 @@ async def create_cur_session_tables(engine: AsyncEngine) -> None:
     dep_model = _get_task_dependency_model()
     message_model = _get_message_model()
     read_status_model = _get_message_read_status_model()
+    review_vote_model = _get_review_vote_model()
 
     async with engine.begin() as conn:
-        for model in (task_model, dep_model, message_model, read_status_model):
+        for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
             await conn.run_sync(model.__table__.create, checkfirst=True)
         await conn.run_sync(_ensure_message_protocol_column)
+        await conn.run_sync(_ensure_message_meta_column)
+        await conn.run_sync(_ensure_dynamic_table_indexes)
 
     team_logger.info("Session tables ready for session %s", session_id)
 
@@ -428,9 +728,10 @@ async def drop_cur_session_tables(engine: AsyncEngine) -> None:
     dep_model = _get_task_dependency_model()
     message_model = _get_message_model()
     read_status_model = _get_message_read_status_model()
+    review_vote_model = _get_review_vote_model()
 
     async with engine.begin() as conn:
-        for model in (task_model, dep_model, message_model, read_status_model):
+        for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
             await conn.run_sync(model.__table__.drop, checkfirst=True)
 
     team_logger.info("Dropped dynamic tables for session %s", session_id)

@@ -17,7 +17,7 @@ import asyncio
 import contextvars
 from typing import TYPE_CHECKING, Any, Optional
 
-from openjiuwen.agent_teams.external.cli_agent.adapters import build_adapter
+from openjiuwen.agent_teams.external.cli_agent.backends import backend_for
 from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_runtime
 from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
@@ -37,14 +37,15 @@ async def _build_member_system_prompt(
     """Build the external CLI member's system prompt from team-rail sections.
 
     Gives the member the same team sections an in-process DeepAgent member gets
-    (role / workflow / lifecycle / persona / ...), built the same way, but
+    (role / workflow / lifecycle / private prompt / ...), built the same way, but
     excluding the other DeepAgent rails (safety, workspace, memory, ...) that
     do not apply to a CLI whose brain is not a local DeepAgent.
 
     Args:
         team_agent: The leader TeamAgent (source of the team backend roster).
-        spec: The team spec carrying lifecycle / teammate_mode / team_mode.
-        ctx: The external CLI member's runtime context (role / persona / language).
+        spec: The team spec carrying lifecycle / teammate_mode / team_mode /
+            dispatch_mode.
+        ctx: The external CLI member's runtime context (role / desc / language).
         member_name: The member's semantic identifier.
 
     Returns:
@@ -54,19 +55,18 @@ async def _build_member_system_prompt(
 
     language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
     backend = team_agent.team_backend
-    human_names = sorted(await backend.human_agent_names()) if backend is not None else []
-    bridge_names = sorted(backend.bridge_agent_names()) if backend is not None else []
+    hitt_enabled = backend.hitt_enabled() if backend is not None else False
     prompt = build_team_member_system_prompt(
         role=ctx.role,
-        persona=ctx.persona,
+        member_prompt=ctx.prompt,
         member_name=member_name,
         lifecycle=spec.lifecycle,
         teammate_mode=spec.teammate_mode,
         team_mode=_resolve_team_mode(spec),
+        dispatch_mode=spec.dispatch_mode,
         language=language,
-        human_agent_names=human_names,
+        hitt_enabled=hitt_enabled,
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
-        bridge_agent_names=bridge_names,
     )
     return prompt or None
 
@@ -77,6 +77,7 @@ async def external_cli_spawn(
     *,
     initial_message: Optional[str] = None,
     session_id: Optional[str] = None,
+    resume_external_backend: bool = False,
 ) -> InProcessSpawnHandle:
     """Launch the CLI for ``ctx.cli_agent`` and run it as a team member.
 
@@ -85,6 +86,8 @@ async def external_cli_spawn(
         ctx: Runtime context for the external CLI member.
         initial_message: First prompt delivered to the CLI.
         session_id: Session id propagated via contextvars.
+        resume_external_backend: Whether the backend should resume its derived
+            native session instead of starting a fresh one.
 
     Returns:
         An :class:`InProcessSpawnHandle` wrapping the member task.
@@ -101,13 +104,13 @@ async def external_cli_spawn(
     card = AgentCard(
         id=card_id,
         name=member_name or "unknown",
-        description=f"External CLI member: {ctx.persona}" if ctx.persona else "External CLI member",
+        description=f"External CLI member: {ctx.desc}" if ctx.desc else "External CLI member",
     )
 
     # Build the member's system prompt from the team-rail sections (the same
     # sections an in-process member gets), excluding the other DeepAgent rails.
     system_prompt = await _build_member_system_prompt(team_agent, spec, ctx, member_name)
-    adapter = build_adapter(ctx.cli_agent) if ctx.cli_agent else None
+    backend = backend_for(ctx.cli_agent) if ctx.cli_agent else None
 
     # Resolve the static launch config declared on the spec for this CLI kind.
     # The member was registered through ``spawn_external_cli_agent`` which
@@ -129,28 +132,24 @@ async def external_cli_spawn(
             system_prompt=system_prompt,
             extra_env=cli_cfg.env or None,
             ssh_transport=cli_cfg.ssh_transport,
+            resume_external_backend=resume_external_backend,
         )
     else:
-        runtime = await build_cli_runtime(ctx, system_prompt=system_prompt)
+        runtime = await build_cli_runtime(
+            ctx,
+            system_prompt=system_prompt,
+            resume_external_backend=resume_external_backend,
+        )
 
     teammate = _TeamAgent(card)
     teammate.configure(spec, ctx, member_runtime=runtime)
 
-    # The default join prompt must NOT tell the member to "wait": a streaming
-    # CLI (e.g. claude) takes that literally and holds the turn open polling,
-    # which idles the whole round until the leader's first task arrives. Tell
-    # it to check once and end the turn promptly when there is no work yet —
-    # the team will message it when a task is assigned.
-    base_query = initial_message or (
-        "You have joined the team. Call read_inbox once now. If you already have "
-        "an assigned task, complete it fully: claim_task to take it, do the work, "
-        "then claim_task again with status=\"completed\" and send_message to report. "
-        "If there is no task yet, just acknowledge briefly and END YOUR TURN now — "
-        "do NOT wait, poll, or loop; the team will message you when there is work."
-    )
-    # CLIs that accept the system prompt as a launch arg (claude) already carry
-    # it; CLIs without such a flag get it prepended to their first user message.
-    if system_prompt and adapter is not None and not adapter.injects_system_prompt_via_arg():
+    base_query = initial_message or ""
+    # Backends that accept the system prompt as a launch arg already carry it;
+    # others get it prepended to their first user message.
+    has_launch_prompt = bool(base_query and system_prompt)
+    needs_prompt_prepend = backend is not None and not backend.injects_system_prompt_via_arg
+    if has_launch_prompt and needs_prompt_prepend:
         query = f"{system_prompt}\n\n---\n\n{base_query}"
     else:
         query = base_query
@@ -170,7 +169,7 @@ async def external_cli_spawn(
             team_logger.error("[external-cli] member {} crashed", member_name, exc_info=True)
             raise
         finally:
-            await runtime.aclose()
+            await runtime.stop()
 
     task = run_ctx.run(asyncio.get_running_loop().create_task, _run())
     handle = InProcessSpawnHandle(

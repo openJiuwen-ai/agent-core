@@ -730,11 +730,15 @@ class EvolutionRail(DeepAgentRail):
             snapshot = await self._snapshot_for_evolution(trajectory, ctx)
             if snapshot is not None:
                 snapshot_contract = EvolutionSnapshot.from_legacy_dict(snapshot)
-                from openjiuwen.core.common.background_tasks import create_background_task
 
-                bg_task = await create_background_task(
-                    self._safe_run_evolution(snapshot),
-                    name=f"evolution-{snapshot_contract.skill_name or 'unknown'}",
+                # Detach from the request task group. create_background_task() would
+                # otherwise attach under the active root group and get cascade-cancelled
+                # as soon as OuterLoop/request cleanup finishes (~0.2s), aborting evaluate.
+                bg_task = BackgroundTask.from_asyncio_task(
+                    asyncio.create_task(
+                        self._safe_run_evolution(snapshot),
+                        name=f"evolution-{snapshot_contract.skill_name or 'unknown'}",
+                    ),
                     group="evolution",
                 )
                 self._bg_tasks.add(bg_task)
@@ -1073,11 +1077,24 @@ class EvolutionRail(DeepAgentRail):
         )
 
     async def cleanup_background_tasks(self) -> None:
-        """Cancel and clear all background tasks. Called by host on shutdown."""
-        for task in self._bg_tasks:
-            if not task.done():
-                await task.cancel(reason="evolution_rail_shutdown")
+        """Wait for background evolution tasks, then clear the registry.
+
+        Host watchers call this when they see terminal progress (cancelled/noop/done).
+        Rails may still be finishing evaluate at that moment, so prefer waiting over
+        immediate cancel. Only force-cancel after a wait timeout.
+        """
+        pending = [task for task in self._bg_tasks if not task.done()]
         self._bg_tasks.clear()
+        for task in pending:
+            try:
+                await asyncio.wait_for(task.wait(), timeout=120.0)
+            except TimeoutError:
+                logger.warning(
+                    "[EvolutionRail] background task still running after wait timeout; cancelling"
+                )
+                await task.cancel(reason="evolution_rail_wait_timeout")
+            except Exception as exc:
+                logger.warning("[EvolutionRail] background task wait failed: %s", exc)
 
 
 __all__ = ["EvolutionRail", "EvolutionTriggerPoint"]
