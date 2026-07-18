@@ -453,7 +453,7 @@ def _start_best_of_n(
         ]
         strategy = strategies[seed % len(strategies)]
         await _emit_message(
-            f"[BestOfN] 尝试 {seed + 1}/{best_of_n_ctrl._n} — {strategy}"
+            f"[BestOfN] 尝试 {seed + 1}/{best_of_n_ctrl.n_attempts} — {strategy}"
         )
         prompt = f"{strategy}\n\n原始任务: {task.description}"
         async for chunk in agent.stream({"query": prompt}):

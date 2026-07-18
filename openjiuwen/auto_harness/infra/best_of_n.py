@@ -72,6 +72,11 @@ class BestOfNController:
         self._scorer = scorer or AttemptScorer()
         self._selector = selector or BestOfNSelector()
 
+    @property
+    def n_attempts(self) -> int:
+        """Number of parallel fix attempts."""
+        return self._n
+
     async def run(
         self,
         workspace: Path | str,

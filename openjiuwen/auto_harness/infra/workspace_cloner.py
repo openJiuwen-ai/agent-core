@@ -105,7 +105,8 @@ class WorkspaceCloner:
             parent_dir,
         )
 
-    def remove(self, cloned: ClonedWorkspace) -> None:
+    @staticmethod
+    def remove(cloned: ClonedWorkspace) -> None:
         """Delete a cloned workspace.  Safe to call on originals (no-op)."""
         if cloned.path == cloned.original:
             return
