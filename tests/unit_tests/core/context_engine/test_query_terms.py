@@ -35,44 +35,18 @@ def test_extract_query_terms_keeps_non_path_tool_argument_values():
     assert "failure" in terms
 
 
-def test_extract_query_terms_adds_builtin_cjk_query_terms():
+def test_extract_query_terms_does_not_translate_cjk_query_terms():
     terms = extract_query_terms("检查密码刷新失败")
 
-    assert "password" in terms
-    assert "refresh" in terms
-    assert "failure" in terms
-    assert "failed" in terms
+    assert "password" not in terms
+    assert "refresh" not in terms
+    assert "failure" not in terms
+    assert "failed" not in terms
 
 
-def test_extract_query_terms_can_add_external_translated_cjk_query_terms():
-    calls: list[str] = []
+def test_extract_query_terms_keeps_english_terms_inside_cjk_queries():
+    terms = extract_query_terms("检查 password refresh failure")
 
-    def translate_query_text(text: str) -> str:
-        calls.append(text)
-        return "custom translator signal"
-
-    terms = extract_query_terms(
-        "检查中文查询",
-        translate_query_text=translate_query_text,
-    )
-
-    assert calls == ["检查中文查询"]
-    assert "chinese" in terms
-    assert "query" in terms
-    assert "custom" in terms
-    assert "translator" in terms
-    assert "signal" in terms
-
-
-def test_extract_query_terms_does_not_translate_non_cjk_queries():
-    calls: list[str] = []
-
-    terms = extract_query_terms(
-        "inspect password refresh failure",
-        translate_query_text=lambda text: calls.append(text) or "unused translated text",
-    )
-
-    assert calls == []
     assert "password" in terms
     assert "refresh" in terms
     assert "failure" in terms
