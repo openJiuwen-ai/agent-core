@@ -3,9 +3,9 @@
 
 """Shared fixtures for external-access tests.
 
-Builds a process-global in-memory team (leader + one teammate) that an
-:class:`ExternalTeamClient` can attach to via the in-memory database and the
-in-process messager — no sqlite file or zmq socket required.
+Builds a process-global sqlite ``:memory:`` team (leader + one teammate)
+that an :class:`ExternalTeamClient` can attach to via the shared database
+and the in-process messager — no sqlite file or zmq socket required.
 """
 
 from typing import Callable
@@ -13,6 +13,7 @@ from typing import Callable
 import pytest
 import pytest_asyncio
 
+from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.external import TeamJoinDescriptor
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.schema.status import MemberStatus
@@ -20,17 +21,28 @@ from openjiuwen.agent_teams.spawn.shared_resources import (
     cleanup_shared_resources,
     get_shared_db,
 )
-from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
+from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
 
 TEAM = "ext_team"
 SESSION = "ext_session"
 
 
+def _memory_db_config() -> DatabaseConfig:
+    """Return a sqlite ``:memory:`` config shared across the test session."""
+    return DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:")
+
+
 @pytest_asyncio.fixture
 async def team_db():
-    """Provide a process-global in-memory team with a leader and a teammate."""
+    """Provide a process-global sqlite team with a leader and a teammate.
+
+    Binds ``SESSION`` before ``initialize()`` so the per-session dynamic
+    tables (tasks / messages) are created up front — the ExternalTeamClient
+    re-uses this same shared instance and its ``initialize()`` is a no-op.
+    """
     cleanup_shared_resources()
-    db = get_shared_db(MemoryDatabaseConfig())
+    token = set_session_id(SESSION)
+    db = get_shared_db(_memory_db_config())
     await db.initialize()
     await db.team.create_team(team_name=TEAM, display_name="Ext Team", leader_member_name="leader")
     await db.member.create_member(
@@ -50,6 +62,7 @@ async def team_db():
         role="teammate",
     )
     yield db
+    reset_session_id(token)
     cleanup_shared_resources()
 
 
@@ -57,14 +70,20 @@ async def team_db():
 def make_descriptor() -> Callable[..., TeamJoinDescriptor]:
     """Return a factory for in-memory / in-process join descriptors."""
 
-    def _factory(member: str = "dev-1", role: str = "teammate", scope: str = "operator") -> TeamJoinDescriptor:
+    def _factory(
+        member: str = "dev-1",
+        role: str = "teammate",
+        scope: str = "operator",
+        teammate_mode: str = "build_mode",
+    ) -> TeamJoinDescriptor:
         return TeamJoinDescriptor(
             session_id=SESSION,
             team_name=TEAM,
             member_name=member,
             role=role,
             scope=scope,
-            db_config=MemoryDatabaseConfig(),
+            teammate_mode=teammate_mode,
+            db_config=_memory_db_config(),
             transport_config=MessagerTransportConfig(backend="inprocess", team_name=TEAM),
         )
 

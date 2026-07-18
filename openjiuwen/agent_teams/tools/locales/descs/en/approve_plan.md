@@ -1,6 +1,6 @@
 Approve or reject a member's execution plan. **Only exposed to the Leader when the team uses `teammate_mode=plan_mode`**; in build_mode members do not submit plans and this tool will not appear in the tool list.
 
-After the Leader calls this tool, the system sends the decision to that member; if approved, the member's claimed plan tasks move into an executable state (`plan_approved`); if rejected, the tasks stay `claimed` and the member should revise and resubmit.
+After the Leader calls this tool, the system sends the decision to that member; if approved, the plan task moves out of the plan gate (`planning`) into the executing state (`in_progress`); if rejected, the task stays `planning` and the member should revise and resubmit.
 
 | Parameter | Usage |
 |---|---|

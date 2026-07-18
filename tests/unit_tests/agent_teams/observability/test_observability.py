@@ -529,13 +529,13 @@ def _close_team_span(team_span: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_plan_request_advances_task_status_to_claimed(
+async def test_plan_request_advances_task_status_to_planning(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
-    """Plan-mode: TaskCreated -> TaskPlanRequest advances AT_TASK_STATUS to 'claimed'.
+    """Plan-mode: TaskCreated -> TaskPlanRequest advances AT_TASK_STATUS to 'planning'.
 
     Plan mode never publishes TaskClaimedEvent; the request event itself carries
-    status=claimed and must be routed through _record_task_status_span.
+    status=planning and must be routed through _record_task_status_span.
     """
     from openjiuwen.agent_teams.observability.monitor_handler import _TASK_EVENT_TYPES
     from openjiuwen.agent_teams.observability.span_context import remove_team_span
@@ -553,13 +553,13 @@ async def test_plan_request_advances_task_status_to_claimed(
         )))
         await handler(EventMessage.from_event(TaskPlanRequestEvent(
             team_name=team, task_id=task_id, member_name="member-1",
-            status=TaskStatus.CLAIMED.value, plan_id="plan-1",
+            status=TaskStatus.PLANNING.value, plan_id="plan-1",
             member_plan_md="/tmp/plan.md", tool_call_id="tc-1",
         )))
 
         task_span = handler._task_spans.get(task_id)
         assert task_span is not None, "task span missing after create + plan_request"
-        assert _attr(task_span, AT_TASK_STATUS) == "claimed"
+        assert _attr(task_span, AT_TASK_STATUS) == "planning"
         assert _attr(task_span, "agentteam.task.plan_id") == "plan-1"
     finally:
         _close_team_span(team_span)
@@ -570,8 +570,8 @@ async def test_plan_request_advances_task_status_to_claimed(
 async def test_plan_response_approved_and_rejected_paths(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
-    """Plan response: approved -> plan_approved + AT_PLAN_APPROVED=True;
-    rejected -> status reverts to claimed + AT_PLAN_APPROVED=False."""
+    """Plan response: approved -> in_progress + AT_PLAN_APPROVED=True;
+    rejected -> status reverts to planning + AT_PLAN_APPROVED=False."""
     from openjiuwen.agent_teams.observability.span_context import remove_team_span
 
     team = "plan_team"
@@ -583,24 +583,24 @@ async def test_plan_response_approved_and_rejected_paths(
             team_name=team, task_id=task_id, status=TaskStatus.PENDING.value)))
         await handler(EventMessage.from_event(TaskPlanRequestEvent(
             team_name=team, task_id=task_id, member_name="member-1",
-            status=TaskStatus.CLAIMED.value, plan_id="plan-1",
+            status=TaskStatus.PLANNING.value, plan_id="plan-1",
             member_plan_md="/tmp/plan.md")))
 
         # approved
         await handler(EventMessage.from_event(TaskPlanResponseEvent(
             team_name=team, task_id=task_id, approved=True,
-            status=TaskStatus.PLAN_APPROVED.value, plan_id="plan-1",
+            status=TaskStatus.IN_PROGRESS.value, plan_id="plan-1",
             member_name="member-1", feedback=feedback, tool_call_id="tc-1")))
         task_span = handler._task_spans.get(task_id)
-        assert _attr(task_span, AT_TASK_STATUS) == "plan_approved"
+        assert _attr(task_span, AT_TASK_STATUS) == "in_progress"
         assert _attr(task_span, AT_PLAN_APPROVED) is True
 
-        # rejected: status reverts to claimed
+        # rejected: status reverts to planning
         await handler(EventMessage.from_event(TaskPlanResponseEvent(
             team_name=team, task_id=task_id, approved=False,
-            status=TaskStatus.CLAIMED.value, plan_id="plan-1",
+            status=TaskStatus.PLANNING.value, plan_id="plan-1",
             member_name="member-1", feedback="需要修改")))
-        assert _attr(task_span, AT_TASK_STATUS) == "claimed"
+        assert _attr(task_span, AT_TASK_STATUS) == "planning"
         assert _attr(task_span, AT_PLAN_APPROVED) is False
     finally:
         _close_team_span(team_span)
@@ -625,11 +625,11 @@ async def test_plan_event_span_io_split_on_semantic_boundary(
             team_name=team, task_id=task_id, status=TaskStatus.PENDING.value)))
         await handler(EventMessage.from_event(TaskPlanRequestEvent(
             team_name=team, task_id=task_id, member_name="member-1",
-            status=TaskStatus.CLAIMED.value, plan_id="plan-1",
+            status=TaskStatus.PLANNING.value, plan_id="plan-1",
             member_plan_md="/tmp/plan.md")))
         await handler(EventMessage.from_event(TaskPlanResponseEvent(
             team_name=team, task_id=task_id, approved=True,
-            status=TaskStatus.PLAN_APPROVED.value, plan_id="plan-1",
+            status=TaskStatus.IN_PROGRESS.value, plan_id="plan-1",
             member_name="member-1", feedback=feedback)))
 
         finished = in_memory_exporter.get_finished_spans()
@@ -640,14 +640,14 @@ async def test_plan_event_span_io_split_on_semantic_boundary(
         req_out = json.loads(_attr(plan_req_span, LANGFUSE_OBSERVATION_OUTPUT))
         assert req_in["task_id"] == task_id
         assert req_in["member_plan_md"] == "/tmp/plan.md"
-        assert req_out == {"plan_id": "plan-1", "status": "claimed"}
-        assert _attr(plan_req_span, AT_TASK_STATUS) == "claimed"
+        assert req_out == {"plan_id": "plan-1", "status": "planning"}
+        assert _attr(plan_req_span, AT_TASK_STATUS) == "planning"
 
         resp_in = json.loads(_attr(plan_resp_span, LANGFUSE_OBSERVATION_INPUT))
         resp_out = json.loads(_attr(plan_resp_span, LANGFUSE_OBSERVATION_OUTPUT))
         assert resp_in == {"plan_id": "plan-1"}
         assert resp_out == {"approved": True, "feedback": feedback}
-        assert _attr(plan_resp_span, AT_TASK_STATUS) == "plan_approved"
+        assert _attr(plan_resp_span, AT_TASK_STATUS) == "in_progress"
     finally:
         _close_team_span(team_span)
         remove_team_span(team)

@@ -26,6 +26,7 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler
+from openjiuwen.agent_teams.message_template import ExpandedMessage
 from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
@@ -89,7 +90,7 @@ async def _make_backend_with_bridge(db, messager) -> TeamBackend:
     await backend.spawn_bridge_agent(
         member_name="codex",
         display_name="Codex",
-        persona="senior python reviewer",
+        prompt="senior python reviewer",
         mailbox_inject_mode=BridgeMailboxInjectMode.PASSTHROUGH,
     )
     return backend
@@ -147,11 +148,11 @@ class _FakeAdapter:
         *,
         member_name: str,
         adapter_config: dict[str, object],
-        bridge_persona: str,
+        prompt: str,
         team_overview: str,
     ) -> None:
         """No-op."""
-        del member_name, adapter_config, bridge_persona, team_overview
+        del member_name, adapter_config, prompt, team_overview
 
     async def relay(self, *, member_name: str, text: str) -> str:
         """Capture + canned reply."""
@@ -172,7 +173,9 @@ async def test_bridge_deliverable_with_adapter_carries_remote_reply(db, messager
     handler = _make_handler_for_bridge(backend)
     msg = _fake_msg(sender="leader", body="review pr 42")
 
-    text = await handler._bridge_deliverable_for("codex", msg)
+    text = await handler._bridge_deliverable_for(
+        "codex", msg, expanded=ExpandedMessage(body=msg.content, is_template=False)
+    )
 
     # The remote was actually called and saw the wrapped outbound.
     assert adapter.last_member == "codex"
@@ -194,7 +197,9 @@ async def test_bridge_deliverable_without_adapter_uses_sentinel(db, messager):
     handler = _make_handler_for_bridge(backend)
     msg = _fake_msg(sender="leader", body="status?")
 
-    text = await handler._bridge_deliverable_for("codex", msg)
+    text = await handler._bridge_deliverable_for(
+        "codex", msg, expanded=ExpandedMessage(body=msg.content, is_template=False)
+    )
 
     assert "status?" in text
     assert REMOTE_UNAVAILABLE_SENTINEL in text
@@ -211,11 +216,11 @@ class _RaisingAdapter:
         *,
         member_name: str,
         adapter_config: dict[str, object],
-        bridge_persona: str,
+        prompt: str,
         team_overview: str,
     ) -> None:
         """No-op."""
-        del member_name, adapter_config, bridge_persona, team_overview
+        del member_name, adapter_config, prompt, team_overview
 
     async def relay(self, *, member_name: str, text: str) -> str:
         """Always fails."""
@@ -233,7 +238,9 @@ async def test_bridge_deliverable_swallows_adapter_exception(db, messager):
     backend.set_bridge_adapter("codex", _RaisingAdapter())
     handler = _make_handler_for_bridge(backend)
     msg = _fake_msg(sender="leader", body="hi")
-    text = await handler._bridge_deliverable_for("codex", msg)
+    text = await handler._bridge_deliverable_for(
+        "codex", msg, expanded=ExpandedMessage(body=msg.content, is_template=False)
+    )
     # The avatar still receives a usable deliverable; the sentinel
     # marks the degraded state so the LLM can react.
     assert "hi" in text
@@ -241,7 +248,7 @@ async def test_bridge_deliverable_swallows_adapter_exception(db, messager):
 
 
 # ---------------------------------------------------------------------------
-# REPHRASE injection mode includes sender role / persona
+# REPHRASE injection mode includes sender role / desc
 # ---------------------------------------------------------------------------
 
 
@@ -265,7 +272,7 @@ async def test_bridge_deliverable_rephrase_mode_includes_sender_context(db, mess
     await backend.spawn_bridge_agent(
         member_name="codex",
         display_name="Codex",
-        persona="reviewer",
+        prompt="reviewer",
         mailbox_inject_mode=BridgeMailboxInjectMode.REPHRASE,
     )
     adapter = _FakeAdapter()
@@ -273,9 +280,11 @@ async def test_bridge_deliverable_rephrase_mode_includes_sender_context(db, mess
     handler = _make_handler_for_bridge(backend)
     msg = _fake_msg(sender="team_leader", body="please review pr 42")
 
-    await handler._bridge_deliverable_for("codex", msg)
+    await handler._bridge_deliverable_for(
+        "codex", msg, expanded=ExpandedMessage(body=msg.content, is_template=False)
+    )
 
-    # The REPHRASE outbound includes the sender's role + persona so the
+    # The REPHRASE outbound includes the sender's role + desc so the
     # remote sees who it's talking to.
     assert "leader" in adapter.last_text.lower()
     assert "human_agent" not in adapter.last_text

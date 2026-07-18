@@ -187,6 +187,18 @@ class ModelContext(ABC):
         for the model family used by this context.
         """
 
+    def last_context_window_access_at(self) -> float | None:
+        """Return the timestamp of the latest context-window access, if tracked."""
+        return None
+
+    def set_last_context_window_access_at(self, timestamp: float) -> None:
+        """Record the timestamp of the latest context-window access."""
+        return
+
+    def context_window_tokens(self) -> int | None:
+        """Return the resolved model context-window size in tokens, if available."""
+        return None
+
 
 class ContextStats(BaseModel):
     """
