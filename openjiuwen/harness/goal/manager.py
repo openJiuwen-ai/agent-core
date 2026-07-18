@@ -14,7 +14,7 @@ from openjiuwen.harness.goal.schema import (
     GoalRecord,
     GoalStatus,
 )
-from openjiuwen.harness.task_loop.event_manager import RoundWorkQueue
+from openjiuwen.harness.task_loop.event_manager import EventManager
 from openjiuwen.harness.schema.interaction import InteractionEvent, RoundWorkItem
 
 logger = logging.getLogger(__name__)
@@ -27,13 +27,20 @@ class GoalStore(Protocol):
     """Persistence surface required by GoalManager."""
 
     @property
-    def session_id(self) -> str: ...
+    def session_id(self) -> str:
+        ...
 
-    def load(self) -> Optional[GoalRecord]: ...
+    def load(self) -> Optional[GoalRecord]:
+        ...
 
-    def save(self, record: GoalRecord) -> None: ...
+    def save(self, record: GoalRecord) -> None:
+        ...
 
-    def clear(self) -> None: ...
+    def clear(self) -> None:
+        ...
+
+    async def commit(self) -> None:
+        ...
 
 
 class GoalManager:
@@ -47,7 +54,7 @@ class GoalManager:
         self,
         *,
         store: GoalStore,
-        event_manager: RoundWorkQueue,
+        event_manager: EventManager,
         control_lock: asyncio.Lock,
         has_output_stream: Callable[[], bool],
         cancel_active_round: CancelRound,
@@ -69,6 +76,16 @@ class GoalManager:
         if session_id is not None and session_id != self._store.session_id:
             raise ValueError("GoalManager is bound to a different session")
         return self._store
+
+    def peek(self) -> Optional[GoalRecord]:
+        """Return a deep-copied GoalRecord without waiting on the control lock.
+
+        Hosts may use this for display/routing heuristics (for example deciding
+        whether an attempt-boundary ``chat.final`` is intermediate). Prefer
+        ``await get()`` when a lock-consistent snapshot is required.
+        """
+        record = self._store.load()
+        return record.copy_for_response() if record is not None else None
 
     async def get(self) -> Optional[GoalRecord]:
         async with self._control_lock:
@@ -126,6 +143,7 @@ class GoalManager:
                 max_attempts=max_attempts,
             )
             self._store.save(record)
+            await self._commit_store_locked()
 
             # An existing stream remains the one and only consumer.  Queue the
             # replacement work before aborting the old goal round so the stream
@@ -149,9 +167,14 @@ class GoalManager:
             if record is None:
                 return None
             if record.status is GoalStatus.ACTIVE:
+                # Do not bump revision: the in-flight goal round is allowed to
+                # finish naturally (including assessment).  Bumping would make
+                # the finishing attempt look stale and drop last_assessment /
+                # COMPLETE.  Pending continuations are discarded below.
                 record.status = GoalStatus.PAUSED
-                record.touch(bump_revision=True)
+                record.touch(bump_revision=False)
                 self._store.save(record)
+                await self._commit_store_locked()
                 self._event_manager.discard_goal_work(
                     session_id=record.session_id,
                     goal_id=record.goal_id,
@@ -169,6 +192,7 @@ class GoalManager:
                 record.status = GoalStatus.ACTIVE
                 record.touch(bump_revision=True)
                 self._store.save(record)
+                await self._commit_store_locked()
                 if self._has_output_stream():
                     self._ensure_goal_work_locked(record)
                     self._emit_goal_updated_locked(record)
@@ -180,6 +204,7 @@ class GoalManager:
             if record is None:
                 return None
             self._store.clear()
+            await self._commit_store_locked()
             self._event_manager.discard_goal_work(
                 session_id=record.session_id,
                 goal_id=record.goal_id,
@@ -218,6 +243,7 @@ class GoalManager:
             record.attempt_count += 1
             record.touch()
             self._store.save(record)
+            await self._commit_store_locked()
             return record.copy_for_response()
 
     async def accumulate_usage(
@@ -231,7 +257,7 @@ class GoalManager:
     ) -> None:
         async with self._control_lock:
             record = self._store.load()
-            if record is None or not self._matches_active(record, goal_id, revision):
+            if record is None or not self._matches_in_flight(record, goal_id, revision):
                 return
             record.token_usage.accumulate(input_tokens, output_tokens, cached_input_tokens)
             record.touch()
@@ -244,10 +270,15 @@ class GoalManager:
         revision: int,
         assessment: GoalAssessment,
     ) -> Optional[GoalRecord]:
-        """Commit an assessment only when its goal generation is still current."""
+        """Commit an assessment only when its goal generation is still current.
+
+        Accepts ACTIVE or PAUSED records with the same ``goal_id``/``revision``.
+        Pause stops *continuation* but lets the current attempt finish: CONTINUE
+        keeps PAUSED (no new work), while COMPLETE/BLOCKED override PAUSED.
+        """
         async with self._control_lock:
             record = self._store.load()
-            if record is None or not self._matches_active(record, goal_id, revision):
+            if record is None or not self._matches_in_flight(record, goal_id, revision):
                 return None
             record.last_assessment = assessment
             if assessment.status is GoalAssessmentStatus.COMPLETE:
@@ -258,6 +289,7 @@ class GoalManager:
                 record.last_stop_reason = "blocked"
             record.touch()
             self._store.save(record)
+            await self._commit_store_locked()
 
             if record.status is GoalStatus.ACTIVE and self._has_output_stream():
                 self._ensure_goal_work_locked(record)
@@ -284,6 +316,11 @@ class GoalManager:
     def _emit_goal_updated_locked(self, record: GoalRecord) -> None:
         self._emit_event(InteractionEvent.goal_updated(record.to_dict()))
 
+    async def _commit_store_locked(self) -> None:
+        commit = getattr(self._store, "commit", None)
+        if callable(commit):
+            await commit()
+
     @staticmethod
     def _matches_active(
         record: Optional[GoalRecord],
@@ -293,6 +330,24 @@ class GoalManager:
         return (
             record is not None
             and record.status is GoalStatus.ACTIVE
+            and record.goal_id == goal_id
+            and record.revision == revision
+        )
+
+    @staticmethod
+    def _matches_in_flight(
+        record: Optional[GoalRecord],
+        goal_id: str,
+        revision: int,
+    ) -> bool:
+        """Whether an in-flight attempt may still write usage/assessment.
+
+        PAUSED is included so ``/goal pause`` can let the current round finish
+        naturally without discarding its assessment.
+        """
+        return (
+            record is not None
+            and record.status in (GoalStatus.ACTIVE, GoalStatus.PAUSED)
             and record.goal_id == goal_id
             and record.revision == revision
         )

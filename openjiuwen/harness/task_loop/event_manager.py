@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Priority work queues for one session-scoped interaction supervisor."""
+"""Event scheduling manager for one session-scoped interaction supervisor."""
 from __future__ import annotations
 
 import logging
@@ -12,7 +12,7 @@ from openjiuwen.harness.schema.interaction import RoundWorkItem
 logger = logging.getLogger(__name__)
 
 
-class RoundWorkQueue:
+class EventManager:
     """Keep user and goal work in one scheduling domain.
 
     The supervisor is the only pop consumer.  Separate deques implement user
@@ -44,7 +44,7 @@ class RoundWorkQueue:
         if self.has_goal_work(goal_id=goal_id, revision=revision):
             return False
         self._goal_queue.append(work)
-        logger.debug("[RoundWorkQueue] goal work queued: goal_id=%s revision=%s", goal_id, revision)
+        logger.debug("[EventManager] goal work queued: goal_id=%s revision=%s", goal_id, revision)
         return True
 
     def next_work(self) -> Optional[RoundWorkItem]:
@@ -94,18 +94,18 @@ class RoundWorkQueue:
     ) -> int:
         """Discard pending goal work owned by a cleared or replaced record."""
         before = len(self._goal_queue)
-        self._goal_queue = deque(
-            work
-            for work in self._goal_queue
-            if not (
-                work.context.get("session_id") == session_id
-                and (goal_id is None or work.context.get("goal_id") == goal_id)
-            )
-        )
+        kept: deque[RoundWorkItem] = deque()
+        for work in self._goal_queue:
+            same_session = work.context.get("session_id") == session_id
+            same_goal = goal_id is None or work.context.get("goal_id") == goal_id
+            if same_session and same_goal:
+                continue
+            kept.append(work)
+        self._goal_queue = kept
         discarded = before - len(self._goal_queue)
         if discarded:
             logger.info(
-                "[RoundWorkQueue] discarded %d pending goal work items: session=%s goal=%s",
+                "[EventManager] discarded %d pending goal work items: session=%s goal=%s",
                 discarded,
                 session_id,
                 goal_id,
@@ -126,4 +126,4 @@ class RoundWorkQueue:
         return self._active
 
 
-__all__ = ["RoundWorkQueue"]
+__all__ = ["EventManager"]

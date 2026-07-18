@@ -8,6 +8,7 @@ SQLite, or history as an alternative goal state source.
 """
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import TYPE_CHECKING, Optional
 
@@ -63,31 +64,14 @@ class SessionGoalStore:
         """Remove the GoalRecord from session state."""
         self._session.update_state({SESSION_GOAL_RECORD_KEY: None})
 
-
-class DictGoalStore:
-    """Lightweight store backed by a shared dict[session_id, GoalRecord].
-
-    Used when the caller owns the goal records dict directly (e.g. a
-    GoalManager managing multiple sessions) instead of going through
-    Session.state.
-    """
-
-    def __init__(self, records: dict[str, GoalRecord], session_id: str) -> None:
-        self._records = records
-        self._session_id = session_id
-
-    @property
-    def session_id(self) -> str:
-        return self._session_id
-
-    def load(self) -> Optional[GoalRecord]:
-        return self._records.get(self._session_id)
-
-    def save(self, record: GoalRecord) -> None:
-        self._records[self._session_id] = record
-
-    def clear(self) -> None:
-        self._records.pop(self._session_id, None)
+    async def commit(self) -> None:
+        """Flush the backing session when it supports explicit persistence."""
+        commit = getattr(self._session, "commit", None)
+        if not callable(commit):
+            return
+        result = commit()
+        if inspect.isawaitable(result):
+            await result
 
 
-__all__ = ["DictGoalStore", "SESSION_GOAL_RECORD_KEY", "SessionGoalStore"]
+__all__ = ["SESSION_GOAL_RECORD_KEY", "SessionGoalStore"]

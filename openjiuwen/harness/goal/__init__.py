@@ -22,10 +22,9 @@ from openjiuwen.harness.goal.schema import (
     GoalStopStrategy,
     TokenUsage,
 )
-from openjiuwen.harness.goal.store import DictGoalStore, SessionGoalStore
+from openjiuwen.harness.goal.store import SessionGoalStore
 
 __all__ = [
-    "DictGoalStore",
     "GoalAssessment",
     "GoalAssessmentStatus",
     "GoalEvaluator",

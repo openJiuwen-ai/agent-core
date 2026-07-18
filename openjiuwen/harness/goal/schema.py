@@ -6,7 +6,6 @@ from __future__ import annotations
 import copy
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Optional
 
@@ -30,6 +29,19 @@ class GoalStopStrategy(str, Enum):
     HYBRID = "hybrid"
 
 
+def _optional_positive_int(value: Any, field_name: str) -> Optional[int]:
+    """Parse an optional positive int from persisted GoalRecord fields."""
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid persisted GoalRecord {field_name}") from exc
+    if parsed <= 0:
+        raise ValueError(f"invalid persisted GoalRecord {field_name}")
+    return parsed
+
+
 class GoalOperationError(RuntimeError):
     """The one expected failure type exposed by the Goal capability."""
 
@@ -39,7 +51,7 @@ class GoalOperationError(RuntimeError):
         operation: str,
         code: str,
         message: str,
-        goal: Optional["GoalRecord"] = None,
+        goal: Optional[GoalRecord] = None,
     ) -> None:
         super().__init__(message)
         self.operation = operation
@@ -63,7 +75,7 @@ class GoalAssessment:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "GoalAssessment":
+    def from_dict(cls, data: Dict[str, Any]) -> GoalAssessment:
         try:
             status = GoalAssessmentStatus(str(data.get("status", "continue")))
         except ValueError:
@@ -103,7 +115,7 @@ class TokenUsage:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "TokenUsage":
+    def from_dict(cls, data: Dict[str, Any]) -> TokenUsage:
         return cls(
             input_tokens=int(data.get("input_tokens", 0)),
             output_tokens=int(data.get("output_tokens", 0)),
@@ -112,28 +124,11 @@ class TokenUsage:
         )
 
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _to_datetime(value: Any) -> datetime:
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            pass
-    return _utc_now()
-
-
 @dataclass
 class GoalRecord:
     goal_id: str
     session_id: str
     objective: str
-    created_at: datetime = field(default_factory=_utc_now)
-    updated_at: datetime = field(default_factory=_utc_now)
     status: GoalStatus = GoalStatus.ACTIVE
     revision: int = 0
     attempt_count: int = 0
@@ -146,9 +141,8 @@ class GoalRecord:
     def touch(self, *, bump_revision: bool = False) -> None:
         if bump_revision:
             self.revision += 1
-        self.updated_at = _utc_now()
 
-    def copy_for_response(self) -> "GoalRecord":
+    def copy_for_response(self) -> GoalRecord:
         return copy.deepcopy(self)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -156,8 +150,6 @@ class GoalRecord:
             "goal_id": self.goal_id,
             "session_id": self.session_id,
             "objective": self.objective,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
             "status": self.status.value,
             "revision": self.revision,
             "attempt_count": self.attempt_count,
@@ -169,7 +161,7 @@ class GoalRecord:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "GoalRecord":
+    def from_dict(cls, data: Dict[str, Any]) -> GoalRecord:
         objective = data.get("objective")
         session_id = data.get("session_id")
         goal_id = data.get("goal_id")
@@ -185,14 +177,12 @@ class GoalRecord:
             goal_id=goal_id,
             session_id=session_id,
             objective=objective,
-            created_at=_to_datetime(data.get("created_at")),
-            updated_at=_to_datetime(data.get("updated_at")),
             status=status,
             revision=int(data.get("revision", 0)),
             attempt_count=int(data.get("attempt_count", 0)),
             token_usage=TokenUsage.from_dict(usage_data) if isinstance(usage_data, dict) else TokenUsage(),
-            max_attempts=data.get("max_attempts"),
-            token_budget=data.get("token_budget"),
+            max_attempts=_optional_positive_int(data.get("max_attempts"), "max_attempts"),
+            token_budget=_optional_positive_int(data.get("token_budget"), "token_budget"),
             last_assessment=GoalAssessment.from_dict(assessment_data)
             if isinstance(assessment_data, dict)
             else None,
@@ -208,13 +198,10 @@ class GoalRecord:
         max_attempts: Optional[int] = None,
         token_budget: Optional[int] = None,
     ) -> "GoalRecord":
-        now = _utc_now()
         return cls(
             goal_id=uuid.uuid4().hex[:12],
             session_id=session_id,
             objective=objective,
-            created_at=now,
-            updated_at=now,
             max_attempts=max_attempts,
             token_budget=token_budget,
         )

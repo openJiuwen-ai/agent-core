@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from openjiuwen.harness.goal.schema import GoalRecord
-from openjiuwen.harness.goal.store import DictGoalStore, SESSION_GOAL_RECORD_KEY, SessionGoalStore
+from openjiuwen.harness.goal.store import SESSION_GOAL_RECORD_KEY, SessionGoalStore
 
 
 class FakeSession:
@@ -51,19 +51,3 @@ def test_session_store_drops_malformed_persistence_data() -> None:
     session.update_state({SESSION_GOAL_RECORD_KEY: {"goal_id": "g"}})
     assert store.load() is None
     assert session.get_state(SESSION_GOAL_RECORD_KEY) is None
-
-
-def test_dict_store_is_scoped_to_its_session() -> None:
-    records: dict[str, GoalRecord] = {}
-    first = DictGoalStore(records, "first")
-    second = DictGoalStore(records, "second")
-
-    first_record = GoalRecord.create(session_id="first", objective="first objective")
-    second_record = GoalRecord.create(session_id="second", objective="second objective")
-    first.save(first_record)
-    second.save(second_record)
-
-    first.clear()
-
-    assert first.load() is None
-    assert second.load() is second_record

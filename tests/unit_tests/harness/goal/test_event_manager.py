@@ -1,8 +1,8 @@
 # coding: utf-8
-"""Tests for user/goal scheduling in RoundWorkQueue."""
+"""Tests for user/goal scheduling in EventManager."""
 from __future__ import annotations
 
-from openjiuwen.harness.task_loop.event_manager import RoundWorkQueue
+from openjiuwen.harness.task_loop.event_manager import EventManager
 from openjiuwen.harness.schema.interaction import RoundWorkItem
 
 
@@ -16,7 +16,7 @@ def _goal(*, goal_id: str = "goal-1", revision: int = 0) -> RoundWorkItem:
 
 
 def test_user_work_has_priority_over_goal_work() -> None:
-    manager = RoundWorkQueue()
+    manager = EventManager()
     goal = _goal()
     user = RoundWorkItem.user(request_id="request-1", inputs={"query": "answer this"})
 
@@ -30,7 +30,7 @@ def test_user_work_has_priority_over_goal_work() -> None:
 
 
 def test_goal_work_is_deduplicated_across_queued_dequeued_and_active_states() -> None:
-    manager = RoundWorkQueue()
+    manager = EventManager()
     goal = _goal()
 
     assert manager.push_goal(goal)
@@ -47,7 +47,7 @@ def test_goal_work_is_deduplicated_across_queued_dequeued_and_active_states() ->
 
 
 def test_discard_goal_work_only_removes_pending_matching_goal() -> None:
-    manager = RoundWorkQueue()
+    manager = EventManager()
     manager.push_goal(_goal(goal_id="replace-me"))
     manager.push_goal(_goal(goal_id="keep-me"))
 

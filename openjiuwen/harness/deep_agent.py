@@ -6,14 +6,12 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
-from dataclasses import dataclass
 import importlib
 import os
 import sys
 import uuid
 from contextlib import suppress
 import warnings
-from dataclasses import replace
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -92,13 +90,15 @@ from openjiuwen.harness.schema.interaction import (
     ActiveInteractionRound,
     InteractionEvent,
     InteractionPhase,
-    InputDispatchKind,
+    InteractionOutputStream,
+    OutputLease,
+    OutputLeaseManager,
     InputDispatchMode,
     RoundOutcome,
     RoundWorkItem,
     SendInputRequest,
 )
-from openjiuwen.harness.task_loop.event_manager import RoundWorkQueue
+from openjiuwen.harness.task_loop.event_manager import EventManager
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.event_queue import (
@@ -163,174 +163,6 @@ _SUB_AGENTS_DIR = "sub_agents"
 
 
 _ROUND_BOUNDARY = object()
-_OUTPUT_END = object()
-
-
-@dataclass
-class _OutputLease:
-    """The one host currently allowed to consume interaction output."""
-
-    token: str
-    closed: asyncio.Event
-    finishing: bool = False
-
-
-class InteractionOutputStream:
-    """Opaque, closeable handle returned to the owner of an output lease."""
-
-    def __init__(self, agent: "DeepAgent", lease: _OutputLease) -> None:
-        self._agent = agent
-        self._lease = lease
-        self._closed = False
-
-    def __aiter__(self) -> "InteractionOutputStream":
-        return self
-
-    async def __anext__(self) -> Any:
-        if self._closed:
-            raise StopAsyncIteration
-        item = await self._agent._next_output(self._lease)
-        if item is None:
-            self._closed = True
-            raise StopAsyncIteration
-        return item
-
-    async def aclose(self) -> None:
-        await self.close()
-
-    async def close(self, *, abort_active_round: bool = True) -> None:
-        """Release this stream only; stale streams cannot release a newer one."""
-        if self._closed:
-            return
-        self._closed = True
-        await self._agent._detach_output(
-            self._lease.token,
-            abort_active_round=abort_active_round,
-        )
-
-
-class _OutputLeaseManager:
-    """Own the queue and atomically attach/detach its single consumer."""
-
-    def __init__(self) -> None:
-        self._queue: asyncio.Queue[Any] = asyncio.Queue()
-        self._lock = asyncio.Lock()
-        self._lease: Optional[_OutputLease] = None
-        self._closed = False
-
-    def has_consumer(self) -> bool:
-        return self._lease is not None and not self._lease.closed.is_set()
-
-    def current_lease(self) -> Optional[_OutputLease]:
-        lease = self._lease
-        if lease is None or lease.closed.is_set():
-            return None
-        return lease
-
-    def current_token(self) -> Optional[str]:
-        lease = self.current_lease()
-        return lease.token if lease is not None else None
-
-    async def attach(self) -> Optional[_OutputLease]:
-        async with self._lock:
-            if self._closed or self.has_consumer():
-                return None
-            lease = _OutputLease(token=uuid.uuid4().hex, closed=asyncio.Event())
-            self._lease = lease
-            return lease
-
-    async def detach(self, token: str, *, discard_buffer: bool = True) -> bool:
-        async with self._lock:
-            lease = self._lease
-            if lease is None or lease.token != token:
-                return False
-            self._lease = None
-            lease.closed.set()
-            if discard_buffer:
-                self._drain_queue()
-            return True
-
-    async def finish_current(self) -> None:
-        """End the current stream *after* already-forwarded chunks drain."""
-        async with self._lock:
-            lease = self._lease
-            if lease is None or lease.closed.is_set() or lease.finishing:
-                return
-            lease.finishing = True
-            self._queue.put_nowait(_OUTPUT_END)
-
-    async def emit(self, item: Any, *, expected_token: Optional[str] = None) -> None:
-        async with self._lock:
-            if self._closed or not self.has_consumer():
-                return
-            if expected_token is not None and self.current_token() != expected_token:
-                return
-            if self._lease is not None and self._lease.finishing:
-                return
-            self._queue.put_nowait(item)
-
-    async def next_item(self, lease: _OutputLease) -> Optional[Any]:
-        async with self._lock:
-            if self._lease is not lease or lease.closed.is_set():
-                return None
-
-        queue_task = asyncio.create_task(self._queue.get())
-        close_task = asyncio.create_task(lease.closed.wait())
-        wait_tasks = {queue_task, close_task}
-        try:
-            done, pending = await asyncio.wait(
-                wait_tasks, return_when=asyncio.FIRST_COMPLETED
-            )
-        except asyncio.CancelledError:
-            # The caller that owned this lease has disappeared.  A detached
-            # queue_task must not survive and steal the next lease's first
-            # output item.
-            for task in wait_tasks:
-                if not task.done():
-                    task.cancel()
-            for task in wait_tasks:
-                with suppress(asyncio.CancelledError, Exception):
-                    await task
-            raise
-        for task in pending:
-            task.cancel()
-        for task in pending:
-            with suppress(asyncio.CancelledError):
-                await task
-
-        # Detach wins even if queue.get() completed in the same loop turn.  It
-        # prevents a just-disconnected request from consuming a new stream's
-        # first output item.
-        if close_task in done or lease.closed.is_set():
-            if queue_task in done:
-                # The item belongs to the detached lease and must not leak to
-                # the next consumer.
-                with suppress(Exception):
-                    queue_task.result()
-            return None
-        item = queue_task.result()
-        if item is _OUTPUT_END:
-            async with self._lock:
-                if self._lease is lease:
-                    self._lease = None
-                    lease.closed.set()
-            return None
-        return item
-
-    async def shutdown(self) -> None:
-        async with self._lock:
-            self._closed = True
-            if self._lease is not None:
-                self._lease.closed.set()
-                self._lease = None
-            self._drain_queue()
-
-    def _drain_queue(self) -> None:
-        while True:
-            try:
-                self._queue.get_nowait()
-            except asyncio.QueueEmpty:
-                return
 
 
 class DeepAgent(BaseAgent):
@@ -359,19 +191,19 @@ class DeepAgent(BaseAgent):
         self._interaction_session: Optional[Session] = None
         self._interaction_phase = InteractionPhase.IDLE
         self._active_interaction_round: Optional[ActiveInteractionRound] = None
-        self._work_queue = RoundWorkQueue()
+        self._event_manager = EventManager()
         self.goal_manager: Optional[GoalManager] = None
-        self._interaction_output = _OutputLeaseManager()
+        self._interaction_output = OutputLeaseManager()
         self._interaction_supervisor_task: Optional[asyncio.Task[None]] = None
         self._interaction_forwarder_task: Optional[asyncio.Task[None]] = None
         self._interaction_round_task: Optional[asyncio.Task[None]] = None
+        self._interaction_emit_tasks: set[asyncio.Task[Any]] = set()
         self._interaction_round_forwarded: Optional[asyncio.Event] = None
         self._interaction_start_lock = asyncio.Lock()
         self._interaction_control_lock = asyncio.Lock()
         self._interaction_send_lock = asyncio.Lock()
         self._interaction_wakeup = asyncio.Event()
         self._interaction_started = False
-        self._interaction_bound_session_id: Optional[str] = None
         super().__init__(card)
 
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
@@ -2178,13 +2010,6 @@ class DeepAgent(BaseAgent):
         Args:
             ctx: Callback context with InvokeInputs.
             session: Current session.
-            keep_alive: When True the controller / coordinator are NOT torn
-                down after the loop finishes.  Used by
-                ``DeepAgent.start()`` which drives many rounds on one
-                long-lived session and manages the task-loop kernel lifecycle
-                itself (bind on ``start()``, unbind on ``stop()``).  The
-                per-round ``stop_condition_state`` reset is still applied so
-                the next round starts fresh.
 
         Yields:
             Result dict from each iteration.
@@ -2783,8 +2608,6 @@ class DeepAgent(BaseAgent):
             self.save_state(session)
             self.clear_state(session)
             return RoundOutcome(next_work=next_work)
-        except asyncio.CancelledError:
-            raise
         except Exception:
             logger.exception("[DeepAgent] interaction round execution failed")
             return RoundOutcome(
@@ -2841,42 +2664,53 @@ class DeepAgent(BaseAgent):
         return self._interaction_phase
 
     @property
+    def interaction_started(self) -> bool:
+        """Whether ``start()`` has bound this session's interaction loop."""
+        return self._interaction_started
+
+    @property
     def active_round(self) -> Optional[ActiveInteractionRound]:
         return self._active_interaction_round
 
     @property
-    def event_manager(self) -> RoundWorkQueue:
-        return self._work_queue
+    def event_manager(self) -> EventManager:
+        return self._event_manager
 
     def has_output_stream(self) -> bool:
         return self._interaction_output.has_consumer()
 
     async def start(
         self,
-        session: Optional["Session"] = None,
         *,
-        session_id: Optional[str] = None,
+        session: Optional[Session] = None,
     ) -> None:
-        """Bind the task-loop kernel and start the passive output forwarder."""
+        """Bind the task-loop kernel and start the passive output forwarder.
+
+        Hosts should pass the product ``Session`` they own.  When ``session`` is
+        omitted, a fresh agent session is created with id ``\"default\"`` (useful
+        for unit tests and simple embeddings).
+        """
         async with self._interaction_start_lock:
             if session is None:
                 from openjiuwen.core.session.agent import create_agent_session
 
-                sid = session_id or "default"
-                session = create_agent_session(session_id=sid, card=getattr(self, "card", None))
+                session = create_agent_session(
+                    session_id="default",
+                    card=getattr(self, "card", None),
+                )
                 await session.pre_run(inputs={})
-            else:
-                sid = session.get_session_id()
+
+            sid = session.get_session_id()
 
             if self._interaction_started:
-                if self._interaction_bound_session_id == sid:
+                if self._bound_session_id == sid:
                     return
                 raise RuntimeError(
-                    f"Interaction loop already bound to session {self._interaction_bound_session_id}; cannot bind {sid}."
+                    f"Interaction loop already bound to session {self._bound_session_id}; "
+                    f"cannot bind {sid}."
                 )
 
             self._interaction_session = session
-            self._interaction_bound_session_id = sid
             await self.prepare_interaction_task_loop(session)
             if self._task_completion_rail is None:
                 await self.register_rail(TaskCompletionRail())
@@ -2885,7 +2719,7 @@ class DeepAgent(BaseAgent):
 
             self.goal_manager = GoalManager(
                 store=SessionGoalStore(session),
-                event_manager=self._work_queue,
+                event_manager=self._event_manager,
                 control_lock=self._interaction_control_lock,
                 has_output_stream=self.has_output_stream,
                 cancel_active_round=self._cancel_active_round,
@@ -2915,7 +2749,7 @@ class DeepAgent(BaseAgent):
             return
         self._interaction_phase = InteractionPhase.TERMINATED
         await self._interaction_output.shutdown()
-        self._work_queue.discard_all_work()
+        self._event_manager.discard_all_work()
         await self._cancel_active_round(reason="stop")
 
         for task in (self._interaction_supervisor_task, self._interaction_forwarder_task):
@@ -2925,6 +2759,15 @@ class DeepAgent(BaseAgent):
                     await task
         self._interaction_supervisor_task = None
         self._interaction_forwarder_task = None
+
+        emit_tasks = list(self._interaction_emit_tasks)
+        self._interaction_emit_tasks.clear()
+        for task in emit_tasks:
+            if not task.done():
+                task.cancel()
+        for task in emit_tasks:
+            with suppress(asyncio.CancelledError, Exception):
+                await task
 
         if self._interaction_session is not None:
             with suppress(Exception):
@@ -2940,56 +2783,71 @@ class DeepAgent(BaseAgent):
         self._active_interaction_round = None
         self._interaction_round_task = None
 
-    async def send_input(self, request: SendInputRequest) -> Optional[InteractionOutputStream]:
-        """Accept user/goal work and optionally return the sole output stream."""
-        if not isinstance(request, SendInputRequest):
-            raise TypeError("send_input expects a SendInputRequest")
+    async def attach_output(self) -> Optional[InteractionOutputStream]:
+        """Claim the sole output reader for this interaction.
+
+        Returns ``None`` when another consumer already holds the lease.
+
+        If an ACTIVE goal exists, missing goal work is ensured even when this
+        call does not obtain the lease, so an already-attached reader continues
+        to receive goal progress (session switch / concurrent attach_goal).
+        """
         if not self._interaction_started or self._interaction_phase is InteractionPhase.TERMINATED:
             raise RuntimeError("interaction_terminated")
 
         async with self._interaction_send_lock:
-            if request.kind is InputDispatchKind.USER:
-                return await self._send_user(request)
-            if request.kind is InputDispatchKind.GOAL:
-                return await self._send_goal(request)
-        raise ValueError(f"unsupported input dispatch kind: {request.kind}")
+            async with self._interaction_control_lock:
+                stream = await self._attach_output_locked()
+                if self.goal_manager is not None:
+                    record = self._load_goal_record_locked()
+                    if record is not None and record.status is GoalStatus.ACTIVE:
+                        self.goal_manager.ensure_active_goal_work_locked()
+                        self._notify_work()
+                return stream
 
-    async def _send_user(self, request: SendInputRequest) -> Optional[InteractionOutputStream]:
+    async def send_input(self, request: SendInputRequest) -> None:
+        """Dispatch user text only; does not attach or return an output stream.
+
+        Hosts that need to read output must call ``attach_output`` first (or
+        already hold a stream).  Steer / follow-up requests typically skip
+        attach and let the existing consumer receive output.
+        """
+        if not self._interaction_started or self._interaction_phase is InteractionPhase.TERMINATED:
+            raise RuntimeError("interaction_terminated")
+
+        async with self._interaction_send_lock:
+            await self._send_user(request)
+
+    async def _send_user(self, request: SendInputRequest) -> None:
         inputs = request.inputs
         if (
             not isinstance(inputs, dict)
             or not isinstance(inputs.get("query"), str)
             or not inputs["query"].strip()
         ):
-            raise ValueError("USER send_input requires a non-empty inputs['query']")
+            raise ValueError("send_input requires a non-empty inputs['query']")
 
-        wait_task: Optional[asyncio.Task[Any]] = None
-        wait_forwarded: Optional[asyncio.Event] = None
         async with self._interaction_control_lock:
-            goal = self._load_goal_record_locked()
-            active_goal = (
-                self._active_interaction_round is not None and self._active_interaction_round.run_kind == "goal"
-            ) or (
-                self._active_interaction_round is None
-                and goal is not None
-                and goal.status is GoalStatus.ACTIVE
-            )
             loop = self.loop_controller
+            try:
+                mode = (
+                    InputDispatchMode.FOLLOW_UP
+                    if request.mode is None
+                    else InputDispatchMode(request.mode)
+                )
+            except ValueError as exc:
+                raise ValueError(f"unsupported input dispatch mode: {request.mode}") from exc
 
-            # Default user input steers the current/next goal attempt.  When a
-            # session returns after its old consumer detached, this same input
-            # acquires the replacement stream before work is allowed to run.
-            if active_goal and request.mode in (InputDispatchMode.AUTO, InputDispatchMode.STEER):
-                if loop is not None:
-                    loop.enqueue_steer(str(inputs["query"]))
-                stream = await self._attach_output_locked()
-                if self.goal_manager is not None:
-                    self.goal_manager.ensure_active_goal_work_locked()
+            if mode is InputDispatchMode.STEER and self._active_interaction_round is not None:
+                if loop is None:
+                    raise RuntimeError("active interaction round cannot accept steer without loop_controller")
+                loop.enqueue_steer(str(inputs["query"]))
                 self._notify_work()
-                return stream
+                return
 
-            if request.mode is InputDispatchMode.FOLLOW_UP:
-                self._work_queue.push_user(
+            keep_open = self._should_keep_interaction_open_locked()
+            if keep_open:
+                self._event_manager.push_user(
                     RoundWorkItem.user(
                         request_id=request.request_id,
                         inputs=inputs,
@@ -2997,74 +2855,29 @@ class DeepAgent(BaseAgent):
                         reset_loop=False,
                     )
                 )
-                stream = await self._attach_output_locked()
                 self._notify_work()
-                return stream
+                return
 
-            # Preserve the established ordinary-chat result while keeping the
-            # execution engine inside the interaction loop: the old user round is aborted,
-            # its output lease is invalidated, and only then is the new user
-            # work allowed to acquire a stream.  Goal AUTO input never reaches
-            # this branch; it is routed to steer above.
-            if self._active_interaction_round is not None:
-                if self._active_interaction_round.run_kind == "goal":
-                    # Explicit FOLLOW_UP is handled above.  AUTO with an
-                    # active goal is the steer branch above.
-                    raise RuntimeError("goal routing invariant violated")
-                wait_task, wait_forwarded = await self._begin_output_replacement_locked()
-            elif self._interaction_output.has_consumer():
-                # A user output owner may still be parked between rounds.
-                await self._detach_current_output_locked(abort_active_round=False)
-
-        if wait_task is not None:
-            await self._wait_for_cancelled_round(wait_task, wait_forwarded)
-
-        async with self._interaction_control_lock:
-            stream = await self._attach_output_locked()
-            self._work_queue.push_user(
+            # Fresh user turn.  Output lease ownership stays with the host via
+            # ``attach_output``; send_input never steals or creates a stream.
+            self._event_manager.push_user(
                 RoundWorkItem.user(request_id=request.request_id, inputs=inputs)
             )
             self._notify_work()
-            return stream
-
-    async def _send_goal(self, request: SendInputRequest) -> Optional[InteractionOutputStream]:
-        if request.inputs is not None:
-            raise ValueError("GOAL send_input does not accept inputs")
-        if request.mode is not InputDispatchMode.AUTO:
-            raise ValueError("GOAL send_input only supports AUTO mode")
-
-        async with self._interaction_control_lock:
-            if self.goal_manager is None:
-                raise RuntimeError("interaction_not_started")
-            record = self._load_goal_record_locked()
-            if record is None or record.status is not GoalStatus.ACTIVE:
-                return None
-            stream = await self._attach_output_locked()
-            # A duplicate GOAL send may arrive while another request already
-            # owns output.  Ensuring work is still required: the call can race
-            # with a round boundary or a cached-session recovery.  RoundWorkQueue
-            # de-duplicates the current goal id/revision.
-            self.goal_manager.ensure_active_goal_work_locked()
-            self._notify_work()
-            return stream
-
-    # ------------------------------------------------------------------
-    # Output lease
-    # ------------------------------------------------------------------
 
     async def _attach_output_locked(self) -> Optional[InteractionOutputStream]:
         lease = await self._interaction_output.attach()
         return InteractionOutputStream(self, lease) if lease is not None else None
 
-    async def _next_output(self, lease: _OutputLease) -> Optional[Any]:
+    async def next_output(self, lease: OutputLease) -> Optional[Any]:
         return await self._interaction_output.next_item(lease)
 
-    async def _detach_output(self, token: str, *, abort_active_round: bool) -> None:
+    async def detach_output(self, token: str, *, abort_active_round: bool) -> None:
         async with self._interaction_control_lock:
             detached = await self._interaction_output.detach(token)
             if not detached:
                 return
-            self._work_queue.discard_all_work()
+            self._event_manager.discard_all_work()
             if abort_active_round:
                 await self._cancel_active_round(reason="output_detached")
 
@@ -3073,66 +2886,41 @@ class DeepAgent(BaseAgent):
         if lease is None:
             return
         if await self._interaction_output.detach(lease.token):
-            self._work_queue.discard_all_work()
+            self._event_manager.discard_all_work()
             if abort_active_round:
                 await self._cancel_active_round(reason="output_replaced")
-
-    async def _begin_output_replacement_locked(
-        self,
-    ) -> tuple[Optional[asyncio.Task[Any]], Optional[asyncio.Event]]:
-        task = self._interaction_round_task
-        forwarded = self._interaction_round_forwarded
-        # This runs while the control lock is held; _cancel_active_round never
-        # waits for the cancelled child task, therefore it cannot deadlock with
-        # a rail that is committing its final assessment.
-        # Waiting for the cancelled child remains outside this lock.  The
-        # detach/cancel itself is completed before returning so the old round
-        # cannot keep running while the replacement is being prepared.
-        await self._detach_current_output_locked(abort_active_round=True)
-        return task, forwarded
-
-    async def _wait_for_cancelled_round(
-        self,
-        task: asyncio.Task[Any],
-        forwarded: Optional[asyncio.Event],
-    ) -> None:
-        with suppress(asyncio.CancelledError, Exception):
-            await task
-        if forwarded is not None:
-            with suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(forwarded.wait(), timeout=2.0)
 
     def _emit_interaction_event(self, event: InteractionEvent) -> None:
         # The callback is synchronous because rails can invoke it from several
         # lifecycle hooks.  Capture the lease now so a delayed task cannot put
         # an old event into a replacement request's output stream.
+        # Fire-and-forget is required (cannot await here); track the task so
+        # stop() can cancel outstanding emits instead of leaking them.
         token = self._interaction_output.current_token()
         if token is not None:
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self._interaction_output.emit(event.to_output_schema(), expected_token=token)
             )
+            self._interaction_emit_tasks.add(task)
+            task.add_done_callback(self._interaction_emit_tasks.discard)
 
-    # ------------------------------------------------------------------
-    # Cancellation and supervisor
-    # ------------------------------------------------------------------
-
-    async def cancel_user_round(
+    async def cancel_round(
         self,
         *,
         reason: str,
     ) -> bool:
-        """Cancel an ordinary user round without stopping the interaction loop.
+        """Cancel the current active round without stopping the interaction loop.
 
-        Goal rounds are deliberately excluded: their owning output stream or
-        Goal lifecycle operation controls cancellation.
+        Works for both user and goal rounds. Does not modify GoalRecord: an
+        ACTIVE goal stays ACTIVE until ``goal_manager.pause/clear`` (or
+        evaluation reaches a terminal status). Hosts that need to stop the
+        in-flight attempt while keeping the persistent goal should call this
+        (or close the output stream with ``abort_active_round=True``).
         """
         active = self._active_interaction_round
-        if active is None or active.run_kind != "user":
+        if active is None:
             return False
-        await self._cancel_active_round(
-            reason=reason,
-            expected_run_kind="user",
-        )
+        await self._cancel_active_round(reason=reason)
         return True
 
     async def _cancel_active_round(
@@ -3182,15 +2970,15 @@ class DeepAgent(BaseAgent):
                     await self._interaction_wakeup.wait()
                     continue
 
-                work = self._work_queue.next_work()
+                work = self._event_manager.next_work()
                 if work is None:
                     await self._promote_loop_follow_ups()
-                    work = self._work_queue.next_work()
+                    work = self._event_manager.next_work()
                 if work is None:
                     await self._close_idle_output_if_finished()
                     self._interaction_phase = InteractionPhase.IDLE
                     self._interaction_wakeup.clear()
-                    if self._work_queue.has_pending_work():
+                    if self._event_manager.has_pending_work():
                         continue
                     await self._interaction_wakeup.wait()
                     continue
@@ -3213,7 +3001,7 @@ class DeepAgent(BaseAgent):
         if controller is None or not controller.has_follow_up():
             return
         for query in controller.drain_follow_up():
-            self._work_queue.push_user(
+            self._event_manager.push_user(
                 RoundWorkItem.user(
                     request_id=None,
                     inputs={"query": query},
@@ -3233,11 +3021,14 @@ class DeepAgent(BaseAgent):
         """Return whether the current output stream still owns live work.
 
         The caller must hold ``_interaction_control_lock``.  A goal stream spans
-        multiple attempts, so an ACTIVE goal keeps the interaction open and
-        ensures its next work item is queued before the host can observe an idle
-        completion.
+        multiple attempts, so an ACTIVE goal keeps the interaction open.
+
+        Side effect (intentional): when the GoalRecord is ACTIVE, this method
+        also calls ``ensure_active_goal_work_locked()`` so the next attempt is
+        queued before the host can observe an idle completion.  Callers must
+        treat a True result as both "keep open" and "goal work ensured".
         """
-        if self._work_queue.has_pending_work() or self._active_interaction_round is not None:
+        if self._event_manager.has_pending_work() or self._active_interaction_round is not None:
             return True
         record = self._load_goal_record_locked()
         if record is not None and record.status is GoalStatus.ACTIVE:
@@ -3257,8 +3048,6 @@ class DeepAgent(BaseAgent):
                         self._interaction_round_forwarded.set()
                     continue
                 await self._interaction_output.emit(chunk)
-        except asyncio.CancelledError:
-            raise
         except Exception:
             logger.exception("[DeepAgent] output forwarder failed")
             self._emit_interaction_event(
@@ -3268,6 +3057,13 @@ class DeepAgent(BaseAgent):
             )
 
     async def _emit_round_boundary(self, session: "Session") -> bool:
+        """Emit an internal round-boundary marker into the session stream.
+
+        Uses ``session._inner`` because the public Session API has no way to
+        inject a non-payload control frame into ``stream_iterator()`` ordering.
+        ``_ROUND_BOUNDARY`` is filtered by ``_forward_session_stream`` and must
+        not go through ``write_stream`` / ``write_custom_stream``.
+        """
         try:
             manager = getattr(session, "_inner").stream_writer_manager()
             await manager.stream_emitter().emit(_ROUND_BOUNDARY)
@@ -3282,7 +3078,7 @@ class DeepAgent(BaseAgent):
         forwarded = asyncio.Event()
         self._interaction_round_forwarded = forwarded
         self._active_interaction_round = ActiveInteractionRound(work=work, task_id=task_id)
-        self._work_queue.mark_started(work)
+        self._event_manager.mark_started(work)
         self._interaction_phase = InteractionPhase.RUNNING
         try:
             if session is None or not self._interaction_output.has_consumer():
@@ -3301,7 +3097,7 @@ class DeepAgent(BaseAgent):
                 work, task_id, session
             )
             if outcome.next_work is not None:
-                self._work_queue.push_user(outcome.next_work)
+                self._event_manager.push_user(outcome.next_work)
                 self._notify_work()
             if outcome.error_code is not None:
                 self._emit_interaction_event(
@@ -3321,7 +3117,7 @@ class DeepAgent(BaseAgent):
                 )
             )
         finally:
-            self._work_queue.mark_finished(work)
+            self._event_manager.mark_finished(work)
             if session is not None:
                 emitted = await self._emit_round_boundary(session)
                 if not emitted:

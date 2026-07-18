@@ -146,7 +146,7 @@ class GetCurrentGoalTool(Tool):
 
     def __init__(
         self,
-        goal_manager: "GoalManager",
+        goal_manager: GoalManager,
         language: str = "cn",
         agent_id: Optional[str] = None,
     ) -> None:

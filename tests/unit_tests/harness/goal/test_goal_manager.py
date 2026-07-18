@@ -15,7 +15,7 @@ from openjiuwen.harness.goal.schema import (
     GoalStatus,
 )
 from openjiuwen.harness.goal.store import SessionGoalStore
-from openjiuwen.harness.task_loop.event_manager import RoundWorkQueue
+from openjiuwen.harness.task_loop.event_manager import EventManager
 from openjiuwen.harness.schema.interaction import InteractionEvent, InteractionEventType
 
 
@@ -23,6 +23,7 @@ class FakeSession:
     def __init__(self, session_id: str = "session-1") -> None:
         self._session_id = session_id
         self._state: dict[str, Any] = {}
+        self.commit_count = 0
 
     def get_session_id(self) -> str:
         return self._session_id
@@ -33,12 +34,15 @@ class FakeSession:
     def update_state(self, value: dict[str, Any]) -> None:
         self._state.update(value)
 
+    async def commit(self) -> None:
+        self.commit_count += 1
+
 
 class ManagerHarness:
     def __init__(self, *, output_attached: bool = True) -> None:
         self.session = FakeSession()
         self.store = SessionGoalStore(self.session)
-        self.events = RoundWorkQueue()
+        self.events = EventManager()
         self.output_attached = output_attached
         self.emitted: list[InteractionEvent] = []
         self.cancel_calls: list[dict[str, Any]] = []
@@ -89,6 +93,25 @@ async def test_set_persists_goal_and_queues_work_only_with_an_output_consumer() 
     assert queued.context["goal_id"] == record.goal_id
     assert attached.notify_calls == 1
     assert attached.emitted[0].type is InteractionEventType.GOAL_UPDATED
+
+
+@pytest.mark.asyncio
+async def test_goal_writes_are_committed_immediately() -> None:
+    harness = ManagerHarness(output_attached=False)
+
+    goal = await harness.manager.set("write a report")
+    assert harness.session.commit_count == 1
+
+    paused = await harness.manager.pause()
+    assert paused is not None
+    assert harness.session.commit_count == 2
+
+    resumed = await harness.manager.resume()
+    assert resumed is not None
+    assert harness.session.commit_count == 3
+
+    await harness.manager.begin_attempt(goal_id=goal.goal_id, revision=resumed.revision)
+    assert harness.session.commit_count == 4
 
 
 @pytest.mark.asyncio
@@ -187,3 +210,55 @@ async def test_attempt_usage_and_completion_are_written_for_current_generation()
     assert completed.status is GoalStatus.COMPLETED
     assert completed.token_usage.total_tokens == 12
     assert completed.last_stop_reason == "completed"
+
+
+@pytest.mark.asyncio
+async def test_pause_keeps_revision_so_in_flight_assessment_can_commit() -> None:
+    harness = ManagerHarness()
+    goal = await harness.manager.set("write a report")
+    started = await harness.manager.begin_attempt(goal_id=goal.goal_id, revision=goal.revision)
+    assert started is not None
+
+    paused = await harness.manager.pause()
+    assert paused is not None
+    assert paused.status is GoalStatus.PAUSED
+    assert paused.revision == goal.revision
+
+    continued = await harness.manager.apply_assessment(
+        goal_id=goal.goal_id,
+        revision=goal.revision,
+        assessment=GoalAssessment(
+            status=GoalAssessmentStatus.CONTINUE,
+            evidence="partial progress",
+            next_instruction="keep going",
+        ),
+    )
+    assert continued is not None
+    assert continued.status is GoalStatus.PAUSED
+    assert continued.last_assessment is not None
+    assert continued.last_assessment.evidence == "partial progress"
+    # Pause discarded pending work; CONTINUE must not re-queue while paused.
+    assert harness.events.next_work() is None
+
+
+@pytest.mark.asyncio
+async def test_pause_then_complete_assessment_overrides_paused() -> None:
+    harness = ManagerHarness()
+    goal = await harness.manager.set("write a report")
+    await harness.manager.begin_attempt(goal_id=goal.goal_id, revision=goal.revision)
+    await harness.manager.pause()
+
+    completed = await harness.manager.apply_assessment(
+        goal_id=goal.goal_id,
+        revision=goal.revision,
+        assessment=GoalAssessment(
+            status=GoalAssessmentStatus.COMPLETE,
+            evidence="all checks passed",
+        ),
+    )
+
+    assert completed is not None
+    assert completed.status is GoalStatus.COMPLETED
+    assert completed.last_assessment is not None
+    assert completed.last_stop_reason == "completed"
+    assert harness.events.next_work() is None

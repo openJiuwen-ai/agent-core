@@ -17,6 +17,9 @@ from typing import TYPE_CHECKING, Dict, Optional
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.harness.prompts.sections import SectionName
 
+if TYPE_CHECKING:
+    from openjiuwen.harness.goal.schema import GoalAssessment, GoalRecord
+
 # ===================================================================
 # Goal protocol — static system prompt section
 # ===================================================================
@@ -192,7 +195,7 @@ def _format_previous_assessment(
     return "\n".join(parts)
 
 
-def _format_budget_notice(record: "GoalRecord", language: str = "cn") -> str:
+def _format_budget_notice(record: GoalRecord, language: str = "cn") -> str:
     notices = []
     if record.max_attempts is not None:
         remaining = max(0, record.max_attempts - record.attempt_count)
@@ -212,7 +215,7 @@ def _format_budget_notice(record: "GoalRecord", language: str = "cn") -> str:
 
 
 def build_goal_task_query(
-    record: "GoalRecord",
+    record: GoalRecord,
     language: str = "cn",
 ) -> str:
     """Build the ``<goal_task>`` XML query for a goal attempt round.
@@ -240,7 +243,7 @@ def build_goal_task_query(
 
 
 def build_goal_current_instruction(
-    record: "GoalRecord",
+    record: GoalRecord,
     language: str = "cn",
 ) -> str:
     """Return the instruction that is authoritative for this goal attempt."""
@@ -275,9 +278,8 @@ TRANSCRIPT_ASSESSOR_SYSTEM: Dict[str, str] = {
         '5. status="continue" 不是失败；remaining_work 必须说明缺口，next_instruction 必须具体可执行。\n'
         '6. 只有缺少用户输入、权限、必要依赖、外部服务或环境状态，导致无法继续任何有意义推进时，才输出 status="blocked"。\n'
         "7. 任务复杂、尚未做完、测试没跑或证据不足都不是 blocked，通常应输出 continue。\n"
-        "8. 如果上下文显示目标已经完成，即使没有单独的结构化报告，也可以输出 complete。\n"
-        "9. 如果主模型报告 blocked 但上下文显示仍有可执行动作，输出 continue。\n"
-        "10. 不输出 paused、cleared 或其它状态。"
+        "8. 如果上下文显示目标已经完成且能找到相关依据，输出 complete。\n"
+        "9. 不输出 paused、cleared 或其它状态。"
     ),
     "en": (
         "You are a Goal completion assessor. Judge goal status only from the objective, "
@@ -292,18 +294,27 @@ TRANSCRIPT_ASSESSOR_SYSTEM: Dict[str, str] = {
         '  "next_instruction": "Most specific actionable step for status=continue, else empty string"\n'
         "}\n\n"
         "Assessment rules:\n"
-        "1. Extract deliverables, acceptance criteria, and verifiable results from the objective and current instruction.\n"
-        "2. Base judgment on verifiable evidence in the attempt context, not the main model's tone or promises.\n"
-        '3. Output status="complete" only when context evidence shows acceptance criteria are met.\n'
-        '4. If implementation, tests, verification, deliverables, or evidence are still missing but progress is possible, output status="continue".\n'
-        '5. status="continue" is not failure; remaining_work must describe gaps, next_instruction must be specific and actionable.\n'
-        '6. Output status="blocked" only when user input, permissions, required dependencies, external services, or environment state prevent any meaningful progress.\n'
-        "7. Complex tasks, incomplete work, unrun tests, or insufficient evidence are not blocked; usually output continue.\n"
-        "8. If the context shows the objective is complete, output complete even when there is no separate structured report.\n"
-        "9. If the main model reports blocked but context shows actionable steps, output continue.\n"
-        "10. Do not output paused, cleared, or any other status."
+        "1. Extract deliverables, acceptance criteria, and verifiable results "
+        "from the objective and current instruction.\n"
+        "2. Base judgment on verifiable evidence in the attempt context, "
+        "not the main model's tone or promises.\n"
+        '3. Output status="complete" only when context evidence shows '
+        "acceptance criteria are met.\n"
+        "4. If implementation, tests, verification, deliverables, or evidence "
+        'are still missing but progress is possible, output status="continue".\n'
+        '5. status="continue" is not failure; remaining_work must describe '
+        "gaps, next_instruction must be specific and actionable.\n"
+        '6. Output status="blocked" only when user input, permissions, required '
+        "dependencies, external services, or environment state prevent any "
+        "meaningful progress.\n"
+        "7. Complex tasks, incomplete work, unrun tests, or insufficient "
+        "evidence are not blocked; usually output continue.\n"
+        "8. If the context shows the objective is complete and relevant "
+        "evidence can be found, output complete.\n"
+        "9. Do not output paused, cleared, or any other status."
     ),
 }
+
 
 def build_transcript_assessor_prompt(
     objective: str,
@@ -330,10 +341,6 @@ def build_transcript_assessor_prompt(
             f"<attempt_context>\n{attempt_context}\n</attempt_context>",
         ]
     )
-
-# Lazy imports — avoid circular dependency with goal.schema
-if TYPE_CHECKING:
-    from openjiuwen.harness.goal.schema import GoalAssessment, GoalRecord
 
 
 __all__ = [

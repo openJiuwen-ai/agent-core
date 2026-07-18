@@ -190,20 +190,19 @@ class GoalEvaluator:
         # COMPLETE or BLOCKED: require transcript verification. The caller must
         # invoke the transcript assessor before calling assess(); if no response
         # is available, continue conservatively rather than trusting self-report.
+        # ``_verify_with_transcript`` already handles a None response; keep the
+        # distinct log lines but share one call path.
         if transcript_response is None:
             logger.info(
                 "[GoalEvaluator] HYBRID: agent reported %s, transcript not invoked, "
                 "falling back to continue",
                 normalized.status.value,
             )
-            return self._verify_with_transcript(
-                normalized, transcript_response, trust_on_failure=False,
+        else:
+            logger.info(
+                "[GoalEvaluator] HYBRID: agent reported %s, verifying via transcript",
+                normalized.status.value,
             )
-
-        logger.info(
-            "[GoalEvaluator] HYBRID: agent reported %s, verifying via transcript",
-            normalized.status.value,
-        )
         return self._verify_with_transcript(
             normalized, transcript_response, trust_on_failure=False,
         )
