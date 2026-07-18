@@ -89,6 +89,7 @@ def build_claude_runtime(
     *,
     member_name: str,
     cwd: str | None,
+    add_dirs: tuple[str, ...],
     env: dict[str, str],
     inject_mcp: bool,
     mcp_server_name: str,
@@ -101,6 +102,7 @@ def build_claude_runtime(
     """Build a Claude SDK runtime, using an SSH SDK transport when configured."""
     options = build_claude_options(
         cwd=cwd,
+        add_dirs=add_dirs,
         env=env,
         inject_mcp=inject_mcp,
         mcp_server_name=mcp_server_name,
