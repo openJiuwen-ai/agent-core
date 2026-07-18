@@ -239,6 +239,62 @@ class TestSkillExperienceOptimizerGenerate:
         assert records[1].change.content == "B"
 
     @staticmethod
+    @pytest.mark.asyncio
+    async def test_two_stage_preserves_summary_and_keywords():
+        llm = MagicMock()
+        candidates = [
+            {
+                "action": "append",
+                "target": "body",
+                "section": "Troubleshooting",
+                "summary": "When tool calls time out, retry with a shorter prompt.",
+                "keywords": ["timeout", "retry", "prompt"],
+                "content": "A",
+            },
+        ]
+        patches = [
+            {
+                "action": "append",
+                "target": "body",
+                "section": "Troubleshooting",
+                "summary": "When tool calls time out, retry with a shorter prompt.",
+                "keywords": ["timeout", "retry", "prompt"],
+                "content": "A",
+                "merge_target": None,
+            },
+        ]
+        llm.invoke = AsyncMock(side_effect=_two_stage_llm_side_effect(candidates, patches))
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="en", two_stage=True)
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal()],
+            skill_content="# skill",
+            messages=[{"role": "user", "content": "hello"}],
+            existing_desc_records=[],
+            existing_body_records=[],
+        )
+        records = await optimizer.generate_records(ctx)
+        assert len(records) == 1
+        assert records[0].summary == "When tool calls time out, retry with a shorter prompt."
+        assert records[0].change.summary == "When tool calls time out, retry with a shorter prompt."
+        assert records[0].change.keywords == ["timeout", "retry", "prompt"]
+
+    @staticmethod
+    def test_two_stage_prompts_require_summary_and_keywords():
+        from openjiuwen.agent_evolving.optimizer.skill_call.templates import (
+            SKILL_EXPERIENCE_ANALYZER_PROMPT,
+            SKILL_EXPERIENCE_FORMATTER_PROMPT,
+        )
+
+        for lang in ("cn", "en"):
+            analyzer = SKILL_EXPERIENCE_ANALYZER_PROMPT[lang]
+            formatter = SKILL_EXPERIENCE_FORMATTER_PROMPT[lang]
+            assert '"summary"' in analyzer
+            assert '"keywords"' in analyzer
+            assert '"summary"' in formatter
+            assert '"keywords"' in formatter
+
+    @staticmethod
     def test_update_llm_updates_runtime_references():
         optimizer = SkillExperienceOptimizer(llm="old", model="m1", language="cn")
         optimizer.update_llm(llm="new", model="m2")
@@ -603,6 +659,29 @@ class TestAssistantTextFromResponse:
         assert "candidates" in _assistant_text_from_response(response)
 
     @staticmethod
+    def test_handles_dict_content_and_text_fallback():
+        assert _assistant_text_from_response({"content": '{"ok": true}'}) == '{"ok": true}'
+        assert _assistant_text_from_response({"text": '{"via": "text"}'}) == '{"via": "text"}'
+
+    @staticmethod
+    def test_handles_dict_reasoning_content_fallback():
+        result = _assistant_text_from_response(
+            {"content": "", "reasoning_content": '{"candidates": []}'}
+        )
+        assert result == '{"candidates": []}'
+
+    @staticmethod
+    def test_matches_shared_response_to_text_for_dict():
+        from openjiuwen.agent_evolving.optimizer.llm_resilience import response_to_text
+
+        response = {
+            "content": None,
+            "text": "",
+            "reasoning_content": '{"candidates": [{"action": "append"}]}',
+        }
+        assert _assistant_text_from_response(response) == response_to_text(response)
+
+    @staticmethod
     @pytest.mark.asyncio
     async def test_invoke_llm_passes_optimizer_max_tokens():
         llm = MagicMock()
@@ -637,6 +716,10 @@ class TestRetryParse:
         prompt_sent = call_args.kwargs["messages"][0]["content"]
         assert "修复" in prompt_sent or "invalid json" in prompt_sent
         assert call_args.kwargs["max_tokens"] == _OPTIMIZER_LLM_MAX_TOKENS
+        assert (
+            call_args.kwargs["timeout"]
+            == optimizer.generate_records_llm_policy.attempt_timeout_secs
+        )
 
     @staticmethod
     @pytest.mark.asyncio

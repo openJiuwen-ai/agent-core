@@ -9,612 +9,80 @@ import re
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.agent_evolving.checkpointing.types import (
-    VALID_SECTIONS,
     EvolutionContext,
     EvolutionPatch,
     EvolutionRecord,
-    EvolutionTarget,
+    EvolutionRecordSpec,
 )
 from openjiuwen.agent_evolving.optimizer.base import BaseOptimizer
-from openjiuwen.agent_evolving.signal.base import EvolutionSignal
+from openjiuwen.agent_evolving.optimizer.llm_resilience import (
+    LLMInvokePolicy,
+    invoke_text_with_retry_and_prompt,
+    response_to_text,
+)
+from openjiuwen.agent_evolving.optimizer.skill_call.experience_draft_parser import (
+    ParsedExperienceDraft,
+    parse_experience_draft,
+    parse_experience_drafts_with_error,
+)
+from openjiuwen.agent_evolving.optimizer.skill_call.templates import (
+    JSON_FIX_PROMPT,
+    JSON_FIX_PROMPT_STRICT,
+    SKILL_EXPERIENCE_ANALYZER_PROMPT,
+    SKILL_EXPERIENCE_FORMATTER_PROMPT,
+    SKILL_EXPERIENCE_GENERATE_PROMPT,
+)
+from openjiuwen.agent_evolving.optimizer.skill_call.tool_call_chain import build_tool_call_chain
+from openjiuwen.agent_evolving.signal.base import EvolutionSignal, EvolutionTarget
 from openjiuwen.agent_evolving.trajectory.types import Updates
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
 
-
-def _assistant_text_from_response(response: Any) -> str:
-    """Normalize assistant output; fall back to reasoning_content when content is empty."""
-    content = getattr(response, "content", None)
-    if isinstance(content, list):
-        parts: list[str] = []
-        for part in content:
-            if isinstance(part, str):
-                parts.append(part)
-            elif isinstance(part, dict) and part.get("type") == "text":
-                parts.append(str(part.get("text", "")))
-        text = "".join(parts).strip()
-    elif content is None:
-        text = ""
-    else:
-        text = str(content).strip()
-
-    if text:
-        return text
-
-    reasoning = getattr(response, "reasoning_content", None)
-    if reasoning and str(reasoning).strip():
-        logger.warning(
-            "[SkillExperienceOptimizer] falling back to reasoning_content "
-            "(empty content; reasoning_content is not the expected JSON output channel)",
-        )
-        return str(reasoning).strip()
-    return ""
+EXPERIENCES_TARGET = "experiences"
+# Keep a high default max_tokens for reasoning models; ModelArts may override higher.
+_OPTIMIZER_LLM_MAX_TOKENS = 8192
 
 # Initial score mapping by signal type
 INITIAL_SCORE_BY_SIGNAL = {
     "execution_failure": 0.65,
+    "user_intent": 0.70,
     "user_correction": 0.70,
     "script_artifact": 0.60,
     "conversation_review": 0.50,
 }
 
-SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
-你是一个 Skill 优化专家。根据对话中发现的问题信号和对话历史，为 Skill 生成演进经验。
-
-## 输入信息
-
-### 当前 Skill 内容
-{skill_content}
-
-### 预检测信号（规则引擎自动提取）
-{signals_json}
-
-### 对话历史
-{conversation_snippet}
-
-### 已有 description 经验
-{existing_desc_summary}
-
-### 已有 body 经验
-{existing_body_summary}
-
-## 经验来源
-
-经验来自两个渠道，都要处理：
-
-**渠道 A — 预检测信号**：上方「预检测信号」中列出的条目，由规则引擎自动从对话中提取，可能包含误报。
-
-**渠道 B — 对话历史直接分析**：直接审视「对话历史」，发现规则引擎未捕获的有价值经验，包括但不限于：
-- Agent 经过多次尝试/重试才成功的 workaround（说明 Skill 缺少相关指导）
-- 用户含蓄的纠正或补充说明（未使用"错了""不对"等显式关键词）
-- 低效的工具调用模式（如多余步骤、错误的调用顺序）
-- Agent 遗漏的关键步骤（用户不得不手动补充）
-- 需要特殊处理的边界情况（Skill 中未覆盖的场景）
-
-**渠道 C — 脚本工件提取**：检查「预检测信号」中 type 为 "script_artifact" 的条目。这些是 Agent 在对话中生成并成功执行的脚本代码。评估其复用价值：
-- 高复用价值：图表生成（matplotlib/plotly）、图标/配图生成（PIL）、数据处理（JSON/CSV/Excel 转换）、自动化脚本（批量操作、格式化等）
-- 排除标准：仅包含硬编码特定数据的一次性脚本（纯硬编码特定内容才排除）
-- 脚本类经验使用 target="script"，section="Scripts"
-
-如果对话历史中没有额外发现，不需要强制生成；如果有发现，与预检测信号的经验一起输出。
-
-## 数量限制
-
-最终输出的有效经验（action 为 append 的条目）：**文本经验不超过 2 条，脚本经验不超过 1 条**，独立计数互不影响。
-如果候选经验超过限制，按以下优先级保留最重要的，其余标记为 skip：
-1. 导致任务失败或产出错误结果的问题 > 导致效率低下但最终成功的问题
-2. 高频/可复现的模式 > 单次偶发现象
-3. 渠道 A/B/C 的发现同等对待，仅按影响程度排序
-
-## 决策流程（对每条潜在经验按顺序执行）
-
-### 第一步：相关性判断
-判断该经验是否与 Skill 本身相关：
-- 相关：问题由 Skill 的指令、脚本、示例或排查逻辑导致 -> 继续第二步
-- 不相关：问题由外部因素导致（网络、环境、权限、第三方服务等）-> 输出 {{"action": "skip", "skip_reason": "irrelevant"}}
-
-### 第二步：去重判断
-对比已有演进经验（description 和 body 两个列表）：
-- 实质相同：与某条已有记录内容重复 -> 输出 {{"action": "skip", "skip_reason": "duplicate"}}
-- 高度相似但有增量：与某条已有记录相关但有新信息 -> 输出合并后的完整内容，并设置 "merge_target" 为目标记录 id
-- 全新：与已有记录无关 -> 继续第三步
-
-### 第三步：优先级筛选与生成
-将所有通过前两步的候选经验按优先级排序，仅为排名前 2 的候选生成内容，其余输出 {{"action": "skip", "skip_reason": "low_priority"}}。
-确定经验归属层（target）和章节（section），然后生成内容。
-
-**target 判断（三选一）：**
-- **description**（描述/元数据层）：涉及 Skill 适用场景判断错误、描述不准确、缺少关键词导致未被选中或误选
-- **body**（正文/指令层）：涉及执行步骤、工具调用错误、操作流程、排查逻辑
-- **script**（脚本工件层）：Agent 生成并成功执行的可复用脚本代码（渠道 C）
-
-**section 选择参考：**
-- execution_failure / workaround 类：通常归入 Troubleshooting
-- user_correction / 流程偏差类：通常归入 Instructions 或 Examples
-- script_artifact 类：归入 Scripts
-
-## 内容生成规范
-1. 语言一致：输出语言必须与 Skill 完全一致（中文 Skill 输出中文，英文 Skill 输出英文）
-2. 标题层级：使用与 Skill 相同的标题层级（##、### 等）
-3. 每条记录：1 个标题 + 2-3 个无序列表分点（- 或 *），禁止子层级
-4. 每条记录只涉及一个 section 类型，不混合
-5. 提取可复用的通用规则，非临时补丁（好："遇到 X 错误时，先检查 Y 再执行 Z"；差："某用户某次提到某问题"）
-6. 内容必须是 Skill 中未提及的新知识，精炼简洁
-7. 多个发现指向同一问题时合并为一条；不同问题分别生成
-8. 文本经验（action 为 append，target 为 description/body）最多 2 条；脚本经验（target 为 script）最多 1 条
-9. 脚本经验的 content 字段直接放完整脚本源码，同时填写 script_filename、script_language、script_purpose
-
-## 输出格式
-只输出以下 JSON 数组，不要其他内容（即使只有一条，也必须用数组包裹）：
-[
-  {{
-    "action": "append | skip",
-    "skip_reason": "irrelevant | duplicate | low_priority（仅 action 为 skip 时填写，否则为 null）",
-    "target": "description | body | script",
-    "section": "Instructions | Examples | Troubleshooting | Scripts",
-    "content": "Markdown 内容或脚本源码（仅 action 为 append 时填写）",
-    "merge_target": "ev_xxxxxxxx 或 null",
-    "script_filename": "文件名（仅 target 为 script 时填写，如 generate_chart.py）",
-    "script_language": "语言标识（仅 target 为 script 时填写，如 python）",
-    "script_purpose": "用途说明（仅 target 为 script 时填写）"
-  }}
-]"""
-
-SKILL_EXPERIENCE_GENERATE_PROMPT_EN = """\
-You are a Skill optimization expert. Based on problem signals discovered in the conversation and the conversation history, generate evolution experiences for the Skill.
-
-## Input Information
-
-### Current Skill Content
-{skill_content}
-
-### Pre-detected Signals (automatically extracted by the rule engine)
-{signals_json}
-
-### Conversation History
-{conversation_snippet}
-
-### Existing description experiences
-{existing_desc_summary}
-
-### Existing body experiences
-{existing_body_summary}
-
-## Experience Sources
-
-Experiences come from two channels, both must be processed:
-
-**Channel A — Pre-detected Signals**: The entries listed in the "Pre-detected Signals" section above, automatically extracted from the conversation by the rule engine. May contain false positives.
-
-**Channel B — Direct Conversation History Analysis**: Directly examine the "Conversation History" to discover valuable experiences not captured by the rule engine, including but not limited to:
-- Workarounds where the Agent succeeded only after multiple attempts/retries (indicating the Skill lacks relevant guidance)
-- Implicit corrections or supplementary explanations from the user (without using explicit keywords like "wrong" or "incorrect")
-- Inefficient tool invocation patterns (e.g., redundant steps, incorrect invocation order)
-- Critical steps missed by the Agent (where the user had to manually fill in)
-- Edge cases requiring special handling (scenarios not covered by the Skill)
-
-**Channel C — Script Artifact Extraction**: Check the "Pre-detected Signals" for entries with type "script_artifact". These are scripts that the Agent generated and successfully executed during the conversation. Evaluate their reuse value:
-- High reuse value: chart generation (matplotlib/plotly), icon/image generation (PIL), data processing (JSON/CSV/Excel conversion), automation scripts (batch operations, formatting, etc.)
-- Exclusion criteria: one-off scripts that only contain hardcoded specific data
-- Script experiences use target="script", section="Scripts"
-
-If no additional findings exist in the conversation history, do not force generation; if findings exist, output them together with the pre-detected signal experiences.
-
-## Quantity Limit
-
-The final output of valid experiences (entries with action "append"): **text experiences must not exceed 2, script experiences must not exceed 1**, counted independently.
-If candidate experiences exceed the limit, retain the most important ones by the following priority and mark the rest as skip:
-1. Issues causing task failure or incorrect results > Issues causing inefficiency but eventual success
-2. High-frequency / reproducible patterns > One-off occurrences
-3. Findings from Channel A/B/C are treated equally, sorted only by impact level
-
-## Decision Flow (execute sequentially for each potential experience)
-
-### Step 1: Relevance Check
-Determine whether the experience is related to the Skill itself:
-- Relevant: The issue is caused by the Skill's instructions, scripts, examples, or troubleshooting logic -> proceed to Step 2
-- Irrelevant: The issue is caused by external factors (network, environment, permissions, third-party services, etc.) -> output {{"action": "skip", "skip_reason": "irrelevant"}}
-
-### Step 2: Deduplication Check
-Compare against existing evolution experiences (both description and body lists):
-- Essentially identical: Duplicates an existing record -> output {{"action": "skip", "skip_reason": "duplicate"}}
-- Highly similar but with incremental value: Related to an existing record but contains new information -> output the merged complete content and set "merge_target" to the target record id
-- Entirely new: Unrelated to existing records -> proceed to Step 3
-
-### Step 3: Priority Filtering and Generation
-Sort all candidates that passed the first two steps by priority, generate content only for the top 2, and output {{"action": "skip", "skip_reason": "low_priority"}} for the rest.
-Determine the experience's target layer (target) and section (section), then generate the content.
-
-**target selection (choose one):**
-- **description** (metadata layer): Involves incorrect Skill applicability judgment, inaccurate description, missing keywords causing the Skill to be unselected or incorrectly selected
-- **body** (instruction layer): Involves execution steps, tool invocation errors, operational procedures, troubleshooting logic
-- **script** (script artifact layer): Reusable scripts that the Agent generated and successfully executed (Channel C)
-
-**section selection reference:**
-- execution_failure / workaround types: Usually belong to Troubleshooting
-- user_correction / process deviation types: Usually belong to Instructions or Examples
-- script_artifact types: Belong to Scripts
-
-## Content Generation Guidelines
-1. Language consistency: Output language must match the Skill exactly (Chinese Skill outputs Chinese, English Skill outputs English)
-2. Heading levels: Use the same heading levels as the Skill (##, ###, etc.)
-3. Each record: 1 heading + 2-3 unordered list items (- or *), no sub-levels allowed
-4. Each record covers only one section type, no mixing
-5. Extract reusable general rules, not temporary patches (good: "When encountering error X, first check Y then execute Z"; bad: "A certain user once mentioned a certain issue")
-6. Content must be new knowledge not already mentioned in the Skill, concise and refined
-7. When multiple findings point to the same issue, merge into one entry; generate separately for different issues
-8. Text experiences (action "append", target description/body): at most 2; script experiences (target script): at most 1
-9. For script experiences, put the full script source code in the content field, and fill in script_filename, script_language, script_purpose
-
-## Output Format
-Output only the following JSON array, nothing else (even if there is only one entry, it must be wrapped in an array):
-[
-  {{
-    "action": "append | skip",
-    "skip_reason": "irrelevant | duplicate | low_priority (fill only when action is skip, otherwise null)",
-    "target": "description | body | script",
-    "section": "Instructions | Examples | Troubleshooting | Scripts",
-    "content": "Markdown content or script source code (fill only when action is append)",
-    "merge_target": "ev_xxxxxxxx or null",
-    "script_filename": "filename (only when target is script, e.g. generate_chart.py)",
-    "script_language": "language identifier (only when target is script, e.g. python)",
-    "script_purpose": "purpose description (only when target is script)"
-  }}
-]"""
-
-SKILL_EXPERIENCE_GENERATE_PROMPT: Dict[str, str] = {
-    "cn": SKILL_EXPERIENCE_GENERATE_PROMPT_CN,
-    "en": SKILL_EXPERIENCE_GENERATE_PROMPT_EN,
-}
-
-# --- Two-stage pipeline: Analyzer (root-cause + candidates) → Formatter (strict JSON) ---
-
-_ANALYZER_SHARED_INPUT_CN = """\
-## 输入信息
-
-### 当前 Skill 内容
-{skill_content}
-
-### 预检测信号（规则引擎自动提取）
-{signals_json}
-
-### 结构化执行轨迹（优先于对话历史分析）
-{tool_call_chain}
-
-### 对话历史（补充上下文）
-{conversation_snippet}
-
-### 已有 description 经验
-{existing_desc_summary}
-
-### 已有 body 经验
-{existing_body_summary}"""
-
-_ANALYZER_SHARED_INPUT_EN = """\
-## Input Information
-
-### Current Skill Content
-{skill_content}
-
-### Pre-detected Signals (rule engine)
-{signals_json}
-
-### Structured Execution Trace (prioritize over conversation history)
-{tool_call_chain}
-
-### Conversation History (supplementary context)
-{conversation_snippet}
-
-### Existing description experiences
-{existing_desc_summary}
-
-### Existing body experiences
-{existing_body_summary}"""
-
-SKILL_EXPERIENCE_ANALYZER_PROMPT_CN = """\
-你是一个 Skill 优化分析专家。根据信号、结构化执行轨迹和对话历史，完成根因归因并产出候选演进经验（自然语言草稿）。
-
-""" + _ANALYZER_SHARED_INPUT_CN + """
-
-## 经验来源
-
-**渠道 A — 预检测信号**：可能包含误报，需经 Step 0 过滤。
-**渠道 B — 执行轨迹与对话分析**：重试后成功（workaround）、用户含蓄纠正、低效工具调用模式、遗漏步骤、边界情况。
-**渠道 C — script_artifact 信号**：可复用脚本工件（target=script）。
-
-## Step 0：根因归因（对每条信号或发现必须先执行）
-
-判断 failure_type（四选一）：
-- **skill_instruction_gap**：Skill 指令/示例/排查缺失导致 → should_evolve=true（confidence≥0.7 时）
-- **external_env**：网络/环境/权限/第三方服务 → should_evolve=false
-- **user_ambiguity**：用户表述不清，非 Skill 缺陷 → 仅当能补充 Examples 时 should_evolve=true
-- **tool_limitation**：工具能力不足 → should_evolve=false
-
-仅 should_evolve=true 且与 Skill 相关的发现可进入 candidates。
-
-## 决策流程（对每条候选）
-
-1. **相关性**：外部因素 → 不进入 candidates
-2. **去重**：与已有经验实质相同 → 不进入；有增量 → 标记 merge_target
-3. **优先级**：失败/错误 > 效率低；可复现 > 偶发
-
-## 数量限制
-
-candidates 中 action=append 的条目：**文本最多 2 条，脚本最多 1 条**，独立计数。
-
-## 内容规范
-
-- 语言与 Skill 一致；1 标题 + 2-3 列表项；可复用通用规则；单条 content 草稿 ≤500 字符
-
-## 输出格式
-
-只输出以下 JSON 对象，不要其他内容：
-```json
-{{
-  "root_causes": [
-    {{
-      "failure_type": "skill_instruction_gap | external_env | user_ambiguity | tool_limitation",
-      "confidence": 0.85,
-      "evidence": ["简要证据"],
-      "should_evolve": true
-    }}
-  ],
-  "candidates": [
-    {{
-      "action": "append",
-      "target": "description | body | script",
-      "section": "Instructions | Examples | Troubleshooting | Scripts",
-      "content": "Markdown 或脚本源码草稿",
-      "merge_target": "ev_xxxxxxxx 或 null",
-      "priority": 1,
-      "script_filename": "仅 script 时填写",
-      "script_language": "仅 script 时填写",
-      "script_purpose": "仅 script 时填写"
-    }}
-  ]
-}}
-```
-
-若无值得记录的经验，返回 `"candidates": []`。"""
-
-SKILL_EXPERIENCE_ANALYZER_PROMPT_EN = """\
-You are a Skill optimization analyst. Based on signals, structured execution trace, and conversation history, perform root-cause attribution and produce candidate evolution experiences (drafts).
-
-""" + _ANALYZER_SHARED_INPUT_EN + """
-
-## Experience Sources
-
-**Channel A — Pre-detected signals**: May contain false positives; must pass Step 0 filtering.
-**Channel B — Trace & conversation analysis**: Workarounds after retries, implicit user corrections, inefficient tool patterns, missed steps, edge cases.
-**Channel C — script_artifact signals**: Reusable script artifacts (target=script).
-
-## Step 0: Root-Cause Attribution (required for each signal or finding)
-
-Determine failure_type (choose one):
-- **skill_instruction_gap**: Caused by missing Skill instructions/examples/troubleshooting → should_evolve=true (when confidence≥0.7)
-- **external_env**: Network/environment/permissions/third-party → should_evolve=false
-- **user_ambiguity**: Unclear user intent, not a Skill defect → should_evolve=true only if Examples can help
-- **tool_limitation**: Tool capability limits → should_evolve=false
-
-Only findings with should_evolve=true and Skill relevance enter candidates.
-
-## Decision Flow (per candidate)
-
-1. **Relevance**: External factors → exclude from candidates
-2. **Deduplication**: Essentially duplicate → exclude; incremental → set merge_target
-3. **Priority**: Failure/errors > inefficiency; reproducible > one-off
-
-## Quantity Limit
-
-action=append entries in candidates: **at most 2 text, 1 script**, counted independently.
-
-## Content Guidelines
-
-- Match Skill language; 1 heading + 2-3 list items; reusable rules; draft content ≤500 chars per entry
-
-## Output Format
-
-Output only the following JSON object, nothing else:
-```json
-{{
-  "root_causes": [
-    {{
-      "failure_type": "skill_instruction_gap | external_env | user_ambiguity | tool_limitation",
-      "confidence": 0.85,
-      "evidence": ["brief evidence"],
-      "should_evolve": true
-    }}
-  ],
-  "candidates": [
-    {{
-      "action": "append",
-      "target": "description | body | script",
-      "section": "Instructions | Examples | Troubleshooting | Scripts",
-      "content": "Markdown or script source draft",
-      "merge_target": "ev_xxxxxxxx or null",
-      "priority": 1,
-      "script_filename": "script only",
-      "script_language": "script only",
-      "script_purpose": "script only"
-    }}
-  ]
-}}
-```
-
-If nothing is worth recording, return `"candidates": []`."""
-
-SKILL_EXPERIENCE_ANALYZER_PROMPT: Dict[str, str] = {
-    "cn": SKILL_EXPERIENCE_ANALYZER_PROMPT_CN,
-    "en": SKILL_EXPERIENCE_ANALYZER_PROMPT_EN,
-}
-
-SKILL_EXPERIENCE_FORMATTER_PROMPT_CN = """\
-你是 JSON 格式化专家。将下方分析阶段产出的候选经验转换为严格的演进记录 JSON 数组。
-
-## 分析阶段输出
-{analyzer_output}
-
-## 目标格式
-
-只输出以下 JSON 数组，不要其他内容（即使只有一条也必须用数组包裹）：
-[
-  {{
-    "action": "append | skip",
-    "skip_reason": "irrelevant | duplicate | low_priority（仅 skip 时填写，否则为 null）",
-    "target": "description | body | script",
-    "section": "Instructions | Examples | Troubleshooting | Scripts",
-    "content": "Markdown 内容或脚本源码（仅 append 时填写）",
-    "merge_target": "ev_xxxxxxxx 或 null",
-    "script_filename": "文件名或 null",
-    "script_language": "语言标识或 null",
-    "script_purpose": "用途说明或 null"
-  }}
-]
-
-规则：
-1. 保留分析阶段所有 action=append 的候选（文本≤2，脚本≤1）
-2. content 中的换行用 \\n，引号正确转义
-3. merge_target 为 null 时写 null，不要写字符串 "null\""""
-
-SKILL_EXPERIENCE_FORMATTER_PROMPT_EN = """\
-You are a JSON formatting expert. Convert the analyzer-stage candidate experiences below into a strict evolution record JSON array.
-
-## Analyzer Output
-{analyzer_output}
-
-## Target Format
-
-Output only the following JSON array, nothing else (wrap in an array even for a single entry):
-[
-  {{
-    "action": "append | skip",
-    "skip_reason": "irrelevant | duplicate | low_priority (only when action is skip, else null)",
-    "target": "description | body | script",
-    "section": "Instructions | Examples | Troubleshooting | Scripts",
-    "content": "Markdown or script source (only when action is append)",
-    "merge_target": "ev_xxxxxxxx or null",
-    "script_filename": "filename or null",
-    "script_language": "language id or null",
-    "script_purpose": "purpose or null"
-  }}
-]
-
-Rules:
-1. Keep all action=append candidates from the analyzer (text≤2, script≤1)
-2. Escape newlines as \\n and quotes correctly in content
-3. Use null for merge_target when absent, not the string "null\""""
-
-SKILL_EXPERIENCE_FORMATTER_PROMPT: Dict[str, str] = {
-    "cn": SKILL_EXPERIENCE_FORMATTER_PROMPT_CN,
-    "en": SKILL_EXPERIENCE_FORMATTER_PROMPT_EN,
-}
-
-_TOOL_CHAIN_FAILURE_RE = re.compile(
-    r"error|exception|traceback|failed|failure|timeout|timed out"
-    r"|errno|connectionerror|oserror|valueerror|typeerror"
-    r"|错误|异常|失败|超时",
-    re.IGNORECASE,
+GENERATE_RECORDS_LLM_POLICY = LLMInvokePolicy(
+    attempt_timeout_secs=150,
+    total_budget_secs=300,
+    max_attempts=2,
 )
-_TOOL_CHAIN_CORRECTION_RE = re.compile(
-    r"不对|错了|应该|你搞错|纠正|我的意思是|that's wrong|should be|actually",
-    re.IGNORECASE,
-)
-_TOOL_CHAIN_ARGS_MAX_CHARS = 120
-_TOOL_CHAIN_RESULT_MAX_CHARS = 100
 _ANALYZER_LOG_MAX_CHARS = 500
-# Reasoning models (e.g. GLM-5.1) may spend the entire default output budget on
-# reasoning_content before emitting JSON in content; raise the cap for optimizer calls.
-_OPTIMIZER_LLM_MAX_TOKENS = 8192
+
+# When the model is deployed on Huawei Cloud ModelArts MaaS, bump max_tokens
+# explicitly to avoid JSON truncation.
+_HUAWEI_MODELARTS_KEYWORD = "modelarts"
+_HUAWEI_MODELARTS_MAX_TOKENS = 20000
 
 
-def _extract_message_text(message: dict) -> str:
-    content = message.get("content", "")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict):
-                parts.append(str(block.get("text", "")))
-            elif isinstance(block, str):
-                parts.append(block)
-        return "\n".join(parts)
-    return str(content)
+def _assistant_text_from_response(response: Any) -> str:
+    """Normalize assistant output via shared ``response_to_text`` helper."""
+    return response_to_text(response)
 
 
-def _summarize_tool_result(content: str, language: str = "cn") -> tuple[str, str]:
-    """Return (status_label, summary) for a tool result line."""
-    text = content.strip()
-    if not text:
-        empty = "(空)" if language == "cn" else "(empty)"
-        status = "空" if language == "cn" else "EMPTY"
-        return status, empty
-    if _TOOL_CHAIN_FAILURE_RE.search(text):
-        status = "FAIL" if language == "en" else "失败"
-    else:
-        status = "OK"
-    one_line = " ".join(text.split())
-    if len(one_line) > _TOOL_CHAIN_RESULT_MAX_CHARS:
-        one_line = one_line[:_TOOL_CHAIN_RESULT_MAX_CHARS] + "..."
-    return status, one_line
+def _resolve_max_tokens(llm: Any) -> int | None:
+    """Return the max_tokens override for the current LLM, or None to use defaults.
 
-
-def build_tool_call_chain(
-    messages: List[dict],
-    language: str = "cn",
-    max_events: int = 40,
-) -> str:
-    """Build a structured tool-call chain from conversation messages."""
-    if not messages:
-        return "(无执行轨迹)" if language == "cn" else "(No execution trace)"
-
-    lines: list[str] = []
-    turn = 0
-    for message in messages:
-        role = message.get("role", "")
-        if role == "assistant" and message.get("tool_calls"):
-            for tool_call in message.get("tool_calls", []):
-                if not isinstance(tool_call, dict):
-                    continue
-                turn += 1
-                if turn > max_events:
-                    break
-                name = tool_call.get("name", "unknown")
-                args = tool_call.get("arguments", "")
-                if isinstance(args, dict):
-                    args_str = json.dumps(args, ensure_ascii=False)
-                else:
-                    args_str = str(args)
-                if len(args_str) > _TOOL_CHAIN_ARGS_MAX_CHARS:
-                    args_str = args_str[:_TOOL_CHAIN_ARGS_MAX_CHARS] + "..."
-                lines.append(f"[Turn {turn}] assistant → {name}({args_str})")
-        elif role in ("tool", "function"):
-            turn += 1
-            if turn > max_events:
-                break
-            tool_name = message.get("name") or message.get("tool_name") or "tool"
-            status, summary = _summarize_tool_result(
-                _extract_message_text(message), language=language,
-            )
-            lines.append(f"[Turn {turn}] {tool_name} → {status}: {summary}")
-        elif role == "user":
-            text = _extract_message_text(message).strip()
-            if text and _TOOL_CHAIN_CORRECTION_RE.search(text):
-                turn += 1
-                if turn > max_events:
-                    break
-                preview = text[:150] + ("..." if len(text) > 150 else "")
-                tag = "用户纠正" if language == "cn" else "user_correction"
-                lines.append(f"[Turn {turn}] user ({tag}): {preview}")
-        if turn >= max_events:
-            break
-
-    if not lines:
-        return (
-            "(无工具调用轨迹；参见对话历史)"
-            if language == "cn"
-            else "(No tool calls; see conversation history)"
-        )
-    return "\n".join(lines)
+    The Huawei Cloud ModelArts MaaS gateway truncates long JSON outputs more
+    aggressively than other providers. We bump max_tokens explicitly when the
+    configured api_base targets ModelArts. For every other provider we return
+    None and let the client/model default apply.
+    """
+    client_config = getattr(llm, "model_client_config", None)
+    api_base = getattr(client_config, "api_base", "") or ""
+    if _HUAWEI_MODELARTS_KEYWORD in api_base.lower():
+        return _HUAWEI_MODELARTS_MAX_TOKENS
+    return None
 
 
 def _build_conversation_snippet(
@@ -656,11 +124,7 @@ def _build_conversation_snippet(
             )
         tool_calls = message.get("tool_calls")
         if role == "assistant" and tool_calls:
-            names = [
-                tool_call.get("name", "")
-                for tool_call in tool_calls
-                if isinstance(tool_call, dict)
-            ]
+            names = [tool_call.get("name", "") for tool_call in tool_calls if isinstance(tool_call, dict)]
             prefix = f"[assistant] (tool_calls: {', '.join(names)})\n  "
         else:
             prefix = f"[{role}] "
@@ -723,10 +187,37 @@ def _preview_section(section: str, preview_chars: int = _SECTION_PREVIEW_CHARS) 
     return f"{heading}\n{body[:preview_chars]}..."
 
 
+def _strip_outer_markdown_fence(text: str) -> str:
+    """Remove only the outermost markdown code fence, preserving inner fences in JSON strings."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    first_newline = stripped.find("\n")
+    if first_newline == -1:
+        return stripped
+
+    first_line = stripped[:first_newline].strip()
+    if not re.fullmatch(r"```(?:json|JSON)?", first_line):
+        return stripped
+
+    content_start = first_newline + 1
+    inner = stripped[content_start:].rstrip()
+    if inner.endswith("```"):
+        last_newline = inner.rfind("\n")
+        if last_newline != -1:
+            last_line = inner[last_newline + 1:].strip()
+        else:
+            last_line = inner.strip()
+        if last_line == "```":
+            inner = inner[:last_newline] if last_newline != -1 else ""
+    return inner.strip()
+
+
 def _fix_json_text(text: str) -> str:
     """Apply common fixes to malformed JSON produced by LLMs."""
-    text = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.MULTILINE)
-    text = re.sub(r"```\s*$", "", text, flags=re.MULTILINE)
+    text = _strip_outer_markdown_fence(text.strip())
+    # Strip // comments; keep https:// and other scheme:// sequences intact.
     text = re.sub(r"(?<!:)//[^\n]*", "", text)
     text = re.sub(r",\s*([}\]])", r"\1", text)
     return text.strip()
@@ -754,6 +245,7 @@ def _extract_json(raw: str) -> Optional[Any]:
     if result is not None:
         return result
 
+    # Step 3: regex extract outer [ ... ] or { ... } from already-fixed text
     for pattern in (r"\[[\s\S]*\]", r"\{[\s\S]*\}"):
         matched = re.search(pattern, fixed)
         if matched:
@@ -766,6 +258,38 @@ def _extract_json(raw: str) -> Optional[Any]:
                 return result
 
     return None
+
+
+def _extract_json_with_error(raw: str) -> tuple[Any, str] | tuple[None, str]:
+    """Like _extract_json but also returns the last parse error message."""
+    raw = raw.strip()
+    if not raw:
+        return None, "empty response"
+
+    last_error = "unknown"
+    result = _try_parse(raw)
+    if result is not None:
+        return result, ""
+
+    fixed = _fix_json_text(raw)
+    result = _try_parse(fixed)
+    if result is not None:
+        return result, ""
+
+    for pattern in (r"\[[\s\S]*\]", r"\{[\s\S]*\}"):
+        matched = re.search(pattern, fixed)
+        if matched:
+            result = _try_parse(matched.group(0))
+            if result is not None:
+                return result, ""
+            refixed = _fix_json_text(matched.group(0))
+            try:
+                parsed = json.loads(refixed)
+                return parsed, ""
+            except json.JSONDecodeError as e:
+                last_error = str(e)
+
+    return None, last_error
 
 
 _CONTEXT_MAX_CHARS = 500
@@ -797,53 +321,23 @@ def _build_existing_summary(records: List[EvolutionRecord], label: str = "") -> 
         return ""
     lines: List[str] = []
     for record in records:
+        if not isinstance(record, EvolutionRecord):
+            lines.append(f"- {record}")
+            continue
         prefix = f"[{label}] " if label else ""
-        lines.append(
-            f"- {prefix}[{record.id}] [{record.change.section}] {record.change.content}"
-        )
+        lines.append(f"- {prefix}[{record.id}] [{record.change.section}] {record.change.content}")
     return "\n".join(lines)
 
 
-def _parse_single_patch(data: dict) -> Optional[EvolutionPatch]:
-    action = data.get("action", "append")
-    if action == "skip":
-        return EvolutionPatch(
-            section="",
-            action="skip",
-            content="",
-            skip_reason=data.get("skip_reason", "unknown"),
-        )
-
-    section = data.get("section", "Troubleshooting")
-    if section not in VALID_SECTIONS:
-        section = "Troubleshooting"
-
-    raw_target = data.get("target", "body")
-    try:
-        target = EvolutionTarget(raw_target)
-    except ValueError:
-        target = EvolutionTarget.BODY
-
-    merge_target = data.get("merge_target")
-    if merge_target in ("null", None):
-        merge_target = None
-
-    return EvolutionPatch(
-        section=section,
-        action="append",
-        content=data.get("content", ""),
-        target=target,
-        merge_target=merge_target,
-        script_filename=data.get("script_filename"),
-        script_language=data.get("script_language"),
-        script_purpose=data.get("script_purpose"),
-    )
+def _limit_summary_lines(summary: str, max_lines: int) -> str:
+    if not summary or max_lines <= 0:
+        return ""
+    return "\n".join(summary.splitlines()[:max_lines])
 
 
 def _parse_analyzer_response(raw: str) -> Optional[dict]:
     """Parse analyzer-stage JSON object. Returns None on failure."""
-    extracted = _extract_json(raw)
-    data = extracted
+    data = _extract_json(raw)
     if not isinstance(data, dict):
         return None
     if "candidates" not in data:
@@ -867,52 +361,28 @@ def _filter_analyzer_candidates(candidates: list) -> list:
     return result
 
 
-def _parse_llm_response(raw: str) -> Optional[List[EvolutionPatch]]:
-    """Parse response JSON into EvolutionPatch list. Returns None on parse failure."""
-    data = _extract_json(raw)
-    if data is None:
+def _parse_single_patch(data: dict) -> Optional[EvolutionPatch]:
+    """Compatibility wrapper over the draft parser."""
+    draft = parse_experience_draft(data)
+    if draft is None:
         return None
-
-    items = data if isinstance(data, list) else [data]
-    patches: List[EvolutionPatch] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        patch = _parse_single_patch(item)
-        if patch is not None:
-            patches.append(patch)
-    return patches
+    return draft.patch
 
 
-_JSON_FIX_PROMPT = """\
-你上次的输出不是合法 JSON，请修复并重新输出。
-只输出修复后的 JSON 数组，不要任何解释文字。
-
-## 目标格式
-[
-  {{
-    "action": "append | skip",
-    "skip_reason": "irrelevant | duplicate | low_priority（仅 skip 时填写，否则为 null）",
-    "target": "description | body | script",
-    "section": "Instructions | Examples | Troubleshooting | Scripts",
-    "content": "Markdown 内容（注意 JSON 转义：换行用 \\\\n，引号用 \\\\"）",
-    "merge_target": "ev_xxxxxxxx 或 null",
-    "script_filename": "文件名或 null",
-    "script_language": "语言标识或 null",
-    "script_purpose": "用途说明或 null"
-  }}
-]
-
-## 原始输出（请从中提取并修复）
-{broken_output}"""
+def _parse_llm_response(raw: str) -> Optional[List[EvolutionPatch]]:
+    """Compatibility wrapper: parse LLM JSON into EvolutionPatch list."""
+    drafts, _ = parse_experience_drafts_with_error(raw, _extract_json_with_error)
+    if drafts is None:
+        return None
+    return [draft.patch for draft in drafts]
 
 
 class SkillExperienceOptimizer(BaseOptimizer):
     """Online Skill experience optimizer.
 
-    Signals arrive from SkillEvolutionRail; context is None (online path),
-    so _get_bad_signals() retains all signals. _backward() groups signals
-    by skill_name and generates EvolutionRecord(s).
+    Signals arrive from SkillEvolutionRail and are consumed through the
+    optimizer's neutral signal-selection contract. _backward() groups
+    selected signals by skill_name and generates EvolutionRecord(s).
     """
 
     domain = "skill_experience"
@@ -922,6 +392,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
         llm: Any,
         model: str,
         language: str = "cn",
+        generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
         *,
         two_stage: bool = True,
     ) -> None:
@@ -929,7 +400,19 @@ class SkillExperienceOptimizer(BaseOptimizer):
         self._llm = llm
         self._model = model
         self._language = language
+        self._generate_records_llm_policy = generate_records_llm_policy
         self._two_stage = two_stage
+        self._online_contexts: Dict[str, EvolutionContext] = {}
+
+    @property
+    def generate_records_llm_policy(self) -> LLMInvokePolicy:
+        """Get the configured record generation policy."""
+        return self._generate_records_llm_policy
+
+    @property
+    def record_llm_policy(self) -> LLMInvokePolicy:
+        """Compatibility property for callers that label record generation as record_llm_policy."""
+        return self._generate_records_llm_policy
 
     @property
     def llm(self) -> Any:
@@ -943,20 +426,55 @@ class SkillExperienceOptimizer(BaseOptimizer):
 
     @staticmethod
     def default_targets() -> List[str]:
-        return ["experiences"]
+        return [EXPERIENCES_TARGET]
+
+    def bind(
+        self,
+        operators: Optional[Dict[str, Any]] = None,
+        targets: Optional[List[str]] = None,
+        **config: Any,
+    ) -> int:
+        self._online_contexts = dict(config.get("online_contexts") or {})
+        return super().bind(operators=operators, targets=targets, **config)
 
     async def _backward(self, signals: List[EvolutionSignal]) -> None:
-        """Generate experience records for each bound SkillCallOperator."""
+        """Generate experience records for each bound SkillExperienceOperator."""
         for op_id, op in self._operators.items():
-            skill_name = op_id.removeprefix("skill_call_")
+            skill_name = op_id.removeprefix("skill_experience_").removeprefix("skill_call_")
+            selected = getattr(self, "_selected_signals", None) or self._bad_signals
             skill_signals = [
-                s for s in self._bad_signals
-                if s.skill_name == skill_name or not s.skill_name
+                s for s in selected if s.skill_name == skill_name or not s.skill_name
             ]
             if not skill_signals:
                 continue
-            state = op.get_state()
-            ctx = EvolutionContext(
+            ctx = self._build_evolution_context(skill_name, op, skill_signals)
+            records = await self.generate_records(ctx)
+            if not records:
+                logger.info("[SkillExperienceOptimizer] no records generated for skill=%s", skill_name)
+                continue
+            existing: List = self._parameters[op_id].get_gradient(EXPERIENCES_TARGET) or []
+            self._parameters[op_id].set_gradient(EXPERIENCES_TARGET, existing + records)
+            logger.info(
+                "[SkillExperienceOptimizer] generated %d record(s) for skill=%s",
+                len(records),
+                skill_name,
+            )
+
+    def _build_evolution_context(
+        self,
+        skill_name: str,
+        operator: Any,
+        skill_signals: List[EvolutionSignal],
+    ) -> EvolutionContext:
+        online_ctx = self._online_contexts.get(skill_name)
+        if online_ctx is not None:
+            return online_ctx
+
+        # Backward-compatible path used by SkillEvolutionRail + SkillCallOperator.
+        get_state = getattr(operator, "get_state", None)
+        if callable(get_state):
+            state = get_state() or {}
+            return EvolutionContext(
                 skill_name=skill_name,
                 signals=skill_signals,
                 skill_content=state.get("skill_content", ""),
@@ -964,48 +482,45 @@ class SkillExperienceOptimizer(BaseOptimizer):
                 existing_desc_records=state.get("desc_records", []),
                 existing_body_records=state.get("body_records", []),
                 tool_call_chain=state.get("tool_call_chain", ""),
+                user_query=state.get("user_query", ""),
             )
-            records = await self.generate_records(ctx)
-            if not records:
-                logger.info(
-                    "[SkillExperienceOptimizer] no records generated for skill=%s", skill_name
-                )
-                continue
-            existing: List = self._parameters[op_id].get_gradient("experiences") or []
-            self._parameters[op_id].set_gradient("experiences", existing + records)
-            logger.info(
-                "[SkillExperienceOptimizer] generated %d record(s) for skill=%s",
-                len(records), skill_name,
-            )
+
+        raise build_error(
+            StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR,
+            error_msg=(
+                "online_contexts missing entry for skill "
+                f"{skill_name}; SkillExperienceOptimizer requires EvolutionContext"
+            ),
+        )
 
     def _step(self) -> Updates:
         updates: Updates = {}
         for op_id, param in self._parameters.items():
-            records: List = param.get_gradient("experiences") or []
+            records: List = param.get_gradient(EXPERIENCES_TARGET) or []
             if records:
-                updates[(op_id, "experiences")] = records
+                updates[(op_id, EXPERIENCES_TARGET)] = records
         return updates
+
+    async def generate_records(self, ctx: EvolutionContext) -> List[EvolutionRecord]:
+        """Generate and parse evolution records from LLM output."""
+        if not ctx.signals:
+            return []
+        return await self._generate_regular_records(ctx)
 
     def _build_generation_inputs(self, ctx: EvolutionContext) -> dict:
         """Shared prompt inputs for analyzer / single-stage paths."""
         tool_call_chain = ctx.tool_call_chain or build_tool_call_chain(
-            ctx.messages, language=self._language,
+            ctx.messages,
+            language=self._language,
         )
-        conversation_snippet = _build_conversation_snippet(
-            ctx.messages, language=self._language,
-        )
+        conversation_snippet = _build_conversation_snippet(ctx.messages, language=self._language)
         signals_json = json.dumps(
             [signal.to_dict() for signal in ctx.signals],
             ensure_ascii=False,
             indent=2,
         )
-        desc_summary = _build_existing_summary(
-            ctx.existing_desc_records, label="description",
-        )
-        body_summary = _build_existing_summary(
-            ctx.existing_body_records, label="body",
-        )
-        no_records = "无已有记录" if self._language == "cn" else "No existing records"
+        desc_summary = _build_existing_summary(ctx.existing_desc_records, label="description")
+        body_summary = _build_existing_summary(ctx.existing_body_records, label="body")
         return {
             "skill_content": _summarize_skill_content(ctx.skill_content),
             "signals_json": signals_json,
@@ -1013,30 +528,78 @@ class SkillExperienceOptimizer(BaseOptimizer):
                 "(无)" if self._language == "cn" else "(none)"
             ),
             "conversation_snippet": (conversation_snippet or "").strip(),
-            "existing_desc_summary": desc_summary or f"({no_records})",
-            "existing_body_summary": body_summary or f"({no_records})",
+            "existing_desc_summary": desc_summary or self._default_existing_summary(),
+            "existing_body_summary": body_summary or self._default_existing_summary(),
+            "user_query": self._default_user_query(ctx.user_query),
         }
 
-    async def _invoke_llm(self, prompt: str) -> Optional[str]:
+    def _build_analyzer_retry_inputs(self, ctx: EvolutionContext, inputs: dict) -> dict:
+        """Shorter analyzer prompt inputs for timeout retry (mirrors single-stage retry)."""
+        return {
+            "skill_content": _summarize_skill_content(ctx.skill_content, max_chars=2500),
+            "signals_json": json.dumps(
+                [signal.to_dict() for signal in ctx.signals],
+                ensure_ascii=False,
+            ),
+            "tool_call_chain": inputs["tool_call_chain"],
+            "conversation_snippet": _build_conversation_snippet(
+                ctx.messages,
+                max_messages=10,
+                content_preview_chars=100,
+                language=self._language,
+            ).strip(),
+            "existing_desc_summary": _limit_summary_lines(inputs["existing_desc_summary"], 2)
+            or self._default_existing_summary(),
+            "existing_body_summary": _limit_summary_lines(inputs["existing_body_summary"], 2)
+            or self._default_existing_summary(),
+            "user_query": self._default_user_query(ctx.user_query, max_chars=500),
+        }
+
+    def _build_formatter_retry_prompt(self, analyzer_data: dict) -> str:
+        """Shorter formatter prompt for timeout retry."""
+        analyzer_output = json.dumps(analyzer_data, ensure_ascii=False, indent=2)
+        analyzer_output = self._limit_text(analyzer_output, 4000)
+        return SKILL_EXPERIENCE_FORMATTER_PROMPT[self._language].format(
+            analyzer_output=analyzer_output,
+        )
+
+    async def _invoke_llm(
+        self,
+        prompt: str,
+        *,
+        retry_prompt: str | None = None,
+    ) -> Optional[str]:
         try:
-            response = await self._llm.invoke(
+            raw, _ = await invoke_text_with_retry_and_prompt(
+                llm=self._llm,
                 model=self._model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=_OPTIMIZER_LLM_MAX_TOKENS,
+                prompt=prompt,
+                retry_prompt=retry_prompt,
+                policy=self._generate_records_llm_policy,
+                max_tokens=_resolve_max_tokens(self._llm) or _OPTIMIZER_LLM_MAX_TOKENS,
             )
-            return _assistant_text_from_response(response)
+            return raw
+        except BaseError as exc:
+            logger.error("[SkillExperienceOptimizer] LLM call failed: %s", exc)
+            return None
         except Exception as exc:
             logger.error("[SkillExperienceOptimizer] LLM call failed: %s", exc)
             return None
 
     async def _run_analyzer(
-        self, ctx: EvolutionContext, inputs: dict,
+        self,
+        ctx: EvolutionContext,
+        inputs: dict,
     ) -> Optional[dict]:
         prompt = SKILL_EXPERIENCE_ANALYZER_PROMPT[self._language].format(**inputs)
-        logger.info(
-            "[SkillExperienceOptimizer] analyzer stage (skill=%s)", ctx.skill_name,
+        retry_prompt = SKILL_EXPERIENCE_ANALYZER_PROMPT[self._language].format(
+            **self._build_analyzer_retry_inputs(ctx, inputs),
         )
-        raw = await self._invoke_llm(prompt)
+        logger.info(
+            "[SkillExperienceOptimizer] analyzer stage (skill=%s)",
+            ctx.skill_name,
+        )
+        raw = await self._invoke_llm(prompt, retry_prompt=retry_prompt)
         if raw is None:
             return None
         data = _parse_analyzer_response(raw)
@@ -1045,7 +608,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
                 "[SkillExperienceOptimizer] analyzer parse failed (preview: %s)",
                 raw[:200],
             )
-            retry_raw = await self._invoke_llm(prompt)
+            retry_raw = await self._invoke_llm(prompt, retry_prompt=retry_prompt)
             if retry_raw:
                 data = _parse_analyzer_response(retry_raw)
         if data is None:
@@ -1070,30 +633,48 @@ class SkillExperienceOptimizer(BaseOptimizer):
         return data
 
     async def _run_formatter(
-        self, analyzer_data: dict, skill_name: str,
-    ) -> Optional[List[EvolutionPatch]]:
+        self,
+        analyzer_data: dict,
+        skill_name: str,
+    ) -> List[ParsedExperienceDraft]:
         analyzer_output = json.dumps(analyzer_data, ensure_ascii=False, indent=2)
         prompt = SKILL_EXPERIENCE_FORMATTER_PROMPT[self._language].format(
             analyzer_output=analyzer_output,
         )
+        retry_prompt = self._build_formatter_retry_prompt(analyzer_data)
         logger.info(
-            "[SkillExperienceOptimizer] formatter stage (skill=%s)", skill_name,
+            "[SkillExperienceOptimizer] formatter stage (skill=%s)",
+            skill_name,
         )
-        raw = await self._invoke_llm(prompt)
+        raw = await self._invoke_llm(prompt, retry_prompt=retry_prompt)
         if raw is None:
-            return None
-        patches = _parse_llm_response(raw)
-        if patches is None:
-            patches = await self.retry_parse(raw, original_prompt=prompt)
-        return patches
-
-    async def generate_records(self, ctx: EvolutionContext) -> List[EvolutionRecord]:
-        """Generate and parse evolution records from LLM output."""
-        if not ctx.signals:
             return []
+        drafts, last_error = parse_experience_drafts_with_error(raw, _extract_json_with_error)
+        if drafts is not None:
+            return drafts
 
+        last_raw = raw
+        for attempt in range(2, 4):
+            logger.warning(
+                "[SkillExperienceOptimizer] formatter parse failed, repair attempt %d/3",
+                attempt,
+            )
+            repaired, retry_raw = await self.retry_parse_drafts(
+                broken_raw=last_raw,
+                original_prompt=prompt,
+                attempt_number=attempt,
+                parse_error=last_error,
+            )
+            if repaired is not None:
+                return repaired
+            if retry_raw:
+                last_raw = retry_raw
+                _, last_error = parse_experience_drafts_with_error(retry_raw, _extract_json_with_error)
+        return []
+
+    async def _generate_regular_records(self, ctx: EvolutionContext) -> List[EvolutionRecord]:
+        """Generate regular-profile records via two-stage or single-stage pipeline."""
         inputs = self._build_generation_inputs(ctx)
-        patches: Optional[List[EvolutionPatch]] = None
 
         if self._two_stage:
             logger.info(
@@ -1101,79 +682,145 @@ class SkillExperienceOptimizer(BaseOptimizer):
                 ctx.skill_name,
                 len(ctx.signals),
             )
-            analyzer_data = await self._run_analyzer(ctx, inputs)
-            if not analyzer_data or not analyzer_data.get("candidates"):
-                root_cause_count = len((analyzer_data or {}).get("root_causes", []))
+            try:
+                analyzer_data = await self._run_analyzer(ctx, inputs)
+                if not analyzer_data or not analyzer_data.get("candidates"):
+                    root_cause_count = len((analyzer_data or {}).get("root_causes", []))
+                    logger.info(
+                        "[SkillExperienceOptimizer] two-stage early exit (skill=%s): "
+                        "no candidates (root_causes=%d)",
+                        ctx.skill_name,
+                        root_cause_count,
+                    )
+                    return []
+                candidates = analyzer_data.get("candidates", [])
                 logger.info(
-                    "[SkillExperienceOptimizer] two-stage early exit (skill=%s): "
-                    "no candidates (root_causes=%d)",
+                    "[SkillExperienceOptimizer] analyzer done (skill=%s): "
+                    "candidates=%d, entering formatter",
                     ctx.skill_name,
-                    root_cause_count,
+                    len(candidates),
                 )
-                return []
-            candidates = analyzer_data.get("candidates", [])
-            logger.info(
-                "[SkillExperienceOptimizer] analyzer done (skill=%s): "
-                "candidates=%d, entering formatter",
-                ctx.skill_name,
-                len(candidates),
-            )
-            patches = await self._run_formatter(analyzer_data, ctx.skill_name)
+                drafts = await self._run_formatter(analyzer_data, ctx.skill_name)
+            except BaseError as exc:
+                logger.error("[SkillExperienceOptimizer] LLM call failed: %s", exc)
+                raise
         else:
-            prompt = SKILL_EXPERIENCE_GENERATE_PROMPT[self._language].format(
-                skill_content=inputs["skill_content"],
-                signals_json=inputs["signals_json"],
+            prompt = SKILL_EXPERIENCE_GENERATE_PROMPT[self._language].format(**inputs)
+            retry_prompt = SKILL_EXPERIENCE_GENERATE_PROMPT[self._language].format(
+                skill_content=_summarize_skill_content(ctx.skill_content, max_chars=2500),
+                signals_json=json.dumps([signal.to_dict() for signal in ctx.signals], ensure_ascii=False),
                 tool_call_chain=inputs["tool_call_chain"],
-                conversation_snippet=inputs["conversation_snippet"],
-                existing_desc_summary=inputs["existing_desc_summary"],
-                existing_body_summary=inputs["existing_body_summary"],
+                conversation_snippet=_build_conversation_snippet(
+                    ctx.messages,
+                    max_messages=10,
+                    content_preview_chars=100,
+                    language=self._language,
+                ).strip(),
+                existing_desc_summary=_limit_summary_lines(inputs["existing_desc_summary"], 2)
+                or self._default_existing_summary(),
+                existing_body_summary=_limit_summary_lines(inputs["existing_body_summary"], 2)
+                or self._default_existing_summary(),
+                user_query=self._default_user_query(ctx.user_query, max_chars=500),
             )
             logger.info(
-                "[SkillExperienceOptimizer] single-stage LLM (skill=%s)", ctx.skill_name,
+                "[SkillExperienceOptimizer] single-stage LLM (skill=%s)",
+                ctx.skill_name,
             )
-            raw = await self._invoke_llm(prompt)
-            if raw is None:
+            try:
+                drafts = await self._generate_drafts_with_retries(
+                    prompt=prompt,
+                    retry_prompt=retry_prompt,
+                )
+            except BaseError as exc:
+                logger.error("[SkillExperienceOptimizer] LLM call failed: %s", exc)
+                raise
+            except ValueError:
+                logger.warning("[SkillExperienceOptimizer] all retries exhausted, returning no records")
                 return []
-            patches = _parse_llm_response(raw)
-            if patches is None:
-                patches = await self.retry_parse(raw, original_prompt=prompt)
 
-        if not patches:
+        if not drafts:
             return []
+        return self._build_records_from_drafts(
+            drafts,
+            signals=ctx.signals,
+            skip_log_message="LLM decided to skip",
+            empty_log_message="LLM returned empty content, skipping",
+            generated_log_prefix="",
+        )
 
-        source = ctx.signals[0].signal_type
-        merged_context = _build_context(ctx.signals)
+    def _default_existing_summary(self) -> str:
+        return "无已有记录" if self._language == "cn" else "No existing records"
+
+    def _default_user_query(self, user_query: str | None, max_chars: int | None = None) -> str:
+        if not user_query:
+            return "无" if self._language == "cn" else "None"
+        if max_chars is None or len(user_query) <= max_chars:
+            return user_query
+        return user_query[:max_chars]
+
+    def _build_records_from_drafts(
+        self,
+        drafts: List[ParsedExperienceDraft],
+        *,
+        signals: List[EvolutionSignal],
+        skip_log_message: str,
+        empty_log_message: str,
+        generated_log_prefix: str,
+    ) -> List[EvolutionRecord]:
+        source = signals[0].signal_type
+        merged_context = _build_context(signals)
         text_records: List[EvolutionRecord] = []
         script_records: List[EvolutionRecord] = []
-
-        for patch in patches:
+        for draft in drafts:
+            patch = draft.patch
             if patch.action == "skip":
                 logger.info(
-                    "[SkillExperienceOptimizer] LLM decided to skip (reason=%s)",
+                    "[SkillExperienceOptimizer] %s (reason=%s)",
+                    skip_log_message,
                     patch.skip_reason or "unknown",
                 )
                 continue
             if not patch.content.strip():
-                logger.info("[SkillExperienceOptimizer] LLM returned empty content, skipping")
+                logger.info("[SkillExperienceOptimizer] %s", empty_log_message)
                 continue
             is_script = patch.target == EvolutionTarget.SCRIPT
             if is_script and len(script_records) >= 1:
+                logger.info(
+                    "[SkillExperienceOptimizer] %sskipped draft due to script limit "
+                    "(kept=%d, limit=1, section=%s, summary=%r)",
+                    generated_log_prefix,
+                    len(script_records),
+                    patch.section,
+                    (draft.summary or "")[:80],
+                )
                 continue
             if not is_script and len(text_records) >= 2:
+                logger.info(
+                    "[SkillExperienceOptimizer] %sskipped draft due to text limit "
+                    "(kept=%d, limit=2, section=%s, target=%s, summary=%r)",
+                    generated_log_prefix,
+                    len(text_records),
+                    patch.section,
+                    patch.target.value,
+                    (draft.summary or "")[:80],
+                )
                 continue
-            initial_score = INITIAL_SCORE_BY_SIGNAL.get(source, 0.6)
             record = EvolutionRecord.make(
-                source=source,
-                context=merged_context,
-                change=patch,
-                score=initial_score,
+                EvolutionRecordSpec(
+                    source=source,
+                    context=merged_context,
+                    change=patch,
+                    score=INITIAL_SCORE_BY_SIGNAL.get(source, 0.6),
+                    summary=draft.summary,
+                )
             )
             if is_script:
                 script_records.append(record)
             else:
                 text_records.append(record)
             logger.info(
-                "[SkillExperienceOptimizer] generated record %s -> [%s] target=%s merge_target=%s",
+                "[SkillExperienceOptimizer] %sgenerated record %s -> [%s] target=%s merge_target=%s",
+                generated_log_prefix,
                 record.id,
                 patch.section,
                 patch.target.value,
@@ -1181,32 +828,131 @@ class SkillExperienceOptimizer(BaseOptimizer):
             )
         return text_records + script_records
 
-    async def retry_parse(self, broken_raw: str, original_prompt: str) -> List[EvolutionPatch]:
-        """One-shot retry: fix JSON if malformed, or regenerate if truncated."""
+    @staticmethod
+    def _limit_text(text: str, max_chars: int) -> str:
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + f"\n... [truncated, original {len(text)} chars]"
+
+    async def retry_parse(
+        self,
+        broken_raw: str,
+        original_prompt: str,
+        attempt_number: int = 1,
+        parse_error: str = "",
+    ) -> List[EvolutionPatch]:
+        """Retry parsing: fix JSON if malformed, or regenerate if truncated.
+
+        Compatibility wrapper used by existing callers/tests. Returns a list of
+        patches (empty on failure). Progressive draft-preserving retries are
+        available via :meth:`retry_parse_drafts`.
+        """
+        drafts, _ = await self.retry_parse_drafts(
+            broken_raw=broken_raw,
+            original_prompt=original_prompt,
+            attempt_number=attempt_number,
+            parse_error=parse_error,
+        )
+        if drafts is None:
+            return []
+        return [draft.patch for draft in drafts]
+
+    async def retry_parse_drafts(
+        self,
+        broken_raw: str,
+        original_prompt: str,
+        attempt_number: int = 1,
+        parse_error: str = "",
+    ) -> tuple[List[ParsedExperienceDraft] | None, str]:
+        """Retry parsing while preserving per-record summaries."""
         truncated = _looks_truncated(broken_raw)
+
         if truncated:
-            logger.warning(
-                "[SkillExperienceOptimizer] output appears truncated, retrying full regeneration"
-            )
+            if attempt_number >= 3:
+                logger.warning("[SkillExperienceOptimizer] output still truncated on attempt 3, giving up")
+                return None, broken_raw
+            logger.warning("[SkillExperienceOptimizer] output appears truncated, retrying full regeneration")
             retry_prompt = original_prompt
+        elif attempt_number >= 3:
+            logger.warning(
+                "[SkillExperienceOptimizer] JSON malformed (attempt %d), using strict fix prompt",
+                attempt_number,
+            )
+            error_detail = parse_error or "无法解析为合法 JSON"
+            retry_prompt = JSON_FIX_PROMPT_STRICT.format(
+                parse_error=error_detail,
+                broken_preview=broken_raw[:500],
+            )
         else:
             logger.warning(
                 "[SkillExperienceOptimizer] JSON malformed, requesting fix (preview: %s)",
                 broken_raw[:200],
             )
-            retry_prompt = _JSON_FIX_PROMPT.format(broken_output=broken_raw)
+            error_detail = parse_error or "JSON 解析失败"
+            retry_prompt = JSON_FIX_PROMPT.format(parse_error=error_detail, broken_output=broken_raw)
 
-        retry_raw = await self._invoke_llm(retry_prompt)
-        if retry_raw is None:
-            return []
+        try:
+            retry_raw, _ = await invoke_text_with_retry_and_prompt(
+                llm=self._llm,
+                model=self._model,
+                prompt=retry_prompt,
+                policy=self._generate_records_llm_policy,
+                temperature=0.1,
+                max_tokens=_resolve_max_tokens(self._llm) or _OPTIMIZER_LLM_MAX_TOKENS,
+            )
+        except BaseError as exc:
+            logger.error("[SkillExperienceOptimizer] retry LLM call failed: %s", exc)
+            return None, ""
+        except Exception as exc:
+            logger.error("[SkillExperienceOptimizer] retry LLM call failed: %s", exc)
+            return None, ""
 
-        patches = _parse_llm_response(retry_raw)
-        if patches is None:
-            strategy = "regeneration" if truncated else "fix"
+        drafts, _ = parse_experience_drafts_with_error(retry_raw, _extract_json_with_error)
+        if drafts is None:
+            strategy = "regeneration" if truncated else ("strict_fix" if attempt_number >= 3 else "fix")
             logger.warning("[SkillExperienceOptimizer] retry (%s) also failed, giving up", strategy)
-            return []
-        logger.info("[SkillExperienceOptimizer] retry succeeded, got %d patches", len(patches))
-        return patches
+            return None, retry_raw
+        logger.info("[SkillExperienceOptimizer] retry succeeded, got %d patches", len(drafts))
+        return drafts, retry_raw
+
+    async def _generate_drafts_with_retries(
+        self,
+        *,
+        prompt: str,
+        retry_prompt: str,
+    ) -> List[ParsedExperienceDraft]:
+        extra_kwargs: dict[str, Any] = {
+            "max_tokens": _resolve_max_tokens(self._llm) or _OPTIMIZER_LLM_MAX_TOKENS,
+        }
+        raw, prompt_used = await invoke_text_with_retry_and_prompt(
+            llm=self._llm,
+            model=self._model,
+            prompt=prompt,
+            retry_prompt=retry_prompt,
+            policy=self._generate_records_llm_policy,
+            **extra_kwargs,
+        )
+
+        drafts, last_error = parse_experience_drafts_with_error(raw, _extract_json_with_error)
+        if drafts is not None:
+            return drafts
+
+        last_raw = raw
+        for attempt in range(2, 4):
+            logger.warning("[SkillExperienceOptimizer] parse failed, repair attempt %d/3", attempt)
+            repaired, retry_raw = await self.retry_parse_drafts(
+                broken_raw=last_raw,
+                original_prompt=prompt_used,
+                attempt_number=attempt,
+                parse_error=last_error,
+            )
+            if repaired is not None:
+                return repaired
+            if retry_raw:
+                last_raw = retry_raw
+                _, last_error = parse_experience_drafts_with_error(retry_raw, _extract_json_with_error)
+
+        raise ValueError("SkillExperienceOptimizer response could not be parsed")
 
     def update_llm(self, llm: Any, model: str) -> None:
         """Update runtime llm/model for hot reload."""

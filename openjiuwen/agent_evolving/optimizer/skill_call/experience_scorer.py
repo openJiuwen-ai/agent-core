@@ -31,9 +31,14 @@ EXPERIENCE_EVAL_PROMPT_CN = """\
 ## 对话片段（展示经验之后的部分）
 {conversation_snippet}
 
+## 重要说明
+经验可能仅以 SKILL.md Evolution Index 中的 summary（及 keywords）形式展示给 Agent；
+Agent 未必打开过完整经验 md 文件。请基于 summary/关键词与后续行为判断是否被采纳，
+不要要求对话复述完整经验正文。
+
 ## 评估任务
 对于每条展示的经验，判断：
-1. 该经验是否被 Agent 理解和采纳（内容被用于指导后续行为）
+1. 该经验是否被 Agent 理解和采纳（summary/关键词被用于指导后续行为即可）
 2. 该经验是否产生了积极效果（帮助解决了问题或改进了输出）
 3. 该经验是否产生了消极效果（导致错误或误导）
 
@@ -62,9 +67,15 @@ You are an experience evaluation expert. Based on the conversation snippet, eval
 ## Conversation Snippet (after presenting experiences)
 {conversation_snippet}
 
+## Important
+Experiences may have been presented only as Evolution Index summaries (and keywords)
+in SKILL.md; the Agent may not have opened the full experience markdown files.
+Judge adoption from the summary/keywords and subsequent behavior — do not require
+the dialogue to restate the full experience body.
+
 ## Evaluation Task
 For each presented experience, determine:
-1. Whether the experience was understood and adopted by the Agent (content used to guide subsequent behavior)
+1. Whether the experience was understood and adopted by the Agent (summary/keywords used to guide subsequent behavior is enough)
 2. Whether the experience produced positive effects (helped solve problems or improved output)
 3. Whether the experience produced negative effects (caused errors or mislead)
 
@@ -451,25 +462,55 @@ class ExperienceScorer:
         return counts
 
     @staticmethod
+    def _resolve_presentation_text(record: EvolutionRecord, *, max_chars: int = 200) -> str:
+        """Resolve the text an agent was most likely shown for a record.
+
+        Prefer ``summary`` (Evolution Index presentation) over full detail
+        ``content``, because agents often act on the index summary without
+        opening experience markdown files. Fall back to content for legacy
+        records that have no summary.
+        """
+        summary = (
+            getattr(record, "summary", None)
+            or getattr(record.change, "summary", None)
+            or ""
+        ).strip()
+        if summary:
+            text = summary
+        else:
+            text = (record.change.content or "").strip()
+
+        text = " ".join(text.split())
+        if len(text) > max_chars:
+            text = text[:max_chars]
+
+        keywords = getattr(record.change, "keywords", None) or []
+        if keywords:
+            kw = ", ".join(str(item).strip() for item in keywords[:12] if str(item).strip())
+            if kw:
+                return f"{text} | keywords: {kw}"
+        return text
+
+    @staticmethod
     def _format_presented_experiences(records: List[EvolutionRecord]) -> str:
-        """Format presented experiences for prompt."""
+        """Format presented experiences for prompt (summary-first)."""
         lines: List[str] = []
         for record in records:
-            content = record.change.content[:200]
-            lines.append(f"[{record.id}] {content}")
+            text = ExperienceScorer._resolve_presentation_text(record, max_chars=200)
+            lines.append(f"[{record.id}] {text}")
         return "\n".join(lines)
 
     @staticmethod
     def _format_scored_experiences(records: List[EvolutionRecord]) -> str:
-        """Format scored experiences for prompt."""
+        """Format scored experiences for prompt (summary-first)."""
         lines: List[str] = []
         for record in records:
             stats = record.usage_stats or UsageStats()
-            content = record.change.content[:150]
+            text = ExperienceScorer._resolve_presentation_text(record, max_chars=150)
             lines.append(
                 f"[{record.id}] score={record.score:.2f} | "
                 f"presented={stats.times_presented} used={stats.times_used} | "
-                f"{content}"
+                f"{text}"
             )
         return "\n".join(lines)
 
@@ -483,7 +524,8 @@ class ExperienceScorer:
         # Remove markdown code blocks
         raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
         raw = re.sub(r"```\s*$", "", raw, flags=re.MULTILINE)
-        raw = re.sub(r"//[^\n]*", "", raw)
+        # Strip // comments; keep https:// and other scheme:// sequences intact.
+        raw = re.sub(r"(?<!:)//[^\n]*", "", raw)
         raw = re.sub(r",\s*([}\]])", r"\1", raw)
         raw = raw.strip()
 

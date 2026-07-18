@@ -8,23 +8,29 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
-from openjiuwen.agent_evolving.checkpointing.types import EvolutionPatch, EvolutionRecord
+from openjiuwen.agent_evolving.checkpointing.types import (
+    EvolutionPatch,
+    EvolutionRecord,
+    EvolutionRecordSpec,
+)
 from openjiuwen.agent_evolving.experience.rebuild import ExperienceRebuildService
 from openjiuwen.agent_evolving.signal.base import EvolutionTarget
 
 
 def _make_record(content: str, *, score: float = 0.8, skip_reason: str | None = None) -> EvolutionRecord:
     record = EvolutionRecord.make(
-        source="test",
-        context="ctx",
-        change=EvolutionPatch(
-            section="Troubleshooting",
-            action="append",
-            content=content,
-            target=EvolutionTarget.BODY,
-            skip_reason=skip_reason,
-        ),
-        score=score,
+        EvolutionRecordSpec(
+            source="test",
+            context="ctx",
+            change=EvolutionPatch(
+                section="Troubleshooting",
+                action="append",
+                content=content,
+                target=EvolutionTarget.BODY,
+                skip_reason=skip_reason,
+            ),
+            score=score,
+        )
     )
     
     record.id = f"ev_{content[:4]}"

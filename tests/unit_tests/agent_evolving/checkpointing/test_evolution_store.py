@@ -26,6 +26,7 @@ def make_record(
     target: EvolutionTarget = EvolutionTarget.BODY,
     section: str = "Troubleshooting",
     content: str = "fix issue",
+    summary: str | None = None,
     merge_target: str | None = None,
     applied: bool = False,
 ) -> EvolutionRecord:
@@ -42,6 +43,7 @@ def make_record(
             merge_target=merge_target,
         ),
         applied=applied,
+        summary=summary,
     )
 
 
@@ -597,6 +599,9 @@ class TestEvolutionStoreRenderMarkdown:
         assert "Script Index" in index_content
         assert "python" in index_content
         assert "greeting" in index_content
+        skill_md = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
+        assert "### Script Assets" in skill_md
+        assert "| greeting | python | 0.60 |" in skill_md
 
     @staticmethod
     @pytest.mark.asyncio
@@ -607,7 +612,12 @@ class TestEvolutionStoreRenderMarkdown:
 
         await store.append_record(
             "skill-a",
-            make_record("ev_1", target=EvolutionTarget.BODY, content="body fix"),
+            make_record(
+                "ev_1",
+                target=EvolutionTarget.BODY,
+                content="## Body fix\n\nUse the safer fallback.",
+                summary="Use safer fallback for unstable services",
+            ),
         )
 
         skill_md = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
@@ -615,6 +625,17 @@ class TestEvolutionStoreRenderMarkdown:
         assert "<!-- evolution-index-end -->" in skill_md
         assert "Evolution Experiences" in skill_md
         assert "**1**" in skill_md
+        assert "### Experience Index" in skill_md
+        assert "| Summary | Type | Score | Detail |" in skill_md
+        assert "Use safer fallback for unstable services" in skill_md
+        assert "[evolution/troubleshooting.md#ev_1]" in skill_md
+        assert "Before applying this skill" in skill_md
+        assert "Top Experiences" not in skill_md
+
+        detail = (root / "skill-a" / "evolution" / "troubleshooting.md").read_text(encoding="utf-8")
+        assert '<a id="ev_1"></a>' in detail
+        assert "### [ev_1] Use safer fallback for unstable services" in detail
+        assert "## Body fix" in detail
 
     @staticmethod
     @pytest.mark.asyncio

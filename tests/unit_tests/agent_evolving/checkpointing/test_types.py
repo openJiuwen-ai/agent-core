@@ -8,6 +8,7 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionLog,
     EvolutionPatch,
     EvolutionRecord,
+    EvolutionRecordSpec,
 )
 from openjiuwen.agent_evolving.signal.base import (
     EvolutionCategory,
@@ -106,9 +107,11 @@ class TestEvolutionRecord:
     @staticmethod
     def test_make_generates_prefixed_id():
         record = EvolutionRecord.make(
-            source="tool_failure",
-            context="ctx",
-            change=make_patch(),
+            EvolutionRecordSpec(
+                source="tool_failure",
+                context="ctx",
+                change=make_patch(),
+            )
         )
         assert record.id.startswith("ev_")
         assert record.is_pending is True

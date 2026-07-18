@@ -4,7 +4,6 @@
 
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
     SkillExperienceOptimizer,
-    build_tool_call_chain,
 )
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_scorer import (
     ExperienceScorer,
@@ -14,6 +13,7 @@ from openjiuwen.agent_evolving.optimizer.skill_call.experience_scorer import (
     calc_score,
     update_score,
 )
+from openjiuwen.agent_evolving.optimizer.skill_call.tool_call_chain import build_tool_call_chain
 
 __all__ = [
     "SkillExperienceOptimizer",

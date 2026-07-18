@@ -1,0 +1,295 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Lightweight LLM resilience helpers for evolution flows."""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, NoReturn
+
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.model import Model
+
+
+@dataclass(frozen=True)
+class LLMInvokePolicy:
+    """Policy for a single evolution-layer LLM invocation."""
+
+    attempt_timeout_secs: float
+    total_budget_secs: float
+    max_attempts: int = 2
+    backoff_base_secs: float = 1.0
+    retry_empty_response: bool = True
+
+
+def response_to_text(response: Any) -> str:
+    """Normalize assistant output; fall back to reasoning_content when content is empty.
+
+    Supports object responses (``content`` / ``reasoning_content`` attributes) and
+    dict responses (``content``, ``text``, ``reasoning_content`` keys). List-shaped
+    multimodal content parts are flattened to plain text.
+    """
+    if isinstance(response, dict):
+        content = response.get("content")
+    else:
+        content = getattr(response, "content", None)
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and part.get("type") == "text":
+                parts.append(str(part.get("text", "")))
+        text = "".join(parts).strip()
+    elif content is None and isinstance(response, dict):
+        text = str(response.get("text", "") or "").strip()
+    elif content is None:
+        text = ""
+    else:
+        text = str(content).strip()
+
+    if text:
+        return text
+
+    if isinstance(response, dict):
+        reasoning = response.get("reasoning_content")
+    else:
+        reasoning = getattr(response, "reasoning_content", None)
+    if reasoning and str(reasoning).strip():
+        logger.warning(
+            "[llm_resilience] falling back to reasoning_content "
+            "(empty content; reasoning_content is not the expected JSON output channel)",
+        )
+        return str(reasoning).strip()
+    return ""
+
+
+# Backward-compatible private alias used inside this module.
+_response_to_text = response_to_text
+
+
+async def invoke_text_with_retry(
+    llm: Model,
+    model: str,
+    prompt: str,
+    *,
+    policy: LLMInvokePolicy,
+    retry_prompt: str | None = None,
+    temperature: float | None = None,
+    is_result_usable: Callable[[str], bool] | None = None,
+    **kwargs: Any,
+) -> str:
+    raw, _ = await invoke_text_with_retry_and_prompt(
+        llm=llm,
+        model=model,
+        prompt=prompt,
+        policy=policy,
+        retry_prompt=retry_prompt,
+        temperature=temperature,
+        is_result_usable=is_result_usable,
+        **kwargs,
+    )
+    return raw
+
+
+async def invoke_text_with_retry_and_prompt(
+    llm: Model,
+    model: str,
+    prompt: str,
+    *,
+    policy: LLMInvokePolicy,
+    retry_prompt: str | None = None,
+    temperature: float | None = None,
+    is_result_usable: Callable[[str], bool] | None = None,
+    **kwargs: Any,
+) -> tuple[str, str]:
+    """Invoke Model with evolution-layer usability retry and total budget control."""
+    if policy.total_budget_secs <= 0:
+        _raise_llm_resilience_error(
+            StatusCode.TOOLCHAIN_EVOLVING_TOOL_CALL_LLM_CALL_EXECUTION_ERROR,
+            reason="total_budget_exceeded",
+            attempts=0,
+        )
+
+    started_at = time.monotonic()
+    attempts_started = 0
+    last_error: Exception | None = None
+    last_response = ""
+    use_retry_prompt = False
+
+    try:
+        async with asyncio.timeout(policy.total_budget_secs):
+            for attempt in range(1, max(policy.max_attempts, 1) + 1):
+                attempts_started = attempt
+                elapsed = time.monotonic() - started_at
+                remaining_budget = policy.total_budget_secs - elapsed
+                if remaining_budget <= 0:
+                    _raise_llm_resilience_error(
+                        StatusCode.TOOLCHAIN_EVOLVING_TOOL_CALL_LLM_CALL_EXECUTION_ERROR,
+                        reason="total_budget_exceeded",
+                        attempts=attempt - 1,
+                        last_error=last_error,
+                        last_response=last_response,
+                    )
+
+                timeout_secs = min(policy.attempt_timeout_secs, remaining_budget)
+                current_prompt = retry_prompt if use_retry_prompt and retry_prompt is not None else prompt
+                try:
+                    response = await llm.invoke(
+                        model=model,
+                        messages=[{"role": "user", "content": current_prompt}],
+                        temperature=temperature,
+                        timeout=timeout_secs,
+                        **kwargs,
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning(
+                        "[llm_resilience] LLM attempt failed: model=%s attempt=%d/%d prompt_chars=%d "
+                        "timeout=%.1fs timeout_like=%s error=%s",
+                        model,
+                        attempt,
+                        max(policy.max_attempts, 1),
+                        len(current_prompt),
+                        timeout_secs,
+                        _is_timeout_like(exc),
+                        exc,
+                    )
+                    if (
+                        retry_prompt is not None
+                        and attempt < policy.max_attempts
+                        and _is_timeout_like(exc)
+                    ):
+                        use_retry_prompt = True
+                        logger.info(
+                            "[llm_resilience] attempt %d/%d timed out; retrying with shorter prompt",
+                            attempt,
+                            policy.max_attempts,
+                        )
+                        await _sleep_before_retry(policy, started_at, attempt)
+                        continue
+                    _raise_llm_resilience_error(
+                        StatusCode.TOOLCHAIN_EVOLVING_TOOL_CALL_LLM_CALL_EXECUTION_ERROR,
+                        reason="invoke_failed",
+                        attempts=attempt,
+                        last_error=exc,
+                        last_response=last_response,
+                        cause=exc,
+                    )
+
+                raw = _response_to_text(response)
+                last_response = raw
+
+                if policy.retry_empty_response and not raw.strip():
+                    if attempt >= policy.max_attempts:
+                        _raise_llm_resilience_error(
+                            StatusCode.TOOLCHAIN_EVOLVING_TOOL_CALL_OUTPUT_PARSE_ERROR,
+                            reason="empty_response",
+                            attempts=attempt,
+                            last_error=last_error,
+                            last_response=raw,
+                        )
+                    logger.warning(
+                        "[llm_resilience] empty LLM response; retrying: model=%s attempt=%d/%d",
+                        model,
+                        attempt,
+                        max(policy.max_attempts, 1),
+                    )
+                    await _sleep_before_retry(policy, started_at, attempt)
+                    continue
+
+                if is_result_usable is not None:
+                    try:
+                        usable = is_result_usable(raw)
+                    except Exception as exc:
+                        usable = False
+                        last_error = exc
+
+                    if not usable:
+                        if attempt >= policy.max_attempts:
+                            _raise_llm_resilience_error(
+                                StatusCode.TOOLCHAIN_EVOLVING_TOOL_CALL_OUTPUT_PARSE_ERROR,
+                                reason="unusable_response",
+                                attempts=attempt,
+                                last_error=last_error,
+                                last_response=raw,
+                            )
+                        logger.warning(
+                            "[llm_resilience] unusable LLM response; retrying: model=%s attempt=%d/%d "
+                            "response_chars=%d",
+                            model,
+                            attempt,
+                            max(policy.max_attempts, 1),
+                            len(raw),
+                        )
+                        await _sleep_before_retry(policy, started_at, attempt)
+                        continue
+
+                return raw, current_prompt
+    except TimeoutError as exc:
+        logger.warning(
+            "[llm_resilience] LLM total budget exceeded: model=%s attempts_started=%d prompt_chars=%d "
+            "total_budget=%.1fs elapsed=%.1fs last_error=%s",
+            model,
+            attempts_started,
+            len(prompt),
+            policy.total_budget_secs,
+            time.monotonic() - started_at,
+            last_error,
+        )
+        _raise_llm_resilience_error(
+            StatusCode.TOOLCHAIN_EVOLVING_TOOL_CALL_LLM_CALL_EXECUTION_ERROR,
+            reason="total_budget_exceeded",
+            attempts=attempts_started,
+            last_error=last_error,
+            last_response=last_response,
+            cause=exc,
+        )
+
+
+def _is_timeout_like(exc: Exception) -> bool:
+    if isinstance(exc, asyncio.TimeoutError):
+        return True
+    if "timeout" in type(exc).__name__.lower():
+        return True
+    message = str(exc).lower()
+    return "timeout" in message or "timed out" in message
+
+
+async def _sleep_before_retry(policy: LLMInvokePolicy, started_at: float, attempt: int) -> None:
+    if policy.backoff_base_secs <= 0:
+        return
+
+    remaining_budget = policy.total_budget_secs - (time.monotonic() - started_at)
+    if remaining_budget <= 0:
+        return
+
+    backoff_secs = policy.backoff_base_secs * (2 ** max(attempt - 1, 0))
+    await asyncio.sleep(min(backoff_secs, remaining_budget))
+
+
+def _raise_llm_resilience_error(
+    status: StatusCode,
+    *,
+    reason: str,
+    attempts: int,
+    last_error: Exception | None = None,
+    last_response: str = "",
+    cause: BaseException | None = None,
+) -> NoReturn:
+    raise build_error(
+        status,
+        cause=cause or last_error,
+        error_msg=reason,
+        details={
+            "reason": reason,
+            "attempts": attempts,
+            "last_response": last_response,
+            "last_error": str(last_error) if last_error is not None else "",
+        },
+    )
