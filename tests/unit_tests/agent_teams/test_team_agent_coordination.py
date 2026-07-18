@@ -33,17 +33,27 @@ from openjiuwen.agent_teams.schema.events import (
     MemberShutdownEvent,
     MemberStatusChangedEvent,
     MessageEvent,
+    TaskCancelledEvent,
     TaskClaimedEvent,
+    TaskRevokedEvent,
+    TaskRevisionRequestedEvent,
     TaskCompletedEvent,
     TaskCreatedEvent,
     TaskListDrainedEvent,
+    TaskReleasedEvent,
+    TaskSubmittedForReviewEvent,
+    TaskUnblockedEvent,
+    TaskUpdatedEvent,
+    TaskVerifiedEvent,
     TeamCleanedEvent,
     TeamCompletedEvent,
     TeamEvent,
     ToolApprovalResultEvent,
 )
 from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.message_template import ExpandedMessage
 from openjiuwen.agent_teams.schema.team import (
+    MemberRosterEntry,
     TeamCompletionSnapshot,
     TeamMemberSpec,
     TeamRole,
@@ -76,13 +86,13 @@ def _make_leader(
         leader=LeaderSpec(
             member_name=member_name,
             display_name="Leader",
-            persona="PM",
+            desc="PM",
         ),
     )
     context = TeamRuntimeContext(
         role=TeamRole.LEADER,
         member_name=member_name,
-        persona="PM",
+        desc="PM",
         team_spec=team_spec,
         db_config=DatabaseConfig(db_type="memory"),
     )
@@ -95,6 +105,48 @@ def _make_leader(
     )
     agent.configure(spec, context)
     return agent
+
+
+async def _prepare_backend_db(agent: TeamAgent) -> None:
+    """Initialize the leader's in-memory db and seed its team row.
+
+    ``_make_leader`` builds the agent without initializing storage. Tests that
+    call ``spawn_member`` directly (instead of driving the coordination
+    start-up path that would init the db) must initialize it and create the
+    ``team_info`` row first, so the member insert satisfies the foreign key.
+    """
+    backend = agent.team_backend
+    await backend.db.initialize()
+    await backend.db.team.create_team(
+        team_name=backend.team_name,
+        display_name=backend.team_name,
+        leader_member_name=backend.member_name,
+    )
+
+
+async def _seed_shutdown_requested(agent: TeamAgent, member_name: str) -> None:
+    """Seed the member row exactly as ``shutdown_member`` leaves it.
+
+    ``TeamBackend.shutdown_member`` writes SHUTDOWN_REQUESTED *before* it sends
+    the shutdown notice and publishes MEMBER_SHUTDOWN, and the teardown gate
+    reads that status from the DB rather than from the event. Dispatching the
+    event without the status behind it would exercise nothing.
+    """
+    backend = agent.team_backend
+    await _prepare_backend_db(agent)
+    await backend.spawn_member(
+        member_name=member_name,
+        display_name=member_name,
+        agent_card=AgentCard(),
+        desc="user avatar",
+        status=MemberStatus.READY,
+        role=TeamRole.HUMAN_AGENT,
+    )
+    await backend.db.member.update_member_status(
+        member_name,
+        backend.team_name,
+        MemberStatus.SHUTDOWN_REQUESTED.value,
+    )
 
 
 def _make_human_agent(member_name: str = "human_alice") -> TeamAgent:
@@ -119,14 +171,14 @@ def _make_human_agent(member_name: str = "human_alice") -> TeamAgent:
                 member_name=member_name,
                 display_name="Alice",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="user avatar",
+                desc="user avatar",
             ),
         ],
     )
     context = TeamRuntimeContext(
         role=TeamRole.HUMAN_AGENT,
         member_name=member_name,
-        persona="user avatar",
+        desc="user avatar",
         team_spec=team_spec,
         db_config=DatabaseConfig(db_type="memory"),
     )
@@ -238,13 +290,116 @@ def _make_teammate() -> TeamAgent:
     ctx = TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
         member_name="dev-1",
-        persona="dev",
+        desc="dev",
         team_spec=team_spec,
         db_config=DatabaseConfig(db_type="memory"),
     )
     agent = TeamAgent(AgentCard(id="dev-1", name="dev", description="test"))
     agent.configure(spec, ctx)
     return agent
+
+
+async def _leader_with_human(agent: TeamAgent, member_name: str, status: MemberStatus) -> list:
+    """Seed a human member at ``status``, register its controller callback.
+
+    Returns the list the callback appends to.
+    """
+    await _prepare_backend_db(agent)
+    backend = agent.team_backend
+    await backend.spawn_member(
+        member_name=member_name,
+        display_name=member_name,
+        agent_card=AgentCard(),
+        desc="user avatar",
+        status=MemberStatus.READY,
+        role=TeamRole.HUMAN_AGENT,
+    )
+    if status is not MemberStatus.READY:
+        await backend.db.member.update_member_status(member_name, backend.team_name, status.value)
+
+    received: list = []
+
+    async def cb(evt):
+        received.append(evt)
+
+    await backend.register_human_agent_inbound(member_name, cb)
+
+    fake_row = MagicMock()
+    fake_row.content = "team traffic"
+    fake_row.timestamp = 12345
+    fake_row.meta = None
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.db.message.get_message = AsyncMock(return_value=fake_row)
+    return received
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_inbound_still_fires_while_shutdown_requested():
+    """A human on its way out must still be delivered to.
+
+    ``shutdown_member`` flips the status to SHUTDOWN_REQUESTED *before* it sends
+    the shutdown notice. Cutting delivery at the request would drop the one
+    message that tells this person's controller they were removed from the team.
+    """
+    agent = _make_leader()
+    received = await _leader_with_human(agent, "human_alice", MemberStatus.SHUTDOWN_REQUESTED)
+
+    await agent._coordination.dispatcher.message._notify_human_agent_inbound(
+        EventMessage.from_event(
+            MessageEvent(
+                team_name="test-team",
+                message_id="msg-1",
+                from_member_name="leader-1",
+                to_member_name="human_alice",
+            )
+        )
+    )
+
+    assert len(received) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_inbound_stops_once_member_is_shutdown():
+    """A human that has left the team stops receiving the team's traffic."""
+    agent = _make_leader()
+    received = await _leader_with_human(agent, "human_alice", MemberStatus.SHUTDOWN)
+
+    await agent._coordination.dispatcher.message._notify_human_agent_inbound(
+        EventMessage.from_event(
+            MessageEvent(
+                team_name="test-team",
+                message_id="msg-1",
+                from_member_name="leader-1",
+                to_member_name="human_alice",
+            )
+        )
+    )
+
+    assert received == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_broadcast_skips_departed_human_but_reaches_the_live_one():
+    """Broadcast fan-out is keyed on reachability, not on the human role."""
+    agent = _make_leader()
+    gone = await _leader_with_human(agent, "human_gone", MemberStatus.SHUTDOWN)
+    still_here = await _leader_with_human(agent, "human_here", MemberStatus.READY)
+
+    await agent._coordination.dispatcher.message._notify_human_agent_inbound(
+        EventMessage.from_event(
+            BroadcastEvent(
+                team_name="test-team",
+                message_id="msg-1",
+                from_member_name="leader-1",
+            )
+        )
+    )
+
+    assert gone == []
+    assert len(still_here) == 1
 
 
 @pytest.mark.asyncio
@@ -258,6 +413,7 @@ async def test_human_agent_inbound_callback_fires_on_message_event():
     # Register a human-agent member name on the live backend so
     # ``is_human_agent`` recognises the recipient. Persist to DB
     # so async queries find the row.
+    await _prepare_backend_db(agent)
     await agent.team_backend.spawn_member(
         member_name="human_alice",
         display_name="Alice",
@@ -316,7 +472,7 @@ async def test_tool_approval_event_resumes_interrupt():
     ctx = TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
         member_name="dev-1",
-        persona="dev",
+        desc="dev",
         team_spec=team_spec,
     )
     agent = TeamAgent(AgentCard(id="dev-1", name="dev", description="test"))
@@ -345,17 +501,16 @@ async def test_tool_approval_event_resumes_interrupt():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_idle_human_agent_tears_down_on_self_shutdown():
-    """An idle human agent must tear its avatar down on MEMBER_SHUTDOWN.
+    """An idle member on its way out settles without a final round.
 
-    Unlike a teammate, a human agent has no autonomous LLM round to
-    consume the shutdown message and reach the round-end
-    ``close_stream`` path. When idle there is no round to ride, so the
-    dispatcher must let MEMBER_SHUTDOWN through and the member handler
-    must call ``shutdown_self`` directly; otherwise the avatar's run
-    cycle never ends and the member is stuck in SHUTDOWN_REQUESTED
+    Its harness has nothing running to ride, and waking it just to hand it a
+    "you are being shut down" notice would burn an LLM round on a goodbye. The
+    harness-input gate must therefore settle it straight to SHUTDOWN; otherwise
+    the run cycle never ends and the member is stuck in SHUTDOWN_REQUESTED
     forever (notably blocking a temporary team's ``clean_team``).
     """
     agent = _make_human_agent("human_alice")
+    await _seed_shutdown_requested(agent, "human_alice")
     agent.shutdown_self = AsyncMock()
     assert not agent.has_in_flight_round()
 
@@ -376,12 +531,13 @@ async def test_idle_human_agent_tears_down_on_self_shutdown():
 async def test_busy_human_agent_not_interrupted_on_self_shutdown():
     """A controller-driven round in flight must not be interrupted.
 
-    ``shutdown_member`` already wrote SHUTDOWN_REQUESTED before this
-    event, so the in-flight round closes the stream at its own round-end
-    (the teammate path). The handler must therefore leave a non-forced
-    shutdown alone rather than collapsing the avatar mid-turn.
+    ``shutdown_member`` already wrote SHUTDOWN_REQUESTED before this event, so
+    the in-flight round closes the stream at its own round-end. The gate must
+    therefore let the delivery through rather than collapsing the avatar
+    mid-turn.
     """
     agent = _make_human_agent("human_alice")
+    await _seed_shutdown_requested(agent, "human_alice")
     agent.shutdown_self = AsyncMock()
     agent.has_in_flight_round = MagicMock(return_value=True)
 
@@ -395,6 +551,38 @@ async def test_busy_human_agent_not_interrupted_on_self_shutdown():
     await agent._coordination.dispatcher.dispatch(event)
 
     agent.shutdown_self.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_shutdown_member_never_wakes_an_already_shutdown_harness():
+    """A member that is already gone is never fed, and is not torn down twice.
+
+    The forced path tears the member down inside ``MemberHandler``, which the
+    framework fans out *before* ``MessageHandler``'s drain on the same event.
+    The drain must therefore find a SHUTDOWN member and drop the delivery
+    outright rather than pushing a final message into a dead harness.
+    """
+    agent = _make_human_agent("human_alice")
+    await _seed_shutdown_requested(agent, "human_alice")
+    backend = agent.team_backend
+    await backend.db.member.update_member_status(
+        "human_alice", backend.team_name, MemberStatus.SHUTDOWN.value
+    )
+    agent.shutdown_self = AsyncMock()
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        MemberShutdownEvent(
+            team_name="hitt-team",
+            member_name="human_alice",
+            force=False,
+        )
+    )
+    await agent._coordination.dispatcher.dispatch(event)
+
+    agent.shutdown_self.assert_not_awaited()
+    agent.deliver_input.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -523,6 +711,7 @@ async def test_human_agent_ignores_other_member_task_claim():
     member — no ``list_tasks`` survey, no ``deliver_input``.
     """
     agent = _make_leader(team_name="human-claim-other-team", member_name="human-leader-other")
+    await _prepare_backend_db(agent)
     # Role check consults backend.is_human_agent (not TeamRole); persist
     # a HUMAN_AGENT row so async DB queries find it.
     await agent.team_backend.spawn_member(
@@ -556,11 +745,12 @@ async def test_human_agent_ignores_other_member_task_claim():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_teammate_does_not_self_shutdown_on_member_shutdown():
-    """Teammates keep the round-end teardown path on MEMBER_SHUTDOWN.
+    """A non-forced MEMBER_SHUTDOWN is not decided in ``MemberHandler``.
 
-    A teammate consumes its shutdown message through the mailbox drain
-    and final round, so the member handler must not short-circuit it
-    with a direct ``shutdown_self`` (that is the human-agent-only path).
+    Graceful teardown rides ``MessageHandler``'s drain and its harness-input
+    gate (settle if idle, steer the final messages into a running round
+    otherwise), so the member handler must not short-circuit it with a direct
+    ``shutdown_self``. Only ``force`` tears a member down from here.
     """
     team_spec = TeamSpec(
         team_name="test-team",
@@ -571,7 +761,7 @@ async def test_teammate_does_not_self_shutdown_on_member_shutdown():
     ctx = TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
         member_name="dev-1",
-        persona="dev",
+        desc="dev",
         team_spec=team_spec,
         db_config=DatabaseConfig(db_type="memory"),
     )
@@ -590,6 +780,68 @@ async def test_teammate_does_not_self_shutdown_on_member_shutdown():
     )
 
     agent.shutdown_self.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_idle_teammate_settles_on_shutdown_without_a_final_round():
+    """An idle teammate rides the same gate as a human avatar — no role branch.
+
+    This is the special case that used to exist: only a human agent settled when
+    idle, while a teammate was always woken for one more round just to be told it
+    was being shut down. Both now settle through the harness-input gate, and the
+    shutdown notice arriving as an ordinary message must not wake the harness
+    either — that message lands *before* MEMBER_SHUTDOWN does, so a gate keyed on
+    the event would be too late.
+    """
+    team_spec = TeamSpec(
+        team_name="test-team",
+        display_name="test-team",
+        leader_member_name="leader-1",
+    )
+    spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="test-team")
+    ctx = TeamRuntimeContext(
+        role=TeamRole.TEAMMATE,
+        member_name="dev-1",
+        desc="dev",
+        team_spec=team_spec,
+        db_config=DatabaseConfig(db_type="memory"),
+    )
+    agent = TeamAgent(AgentCard(id="dev-1", name="dev", description="test"))
+    agent.configure(spec, ctx)
+
+    backend = agent.team_backend
+    await backend.db.initialize()
+    await backend.db.team.create_team(
+        team_name="test-team",
+        display_name="test-team",
+        leader_member_name="leader-1",
+    )
+    await backend.spawn_member(
+        member_name="dev-1",
+        display_name="dev-1",
+        agent_card=AgentCard(),
+        desc="dev",
+        status=MemberStatus.READY,
+    )
+    await backend.db.member.update_member_status("dev-1", "test-team", MemberStatus.SHUTDOWN_REQUESTED.value)
+
+    agent.shutdown_self = AsyncMock()
+    agent.deliver_input = AsyncMock()
+    assert not agent.has_in_flight_round()
+
+    await agent._coordination.dispatcher.message.on_member_shutdown_drain(
+        EventMessage.from_event(
+            MemberShutdownEvent(
+                team_name="test-team",
+                member_name="dev-1",
+                force=False,
+            )
+        )
+    )
+
+    agent.shutdown_self.assert_awaited_once()
+    agent.deliver_input.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -622,23 +874,21 @@ async def test_mailbox_messages_deferred_while_interrupt_pending():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_process_unread_collects_only_newest_broadcast_for_watermark():
-    """A batch of broadcasts marks only the newest id; directs all pass through.
+async def test_process_unread_delegates_raw_delivered_messages_to_manager():
+    """The handler hands every delivered message object to the manager.
 
-    Broadcast read state is a per-member watermark (one row per ``(member,
-    team)``). Collecting more than one broadcast id in one batch would make
-    ``mark_messages_read`` insert duplicate primary keys in the same
-    transaction and the commit would raise ``UNIQUE constraint failed``,
-    rolling back the whole batch and stalling the watermark — the mailbox
-    reprocessing loop. The handler delivers every broadcast to the agent but
-    only collects the newest (the unread list is newest-first) for the
-    read-state write; the watermark then covers the older broadcasts too.
+    Read-state semantics (direct ``is_read`` rows vs the single broadcast
+    watermark) belong to ``TeamMessageManager.mark_messages_read``, not the
+    handler. The handler therefore delivers every message to the agent and
+    passes the raw delivered objects — all directs AND all broadcasts — to
+    the manager in one batch; collapsing broadcasts to their watermark anchor
+    is the manager's job (see ``test_message_manager`` for that guard).
     """
     agent = _make_leader()
     agent._configurator.message_manager = MagicMock()
     mark_messages_read = AsyncMock(return_value=3)
     agent._configurator.message_manager.mark_messages_read = mark_messages_read
-    # deliver_input is a no-op so delivered_ids collection is exercised
+    # deliver_input is a no-op so the delivered-object collection is exercised
     # without a live harness.
     agent.deliver_input = AsyncMock()
     agent._start_agent = AsyncMock()
@@ -662,8 +912,8 @@ async def test_process_unread_collects_only_newest_broadcast_for_watermark():
         msg.content = f"direct {msg_id}"
         return msg
 
-    # Newest-first ordering (as _read_all_unread returns). Two directs both
-    # pass through; three broadcasts collapse to the newest one.
+    # Newest-first ordering (as _read_all_unread returns). Two directs and
+    # three broadcasts — the handler forwards all five untouched.
     agent._coordination.dispatcher.message._read_all_unread = AsyncMock(
         side_effect=[
             [_bc("b3", 3000), _dm("dm-2", 2500), _bc("b2", 2000), _dm("dm-1", 1500), _bc("b1", 1000)],
@@ -673,16 +923,12 @@ async def test_process_unread_collects_only_newest_broadcast_for_watermark():
 
     await agent._coordination.dispatcher.message._process_unread_messages("leader-1")
 
-    # mark_messages_read called once. Both directs are collected (each flips
-    # its own is_read row); only the newest broadcast is collected (the
-    # watermark then covers the older broadcasts).
+    # Called once with the raw delivered message objects — every id present,
+    # no dedup at the handler layer.
     mark_messages_read.assert_called_once()
-    marked_ids = mark_messages_read.call_args.args[0]
-    assert "dm-1" in marked_ids
-    assert "dm-2" in marked_ids
-    assert "b3" in marked_ids
-    assert "b1" not in marked_ids
-    assert "b2" not in marked_ids
+    delivered = mark_messages_read.call_args.args[0]
+    delivered_ids = {m.message_id for m in delivered}
+    assert delivered_ids == {"b3", "b2", "b1", "dm-2", "dm-1"}
 
 
 @pytest.mark.asyncio
@@ -710,97 +956,14 @@ async def test_resume_interrupt_forwards_to_runtime_send():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_member_ready_with_claimed_task_triggers_nudge():
-    """Leader nudges a member returning to READY while still holding a claimed task."""
-    agent = _make_leader()
-    fake_task = MagicMock()
-    fake_task.task_id = "task-1"
-    fake_task.title = "Fix bug"
-    fake_task.content = "Investigate and fix the critical bug"
-    fake_task.updated_at = 0  # stale → triggers nudge path
+async def test_member_status_change_does_not_nudge_about_stale_claims():
+    """Leader no longer reaches across processes on a member status change.
 
-    agent._configurator.task_manager = MagicMock()
-    agent._configurator.task_manager.get_tasks_by_assignee = AsyncMock(return_value=[fake_task])
-    agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock(return_value="msg-1")
-
-    event = EventMessage.from_event(
-        MemberStatusChangedEvent(
-            team_name="test-team",
-            member_name="dev-1",
-            old_status="busy",
-            new_status="ready",
-        )
-    )
-    await agent._coordination.dispatcher.member._handle_leader_member_event(event)
-
-    agent._configurator.task_manager.get_tasks_by_assignee.assert_awaited_once_with(
-        "dev-1",
-        status="claimed",
-    )
-    agent._configurator.message_manager.send_message.assert_awaited_once()
-    content, to_member_name = agent._configurator.message_manager.send_message.await_args.args
-    assert to_member_name == "dev-1"
-    assert "task-1" in content
-    assert "Fix bug" in content
-
-
-@pytest.mark.asyncio
-@pytest.mark.level1
-async def test_member_error_with_claimed_task_triggers_nudge():
-    """Leader also nudges on transition into ERROR when claimed tasks remain."""
-    agent = _make_leader()
-    fake_task = MagicMock()
-    fake_task.task_id = "task-2"
-    fake_task.title = "Ship feature"
-    fake_task.content = "Wrap up the pending PR"
-    fake_task.updated_at = 0  # stale → triggers nudge path
-
-    agent._configurator.task_manager = MagicMock()
-    agent._configurator.task_manager.get_tasks_by_assignee = AsyncMock(return_value=[fake_task])
-    agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock(return_value="msg-2")
-
-    event = EventMessage.from_event(
-        MemberStatusChangedEvent(
-            team_name="test-team",
-            member_name="dev-1",
-            old_status="busy",
-            new_status="error",
-        )
-    )
-    await agent._coordination.dispatcher.member._handle_leader_member_event(event)
-
-    agent._configurator.message_manager.send_message.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-@pytest.mark.level1
-async def test_member_ready_without_claimed_task_skips_nudge():
-    """No message is sent when the member has no claimed tasks."""
-    agent = _make_leader()
-    agent._configurator.task_manager = MagicMock()
-    agent._configurator.task_manager.get_tasks_by_assignee = AsyncMock(return_value=[])
-    agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock()
-
-    event = EventMessage.from_event(
-        MemberStatusChangedEvent(
-            team_name="test-team",
-            member_name="dev-1",
-            old_status="busy",
-            new_status="ready",
-        )
-    )
-    await agent._coordination.dispatcher.member._handle_leader_member_event(event)
-
-    agent._configurator.message_manager.send_message.assert_not_called()
-
-
-@pytest.mark.asyncio
-@pytest.mark.level1
-async def test_member_status_unchanged_skips_nudge():
-    """Redundant READY → READY transitions should not query tasks nor send messages."""
+    Stale-claim nudging is self-only (each member sweeps its own claims
+    on POLL_TASK), so a teammate returning to READY while holding a
+    claimed task must not make the leader query tasks or send a message —
+    the member handler only logs the transition now.
+    """
     agent = _make_leader()
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.get_tasks_by_assignee = AsyncMock()
@@ -811,7 +974,7 @@ async def test_member_status_unchanged_skips_nudge():
         MemberStatusChangedEvent(
             team_name="test-team",
             member_name="dev-1",
-            old_status="ready",
+            old_status="busy",
             new_status="ready",
         )
     )
@@ -836,7 +999,7 @@ async def test_task_claimed_for_other_member_falls_through_to_board_nudge():
     incomplete_task.task_id = "task-7"
     incomplete_task.title = "Investigate crash"
     incomplete_task.content = "Reproduce and root-cause"
-    incomplete_task.status = "claimed"
+    incomplete_task.status = "in_progress"
     incomplete_task.assignee = "dev-1"
     incomplete_task.updated_at = 1_700_000_000_000
 
@@ -864,6 +1027,96 @@ async def test_task_claimed_for_other_member_falls_through_to_board_nudge():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
+async def test_submitted_for_review_wakes_the_reviewer():
+    """A member named in the reviewer list is steered to verify the task."""
+    agent = _make_teammate()  # member_name = dev-1
+    agent._configurator.task_manager = MagicMock()
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskSubmittedForReviewEvent(
+            team_name="test-team",
+            member_name="author-1",
+            task_id="task-9",
+            reviewer=["dev-1"],
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_submitted_for_review(event)
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "task-9" in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_submitted_for_review_ignored_by_non_reviewer_teammate():
+    """A teammate not on the reviewer list is not nudged (no claimable growth)."""
+    agent = _make_teammate()  # member_name = dev-1
+    agent._configurator.task_manager = MagicMock()
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskSubmittedForReviewEvent(
+            team_name="test-team",
+            member_name="author-1",
+            task_id="task-9",
+            reviewer=["someone-else"],
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_submitted_for_review(event)
+
+    agent.deliver_input.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_revision_requested_steers_the_author():
+    """A verify fail steers the author (member_name) back with the feedback."""
+    agent = _make_teammate()  # member_name = dev-1
+    agent._configurator.task_manager = MagicMock()
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskRevisionRequestedEvent(
+            team_name="test-team",
+            member_name="dev-1",
+            task_id="task-9",
+            feedback="add tests",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_revision_requested(event)
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "task-9" in content
+    assert "add tests" in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_verified_frees_the_author():
+    """A verify pass steers the author back to the board (it was held in review)."""
+    agent = _make_teammate()  # member_name = dev-1
+    agent._configurator.task_manager = MagicMock()
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskVerifiedEvent(
+            team_name="test-team",
+            member_name="dev-1",
+            task_id="task-9",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_verified(event)
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "task-9" in content
+
+
+@pytest.mark.asyncio
 @pytest.mark.level1
 async def test_task_claimed_for_other_member_nudges_leader_via_steer_when_busy():
     """A leader already running a round is nudged via steer on a teammate claim.
@@ -878,7 +1131,7 @@ async def test_task_claimed_for_other_member_nudges_leader_via_steer_when_busy()
     incomplete_task.task_id = "task-8"
     incomplete_task.title = "In progress"
     incomplete_task.content = "Working"
-    incomplete_task.status = "claimed"
+    incomplete_task.status = "in_progress"
     incomplete_task.assignee = "dev-1"
     incomplete_task.updated_at = 1_700_000_000_000
 
@@ -948,6 +1201,121 @@ async def test_task_claimed_for_self_uses_teammate_template():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_task_revoked_for_self_steers_member_off_task():
+    """A member whose claimed task is reassigned away is steered off it.
+
+    The revoke targets the former assignee (payload.member_name == self),
+    so the handler delivers the ``[任务撤回]`` prompt telling the member to
+    stop and re-survey the board via ``view_task``.
+    """
+    agent = _make_leader()
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskRevokedEvent(
+            team_name="test-team",
+            member_name="leader-1",
+            task_id="task-42",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_revoked(event)
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "[任务撤回]" in content
+    assert "task-42" in content
+    assert "view_task" in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_task_revoked_for_other_member_is_ignored():
+    """A revoke for another member is ignored — no deliver_input.
+
+    The reset already fired TASK_RELEASED to nudge the idle pool; the
+    revoke is a targeted notice only for the member who lost the task.
+    """
+    agent = _make_leader()
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskRevokedEvent(
+            team_name="test-team",
+            member_name="dev-1",
+            task_id="task-9",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_revoked(event)
+
+    agent.deliver_input.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_task_cancelled_for_self_steers_member_off_task():
+    """A member whose claimed task is cancelled is steered off it via the
+    [任务取消] prompt (stop working + re-survey the board)."""
+    agent = _make_leader()
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCancelledEvent(team_name="test-team", member_name="leader-1", task_id="task-42")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_cancelled(event)
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "[任务取消]" in content
+    assert "task-42" in content
+    assert "view_task" in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_task_updated_for_self_tells_member_to_reread():
+    """A member whose claimed task's content was edited is told to re-read via
+    the [任务变更] prompt; it keeps the task (no re-claim)."""
+    agent = _make_leader()
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskUpdatedEvent(team_name="test-team", member_name="leader-1", task_id="task-42")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_updated(event)
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "[任务变更]" in content
+    assert "task-42" in content
+    assert "view_task" in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_dispatch_routes_targeted_task_events_to_handlers():
+    """Integration: the real dispatch entry (EVENT_METHOD_MAP + framework)
+    routes TASK_REVOKED / TASK_CANCELLED / TASK_UPDATED to their targeted
+    self-branches — verified through dispatcher.dispatch, not by hand-calling
+    the handler methods (closes the routing gap the unit tests skipped)."""
+    cases = (
+        (TaskRevokedEvent(team_name="test-team", member_name="leader-1", task_id="t-1"), "[任务撤回]"),
+        (TaskCancelledEvent(team_name="test-team", member_name="leader-1", task_id="t-2"), "[任务取消]"),
+        (TaskUpdatedEvent(team_name="test-team", member_name="leader-1", task_id="t-3"), "[任务变更]"),
+    )
+    for event_model, marker in cases:
+        agent = _make_leader()
+        agent.deliver_input = AsyncMock()
+        await agent._coordination.dispatcher.dispatch(EventMessage.from_event(event_model))
+        agent.deliver_input.assert_awaited_once()
+        assert marker in agent.deliver_input.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_task_claimed_for_self_uses_human_template_when_human_agent():
     """Self-claim by a human-agent avatar renders the controller-facing prompt.
 
@@ -959,6 +1327,7 @@ async def test_task_claimed_for_self_uses_human_template_when_human_agent():
     ``view_task`` round-trip.
     """
     agent = _make_leader(team_name="human-claim-self-team", member_name="human-leader-self")
+    await _prepare_backend_db(agent)
     # Register the leader's member_name as a human-agent member. The
     # role check in TaskBoardHandler only consults
     # ``backend.is_human_agent`` — persist a HUMAN_AGENT row so async
@@ -1017,6 +1386,7 @@ async def test_task_claimed_for_human_self_swallows_title_lookup_error():
     avatar still gets notified.
     """
     agent = _make_leader(team_name="human-claim-error-team", member_name="human-leader-error")
+    await _prepare_backend_db(agent)
     await agent.team_backend.spawn_member(
         member_name="human-leader-error",
         display_name="Leader",
@@ -1059,7 +1429,8 @@ def test_format_message_uses_teammate_template_when_not_human():
     msg.broadcast = False
     msg.timestamp = 1_700_000_000_000
 
-    text = handler._format_message(msg, is_human_agent=False, now_ms=1_700_000_000_000)
+    expanded = ExpandedMessage(body=msg.content, is_template=False)
+    text = handler._format_message(msg, expanded=expanded, is_human_agent=False, now_ms=1_700_000_000_000)
     assert "msg-1" in text
     assert "dev-1" in text
     assert "ping" in text
@@ -1087,7 +1458,10 @@ def test_format_message_uses_human_template_when_human_agent():
     direct.broadcast = False
     direct.timestamp = 1_700_000_000_000
 
-    direct_text = handler._format_message(direct, is_human_agent=True, now_ms=1_700_000_000_000)
+    direct_expanded = ExpandedMessage(body=direct.content, is_template=False)
+    direct_text = handler._format_message(
+        direct, expanded=direct_expanded, is_human_agent=True, now_ms=1_700_000_000_000
+    )
     assert 'type="direct"' in direct_text
     assert 'for="controller"' in direct_text
     assert "msg-direct" in direct_text
@@ -1107,7 +1481,10 @@ def test_format_message_uses_human_template_when_human_agent():
     bcast.broadcast = True
     bcast.timestamp = 1_700_000_000_000
 
-    bcast_text = handler._format_message(bcast, is_human_agent=True, now_ms=1_700_000_000_000)
+    bcast_expanded = ExpandedMessage(body=bcast.content, is_template=False)
+    bcast_text = handler._format_message(
+        bcast, expanded=bcast_expanded, is_human_agent=True, now_ms=1_700_000_000_000
+    )
     assert 'type="broadcast"' in bcast_text
     assert 'for="controller"' in bcast_text
     assert "严格禁止" in bcast_text
@@ -1125,7 +1502,7 @@ def _make_claimed_task(
     task.task_id = task_id
     task.title = title
     task.content = f"Work on {task_id}"
-    task.status = "claimed"
+    task.status = "in_progress"
     task.assignee = assignee
     task.updated_at = updated_at
     return task
@@ -1136,57 +1513,139 @@ def _make_pending_task(
     *,
     updated_at: int | None,
     title: str = "Pending work",
+    assignee: str | None = None,
 ):
     task = MagicMock()
     task.task_id = task_id
     task.title = title
     task.content = f"Work on {task_id}"
     task.status = "pending"
-    task.assignee = None
+    task.assignee = assignee
     task.updated_at = updated_at
     return task
 
 
+def _set_idle(agent: TeamAgent, seconds: float) -> None:
+    """Put the member's runtime idle clock ``seconds`` into the past.
+
+    Autonomous stall detection reads this process-local clock rather than
+    ``task.updated_at`` (F_65), so this is what drives the sweeps.
+    """
+    agent._state.idle_since = time.monotonic() - seconds
+
+
+def _set_busy(agent: TeamAgent) -> None:
+    """Mark the member mid-round: a busy member has no idle clock at all."""
+    agent._state.idle_since = None
+
+
+def _stub_free_roster(agent: TeamAgent, *, free: bool = True) -> None:
+    """Give the leader a roster with (or without) an idle teammate on it."""
+    status = MemberStatus.READY.value if free else MemberStatus.BUSY.value
+    backend = MagicMock()
+    backend.list_member_roster = AsyncMock(
+        return_value=[MemberRosterEntry(member_name="dev-1", display_name="Dev", status=status)],
+    )
+    agent._configurator.team_backend = backend
+
+
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_stale_claim_leader_messages_assignee():
-    """Leader messages a member whose claimed task has aged past the threshold."""
+async def test_stale_claim_leader_ignores_other_members_claim():
+    """Stale-claim nudging is self-only: a leader never messages another member.
+
+    The leader sweeps only tasks assigned to itself; a stale claim held
+    by a teammate is that teammate's own POLL_TASK concern, so the
+    leader neither messages the assignee nor feeds its own loop.
+    """
     agent = _make_leader()
-    # updated_at at wall clock 0 → ancient → well past 60s threshold.
     stale_task = _make_claimed_task("task-1", assignee="dev-1", updated_at=0)
+    _set_idle(agent, 700)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale_task])
     agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock(return_value="msg-1")
+    agent._configurator.message_manager.send_message = AsyncMock()
+    agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
 
-    agent._configurator.task_manager.list_tasks.assert_awaited_once_with(status="claimed")
-    agent._configurator.message_manager.send_message.assert_awaited_once()
-    content, to_name = agent._configurator.message_manager.send_message.await_args.args
-    assert to_name == "dev-1"
-    assert "task-1" in content
+    # Only the two conditions the member itself is expected to push are
+    # swept. IN_REVIEW is excluded: an author idle while reviewers decide is
+    # waiting by design, not stalling (F_65).
+    surveyed = {c.kwargs.get("status") for c in agent._configurator.task_manager.list_tasks.await_args_list}
+    assert surveyed == {"planning", "in_progress"}
+    agent._configurator.message_manager.send_message.assert_not_called()
+    agent.deliver_input.assert_not_called()
+    assert "task-1" not in agent._coordination.dispatcher.stale_task._last_stale_nudge
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_claim_leader_self_nudges_own_claim():
+    """A leader idle on its own active task self-nudges, id + title only.
+
+    Delivery is an append (``use_steer=False``) and the body must not
+    dump the full task content — the member reads details via view_task.
+    """
+    agent = _make_leader()
+    own_task = _make_claimed_task("task-1", assignee="leader-1", updated_at=0)
+    _set_idle(agent, 700)
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
+    agent.deliver_input = AsyncMock()
+
+    await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
+
+    agent.deliver_input.assert_awaited_once()
+    body = agent.deliver_input.await_args.args[0]
+    assert agent.deliver_input.await_args.kwargs.get("use_steer") is False
+    assert "task-1" in body
+    assert "Work on task-1" not in body
     assert "task-1" in agent._coordination.dispatcher.stale_task._last_stale_nudge
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_stale_claim_fresh_task_does_not_nudge():
-    """A task just claimed (updated_at ≈ now) is under the threshold and skipped."""
+async def test_stale_claim_recently_idle_does_not_nudge():
+    """A member that only just went idle is under the threshold and skipped."""
     agent = _make_leader()
-    fresh_ms = int(time.time() * 1000)
-    fresh_task = _make_claimed_task("task-2", assignee="dev-1", updated_at=fresh_ms)
+    own_task = _make_claimed_task("task-2", assignee="leader-1", updated_at=0)
+    _set_idle(agent, 5)
 
     agent._configurator.task_manager = MagicMock()
-    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[fresh_task])
-    agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
+    agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
 
-    agent._configurator.message_manager.send_message.assert_not_called()
+    agent.deliver_input.assert_not_called()
     assert "task-2" not in agent._coordination.dispatcher.stale_task._last_stale_nudge
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_claim_busy_member_is_never_stalled():
+    """A member mid-round is never nudged, however ancient its task row is.
+
+    ``updated_at`` is 0 (epoch) here, which the pre-F_65 sweep would have
+    read as a huge stall. Only the idle clock decides now, and a busy member
+    has none — "busy" is simply unrepresentable as a stall.
+    """
+    agent = _make_teammate()
+    agent._state.team_member = None
+    own_task = _make_claimed_task("task-4", assignee="dev-1", updated_at=0)
+    _set_busy(agent)
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
+    agent.deliver_input = AsyncMock()
+
+    await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
+
+    agent.deliver_input.assert_not_called()
+    assert "task-4" not in agent._coordination.dispatcher.stale_task._last_stale_nudge
 
 
 @pytest.mark.asyncio
@@ -1194,30 +1653,30 @@ async def test_stale_claim_fresh_task_does_not_nudge():
 async def test_stale_claim_throttles_follow_up_polls():
     """After one nudge, follow-up polls in the same window do not re-nudge."""
     agent = _make_leader()
-    stale_task = _make_claimed_task("task-1b", assignee="dev-1", updated_at=0)
+    stale_task = _make_claimed_task("task-1b", assignee="leader-1", updated_at=0)
+    _set_idle(agent, 700)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale_task])
-    agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock(return_value="msg")
+    agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
 
-    agent._configurator.message_manager.send_message.assert_awaited_once()
+    agent.deliver_input.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_stale_claim_self_nudge_when_idle():
-    """Teammate nudges itself via start_agent when idle on a stale self-claim."""
+    """Teammate feeds its own loop when idle on a self-owned active task."""
     agent = _make_teammate()
     agent._state.team_member = None
     own_task = _make_claimed_task("task-3", assignee="dev-1", updated_at=0)
+    _set_idle(agent, 700)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
-    agent._is_agent_running = lambda: False
     agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
@@ -1229,57 +1688,88 @@ async def test_stale_claim_self_nudge_when_idle():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_stale_claim_self_nudge_steers_when_running():
-    """A running self-owned stale task is nudged via steer rather than start."""
+async def test_stale_claim_escalates_to_leader_after_repeated_windows():
+    """Self-nudging that never lands escalates the stall to the leader once.
+
+    The stalled member reports *itself* to the leader — the leader neither
+    polls member state nor reaches across processes to nudge it (F_53).
+    """
     agent = _make_teammate()
     agent._state.team_member = None
-    own_task = _make_claimed_task("task-4", assignee="dev-1", updated_at=0)
+    own_task = _make_claimed_task("task-7", assignee="dev-1", updated_at=0)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
-    # The handler always delivers; the running round receives it as a steer
-    # inside the supervisor, so the test asserts on the delivery seam.
-    agent._is_agent_running = lambda: True
+    backend = MagicMock()
+    backend.resolve_leader_member_name = AsyncMock(return_value="leader-1")
+    agent._configurator.team_backend = backend
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.send_message = AsyncMock()
     agent.deliver_input = AsyncMock()
 
-    await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
+    handler = agent._coordination.dispatcher.stale_task
+    # Each window: idle past the threshold, sweep, then drop the throttle so
+    # the next sweep counts as the next consecutive window.
+    for _ in range(handler._STALE_CLAIM_ESCALATE_STREAK):
+        _set_idle(agent, 700)
+        handler._last_stale_nudge.clear()
+        await handler._check_stale_claimed_tasks()
 
-    agent.deliver_input.assert_awaited_once()
-    content = agent.deliver_input.await_args.args[0]
-    assert "task-4" in content
+    assert handler._stale_claim_streak["task-7"] == handler._STALE_CLAIM_ESCALATE_STREAK
+    agent._configurator.message_manager.send_message.assert_awaited_once()
+    kwargs = agent._configurator.message_manager.send_message.await_args.kwargs
+    assert kwargs["to_member_name"] == "leader-1"
+    assert kwargs["from_member_name"] == "dev-1"
+    assert "task-7" in kwargs["content"]
+
+    # A further stale window must not re-report the same stall.
+    _set_idle(agent, 700)
+    handler._last_stale_nudge.clear()
+    await handler._check_stale_claimed_tasks()
+    agent._configurator.message_manager.send_message.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_stale_claim_throttle_drops_unrelated_entries():
-    """Throttle entries for tasks no longer claimed are cleaned up."""
+    """Bookkeeping for tasks that left the owned-active set is cleaned up."""
     agent = _make_leader()
-    still_claimed = _make_claimed_task("task-5", assignee="dev-1", updated_at=0)
+    still_claimed = _make_claimed_task("task-5", assignee="leader-1", updated_at=0)
+    _set_idle(agent, 700)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[still_claimed])
-    agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock()
+    agent.deliver_input = AsyncMock()
 
-    agent._coordination.dispatcher.stale_task._last_stale_nudge["task-5"] = 0.0
-    agent._coordination.dispatcher.stale_task._last_stale_nudge["task-6"] = 0.0
+    handler = agent._coordination.dispatcher.stale_task
+    handler._last_stale_nudge["task-5"] = 0.0
+    handler._last_stale_nudge["task-6"] = 0.0
+    handler._stale_claim_streak["task-6"] = 2
+    handler._escalated_claims.add("task-6")
 
-    await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
+    await handler._check_stale_claimed_tasks()
 
-    assert "task-6" not in agent._coordination.dispatcher.stale_task._last_stale_nudge
-    assert "task-5" in agent._coordination.dispatcher.stale_task._last_stale_nudge
+    assert "task-6" not in handler._last_stale_nudge
+    assert "task-6" not in handler._stale_claim_streak
+    assert "task-6" not in handler._escalated_claims
+    assert "task-5" in handler._last_stale_nudge
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_stale_pending_leader_self_nudges_with_hint():
-    """Leader self-prompts about stale pending tasks so its LLM picks targets."""
+    """An idle leader self-prompts about unclaimed work while someone is free.
+
+    The prompt lists tasks by id + title only (no content dump) and is
+    appended rather than steered.
+    """
     agent = _make_leader()
     stale = _make_pending_task("p-1", updated_at=0, title="Argue for ACP")
+    _set_idle(agent, 700)
+    _stub_free_roster(agent)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
-    agent._is_agent_running = lambda: False
     agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
@@ -1287,7 +1777,10 @@ async def test_stale_pending_leader_self_nudges_with_hint():
     agent._configurator.task_manager.list_tasks.assert_awaited_once_with(status="pending")
     agent.deliver_input.assert_awaited_once()
     content = agent.deliver_input.await_args.args[0]
+    assert agent.deliver_input.await_args.kwargs.get("use_steer") is False
     assert "p-1" in content
+    assert "Argue for ACP" in content
+    assert "Work on p-1" not in content
     assert "send_message" in content
     assert "claim_task" in content
     assert "p-1" in agent._coordination.dispatcher.stale_task._last_pending_nudge
@@ -1295,40 +1788,80 @@ async def test_stale_pending_leader_self_nudges_with_hint():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_stale_pending_leader_steers_when_running():
-    """A running leader should still receive the hint via steer."""
+async def test_stale_pending_skipped_when_every_member_is_busy():
+    """Unclaimed work with nobody free is a normal queue, not a stall.
+
+    Prompting the leader here would be noise: there is no free member to
+    hand the work to, so the queue is exactly what it should be.
+    """
     agent = _make_leader()
-    stale = _make_pending_task("p-2", updated_at=0)
+    stale = _make_pending_task("p-6", updated_at=0)
+    _set_idle(agent, 700)
+    _stub_free_roster(agent, free=False)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
-    # The handler always delivers; a running leader receives it as a steer
-    # inside the supervisor, so the test asserts on the delivery seam.
-    agent._is_agent_running = lambda: True
     agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
 
-    agent.deliver_input.assert_awaited_once()
-    content = agent.deliver_input.await_args.args[0]
-    assert "p-2" in content
+    agent.deliver_input.assert_not_called()
+    assert "p-6" not in agent._coordination.dispatcher.stale_task._last_pending_nudge
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_stale_pending_fresh_task_skipped():
-    """A pending task whose updated_at is recent should not trigger a nudge."""
+async def test_stale_pending_skips_already_assigned_task():
+    """A PENDING task that already has an assignee is nobody's stall."""
     agent = _make_leader()
-    fresh = _make_pending_task("p-3", updated_at=int(time.time() * 1000))
+    assigned = _make_pending_task("p-7", updated_at=0, assignee="dev-1")
+    _set_idle(agent, 700)
+    _stub_free_roster(agent)
 
     agent._configurator.task_manager = MagicMock()
-    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[fresh])
-    agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[assigned])
+    agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
 
-    agent._start_agent.assert_not_called()
+    agent.deliver_input.assert_not_called()
+    assert "p-7" not in agent._coordination.dispatcher.stale_task._last_pending_nudge
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_pending_busy_leader_skipped():
+    """A leader mid-round is not prompted: it is not idle on the work."""
+    agent = _make_leader()
+    stale = _make_pending_task("p-2", updated_at=0)
+    _set_busy(agent)
+    _stub_free_roster(agent)
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
+    agent.deliver_input = AsyncMock()
+
+    await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
+
+    agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_pending_recently_idle_leader_skipped():
+    """A leader that only just went idle is under the threshold and skipped."""
+    agent = _make_leader()
+    stale = _make_pending_task("p-3", updated_at=0)
+    _set_idle(agent, 5)
+    _stub_free_roster(agent)
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
+    agent.deliver_input = AsyncMock()
+
+    await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
+
+    agent.deliver_input.assert_not_called()
     assert "p-3" not in agent._coordination.dispatcher.stale_task._last_pending_nudge
 
 
@@ -1338,10 +1871,11 @@ async def test_stale_pending_throttled_after_first_nudge():
     """Follow-up polls inside the same window should not re-nudge."""
     agent = _make_leader()
     stale = _make_pending_task("p-4", updated_at=0)
+    _set_idle(agent, 700)
+    _stub_free_roster(agent)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
-    agent._is_agent_running = lambda: False
     agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
@@ -1357,16 +1891,57 @@ async def test_stale_pending_teammate_skips_check():
     agent = _make_teammate()
     agent._state.team_member = None
     stale = _make_pending_task("p-5", updated_at=0)
+    _set_idle(agent, 700)
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
-    agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
+    agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
 
     agent._configurator.task_manager.list_tasks.assert_not_called()
-    agent._start_agent.assert_not_called()
+    agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_refresh_idle_baseline_prevents_false_stall_after_resume():
+    """Resuming a team must not bill the pause window as idle time.
+
+    A member already idle when the team paused keeps its idle stamp while the
+    monotonic clock runs through the entire pause, and — having no suspended
+    round to resume — never re-enters IDLE to re-stamp itself. ``kernel.start``
+    re-bases the clock, so the first poll after resume measures a fresh idle
+    span instead of the whole pause (F_65).
+    """
+    agent = _make_leader()
+    own_task = _make_claimed_task("task-8", assignee="leader-1", updated_at=0)
+    # Idle since long before the pause: without a re-base this reads as a
+    # two-hour stall the instant polling comes back.
+    _set_idle(agent, 7200)
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
+    agent.deliver_input = AsyncMock()
+
+    agent.refresh_idle_baseline()
+
+    assert agent.idle_seconds() < 1
+    await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
+    agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_refresh_idle_baseline_leaves_a_busy_member_alone():
+    """A member paused mid-round has no idle clock; re-basing must not start one."""
+    agent = _make_leader()
+    _set_busy(agent)
+
+    agent.refresh_idle_baseline()
+
+    assert agent._state.idle_since is None
+    assert agent.idle_seconds() is None
 
 
 @pytest.mark.asyncio
@@ -1417,7 +1992,6 @@ def _make_member_status_handler(
         ),
         infra=TeamInfra(team_backend=backend),
         poll_ctrl=SimpleNamespace(),
-        stale_claim_throttle={},
     )
     return backend, handler
 
@@ -1970,7 +2544,7 @@ async def test_task_completed_with_incomplete_tasks_nudges_leader_board():
     incomplete_task.task_id = "task-2"
     incomplete_task.title = "Pending task"
     incomplete_task.content = "In progress"
-    incomplete_task.status = "claimed"
+    incomplete_task.status = "in_progress"
     incomplete_task.assignee = "member-2"
     incomplete_task.updated_at = 1_700_000_000_000
 
@@ -1995,6 +2569,233 @@ async def test_task_completed_with_incomplete_tasks_nudges_leader_board():
     assert "task-2" in content
     # Should NOT contain the "all done" summary prompt
     assert "完成" not in content or "task" in content.lower()
+
+
+# ------------------------------------------------------------------
+# Teammate idle nudge is gated on claimable-set growth
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_teammate_nudged_on_task_created():
+    """A brand-new pending task grows the claimable set, so an idle
+    teammate is nudged to re-evaluate the board."""
+    agent = _make_teammate()
+    claimable = MagicMock()
+    claimable.task_id = "task-9"
+    claimable.title = "Fresh work"
+    claimable.content = "Do it"
+    claimable.status = "pending"
+    claimable.assignee = None
+    claimable.updated_at = 1_700_000_000_000
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[claimable])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCreatedEvent(team_name="test-team", task_id="task-9", status="pending")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
+    agent.deliver_input.assert_awaited_once()
+    assert "task-9" in agent.deliver_input.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_teammate_nudged_on_task_unblocked():
+    """A task whose dependencies clear flips to pending and grows the
+    claimable set, so an idle teammate is nudged."""
+    agent = _make_teammate()
+    unblocked = MagicMock()
+    unblocked.task_id = "task-11"
+    unblocked.title = "Now ready"
+    unblocked.content = "Was blocked"
+    unblocked.status = "pending"
+    unblocked.assignee = None
+    unblocked.updated_at = 1_700_000_000_000
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[unblocked])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskUnblockedEvent(team_name="test-team", task_id="task-11")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
+    agent.deliver_input.assert_awaited_once()
+    assert "task-11" in agent.deliver_input.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_teammate_skips_nudge_on_task_updated():
+    """TASK_UPDATED only edits an existing task; it does not grow the
+    claimable set, so an idle teammate is not woken — no board survey,
+    no deliver_input."""
+    agent = _make_teammate()
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskUpdatedEvent(team_name="test-team", task_id="task-9")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent._configurator.task_manager.list_tasks.assert_not_awaited()
+    agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_teammate_skips_nudge_on_task_completed():
+    """A teammate is not woken when someone else completes a task — it
+    shrinks, not grows, the claimable set."""
+    agent = _make_teammate()
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCompletedEvent(team_name="test-team", task_id="task-9")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent._configurator.task_manager.list_tasks.assert_not_awaited()
+    agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_teammate_nudged_on_task_released():
+    """A reset task re-enters the claimable pool, so an idle teammate is
+    nudged by TASK_RELEASED to pick it up."""
+    agent = _make_teammate()
+    released = MagicMock()
+    released.task_id = "task-13"
+    released.title = "Freed work"
+    released.content = "Was someone else's"
+    released.status = "pending"
+    released.assignee = None
+    released.updated_at = 1_700_000_000_000
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[released])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskReleasedEvent(team_name="test-team", task_id="task-13")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
+    agent.deliver_input.assert_awaited_once()
+    assert "task-13" in agent.deliver_input.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_teammate_board_shows_only_claimable_tasks():
+    """The teammate nudge surfaces only claimable (pending + unassigned)
+    tasks — claimed / in-flight tasks owned by others are excluded."""
+    agent = _make_teammate()
+    claimable = MagicMock()
+    claimable.task_id = "task-free"
+    claimable.title = "Open work"
+    claimable.content = "Grab me"
+    claimable.status = "pending"
+    claimable.assignee = None
+    claimable.updated_at = 1_700_000_000_000
+
+    others = MagicMock()
+    others.task_id = "task-busy"
+    others.title = "Someone's work"
+    others.content = "In progress"
+    others.status = "in_progress"
+    others.assignee = "dev-2"
+    others.updated_at = 1_700_000_000_000
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[claimable, others])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCreatedEvent(team_name="test-team", task_id="task-free", status="pending")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "task-free" in content
+    assert "task-busy" not in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_teammate_skips_nudge_when_no_claimable_task():
+    """Even on a claimable-growth event, a teammate is not woken when no
+    task is actually claimable (e.g. the new task was already taken)."""
+    agent = _make_teammate()
+    claimed = MagicMock()
+    claimed.task_id = "task-gone"
+    claimed.title = "Taken"
+    claimed.content = "Already claimed"
+    claimed.status = "in_progress"
+    claimed.assignee = "dev-2"
+    claimed.updated_at = 1_700_000_000_000
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[claimed])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCreatedEvent(team_name="test-team", task_id="task-gone", status="pending")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_leader_nudged_on_task_updated_despite_filter():
+    """The teammate nudge filter must not touch the leader: a leader
+    still re-surveys the board on TASK_UPDATED."""
+    agent = _make_leader()
+    incomplete = MagicMock()
+    incomplete.task_id = "task-3"
+    incomplete.title = "Ongoing"
+    incomplete.content = "Work"
+    incomplete.status = "in_progress"
+    incomplete.assignee = "dev-1"
+    incomplete.updated_at = 1_700_000_000_000
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[incomplete])
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskUpdatedEvent(team_name="test-team", task_id="task-3")
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
+    agent.deliver_input.assert_awaited_once()
+    assert "task-3" in agent.deliver_input.await_args.args[0]
 
 
 @pytest.mark.asyncio

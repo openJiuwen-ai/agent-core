@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import time
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -269,11 +270,19 @@ class StreamController:
         """Map a runtime phase transition onto MemberStatus.
 
         ``RUNNING`` → BUSY, ``IDLE`` → READY (and round-chain-end settling).
-        ``PAUSED`` / ``TERMINATED`` leave member status to the lifecycle layer.
+        ``PAUSING`` / ``PAUSED`` / ``TERMINATED`` leave member status to the
+        lifecycle layer.
+
+        This edge is also where ``TeamAgentState.idle_since`` — the member's
+        process-local idle clock feeding the stale-task sweep — is started
+        and cleared. Pause-adjacent phases stay untouched here; the resume
+        path re-bases the clock via ``TeamAgent.refresh_idle_baseline()``.
         """
         if new is HarnessState.RUNNING:
+            self._state.idle_since = None
             await self._update_status(MemberStatus.BUSY)
         elif new is HarnessState.IDLE:
+            self._state.idle_since = time.monotonic()
             await self._update_status(MemberStatus.READY)
             await self._on_idle_settled()
 
@@ -373,8 +382,35 @@ class StreamController:
         if harness is not None:
             await harness.abort(immediate=False)
 
+    async def pause_agent(self) -> None:
+        """Pause the in-flight round at its nearest inner iteration boundary.
+
+        Unlike :meth:`cancel_agent`, the round is preserved: a parked model call
+        is interrupted and rewound to the previous boundary, while a running
+        iteration's tools finish first. :meth:`resume_agent` continues it.
+        """
+        harness = self._resources.harness
+        if harness is not None:
+            await harness.pause()
+
+    async def resume_agent(self, *, query: str | None = None) -> None:
+        """Continue a paused round in place, from its preserved context.
+
+        ``query`` drives a cold resume (the harness was rebuilt and its context
+        restored from a checkpoint); a warm resume needs none.
+        """
+        harness = self._resources.harness
+        if harness is not None:
+            await harness.resume(query=query)
+
     async def drain_agent_task(self) -> None:
-        """Tear down the in-flight round during lifecycle pause/stop."""
+        """Tear down the in-flight round during lifecycle stop / teardown.
+
+        Hard-cancels the round: used by ``stop`` / ``destroy``, where it is being
+        discarded outright. A lifecycle *pause* must not come here — it routes
+        through :meth:`pause_agent`, which stops at a clean iteration boundary
+        and keeps the round resumable.
+        """
         await self.cancel_agent()
 
     # ------------------------------------------------------------------

@@ -13,6 +13,7 @@ mapping/forwarding contract is exercised without a real DeepAgent.
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable
 
@@ -434,6 +435,38 @@ async def test_map_state_idle_sets_ready_and_settles() -> None:
 
     assert statuses == [MemberStatus.READY]
     assert polls == [None]  # idle-settled fired the completion poll
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_map_state_idle_stamps_the_idle_clock() -> None:
+    """Settling into IDLE starts the member's process-local idle clock.
+
+    The stall sweeps measure staleness from this stamp rather than from the
+    task row's ``updated_at``, so a paused team cannot fabricate a stall
+    (F_65).
+    """
+    state = TeamAgentState()
+    sc = _make_controller(_FakeRuntime(), state=state)
+    sc.stream_queue = asyncio.Queue()
+
+    before = time.monotonic()
+    await sc._map_state(HarnessState.IDLE)
+
+    assert state.idle_since is not None
+    assert state.idle_since >= before
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_map_state_running_clears_the_idle_clock() -> None:
+    """A member driving a round is progressing, so it carries no idle clock."""
+    state = TeamAgentState(idle_since=time.monotonic() - 100)
+    sc = _make_controller(_FakeRuntime(), state=state)
+
+    await sc._map_state(HarnessState.RUNNING)
+
+    assert state.idle_since is None
 
 
 # ----------------------------------------------------------------------

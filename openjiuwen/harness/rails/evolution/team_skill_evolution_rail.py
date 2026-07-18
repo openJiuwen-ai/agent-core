@@ -263,6 +263,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         language: str,
         *,
         generate_records_llm_policy: LLMInvokePolicy,
+        two_stage: bool,
     ) -> SkillExperienceOptimizer:
         """Build the team/swarm optimizer used by the shared online pipeline."""
         return SkillExperienceOptimizer(
@@ -270,6 +271,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
             model,
             language,
             generate_records_llm_policy=generate_records_llm_policy,
+            two_stage=two_stage,
             profile="team",
         )
 
@@ -353,6 +355,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
             "eval_interval": self._eval_interval,
             "evolution_total_timeout_secs": self.evolution_total_timeout_secs,
             "max_concurrent_evolution": self._max_concurrent_evolution,
+            "two_stage": self.two_stage,
         }
 
     @property
@@ -707,7 +710,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
                     "no skill usage of a team/swarm skill detected in trajectory; "
                     "cancelling team skill evolution analysis",
                 )
-                await self._evaluate_presented_entries(presented_entries)
+                await self._evaluate_presented_entries(presented_entries, messages)
                 return
 
             logger.info("[TeamSkillEvolutionRail] detected existing skill '%s'", used_skill)
@@ -722,7 +725,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
                     "cancelling team skill evolution analysis",
                     skill_name=used_skill,
                 )
-                await self._evaluate_presented_entries(presented_entries)
+                await self._evaluate_presented_entries(presented_entries, messages)
                 return
 
             self._emit_progress(
@@ -752,7 +755,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
                     request_id=request.request_id,
                 )
 
-            await self._evaluate_presented_entries(presented_entries)
+            await self._evaluate_presented_entries(presented_entries, messages)
 
             elapsed = time.time() - t0
             logger.info("[TeamSkillEvolutionRail] run_evolution completed in %.1fs", elapsed)
@@ -798,7 +801,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         await self._experience_tracker.record_presented_records(
             session=session,
             skill_name=skill_name,
-            presentation_snippet=content,
+            presentation_snippet="",
             record_ids=record_ids,
         )
 
@@ -807,12 +810,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         if tracker is None:
             return []
         return tracker.consume_eval_state(session)
-
-    async def _evaluate_presented_entries(self, presented_entries: list[tuple[str, Any, str]]) -> None:
-        tracker = getattr(self, "_experience_tracker", None)
-        if tracker is None:
-            return
-        await tracker.evaluate_presented(presented_entries)
 
     async def approve_record(
         self,

@@ -38,6 +38,7 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
     BridgeMemberSpec,
     ExternalCliAgentSpec,
+    MemberSpecBase,
     TeamLifecycle,
     TeamMemberSpec,
     TeamRole,
@@ -83,12 +84,13 @@ def _ensure_builtin_infra_registered() -> None:
 
     if not _STORAGE_REGISTRY:
         from openjiuwen.agent_teams.tools.database import DatabaseConfig
-        from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 
         _STORAGE_REGISTRY["sqlite"] = DatabaseConfig
         _STORAGE_REGISTRY["postgresql"] = DatabaseConfig
         _STORAGE_REGISTRY["mysql"] = DatabaseConfig
-        _STORAGE_REGISTRY["memory"] = MemoryDatabaseConfig
+        # "memory" is an alias for a :memory: SQLite db (DatabaseConfig
+        # normalises db_type="memory" -> sqlite + connection_string=":memory:").
+        _STORAGE_REGISTRY["memory"] = DatabaseConfig
 
 
 class TransportSpec(BaseModel):
@@ -150,26 +152,22 @@ PredefinedMemberSpec = Annotated[
 # ---------------------------------------------------------------------------
 
 
-class LeaderSpec(BaseModel):
-    """Leader identity specification."""
+class LeaderSpec(MemberSpecBase):
+    """Leader identity specification.
 
-    model_config = {"protected_namespaces": ()}
+    Shares the ``desc`` (public) / ``prompt`` (private) split with every other
+    member via :class:`MemberSpecBase`. The leader's ``prompt`` — its private
+    system prompt — is fixed at build time and, unlike a teammate, is never
+    regenerated after ``build_team``, keeping the leader's system-prompt prefix
+    KV-cache stable.
+
+    Overrides ``model_name``'s docstring only to note the ``build()``-time
+    (rather than ``build_team``-time) allocation; the field itself is inherited.
+    """
 
     member_name: str = "team_leader"
     display_name: str = "Team Leader"
-    persona: str = Field(default_factory=lambda: t("blueprint.default_persona"))
-    model_name: Optional[str] = None
-    """Optional pool model_name to allocate from when ``TeamSpec.model_pool``
-    is configured with ``by_model_name`` or ``router`` strategy.
-
-    Forwarded to ``ModelAllocator.allocate`` at ``build()`` time so the
-    leader draws an endpoint from the named group (``by_model_name``) or
-    the named router entry (``router``). Ignored by the ``round_robin``
-    strategy (which always allocates regardless of name). ``None``
-    (default) means the leader uses its per-agent model — except under
-    ``router``, where it falls back to the router's first declared
-    model_name.
-    """
+    desc: str = Field(default_factory=lambda: t("blueprint.default_desc"))
 
 
 class TinyAgentSpec(BaseModel):
@@ -281,6 +279,76 @@ class TeamAgentSpec(BaseModel):
     ``spawn_member`` calls during execution. Set explicitly to
     "predefined" to lock the roster and drop the leader's
     ``spawn_member`` tool.
+    """
+    dispatch_mode: Literal["autonomous", "scheduled"] = "autonomous"
+    """How a task reaches the member that executes it. Static configuration.
+
+    Orthogonal to ``team_mode`` (which governs whether the roster can
+    grow). ``"autonomous"`` (default) puts tasks on a shared board:
+    members claim what matches their expertise, and the leader launches
+    them with a ``send_message`` broadcast. ``"scheduled"`` has the
+    leader assign every task to a named member up front; the scheduling
+    runtime (``agent/scheduling``, F_62) starts each task and performs
+    every handoff — start, review dispatch, rework, verified — as
+    leader-identity mailbox messages, and members lose ``claim_task``
+    in favour of ``member_complete_task``. Prompts and tool shapes are
+    assembled per mode at build time; the mode never changes at runtime.
+    """
+    enable_task_verification: bool = False
+    """Team-level "verification expected" switch for the verify gate.
+
+    Purely prompt-driven: when True the leader's task-creation guidance
+    asks it to assign 0..N reviewers per task by its own judgement (no
+    hard validation — a task the leader deems trivial may still carry no
+    reviewer). The reviewer machinery itself (column, guards, voting) is
+    always available regardless of this flag. Overridable per team
+    instance at ``build_team`` time. See F_62.
+    """
+    verify_vote_threshold: float = 2 / 3
+    """Pass quorum for multi-reviewer verification under scheduled dispatch.
+
+    A task in review completes when ``pass_votes >= ceil(threshold * n)``
+    over ``n = len(reviewer)``, and is sent back for rework as soon as
+    that quorum becomes unreachable. Consumed only by the leader-side
+    scheduler (single judge), so it is not mirrored onto ``TeamSpec``.
+    Range ``0 < threshold <= 1``. See F_62.
+    """
+    default_max_review_rounds: int = 3
+    """Default per-task review-round ceiling (scheduled dispatch).
+
+    Used when a task does not set ``max_review_rounds`` at creation.
+    When a review round beyond this ceiling still fails, the scheduler
+    stops the automatic rework loop and escalates to the leader instead.
+    See F_62.
+    """
+    review_stall_timeout: int = 1800
+    """Seconds before a stalled review round escalates to the leader.
+
+    A round that produced no verdict (including no votes at all) within
+    this window is surfaced to the leader with the current vote status —
+    covering reviewers that never vote, which the round ceiling alone
+    cannot catch. Consumed only by the leader-side scheduler. See F_62.
+    """
+    stale_claim_idle_timeout: int = 600
+    """Autonomous dispatch: seconds a member may sit idle holding active work.
+
+    A member that stays runtime-IDLE this long while still owning a
+    ``PLANNING`` / ``IN_PROGRESS`` task gets a nudge fed back into its own
+    loop to keep pushing; if consecutive windows keep finding it idle the
+    stall is escalated to the leader, who can reassign or intervene.
+    Measured off the member's process-local idle clock
+    (``TeamAgentState.idle_since``), never DB ``updated_at`` — see F_65.
+    Ignored under scheduled dispatch. See F_65.
+    """
+    stale_pending_idle_timeout: int = 600
+    """Autonomous dispatch: seconds the leader may sit idle on unclaimed work.
+
+    Once the leader has been runtime-IDLE this long while unassigned
+    ``PENDING`` tasks exist *and* at least one non-leader member is READY,
+    it self-prompts to assign them — the free-member precondition keeps the
+    prompt away from a team whose members are simply all busy. Measured off
+    the leader's process-local idle clock, never DB ``updated_at``.
+    Ignored under scheduled dispatch. See F_65.
     """
     transport: Optional[TransportSpec] = None
     """Pluggable transport layer specification.
@@ -487,6 +555,44 @@ class TeamAgentSpec(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _validate_review_settings(self) -> "TeamAgentSpec":
+        """Range-check the verify-gate knobs (F_62).
+
+        The scheduler consumes these without further guarding, so an
+        out-of-range value must fail at spec time, not mid-run.
+        """
+        if not 0 < self.verify_vote_threshold <= 1:
+            raise ValueError(
+                f"verify_vote_threshold must be in (0, 1], got {self.verify_vote_threshold}",
+            )
+        if self.default_max_review_rounds < 1:
+            raise ValueError(
+                f"default_max_review_rounds must be >= 1, got {self.default_max_review_rounds}",
+            )
+        if self.review_stall_timeout <= 0:
+            raise ValueError(
+                f"review_stall_timeout must be > 0 seconds, got {self.review_stall_timeout}",
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_stall_settings(self) -> "TeamAgentSpec":
+        """Range-check the autonomous stall-nudge thresholds (F_65).
+
+        The stale-task sweep consumes these as-is, so a non-positive window
+        must fail at spec time rather than turn every poll into a nudge.
+        """
+        if self.stale_claim_idle_timeout <= 0:
+            raise ValueError(
+                f"stale_claim_idle_timeout must be > 0 seconds, got {self.stale_claim_idle_timeout}",
+            )
+        if self.stale_pending_idle_timeout <= 0:
+            raise ValueError(
+                f"stale_pending_idle_timeout must be > 0 seconds, got {self.stale_pending_idle_timeout}",
+            )
+        return self
+
+    @model_validator(mode="after")
     def _default_transport_for_spawn_mode(self) -> "TeamAgentSpec":
         """Fill an in-process transport default when spawn_mode='inprocess'.
 
@@ -561,6 +667,8 @@ class TeamAgentSpec(BaseModel):
             display_name=self.team_name,
             leader_member_name=self.leader.member_name,
             language=resolved_language,
+            dispatch_mode=self.dispatch_mode,
+            teammate_mode=str(self.teammate_mode),
             model_pool=team_pool,
             model_pool_strategy=team_strategy,
             external_messager_config=external_messager_config,
@@ -595,7 +703,8 @@ class TeamAgentSpec(BaseModel):
         context = TeamRuntimeContext(
             role=TeamRole.LEADER,
             member_name=self.leader.member_name,
-            persona=self.leader.persona,
+            desc=self.leader.desc,
+            prompt=self.leader.prompt,
             team_spec=team_spec,
             messager_config=messager_config,
             db_config=db_config,

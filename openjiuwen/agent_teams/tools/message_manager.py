@@ -63,15 +63,21 @@ class TeamMessageManager:
         to_member_name: str,
         from_member_name: str | None = None,
         protocol: str = "plain",
+        meta: dict | None = None,
     ) -> Optional[str]:
         """Send a point-to-point message.
 
         Args:
-            content: Message content.
+            content: Message content. Empty for a templated framework message,
+                whose text is rendered from ``meta`` at delivery time.
             to_member_name: Recipient member ID.
             from_member_name: Override sender ID. Defaults to self.member_name.
             protocol: Message format — ``"plain"`` for normal text,
                 ``"json"`` for structured payloads.
+            meta: Framework-only delivery payload (template key + refs +
+                params). Not reachable from the send_message tool — only the
+                framework (scheduler handoffs) sets it. See
+                ``message_template.py``.
         """
         sender = from_member_name or self.member_name
         message_id = str(uuid.uuid4())
@@ -85,6 +91,7 @@ class TeamMessageManager:
             broadcast=False,
             is_read=False,
             protocol=protocol,
+            meta=meta,
         )
         if not success:
             team_logger.error(f"Failed to create message {message_id}")
@@ -153,6 +160,69 @@ class TeamMessageManager:
 
         team_logger.debug(f"Broadcast message sent from {sender}: {message_id}")
         return message_id
+
+    async def multicast_message(
+        self,
+        content: str,
+        to_member_names: List[str],
+        from_member_name: str | None = None,
+        protocol: str = "plain",
+    ) -> List[str]:
+        """Send identical content to several members as N point-to-point messages.
+
+        Persists all recipients in a SINGLE DB transaction (one fsync) via
+        ``create_direct_messages`` instead of N separate ``send_message``
+        writes — this is the multicast write-tail optimization. Message events
+        are published per recipient AFTER the commit; the messager bus runs off
+        the DB write lock, so the fan-out never extends the write critical
+        section.
+
+        Args:
+            content: Shared message body.
+            to_member_names: Recipient member ids (caller de-duplicates /
+                validates existence; empty list is a no-op).
+            from_member_name: Override sender id. Defaults to
+                ``self.member_name``.
+            protocol: Message format (``"plain"`` / ``"json"``).
+
+        Returns:
+            The created message ids in recipient order, or an empty list when
+            there were no recipients or the batch write failed.
+        """
+        sender = from_member_name or self.member_name
+        if not to_member_names:
+            return []
+
+        pairs = [(str(uuid.uuid4()), to) for to in to_member_names]
+        created = await self.db.message.create_direct_messages(
+            team_name=self.team_name,
+            from_member_name=sender,
+            content=content,
+            recipients=pairs,
+            protocol=protocol,
+        )
+        if created != len(pairs):
+            team_logger.error("Failed to batch-create multicast messages from %s", sender)
+            return []
+
+        for message_id, to_member_name in pairs:
+            try:
+                await self.messager.publish(
+                    topic_id=TeamTopic.MESSAGE.build(get_session_id(), self.team_name),
+                    message=EventMessage.from_event(
+                        MessageEvent(
+                            message_id=message_id,
+                            team_name=self.team_name,
+                            from_member_name=sender,
+                            to_member_name=to_member_name,
+                        )
+                    ),
+                )
+            except Exception as e:
+                team_logger.error(f"Failed to publish message event for {message_id}: {e}")
+
+        team_logger.debug(f"Multicast sent from {sender} to {len(pairs)} members")
+        return [message_id for message_id, _ in pairs]
 
     async def get_messages(
         self,
@@ -265,20 +335,49 @@ class TeamMessageManager:
             team_logger.error(f"Failed to mark message {message_id} as read by {member_name}")
         return success
 
-    async def mark_messages_read(self, message_ids: list[str], member_name: str) -> int:
-        """Mark several messages read for one member in one transaction.
+    async def mark_messages_read(self, messages: List[TeamMessageBase], member_name: str) -> int:
+        """Mark a batch of delivered messages read for one member.
 
-        Batches the per-message read-state writes into a single commit
-        (one fsync) — the dominant write-throughput lever on SQLite.
+        Takes the raw message objects (not ids) so this layer — which owns
+        read-state semantics — can honour the two read models before handing
+        a safe id list to the DAO:
+
+          - Direct messages each flip their own ``is_read`` row, so every
+            direct id is kept.
+          - Broadcast read state is a per-member watermark: one
+            ``(member, team)`` row keyed by the newest read broadcast
+            timestamp. Marking the newest broadcast advances the watermark
+            past every older one, so only that single id is kept. Passing
+            more than one broadcast id to the DAO in one transaction would
+            re-insert the same ``(member, team)`` primary key and the commit
+            would raise ``UNIQUE constraint failed``, rolling back the whole
+            batch and stalling the mailbox. Collapsing broadcasts here keeps
+            that invariant out of every caller (handler, external client,
+            stress harness).
+
+        The DAO write stays a single transaction (one fsync) — the dominant
+        write-throughput lever on SQLite.
 
         Args:
-            message_ids: Message ids to mark read, in delivery order.
+            messages: Delivered message objects to mark read.
             member_name: Member who read the messages.
 
         Returns:
             Count of messages whose read state was applied.
         """
-        marked = await self.db.message.mark_messages_read(message_ids, member_name)
+        if not messages:
+            return 0
+
+        direct_ids = [m.message_id for m in messages if not m.broadcast]
+        broadcasts = [m for m in messages if m.broadcast]
+        ids = list(direct_ids)
+        if broadcasts:
+            newest_broadcast = max(broadcasts, key=lambda m: m.timestamp)
+            ids.append(newest_broadcast.message_id)
+        if not ids:
+            return 0
+
+        marked = await self.db.message.mark_messages_read(ids, member_name)
         if marked:
             team_logger.debug("Marked %d messages read by %s", marked, member_name)
         return marked

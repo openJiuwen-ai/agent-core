@@ -62,13 +62,13 @@ def predefined_members():
         TeamMemberSpec(
             member_name="backend-dev",
             display_name="Backend Developer",
-            persona="Senior backend engineer",
-            prompt_hint="Check tasks and start working",
+            desc="Senior backend engineer",
+            prompt="Check tasks and start working",
         ),
         TeamMemberSpec(
             member_name="frontend-dev",
             display_name="Frontend Developer",
-            persona="Senior frontend engineer",
+            desc="Senior frontend engineer",
         ),
     ]
 
@@ -147,7 +147,9 @@ class TestBuildTeamWithPredefinedMembers:
         assert backend_dev.desc == "Senior backend engineer"
         assert backend_dev.prompt == "Check tasks and start working"
         assert frontend_dev.desc == "Senior frontend engineer"
-        assert frontend_dev.prompt is None
+        # A predefined member with no ``prompt`` stores the schema default (empty
+        # string), not NULL — ``MemberSpecBase.prompt`` defaults to "".
+        assert frontend_dev.prompt == ""
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -331,11 +333,11 @@ class TestPredefinedTeamPrompt:
 
     @pytest.mark.level1
     def test_predefined_prompt_includes_override(self):
-        from openjiuwen.agent_teams.prompts import build_system_prompt
+        from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 
-        prompt = build_system_prompt(
+        prompt = build_team_member_system_prompt(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_name="leader",
             team_mode="predefined",
         )
         logger.info("Predefined prompt length: {}", len(prompt))
@@ -345,11 +347,11 @@ class TestPredefinedTeamPrompt:
 
     @pytest.mark.level1
     def test_auto_team_prompt_no_override(self):
-        from openjiuwen.agent_teams.prompts import build_system_prompt
+        from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 
-        prompt = build_system_prompt(
+        prompt = build_team_member_system_prompt(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_name="leader",
             team_mode="default",
         )
 
@@ -357,11 +359,11 @@ class TestPredefinedTeamPrompt:
 
     @pytest.mark.level1
     def test_hybrid_prompt_includes_hybrid_mode(self):
-        from openjiuwen.agent_teams.prompts import build_system_prompt
+        from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 
-        prompt = build_system_prompt(
+        prompt = build_team_member_system_prompt(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_name="leader",
             team_mode="hybrid",
         )
 
@@ -370,11 +372,11 @@ class TestPredefinedTeamPrompt:
 
     @pytest.mark.level1
     def test_predefined_workflow_not_applied_to_teammate(self):
-        from openjiuwen.agent_teams.prompts import build_system_prompt
+        from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 
-        prompt = build_system_prompt(
+        prompt = build_team_member_system_prompt(
             role=TeamRole.TEAMMATE,
-            persona="Dev",
+            member_name="worker",
             team_mode="predefined",
         )
 
