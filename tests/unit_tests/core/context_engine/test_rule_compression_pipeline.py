@@ -135,11 +135,25 @@ def test_search_results_compression_ignores_numbered_line_prefixes():
     assert "more files omitted" not in result.content
 
 
-def test_rule_compression_pipeline_adds_builtin_cjk_query_terms():
+def test_rule_compression_pipeline_does_not_translate_cjk_query_terms():
     pipeline = RuleCompressionPipeline()
 
     terms = pipeline._query_terms_for_message(
         [UserMessage(content="检查密码刷新失败")],
+        tool_name=None,
+        tool_arguments=None,
+    )
+
+    assert "password" not in terms
+    assert "refresh" not in terms
+    assert "failure" not in terms
+
+
+def test_rule_compression_pipeline_keeps_english_terms_inside_cjk_queries():
+    pipeline = RuleCompressionPipeline()
+
+    terms = pipeline._query_terms_for_message(
+        [UserMessage(content="检查 password refresh failure")],
         tool_name=None,
         tool_arguments=None,
     )
