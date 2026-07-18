@@ -55,7 +55,8 @@ class FirstSuccessfulSelector:
     This is the fastest selector and a safe default.
     """
 
-    def select(self, results: list[RolloutResult]) -> RolloutResult:
+    @staticmethod
+    def select(results: list[RolloutResult]) -> RolloutResult:
         if not results:
             raise ValueError("No rollout results to select from")
 
@@ -82,7 +83,8 @@ class LongestOutputSelector:
     Useful when longer outputs indicate more complete solutions.
     """
 
-    def select(self, results: list[RolloutResult]) -> RolloutResult:
+    @staticmethod
+    def select(results: list[RolloutResult]) -> RolloutResult:
         if not results:
             raise ValueError("No rollout results to select from")
 
@@ -106,7 +108,8 @@ class ShortestOutputSelector:
     Useful when brevity indicates precision (e.g., minimal diffs).
     """
 
-    def select(self, results: list[RolloutResult]) -> RolloutResult:
+    @staticmethod
+    def select(results: list[RolloutResult]) -> RolloutResult:
         if not results:
             raise ValueError("No rollout results to select from")
 

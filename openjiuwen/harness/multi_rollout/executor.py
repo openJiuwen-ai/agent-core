@@ -159,19 +159,22 @@ class MultiRolloutExecutor:
             results.append(inp)
         return results
 
-    def _copy_inputs(self, inputs: Any) -> Any:
+    @staticmethod
+    def _copy_inputs(inputs: Any) -> Any:
         """Shallow-copy inputs dict so each attempt is independent."""
         if isinstance(inputs, dict):
             return dict(inputs)
         return inputs
 
-    def _extract_query(self, inputs: Any) -> str:
+    @staticmethod
+    def _extract_query(inputs: Any) -> str:
         """Best-effort extraction of the user query from inputs."""
         if isinstance(inputs, dict):
             return str(inputs.get("query", inputs.get("content", "")))
         return str(inputs) if inputs is not None else ""
 
-    def _set_query(self, inputs: Any, query: str) -> None:
+    @staticmethod
+    def _set_query(inputs: Any, query: str) -> None:
         """Set the query field back into inputs."""
         if isinstance(inputs, dict):
             if "query" in inputs:
