@@ -409,6 +409,8 @@ class TestEvolutionStoreArchive:
         assert EvolutionStore.normalize_body_archive_name("v1.0.0") == "SKILL.v1.0.0.md"
         assert EvolutionStore.normalize_body_archive_name("SKILL.v1.0.0.md") == "SKILL.v1.0.0.md"
         assert EvolutionStore.normalize_body_archive_name("SKILL.1.0.0.md") is None
+        assert EvolutionStore.normalize_body_archive_name("latest") is None
+        assert EvolutionStore.normalize_body_archive_name("not-a-version") is None
         assert EvolutionStore.normalize_body_archive_name("../SKILL.v1.0.0.md") is None
         assert EvolutionStore.is_body_archive_filename("SKILL.v1.0.0.md") is True
         assert EvolutionStore.is_body_archive_filename("SKILL.1.0.0.md") is False

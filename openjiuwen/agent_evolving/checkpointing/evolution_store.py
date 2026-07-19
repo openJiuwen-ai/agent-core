@@ -27,6 +27,7 @@ from openjiuwen.agent_evolving.checkpointing.types import (
 from openjiuwen.agent_evolving.checkpointing.versioning import (
     aggregate_version_bump,
     bump_semver,
+    parse_semver,
 )
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.sys_operation import SysOperation
@@ -1109,6 +1110,12 @@ version: 1.0.0
                 return None
             return version_or_name
         if "/" in version_or_name or "\\" in version_or_name:
+            return None
+        # Reject non-SemVer bare strings (parse_semver falls back to 1.0.0).
+        stripped = version_or_name.strip()
+        bare = stripped[1:] if stripped[:1] in ("v", "V") else stripped
+        major, minor, patch = parse_semver(stripped)
+        if bare != f"{major}.{minor}.{patch}":
             return None
         return cls.body_archive_name_for_version(version_or_name)
 

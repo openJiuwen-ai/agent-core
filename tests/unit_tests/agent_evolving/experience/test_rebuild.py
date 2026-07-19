@@ -196,14 +196,16 @@ async def test_complete_rebuild_bumps_patch_from_all_entries(tmp_path: Path):
     await store.append_record(
         "skill-a",
         EvolutionRecord.make(
-            source="execution_failure",
-            context="ctx",
-            change=EvolutionPatch(
-                section="Troubleshooting",
-                action="append",
-                content="fix",
-                target=EvolutionTarget.BODY,
-            ),
+            EvolutionRecordSpec(
+                source="execution_failure",
+                context="ctx",
+                change=EvolutionPatch(
+                    section="Troubleshooting",
+                    action="append",
+                    content="fix",
+                    target=EvolutionTarget.BODY,
+                ),
+            )
         ),
     )
     rebuild_service = ExperienceRebuildService(store=store)
@@ -237,27 +239,31 @@ async def test_complete_rebuild_bumps_minor_when_any_instruction(tmp_path: Path)
     await store.append_record(
         "skill-a",
         EvolutionRecord.make(
-            source="execution_failure",
-            context="ctx",
-            change=EvolutionPatch(
-                section="Troubleshooting",
-                action="append",
-                content="patch",
-                target=EvolutionTarget.BODY,
-            ),
+            EvolutionRecordSpec(
+                source="execution_failure",
+                context="ctx",
+                change=EvolutionPatch(
+                    section="Troubleshooting",
+                    action="append",
+                    content="patch",
+                    target=EvolutionTarget.BODY,
+                ),
+            )
         ),
     )
     await store.append_record(
         "skill-a",
         EvolutionRecord.make(
-            source="user_correction",
-            context="ctx",
-            change=EvolutionPatch(
-                section="Instructions",
-                action="append",
-                content="minor",
-                target=EvolutionTarget.BODY,
-            ),
+            EvolutionRecordSpec(
+                source="user_correction",
+                context="ctx",
+                change=EvolutionPatch(
+                    section="Instructions",
+                    action="append",
+                    content="minor",
+                    target=EvolutionTarget.BODY,
+                ),
+            )
         ),
     )
     rebuild_service = ExperienceRebuildService(store=store)
@@ -307,14 +313,16 @@ async def test_complete_rebuild_uses_llm_classification(tmp_path: Path):
     )
     store = EvolutionStore(str(root))
     record = EvolutionRecord.make(
-        source="execution_failure",
-        context="ctx",
-        change=EvolutionPatch(
-            section="Troubleshooting",
-            action="append",
-            content="timeout fallback broken",
-            target=EvolutionTarget.BODY,
-        ),
+        EvolutionRecordSpec(
+            source="execution_failure",
+            context="ctx",
+            change=EvolutionPatch(
+                section="Troubleshooting",
+                action="append",
+                content="timeout fallback broken",
+                target=EvolutionTarget.BODY,
+            ),
+        )
     )
     await store.append_record("skill-a", record)
 
@@ -361,14 +369,16 @@ async def test_complete_rebuild_changelog_idempotent_same_version(tmp_path: Path
     await store.append_record(
         "skill-a",
         EvolutionRecord.make(
-            source="execution_failure",
-            context="ctx",
-            change=EvolutionPatch(
-                section="Troubleshooting",
-                action="append",
-                content="fix once",
-                target=EvolutionTarget.BODY,
-            ),
+            EvolutionRecordSpec(
+                source="execution_failure",
+                context="ctx",
+                change=EvolutionPatch(
+                    section="Troubleshooting",
+                    action="append",
+                    content="fix once",
+                    target=EvolutionTarget.BODY,
+                ),
+            )
         ),
     )
     rebuild_service = ExperienceRebuildService(store=store)

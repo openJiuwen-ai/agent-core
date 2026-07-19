@@ -4,10 +4,11 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Any, Callable, Final, Iterable, List, Optional, Sequence
 
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
@@ -214,9 +215,8 @@ def _extract_json(raw: str) -> Optional[Any]:
         if parsed is not None:
             return parsed
 
-    for pattern in (r"\[[\s\S]*\]", r"\{[\s\S]*\}"):
-        matched = re.search(pattern, text)
-        if matched:
+    for pattern in (r"\[[\s\S]*?\]", r"\{[\s\S]*?\}"):
+        for matched in re.finditer(pattern, text):
             parsed = _try_parse(matched.group(0))
             if parsed is not None:
                 return parsed
@@ -304,8 +304,8 @@ async def classify_records_for_changelog(
 
     if classify_fn is not None:
         result = classify_fn(active)
-        if hasattr(result, "__await__"):
-            result = await result  # type: ignore[misc]
+        if inspect.isawaitable(result):
+            result = await result
         return _coerce_classified_entries(result, active)
 
     if llm is None or not model:
@@ -360,6 +360,11 @@ def _coerce_classified_entries(
     return fallback_classified_entries(records)
 
 
+def utc_today_iso() -> str:
+    """UTC calendar date as YYYY-MM-DD."""
+    return datetime.now(tz=timezone.utc).date().isoformat()
+
+
 def render_version_section(
     version: str,
     entries: Sequence[ClassifiedChangelogEntry],
@@ -367,7 +372,7 @@ def render_version_section(
     release_date: Optional[str] = None,
 ) -> str:
     """Render one ``## [version] - date`` markdown section."""
-    day = release_date or date.today().isoformat()
+    day = release_date or utc_today_iso()
     lines = [f"## [{version}] - {day}", ""]
     grouped: dict[str, List[ClassifiedChangelogEntry]] = {name: [] for name in CHANGELOG_CATEGORIES}
     for entry in entries:
@@ -434,11 +439,6 @@ def merge_changelog_for_release(
         return None
     section = render_version_section(version, entries, release_date=release_date)
     return insert_version_section(content, section)
-
-
-def utc_today_iso() -> str:
-    """UTC calendar date as YYYY-MM-DD."""
-    return datetime.now(tz=timezone.utc).date().isoformat()
 
 
 __all__ = [

@@ -1800,7 +1800,7 @@ class SkillEvolutionRail(EvolutionRail):
     async def rollback_skill(self, skill_name: str, version: Optional[str] = None) -> bool:
         """Rollback skill to an archived version (no approval required).
 
-        ``version`` may be a body archive filename (``SKILL.1.0.0.md``) or a bare
+        ``version`` may be a body archive filename (``SKILL.v1.0.0.md``) or a bare
         SemVer string (``1.0.0``). When omitted, the newest body archive by mtime
         is used.
         """

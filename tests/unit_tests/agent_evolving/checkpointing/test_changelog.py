@@ -11,6 +11,7 @@ import pytest
 
 from openjiuwen.agent_evolving.checkpointing.changelog import (
     ClassifiedChangelogEntry,
+    _extract_json,
     changelog_has_version,
     classify_records_for_changelog,
     empty_changelog_template,
@@ -19,6 +20,7 @@ from openjiuwen.agent_evolving.checkpointing.changelog import (
     merge_changelog_for_release,
     normalize_category,
     render_version_section,
+    utc_today_iso,
 )
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionPatch, EvolutionRecord
 from openjiuwen.agent_evolving.signal.base import EvolutionTarget
@@ -87,6 +89,17 @@ def test_render_version_section_groups_and_links():
     assert "(关联经验 ev_aaaa1111)" in section
     assert "(关联经验 ev_bbbb2222)" in section
     assert "Unreleased" not in section
+
+
+def test_render_version_section_defaults_to_utc_date():
+    section = render_version_section("1.0.0", [])
+    assert f"## [1.0.0] - {utc_today_iso()}" in section
+
+
+def test_extract_json_prefers_first_valid_block_among_multiple():
+    raw = 'First batch: [{"id":"1","category":"Fixed","summary":"a"}]\nSecond batch: [{"id":"2"}]'
+    parsed = _extract_json(raw)
+    assert parsed == [{"id": "1", "category": "Fixed", "summary": "a"}]
 
 
 def test_insert_and_merge_keep_newest_first_and_idempotent():
