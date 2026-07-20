@@ -889,52 +889,88 @@ class ReActAgent(BaseAgent):
             len(ctx.inputs.messages or []),
             len(ctx.inputs.tools or []),
         )
-        async for chunk in llm.stream(
+        stream_iter = llm.stream(
                 model=self._config.model_name,
                 messages=ctx.inputs.messages,
                 tools=ctx.inputs.tools or None,
                 **extra_kwargs,
-        ):
-            if accumulated_chunk is None:
-                accumulated_chunk = chunk
-            else:
-                accumulated_chunk = accumulated_chunk + chunk
-
-            if chunk.reasoning_content:
-                await session.write_stream(OutputSchema(
-                    type="llm_reasoning",
-                    index=chunk_index,
-                    payload={"content": chunk.reasoning_content, "result_type": "answer"},
-                ))
-                chunk_index += 1
-            if chunk.content:
-                await session.write_stream(OutputSchema(
-                    type="llm_output",
-                    index=chunk_index,
-                    payload={"content": chunk.content, "result_type": "answer"},
-                ))
-                chunk_index += 1
-            if chunk.tool_calls:
-                await session.write_stream(OutputSchema(
-                    type="tool_calls.delta",
-                    index=chunk_index,
-                    payload={
-                        "tool_calls": [
-                            serialize_tool_call_delta(tc)
-                            for tc in chunk.tool_calls
-                        ],
-                        "result_type": "answer",
-                    },
-                ))
-                chunk_index += 1
-            # 每个chunk结束时，判断是否构成完整tool_call
-            self._stream_schedule_ready_tool_calls(
-                executor, accumulated_chunk, finalize=False,
-            )
-        # 所有chuck结束时，做一次最终检查和去重（finalize=True）
-        self._stream_schedule_ready_tool_calls(
-            executor, accumulated_chunk, finalize=True,
         )
+        stream_aborted = False
+        try:
+            async for chunk in stream_iter:
+                if ctx.has_abort_stream_request:
+                    ctx.consume_abort_stream()
+                    stream_aborted = True
+                    logger.info(
+                        "[ReActAgent] llm.stream aborted session_id=%s",
+                        _session_id,
+                    )
+                    break
+
+                if accumulated_chunk is None:
+                    accumulated_chunk = chunk
+                else:
+                    accumulated_chunk = accumulated_chunk + chunk
+
+                if chunk.reasoning_content:
+                    await session.write_stream(OutputSchema(
+                        type="llm_reasoning",
+                        index=chunk_index,
+                        payload={"content": chunk.reasoning_content, "result_type": "answer"},
+                    ))
+                    chunk_index += 1
+                if chunk.content:
+                    await session.write_stream(OutputSchema(
+                        type="llm_output",
+                        index=chunk_index,
+                        payload={"content": chunk.content, "result_type": "answer"},
+                    ))
+                    chunk_index += 1
+                if chunk.tool_calls:
+                    await session.write_stream(OutputSchema(
+                        type="tool_calls.delta",
+                        index=chunk_index,
+                        payload={
+                            "tool_calls": [
+                                serialize_tool_call_delta(tc)
+                                for tc in chunk.tool_calls
+                            ],
+                            "result_type": "answer",
+                        },
+                    ))
+                    chunk_index += 1
+                # 每个chunk结束时，判断是否构成完整tool_call
+                self._stream_schedule_ready_tool_calls(
+                    executor, accumulated_chunk, finalize=False,
+                )
+
+                if ctx.has_abort_stream_request:
+                    ctx.consume_abort_stream()
+                    stream_aborted = True
+                    logger.info(
+                        "[ReActAgent] llm.stream aborted after chunk session_id=%s",
+                        _session_id,
+                    )
+                    break
+        finally:
+            if stream_aborted:
+                aclose = getattr(stream_iter, "aclose", None)
+                if callable(aclose):
+                    try:
+                        await aclose()
+                    except Exception:
+                        logger.warning(
+                            "[ReActAgent] llm.stream aclose failed "
+                            "session_id=%s model=%s",
+                            _session_id,
+                            getattr(self._config, "model_name", "") or "",
+                            exc_info=True,
+                        )
+        # 正常结束时做最终检查和去重；abort 后不再调度半成品 tool_calls（CR-007）
+        if not stream_aborted:
+            self._stream_schedule_ready_tool_calls(
+                executor, accumulated_chunk, finalize=True,
+            )
 
         if accumulated_chunk is None:
             ai_message = AssistantMessage(content="", tool_calls=[], finish_reason="null")
@@ -1587,6 +1623,9 @@ class ReActAgent(BaseAgent):
             session: Session object (required for tool execution)
             **kwargs: Internal flags. _streaming=True selects
                 the llm.stream() path inside _railed_model_call.
+                Outer-loop may pass ``_steering_queue`` in the inputs
+                dict; it is bound to ctx then popped so it does not
+                linger on the business inputs dict.
 
         Returns:
             Dict with output and result_type
@@ -1622,7 +1661,7 @@ class ReActAgent(BaseAgent):
             ctx.extra["user_id"] = inputs.get("user_id", "")
             ctx.extra["run_kind"] = inputs.get("run_kind", "")
             ctx.extra["run_context"] = inputs.get("run_context", "")
-            _sq = inputs.get("_steering_queue")
+            _sq = inputs.pop("_steering_queue", None)
             if _sq is not None:
                 ctx.bind_steering_queue(_sq)
 
@@ -1726,6 +1765,15 @@ class ReActAgent(BaseAgent):
                         steering = ctx.drain_steering()
                         if steering:
                             combined = "\n".join(steering)
+                            logger.info(
+                                "[ReActAgent] STEERING injected session_id=%s "
+                                "iteration=%s count=%s chars=%s prefix=%r",
+                                _session_id,
+                                iteration + 1,
+                                len(steering),
+                                len(combined),
+                                combined[:80],
+                            )
                             await context.add_messages(
                                 UserMessage(
                                     content=(
@@ -2011,7 +2059,8 @@ class ReActAgent(BaseAgent):
             self,
             inputs: Any,
             session: Optional[Session] = None,
-            stream_modes: Optional[List[StreamMode]] = None
+            stream_modes: Optional[List[StreamMode]] = None,
+            **kwargs,
     ) -> AsyncIterator[Any]:
         """Stream execute ReAct process
 
@@ -2044,14 +2093,18 @@ class ReActAgent(BaseAgent):
                 inputs=inputs if isinstance(inputs, dict) else None
             )
 
-        async for chunk in self._inner_stream(session=session, inputs=inputs, need_cleanup=need_cleanup):
+        async for chunk in self._inner_stream(
+            session=session, inputs=inputs, need_cleanup=need_cleanup, **kwargs
+        ):
             yield chunk
 
     @with_session()
-    async def _inner_stream(self, session, inputs, need_cleanup):
+    async def _inner_stream(self, session, inputs, need_cleanup, **kwargs):
         async def stream_process():
             try:
-                final_result = await self.invoke(inputs, session, _streaming=True)
+                final_result = await self.invoke(
+                    inputs, session, _streaming=True, **kwargs
+                )
                 if isinstance(final_result, list):
                     for schema in final_result:
                         await session.write_stream(schema)
