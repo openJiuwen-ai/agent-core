@@ -366,11 +366,16 @@ class SkillUseRail(DeepAgentRail):
         await self.refresh_skill_prompt(ctx)
         self._ensure_session_baseline(ctx)
 
-    async def _fetch_evolution_texts(self) -> None:
+    async def _fetch_evolution_texts(self, skills: Optional[List[Skill]] = None) -> None:
         """Fetch and cache evolution experience texts from EvolutionStore."""
         if self.evolution_store is None:
             return
-        for skill in self.skills:
+        skills = self.skills if skills is None else skills
+        seen_names: Set[str] = set()
+        for skill in skills:
+            if skill.name in seen_names:
+                continue
+            seen_names.add(skill.name)
             try:
                 text = await self.evolution_store.format_desc_experience_text(skill.name)
                 self._evolution_texts[skill.name] = text
@@ -402,6 +407,9 @@ class SkillUseRail(DeepAgentRail):
             return
 
         await self._refresh_skill_prompt_if_changed(ctx)
+        # Evolution records can change without changing the Skill.md snapshot.
+        # Refresh them independently so the attachment always contains the
+        # latest experience while the system prompt remains stable.
         # Some task-loop paths may enter model call without BEFORE_INVOKE.
         # Establish the durable baseline at the first point where skills are used.
         self._ensure_session_baseline(ctx)
@@ -411,6 +419,7 @@ class SkillUseRail(DeepAgentRail):
             if session_state is not None
             else list(self.skills)
         )
+        await self._fetch_evolution_texts([*baseline_skills, *self.skills])
         skills_section = self._build_skills_section(baseline_skills)
         if skills_section is not None:
             self.system_prompt_builder.add_section(skills_section)
@@ -568,13 +577,18 @@ class SkillUseRail(DeepAgentRail):
         writer = manager.bind_context(ctx)
         if not writer.session_id:
             return
-        if not additions and not removals:
+        content = self._build_runtime_skill_change_content(
+            additions,
+            removals,
+            baseline_skills,
+        )
+        if not content:
             await writer.clear_section(self._RUNTIME_ATTACHMENT_SECTION)
             return
 
         await writer.add_section(
             section=self._RUNTIME_ATTACHMENT_SECTION,
-            content=self._build_runtime_skill_change_content(additions, removals),
+            content=content,
             kind=PromptAttachmentKind.SKILL,
             source="skill_use_rail",
         )
@@ -583,10 +597,23 @@ class SkillUseRail(DeepAgentRail):
         self,
         additions: List[Skill],
         removals: List[Skill],
+        baseline_skills: List[Skill],
     ) -> str:
-        """Render a non-actionable Skill environment update for the latest message."""
+        """Render Skill changes and evolution experience in one attachment."""
         language = getattr(self.system_prompt_builder, "language", "cn")
         is_english = str(language).lower().startswith("en")
+        evolution_skills: List[Skill] = []
+        seen_names: Set[str] = set()
+        for skill in [*baseline_skills, *additions]:
+            if skill.name in seen_names:
+                continue
+            if self._evolution_texts.get(skill.name, "").strip():
+                evolution_skills.append(skill)
+                seen_names.add(skill.name)
+
+        if not additions and not removals and not evolution_skills:
+            return ""
+
         if is_english:
             lines = [
                 "Skill environment status update. Invoke relevant skills only when needed for the current task.",
@@ -597,13 +624,18 @@ class SkillUseRail(DeepAgentRail):
                     build_skill_line(
                         index=index,
                         skill_name=skill.name,
-                        description=self._get_skill_description(skill),
+                        description=skill.description,
                     )
                     for index, skill in enumerate(additions)
                 )
             if removals:
                 lines.append("Unavailable skills (removed from the environment):")
                 lines.extend(f"- {skill.name}" for skill in removals)
+            if evolution_skills:
+                lines.append("Skill evolution experience reference:")
+                for skill in evolution_skills:
+                    lines.append(f"[Skill: {skill.name}]")
+                    lines.append(self._evolution_texts[skill.name].strip())
             return "\n".join(lines)
 
         lines = ["Skill 环境状态更新。请根据当前任务需要，按需调用相关 Skill。"]
@@ -613,13 +645,18 @@ class SkillUseRail(DeepAgentRail):
                 build_skill_line(
                     index=index,
                     skill_name=skill.name,
-                    description=self._get_skill_description(skill),
+                    description=skill.description,
                 )
                 for index, skill in enumerate(additions)
             )
         if removals:
             lines.append("已移除、当前不可用的 Skill：")
             lines.extend(f"- {skill.name}" for skill in removals)
+        if evolution_skills:
+            lines.append("Skill 演进经验参考：")
+            for skill in evolution_skills:
+                lines.append(f"[Skill: {skill.name}]")
+                lines.append(self._evolution_texts[skill.name].strip())
         return "\n".join(lines)
 
     def _build_all_mode_prompt(self) -> str:

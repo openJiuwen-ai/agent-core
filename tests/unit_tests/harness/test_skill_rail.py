@@ -43,6 +43,14 @@ class _DummyModel:
         return _DummyResponse(self._content)
 
 
+class _DummyEvolutionStore:
+    def __init__(self, texts: Dict[str, str]):
+        self.texts = texts
+
+    async def format_desc_experience_text(self, skill_name: str) -> str:
+        return self.texts.get(skill_name, "")
+
+
 class _SessionState:
     def __init__(self, session_id: str, state: Dict[str, Any] | None = None):
         self.session_id = session_id
@@ -675,6 +683,152 @@ async def test_skill_rail_persists_baseline_and_attaches_only_runtime_additions(
     )
     assert "使用规则" not in (attachments[0].content or "")
     assert "Activation rule" not in (attachments[0].content or "")
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_puts_baseline_evolution_experience_in_attachment(tmp_path: Path):
+    """Baseline evolution experience is attached without changing the system prompt."""
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+
+    sys_operation = _make_sys_operation(tmp_path)
+    rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+        evolution_store=_DummyEvolutionStore(
+            {"invoice-parser": "- Prefer extracting tables before summarizing the invoice."}
+        ),
+    )
+    rail.set_sys_operation(sys_operation)
+    rail.system_prompt_builder = SystemPromptBuilder()
+    rail.attachment_manager = PromptAttachmentManager()
+
+    session = _SessionState("evolution-baseline")
+    ctx = AgentCallbackContext(agent=None, inputs=ModelCallInputs(tools=[]), session=session)
+    await rail.before_invoke(ctx)
+    await rail.before_model_call(ctx)
+
+    system_prompt = rail.system_prompt_builder.build()
+    assert "Parse invoice pdf files" in system_prompt
+    assert "Prefer extracting tables" not in system_prompt
+
+    attachments = await rail.attachment_manager.collect_for_session("evolution-baseline")
+    assert len(attachments) == 1
+    content = attachments[0].content or ""
+    assert "Skill 演进经验参考：" in content
+    assert "[Skill: invoice-parser]" in content
+    assert "Prefer extracting tables before summarizing the invoice." in content
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_combines_additions_removals_and_evolution_in_one_attachment(tmp_path: Path):
+    """Skill changes and evolution experience share one Skill attachment."""
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+    removed_dir = _write_skill(skills_root, "legacy-parser", "Parse legacy files")
+
+    sys_operation = _make_sys_operation(tmp_path)
+    rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+        evolution_store=_DummyEvolutionStore(
+            {
+                "invoice-parser": "- Prefer extracting tables first.",
+                "legacy-parser": "- Preserve legacy field names.",
+                "new-parser": "- Validate the output schema before returning.",
+            }
+        ),
+    )
+    rail.set_sys_operation(sys_operation)
+    rail.system_prompt_builder = SystemPromptBuilder()
+    rail.attachment_manager = PromptAttachmentManager()
+
+    session = _SessionState("combined-changes")
+    ctx = AgentCallbackContext(agent=None, inputs=ModelCallInputs(tools=[]), session=session)
+    await rail.before_invoke(ctx)
+
+    removed_dir.joinpath("SKILL.md").unlink()
+    _write_skill(skills_root, "new-parser", "Parse new files")
+    await rail.before_model_call(ctx)
+
+    attachments = await rail.attachment_manager.collect_for_session("combined-changes")
+    assert len(attachments) == 1
+    content = attachments[0].content or ""
+    assert "新增可用 Skill：" in content
+    assert "new-parser: Parse new files" in content
+    assert "已移除、当前不可用的 Skill：" in content
+    assert "legacy-parser" in content
+    assert "[Skill: invoice-parser]" in content
+    assert "[Skill: legacy-parser]" in content
+    assert "[Skill: new-parser]" in content
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_renders_evolution_attachment_in_english(tmp_path: Path):
+    """English prompt builders use the English Skill attachment headings."""
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+
+    sys_operation = _make_sys_operation(tmp_path)
+    rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+        evolution_store=_DummyEvolutionStore({"invoice-parser": "- Extract tables first."}),
+    )
+    rail.set_sys_operation(sys_operation)
+    rail.system_prompt_builder = SystemPromptBuilder(language="en")
+    rail.attachment_manager = PromptAttachmentManager()
+
+    session = _SessionState("evolution-english")
+    ctx = AgentCallbackContext(agent=None, inputs=ModelCallInputs(tools=[]), session=session)
+    await rail.before_invoke(ctx)
+    await rail.before_model_call(ctx)
+
+    attachments = await rail.attachment_manager.collect_for_session("evolution-english")
+    content = attachments[0].content or ""
+    assert "Skill environment status update." in content
+    assert "Skill evolution experience reference:" in content
+    assert "[Skill: invoice-parser]" in content
+    assert "Extract tables first." in content
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_refreshes_evolution_when_skill_files_are_unchanged(tmp_path: Path):
+    """Evolution changes are refreshed independently from the Skill.md snapshot."""
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+    evolution_store = _DummyEvolutionStore({"invoice-parser": "- Use the first experience."})
+
+    sys_operation = _make_sys_operation(tmp_path)
+    rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+        evolution_store=evolution_store,
+    )
+    rail.set_sys_operation(sys_operation)
+    rail.system_prompt_builder = SystemPromptBuilder()
+    rail.attachment_manager = PromptAttachmentManager()
+
+    session = _SessionState("evolution-refresh")
+    ctx = AgentCallbackContext(agent=None, inputs=ModelCallInputs(tools=[]), session=session)
+    await rail.before_invoke(ctx)
+    await rail.before_model_call(ctx)
+
+    evolution_store.texts["invoice-parser"] = "- Use the updated experience."
+    await rail.before_model_call(ctx)
+
+    attachments = await rail.attachment_manager.collect_for_session("evolution-refresh")
+    content = attachments[0].content or ""
+    assert "Use the updated experience." in content
+    assert "Use the first experience." not in content
 
 
 @pytest.mark.asyncio
