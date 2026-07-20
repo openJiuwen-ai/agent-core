@@ -49,13 +49,29 @@ class TeamAgentState:
 
     # One-shot latch raised on the ``clean_team`` success path, wired via
     # ``TeamBackend.on_team_cleaned`` -> ``TeamAgent._mark_team_cleaned``.
-    # ``StreamController._run_one_round``'s finally block reads it as the
+    # ``StreamController._on_idle_settled`` reads it as the
     # highest-priority terminal condition so a TEMPORARY-team leader closes
     # its stream after the round that cleaned the team instead of hanging on
     # the ``None`` sentinel forever. Cross-operator (written from the
     # tool/clean path, read from the stream round-end path), so it belongs
     # in TeamAgentState per the four-quadrant rule.
     team_cleaned: bool = False
+
+    # ``time.monotonic()`` stamp of the moment this member last settled into
+    # runtime IDLE (MemberStatus.READY); ``None`` while it is mid-round
+    # (BUSY) or has never settled. Written by ``StreamController._map_state``
+    # on the READY/BUSY edge, read via ``TeamAgent.idle_seconds()`` by the
+    # coordination stale-task sweep — cross-operator, hence a state field.
+    #
+    # Deliberately process-local, in-memory and NOT persisted, and NOT
+    # derived from the database ``task.updated_at``: pausing a team freezes
+    # ``updated_at`` while the wall clock keeps running, so any
+    # ``now - updated_at`` staleness measure reports a huge false stall right
+    # after a long pause -> resume. A monotonic stamp taken at idle-entry
+    # measures only time the member actually spent idle *while running*, and
+    # ``TeamAgent.refresh_idle_baseline()`` re-bases it on the resume path so
+    # the pause window itself never counts.
+    idle_since: Optional[float] = None
 
 
 __all__ = ["TeamAgentState"]

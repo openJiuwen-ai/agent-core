@@ -35,13 +35,13 @@ def _make_leader_with_reliability(enabled: bool = True) -> TeamAgent:
         agents={"leader": DeepAgentSpec()},
         team_name="rel-team",
         lifecycle="temporary",
-        leader=LeaderSpec(member_name="leader-1", display_name="Leader", persona="PM"),
+        leader=LeaderSpec(member_name="leader-1", display_name="Leader", desc="PM"),
         reliability=ReliabilityConfig(enabled=enabled),
     )
     context = TeamRuntimeContext(
         role=TeamRole.LEADER,
         member_name="leader-1",
-        persona="PM",
+        desc="PM",
         team_spec=team_spec,
         db_config=DatabaseConfig(db_type="memory"),
     )

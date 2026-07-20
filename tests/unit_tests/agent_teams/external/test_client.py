@@ -126,6 +126,19 @@ async def test_list_members_returns_roster(team_db, make_descriptor):
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
+async def test_member_scope_tools_follow_teammate_mode(team_db, make_descriptor):
+    build_descriptor = make_descriptor(member="dev-1", scope="member", teammate_mode="build_mode")
+    plan_descriptor = make_descriptor(member="dev-1", scope="member", teammate_mode="plan_mode")
+
+    async with ExternalTeamClient(build_descriptor) as build_client:
+        assert "submit_plan" not in build_client.tools
+
+    async with ExternalTeamClient(plan_descriptor) as plan_client:
+        assert "submit_plan" in plan_client.tools
+
+
+@pytest.mark.asyncio
 @pytest.mark.level1
 async def test_operations_before_connect_raise(make_descriptor):
     client = ExternalTeamClient(make_descriptor(member="dev-1"))

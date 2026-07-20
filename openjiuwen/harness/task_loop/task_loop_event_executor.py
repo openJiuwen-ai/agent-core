@@ -184,6 +184,10 @@ class TaskLoopEventExecutor(TaskExecutor):
                 effective["run_kind"] = metadata.get("run_kind")
             if metadata.get("run_context") is not None:
                 effective["run_context"] = metadata.get("run_context")
+            # Continuation round (NativeHarness.resume): the inner loop must not
+            # append a new user turn — it resumes the preserved context.
+            if metadata.get("_resume_continuation"):
+                effective["_resume_continuation"] = True
 
         # Pass steering queue reference so the inner
         # ReAct loop can drain it before each model call.

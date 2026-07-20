@@ -31,7 +31,7 @@ def wrap_outbound_to_remote(
     sender: str,
     sender_display_name: Optional[str],
     sender_role: Optional[TeamRole],
-    sender_persona: Optional[str],
+    sender_desc: Optional[str],
     body: str,
     broadcast: bool,
     task_hint: Optional[str],
@@ -41,7 +41,7 @@ def wrap_outbound_to_remote(
     """Build the text payload relayed to the remote agent.
 
     Both modes prepend a sender header so the remote knows where the
-    text came from. REPHRASE additionally inlines role + persona and
+    text came from. REPHRASE additionally inlines role + desc and
     appends an optional task hint, suitable for stateless wrapping
     CLIs that need full context per turn.
 
@@ -51,8 +51,8 @@ def wrap_outbound_to_remote(
         sender_display_name: Human-readable label of the sender; falls
             back to ``sender`` when None.
         sender_role: ``TeamRole`` of the sender. Only used in REPHRASE.
-        sender_persona: Short persona of the sender. Only used in
-            REPHRASE.
+        sender_desc: Short public description of the sender. Only used
+            in REPHRASE.
         body: The team-side message text.
         broadcast: True if the message arrived via team-wide broadcast.
         task_hint: Optional task context (e.g. ``"task #42: Refactor
@@ -72,7 +72,7 @@ def wrap_outbound_to_remote(
     return _wrap_rephrase(
         sender_label=display,
         sender_role=sender_role,
-        sender_persona=sender_persona,
+        sender_desc=sender_desc,
         body=body,
         broadcast=broadcast,
         task_hint=task_hint,
@@ -99,7 +99,7 @@ def _wrap_rephrase(
     *,
     sender_label: str,
     sender_role: Optional[TeamRole],
-    sender_persona: Optional[str],
+    sender_desc: Optional[str],
     body: str,
     broadcast: bool,
     task_hint: Optional[str],
@@ -107,13 +107,13 @@ def _wrap_rephrase(
 ) -> str:
     """REPHRASE: full sender context + body + optional task hint."""
     role_value = sender_role.value if sender_role is not None else "unknown"
-    persona = sender_persona or ""
+    desc = sender_desc or ""
     if language == "en":
         kind = "broadcast" if broadcast else "direct"
-        header = f"[from {sender_label} (role={role_value}, persona={persona!r}, kind={kind})]"
+        header = f"[from {sender_label} (role={role_value}, desc={desc!r}, kind={kind})]"
         suffix = f"\nRe: {task_hint}" if task_hint else ""
         return f"{header}\n{body}{suffix}"
     kind = "广播" if broadcast else "点对点"
-    header = f"[来自 {sender_label}（角色={role_value}，人设={persona!r}，类型={kind}）]"
+    header = f"[来自 {sender_label}（角色={role_value}，描述={desc!r}，类型={kind}）]"
     suffix = f"\n相关任务：{task_hint}" if task_hint else ""
     return f"{header}\n{body}{suffix}"

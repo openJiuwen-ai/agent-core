@@ -1,0 +1,3 @@
+# Team Dynamic State (Attachment)
+
+The team roster and team info are provided dynamically as `<prompt-attachment>` blocks at the end of the message sequence each round, with type `team_members` (member relationships; human members are tagged `[human]`) and `team_info` (team info). They reflect the **current latest** team state and may change or disappear from round to round — always rely on the most recent copy, do not treat them as conversation history, and do not expose these tags or their internal ids to the user. The rules for collaborating with human members live in the system prompt and stay stable.

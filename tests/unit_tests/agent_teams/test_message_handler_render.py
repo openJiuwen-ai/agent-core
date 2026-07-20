@@ -18,6 +18,7 @@ import pytest
 
 from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler
 from openjiuwen.agent_teams.i18n import get_language, set_language
+from openjiuwen.agent_teams.message_template import ExpandedMessage
 from tests.test_logger import logger
 
 
@@ -40,6 +41,11 @@ class _FakeMessage:
         self.timestamp = timestamp
 
 
+def _plain(msg: _FakeMessage) -> ExpandedMessage:
+    """Delivery text of an ordinary (non-templated) message: its own content."""
+    return ExpandedMessage(body=msg.content, is_template=False)
+
+
 def _make_handler() -> MessageHandler:
     """Build a MessageHandler without the coordination dependency wiring.
 
@@ -60,7 +66,7 @@ def test_format_message_direct_for_teammate():
         from_member_name="leader1",
         message_id="m-1",
     )
-    out = handler._format_message(msg, is_human_agent=False, now_ms=_NOW_MS)
+    out = handler._format_message(msg, expanded=_plain(msg), is_human_agent=False, now_ms=_NOW_MS)
 
     assert "<team-inbound" in out
     assert 'type="direct"' in out
@@ -81,9 +87,31 @@ def test_format_message_broadcast_type():
         message_id="m-2",
         broadcast=True,
     )
-    out = handler._format_message(msg, is_human_agent=False, now_ms=_NOW_MS)
+    out = handler._format_message(msg, expanded=_plain(msg), is_human_agent=False, now_ms=_NOW_MS)
     assert 'type="broadcast"' in out
     assert "standup in 5" in out
+
+
+@pytest.mark.level0
+def test_format_message_template_message_drops_reply_hint():
+    """A framework instruction is answered with a tool call, not a reply (F_63).
+
+    The row carries no body of its own — the document was rendered at delivery
+    from the template — and the envelope must still be the ordinary
+    ``<team-inbound>`` one, so a member reads framework and human messages the
+    same way.
+    """
+    handler = _make_handler()
+    msg = _FakeMessage(content="", from_member_name="team_leader", message_id="m-4")
+    expanded = ExpandedMessage(body="[Task Started] Task [a] ...", is_template=True)
+
+    out = handler._format_message(msg, expanded=expanded, is_human_agent=False, now_ms=_NOW_MS)
+
+    assert "<team-inbound" in out
+    assert 'from="team_leader"' in out
+    assert "[Task Started] Task [a] ..." in out
+    assert "reply-hint" not in out
+    logger.info("template inbound: %s", out)
 
 
 @pytest.mark.level0
@@ -106,7 +134,7 @@ def test_format_message_hitt_silence_regression():
     previous = get_language()
     set_language("cn")
     try:
-        out = handler._format_message(msg, is_human_agent=True, now_ms=_NOW_MS)
+        out = handler._format_message(msg, expanded=_plain(msg), is_human_agent=True, now_ms=_NOW_MS)
     finally:
         set_language(previous)
 

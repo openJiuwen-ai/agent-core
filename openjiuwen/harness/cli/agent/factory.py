@@ -663,14 +663,15 @@ class LocalBackend:
             if ext_key in self._loaded_extensions:
                 continue
             try:
-                loaded = await self.agent.load_harness_config(
+                record = await self.agent.load_expert_harness(
                     ext_key,
                 )
                 self._loaded_extensions.add(ext_key)
-                if loaded:
+                labels = [f"{ref.kind.value}:{ref.identity}" for ref in record.refs]
+                if labels:
                     logger.info(
                         "Hot-loaded runtime extension: %s",
-                        ", ".join(loaded),
+                        ", ".join(labels),
                     )
             except Exception:  # noqa: BLE001
                 logger.warning(

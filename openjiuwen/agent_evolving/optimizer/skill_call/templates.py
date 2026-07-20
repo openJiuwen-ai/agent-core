@@ -28,7 +28,10 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 ### 预检测信号（规则引擎自动提取）
 {signals_json}
 
-### 对话历史
+### 结构化执行轨迹（优先于对话历史分析）
+{tool_call_chain}
+
+### 对话历史（补充上下文）
 {conversation_snippet}
 
 ### 已有 description 经验
@@ -151,7 +154,10 @@ Evolution experiences must respect the Agent's role capabilities and primary obj
 ### Pre-detected Signals (automatically extracted by the rule engine)
 {signals_json}
 
-### Conversation History
+### Structured Execution Trace (prioritize over conversation history)
+{tool_call_chain}
+
+### Conversation History (supplementary context)
 {conversation_snippet}
 
 ### Existing description experiences
@@ -787,9 +793,258 @@ TEAM_JSON_FIX_PROMPT_STRICT = """\
 """
 
 
+_ANALYZER_SHARED_INPUT_CN = """\
+## 输入信息
+
+### 当前 Skill 内容
+{skill_content}
+
+### 预检测信号（规则引擎自动提取）
+{signals_json}
+
+### 结构化执行轨迹（优先于对话历史分析）
+{tool_call_chain}
+
+### 对话历史（补充上下文）
+{conversation_snippet}
+
+### 已有 description 经验
+{existing_desc_summary}
+
+### 已有 body 经验
+{existing_body_summary}
+
+### 用户主动描述的优化方向（可选）
+{user_query}"""
+
+_ANALYZER_SHARED_INPUT_EN = """\
+## Input Information
+
+### Current Skill Content
+{skill_content}
+
+### Pre-detected Signals (rule engine)
+{signals_json}
+
+### Structured Execution Trace (prioritize over conversation history)
+{tool_call_chain}
+
+### Conversation History (supplementary context)
+{conversation_snippet}
+
+### Existing description experiences
+{existing_desc_summary}
+
+### Existing body experiences
+{existing_body_summary}
+
+### User-specified optimization direction (optional)
+{user_query}"""
+
+SKILL_EXPERIENCE_ANALYZER_PROMPT_CN = """\
+你是一个 Skill 优化分析专家。根据信号、结构化执行轨迹和对话历史，完成根因归因并产出候选演进经验（自然语言草稿）。
+
+""" + _ANALYZER_SHARED_INPUT_CN + """
+
+## 经验来源
+
+**渠道 A — 预检测信号**：可能包含误报，需经 Step 0 过滤。
+**渠道 B — 执行轨迹与对话分析**：重试后成功（workaround）、用户含蓄纠正、低效工具调用模式、遗漏步骤、边界情况。
+**渠道 C — script_artifact 信号**：可复用脚本工件（target=script）。
+
+## Step 0：根因归因（对每条信号或发现必须先执行）
+
+判断 failure_type（四选一）：
+- **skill_instruction_gap**：Skill 指令/示例/排查缺失导致 → should_evolve=true（confidence≥0.7 时）
+- **external_env**：网络/环境/权限/第三方服务 → should_evolve=false
+- **user_ambiguity**：用户表述不清，非 Skill 缺陷 → 仅当能补充 Examples 时 should_evolve=true
+- **tool_limitation**：工具能力不足 → should_evolve=false
+
+仅 should_evolve=true 且与 Skill 相关的发现可进入 candidates。
+
+## 决策流程（对每条候选）
+
+1. **相关性**：外部因素 → 不进入 candidates
+2. **去重**：与已有经验实质相同 → 不进入；有增量 → 标记 merge_target
+3. **优先级**：失败/错误 > 效率低；可复现 > 偶发
+
+## 数量限制
+
+candidates 中 action=append 的条目：**文本最多 2 条，脚本最多 1 条**，独立计数。
+
+## 内容规范
+
+- 语言与 Skill 一致；1 标题 + 2-3 列表项；可复用通用规则；单条 content 草稿 ≤500 字符
+
+## 输出格式
+
+只输出以下 JSON 对象，不要其他内容：
+```json
+{{
+  "root_causes": [
+    {{
+      "failure_type": "skill_instruction_gap | external_env | user_ambiguity | tool_limitation",
+      "confidence": 0.85,
+      "evidence": ["简要证据"],
+      "should_evolve": true
+    }}
+  ],
+  "candidates": [
+    {{
+      "action": "append",
+      "target": "description | body | script",
+      "section": "Instructions | Examples | Troubleshooting | Scripts",
+      "content": "Markdown 或脚本源码草稿",
+      "merge_target": "ev_xxxxxxxx 或 null",
+      "priority": 1,
+      "script_filename": "仅 script 时填写",
+      "script_language": "仅 script 时填写",
+      "script_purpose": "仅 script 时填写"
+    }}
+  ]
+}}
+```
+
+若无值得记录的经验，返回 `"candidates": []`。"""
+
+SKILL_EXPERIENCE_ANALYZER_PROMPT_EN = """\
+You are a Skill optimization analyst. Based on signals, structured execution trace, and conversation history, perform root-cause attribution and produce candidate evolution experiences (drafts).
+
+""" + _ANALYZER_SHARED_INPUT_EN + """
+
+## Experience Sources
+
+**Channel A — Pre-detected signals**: May contain false positives; must pass Step 0 filtering.
+**Channel B — Trace & conversation analysis**: Workarounds after retries, implicit user corrections, inefficient tool patterns, missed steps, edge cases.
+**Channel C — script_artifact signals**: Reusable script artifacts (target=script).
+
+## Step 0: Root-Cause Attribution (required for each signal or finding)
+
+Determine failure_type (choose one):
+- **skill_instruction_gap**: Caused by missing Skill instructions/examples/troubleshooting → should_evolve=true (when confidence≥0.7)
+- **external_env**: Network/environment/permissions/third-party → should_evolve=false
+- **user_ambiguity**: Unclear user intent, not a Skill defect → should_evolve=true only if Examples can help
+- **tool_limitation**: Tool capability limits → should_evolve=false
+
+Only findings with should_evolve=true and Skill relevance enter candidates.
+
+## Decision Flow (per candidate)
+
+1. **Relevance**: External factors → exclude from candidates
+2. **Deduplication**: Essentially duplicate → exclude; incremental → set merge_target
+3. **Priority**: Failure/errors > inefficiency; reproducible > one-off
+
+## Quantity Limit
+
+action=append entries in candidates: **at most 2 text, 1 script**, counted independently.
+
+## Content Guidelines
+
+- Match Skill language; 1 heading + 2-3 list items; reusable rules; draft content ≤500 chars per entry
+
+## Output Format
+
+Output only the following JSON object, nothing else:
+```json
+{{
+  "root_causes": [
+    {{
+      "failure_type": "skill_instruction_gap | external_env | user_ambiguity | tool_limitation",
+      "confidence": 0.85,
+      "evidence": ["brief evidence"],
+      "should_evolve": true
+    }}
+  ],
+  "candidates": [
+    {{
+      "action": "append",
+      "target": "description | body | script",
+      "section": "Instructions | Examples | Troubleshooting | Scripts",
+      "content": "Markdown or script source draft",
+      "merge_target": "ev_xxxxxxxx or null",
+      "priority": 1,
+      "script_filename": "script only",
+      "script_language": "script only",
+      "script_purpose": "script only"
+    }}
+  ]
+}}
+```
+
+If nothing is worth recording, return `"candidates": []`."""
+
+SKILL_EXPERIENCE_ANALYZER_PROMPT: Dict[str, str] = {
+    "cn": SKILL_EXPERIENCE_ANALYZER_PROMPT_CN,
+    "en": SKILL_EXPERIENCE_ANALYZER_PROMPT_EN,
+}
+
+SKILL_EXPERIENCE_FORMATTER_PROMPT_CN = """\
+你是 JSON 格式化专家。将下方分析阶段产出的候选经验转换为严格的演进记录 JSON 数组。
+
+## 分析阶段输出
+{analyzer_output}
+
+## 目标格式
+
+只输出以下 JSON 数组，不要其他内容（即使只有一条也必须用数组包裹）：
+[
+  {{
+    "action": "append | skip",
+    "skip_reason": "irrelevant | duplicate | low_priority（仅 skip 时填写，否则为 null）",
+    "target": "description | body | script",
+    "section": "Instructions | Examples | Troubleshooting | Scripts",
+    "content": "Markdown 内容或脚本源码（仅 append 时填写）",
+    "merge_target": "ev_xxxxxxxx 或 null",
+    "script_filename": "文件名或 null",
+    "script_language": "语言标识或 null",
+    "script_purpose": "用途说明或 null"
+  }}
+]
+
+规则：
+1. 保留分析阶段所有 action=append 的候选（文本≤2，脚本≤1）
+2. content 中的换行用 \\n，引号正确转义
+3. merge_target 为 null 时写 null，不要写字符串 "null\""""
+
+SKILL_EXPERIENCE_FORMATTER_PROMPT_EN = """\
+You are a JSON formatting expert. Convert the analyzer-stage candidate experiences below into a strict evolution record JSON array.
+
+## Analyzer Output
+{analyzer_output}
+
+## Target Format
+
+Output only the following JSON array, nothing else (wrap in an array even for a single entry):
+[
+  {{
+    "action": "append | skip",
+    "skip_reason": "irrelevant | duplicate | low_priority (only when action is skip, else null)",
+    "target": "description | body | script",
+    "section": "Instructions | Examples | Troubleshooting | Scripts",
+    "content": "Markdown or script source (only when action is append)",
+    "merge_target": "ev_xxxxxxxx or null",
+    "script_filename": "filename or null",
+    "script_language": "language id or null",
+    "script_purpose": "purpose or null"
+  }}
+]
+
+Rules:
+1. Keep all action=append candidates from the analyzer (text≤2, script≤1)
+2. Escape newlines as \\n and quotes correctly in content
+3. Use null for merge_target when absent, not the string "null\""""
+
+SKILL_EXPERIENCE_FORMATTER_PROMPT: Dict[str, str] = {
+    "cn": SKILL_EXPERIENCE_FORMATTER_PROMPT_CN,
+    "en": SKILL_EXPERIENCE_FORMATTER_PROMPT_EN,
+}
+
+
 __all__ = [
     "SKILL_EXPERIENCE_GENERATE_PROMPT",
     "SKILL_EXPERIENCE_GENERATE_PROMPT_EN",
+    "SKILL_EXPERIENCE_ANALYZER_PROMPT",
+    "SKILL_EXPERIENCE_FORMATTER_PROMPT",
     "TEAM_EXPERIENCE_GENERATE_PROMPT",
     "TEAM_EXPERIENCE_GENERATE_PROMPT_EN",
     "JSON_FIX_PROMPT",

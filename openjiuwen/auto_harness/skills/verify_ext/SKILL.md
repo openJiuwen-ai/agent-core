@@ -51,25 +51,27 @@ from openjiuwen.harness.schema.config import DeepAgentConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 agent = DeepAgent(AgentCard(name="test_agent", description="test")).configure(
             DeepAgentConfig(enable_task_loop=False))
-loaded = await agent.load_harness_config(config_path)
+record = await agent.load_expert_harness(config_path)
+labels = [f"{ref.kind.value}:{ref.identity}" for ref in record.refs]
 ```
 
-`loaded` 返回值格式（`list[str]`）：
-- `"rail:<ClassName>"` — 每个 rail 加载成功
-- `"tool:<ClassName>"` — 每个 tool 加载成功
-- `"skill_dir:<directory_path>"` — 每个 skill 目录路径
+`record` 返回值格式（`LoadRecord`）：
+- `record.phase == "hot"` — 通过热加载路径加载
+- `record.refs` — 每个已绑定或复用资源的事实记录
+- `labels` — 从 `record.refs` 派生的可读标签，格式为 `"<kind>:<identity>"`
 
-示例：`["rail:MyRail", "tool:MyTool", "skill_dir:/path/to/skills/pptx"]`
+示例：`["rail:MyRail", "tool:my_tool_id", "skill:/path/to/skills/pptx"]`
 
 断言：
-- 如果存在 rails：每个 rail 返回 `"rail:<ClassName>"`
+- 如果存在 rails：`labels` 包含每个 `"rail:<ClassName>"`
 - 如果存在 tools：
-  - 每个 tool 返回 `"tool:<ClassName>"`
+  - `labels` 包含每个 `"tool:<tool_id_or_name>"`
   - Tool 的 `ToolCard` 出现在 `agent.ability_manager.list()`
-- 如果存在 skills：skill 目录返回 `"skill_dir:<path>"`
+- 如果存在 skills：`labels` 包含每个 `"skill:<resolved_path>"`
   - 验证方法：检查 `agent._registered_rails` 中存在 `SkillUseRail` 且其 `skills_dir` 包含声明的 skill 目录路径
+- 可选：调用 `await agent.unload_expert_harness(record)` 验证资源可回滚
 
-这一层必须覆盖 `DeepAgent.load_harness_config()`，不能只调用 `load_runtime_rails()` / `load_runtime_tools()`。
+这一层必须覆盖 `DeepAgent.load_expert_harness()`，不能只调用 `load_runtime_rails()` / `load_runtime_tools()`。
 
 失败归因：
 - `harness_load_failed`
