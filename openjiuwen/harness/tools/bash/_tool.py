@@ -37,6 +37,8 @@ from openjiuwen.harness.tools.bash._semantics import (
     is_silent,
 )
 
+from openjiuwen.harness.tools.bash._circuit_breaker import get_breaker
+
 _VALID_SHELL_TYPES = frozenset({"auto", "cmd", "powershell", "bash", "sh"})
 
 
@@ -118,6 +120,12 @@ class BashTool(Tool):
         if not p.command:
             return ToolOutput(success=False, error="command cannot be empty")
 
+        # ── circuit-breaker check (hard block before execution) ──
+        _cb = get_breaker()
+        _cb_hit = _cb.check(p.command)
+        if _cb_hit is not None:
+            return _cb_hit
+
         if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
             guard = self._guard(p)
             if guard is not None:
@@ -165,6 +173,7 @@ class BashTool(Tool):
                     "persisted_output_size": persisted_size,
                 }
                 err_text = payload["stderr"] or res.message
+                _cb.record_failure(p.command, err_text)
                 return ToolOutput(success=False, data=payload, error=err_text)
             return ToolOutput(
                 success=True,
@@ -179,6 +188,7 @@ class BashTool(Tool):
             p.command, cwd=resolved_cwd, timeout=p.timeout, shell_type=p.shell_type,
         )
         if res.code != StatusCode.SUCCESS.code:
+            _cb.record_failure(p.command, res.message or "shell_error")
             return ToolOutput(success=False, error=res.message)
 
         exit_code = res.data.exit_code if res.data else -1
@@ -194,6 +204,16 @@ class BashTool(Tool):
         if len(stdout) + len(stderr) > p.max_output_chars:
             persisted_path, persisted_size = persist_large_output(stdout, stderr)
 
+        # ── circuit-breaker: record result ──
+        if meaning.is_error:
+            _cb.record_failure(
+                p.command,
+                truncate_output(stderr, p.max_output_chars)
+                or f"exit_code={exit_code}",
+            )
+        else:
+            _cb.record_success(p.command)
+
         return ToolOutput(
             success=not meaning.is_error,
             data={
@@ -206,18 +226,30 @@ class BashTool(Tool):
                 "persisted_output_path": persisted_path,
                 "persisted_output_size": persisted_size,
             },
-            error=truncate_output(stderr, p.max_output_chars) if meaning.is_error else None,
+            error=(
+                truncate_output(stderr, p.max_output_chars)
+                if meaning.is_error else None
+            ),
         )
 
     # ── stream ────────────────────────────────────────────────
 
-    async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[ToolOutput]:
+    async def stream(
+        self, inputs: Dict[str, Any], **kwargs: Any,
+    ) -> AsyncIterator[ToolOutput]:
         from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
 
         p = self._parse_inputs(inputs)
 
         if not p.command:
             yield ToolOutput(success=False, error="command cannot be empty")
+            return
+
+        # ── circuit-breaker check (hard block before execution) ──
+        _cb = get_breaker()
+        _cb_hit = _cb.check(p.command)
+        if _cb_hit is not None:
+            yield _cb_hit
             return
 
         current_cwd = get_cwd()
@@ -233,7 +265,10 @@ class BashTool(Tool):
         warning = get_destructive_warning(p.command)
 
         if p.description:
-            sys_operation_logger.debug("BashTool(stream): %s — %s", p.description, p.command)
+            sys_operation_logger.debug(
+                "BashTool(stream): %s — %s",
+                p.description, p.command,
+            )
 
         start = time.monotonic()
         accumulated_stdout = ""
@@ -244,6 +279,9 @@ class BashTool(Tool):
                 p.command, cwd=resolved_cwd, timeout=p.timeout, shell_type=p.shell_type,
         ):
             if chunk.code != StatusCode.SUCCESS.code:
+                _cb.record_failure(
+                    p.command, chunk.message or "stream_error",
+                )
                 yield ToolOutput(success=False, error=chunk.message)
                 return
 
@@ -272,8 +310,20 @@ class BashTool(Tool):
             )
 
         # final summary after stream ends
-        meaning = interpret_exit_code(p.command, final_exit_code, accumulated_stdout, accumulated_stderr)
+        meaning = interpret_exit_code(
+            p.command, final_exit_code,
+            accumulated_stdout, accumulated_stderr,
+        )
         silent = is_silent(p.command)
+        # ── circuit-breaker: record result ──
+        if meaning.is_error:
+            _cb.record_failure(
+                p.command,
+                truncate_output(accumulated_stderr, p.max_output_chars)
+                or f"exit_code={final_exit_code}",
+            )
+        else:
+            _cb.record_success(p.command)
         yield ToolOutput(
             success=not meaning.is_error,
             data={
@@ -285,7 +335,10 @@ class BashTool(Tool):
                 "destructive_warning": warning,
                 "elapsed_time_seconds": round(time.monotonic() - start, 2),
             },
-            error=truncate_output(accumulated_stderr, p.max_output_chars) if meaning.is_error else None,
+            error=(
+                truncate_output(accumulated_stderr, p.max_output_chars)
+                if meaning.is_error else None
+            ),
         )
 
     def _guard(self, p: _BashInputs):
