@@ -198,15 +198,13 @@ class MemberHandler(BaseCoordinationHandler):
             }
 
         workspace_manager = self._infra.workspace_manager
-        team_workspace_mount = None
         team_workspace_path = None
         if workspace_manager is not None:
-            team_workspace_mount = f".team/{backend.team_name}/"
             team_workspace_path = workspace_manager.workspace_path
 
         return build_team_info_section(
             team_info=info_dict,
-            team_workspace_mount=team_workspace_mount,
+            team_workspace_mount=None,
             team_workspace_path=team_workspace_path,
             language=language,
         )

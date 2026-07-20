@@ -12,6 +12,7 @@ other DeepAgent rails.
 import pytest
 
 from openjiuwen.agent_teams.prompts import (
+    build_team_info_section,
     build_team_member_system_prompt,
     build_team_static_sections,
 )
@@ -103,3 +104,56 @@ def test_member_system_prompt_includes_attachment_notice():
     assert "prompt-attachment" in prompt
     assert "team_members" in prompt
     assert "team_info" in prompt
+
+
+@pytest.mark.level0
+def test_member_system_prompt_uses_native_workspace_policy_by_default():
+    prompt = build_team_member_system_prompt(
+        role=TeamRole.TEAMMATE,
+        member_prompt="",
+        member_name="dev-1",
+        language="en",
+    )
+    assert "under `.team/`" in prompt
+    assert "workspace_meta" in prompt
+
+
+@pytest.mark.level0
+def test_member_system_prompt_uses_external_workspace_policy():
+    prompt = build_team_member_system_prompt(
+        role=TeamRole.TEAMMATE,
+        member_prompt="",
+        member_name="dev-1",
+        language="en",
+        workspace_prompt_variant="external",
+    )
+    assert "under `.team/`" not in prompt
+    assert "provided by the latest `team_info` attachment" in prompt
+    assert "workspace_meta" in prompt
+
+
+@pytest.mark.level0
+def test_team_info_section_keeps_native_workspace_mount():
+    section = build_team_info_section(
+        team_info={"team_name": "demo", "display_name": "Demo", "desc": "Ship it"},
+        team_workspace_mount=".team/demo/",
+        team_workspace_path="/tmp/demo-workspace",
+        language="en",
+    )
+    assert section is not None
+    content = section.content["en"]
+    assert "`.team/demo/`" in content
+    assert "Absolute path: `/tmp/demo-workspace`" in content
+
+
+@pytest.mark.level0
+def test_team_info_section_supports_path_only_workspace():
+    section = build_team_info_section(
+        team_info={"team_name": "demo", "display_name": "Demo", "desc": "Ship it"},
+        team_workspace_path="/tmp/demo-workspace",
+        language="en",
+    )
+    assert section is not None
+    content = section.content["en"]
+    assert "`.team/" not in content
+    assert "Team Shared Workspace: `/tmp/demo-workspace`" in content
