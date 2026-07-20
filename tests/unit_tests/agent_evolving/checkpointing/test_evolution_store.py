@@ -29,10 +29,11 @@ def make_record(
     summary: str | None = None,
     merge_target: str | None = None,
     applied: bool = False,
+    source: str = "execution_failure",
 ) -> EvolutionRecord:
     return EvolutionRecord(
         id=record_id,
-        source="execution_failure",
+        source=source,
         timestamp="2026-01-01T00:00:00+00:00",
         context="ctx",
         change=EvolutionPatch(
@@ -135,6 +136,129 @@ class TestEvolutionStoreLogCRUD:
         assert evo_log.entries[0].change.content == "new"
 
 
+class TestEvolutionStoreVersionBump:
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_append_record_does_not_bump_version(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(
+            root,
+            "skill-a",
+            "---\nname: skill-a\ndescription: weather\nversion: 1.0.0\n---\n\n# Skill\n",
+        )
+        store = EvolutionStore(str(root))
+
+        record = make_record(
+            "ev_1",
+            source="execution_failure",
+            section="Instructions",
+        )
+        await store.append_record("skill-a", record)
+
+        evo_log = await store.load_full_evolution_log("skill-a")
+        assert evo_log.version == "1.0.0"
+        assert evo_log.entries[0].skill_version is None
+        skill_md = await store.read_skill_content("skill-a")
+        assert EvolutionStore._extract_version_from_skill_md(skill_md) == "1.0.0"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_bump_version_for_rebuild_patch(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(
+            root,
+            "skill-a",
+            "---\nname: skill-a\ndescription: weather\nversion: 1.0.0\n---\n\n# Skill\n",
+        )
+        store = EvolutionStore(str(root))
+        await store.append_record(
+            "skill-a",
+            make_record("ev_1", source="execution_failure", section="Troubleshooting"),
+        )
+
+        new_version = await store.bump_version_for_rebuild("skill-a")
+        assert new_version == "1.0.1"
+        evo_log = await store.load_full_evolution_log("skill-a")
+        assert evo_log.version == "1.0.1"
+        skill_md = await store.read_skill_content("skill-a")
+        assert EvolutionStore._extract_version_from_skill_md(skill_md) == "1.0.1"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_bump_version_for_rebuild_minor_when_any_instruction(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(
+            root,
+            "skill-a",
+            "---\nname: skill-a\ndescription: weather\nversion: 1.0.5\n---\n\n# Skill\n",
+        )
+        store = EvolutionStore(str(root))
+        await store.append_record(
+            "skill-a",
+            make_record("ev_patch", source="execution_failure", section="Troubleshooting"),
+        )
+        await store.append_record(
+            "skill-a",
+            make_record("ev_minor", source="user_correction", section="Instructions"),
+        )
+
+        new_version = await store.bump_version_for_rebuild("skill-a")
+        assert new_version == "1.1.0"
+        skill_md = await store.read_skill_content("skill-a")
+        assert EvolutionStore._extract_version_from_skill_md(skill_md) == "1.1.0"
+        assert "description: weather" in skill_md
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_bump_version_for_rebuild_none_when_empty(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(
+            root,
+            "skill-a",
+            "---\nversion: 2.0.0\n---\n\n# Skill\n",
+        )
+        store = EvolutionStore(str(root))
+        assert await store.bump_version_for_rebuild("skill-a") is None
+        skill_md = await store.read_skill_content("skill-a")
+        assert EvolutionStore._extract_version_from_skill_md(skill_md) == "2.0.0"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_clear_evolutions_retains_version(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(
+            root,
+            "skill-a",
+            "---\nversion: 1.2.3\n---\n\n# Skill\n",
+        )
+        store = EvolutionStore(str(root))
+        await store.append_record("skill-a", make_record("ev_1"))
+        await store.clear_evolutions("skill-a", retain_version="1.3.0")
+
+        evo_log = await store.load_full_evolution_log("skill-a")
+        assert evo_log.entries == []
+        assert evo_log.version == "1.3.0"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_create_skill_includes_default_version(tmp_path: Path):
+        root = tmp_path / "skills"
+        root.mkdir()
+        store = EvolutionStore(str(root))
+
+        skill_dir = await store.create_skill("new-skill", "a skill", body="body text")
+        assert skill_dir is not None
+
+        skill_md = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        assert "version: 1.0.0" in skill_md
+        evo_log = await store.load_full_evolution_log("new-skill")
+        assert evo_log.version == "1.0.0"
+        changelog = (skill_dir / "changelog.md").read_text(encoding="utf-8")
+        assert changelog.startswith("# Changelog")
+        assert "Unreleased" not in changelog
+        assert "## [" not in changelog
+
+
 class TestEvolutionStoreArchive:
     @staticmethod
     @pytest.mark.asyncio
@@ -146,7 +270,7 @@ class TestEvolutionStoreArchive:
         await store.append_record("skill-a", make_record("ev_1"))
 
         archive = skill_dir / "archive"
-        assert not archive.exists() or list(archive.glob("SKILL.v*.md")) == []
+        assert not archive.exists() or list(archive.glob("SKILL.*.md")) == []
 
     @staticmethod
     @pytest.mark.asyncio
@@ -159,7 +283,7 @@ class TestEvolutionStoreArchive:
         await store.append_record("skill-a", make_record("ev_2", content="second"))
 
         archive = skill_dir / "archive"
-        assert not archive.exists() or list(archive.glob("evolutions.v*.json")) == []
+        assert not archive.exists() or list(archive.glob("evolutions.*.json")) == []
         current_log = json.loads((skill_dir / "evolutions.json").read_text(encoding="utf-8"))
         assert [entry["id"] for entry in current_log["entries"]] == ["ev_1", "ev_2"]
 
@@ -193,12 +317,12 @@ class TestEvolutionStoreArchive:
         archive.mkdir(parents=True)
         archived_log = {
             "skill_id": "skill-a",
-            "version": "1.0",
+            "version": "1.0.0",
             "updated_at": "2026-01-01T00:00:00+00:00",
             "entries": [],
         }
-        (archive / "SKILL.v20260622T123456.md").write_text("# Archived\n", encoding="utf-8")
-        (archive / "evolutions.v20260622T123456.json").write_text(
+        (archive / "SKILL.v1.0.0.md").write_text("# Archived\n", encoding="utf-8")
+        (archive / "evolutions.v1.0.0.json").write_text(
             json.dumps(archived_log, ensure_ascii=False),
             encoding="utf-8",
         )
@@ -206,11 +330,11 @@ class TestEvolutionStoreArchive:
         store = EvolutionStore(str(root))
 
         assert store.get_skill_archive_dir("skill-a") == archive
-        assert store.get_skill_archive_file("skill-a", "SKILL.v20260622T123456.md") == archive / "SKILL.v20260622T123456.md"
+        assert store.get_skill_archive_file("skill-a", "SKILL.v1.0.0.md") == archive / "SKILL.v1.0.0.md"
         assert store.get_skill_archive_file("skill-a", "../SKILL.md") is None
-        assert await store.read_archive_text("skill-a", "SKILL.v20260622T123456.md") == "# Archived\n"
+        assert await store.read_archive_text("skill-a", "SKILL.v1.0.0.md") == "# Archived\n"
         assert await store.read_archive_text("skill-a", "../SKILL.md") == ""
-        assert await store.restore_evolution_log_from_archive("skill-a", "evolutions.v20260622T123456.json") is True
+        assert await store.restore_evolution_log_from_archive("skill-a", "evolutions.v1.0.0.json") is True
         assert json.loads((skill_dir / "evolutions.json").read_text(encoding="utf-8")) == archived_log
         assert await store.restore_evolution_log_from_archive("skill-a", "missing.json") is False
 
@@ -222,11 +346,10 @@ class TestEvolutionStoreArchive:
         store = EvolutionStore(str(root))
         await store.append_record("skill-a", make_record("ev_1", content="first"))
 
-        suffix = "20260622T123456"
-        body_archive = await store.archive_skill_body("skill-a", suffix=suffix)
-        evo_archive = await store.archive_evolutions("skill-a", suffix=suffix)
-        assert body_archive == "SKILL.v20260622T123456.md"
-        assert evo_archive == "evolutions.v20260622T123456.json"
+        body_archive = await store.archive_skill_body("skill-a", version="1.0.1")
+        evo_archive = await store.archive_evolutions("skill-a", version="1.0.1")
+        assert body_archive == "SKILL.v1.0.1.md"
+        assert evo_archive == "evolutions.v1.0.1.json"
         archives = store.list_archives("skill-a")
         assert body_archive in archives
         assert evo_archive in archives
@@ -238,30 +361,59 @@ class TestEvolutionStoreArchive:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_archive_current_state_uses_paired_suffix(tmp_path: Path):
+    async def test_archive_current_state_uses_semver_names(tmp_path: Path):
         root = tmp_path / "skills"
-        prepare_skill(root, "skill-a", "# Skill\n")
+        prepare_skill(
+            root,
+            "skill-a",
+            "---\nname: skill-a\ndescription: d\nversion: 1.2.3\n---\n\n# Skill\n",
+        )
         store = EvolutionStore(str(root))
         await store.append_record("skill-a", make_record("ev_1", content="first"))
-
+        # append no longer bumps; archive uses current frontmatter version
         body_archive, evo_archive = await store.archive_current_state("skill-a")
 
-        assert body_archive is not None
-        assert evo_archive is not None
-        body_suffix = body_archive.removeprefix("SKILL.").removesuffix(".md")
-        evo_suffix = evo_archive.removeprefix("evolutions.").removesuffix(".json")
-        assert body_suffix == evo_suffix
+        assert body_archive == "SKILL.v1.2.3.md"
+        assert evo_archive == "evolutions.v1.2.3.json"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_archive_current_state_skips_when_version_exists(tmp_path: Path):
+        root = tmp_path / "skills"
+        skill_dir = prepare_skill(
+            root,
+            "skill-a",
+            "---\nname: skill-a\ndescription: d\nversion: 1.0.0\n---\n\n# Original\n",
+        )
+        archive = skill_dir / "archive"
+        archive.mkdir(parents=True)
+        (archive / "SKILL.v1.0.0.md").write_text("# Already archived\n", encoding="utf-8")
+        (archive / "evolutions.v1.0.0.json").write_text('{"entries": []}', encoding="utf-8")
+        store = EvolutionStore(str(root))
+
+        body_archive, evo_archive = await store.archive_current_state("skill-a")
+        # Skip rewrite but return existing names so rebuild is not blocked.
+        assert body_archive == "SKILL.v1.0.0.md"
+        assert evo_archive == "evolutions.v1.0.0.json"
+        assert (archive / "SKILL.v1.0.0.md").read_text(encoding="utf-8") == "# Already archived\n"
 
     @staticmethod
     def test_archive_name_helpers_validate_and_pair():
-        assert EvolutionStore.is_valid_skill_archive_name("SKILL.v20260622T123456.md") is True
-        assert EvolutionStore.is_valid_skill_archive_name("../SKILL.v20260622T123456.md") is False
-        assert EvolutionStore.is_valid_skill_archive_name("nested/SKILL.v20260622T123456.md") is False
-        assert (
-            EvolutionStore.paired_evolution_archive_name("SKILL.v20260622T123456.md")
-            == "evolutions.v20260622T123456.json"
-        )
+        assert EvolutionStore.is_valid_skill_archive_name("SKILL.v1.0.0.md") is True
+        assert EvolutionStore.is_valid_skill_archive_name("../SKILL.v1.0.0.md") is False
+        assert EvolutionStore.is_valid_skill_archive_name("nested/SKILL.v1.0.0.md") is False
+        assert EvolutionStore.paired_evolution_archive_name("SKILL.v1.0.0.md") == "evolutions.v1.0.0.json"
         assert EvolutionStore.paired_evolution_archive_name("bad.md") is None
+        assert EvolutionStore.paired_evolution_archive_name("SKILL.1.0.0.md") is None
+        assert EvolutionStore.normalize_body_archive_name("1.0.0") == "SKILL.v1.0.0.md"
+        assert EvolutionStore.normalize_body_archive_name("v1.0.0") == "SKILL.v1.0.0.md"
+        assert EvolutionStore.normalize_body_archive_name("SKILL.v1.0.0.md") == "SKILL.v1.0.0.md"
+        assert EvolutionStore.normalize_body_archive_name("SKILL.1.0.0.md") is None
+        assert EvolutionStore.normalize_body_archive_name("latest") is None
+        assert EvolutionStore.normalize_body_archive_name("not-a-version") is None
+        assert EvolutionStore.normalize_body_archive_name("../SKILL.v1.0.0.md") is None
+        assert EvolutionStore.is_body_archive_filename("SKILL.v1.0.0.md") is True
+        assert EvolutionStore.is_body_archive_filename("SKILL.1.0.0.md") is False
 
     @staticmethod
     @pytest.mark.asyncio
@@ -270,8 +422,8 @@ class TestEvolutionStoreArchive:
         skill_dir = prepare_skill(root, "skill-a", "# Skill\n")
         archive = skill_dir / "archive"
         archive.mkdir(parents=True)
-        body_name = "SKILL.v20260622T123456.md"
-        evo_name = "evolutions.v20260622T123456.json"
+        body_name = "SKILL.v1.0.0.md"
+        evo_name = "evolutions.v1.0.0.json"
         (archive / body_name).write_text("# Archived\n", encoding="utf-8")
         (archive / evo_name).write_text("{\"entries\": []}", encoding="utf-8")
         store = EvolutionStore(str(root))
@@ -280,7 +432,7 @@ class TestEvolutionStoreArchive:
         assert not (archive / body_name).exists()
         assert not (archive / evo_name).exists()
 
-        assert await store.delete_archive_version("skill-a", "../SKILL.v20260622T123456.md") is False
+        assert await store.delete_archive_version("skill-a", "../SKILL.v1.0.0.md") is False
         assert await store.delete_archive_version("skill-a", "missing.md") is False
 
     @staticmethod
@@ -290,8 +442,8 @@ class TestEvolutionStoreArchive:
         skill_dir = prepare_skill(root, "skill-a", "# Skill\n")
         archive = skill_dir / "archive"
         archive.mkdir(parents=True)
-        body_name = "SKILL.v20260622T123456.md"
-        evo_name = "evolutions.v20260622T123456.json"
+        body_name = "SKILL.v1.0.0.md"
+        evo_name = "evolutions.v1.0.0.json"
         (archive / body_name).write_text("# Archived\n", encoding="utf-8")
         (archive / evo_name).write_text("{\"entries\": []}", encoding="utf-8")
         store = EvolutionStore(str(root))
@@ -311,39 +463,22 @@ class TestEvolutionStoreArchive:
         assert (archive / evo_name).exists()
 
     @staticmethod
-    @pytest.mark.asyncio
-    async def test_delete_archive_version_removes_fuzzy_paired_evo(tmp_path: Path):
+    def test_resolve_paired_evolution_archive_exact_only(tmp_path: Path):
         root = tmp_path / "skills"
         skill_dir = prepare_skill(root, "skill-a", "# Skill\n")
         archive = skill_dir / "archive"
         archive.mkdir(parents=True)
-        body_name = "SKILL.v20260622T120000.md"
-        evo_name = "evolutions.v20260622T120001.json"
+        body_name = "SKILL.v1.0.0.md"
         (archive / body_name).write_text("# Archived\n", encoding="utf-8")
-        (archive / evo_name).write_text("{\"entries\": [\"archived\"]}", encoding="utf-8")
-        store = EvolutionStore(str(root))
-
-        assert await store.delete_archive_version("skill-a", body_name) is True
-        assert not (archive / body_name).exists()
-        assert not (archive / evo_name).exists()
-        assert list(archive.iterdir()) == []
-
-    @staticmethod
-    def test_resolve_paired_evolution_archive_picks_closest_older_candidate(tmp_path: Path):
-        root = tmp_path / "skills"
-        skill_dir = prepare_skill(root, "skill-a", "# Skill\n")
-        archive = skill_dir / "archive"
-        archive.mkdir(parents=True)
-        body_name = "SKILL.v20260622T120000.md"
-        (archive / body_name).write_text("# Archived\n", encoding="utf-8")
-        closer = archive / "evolutions.v20260622T115900.json"
-        farther = archive / "evolutions.v20260622T100000.json"
-        closer.write_text("{\"entries\": [\"closer\"]}", encoding="utf-8")
-        farther.write_text("{\"entries\": [\"farther\"]}", encoding="utf-8")
+        exact = archive / "evolutions.v1.0.0.json"
+        other = archive / "evolutions.v1.0.1.json"
+        exact.write_text("{\"entries\": [\"exact\"]}", encoding="utf-8")
+        other.write_text("{\"entries\": [\"other\"]}", encoding="utf-8")
         store = EvolutionStore(str(root))
 
         resolved = store.resolve_paired_evolution_archive("skill-a", body_name)
-        assert resolved == closer
+        assert resolved == exact
+        assert store.resolve_paired_evolution_archive("skill-a", "SKILL.v9.9.9.md") is None
 
 
 class TestEvolutionStoreSolidifyAndFormatting:

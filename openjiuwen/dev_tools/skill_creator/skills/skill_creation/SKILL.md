@@ -29,7 +29,7 @@ skill-name/
 └── assets/ (optional)
 ```
 
-Do NOT create unrelated documentation on the creation of this skill. **DO NOT** create any README, changelog, installation guide, creation summary etc. files. The skill-name directory should contain only execution-relevant content.
+Do NOT create unrelated documentation on the creation of this skill. **DO NOT** create any README, installation guide, creation summary etc. files. The skill-name directory should contain only execution-relevant content. Exception: `changelog.md` may exist when maintained by the skill self-evolution system (rebuild releases); do not hand-author unrelated changelogs.
 
 #### Skill.md
 
