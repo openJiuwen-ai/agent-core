@@ -276,10 +276,26 @@ class ToolInterruptHandler:
             invoke_inputs: InvokeInputs,
             sub_agent_outputs: list = None,
     ) -> Dict[str, object]:
-        """Persist tool interruption state and return interrupt dict."""
+        """Persist tool interruption state and return interrupt dict.
+
+        Emit interaction chunks to the stream at commit time rather than after
+        the agent returns, so they are not lost when close_stream runs.
+        """
         await self._agent.context_engine.save_contexts(session)
         self.save(state, session)
         result = self.build_interrupt_result(sub_agent_outputs)
+        schemas = result.get("state", [])
+        if isinstance(schemas, list) and schemas:
+            try:
+                for schema in schemas:
+                    await session.write_stream(schema)
+                result["_interaction_emitted"] = True
+            except Exception as exc:
+                logger.warning(
+                    "[ToolInterruptHandler] emit interaction chunks failed, "
+                    "will rely on later write_interrupt_to_stream: %s",
+                    exc,
+                )
         invoke_inputs.result = result
         return result
 
@@ -290,8 +306,11 @@ class ToolInterruptHandler:
     ) -> None:
         """Write tool interrupt result to session stream.
 
-        Emit all OutputSchema from state list to stream.
+        Skip when commit_interrupt has already emitted, to avoid duplicates.
         """
+        if result.get("_interaction_emitted"):
+            return
+
         schemas = result.get("state", [])
         if not isinstance(schemas, list):
             schemas = []
