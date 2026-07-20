@@ -454,6 +454,91 @@ class TestConversationSignalDetector:
 
     @staticmethod
     @pytest.mark.asyncio
+    async def test_detect_user_intent_emits_one_signal_per_skill() -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "name": "skill_tool",
+                        "arguments": '{"skill_name":"travel-planner","relative_file_path":"SKILL.md"}',
+                    },
+                    {
+                        "name": "skill_tool",
+                        "arguments": '{"skill_name":"weather","relative_file_path":"SKILL.md"}',
+                    },
+                ],
+            },
+            {
+                "role": "user",
+                "content": "输出不对，没有给出简单的紫外线数据，旅游规划输出不对，要给出简单的住宿安排",
+            },
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            return_value={
+                "content": (
+                    '{"is_feedback": true, "items": ['
+                    '{"skill_name": "weather", "excerpt": "没有给出简单的紫外线数据"},'
+                    '{"skill_name": "travel-planner", "excerpt": "要给出简单的住宿安排"}'
+                    "]}"
+                )
+            }
+        )
+        detector = ConversationSignalDetector(
+            existing_skills={"weather", "travel-planner"}
+        ).bind_llm(llm=llm, model="test-model")
+
+        signals = await detector.detect_user_intent(messages)
+
+        assert len(signals) == 2
+        by_skill = {s.skill_name: s for s in signals}
+        assert by_skill["weather"].excerpt == "没有给出简单的紫外线数据"
+        assert by_skill["travel-planner"].excerpt == "要给出简单的住宿安排"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_uses_extra_skills_when_traj_has_none() -> None:
+        messages = [
+            {"role": "user", "content": "输出不对，没有给出简单的紫外线数据"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"name": "web_search", "arguments": '{"query":"uv index"}'},
+                ],
+            },
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            return_value={
+                "content": (
+                    '{"is_feedback": true, "items": ['
+                    '{"skill_name": "weather", "excerpt": "没有给出简单的紫外线数据"}'
+                    "]}"
+                )
+            }
+        )
+        detector = ConversationSignalDetector(
+            existing_skills={"weather", "travel-planner"}
+        ).bind_llm(llm=llm, model="test-model")
+
+        assert await detector.detect_user_intent(messages) == []
+
+        signals = await detector.detect_user_intent(
+            messages,
+            extra_skills=["weather", "travel-planner"],
+        )
+
+        assert len(signals) == 1
+        assert signals[0].skill_name == "weather"
+        prompt = llm.invoke.await_args.kwargs["messages"][0]["content"]
+        assert "weather" in prompt
+        assert "travel-planner" in prompt
+
+    @staticmethod
+    @pytest.mark.asyncio
     async def test_detect_user_intent_without_bound_llm_uses_rule_fallback() -> None:
         messages = [
             {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/my_skill/SKILL.md"}]},
