@@ -200,8 +200,19 @@ class EvolutionStore:
             )
         return evo_log
 
-    async def append_record(self, name: str, record: EvolutionRecord) -> None:
-        """Append or merge one evolution record to evolutions.json."""
+    async def append_record(
+        self,
+        name: str,
+        record: EvolutionRecord,
+        *,
+        update_skill_md: bool = True,
+    ) -> None:
+        """Append or merge one evolution record to evolutions.json.
+
+        When ``update_skill_md`` is False (suggest mode), the record is persisted to
+        ``evolutions.json`` only and SKILL.md / evolution/*.md are left untouched until
+        the host accepts the suggestion.
+        """
         skill_dir = self._resolve_skill_dir(name, create=True)
         if skill_dir is None:
             return
@@ -231,11 +242,12 @@ class EvolutionStore:
         evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
         await self._save_evolution_log(name, evo_log, skill_dir=skill_dir)
         logger.info(
-            "[EvolutionStore] wrote %s/%s (id=%s, target=%s)",
+            "[EvolutionStore] wrote %s/%s (id=%s, target=%s, update_skill_md=%s)",
             name,
             _EVOLUTION_FILENAME,
             record.id,
             record.change.target.value,
+            update_skill_md,
         )
 
         total = len(evo_log.entries)
@@ -246,7 +258,8 @@ class EvolutionStore:
                 total,
             )
 
-        await self.render_evolution_markdown(name)
+        if update_skill_md:
+            await self.render_evolution_markdown(name)
 
     async def _load_full_evolution_log(self, name: str) -> EvolutionLog:
         skill_dir = self._resolve_skill_dir(name)

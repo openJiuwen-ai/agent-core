@@ -303,7 +303,7 @@ class EvolutionRail(DeepAgentRail):
                 return
 
             self._trajectory_store.save(trajectory)
-            await self.run_evolution(trajectory, ctx)
+            await self._dispatch_run_evolution(trajectory, ctx)
         finally:
             if trace_id is not None:
                 self.trajectory_state_manager.release_trace(
@@ -312,6 +312,18 @@ class EvolutionRail(DeepAgentRail):
                 )
             self._active_trace_id = None
             self._builder = None
+
+    async def _dispatch_run_evolution(
+        self,
+        trajectory: Trajectory,
+        ctx: AgentCallbackContext,
+    ) -> None:
+        """Dispatch evolution after trajectory is saved.
+
+        Default awaits ``run_evolution``. Subclasses may override to schedule
+        evolution in the background without blocking the invoke path.
+        """
+        await self.run_evolution(trajectory, ctx)
 
     # ---- Trajectory helpers ----
 

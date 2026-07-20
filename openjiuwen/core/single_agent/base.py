@@ -208,6 +208,9 @@ class BaseAgent(metaclass=_AgentMeta):
             self for chaining
         """
         await self._agent_callback_manager.unregister_rail(rail, self)
+        cancel_pending = getattr(rail, "cancel_pending_evolution", None)
+        if callable(cancel_pending):
+            await cancel_pending()
         rail.uninit(self)
         return self
 
