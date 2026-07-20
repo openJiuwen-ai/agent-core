@@ -21,6 +21,7 @@ from openjiuwen.agent_teams.spawn.shared_resources import (
     cleanup_shared_resources,
     get_shared_db,
 )
+from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
 
 TEAM = "ext_team"
@@ -75,6 +76,8 @@ def make_descriptor() -> Callable[..., TeamJoinDescriptor]:
         role: str = "teammate",
         scope: str = "operator",
         teammate_mode: str = "build_mode",
+        workspace_config: TeamWorkspaceConfig | None = None,
+        workspace_path: str | None = None,
     ) -> TeamJoinDescriptor:
         return TeamJoinDescriptor(
             session_id=SESSION,
@@ -85,6 +88,8 @@ def make_descriptor() -> Callable[..., TeamJoinDescriptor]:
             teammate_mode=teammate_mode,
             db_config=_memory_db_config(),
             transport_config=MessagerTransportConfig(backend="inprocess", team_name=TEAM),
+            workspace_config=workspace_config,
+            workspace_path=workspace_path,
         )
 
     return _factory

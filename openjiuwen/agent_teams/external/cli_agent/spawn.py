@@ -29,8 +29,10 @@ from openjiuwen.agent_teams.external.cli_agent.transport.local import LocalTrans
 from openjiuwen.agent_teams.external.descriptor import TeamJoinDescriptor
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase, ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
+from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
+from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
@@ -65,6 +67,16 @@ def descriptor_from_context(ctx: TeamRuntimeContext) -> TeamJoinDescriptor:
     if transport.backend == "pyzmq" and transport.direct_addr:
         transport_updates["direct_addr"] = "tcp://127.0.0.1:*"
     transport = transport.model_copy(update=transport_updates)
+
+    workspace_config = None
+    if team_spec.workspace:
+        candidate_workspace = TeamWorkspaceConfig.model_validate(team_spec.workspace)
+        if candidate_workspace.enabled:
+            workspace_config = candidate_workspace
+    workspace_path = None
+    if workspace_config is not None:
+        workspace_path = workspace_config.root_path or str(team_home(team_name) / "team-workspace")
+
     return TeamJoinDescriptor(
         session_id=session_id,
         team_name=team_name,
@@ -83,6 +95,8 @@ def descriptor_from_context(ctx: TeamRuntimeContext) -> TeamJoinDescriptor:
         teammate_mode=teammate_mode,
         db_config=ctx.db_config,
         transport_config=transport,
+        workspace_config=workspace_config,
+        workspace_path=workspace_path,
     )
 
 
