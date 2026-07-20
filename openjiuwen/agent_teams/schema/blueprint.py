@@ -672,6 +672,7 @@ class TeamAgentSpec(BaseModel):
             model_pool=team_pool,
             model_pool_strategy=team_strategy,
             external_messager_config=external_messager_config,
+            workspace=self.workspace.model_dump() if self.workspace is not None else None,
         )
 
         messager_config = self.transport.build() if self.transport else None

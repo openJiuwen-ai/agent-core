@@ -40,6 +40,7 @@ from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tools.database import TeamDatabase
     from openjiuwen.agent_teams.tools.team import TeamBackend
     from openjiuwen.core.foundation.tool.base import Tool
@@ -85,6 +86,7 @@ class ExternalTeamClient:
         self._tasks: TeamTaskManager | None = None
         self._messages: TeamMessageManager | None = None
         self._db: "TeamDatabase | None" = None
+        self._workspace_manager: "TeamWorkspaceManager | None" = None
         self._session_token: Token[str] | None = None
         # Member-scope real team tools, keyed by card.name. Built at connect()
         # for the ``member`` scope so an external CLI member calls the exact
@@ -223,6 +225,9 @@ class ExternalTeamClient:
                 dispatch_mode=self._descriptor.dispatch_mode,
                 lang=self._descriptor.language,
             )
+            workspace_tool = self._build_workspace_meta_tool()
+            if workspace_tool is not None:
+                real_tools.append(workspace_tool)
             self._tools = {tool.card.name: tool for tool in real_tools}
 
         self._connected = True
@@ -244,8 +249,27 @@ class ExternalTeamClient:
         self._tasks = None
         self._messages = None
         self._backend = None
+        self._workspace_manager = None
         self._tools = {}
         self._connected = False
+
+    def _build_workspace_meta_tool(self) -> "Tool | None":
+        """Build the external workspace metadata tool when workspace is enabled."""
+        workspace_config = self._descriptor.workspace_config
+        workspace_path = self._descriptor.workspace_path
+        if workspace_config is None or not workspace_config.enabled or not workspace_path:
+            return None
+
+        from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
+        from openjiuwen.agent_teams.team_workspace.tools import WorkspaceMetaTool
+        from openjiuwen.agent_teams.tools.locales import make_translator
+
+        self._workspace_manager = TeamWorkspaceManager(
+            config=workspace_config,
+            workspace_path=workspace_path,
+            team_name=self.team_name,
+        )
+        return WorkspaceMetaTool(self._workspace_manager, make_translator(self._descriptor.language))
 
     async def __aenter__(self) -> "ExternalTeamClient":
         await self.connect()

@@ -17,6 +17,7 @@ import pytest
 from openjiuwen.agent_teams.external import ExternalTeamClient
 from openjiuwen.agent_teams.mcp.server import build_server
 from openjiuwen.agent_teams.schema.status import TaskStatus
+from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 
 _MEMBER_TOOLS = {"read_inbox", "view_task", "claim_task", "verify_task", "send_message"}
 _OPERATOR_TOOLS = {
@@ -36,6 +37,22 @@ _OPERATOR_TOOLS = {
 def _factory(make_descriptor, *, member="dev-1", role="teammate", scope="member"):
     async def _connect() -> ExternalTeamClient:
         client = ExternalTeamClient(make_descriptor(member=member, role=role, scope=scope))
+        await client.connect()
+        return client
+
+    return _connect
+
+
+def _workspace_factory(make_descriptor, workspace_path: str):
+    async def _connect() -> ExternalTeamClient:
+        client = ExternalTeamClient(
+            make_descriptor(
+                member="dev-1",
+                scope="member",
+                workspace_config=TeamWorkspaceConfig(enabled=True, root_path=workspace_path),
+                workspace_path=workspace_path,
+            ),
+        )
         await client.connect()
         return client
 
@@ -66,6 +83,21 @@ async def test_member_scope_exposes_real_teammate_tools(team_db, make_descriptor
     # Member instructions are empty — the team system prompt is injected into
     # the CLI directly at spawn time, so the protocol is not repeated here.
     assert not server.instructions
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_member_scope_exposes_workspace_meta_when_workspace_enabled(
+    team_db,
+    make_descriptor,
+    tmp_path,
+):
+    server = build_server(_workspace_factory(make_descriptor, str(tmp_path)), scope="member")
+    assert "workspace_meta" in await _list_names(server)
+
+    await _call_text(server, "workspace_meta", {"action": "lock", "path": "report.md"})
+    text = await _call_text(server, "workspace_meta", {"action": "locks"})
+    assert "dev-1" in text
 
 
 @pytest.mark.asyncio

@@ -326,6 +326,8 @@ class TeamSpec(BaseModel):
     """
     external_messager_config: Optional[MessagerTransportConfig] = None
     """Transport used by an external CLI member's MCP client."""
+    workspace: Optional[dict[str, Any]] = None
+    """Shared workspace config mirrored from ``TeamAgentSpec`` for runtime-only paths."""
 
 
 class TeamRuntimeContext(BaseModel):
