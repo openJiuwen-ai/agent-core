@@ -141,6 +141,29 @@ class TestNormalizeInputsRawQuery:
         assert result.run_context.extra.get("cron") == {"id": "x"}
         assert "raw_query" not in result.run_context.extra
 
+    def test_goal_context_fields_are_preserved_in_extra(self, agent):
+        """Goal metadata is not part of RunContext but must reach goal rails."""
+        inputs = {
+            "query": "goal attempt",
+            "run": {
+                "kind": "goal",
+                "context": {
+                    "session_id": "session-1",
+                    "goal_id": "goal-1",
+                    "revision": 3,
+                    "extra": {"instruction": "continue"},
+                },
+            },
+        }
+        result = agent._normalize_inputs(inputs)
+
+        assert result.run_kind == RunKind.GOAL
+        assert result.run_context is not None
+        assert result.run_context.session_id == "session-1"
+        assert result.run_context.extra["goal_id"] == "goal-1"
+        assert result.run_context.extra["revision"] == 3
+        assert result.run_context.extra["instruction"] == "continue"
+
     def test_string_input_no_run_context(self, agent):
         """String input (non-dict) → no run_context, query is the string itself."""
         result = agent._normalize_inputs("just a string")

@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import dataclasses
 import importlib
 import os
 import sys
 import uuid
+from contextlib import suppress
 import warnings
-from dataclasses import replace
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -82,6 +84,21 @@ from openjiuwen.harness.task_loop.task_loop_event_handler import (
     TaskLoopEventHandler,
 )
 from openjiuwen.harness.tools import SessionToolkit, is_free_search_enabled, is_paid_search_enabled
+from openjiuwen.harness.goal.manager import GoalManager
+from openjiuwen.harness.goal.schema import GoalRecord, GoalStatus
+from openjiuwen.harness.schema.interaction import (
+    ActiveInteractionRound,
+    InteractionEvent,
+    InteractionPhase,
+    InteractionOutputStream,
+    OutputLease,
+    OutputLeaseManager,
+    InputDispatchMode,
+    RoundOutcome,
+    RoundWorkItem,
+    SendInputRequest,
+)
+from openjiuwen.harness.task_loop.event_manager import EventManager
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.event_queue import (
@@ -145,6 +162,9 @@ _DEEP_EVENTS = frozenset(
 _SUB_AGENTS_DIR = "sub_agents"
 
 
+_ROUND_BOUNDARY = object()
+
+
 class DeepAgent(BaseAgent):
     """High-level agent that delegates to an internal ReActAgent."""
 
@@ -168,6 +188,22 @@ class DeepAgent(BaseAgent):
         self._session_toolkit: SessionToolkit | None = None
         self._pending_harness_configs: List[str] = []
         self.prompt_attachment_manager: PromptAttachmentManager = PromptAttachmentManager()
+        self._interaction_session: Optional[Session] = None
+        self._interaction_phase = InteractionPhase.IDLE
+        self._active_interaction_round: Optional[ActiveInteractionRound] = None
+        self._event_manager = EventManager()
+        self.goal_manager: Optional[GoalManager] = None
+        self._interaction_output = OutputLeaseManager()
+        self._interaction_supervisor_task: Optional[asyncio.Task[None]] = None
+        self._interaction_forwarder_task: Optional[asyncio.Task[None]] = None
+        self._interaction_round_task: Optional[asyncio.Task[None]] = None
+        self._interaction_emit_tasks: set[asyncio.Task[Any]] = set()
+        self._interaction_round_forwarded: Optional[asyncio.Event] = None
+        self._interaction_start_lock = asyncio.Lock()
+        self._interaction_control_lock = asyncio.Lock()
+        self._interaction_send_lock = asyncio.Lock()
+        self._interaction_wakeup = asyncio.Event()
+        self._interaction_started = False
         super().__init__(card)
 
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
@@ -1144,7 +1180,17 @@ class DeepAgent(BaseAgent):
                 run_kind = RunKind(kind)
                 context_data = run.get("context")
                 if context_data:
-                    run_context = RunContext(**context_data)
+                    _rc_fields = {f.name for f in dataclasses.fields(RunContext)}
+                    extra = dict(context_data.get("extra") or {})
+                    for k, v in context_data.items():
+                        if k not in _rc_fields:
+                            extra[k] = v
+                    rc_kwargs = {
+                        k: v for k, v in context_data.items()
+                        if k in _rc_fields
+                    }
+                    rc_kwargs["extra"] = extra
+                    run_context = RunContext(**rc_kwargs)
             # Merge raw_query into RunContext.extra
             # (without affecting run_kind for normal queries)
             raw_query = inputs.get("raw_query", "")
@@ -2232,7 +2278,7 @@ class DeepAgent(BaseAgent):
         ):
             yield chunk
 
-    async def invoke(  # type: ignore[override]
+    async def invoke(
         self,
         inputs: Any,
         session: Optional[Session] = None,
@@ -2273,7 +2319,7 @@ class DeepAgent(BaseAgent):
         finally:
             self._invoke_active = False
 
-    async def stream(  # type: ignore[override]
+    async def stream(
         self,
         inputs: Any,
         session: Optional[Session] = None,
@@ -2488,6 +2534,603 @@ class DeepAgent(BaseAgent):
             )
             await handler.on_abort()
         await self._cancel_stream_process_task()
+
+    # ----------------------------------------------------------------
+    # long-lived session
+    # ----------------------------------------------------------------
+    async def prepare_interaction_task_loop(
+        self,
+        session: Session,
+    ) -> Tuple[LoopCoordinator, TaskLoopController]:
+        """Prepare and bind the task-loop kernel for the long-lived interaction loop."""
+        coordinator, controller = await self._setup_task_loop(session)
+        session_id = session.get_session_id()
+        if self._bound_session_id != session_id:
+            await controller.bind_session(session)
+            self._bound_session_id = session_id
+        self._loop_session = session
+        return coordinator, controller
+
+    async def run_one_round(
+        self,
+        work: RoundWorkItem,
+        task_id: str,
+        session: Session,
+    ) -> RoundOutcome:
+        """Execute one interaction work item and optionally propose follow-up work."""
+        self._invoke_active = True
+        try:
+            coordinator, controller = await self.prepare_interaction_task_loop(session)
+            if work.reset_loop:
+                coordinator.reset()
+                state = self.load_state(session)
+                state.stop_condition_state = None
+                self.save_state(session, state)
+
+            inputs = copy.deepcopy(work.inputs)
+            if work.kind == "goal":
+                inputs["run"] = {
+                    "kind": "goal",
+                    "context": copy.deepcopy(work.context),
+                }
+            invoke_inputs = self._normalize_inputs(inputs)
+            ctx = AgentCallbackContext(
+                agent=self, inputs=invoke_inputs, session=session
+            )
+            async with ctx.lifecycle(
+                AgentCallbackEvent.BEFORE_INVOKE,
+                AgentCallbackEvent.AFTER_INVOKE,
+            ):
+                await controller.submit_round(
+                    session,
+                    str(work.query),
+                    is_follow_up=work.is_follow_up,
+                    run_kind=invoke_inputs.run_kind,
+                    run_context=invoke_inputs.run_context,
+                    task_id=task_id,
+                )
+                timeout = (
+                    self._deep_config.completion_timeout
+                    if self._deep_config
+                    else 600.0
+                )
+                result = await controller.wait_round_completion(timeout=timeout)
+                await self._write_round_result_to_stream(result, session)
+                invoke_inputs.result = result
+                next_work = self._build_interaction_next_work(
+                    work=work,
+                    result=result,
+                    session=session,
+                    coordinator=coordinator,
+                    controller=controller,
+                )
+
+            self.save_state(session)
+            self.clear_state(session)
+            return RoundOutcome(next_work=next_work)
+        except Exception:
+            logger.exception("[DeepAgent] interaction round execution failed")
+            return RoundOutcome(
+                error_code="round_execution_error",
+                error_message="interaction round execution failed",
+            )
+        finally:
+            self._invoke_active = False
+
+    def _build_interaction_next_work(
+        self,
+        *,
+        work: RoundWorkItem,
+        result: Dict[str, Any],
+        session: Session,
+        coordinator: Any,
+        controller: Any,
+    ) -> Optional[RoundWorkItem]:
+        """Decide whether another user work item should follow this round."""
+        coordinator.increment_iteration()
+        coordinator.set_last_result(result)
+        state = self.load_state(session)
+        state.stop_condition_state = coordinator.get_state()
+        state.pending_follow_ups.extend(controller.drain_follow_up())
+        self.save_state(session, state)
+
+        if result.get("result_type") == "interrupt" or coordinator.is_aborted:
+            return None
+        if not coordinator.should_continue() or work.kind == "goal":
+            return None
+
+        state = self.load_state(session)
+        if state.pending_follow_ups:
+            query = state.pending_follow_ups.pop(0)
+            self.save_state(session, state)
+            inputs = copy.deepcopy(work.inputs)
+            inputs["query"] = query
+            return RoundWorkItem.user(
+                request_id=work.request_id,
+                inputs=inputs,
+                is_follow_up=True,
+                reset_loop=False,
+            )
+        if self._has_remaining_tasks(session):
+            return RoundWorkItem.user(
+                request_id=work.request_id,
+                inputs=work.inputs,
+                reset_loop=False,
+            )
+        return None
+
+    @property
+    def phase(self) -> InteractionPhase:
+        return self._interaction_phase
+
+    @property
+    def interaction_started(self) -> bool:
+        """Whether ``start()`` has bound this session's interaction loop."""
+        return self._interaction_started
+
+    @property
+    def active_round(self) -> Optional[ActiveInteractionRound]:
+        return self._active_interaction_round
+
+    @property
+    def event_manager(self) -> EventManager:
+        return self._event_manager
+
+    def has_output_stream(self) -> bool:
+        return self._interaction_output.has_consumer()
+
+    async def start(
+        self,
+        *,
+        session: Optional[Session] = None,
+    ) -> None:
+        """Bind the task-loop kernel and start the passive output forwarder.
+
+        Hosts should pass the product ``Session`` they own.  When ``session`` is
+        omitted, a fresh agent session is created with id ``\"default\"`` (useful
+        for unit tests and simple embeddings).
+        """
+        async with self._interaction_start_lock:
+            if session is None:
+                from openjiuwen.core.session.agent import create_agent_session
+
+                session = create_agent_session(
+                    session_id="default",
+                    card=getattr(self, "card", None),
+                )
+                await session.pre_run(inputs={})
+
+            sid = session.get_session_id()
+
+            if self._interaction_started:
+                if self._bound_session_id == sid:
+                    return
+                raise RuntimeError(
+                    f"Interaction loop already bound to session {self._bound_session_id}; "
+                    f"cannot bind {sid}."
+                )
+
+            self._interaction_session = session
+            await self.prepare_interaction_task_loop(session)
+            if self._task_completion_rail is None:
+                await self.register_rail(TaskCompletionRail())
+
+            from openjiuwen.harness.goal.store import SessionGoalStore
+
+            self.goal_manager = GoalManager(
+                store=SessionGoalStore(session),
+                event_manager=self._event_manager,
+                control_lock=self._interaction_control_lock,
+                has_output_stream=self.has_output_stream,
+                cancel_active_round=self._cancel_active_round,
+                emit_event=self._emit_interaction_event,
+                notify_work=self._notify_work,
+            )
+            self._interaction_phase = InteractionPhase.IDLE
+            self._interaction_started = True
+            self._interaction_forwarder_task = asyncio.create_task(
+                self._forward_session_stream(), name=f"interaction_forwarder[{sid}]"
+            )
+
+            rail = self._task_completion_rail
+            if rail is not None and hasattr(rail, "set_goal_manager"):
+                rail.set_goal_manager(self.goal_manager)
+                try:
+                    rail.init(self)
+                except Exception:
+                    logger.exception("[DeepAgent] Failed to register goal tools")
+
+            self._ensure_supervisor_running()
+            logger.info("[DeepAgent] Started for session %s", sid)
+
+    async def stop(self) -> None:
+        """Terminate the interaction loop and wake any attached output consumer."""
+        if not self._interaction_started:
+            return
+        self._interaction_phase = InteractionPhase.TERMINATED
+        await self._interaction_output.shutdown()
+        self._event_manager.discard_all_work()
+        await self._cancel_active_round(reason="stop")
+
+        for task in (self._interaction_supervisor_task, self._interaction_forwarder_task):
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await task
+        self._interaction_supervisor_task = None
+        self._interaction_forwarder_task = None
+
+        emit_tasks = list(self._interaction_emit_tasks)
+        self._interaction_emit_tasks.clear()
+        for task in emit_tasks:
+            if not task.done():
+                task.cancel()
+        for task in emit_tasks:
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+
+        if self._interaction_session is not None:
+            with suppress(Exception):
+                await self._interaction_session.close_stream()
+        controller = self.loop_controller
+        if controller is not None and self._interaction_session is not None:
+            with suppress(Exception):
+                await controller.unbind_session(self._interaction_session)
+            with suppress(Exception):
+                await controller.stop()
+
+        self._interaction_started = False
+        self._active_interaction_round = None
+        self._interaction_round_task = None
+
+    async def attach_output(self) -> Optional[InteractionOutputStream]:
+        """Claim the sole output reader for this interaction.
+
+        Returns ``None`` when another consumer already holds the lease.
+
+        If an ACTIVE goal exists, missing goal work is ensured even when this
+        call does not obtain the lease, so an already-attached reader continues
+        to receive goal progress (session switch / concurrent attach_goal).
+        """
+        if not self._interaction_started or self._interaction_phase is InteractionPhase.TERMINATED:
+            raise RuntimeError("interaction_terminated")
+
+        async with self._interaction_send_lock:
+            async with self._interaction_control_lock:
+                stream = await self._attach_output_locked()
+                if self.goal_manager is not None:
+                    record = self._load_goal_record_locked()
+                    if record is not None and record.status is GoalStatus.ACTIVE:
+                        self.goal_manager.ensure_active_goal_work_locked()
+                        self._notify_work()
+                return stream
+
+    async def send_input(self, request: SendInputRequest) -> None:
+        """Dispatch user text only; does not attach or return an output stream.
+
+        Hosts that need to read output must call ``attach_output`` first (or
+        already hold a stream).  Steer / follow-up requests typically skip
+        attach and let the existing consumer receive output.
+        """
+        if not self._interaction_started or self._interaction_phase is InteractionPhase.TERMINATED:
+            raise RuntimeError("interaction_terminated")
+
+        async with self._interaction_send_lock:
+            await self._send_user(request)
+
+    async def _send_user(self, request: SendInputRequest) -> None:
+        inputs = request.inputs
+        if (
+            not isinstance(inputs, dict)
+            or not isinstance(inputs.get("query"), str)
+            or not inputs["query"].strip()
+        ):
+            raise ValueError("send_input requires a non-empty inputs['query']")
+
+        async with self._interaction_control_lock:
+            loop = self.loop_controller
+            try:
+                mode = (
+                    InputDispatchMode.FOLLOW_UP
+                    if request.mode is None
+                    else InputDispatchMode(request.mode)
+                )
+            except ValueError as exc:
+                raise ValueError(f"unsupported input dispatch mode: {request.mode}") from exc
+
+            if mode is InputDispatchMode.STEER and self._active_interaction_round is not None:
+                if loop is None:
+                    raise RuntimeError("active interaction round cannot accept steer without loop_controller")
+                loop.enqueue_steer(str(inputs["query"]))
+                self._notify_work()
+                return
+
+            keep_open = self._should_keep_interaction_open_locked()
+            if keep_open:
+                self._event_manager.push_user(
+                    RoundWorkItem.user(
+                        request_id=request.request_id,
+                        inputs=inputs,
+                        is_follow_up=True,
+                        reset_loop=False,
+                    )
+                )
+                self._notify_work()
+                return
+
+            # Fresh user turn.  Output lease ownership stays with the host via
+            # ``attach_output``; send_input never steals or creates a stream.
+            self._event_manager.push_user(
+                RoundWorkItem.user(request_id=request.request_id, inputs=inputs)
+            )
+            self._notify_work()
+
+    async def _attach_output_locked(self) -> Optional[InteractionOutputStream]:
+        lease = await self._interaction_output.attach()
+        return InteractionOutputStream(self, lease) if lease is not None else None
+
+    async def next_output(self, lease: OutputLease) -> Optional[Any]:
+        return await self._interaction_output.next_item(lease)
+
+    async def detach_output(self, token: str, *, abort_active_round: bool) -> None:
+        async with self._interaction_control_lock:
+            detached = await self._interaction_output.detach(token)
+            if not detached:
+                return
+            self._event_manager.discard_all_work()
+            if abort_active_round:
+                await self._cancel_active_round(reason="output_detached")
+
+    async def _detach_current_output_locked(self, *, abort_active_round: bool) -> None:
+        lease = self._interaction_output.current_lease()
+        if lease is None:
+            return
+        if await self._interaction_output.detach(lease.token):
+            self._event_manager.discard_all_work()
+            if abort_active_round:
+                await self._cancel_active_round(reason="output_replaced")
+
+    def _emit_interaction_event(self, event: InteractionEvent) -> None:
+        # The callback is synchronous because rails can invoke it from several
+        # lifecycle hooks.  Capture the lease now so a delayed task cannot put
+        # an old event into a replacement request's output stream.
+        # Fire-and-forget is required (cannot await here); track the task so
+        # stop() can cancel outstanding emits instead of leaking them.
+        token = self._interaction_output.current_token()
+        if token is not None:
+            task = asyncio.create_task(
+                self._interaction_output.emit(event.to_output_schema(), expected_token=token)
+            )
+            self._interaction_emit_tasks.add(task)
+            task.add_done_callback(self._interaction_emit_tasks.discard)
+
+    async def cancel_round(
+        self,
+        *,
+        reason: str,
+    ) -> bool:
+        """Cancel the current active round without stopping the interaction loop.
+
+        Works for both user and goal rounds. Does not modify GoalRecord: an
+        ACTIVE goal stays ACTIVE until ``goal_manager.pause/clear`` (or
+        evaluation reaches a terminal status). Hosts that need to stop the
+        in-flight attempt while keeping the persistent goal should call this
+        (or close the output stream with ``abort_active_round=True``).
+        """
+        active = self._active_interaction_round
+        if active is None:
+            return False
+        await self._cancel_active_round(reason=reason)
+        return True
+
+    async def _cancel_active_round(
+        self,
+        *,
+        reason: str,
+        expected_run_kind: Optional[str] = None,
+        expected_goal_id: Optional[str] = None,
+        expected_revision: Optional[int] = None,
+    ) -> None:
+        active = self._active_interaction_round
+        if active is None:
+            return
+        if expected_run_kind is not None and active.run_kind != expected_run_kind:
+            return
+        if expected_goal_id is not None and active.goal_id != expected_goal_id:
+            return
+        if expected_revision is not None and active.revision != expected_revision:
+            return
+
+        logger.info("[DeepAgent] cancelling %s round: %s", active.run_kind, reason)
+        controller = self.loop_controller
+        scheduler = getattr(controller, "task_scheduler", None) if controller else None
+        if active.task_id and scheduler is not None:
+            with suppress(Exception):
+                await scheduler.cancel_task(active.task_id)
+        with suppress(Exception):
+            await self.abort(self._interaction_session)
+        task = self._interaction_round_task
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+
+    def _notify_work(self) -> None:
+        self._interaction_wakeup.set()
+        self._ensure_supervisor_running()
+
+    def _ensure_supervisor_running(self) -> None:
+        if self._interaction_supervisor_task is None or self._interaction_supervisor_task.done():
+            self._interaction_supervisor_task = asyncio.create_task(self._supervisor_loop())
+
+    async def _supervisor_loop(self) -> None:
+        try:
+            while self._interaction_started and self._interaction_phase is not InteractionPhase.TERMINATED:
+                if not self._interaction_output.has_consumer():
+                    self._interaction_phase = InteractionPhase.IDLE
+                    self._interaction_wakeup.clear()
+                    await self._interaction_wakeup.wait()
+                    continue
+
+                work = self._event_manager.next_work()
+                if work is None:
+                    await self._promote_loop_follow_ups()
+                    work = self._event_manager.next_work()
+                if work is None:
+                    await self._close_idle_output_if_finished()
+                    self._interaction_phase = InteractionPhase.IDLE
+                    self._interaction_wakeup.clear()
+                    if self._event_manager.has_pending_work():
+                        continue
+                    await self._interaction_wakeup.wait()
+                    continue
+
+                self._interaction_round_task = asyncio.create_task(self._execute_round(work))
+                await asyncio.wait({self._interaction_round_task})
+                if self._interaction_round_forwarded is not None:
+                    with suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(self._interaction_round_forwarded.wait(), timeout=2.0)
+                self._interaction_round_task = None
+                self._interaction_round_forwarded = None
+        except asyncio.CancelledError:
+            logger.debug("[DeepAgent] supervisor cancelled")
+        except Exception:
+            logger.exception("[DeepAgent] supervisor failed")
+            self._interaction_phase = InteractionPhase.IDLE
+
+    async def _promote_loop_follow_ups(self) -> None:
+        controller = self.loop_controller
+        if controller is None or not controller.has_follow_up():
+            return
+        for query in controller.drain_follow_up():
+            self._event_manager.push_user(
+                RoundWorkItem.user(
+                    request_id=None,
+                    inputs={"query": query},
+                    is_follow_up=True,
+                    reset_loop=False,
+                )
+            )
+
+    async def _close_idle_output_if_finished(self) -> None:
+        """End an ordinary response stream after its final queued round."""
+        async with self._interaction_control_lock:
+            if self._should_keep_interaction_open_locked():
+                return
+            await self._interaction_output.finish_current()
+
+    def _should_keep_interaction_open_locked(self) -> bool:
+        """Return whether the current output stream still owns live work.
+
+        The caller must hold ``_interaction_control_lock``.  A goal stream spans
+        multiple attempts, so an ACTIVE goal keeps the interaction open.
+
+        Side effect (intentional): when the GoalRecord is ACTIVE, this method
+        also calls ``ensure_active_goal_work_locked()`` so the next attempt is
+        queued before the host can observe an idle completion.  Callers must
+        treat a True result as both "keep open" and "goal work ensured".
+        """
+        if self._event_manager.has_pending_work() or self._active_interaction_round is not None:
+            return True
+        record = self._load_goal_record_locked()
+        if record is not None and record.status is GoalStatus.ACTIVE:
+            if self.goal_manager is not None:
+                self.goal_manager.ensure_active_goal_work_locked()
+            return True
+        return False
+
+    async def _forward_session_stream(self) -> None:
+        session = self._interaction_session
+        if session is None:
+            return
+        try:
+            async for chunk in session.stream_iterator():
+                if chunk is _ROUND_BOUNDARY:
+                    if self._interaction_round_forwarded is not None:
+                        self._interaction_round_forwarded.set()
+                    continue
+                await self._interaction_output.emit(chunk)
+        except Exception:
+            logger.exception("[DeepAgent] output forwarder failed")
+            self._emit_interaction_event(
+                InteractionEvent.execution_error(
+                    code="forwarder_crashed", message="output forwarder crashed"
+                )
+            )
+
+    async def _emit_round_boundary(self, session: "Session") -> bool:
+        """Emit an internal round-boundary marker into the session stream.
+
+        Uses ``session._inner`` because the public Session API has no way to
+        inject a non-payload control frame into ``stream_iterator()`` ordering.
+        ``_ROUND_BOUNDARY`` is filtered by ``_forward_session_stream`` and must
+        not go through ``write_stream`` / ``write_custom_stream``.
+        """
+        try:
+            manager = getattr(session, "_inner").stream_writer_manager()
+            await manager.stream_emitter().emit(_ROUND_BOUNDARY)
+            return True
+        except Exception:
+            logger.debug("[DeepAgent] unable to emit ordered round boundary", exc_info=True)
+            return False
+
+    async def _execute_round(self, work: RoundWorkItem) -> None:
+        session = self._interaction_session
+        task_id = uuid.uuid4().hex
+        forwarded = asyncio.Event()
+        self._interaction_round_forwarded = forwarded
+        self._active_interaction_round = ActiveInteractionRound(work=work, task_id=task_id)
+        self._event_manager.mark_started(work)
+        self._interaction_phase = InteractionPhase.RUNNING
+        try:
+            if session is None or not self._interaction_output.has_consumer():
+                return
+            if work.kind == "goal":
+                if self.goal_manager is None:
+                    return
+                started = await self.goal_manager.begin_attempt(
+                    goal_id=str(work.context["goal_id"]),
+                    revision=int(work.context["revision"]),
+                )
+                if started is None:
+                    return
+
+            outcome: RoundOutcome = await self.run_one_round(
+                work, task_id, session
+            )
+            if outcome.next_work is not None:
+                self._event_manager.push_user(outcome.next_work)
+                self._notify_work()
+            if outcome.error_code is not None:
+                self._emit_interaction_event(
+                    InteractionEvent.execution_error(
+                        code=outcome.error_code,
+                        message=outcome.error_message or "",
+                    )
+                )
+        except asyncio.CancelledError:
+            logger.info("[DeepAgent] round cancelled")
+        except Exception:
+            logger.exception("[DeepAgent] round execution failed")
+            self._emit_interaction_event(
+                InteractionEvent.execution_error(
+                    code="round_execution_error",
+                    message="round execution failed",
+                )
+            )
+        finally:
+            self._event_manager.mark_finished(work)
+            if session is not None:
+                emitted = await self._emit_round_boundary(session)
+                if not emitted:
+                    forwarded.set()
+            self._active_interaction_round = None
+            if self._interaction_phase is InteractionPhase.RUNNING:
+                self._interaction_phase = InteractionPhase.IDLE
+
+    def _load_goal_record_locked(self) -> Optional[GoalRecord]:
+        if self.goal_manager is None:
+            return None
+        return self.goal_manager.get_store().load()
+
 
 
 __all__ = [

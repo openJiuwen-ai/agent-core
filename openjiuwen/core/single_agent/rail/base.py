@@ -45,6 +45,7 @@ class RunKind(Enum):
     NORMAL = "normal"
     HEARTBEAT = "heartbeat"
     CRON = "cron"
+    GOAL = "goal"
 
 
 class HeartbeatReason(Enum):
@@ -153,6 +154,13 @@ class TaskIterationInputs:
             a controller follow-up rather than the original user
             query.  ``task_instruction`` templates should not be
             applied to follow-up queries.
+        run_kind: Run kind propagated from task metadata
+            (e.g. ``RunKind.GOAL``).  Set by the executor so
+            that rails like ``TaskCompletionRail`` can identify
+            goal rounds without reading task metadata directly.
+        run_context: Structured runtime context propagated from
+            task metadata.  May be a ``RunContext`` dataclass or
+            a plain dict depending on the caller.
     """
     iteration: int
     loop_event: Any
@@ -160,6 +168,8 @@ class TaskIterationInputs:
     result: Optional[Dict[str, Any]] = None
     query: Optional[str] = None
     is_follow_up: bool = False
+    run_kind: Any = None
+    run_context: Any = None
 
 
 @dataclass

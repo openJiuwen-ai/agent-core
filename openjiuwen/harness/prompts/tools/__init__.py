@@ -122,6 +122,10 @@ from openjiuwen.harness.prompts.tools.enter_worktree import (
 from openjiuwen.harness.prompts.tools.exit_worktree import (
     ExitWorktreeMetadataProvider,
 )
+from openjiuwen.harness.prompts.tools.goal import (
+    GetCurrentGoalMetadataProvider,
+    SubmitGoalReportMetadataProvider,
+)
 
 # ---------------------------------------------------------------------------
 # Provider registry
@@ -182,6 +186,8 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     CodingMemoryEditMetadataProvider(),
     EnterWorktreeMetadataProvider(),
     ExitWorktreeMetadataProvider(),
+    SubmitGoalReportMetadataProvider(),
+    GetCurrentGoalMetadataProvider(),
 ]
 
 _REGISTRY: Dict[str, ToolMetadataProvider] = {p.get_name(): p for p in _PROVIDERS}
