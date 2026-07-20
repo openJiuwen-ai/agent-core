@@ -82,12 +82,12 @@ def skill_markdown_has_media(skill_content: str) -> bool:
 class SkillTool(Tool):
     """View the skill contents of a certain skill"""
     operation: SysOperation
-    get_skills: Callable[[], List[Skill]]
+    get_skills: Callable[..., List[Skill]]
 
     def __init__(
         self,
         operation: SysOperation,
-        get_skills: Callable[[], List[Skill]],
+        get_skills: Callable[..., List[Skill]],
         language: str = "cn",
         agent_id: Optional[str] = None,
         multimodal_skill_mode: str = "hint",
@@ -117,7 +117,7 @@ class SkillTool(Tool):
         relative_file_path = str(inputs.get("relative_file_path") or "SKILL.md").strip()
 
         try:
-            skill = self._get_skill_by_name(skill_name)
+            skill = self._get_skill_by_name(skill_name, kwargs.get("session"))
             if not skill:
                 return ToolOutput(
                     success=False,
@@ -162,12 +162,16 @@ class SkillTool(Tool):
         if False:
             yield None
 
-    def _get_skill_by_name(self, skill_name: str) -> Optional[Skill]:
+    def _get_skill_by_name(self, skill_name: str, session: Any = None) -> Optional[Skill]:
         """Select skill object by name."""
         if not skill_name:
             return None
 
-        skills = self.get_skills() or []
+        try:
+            skills = self.get_skills(session=session) or []
+        except TypeError:
+            # Keep compatibility with callers that provide the original no-arg callback.
+            skills = self.get_skills() or []
         skill_map = {skill.name: skill for skill in skills}
         return skill_map.get(skill_name)
 
