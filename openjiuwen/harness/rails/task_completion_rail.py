@@ -1,8 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""TaskCompletionRail — unified task-completion strategy Rail.
+"""Task completion rail with integrated goal lifecycle support.
 
-Responsibilities:
+``TaskCompletionRail`` unified task-completion strategy Rail.
+Responsibilities (task loop):
 1. Carry loop-strategy parameters (replacing StopCondition).
 2. before_model_call: inject completion-signal section into
    SystemPromptBuilder.
@@ -10,16 +11,29 @@ Responsibilities:
    the first-round query.
 4. after_task_iteration: detect completion promise in output
    and notify CompletionPromiseEvaluator.
-
 Only takes effect when ``enable_task_loop=True``.
+
+When a ``goal_manager`` is supplied, the rail additionally drives the
+goal attempt lifecycle (formerly in the standalone GoalCompletionDriver):
+- Injecting the goal protocol prompt section (before_model_call)
+- Replacing the query with <goal_task> XML (before_task_iteration)
+- Consuming submit_goal_report and running assessment (after_task_iteration)
+- Accumulating token usage (after_model_call)
+- Writing back GoalRecord state transitions
+- Registering/unregistering the SubmitGoalReportTool via init/uninit
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
-from typing import List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.foundation.tool import Tool
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    ToolCallInputs,
+)
 from openjiuwen.harness.prompts.sections.task_completion import (
     build_completion_signal_section,
 )
@@ -31,7 +45,17 @@ from openjiuwen.harness.schema.stop_condition import (
     TimeoutEvaluator,
 )
 
+if TYPE_CHECKING:
+    from openjiuwen.harness.goal.evaluation import GoalEvaluator
+    from openjiuwen.harness.goal.manager import GoalManager
+    from openjiuwen.harness.goal.schema import GoalAssessment, GoalRecord
+    from openjiuwen.harness.tools.goal import GoalReportSink
+
 logger = logging.getLogger(__name__)
+
+# Cap transcript assessor input size so a long attempt cannot blow the
+# assessor prompt / context window.  Truncation prefers the latest messages.
+_ATTEMPT_CONTEXT_MAX_CHARS = 64_000
 
 # ----------------------------------------------------------------
 # Promise tag pattern
@@ -43,11 +67,14 @@ PROMISE_TAG_PATTERN = re.compile(
 
 
 class TaskCompletionRail(DeepAgentRail):
-    """Task-completion strategy Rail.
+    """Task-completion strategy Rail with optional goal lifecycle support.
 
-    Carries loop-strategy parameters and implements the three
-    lifecycle hooks that drive completion detection and prompt
-    injection.
+    Carries loop-strategy parameters and implements lifecycle hooks that
+    drive completion detection and prompt injection.
+
+    When ``goal_manager`` is provided, the rail also manages goal
+    attempts: tool registration, query replacement, protocol prompt
+    injection, token accounting, report consumption, and assessment.
 
     Args:
         task_instruction: Optional format string with a
@@ -61,6 +88,9 @@ class TaskCompletionRail(DeepAgentRail):
             entire task loop.
         evaluators: Additional custom evaluators appended after
             the built-in ones.
+        goal_manager: Optional GoalManager. When set, goal
+            lifecycle hooks are activated.
+        goal_language: Language for goal prompts (default "cn").
     """
 
     priority = 10
@@ -76,6 +106,8 @@ class TaskCompletionRail(DeepAgentRail):
         evaluators: Optional[
             List[StopConditionEvaluator]
         ] = None,
+        goal_manager: Optional[GoalManager] = None,
+        goal_language: str = "cn",
     ) -> None:
         super().__init__()
         self.task_instruction = task_instruction
@@ -89,6 +121,38 @@ class TaskCompletionRail(DeepAgentRail):
         self._extra_evaluators: List[StopConditionEvaluator] = (
             evaluators or []
         )
+
+        # Goal support
+        self._goal_manager = goal_manager
+        self._goal_language = goal_language
+        self._goal_report_sink: Optional["GoalReportSink"] = None
+        self._goal_evaluator: Optional["GoalEvaluator"] = None
+        self._goal_tools: List[Tool] = []
+        self._is_goal_round = False
+        self._current_goal_id: Optional[str] = None
+        self._current_revision: Optional[int] = None
+        self._current_session_id: Optional[str] = None
+        self._current_attempt_messages: List[Any] = []
+
+
+    def set_goal_manager(
+        self, goal_manager: GoalManager,
+    ) -> None:
+        """Inject or replace the GoalManager after DeepAgent starts.
+
+        Called by ``DeepAgent.start()`` after the
+        manager is created so that the rail can drive goal
+        lifecycle without requiring it at construction time.
+        Also lazily initialises the report sink and evaluator when
+        goal mode is first activated.
+        """
+        self._goal_manager = goal_manager
+        if self._goal_report_sink is None:
+            from openjiuwen.harness.goal.evaluation import GoalEvaluator
+            from openjiuwen.harness.tools.goal import GoalReportSink
+
+            self._goal_report_sink = GoalReportSink()
+            self._goal_evaluator = GoalEvaluator()
 
     # -- evaluator builder --
 
@@ -118,40 +182,119 @@ class TaskCompletionRail(DeepAgentRail):
         result.extend(self._extra_evaluators)
         return result
 
+    # -- init / uninit --
+
+    def init(self, agent: Any) -> None:
+        """Register the goal tools when goal mode is active.
+
+        Registers two tools that stay available for the whole DeepAgent lifecycle
+        (both goal rounds and normal user turns):
+        - ``submit_goal_report``: submit the structured attempt result.
+        - ``get_current_goal``: let the model re-orient to the active goal
+          when it has lost the ``<goal_task>`` context (e.g. after the user
+          interjects a normal question).
+        """
+        if self._goal_manager is None:
+            return
+
+        from openjiuwen.harness.tools.goal import (
+            GetCurrentGoalTool,
+            SubmitGoalReportTool,
+        )
+
+        agent_id = getattr(agent, "agent_id", None)
+        tools: List[Tool] = [
+            SubmitGoalReportTool(
+                self._goal_report_sink,
+                language=self._goal_language,
+                agent_id=agent_id,
+            ),
+            GetCurrentGoalTool(
+                self._goal_manager,
+                language=self._goal_language,
+                agent_id=agent_id,
+            ),
+        ]
+        if hasattr(agent, "ability_manager"):
+            for tool in tools:
+                agent.ability_manager.add_ability(tool.card, tool)
+            self._goal_tools = tools
+            logger.info(
+                "TaskCompletionRail: registered submit_goal_report "
+                "and get_current_goal tools"
+            )
+        else:
+            logger.warning(
+                "TaskCompletionRail.init: agent has no ability_manager; "
+                "goal tools were not registered"
+            )
+
+    def uninit(self, agent: Any) -> None:
+        """Remove the goal tools."""
+        if not hasattr(agent, "ability_manager"):
+            self._goal_tools = []
+            return
+        for tool in self._goal_tools:
+            name = getattr(tool.card, "name", None)
+            if not name:
+                continue
+            try:
+                agent.ability_manager.remove_ability(name)
+            except Exception:
+                logger.debug(
+                    "TaskCompletionRail: failed to remove goal tool %s",
+                    name,
+                    exc_info=True,
+                )
+        self._goal_tools = []
+
     # -- lifecycle hooks --
 
     async def before_model_call(
         self, ctx: AgentCallbackContext,
     ) -> None:
-        """Inject completion-signal section into SystemPromptBuilder.
+        """Inject prompt sections.
 
-        Follows the same pattern as TaskPlanningRail and
-        SkillUseRail: ``add_section`` is idempotent (same name
-        overwrites), so repeated calls per model call are safe.
+        - Always: completion-signal section (when promise is configured).
+        - Goal support: static goal protocol section.
         """
-        if not self.completion_promise:
-            return
         builder = getattr(
             ctx.agent, "system_prompt_builder", None
         )
-        if builder is None:
-            return
-        language = getattr(builder, "language", "cn")
-        section = build_completion_signal_section(
-            language,
-            self.completion_promise,
-        )
-        builder.add_section(section)
+
+        if self.completion_promise and builder is not None:
+            language = getattr(builder, "language", "cn")
+            section = build_completion_signal_section(
+                language,
+                self.completion_promise,
+            )
+            builder.add_section(section)
+
+        if self._goal_manager is not None and builder is not None:
+            from openjiuwen.harness.prompts.sections.goal import (
+                build_goal_protocol_section,
+            )
+
+            language = getattr(builder, "language", self._goal_language)
+            section = build_goal_protocol_section(language)
+            builder.add_section(section)
 
     async def before_task_iteration(
         self, ctx: AgentCallbackContext,
     ) -> None:
-        """Apply task_instruction template to the iteration query.
+        """Apply task_instruction template or goal query replacement.
 
-        The template is only applied on the first, non-follow-up
-        iteration.  Follow-up queries (``is_follow_up=True``) are
-        passed through unchanged.
+        For goal rounds: validate goal state and replace query with
+        <goal_task> XML.
+        For normal rounds: apply task_instruction on the first iteration.
         """
+        run_kind = self._get_run_kind(ctx)
+        if run_kind == "goal" and self._goal_manager is not None:
+            self._do_goal_before_iteration(ctx)
+            return
+
+        self._is_goal_round = False
+
         if not self.task_instruction:
             return
         inputs = ctx.inputs
@@ -164,15 +307,37 @@ class TaskCompletionRail(DeepAgentRail):
             query=query,
         )
 
+    async def after_model_call(
+        self, ctx: AgentCallbackContext,
+    ) -> None:
+        """Accumulate token usage for goal rounds."""
+        if not self._is_goal_round or self._goal_manager is None:
+            return
+
+        self._capture_attempt_model_context(ctx)
+
+        usage = self._extract_usage(ctx)
+        if usage:
+            await self._goal_manager.accumulate_usage(
+                goal_id=str(self._current_goal_id),
+                revision=int(self._current_revision),
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+                cached_input_tokens=usage.get("cached_input_tokens", 0),
+            )
+
     async def after_task_iteration(
         self, ctx: AgentCallbackContext,
     ) -> None:
-        """Detect completion promise in the iteration output.
+        """Detect completion promise and/or consume goal report.
 
-        When the promise tag is found and the token matches,
-        notifies the ``CompletionPromiseEvaluator`` so the outer
-        loop stops before the next round.
+        For goal rounds: consume report, run assessment, manage lifecycle.
+        For normal rounds: detect promise tag.
         """
+        if self._is_goal_round and self._goal_manager is not None:
+            await self._do_goal_after_iteration(ctx)
+            return
+
         if not self.completion_promise:
             return
         content = self._extract_output(ctx)
@@ -198,7 +363,393 @@ class TaskCompletionRail(DeepAgentRail):
         )
         self._notify_evaluator(ctx, matched)
 
-    # -- private helpers --
+    # ================================================================
+    # Goal lifecycle (integrated from former GoalCompletionDriver)
+    # ================================================================
+
+    def _do_goal_before_iteration(
+        self, ctx: AgentCallbackContext,
+    ) -> None:
+        """Validate goal and replace query with <goal_task> XML."""
+        run_context = self._get_run_context(ctx)
+        goal_id = run_context.get("goal_id")
+        revision = run_context.get("revision")
+        session_id = run_context.get("session_id", "default")
+
+        manager = self._goal_manager
+        if manager is None:
+            return
+        store = manager.get_store(session_id)
+        record = store.load()
+
+        if not self._validate_goal_state(record, goal_id, revision):
+            self._is_goal_round = False
+            self._current_attempt_messages = []
+            return
+
+        self._is_goal_round = True
+        self._current_goal_id = goal_id
+        self._current_session_id = session_id
+
+        # DeepAgent increments attempt_count before it starts the task-loop
+        # round.  Rails only consume that committed generation.
+        self._current_revision = record.revision
+
+        if self._goal_report_sink is not None:
+            self._goal_report_sink.begin_attempt(
+                session_id=record.session_id,
+                goal_id=record.goal_id,
+                revision=record.revision,
+                attempt_index=record.attempt_count,
+            )
+
+        from openjiuwen.harness.prompts.sections.goal import (
+            build_goal_task_query,
+        )
+
+        self._current_attempt_messages = []
+        inputs = ctx.inputs
+        if hasattr(inputs, "query"):
+            inputs.query = build_goal_task_query(record, self._goal_language)
+
+    async def _do_goal_after_iteration(
+        self, ctx: AgentCallbackContext,
+    ) -> None:
+        """Consume the goal report and run assessment."""
+        run_context = self._get_run_context(ctx)
+        session_id = run_context.get("session_id", "default")
+
+        manager = self._goal_manager
+        if manager is None:
+            return
+        store = manager.get_store(session_id)
+        record = store.load()
+
+        if not self._validate_goal_state(
+            record,
+            self._current_goal_id,
+            self._current_revision,
+            allow_paused=True,
+        ):
+            logger.info(
+                "[GoalLifecycle] Goal state invalid after iteration, "
+                "discarding results"
+            )
+            return
+
+        agent_report = (
+            self._goal_report_sink.consume()
+            if self._goal_report_sink is not None
+            else None
+        )
+        transcript_response = await self._maybe_invoke_transcript_assessor(
+            record, agent_report, ctx,
+        )
+        if self._goal_evaluator is None:
+            logger.warning("[GoalLifecycle] Goal evaluator unavailable")
+            return
+
+        assessment = self._goal_evaluator.assess(
+            record=record,
+            agent_report=agent_report,
+            transcript_response=transcript_response,
+        )
+
+        await manager.apply_assessment(
+            goal_id=str(self._current_goal_id),
+            revision=int(self._current_revision),
+            assessment=assessment,
+        )
+
+    async def _maybe_invoke_transcript_assessor(
+        self,
+        record: GoalRecord,
+        agent_report: Optional[GoalAssessment],
+        ctx: AgentCallbackContext,
+    ) -> Optional[str]:
+        """Invoke transcript assessment only when the configured strategy needs it."""
+        from openjiuwen.harness.goal.schema import GoalAssessmentStatus, GoalStopStrategy
+
+        if self._goal_evaluator is None:
+            return None
+
+        strategy = self._goal_evaluator.strategy
+        if strategy is GoalStopStrategy.AGENT_REPORT:
+            return None
+        if strategy is GoalStopStrategy.TRANSCRIPT:
+            return await self._invoke_transcript_assessor(record, ctx)
+
+        should_invoke = agent_report is None
+        if agent_report is not None:
+            should_invoke = agent_report.status in (
+                GoalAssessmentStatus.COMPLETE,
+                GoalAssessmentStatus.BLOCKED,
+            )
+            if not should_invoke:
+                try:
+                    should_invoke = bool(self._goal_evaluator.should_spot_check(record))
+                except Exception:
+                    should_invoke = False
+        if not should_invoke:
+            return None
+
+        return await self._invoke_transcript_assessor(record, ctx)
+
+    async def _invoke_transcript_assessor(
+        self,
+        record: GoalRecord,
+        ctx: AgentCallbackContext,
+    ) -> Optional[str]:
+        """Run a no-tool LLM call that judges the goal attempt transcript."""
+        from openjiuwen.core.foundation.llm import SystemMessage, UserMessage
+        from openjiuwen.harness.prompts.sections.goal import (
+            TRANSCRIPT_ASSESSOR_SYSTEM,
+            build_goal_current_instruction,
+            build_transcript_assessor_prompt,
+        )
+
+        model = self._resolve_transcript_model(ctx)
+        if model is None:
+            logger.warning(
+                "[GoalLifecycle] Transcript assessor skipped: model unavailable"
+            )
+            return None
+
+        language = self._goal_language
+        system_prompt = TRANSCRIPT_ASSESSOR_SYSTEM.get(
+            language, TRANSCRIPT_ASSESSOR_SYSTEM["cn"],
+        )
+        user_prompt = build_transcript_assessor_prompt(
+            record.objective,
+            build_goal_current_instruction(record, language),
+            self._extract_attempt_context(ctx),
+            language,
+        )
+        try:
+            response = await model.invoke(
+                [
+                    SystemMessage(content=system_prompt),
+                    UserMessage(content=user_prompt),
+                ],
+                tools=[],
+                temperature=0.0,
+                top_p=1.0,
+            )
+        except TypeError:
+            # Some custom model objects accept invoke() without sampling kwargs.
+            try:
+                response = await model.invoke(
+                    [
+                        SystemMessage(content=system_prompt),
+                        UserMessage(content=user_prompt),
+                    ],
+                    tools=[],
+                )
+            except Exception:
+                logger.exception(
+                    "[GoalLifecycle] Transcript assessor invocation failed"
+                )
+                return None
+        except Exception:
+            logger.exception("[GoalLifecycle] Transcript assessor invocation failed")
+            return None
+
+        content = getattr(response, "content", None)
+        return content if isinstance(content, str) else str(content or "")
+
+    @staticmethod
+    def _resolve_transcript_model(ctx: AgentCallbackContext) -> Optional[Any]:
+        """Resolve the model used for isolated transcript assessment."""
+        agent = ctx.agent
+        deep_config = getattr(agent, "deep_config", None)
+        model = getattr(deep_config, "model", None)
+        if model is not None:
+            return model
+
+        react_agent = getattr(agent, "react_agent", None)
+        react_config = getattr(react_agent, "config", None)
+        model_client_config = getattr(react_config, "model_client_config", None)
+        model_config = getattr(react_config, "model_config_obj", None)
+        if model_client_config is None or model_config is None:
+            return None
+
+        from openjiuwen.core.foundation.llm import Model
+
+        try:
+            return Model(model_client_config, model_config)
+        except Exception:
+            logger.exception("[GoalLifecycle] Failed to create transcript model")
+            return None
+
+    # -- validation / extraction helpers --
+
+    @staticmethod
+    def _validate_goal_state(
+        record: Optional[GoalRecord],
+        expected_goal_id: Optional[str],
+        expected_revision: Optional[int],
+        *,
+        allow_paused: bool = False,
+    ) -> bool:
+        from openjiuwen.harness.goal.schema import GoalStatus
+
+        if record is None:
+            return False
+        allowed = {GoalStatus.ACTIVE}
+        if allow_paused:
+            allowed.add(GoalStatus.PAUSED)
+        if record.status not in allowed:
+            return False
+        if expected_goal_id is not None and record.goal_id != expected_goal_id:
+            return False
+        if expected_revision is not None and record.revision != expected_revision:
+            return False
+        return True
+
+    @staticmethod
+    def _get_run_kind(ctx: AgentCallbackContext) -> Optional[str]:
+        inputs = ctx.inputs
+        run_kind = getattr(inputs, "run_kind", None)
+        if run_kind is not None:
+            return str(run_kind.value) if hasattr(run_kind, "value") else str(run_kind)
+        metadata = getattr(inputs, "metadata", None)
+        if isinstance(metadata, dict):
+            return metadata.get("run_kind")
+        return None
+
+    @staticmethod
+    def _get_run_context(ctx: AgentCallbackContext) -> Dict[str, Any]:
+        inputs = ctx.inputs
+        run_context = getattr(inputs, "run_context", None)
+        if isinstance(run_context, dict):
+            result = dict(run_context)
+            extra = result.pop("extra", None)
+            if isinstance(extra, dict):
+                result.update(extra)
+            return result
+        if run_context is not None and hasattr(run_context, "__dict__"):
+            result = dict(vars(run_context))
+            extra = result.pop("extra", None)
+            if isinstance(extra, dict):
+                result.update(extra)
+            return result
+        metadata = getattr(inputs, "metadata", None)
+        if isinstance(metadata, dict):
+            return metadata.get("run_context", {})
+        return {}
+
+    @staticmethod
+    def _extract_usage(ctx: AgentCallbackContext) -> Optional[Dict[str, int]]:
+        """Extract per-call token usage.
+
+        ``after_model_call`` receives ``ModelCallInputs`` whose ``response`` is
+        the ``AssistantMessage`` carrying ``usage_metadata`` (fields:
+        ``input_tokens`` / ``output_tokens`` / ``total_tokens`` /
+        ``cache_tokens``).  Map it onto the GoalRecord ``TokenUsage`` shape
+        (which uses ``cached_input_tokens``).  Falls back to the legacy
+        ``result["usage"]`` dict for other input shapes.
+        """
+        inputs = ctx.inputs
+
+        response = getattr(inputs, "response", None)
+        usage_meta = getattr(response, "usage_metadata", None)
+        if usage_meta is not None:
+            get = (
+                usage_meta.get
+                if isinstance(usage_meta, dict)
+                else lambda key, default=0: getattr(usage_meta, key, default)
+            )
+            input_tokens = int(get("input_tokens", 0) or 0)
+            output_tokens = int(get("output_tokens", 0) or 0)
+            cached = int(get("cache_tokens", 0) or 0)
+            if input_tokens or output_tokens or cached:
+                return {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cached_input_tokens": cached,
+                }
+
+        result = getattr(inputs, "result", None)
+        if isinstance(result, dict):
+            return result.get("usage")
+        return None
+
+    def _extract_attempt_context(
+        self, ctx: AgentCallbackContext,
+    ) -> str:
+        """Serialize the current attempt's model context for assessment."""
+        if self._current_attempt_messages:
+            return self._format_context_messages(self._current_attempt_messages)
+
+        context = getattr(ctx, "context", None)
+        messages_getter = getattr(context, "get_messages", None)
+        if not callable(messages_getter):
+            return ""
+        try:
+            messages = messages_getter(with_history=False)
+        except TypeError:
+            messages = messages_getter()
+        return self._format_context_messages(messages)
+
+    def _capture_attempt_model_context(
+        self, ctx: AgentCallbackContext,
+    ) -> None:
+        """Keep the latest actual LLM request/response for goal assessment."""
+        inputs = ctx.inputs
+        messages = getattr(inputs, "messages", None)
+        if not isinstance(messages, list):
+            return
+
+        captured = list(messages)
+        response = getattr(inputs, "response", None)
+        if response is not None:
+            captured.append(response)
+        self._current_attempt_messages = captured
+
+    @classmethod
+    def _format_context_messages(cls, messages: Any) -> str:
+        if not isinstance(messages, list):
+            return ""
+        lines: List[str] = []
+        for index, message in enumerate(messages, start=1):
+            data = cls._message_to_assessment_dict(message)
+            if not data:
+                continue
+            lines.append(
+                f"[{index}] "
+                + json.dumps(data, ensure_ascii=False, default=str)
+            )
+        text = "\n".join(lines)
+        if len(text) <= _ATTEMPT_CONTEXT_MAX_CHARS:
+            return text
+        # Keep the tail (latest model window) for assessment relevance.
+        omitted = len(text) - _ATTEMPT_CONTEXT_MAX_CHARS
+        return (
+            f"...[truncated {omitted} earlier chars]...\n"
+            + text[-_ATTEMPT_CONTEXT_MAX_CHARS:]
+        )
+
+    @staticmethod
+    def _message_to_assessment_dict(message: Any) -> Dict[str, Any]:
+        if isinstance(message, dict):
+            return dict(message)
+
+        dump = getattr(message, "model_dump", None)
+        if callable(dump):
+            data = dump()
+            return data if isinstance(data, dict) else {}
+
+        if hasattr(message, "__dict__"):
+            data = {
+                key: value
+                for key, value in vars(message).items()
+                if value is not None and value != ""
+            }
+            return data if isinstance(data.get("role"), str) else {}
+
+        return {}
+
+    # -- private helpers (promise detection) --
 
     def _notify_evaluator(
         self, ctx: AgentCallbackContext, text: str,

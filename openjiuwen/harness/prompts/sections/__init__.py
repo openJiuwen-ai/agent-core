@@ -31,3 +31,4 @@ class SectionName:
     SKILL_CREATION_NUDGE = "skill_creation_nudge"
     TEAM_SKILL_CREATION_GUIDANCE = "team_skill_creation_guidance"
     TEAM_SKILL_CREATION_NUDGE = "team_skill_creation_nudge"
+    GOAL_PROTOCOL = "goal_protocol"
