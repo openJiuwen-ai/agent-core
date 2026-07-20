@@ -92,13 +92,17 @@ class SessionModelContext(ModelContext):
                 "properties": {
                     "offload_handle": {
                         "description": "A unique identifier or file path pointing to the offloaded content. "
-                                       "Accepts either a UUID string (e.g., 'abc123-def456') for memory-based storage.",
+                                       "Accepts either a UUID string (e.g., 'abc123-def456') for memory-based storage, "
+                                       "a QA block handle (e.g., 'qa_001'), or a file path for filesystem storage.",
                         "type": "string",
                     },
                     "offload_type": {
                         "description": "The storage backend used when the content was offloaded. Must be one of: "
                                        "'in_memory': Content was stored in in-memory cache. "
-                                       "Requires offload_handle to be a UUID or key string.",
+                                       "Requires offload_handle to be a UUID or key string. "
+                                       "'filesystem': Content was offloaded to persistent file storage. "
+                                       "Requires offload_handle to be a file path or handle string. "
+                                       "Use the exact type value shown in the [OFFLOAD] marker or QA block catalog.",
                         "type": "string",
                     },
                 },
@@ -543,6 +547,9 @@ class SessionModelContext(ModelContext):
         @tool(card=self._reloader_tool_card)
         async def reload_original_context_messages(offload_handle: str, offload_type: str) -> str:
             reloaded_messages = await self._offload_message_buffer.reload(offload_handle, offload_type)
+            if not reloaded_messages:
+                fallback_type = "filesystem" if offload_type == "in_memory" else "in_memory"
+                reloaded_messages = await self._offload_message_buffer.reload(offload_handle, fallback_type)
             if not reloaded_messages:
                 return f"Failed to reload messages with offload_handle={offload_handle} and offload_type={offload_type}"
             return ContextUtils.format_reloaded_messages(offload_handle, reloaded_messages)
