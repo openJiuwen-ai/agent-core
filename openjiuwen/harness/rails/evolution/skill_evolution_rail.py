@@ -37,11 +37,7 @@ from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimi
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
     GENERATE_RECORDS_LLM_POLICY,
 )
-from openjiuwen.agent_evolving.prompts.sections import (
-    EVOLUTION_FUZZY_REVIEW_RULES_CN,
-    EVOLUTION_FUZZY_REVIEW_RULES_EN,
-    build_evolution_protocol_section,
-)
+from openjiuwen.agent_evolving.prompts.sections import build_evolution_protocol_section
 from openjiuwen.agent_evolving.signal import (
     EvolutionSignal,
     SignalDetector,
@@ -86,13 +82,16 @@ from openjiuwen.harness.rails.subagent import SubagentRail
 _MAX_PROCESSED_SIGNAL_KEYS = 500
 _DEFAULT_EVOLUTION_TOTAL_TIMEOUT_SECS = 600.0
 _NON_REGULAR_SKILL_KINDS = {"team-skill", "swarm-skill"}
+_AUTO_SKILL_EVOLUTION_FOLLOW_UP_TAG = "auto_skill_evolution_review_followup"
 _FUZZY_REVIEW_PROMPT_CN = (
-    "请检查近期上下文是否有可复用 Skill 经验线索；这不是处理本次错误的请求。\n"
-    f"{EVOLUTION_FUZZY_REVIEW_RULES_CN}"
+    "这是运行时自动插入的 Skill 演进 follow-up，不是用户的新需求。\n"
+    "请参考“技能演进自检”规则，基于当前可见上下文和刚完成的执行过程，判断是否暴露了已使用 Skill 需要更新。"
 )
 _FUZZY_REVIEW_PROMPT_EN = (
-    "Check recent context for reusable Skill lessons; this is not a request to handle the current error.\n"
-    f"{EVOLUTION_FUZZY_REVIEW_RULES_EN}"
+    "This is a runtime-inserted Skill evolution follow-up; it is not a new user request.\n"
+    'Refer to the "Skill Evolution Self-Check" rules and, based on the visible context\n'
+    "and the recently completed execution,\n"
+    "decide whether it exposed that a used Skill needs updating."
 )
 _EVAL_SNIPPET_MAX_MESSAGES = 20
 _EVAL_SNIPPET_POST_PRESENT_MAX_CHARS = 800
@@ -164,7 +163,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         *,
         llm: Model,
         model: str,
-        auto_scan: bool = True,
+        auto_scan: Optional[bool] = None,
+        signal_trigger: Optional[bool] = None,
         auto_save: bool = False,
         review_runtime: EvolutionReviewRuntime,
         language: str = "cn",
@@ -182,7 +182,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         evolution_trigger: EvolutionTriggerPoint = EvolutionTriggerPoint.AFTER_INVOKE,
         async_evolution: bool = True,
         max_concurrent_evolution: int = 1,
-        fuzzy_review: bool = True,
+        fuzzy_review: Optional[bool] = None,
+        review_trigger: Optional[bool] = None,
         fuzzy_review_interval: int = 5,
     ) -> None:
         """Initialize SkillEvolutionRail.
@@ -191,7 +192,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             skills_dir: Directory or list of directories containing skill definitions
             llm: LLM client for experience generation
             model: Model name for experience generation
-            auto_scan: Whether to auto-detect evolution signals
+            signal_trigger: Whether to trigger deterministic signal-based evolution.
+            auto_scan: Backward-compatible alias for signal_trigger.
             auto_save: Whether to auto-save generated experiences
             review_runtime: Externally-managed active-review runtime. Required. Shared instances enable
                 cross-rail review state and keep rail-local orchestration stateless.
@@ -201,7 +203,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             sharing_config: Optional cross-user sharing settings (enabled, hub_path, etc.)
             disabled_skills: Optional deny-list of skill names excluded from self-optimization.
                 Supports a single skill name (str) or multiple names (list[str]).
-            fuzzy_review: Whether to periodically enqueue active fuzzy review self-check follow-ups.
+            review_trigger: Whether to periodically enqueue review self-check follow-ups.
+            fuzzy_review: Backward-compatible alias for review_trigger.
             fuzzy_review_interval: Number of non-follow-up task iterations between fuzzy review checks.
         """
         if eval_interval < 1:
@@ -234,7 +237,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             evaluate_llm_policy=evaluate_llm_policy,
             simplify_llm_policy=simplify_llm_policy,
         )
-        self._auto_scan = auto_scan
+        self._signal_trigger = bool(signal_trigger if signal_trigger is not None else auto_scan or False)
         self._processed_signal_keys: set[tuple[str, ...]] = set()
         self._auto_save = auto_save
         # Optimizer path (for _auto_save=False): memory-staged records until user approval
@@ -254,7 +257,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         self._evolution_tools: list[Any] = []
         self._agent: Any | None = None
         self._skip_auto_scan_this_invoke = False
-        self._fuzzy_review = bool(fuzzy_review)
+        self._review_trigger = bool(review_trigger if review_trigger is not None else fuzzy_review or False)
         self._fuzzy_review_interval = fuzzy_review_interval
         self._fuzzy_review_non_followup_count = 0
         self._review_agent_max_iterations = review_agent_max_iterations
@@ -547,7 +550,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         trigger_point,
         ctx: AgentCallbackContext,
     ) -> bool:
-        if not self._auto_scan:
+        if not self._signal_trigger:
             return False
         if self._is_background_run(ctx):
             return False
@@ -562,7 +565,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
 
     async def _on_after_task_iteration(self, ctx: AgentCallbackContext) -> None:
         """Periodically enqueue a fuzzy active-review self-check follow-up."""
-        if not self._fuzzy_review:
+        if not self._review_trigger:
             return
         if self._task_iteration_followup_blocked(ctx):
             return
@@ -628,7 +631,12 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
 
     def _build_fuzzy_review_followup_prompt(self) -> str:
         """Build the active fuzzy review self-check follow-up prompt."""
-        return _FUZZY_REVIEW_PROMPT_EN if self._language == "en" else _FUZZY_REVIEW_PROMPT_CN
+        prompt = _FUZZY_REVIEW_PROMPT_EN if self._language == "en" else _FUZZY_REVIEW_PROMPT_CN
+        return self._wrap_fuzzy_review_followup_prompt(prompt)
+
+    @staticmethod
+    def _wrap_fuzzy_review_followup_prompt(prompt: str) -> str:
+        return f"<{_AUTO_SKILL_EVOLUTION_FOLLOW_UP_TAG}>\n{prompt}\n</{_AUTO_SKILL_EVOLUTION_FOLLOW_UP_TAG}>"
 
     @property
     def auto_save(self) -> bool:
@@ -672,21 +680,39 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
 
     @property
     def auto_scan(self) -> bool:
-        """Whether auto-scan is enabled."""
-        return self._auto_scan
+        """Backward-compatible alias for signal_trigger."""
+        return self._signal_trigger
 
     @auto_scan.setter
     def auto_scan(self, value: bool) -> None:
-        self._auto_scan = bool(value)
+        self._signal_trigger = bool(value)
+
+    @property
+    def signal_trigger(self) -> bool:
+        """Whether deterministic signal-based evolution is enabled."""
+        return self._signal_trigger
+
+    @signal_trigger.setter
+    def signal_trigger(self, value: bool) -> None:
+        self._signal_trigger = bool(value)
 
     @property
     def fuzzy_review(self) -> bool:
-        """Whether active fuzzy-review follow-ups are enabled."""
-        return self._fuzzy_review
+        """Backward-compatible alias for review_trigger."""
+        return self._review_trigger
 
     @fuzzy_review.setter
     def fuzzy_review(self, value: bool) -> None:
-        self._fuzzy_review = bool(value)
+        self._review_trigger = bool(value)
+
+    @property
+    def review_trigger(self) -> bool:
+        """Whether review self-check follow-ups are enabled."""
+        return self._review_trigger
+
+    @review_trigger.setter
+    def review_trigger(self, value: bool) -> None:
+        self._review_trigger = bool(value)
 
     def set_sys_operation(self, sys_operation: SysOperation) -> None:
         """Set sys_operation for both EvolutionRail and EvolutionStore."""
@@ -711,7 +737,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             builder = getattr(getattr(ctx, "agent", None), "system_prompt_builder", None)
         if builder is not None:
             language = str(getattr(builder, "language", "") or self._language)
-            builder.add_section(build_evolution_protocol_section(language, fuzzy_review=self._fuzzy_review))
+            builder.add_section(build_evolution_protocol_section(language))
 
     async def record_presented_experiences(
         self,
@@ -814,8 +840,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         In async mode: ctx=None, snapshot contains data captured by _snapshot_for_evolution.
         In sync mode: ctx is active, snapshot=None (backward-compatible).
         """
-        logger.info("[SkillEvolutionRail] run_evolution called, auto_scan=%s", self._auto_scan)
-        if not self._auto_scan:
+        logger.info("[SkillEvolutionRail] run_evolution called, auto_scan=%s", self._signal_trigger)
+        if not self._signal_trigger:
             logger.info("[SkillEvolutionRail] auto_scan disabled, skipping")
             return
 
@@ -1671,7 +1697,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         ctx: AgentCallbackContext,
     ) -> Optional[dict]:
         """Phase 1: Collect messages while ctx is alive."""
-        if not self._auto_scan:
+        if not self._signal_trigger:
             return None
 
         snapshot = await super()._snapshot_for_evolution(trajectory, ctx)
