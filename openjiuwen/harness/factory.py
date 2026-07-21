@@ -23,6 +23,9 @@ from openjiuwen.harness.rails import (
     SubagentRail,
     TaskPlanningRail,
 )
+from openjiuwen.harness.agent_ras import AgentRASConfig
+from openjiuwen.harness.agent_ras.factory import build_agent_ras_rail
+from openjiuwen.harness.rails.agent_ras_rail import AgentRASRail
 from openjiuwen.harness.schema.agent_mode import AgentMode
 from openjiuwen.harness.schema.config import (
     AudioModelConfig,
@@ -34,6 +37,33 @@ from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.prompts.sections.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
 from openjiuwen.harness.tools.web_tools import is_free_search_enabled
+
+
+def _normalize_agent_ras_config(
+    agent_ras: AgentRASConfig | dict[str, Any] | bool | None,
+) -> AgentRASConfig | None:
+    """Normalize create_deep_agent ``agent_ras`` into a typed config or None.
+
+    - ``None`` / ``True``: default enabled Agent RAS
+    - ``False``: disable
+    - ``dict``: advanced YAML/SDK overrides via ``AgentRASConfig.model_validate``
+    - ``AgentRASConfig``: use as-is
+    """
+    if agent_ras is False:
+        return None
+    if agent_ras is None or agent_ras is True:
+        return AgentRASConfig(enabled=True)
+    if isinstance(agent_ras, AgentRASConfig):
+        return agent_ras if agent_ras.enabled else None
+    if isinstance(agent_ras, dict):
+        raw = dict(agent_ras)
+        raw.setdefault("enabled", True)
+        config = AgentRASConfig.model_validate(raw)
+        return config if config.enabled else None
+    raise TypeError(
+        "agent_ras must be AgentRASConfig, dict, bool, or None, "
+        f"got {type(agent_ras).__name__}"
+    )
 
 
 def _is_disabled_free_search_tool(tool: Tool | ToolCard) -> bool:
@@ -156,6 +186,7 @@ def create_deep_agent(
     audio_model_config: Optional[AudioModelConfig] = None,
     enable_read_image_multimodal: bool = True,
     enable_task_planning: bool = False,
+    agent_ras: AgentRASConfig | dict[str, Any] | bool | None = None,
     restrict_to_work_dir: bool = True,
     allowed_paths: Optional[List[str]] = None,
     default_mode: AgentMode = AgentMode.AUTO,
@@ -199,6 +230,11 @@ def create_deep_agent(
             as native multimodal input. When False, read_file returns image
             metadata only and suggests using vision tools if available.
         enable_task_planning: Enable task_planning_rail.
+        agent_ras: Agent RAS configuration. ``None``/``True`` enables defaults;
+            ``False`` disables; ``dict`` / ``AgentRASConfig`` provide advanced
+            overrides. When enabled, AgentRASRail mounts automatically unless
+            the caller already provided it in ``rails``. HITL uses the host
+            ``ask_user_question`` tool when registered.
         restrict_to_work_dir: If True, restrict file access to workspace directory.
             If False, allow access to any path including system root.
         allowed_paths: Optional list of directory paths allowed by the
@@ -337,12 +373,17 @@ def create_deep_agent(
             enabled_skills=skills,
         )
 
+    def _make_agent_ras_rail() -> Any:
+        return build_agent_ras_rail(normalized_agent_ras, card.name, model=model)
+
+    normalized_agent_ras = _normalize_agent_ras_config(agent_ras)
     default_rails = [
         (SecurityRail, True, lambda: SecurityRail()),
         (TaskPlanningRail, enable_task_planning, lambda: TaskPlanningRail()),
         (SkillUseRail, bool(skills), _make_skill_rail),
         (SessionRail, bool(subagents) and enable_async_subagent, lambda: SessionRail()),
         (SubagentRail, bool(subagents) and not enable_async_subagent, lambda: SubagentRail()),
+        (AgentRASRail, normalized_agent_ras is not None, _make_agent_ras_rail),
     ]
     for rail_cls, should_add, make_rail in default_rails:
         if should_add and not _already_provided(rail_cls):

@@ -268,6 +268,7 @@ class AgentCallbackContext:
     _force_finish_request: Optional[ForceFinishRequest] = field(
         default=None, init=False, repr=False
     )
+    _abort_stream: bool = field(default=False, init=False, repr=False)
     _steering_queue: Optional[asyncio.Queue] = field(
         default=None, init=False, repr=False
     )
@@ -325,6 +326,25 @@ class AgentCallbackContext:
     def has_force_finish_request(self) -> bool:
         """Check whether a force-finish request is pending."""
         return self._force_finish_request is not None
+
+    def request_abort_stream(self) -> None:
+        """Request the in-flight ``llm.stream`` loop to break after the current chunk.
+
+        Used by reliability (and similar) to stop generation on anomaly hit
+        without waiting for the provider stream to end naturally.
+        """
+        self._abort_stream = True
+
+    def consume_abort_stream(self) -> bool:
+        """Read and clear a pending stream-abort request."""
+        flag = self._abort_stream
+        self._abort_stream = False
+        return flag
+
+    @property
+    def has_abort_stream_request(self) -> bool:
+        """Check whether a stream-abort request is pending."""
+        return self._abort_stream
 
     # ---- Steering runtime control ----
 
