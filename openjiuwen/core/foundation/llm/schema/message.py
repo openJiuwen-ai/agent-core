@@ -69,6 +69,7 @@ class AssistantMessage(BaseMessage):
                         'arguments': tc['function'].get('arguments', ''),
                         'index': tc.get('index'),
                         'response_item_id': tc.get('response_item_id'),
+                        'extra_content': tc.get('extra_content'),
                     }
                     converted_tool_calls.append(converted_tc)
                 else:
@@ -99,6 +100,8 @@ class AssistantMessage(BaseMessage):
                 })
                 if call.response_item_id is not None:
                     tool_calls[-1]["response_item_id"] = call.response_item_id
+                if call.extra_content is not None:
+                    tool_calls[-1]["extra_content"] = call.extra_content
             result["tool_calls"] = tool_calls
         if self.usage_metadata is not None:
             result["usage_metadata"] = self.usage_metadata.model_dump(**kwargs)
