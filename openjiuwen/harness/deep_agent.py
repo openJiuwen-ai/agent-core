@@ -2846,10 +2846,6 @@ class DeepAgent(BaseAgent):
 
         async with self._interaction_control_lock:
             if is_resume_input:
-                if request.mode is not None:
-                    raise ValueError(
-                        "InteractiveInput does not support an input dispatch mode"
-                    )
                 self._event_manager.push_user(
                     RoundWorkItem.user(
                         request_id=request.request_id,

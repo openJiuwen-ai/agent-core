@@ -63,24 +63,29 @@ async def test_send_input_preserves_text_validation_and_queueing(
     assert work.reset_loop is True
 
 
+@pytest.mark.parametrize("mode", list(InputDispatchMode))
 @pytest.mark.asyncio
-async def test_send_input_rejects_dispatch_mode_for_interrupt_resume() -> None:
+async def test_send_input_ignores_dispatch_mode_for_interrupt_resume(
+    mode: InputDispatchMode,
+) -> None:
     agent = DeepAgent(AgentCard(name="deep", description="test"))
     agent._interaction_started = True
     interactive_input = InteractiveInput()
     interactive_input.update("call_123", {"action": "allow_once"})
 
-    with pytest.raises(
-        ValueError,
-        match="InteractiveInput does not support an input dispatch mode",
-    ):
-        await agent.send_input(
-            SendInputRequest(
-                request_id="resume-1",
-                inputs={"query": interactive_input},
-                mode=InputDispatchMode.FOLLOW_UP,
-            )
+    await agent.send_input(
+        SendInputRequest(
+            request_id="resume-1",
+            inputs={"query": interactive_input},
+            mode=mode,
         )
+    )
+
+    work = agent._event_manager.next_work()
+    assert work is not None
+    assert isinstance(work.query, InteractiveInput)
+    assert work.query.user_inputs == interactive_input.user_inputs
+    assert work.reset_loop is False
 
 
 @pytest.mark.asyncio
