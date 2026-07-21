@@ -63,6 +63,7 @@ class SessionSpawnExecutor(TaskExecutor):
         subagent_type = meta.get("subagent_type", "general-purpose")
         query = meta.get("task_description", "")
         cid = meta.get("sub_session_id", "")
+        browser_capabilities = meta.get("browser_capabilities")
 
         logger.info(
             f"[SessionSpawnExecutor] Executing task_id={task_id}, "
@@ -70,7 +71,14 @@ class SessionSpawnExecutor(TaskExecutor):
         )
 
         try:
-            subagent = self._deep_agent.create_subagent(subagent_type, cid)
+            if subagent_type == "browser_agent":
+                subagent = self._deep_agent.create_subagent(
+                    subagent_type,
+                    cid,
+                    browser_capabilities=list(browser_capabilities or []),
+                )
+            else:
+                subagent = self._deep_agent.create_subagent(subagent_type, cid)
             result = await subagent.invoke({"query": query, "conversation_id": cid})
             payload = result.get("output", "") if isinstance(result, dict) else str(result)
 
