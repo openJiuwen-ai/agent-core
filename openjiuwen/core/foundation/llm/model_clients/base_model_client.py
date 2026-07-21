@@ -258,6 +258,8 @@ class BaseModelClient(ABC):
                             "arguments": tc.arguments
                         }
                     })
+                    if tc.extra_content is not None:
+                        tool_calls_list[-1]["extra_content"] = tc.extra_content
                 msg_dict["tool_calls"] = tool_calls_list
 
                 if msg.reasoning_content:
