@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import traceback
 from dataclasses import dataclass
 from typing import List, Any, Union, Optional, Tuple, Dict
 from pydantic import BaseModel
@@ -732,7 +733,11 @@ class AbilityManager:
                     continue
 
                 error_msg = f"Ability execution error: {str(result)}"
-                logger.error(error_msg)
+                # `result` is a captured exception from gather()/sequential fallback,
+                # not the active exception, so logger.exception() would record nothing.
+                # Format its own traceback explicitly instead.
+                tb = "".join(traceback.format_exception(type(result), result, result.__traceback__))
+                logger.error("%s\n%s", error_msg, tb)
 
                 # Trigger TOOL_CALL_ERROR event for observability
                 # This only affects telemetry collection, not business logic
@@ -945,7 +950,7 @@ class AbilityManager:
                 result = await tool.invoke(tool_args, session=session)
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
-                logger.error(error_msg)
+                logger.exception(error_msg)
                 raise self._build_execution_error(
                     tool_call,
                     error_msg,
@@ -964,7 +969,7 @@ class AbilityManager:
                 return await self._run_workflow(workflow, workflow_id, tool_args, session, tool_call)
             except Exception as e:
                 error_msg = f"Workflow execution error: {str(e)}"
-                logger.error(error_msg)
+                logger.exception(error_msg)
                 raise self._build_execution_error(tool_call, error_msg) from e
         elif tool_name in self._agents:
             # Execute sub-Agent - get instance from Runner.resource_mgr
@@ -1003,7 +1008,7 @@ class AbilityManager:
                 result = await Runner.run_agent(agent=agent, inputs=tool_args, session=child_session)
             except Exception as e:
                 error_msg = f"Agent execution error: {str(e)}"
-                logger.error(error_msg)
+                logger.exception(error_msg)
                 raise self._build_execution_error(
                     tool_call,
                     error_msg,
@@ -1027,7 +1032,7 @@ class AbilityManager:
                 result = await tool.invoke(tool_args, session=session)
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
-                logger.error(error_msg)
+                logger.exception(error_msg)
                 raise self._build_execution_error(
                     tool_call,
                     error_msg,
