@@ -555,7 +555,17 @@ class OpenAIModelClient(BaseModelClient):
 
     @staticmethod
     def _extract_reasoning_content(msg_or_delta: Any) -> Optional[str]:
-        return getattr(msg_or_delta, 'reasoning_content', None)
+        # Providers disagree on the field name for reasoning/thinking output:
+        # DeepSeek-style APIs use ``reasoning_content`` while Ollama's
+        # OpenAI-compatible endpoint uses ``reasoning``. Fall back to the
+        # latter so thinking output is not silently dropped. Only accept
+        # string values so absent attributes (or non-string sentinels) do
+        # not leak a non-str into the AssistantMessage.
+        for attr in ('reasoning_content', 'reasoning'):
+            value = getattr(msg_or_delta, attr, None)
+            if isinstance(value, str):
+                return value
+        return None
 
     async def _parse_response(
             self,
