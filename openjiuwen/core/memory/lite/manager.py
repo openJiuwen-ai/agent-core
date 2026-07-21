@@ -86,7 +86,8 @@ if TYPE_CHECKING:
 from .types import MemoryChunk
 from .internal import (
     ensure_dir, list_memory_files, build_file_entry, chunk_markdown,
-    hash_text, build_fts_query, bm25_rank_to_score, is_memory_path
+    hash_text, build_fts_query, bm25_rank_to_score, is_memory_path,
+    split_query_tokens
 )
 from .embeddings import EmbeddingProvider, create_embedding_provider
 from .config import MemorySettings
@@ -270,6 +271,11 @@ class MemoryIndexManager:
         self.sys_operation: Optional["SysOperation"] = None
         self.llm: Optional[Any] = None
 
+        # Set by _ensure_schema when it drops a legacy (non-trigram) chunks_fts;
+        # initialize() uses it to force a full reindex (incremental sync skips
+        # unchanged files and would leave the new trigram table empty).
+        self._fts_migrated: bool = False
+
     @classmethod
     async def get(
             cls,
@@ -329,7 +335,13 @@ class MemoryIndexManager:
         # 或重启时新旧进程短暂并存）。若它们同时检测到配置变化并清表重建，会抢 memory.db
         # 的写锁互相覆盖、写一半失败，留下空的 1024 维表。用跨进程文件锁把"检测→清表→
         # 全量重建"串行化：持锁者重建，其他进程等锁后重新检测，发现已重建好就直接跳过。
-        if await self._needs_rebuild_on_config_change():
+        #
+        # 同一套锁也串行化 FTS trigram 迁移的 force reindex：迁移 DROP+重建了 chunks_fts
+        # 但 files/chunks 行未动，增量 sync 会因 hash 未变而跳过重建、留下空 FTS 表，
+        # 必须 force=True 全量重写。
+        config_rebuild = await self._needs_rebuild_on_config_change()
+        fts_migration = self._needs_fts_migration_reindex()
+        if config_rebuild or fts_migration:
             lock_path = self._rebuild_lock_path()
             async with _REBUILD_INTRAPROCESS_LOCK:  # 本进程内串行（多个 manager 实例同进程时）
                 with _cross_process_lock(lock_path, timeout=120.0):
@@ -339,6 +351,9 @@ class MemoryIndexManager:
                         # 在锁内一次跑完整个重建，释放锁时表已是完整的新索引，避免别的
                         # 进程看到半成品（chunks 有数据但向量表空）。
                         await self.sync(reason="initial")
+                    elif self._needs_fts_migration_reindex():
+                        # config 没变，必须 force=True 才会重写未变文件，填满 trigram 表。
+                        await self.sync(reason="fts_migration", force=True)
         else:
             await self.sync(reason="initial")
 
@@ -381,6 +396,28 @@ class MemoryIndexManager:
         except Exception as e:
             logger.warning(f"Failed to check meta for rebuild: {e}")
             return False
+
+    def _needs_fts_migration_reindex(self) -> bool:
+        """True if this instance just migrated chunks_fts to trigram and the reindex hasn't run yet.
+
+        ``_fts_migrated`` is set by _ensure_schema when it dropped a legacy table;
+        the meta ``ftsTrigram`` check makes this converge across restarts — once a
+        process force-reindexes and writes ``ftsTrigram``, later processes skip.
+        """
+        if not self._fts_migrated:
+            return False
+        try:
+            cursor = self.db.execute(
+                "SELECT value FROM meta WHERE key = ?", (META_KEY,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return True
+            meta = json.loads(row["value"])
+            return not meta.get("ftsTrigram", False)
+        except Exception as e:
+            logger.warning(f"Failed to check meta for FTS migration reindex: {e}")
+            return True
 
     def _clear_index_tables(self) -> None:
         """Clear index tables for rebuild, keeping the DB file.
@@ -543,6 +580,22 @@ class MemoryIndexManager:
 
         if self.fts_enabled:
             try:
+                # Migrate legacy chunks_fts (default unicode61, which doesn't
+                # segment CJK and so never matched Chinese queries) to trigram.
+                # DROP first so the CREATE below rebuilds an empty trigram table;
+                # initialize() then forces a full reindex to repopulate it
+                # (see _needs_fts_migration_reindex).
+                if self._fts_table_is_legacy():
+                    logger.info(
+                        f"Migrating {FTS_TABLE} from unicode61 to trigram tokenizer: "
+                        f"{self.db_path}"
+                    )
+                    try:
+                        self.db.execute(f"DROP TABLE IF EXISTS {FTS_TABLE}")
+                    except sqlite3.Error as e:
+                        logger.debug(f"Skipping legacy {FTS_TABLE} drop: {e}")
+                    self._fts_migrated = True
+
                 self.db.execute(f"""
                     CREATE VIRTUAL TABLE IF NOT EXISTS {FTS_TABLE} USING fts5(
                         id UNINDEXED,
@@ -550,7 +603,8 @@ class MemoryIndexManager:
                         source UNINDEXED,
                         text,
                         content='',
-                        contentless_delete=1
+                        contentless_delete=1,
+                        tokenize='trigram'
                     )
                 """)
                 self.fts_available = True
@@ -560,6 +614,27 @@ class MemoryIndexManager:
                 logger.warning(f"Failed to create FTS5 table: {e}")
 
         self.db.commit()
+
+    def _fts_table_is_legacy(self) -> bool:
+        """True if chunks_fts exists but was created without tokenize=trigram.
+
+        Such a table (the old unicode61 default) must be dropped so _ensure_schema
+        rebuilds it under trigram. A missing table is not legacy.
+        """
+        if not self.db:
+            return False
+        try:
+            cursor = self.db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name = ?",
+                (FTS_TABLE,)
+            )
+            row = cursor.fetchone()
+        except sqlite3.Error as e:
+            logger.debug(f"Failed to introspect {FTS_TABLE} schema: {e}")
+            return False
+        if not row or not row["sql"]:
+            return False
+        return "tokenize=trigram" not in row["sql"].lower()
 
     async def _initialize_provider(self) -> None:
         """Initialize embedding provider."""
@@ -856,6 +931,9 @@ class MemoryIndexManager:
             "providerKey": self.provider_key,
             "chunkTokens": self.settings.chunking.get("tokens"),
             "chunkOverlap": self.settings.chunking.get("overlap"),
+            # Marks chunks_fts as migrated to trigram; initialize() skips the
+            # migration force-reindex once this is recorded.
+            "ftsTrigram": self.fts_available,
         }
         if self.vector_available and self.vector_dims:
             meta["vectorDims"] = self.vector_dims
@@ -1164,10 +1242,14 @@ class MemoryIndexManager:
             ][:max_results]
 
         # if not embedding, Skip the rerank and use the raw keyword scores directly instead.
+        # Pure-keyword BM25 scores run low (trigram multi-token queries commonly land
+        # 0.1-0.3 after the rank->score transform), so apply a lower floor here than
+        # the hybrid path — otherwise real hits get filtered out and search returns [].
         if not has_vector:
+            keyword_min_score = self.settings.query.get("keywordMinScore", 0.1)
             return [
                 r for r in keyword_results
-                if r["score"] >= min_score
+                if r["score"] >= keyword_min_score
             ][:max_results]
 
         merged = _merge_hybrid_results(
@@ -1306,62 +1388,104 @@ class MemoryIndexManager:
             query: str,
             limit: int
     ) -> List[Dict[str, Any]]:
-        """Search using keyword matching (FTS5)."""
-        if not self.fts_available:
+        """Search via trigram FTS (long tokens) with a LIKE fallback for short tokens.
+
+        Long tokens (>=3 chars) hit the BM25-ranked FTS index; short tokens
+        (<3 chars, e.g. 2-char Chinese) can't match trigram and fall back to
+        ``LIKE '%tok%'`` on ``chunks.text``. Results are merged by chunk id —
+        FTS scores win on conflict, LIKE hits get a fixed score.
+        """
+        long_tokens, short_tokens = split_query_tokens(query)
+        if not long_tokens and not short_tokens:
             return []
 
-        try:
-            fts_query = build_fts_query(query)
-            if not fts_query:
-                return []
+        source_filter, source_params = self._build_source_filter()
 
-            source_filter, source_params = self._build_source_filter()
+        cursor = self.db.execute(f"""
+            SELECT rowid, id, path, source, start_line, end_line, text
+            FROM chunks
+            WHERE {source_filter}
+        """, source_params)
 
-            cursor = self.db.execute(f"""
-                SELECT rowid, id, path, source, start_line, end_line, text
-                FROM chunks
-                WHERE {source_filter}
-            """, source_params)
+        chunk_map = {}
+        for row in cursor.fetchall():
+            chunk_map[row["rowid"]] = {
+                "id": str(row["id"]),
+                "path": str(row["path"]),
+                "source": str(row["source"]),
+                "start_line": int(row["start_line"]),
+                "end_line": int(row["end_line"]),
+                "snippet": str(row["text"][:SNIPPET_MAX_CHARS])
+            }
 
-            chunk_map = {}
-            for row in cursor.fetchall():
-                chunk_map[row["rowid"]] = {
-                    "id": str(row["id"]),
-                    "path": str(row["path"]),
-                    "source": str(row["source"]),
-                    "start_line": int(row["start_line"]),
-                    "end_line": int(row["end_line"]),
-                    "snippet": str(row["text"][:SNIPPET_MAX_CHARS])
-                }
-
-            if not chunk_map:
-                return []
-
-            rows = self.db.execute(f"""
-                SELECT 
-                    rowid,
-                    rank
-                FROM {FTS_TABLE}
-                WHERE {FTS_TABLE} MATCH ?
-                ORDER BY rank
-                LIMIT ?
-            """, (fts_query, limit))
-
-            results = []
-            for row in rows:
-                rowid = row["rowid"]
-                if rowid in chunk_map:
-                    score = bm25_rank_to_score(float(row["rank"]))
-
-                    result = chunk_map[rowid].copy()
-                    result["score"] = float(score)
-                    results.append(result)
-
-            return results
-
-        except Exception as e:
-            logger.debug(f"Keyword search failed: {e}")
+        if not chunk_map:
             return []
+
+        results: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        # FTS path for long tokens. Restrict to rowids that still exist in chunks
+        # (via chunk_map): chunks_fts is contentless and may carry orphan rowids
+        # left by prior reindexes where chunks was cleared but the FTS postings
+        # weren't fully purged. Without this filter, high-scoring orphans fill
+        # the LIMIT before the real hits surface — returning [].
+        fts_query = build_fts_query(query) if long_tokens else ""
+        if self.fts_available and fts_query:
+            try:
+                rowid_placeholders = ",".join("?" * len(chunk_map))
+                rows = self.db.execute(f"""
+                    SELECT
+                        rowid,
+                        rank
+                    FROM {FTS_TABLE}
+                    WHERE {FTS_TABLE} MATCH ? AND rowid IN ({rowid_placeholders})
+                    ORDER BY rank
+                    LIMIT ?
+                """, (fts_query, *list(chunk_map.keys()), limit))
+                for row in rows:
+                    rowid = row["rowid"]
+                    if rowid in chunk_map:
+                        score = bm25_rank_to_score(float(row["rank"]))
+                        result = chunk_map[rowid].copy()
+                        result["score"] = float(score)
+                        if result["id"] not in seen_ids:
+                            seen_ids.add(result["id"])
+                            results.append(result)
+            except Exception as e:
+                logger.debug(f"Keyword FTS search failed: {e}")
+
+        # LIKE fallback for short tokens: trigram can't match <3 chars, so scan
+        # chunks.text. No index, but memory chunk volume is small enough to scan.
+        if short_tokens:
+            like_clauses = " OR ".join("text LIKE ? ESCAPE '\\'" for _ in short_tokens)
+            like_params = [self._escape_like(t) for t in short_tokens]
+            try:
+                like_rows = self.db.execute(f"""
+                    SELECT rowid
+                    FROM chunks
+                    WHERE {source_filter} AND ({like_clauses})
+                    LIMIT ?
+                """, (*source_params, *like_params, limit))
+                # Fixed score clears min_score (0.3) but stays below FTS/BM25 hits.
+                like_score = 0.5
+                for row in like_rows:
+                    rowid = row["rowid"]
+                    if rowid in chunk_map:
+                        result = chunk_map[rowid].copy()
+                        result["score"] = float(like_score)
+                        if result["id"] not in seen_ids:
+                            seen_ids.add(result["id"])
+                            results.append(result)
+            except Exception as e:
+                logger.debug(f"Keyword LIKE fallback failed: {e}")
+
+        return results
+
+    @staticmethod
+    def _escape_like(token: str) -> str:
+        """Escape a token into a LIKE ``%token%`` pattern (literal %, _, \\)."""
+        escaped = token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return f"%{escaped}%"
 
     def _build_source_filter(self) -> tuple:
         """Build SQL filter for enabled sources.
