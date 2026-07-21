@@ -37,6 +37,7 @@ def load_claude_sdk() -> Any:
 def build_claude_options(
     *,
     cwd: str | None,
+    add_dirs: tuple[str, ...],
     env: dict[str, str],
     inject_mcp: bool,
     mcp_server_name: str,
@@ -71,6 +72,7 @@ def build_claude_options(
             }
         }
     return sdk.ClaudeAgentOptions(
+        add_dirs=list(add_dirs),
         cwd=cwd,
         env=env,
         mcp_servers=mcp_servers,

@@ -34,7 +34,7 @@ Section layout (aligned with ``prompt_design.md``):
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from openjiuwen.agent_teams.prompts.loader import load_template
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -154,6 +154,7 @@ def build_team_role_section(
     role: TeamRole,
     member_name: str | None,
     teammate_mode: str = "build_mode",
+    workspace_prompt_variant: Literal["native", "external"] = "native",
     language: str = "cn",
 ) -> PromptSection:
     """Build the role + member name section.
@@ -165,6 +166,9 @@ def build_team_role_section(
             (``"plan_mode"`` or ``"build_mode"``). For LEADER, rendered
             as a description of how teammates execute; for TEAMMATE,
             rendered as the member's own execution mode.
+        workspace_prompt_variant: Workspace wording variant. Native teammates
+            receive the ``.team`` mount instructions; external CLI teammates
+            receive path-based shared workspace instructions.
         language: Prompt language ('cn' or 'en').
 
     Returns:
@@ -172,7 +176,12 @@ def build_team_role_section(
         heading, with the member name appended as a leading line when set.
     """
     labels = _labels_for(language)
-    policy_name = "leader_policy" if role == TeamRole.LEADER else "teammate_policy"
+    if role == TeamRole.LEADER:
+        policy_name = "leader_policy"
+    elif workspace_prompt_variant == "external":
+        policy_name = "teammate_policy_external"
+    else:
+        policy_name = "teammate_policy"
     role_text = load_template(policy_name, language).content.strip()
 
     member_line = f"{labels['member_name_line']}: {member_name}\n\n" if member_name else ""
@@ -427,12 +436,14 @@ def build_team_info_section(
             read/write team-shared files from its own workspace.
         team_workspace_path: Absolute path of the team shared
             workspace on disk.  Purely informational; appended as a
-            nested bullet when ``team_workspace_mount`` is provided.
+            nested bullet when ``team_workspace_mount`` is provided, or
+            as a standalone workspace bullet when only the absolute path
+            is available.
         language: Prompt language.
 
     Returns:
         PromptSection listing team_name, display_name, goal and (when
-        configured) the shared workspace mount, or ``None`` when no
+        configured) the shared workspace mount/path, or ``None`` when no
         usable fields are present.
     """
     labels = _labels_for(language)
@@ -440,7 +451,8 @@ def build_team_info_section(
     display_name = team_info.get("display_name") if team_info else None
     desc = team_info.get("desc") if team_info else None
     mount = team_workspace_mount.strip() if team_workspace_mount else ""
-    if not any([team_name, display_name, desc, mount]):
+    path = team_workspace_path.strip() if team_workspace_path else ""
+    if not any([team_name, display_name, desc, mount, path]):
         return None
 
     lines = [labels["info_heading"], ""]
@@ -453,8 +465,11 @@ def build_team_info_section(
     if mount:
         lines.append(f"- {labels['team_workspace']}: `{mount}`")
         lines.append(f"  - {labels['team_workspace_purpose']}")
-        if team_workspace_path:
-            lines.append(f"  - {labels['team_workspace_abs']}: `{team_workspace_path}`")
+        if path:
+            lines.append(f"  - {labels['team_workspace_abs']}: `{path}`")
+    elif path:
+        lines.append(f"- {labels['team_workspace']}: `{path}`")
+        lines.append(f"  - {labels['team_workspace_purpose']}")
     body = "\n".join(lines) + "\n"
     return PromptSection(
         name=TeamSectionName.INFO,
@@ -658,6 +673,7 @@ def build_team_static_sections(
     hitt_enabled: bool = False,
     expose_human_agents_to_teammates: bool = False,
     include_attachment_notice: bool = False,
+    workspace_prompt_variant: Literal["native", "external"] = "native",
 ) -> list[PromptSection]:
     """Build the never-changing team sections for one member.
 
@@ -688,10 +704,11 @@ def build_team_static_sections(
             HITT variant (and, via the caller, the ``[human]`` roster tag).
         include_attachment_notice: When True, append the prompt-attachment
             notice (team state delivered as ``<prompt-attachment>`` at the
-            message tail). In-process DeepAgent members pass True; external CLI
-            members have no attachment channel and leave it False. The inbound
-            tag notice is always appended — every member reads inbound messages
-            and events as ``<team-inbound>`` / ``<team-event>`` XML.
+            message tail). The inbound tag notice is always appended — every
+            member reads inbound messages and events as ``<team-inbound>`` /
+            ``<team-event>`` XML.
+        workspace_prompt_variant: Workspace wording variant forwarded to the
+            teammate role policy section.
 
     Returns:
         The non-None sections, unsorted (the caller orders by priority).
@@ -701,6 +718,7 @@ def build_team_static_sections(
             role=role,
             member_name=member_name,
             teammate_mode=teammate_mode,
+            workspace_prompt_variant=workspace_prompt_variant,
             language=language,
         ),
         build_team_hitt_section(
@@ -742,9 +760,10 @@ def build_team_static_sections(
     sections = [section for section in builders if section is not None]
     # Every team member — in-process or external CLI — receives inbound messages
     # and framework events as <team-inbound> / <team-event> XML, so the inbound
-    # tag notice is always included. The attachment notice is in-process only:
-    # external CLI members have no PromptAttachmentManager (they pull team state
-    # via MCP tools), so it is gated behind include_attachment_notice.
+    # tag notice is always included. The attachment notice is gated by caller:
+    # native members receive prompt attachments from PromptAttachmentManager,
+    # while external members receive the same rendered blocks through their
+    # runtime input channel.
     if include_attachment_notice:
         sections.append(build_team_attachment_notice_section(language=language))
     sections.append(build_team_inbound_tags_section(language=language))
@@ -764,6 +783,7 @@ def build_team_member_system_prompt(
     language: str = "cn",
     hitt_enabled: bool = False,
     expose_human_agents_to_teammates: bool = False,
+    workspace_prompt_variant: Literal["native", "external"] = "native",
 ) -> str:
     """Render a member's team sections into a single standalone system prompt.
 
@@ -790,6 +810,8 @@ def build_team_member_system_prompt(
         language=language,
         hitt_enabled=hitt_enabled,
         expose_human_agents_to_teammates=expose_human_agents_to_teammates,
+        include_attachment_notice=True,
+        workspace_prompt_variant=workspace_prompt_variant,
     )
     builder = SystemPromptBuilder(language=language)
     for section in sections:

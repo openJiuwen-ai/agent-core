@@ -277,6 +277,8 @@ async def test_build_cli_runtime_uses_claude_sdk_backend(fake_claude_sdk):
     try:
         runtime = await spawn_mod.build_cli_runtime(
             _ctx(),
+            cwd="/project",
+            add_dirs=("/team-workspace",),
             mcp_server_command=("openjiuwen-team-mcp",),
             extra_env={"EXTRA": "1"},
             system_prompt="persona",
@@ -286,6 +288,8 @@ async def test_build_cli_runtime_uses_claude_sdk_backend(fake_claude_sdk):
 
     assert isinstance(runtime, ClaudeSdkRuntime)
     options = runtime._options
+    assert options.cwd == "/project"
+    assert options.add_dirs == ["/team-workspace"]
     assert options.permission_mode == "bypassPermissions"
     assert options.system_prompt == {"type": "preset", "append": "persona"}
     assert options.env["EXTRA"] == "1"
@@ -375,6 +379,7 @@ def test_claude_sdk_missing_dependency_reports_clear_error(monkeypatch):
         spawn_mod.build_claude_runtime(
             member_name="claude-1",
             cwd=None,
+            add_dirs=(),
             env={"OPENJIUWEN_TEAM_JOIN": "{}"},
             inject_mcp=True,
             mcp_server_name="openjiuwen-team",

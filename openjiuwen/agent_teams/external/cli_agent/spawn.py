@@ -29,8 +29,10 @@ from openjiuwen.agent_teams.external.cli_agent.transport.local import LocalTrans
 from openjiuwen.agent_teams.external.descriptor import TeamJoinDescriptor
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase, ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
+from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
+from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
@@ -65,6 +67,16 @@ def descriptor_from_context(ctx: TeamRuntimeContext) -> TeamJoinDescriptor:
     if transport.backend == "pyzmq" and transport.direct_addr:
         transport_updates["direct_addr"] = "tcp://127.0.0.1:*"
     transport = transport.model_copy(update=transport_updates)
+
+    workspace_config = None
+    if team_spec.workspace:
+        candidate_workspace = TeamWorkspaceConfig.model_validate(team_spec.workspace)
+        if candidate_workspace.enabled:
+            workspace_config = candidate_workspace
+    workspace_path = None
+    if workspace_config is not None:
+        workspace_path = workspace_config.root_path or str(team_home(team_name) / "team-workspace")
+
     return TeamJoinDescriptor(
         session_id=session_id,
         team_name=team_name,
@@ -83,6 +95,8 @@ def descriptor_from_context(ctx: TeamRuntimeContext) -> TeamJoinDescriptor:
         teammate_mode=teammate_mode,
         db_config=ctx.db_config,
         transport_config=transport,
+        workspace_config=workspace_config,
+        workspace_path=workspace_path,
     )
 
 
@@ -148,6 +162,7 @@ async def build_cli_runtime(
     ctx: TeamRuntimeContext,
     *,
     cwd: str | None = None,
+    add_dirs: tuple[str, ...] = (),
     command_override: tuple[str, ...] | None = None,
     inject_mcp: bool = True,
     mcp_server_name: str = "openjiuwen-team",
@@ -169,6 +184,7 @@ async def build_cli_runtime(
     Args:
         ctx: Member runtime context; ``ctx.cli_agent`` names the backend.
         cwd: Working directory for the subprocess(es).
+        add_dirs: Extra directories exposed to SDK backends that support them.
         command_override: Optional full launch argv (e.g. an absolute path).
         inject_mcp: When True (default), configure the backend to register the
             team MCP server so the CLI gets the team collaboration tools.
@@ -214,6 +230,7 @@ async def build_cli_runtime(
         return build_claude_runtime(
             member_name=ctx.member_name or "",
             cwd=cwd,
+            add_dirs=add_dirs,
             env=env,
             inject_mcp=inject_mcp,
             mcp_server_name=mcp_server_name,

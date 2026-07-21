@@ -59,6 +59,10 @@ class AsyncTasksListTool(TeamTool):
                 description=t("async_tasks_list"),
             )
         )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {},
+        }
         self._parent_agent = parent_agent
         self._t = t
         self._language = language
