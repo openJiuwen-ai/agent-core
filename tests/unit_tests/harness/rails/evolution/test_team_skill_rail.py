@@ -551,7 +551,7 @@ def test_team_rail_init_registers_review_agent_with_default_max_iterations(tmp_p
         for config in agent.deep_config.subagents
         if getattr(config.agent_card, "name", None) == "evolution_reviewer"
     )
-    assert getattr(configured, "max_iterations", None) == 20
+    assert getattr(configured, "max_iterations", None) == 40
 
 
 def test_team_rail_init_registers_review_agent_with_custom_max_iterations(tmp_path):
