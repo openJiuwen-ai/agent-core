@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass
 from typing import List, Any, Union, Optional, Tuple, Dict
 from pydantic import BaseModel
@@ -76,6 +77,11 @@ class AbilityManager:
     - Execute ability calls (get instances from ResourceManager)
     """
 
+    # File operations targeting the same path form one ordered execution lane.
+    # This prevents read-modify-write tools such as edit_file from losing
+    # updates when an LLM emits multiple calls for one file in a single turn.
+    _FILE_PATH_TOOL_NAMES = frozenset({"read_file", "write_file", "edit_file"})
+
     def __init__(self, owner_id: Optional[str] = None):
         self._tools: Dict[str, ToolCard] = {}
         self._workflows: Dict[str, WorkflowCard] = {}
@@ -128,6 +134,123 @@ class AbilityManager:
                 f"execute ability input tool call is invalid, {type(tool_call)}!"
             )
         return tool_calls
+
+    @classmethod
+    def _tool_execution_resource_key(cls, tool_call: ToolCall) -> Optional[str]:
+        """Return the resource that must be accessed in tool-call order.
+
+        Calls without a known resource return ``None`` and remain independently
+        parallel.  File paths are normalized so equivalent spellings (case on
+        Windows, ``..`` components, and slash variants) share one lane.
+        """
+        if tool_call.name not in cls._FILE_PATH_TOOL_NAMES:
+            return None
+
+        try:
+            arguments, _ = cls._parse_tool_arguments_with_repair(tool_call.arguments)
+        except ValueError:
+            # Let normal tool execution surface the malformed-arguments error.
+            return None
+        if not isinstance(arguments, dict):
+            return None
+
+        file_path = arguments.get("file_path")
+        if not isinstance(file_path, str) or not file_path.strip():
+            return None
+
+        normalized_path = os.path.normcase(
+            os.path.abspath(os.path.expanduser(file_path.strip()))
+        )
+        return f"file:{normalized_path}"
+
+    @staticmethod
+    def _is_parallel_safe_tool_call(
+            tool_call: ToolCall,
+            tool_cards: Optional[Dict[str, ToolCard]] = None,
+    ) -> bool:
+        """Return whether a tool call may share an execution batch."""
+        if tool_cards is None:
+            return True
+        tool_card = tool_cards.get(tool_call.name)
+        if tool_card is None:
+            return True
+        return bool(getattr(tool_card, "parallel_safe", True))
+
+    @classmethod
+    async def _execute_resource_ordered_tool_tasks(
+            cls,
+            tool_calls: List[ToolCall],
+            tasks: List[Any],
+    ) -> List[Any]:
+        """Run independent resources concurrently and each resource in order."""
+        lanes: Dict[str, List[int]] = {}
+        for index, single_tool_call in enumerate(tool_calls):
+            resource_key = cls._tool_execution_resource_key(single_tool_call)
+            # Unknown resources get a private lane and retain full parallelism.
+            lane_key = resource_key or f"independent:{index}"
+            lanes.setdefault(lane_key, []).append(index)
+
+        async def _run_lane(indices: List[int]) -> List[Tuple[int, Any]]:
+            lane_results: List[Tuple[int, Any]] = []
+            for index in indices:
+                try:
+                    result = await tasks[index]
+                except BaseException as exc:  # Match gather(return_exceptions=True).
+                    result = exc
+                lane_results.append((index, result))
+            return lane_results
+
+        lane_results = await asyncio.gather(
+            *(_run_lane(indices) for indices in lanes.values()),
+        )
+        results: List[Any] = [None] * len(tasks)
+        for lane_result in lane_results:
+            for index, result in lane_result:
+                results[index] = result
+        return results
+
+    @classmethod
+    async def _execute_parallel_tool_tasks(
+            cls,
+            tool_calls: List[ToolCall],
+            tasks: List[Any],
+            tool_cards: Optional[Dict[str, ToolCard]] = None,
+    ) -> List[Any]:
+        """Run parallel-safe tools concurrently and non-safe tools exclusively.
+
+        Parallel-safe batches still preserve the existing per-resource ordering
+        rule, so repeated file operations for one path execute in model-emitted
+        order while different resources can overlap. A non-parallel-safe tool
+        forms a single-call barrier: earlier safe calls finish before it starts,
+        and later calls wait until it completes.
+        """
+        results: List[Any] = [None] * len(tasks)
+        batch_call_indices: List[int] = []
+
+        async def _flush_parallel_batch() -> None:
+            if not batch_call_indices:
+                return
+            batch_results = await cls._execute_resource_ordered_tool_tasks(
+                [tool_calls[index] for index in batch_call_indices],
+                [tasks[index] for index in batch_call_indices],
+            )
+            for index, result in zip(batch_call_indices, batch_results):
+                results[index] = result
+            batch_call_indices.clear()
+
+        for index, single_tool_call in enumerate(tool_calls):
+            if cls._is_parallel_safe_tool_call(single_tool_call, tool_cards):
+                batch_call_indices.append(index)
+                continue
+
+            await _flush_parallel_batch()
+            try:
+                results[index] = await tasks[index]
+            except BaseException as exc:  # Match gather(return_exceptions=True).
+                results[index] = exc
+
+        await _flush_parallel_batch()
+        return results
 
     @staticmethod
     def _repair_tool_arguments_json(arguments: str) -> Optional[str]:
@@ -698,8 +821,14 @@ class AbilityManager:
 
         results = []
         if parallel_tool_calls:
-            # Execute all tool calls in parallel.
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Preserve parallelism across independent resources while executing
+            # calls for the same file in model-emitted order. Tools marked as
+            # non-parallel-safe execute as exclusive barriers within the turn.
+            results = await self._execute_parallel_tool_tasks(
+                tool_calls,
+                tasks,
+                tool_cards=self._tools,
+            )
         else:
             # Execute all tool calls in sequence.
             for task in tasks:

@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import base64
+import hashlib
 import html
 import io
 import json
@@ -12,7 +13,9 @@ import shlex
 import sys
 import asyncio
 import shutil
+import threading
 import time
+import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, Any, AsyncIterator, List, Optional, Tuple
@@ -25,8 +28,23 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
-from openjiuwen.harness.prompts.tools import build_tool_card
+from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
+
+
+_FILE_EDIT_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+_FILE_EDIT_LOCKS_GUARD = threading.Lock()
+
+
+def _get_file_edit_lock(file_path: str) -> asyncio.Lock:
+    """Return the process-wide edit transaction lock for a normalized path."""
+    key = os.path.normcase(os.path.abspath(file_path))
+    with _FILE_EDIT_LOCKS_GUARD:
+        lock = _FILE_EDIT_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _FILE_EDIT_LOCKS[key] = lock
+        return lock
 
 # Device files that would block indefinitely or produce infinite output.
 _BLOCKED_DEVICE_PATHS: frozenset = frozenset({
@@ -53,12 +71,72 @@ class _FileReadState:
     size_bytes: int
     is_partial: bool  # True if only a subset of lines was read (offset > 0 or explicit limit)
     content: Optional[str] = None
+    # Cumulative coverage tracking for WriteFileTool's full-file overwrite guard.
+    # total_lines: total line count of the file, counted once on first read and cached
+    #              (re-counted after the file is detected stale).
+    # read_ranges: list of 1-indexed inclusive [start, end] line intervals that have
+    #              been read, merged on each read. When the union of ranges covers
+    #              [1, total_lines], the file is "logically fully read" even via
+    #              partial reads — at which point write_file is allowed.
+    total_lines: int = 0
+    read_ranges: list = None  # list of (start, end) tuples; None == not yet tracking
+
+
+@dataclass(frozen=True)
+class _ReadStateRecord:
+    """Inputs needed to update read coverage for a file."""
+
+    mtime_ns: int
+    size_bytes: int
+    is_partial: bool
+    offset: int = 0
+    line_count: int = 0
 
 
 @dataclass
 class _RawTextState:
     content: str
     line_count: int
+
+
+def _merge_range(ranges: list, new: tuple) -> list:
+    """Merge a (start, end) interval into a sorted, non-overlapping list."""
+    ranges = list(ranges)
+    ranges.append(new)
+    ranges.sort()
+    merged: list = []
+    for start, end in ranges:
+        if not merged:
+            merged.append([start, end])
+            continue
+        last = merged[-1]
+        if start <= last[1] + 1:  # overlapping or adjacent
+            last[1] = max(last[1], end)
+        else:
+            merged.append([start, end])
+    return [(s, e) for s, e in merged]
+
+
+def _ranges_cover(ranges: list, lo: int, hi: int) -> bool:
+    """True when the union of `ranges` fully covers [lo, hi]."""
+    covered_to = lo - 1
+    for start, end in sorted(ranges):
+        if start > covered_to + 1:
+            return False  # gap before this range
+        covered_to = max(covered_to, end)
+        if covered_to >= hi:
+            return True
+    return covered_to >= hi
+
+
+def _first_unread_offset(ranges: list) -> int:
+    """Return the 0-based offset of the first unread line, given read ranges."""
+    covered_to = 0
+    for start, end in sorted(ranges or []):
+        if start > covered_to + 1:
+            return covered_to
+        covered_to = max(covered_to, end)
+    return covered_to
 
 
 # Module-level read state registry.
@@ -303,7 +381,15 @@ class ReadFileTool(Tool):
         agent_id: Optional[str] = None,
         enable_image_multimodal: bool = True,
     ):
-        super().__init__(build_tool_card("read_file", "ReadFileTool", language, agent_id=agent_id))
+        super().__init__(
+            build_tool_card(
+                "read_file",
+                "ReadFileTool",
+                language,
+                agent_id=agent_id,
+                options=ToolCardBuildOptions(parallel_safe=True),
+            )
+        )
         self.operation = operation
         self.enable_image_multimodal = enable_image_multimodal
 
@@ -455,27 +541,70 @@ class ReadFileTool(Tool):
     async def _record_read_state(
             self,
             file_path: str,
-            mtime_ns: int,
-            size_bytes: int,
-            is_partial: bool,
+            record: _ReadStateRecord,
     ) -> None:
-        if not mtime_ns or not self._is_text_read_for_edit(file_path):
+        if not record.mtime_ns or not self._is_text_read_for_edit(file_path):
             return
 
-        # A read is partial only when the caller explicitly windowed it
-        # (offset > 0 or a user-supplied limit). Do NOT re-derive partialness by
-        # comparing line counts from two different read paths: the rendered path
-        # is capped at MAX_LINES_TO_READ and skips CRLF normalization, so that
-        # comparison falsely marks files over the cap — or CRLF files with a
-        # trailing newline — as partial, leaving them permanently uneditable
-        # (read -> edit rejected -> read -> ... loop). The full-file snapshot
-        # below is still captured for external-modification detection.
-        raw_state = None if is_partial else await self._read_raw_text_for_edit_state(file_path)
+        # ---- Cumulative coverage tracking for WriteFileTool ----
+        # WriteFileTool performs a full-file overwrite, so it must refuse to write
+        # unless the agent has actually seen every line of the file. A single
+        # partial read (offset/limit) only saw a window, so historically it was
+        # rejected — but large files can ONLY be read in partial windows
+        # (MAX_LINES_TO_READ / MAX_TOKENS), which made them permanently
+        # unwritable (read partial -> write rejected -> read partial -> loop).
+        #
+        # Resolution: track the union of every line interval the agent has read.
+        # When the union covers [1, total_lines], the file is "logically fully
+        # read" and write is allowed. Intervals merge across reads, so an agent
+        # that reads head -> tail -> middle ends up fully covered once the gap is
+        # filled — yet any still-unread range keeps the overwrite blocked,
+        # preventing data loss from overwriting unseen content.
+        existing = _FILE_READ_REGISTRY.get(file_path)
+
+        # Stale check: if the file changed externally since the last read, the
+        # accumulated coverage is no longer valid — reset and recompute total.
+        if existing is not None and (
+            existing.mtime_ns != record.mtime_ns or existing.size_bytes != record.size_bytes
+        ):
+            existing = None
+
+        # total_lines: cached on first read (or after a stale reset). Counting
+        # reads the whole file once (content stays out of the agent context);
+        # the cost is paid only once per file per modification.
+        total_lines = existing.total_lines if (existing and existing.total_lines) else 0
+        raw_state = None
+        if not total_lines:
+            raw_state = await self._read_raw_text_for_edit_state(file_path)
+            total_lines = raw_state.line_count if raw_state else 0
+
+        # Map this read to a 1-indexed closed interval [start_line, end_line].
+        # offset is 0-based lines-skipped, so the first line returned is line
+        # (offset + 1); end is offset + line_count. A zero-row read (e.g. offset
+        # past EOF) is skipped — it contributes no coverage.
+        start_line = max(1, record.offset + 1)
+        end_line = start_line + max(0, record.line_count) - 1
+        read_ranges = list(existing.read_ranges) if (existing and existing.read_ranges) else []
+        if record.line_count > 0:
+            read_ranges = _merge_range(read_ranges, (start_line, end_line))
+
+        is_logically_complete = (
+            total_lines > 0 and _ranges_cover(read_ranges, 1, total_lines)
+        )
+
+        # Full-file content snapshot for stale re-check: only keep it once the
+        # whole file has been covered (segmented reads leave content=None, so
+        # stale re-check falls back to mtime/size only — same as today).
+        if is_logically_complete and raw_state is None:
+            raw_state = await self._read_raw_text_for_edit_state(file_path)
+
         _FILE_READ_REGISTRY[file_path] = _FileReadState(
-            mtime_ns=mtime_ns,
-            size_bytes=size_bytes,
-            is_partial=is_partial,
-            content=raw_state.content if (not is_partial and raw_state) else None,
+            mtime_ns=record.mtime_ns,
+            size_bytes=record.size_bytes,
+            is_partial=record.is_partial,
+            content=raw_state.content if raw_state else None,
+            total_lines=total_lines,
+            read_ranges=read_ranges,
         )
 
     # ------------------------------------------------------------------
@@ -859,12 +988,17 @@ class ReadFileTool(Tool):
 
         line_count = len(content.splitlines()) if content else 0
 
-        # Populate read registry for EditFileTool pre-read validation.
+        # Populate read registry for EditFileTool pre-read validation and
+        # WriteFileTool cumulative coverage tracking.
         await self._record_read_state(
             file_path=file_path,
-            mtime_ns=mtime_ns,
-            size_bytes=size_bytes,
-            is_partial=user_supplied_limit or offset > 0,
+            record=_ReadStateRecord(
+                mtime_ns=mtime_ns,
+                size_bytes=size_bytes,
+                is_partial=user_supplied_limit or offset > 0,
+                offset=offset,
+                line_count=line_count,
+            ),
         )
 
         return ToolOutput(
@@ -896,7 +1030,14 @@ class WriteFileTool(Tool):
 
     def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
         super().__init__(
-            build_tool_card("write_file", "WriteFileTool", language, agent_id=agent_id))
+            build_tool_card(
+                "write_file",
+                "WriteFileTool",
+                language,
+                agent_id=agent_id,
+                options=ToolCardBuildOptions(parallel_safe=False),
+            )
+        )
         self.operation = operation
 
     @staticmethod
@@ -980,14 +1121,41 @@ class WriteFileTool(Tool):
                         )
 
                     read_state = _FILE_READ_REGISTRY.get(path)
-                    if read_state is None or read_state.is_partial:
-                        return ToolOutput(
-                            success=False,
-                            error=(
+                    # WriteFileTool overwrites the whole file, so the agent must
+                    # have seen every line first — otherwise unread content would
+                    # be lost. A single partial read only covered a window, so
+                    # require cumulative coverage of the whole file instead.
+                    # This unblocks large files (which can only be read in
+                    # partial windows) while still refusing to overwrite a file
+                    # that was only partially read.
+                    ranges = read_state.read_ranges if read_state else None
+                    is_logically_complete = (
+                        read_state is not None
+                        and read_state.total_lines > 0
+                        and ranges is not None
+                        and _ranges_cover(ranges, 1, read_state.total_lines)
+                    )
+                    if read_state is None or not is_logically_complete:
+                        if read_state is None:
+                            msg = (
                                 "File has not been read yet. "
                                 f"Call read_file on '{path}' first before writing to it."
-                            ),
-                        )
+                            )
+                        else:
+                            # Point the agent at the first unread line so it knows
+                            # exactly where to resume — this prevents a blind loop.
+                            resume_offset = _first_unread_offset(ranges)
+                            # Lines read so far = sum of interval lengths in ranges.
+                            lines_read = sum(e - s + 1 for s, e in (ranges or []))
+                            msg = (
+                                f"File has not been fully read yet. "
+                                f"You have read {lines_read} of {read_state.total_lines} lines. "
+                                f"Continue with read_file (offset={resume_offset}) "
+                                f"until the whole file is covered, then write. "
+                                f"A full-file overwrite cannot use partial reads — "
+                                f"it would lose the unread content."
+                            )
+                        return ToolOutput(success=False, error=msg)
 
                     old_content, encoding = await self._read_existing_text(path)
                     old_content_lf = old_content.replace("\r\n", "\n")
@@ -1074,7 +1242,15 @@ class EditFileTool(Tool):
                                                "'": '\u2018', '\u2018': "'", '\u2019': "'"})
 
     def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
-        super().__init__(build_tool_card("edit_file", "EditFileTool", language, agent_id=agent_id))
+        super().__init__(
+            build_tool_card(
+                "edit_file",
+                "EditFileTool",
+                language,
+                agent_id=agent_id,
+                options=ToolCardBuildOptions(parallel_safe=False),
+            )
+        )
         self.operation = operation
 
     # ------------------------------------------------------------------
@@ -1248,7 +1424,20 @@ class EditFileTool(Tool):
     # invoke
     # ------------------------------------------------------------------
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:  # noqa: C901
+    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+        """Serialize the complete read-modify-write transaction per file."""
+        file_path = inputs.get("file_path")
+        if not isinstance(file_path, str) or not file_path.strip():
+            return await self._invoke_unlocked(inputs, **kwargs)
+        try:
+            resolved_path = _resolve_tool_file_path(self.operation, file_path)
+        except ValueError:
+            return await self._invoke_unlocked(inputs, **kwargs)
+
+        async with _get_file_edit_lock(resolved_path):
+            return await self._invoke_unlocked(inputs, **kwargs)
+
+    async def _invoke_unlocked(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:  # noqa: C901
         file_path: Optional[str] = inputs.get("file_path")
         old_str: str = inputs.get("old_string", "")
         new_str: Optional[str] = inputs.get("new_string")
@@ -1438,7 +1627,10 @@ class EditFileTool(Tool):
 
         # ---- Write back ----------------------------------------------------------
         write_res = await self.operation.fs().write_file(
-            file_path, new_content, prepend_newline=False
+            file_path,
+            new_content,
+            prepend_newline=False,
+            options={"expected_content_sha256": hashlib.sha256(raw).hexdigest()},
         )
         if write_res.code != StatusCode.SUCCESS.code:
             return ToolOutput(success=False, error=f"Write failed: {write_res.message}")
@@ -1475,7 +1667,14 @@ class GlobTool(Tool):
 
     def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
         super().__init__(
-            build_tool_card("glob", "GlobTool", language, agent_id=agent_id))
+            build_tool_card(
+                "glob",
+                "GlobTool",
+                language,
+                agent_id=agent_id,
+                options=ToolCardBuildOptions(parallel_safe=True),
+            )
+        )
         self.operation = operation
 
     def _resolve_search_path(self, path: Optional[str]) -> str:
@@ -1567,7 +1766,14 @@ class ListDirTool(Tool):
 
     def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
         super().__init__(
-            build_tool_card("list_files", "ListDirTool", language, agent_id=agent_id))
+            build_tool_card(
+                "list_files",
+                "ListDirTool",
+                language,
+                agent_id=agent_id,
+                options=ToolCardBuildOptions(parallel_safe=True),
+            )
+        )
         self.operation = operation
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
@@ -1611,7 +1817,14 @@ class GrepTool(Tool):
 
     def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
         super().__init__(
-            build_tool_card("grep", "GrepTool", language, agent_id=agent_id))
+            build_tool_card(
+                "grep",
+                "GrepTool",
+                language,
+                agent_id=agent_id,
+                options=ToolCardBuildOptions(parallel_safe=True),
+            )
+        )
         self.operation = operation
 
     @staticmethod

@@ -16,7 +16,7 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.session.agent import Session
-from openjiuwen.harness.prompts.tools import build_tool_card
+from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -248,8 +248,10 @@ class SessionsSpawnTool(Tool):
                 name="sessions_spawn",
                 tool_id="sessions_spawn",
                 language=language,
-                format_args={"available_agents": available_agents} if available_agents else None,
                 agent_id=agent_id,
+                options=ToolCardBuildOptions(
+                    format_args={"available_agents": available_agents} if available_agents else None
+                ),
             )
         )
         self._parent_agent = parent_agent

@@ -18,7 +18,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.tools.base_tool import ToolOutput
-from openjiuwen.harness.prompts.tools import build_tool_card
+from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 try:
     from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
         browser_agent_log_info,
@@ -175,8 +175,8 @@ def create_task_tool(
         name="task_tool",
         tool_id="task_tool",
         language=language,
-        format_args={"available_agents": available_agents},
         agent_id=agent_id,
+        options=ToolCardBuildOptions(format_args={"available_agents": available_agents}),
     )
 
     return [TaskTool(card=card, parent_agent=parent_agent, language=language)]
