@@ -2574,6 +2574,7 @@ class DeepAgent(BaseAgent):
                     "context": copy.deepcopy(work.context),
                 }
             invoke_inputs = self._normalize_inputs(inputs)
+            is_resume_input = self._is_resume_input(invoke_inputs)
             ctx = AgentCallbackContext(
                 agent=self, inputs=invoke_inputs, session=session
             )
@@ -2581,28 +2582,35 @@ class DeepAgent(BaseAgent):
                 AgentCallbackEvent.BEFORE_INVOKE,
                 AgentCallbackEvent.AFTER_INVOKE,
             ):
-                await controller.submit_round(
-                    session,
-                    str(work.query),
-                    is_follow_up=work.is_follow_up,
-                    run_kind=invoke_inputs.run_kind,
-                    run_context=invoke_inputs.run_context,
-                    task_id=task_id,
-                )
-                timeout = (
-                    self._deep_config.completion_timeout
-                    if self._deep_config
-                    else 600.0
-                )
-                result = await controller.wait_round_completion(timeout=timeout)
+                if is_resume_input:
+                    result = await self._run_single_round_invoke(ctx, session)
+                else:
+                    await controller.submit_round(
+                        session,
+                        str(work.query),
+                        is_follow_up=work.is_follow_up,
+                        run_kind=invoke_inputs.run_kind,
+                        run_context=invoke_inputs.run_context,
+                        task_id=task_id,
+                    )
+                    timeout = (
+                        self._deep_config.completion_timeout
+                        if self._deep_config
+                        else 600.0
+                    )
+                    result = await controller.wait_round_completion(timeout=timeout)
                 await self._write_round_result_to_stream(result, session)
                 invoke_inputs.result = result
-                next_work = self._build_interaction_next_work(
-                    work=work,
-                    result=result,
-                    session=session,
-                    coordinator=coordinator,
-                    controller=controller,
+                next_work = (
+                    None
+                    if is_resume_input
+                    else self._build_interaction_next_work(
+                        work=work,
+                        result=result,
+                        session=session,
+                        coordinator=coordinator,
+                        controller=controller,
+                    )
                 )
 
             self.save_state(session)
@@ -2806,11 +2814,12 @@ class DeepAgent(BaseAgent):
                 return stream
 
     async def send_input(self, request: SendInputRequest) -> None:
-        """Dispatch user text only; does not attach or return an output stream.
+        """Dispatch user text or interrupt-resume input.
 
         Hosts that need to read output must call ``attach_output`` first (or
         already hold a stream).  Steer / follow-up requests typically skip
-        attach and let the existing consumer receive output.
+        attach and let the existing consumer receive output.  Dispatch modes
+        do not apply to ``InteractiveInput`` recovery requests.
         """
         if not self._interaction_started or self._interaction_phase is InteractionPhase.TERMINATED:
             raise RuntimeError("interaction_terminated")
@@ -2820,14 +2829,37 @@ class DeepAgent(BaseAgent):
 
     async def _send_user(self, request: SendInputRequest) -> None:
         inputs = request.inputs
-        if (
-            not isinstance(inputs, dict)
-            or not isinstance(inputs.get("query"), str)
-            or not inputs["query"].strip()
+        if not isinstance(inputs, dict):
+            raise ValueError(
+                "send_input requires inputs['query'] to be a non-empty string "
+                "or InteractiveInput"
+            )
+        query = inputs.get("query")
+        is_resume_input = isinstance(query, InteractiveInput)
+        if not is_resume_input and (
+            not isinstance(query, str) or not query.strip()
         ):
-            raise ValueError("send_input requires a non-empty inputs['query']")
+            raise ValueError(
+                "send_input requires inputs['query'] to be a non-empty string "
+                "or InteractiveInput"
+            )
 
         async with self._interaction_control_lock:
+            if is_resume_input:
+                if request.mode is not None:
+                    raise ValueError(
+                        "InteractiveInput does not support an input dispatch mode"
+                    )
+                self._event_manager.push_user(
+                    RoundWorkItem.user(
+                        request_id=request.request_id,
+                        inputs=inputs,
+                        reset_loop=False,
+                    )
+                )
+                self._notify_work()
+                return
+
             loop = self.loop_controller
             try:
                 mode = (
