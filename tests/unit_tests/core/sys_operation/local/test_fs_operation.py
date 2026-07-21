@@ -20,7 +20,10 @@ from filelock import ReadWriteLock, Timeout as FileLockTimeout
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
-from openjiuwen.core.sys_operation.local._async_read_write_lock import _ManagedReadWriteLock
+from openjiuwen.core.sys_operation.local._async_read_write_lock import (
+    HybridAsyncReadWriteLock,
+    _ManagedReadWriteLock,
+)
 from openjiuwen.core.sys_operation.local.fs_operation import FsOperation
 from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
 
@@ -1030,6 +1033,31 @@ async def test_idle_lock_cleanup_deletes_database(work_dir, monkeypatch):
 
     await ReadWriteLockManager.cleanup_expired_locks()
 
+    assert not lock_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_idle_lock_cleanup_closes_probe_before_deleting_database(rw_lock_dir, monkeypatch):
+    """Windows-compatible cleanup closes the SQLite probe before unlinking its database."""
+    lock_file = rw_lock_dir / "closed_probe_before_delete.db"
+    lock_file.touch()
+    probe_closed = False
+    original_close = HybridAsyncReadWriteLock.close
+    original_unlink = Path.unlink
+
+    async def tracked_close(lock):
+        nonlocal probe_closed
+        await original_close(lock)
+        probe_closed = True
+
+    def checked_unlink(path, *args, **kwargs):
+        assert probe_closed
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(HybridAsyncReadWriteLock, "close", tracked_close)
+    monkeypatch.setattr(Path, "unlink", checked_unlink)
+
+    assert await ReadWriteLockManager._try_delete_database(lock_file)
     assert not lock_file.exists()
 
 
