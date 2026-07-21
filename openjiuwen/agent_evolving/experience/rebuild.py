@@ -101,6 +101,14 @@ class ExperienceRebuildService:
         Skip only when archive explicitly failed (``archive_error``), so a
         prior partial failure that left the version already archived cannot
         permanently block rebuild.
+
+        Entry selection for bump/changelog (distinct from prepare's context filter):
+        - With ``record_ids``: only whitelisted IDs participate.
+        - Without ``record_ids``: use the full live log (no ``min_score`` /
+          ``skip_reason`` filtering), matching pre-whitelist behavior so that
+          ``clear_evolutions`` does not drop records that never contributed to
+          the version bump.
+
         Returns True when cleared, False when skipped.
         """
         if rebuild_context.get("archive_error") is not None:
@@ -127,19 +135,21 @@ class ExperienceRebuildService:
         self,
         rebuild_context: dict[str, Any],
     ) -> list[EvolutionRecord]:
-        """Load live log and apply the same selection rules as prepare."""
+        """Select entries for version bump and changelog.
+
+        Whitelist mode (``record_ids`` present) keeps only matching IDs.
+        Otherwise return the full live log — do not apply prepare's
+        ``min_score`` / ``skip_reason`` filters.
+        """
         skill_name = str(rebuild_context.get("skill_name") or "").strip()
-        min_score_raw = rebuild_context.get("min_score", 0.5)
-        try:
-            min_score = float(min_score_raw)
-        except (TypeError, ValueError):
-            min_score = 0.5
         record_ids = _normalize_record_ids(rebuild_context.get("record_ids"))
         evo_log = await self._store.load_evolution_log(skill_name)
-        entries = getattr(evo_log, "entries", None) or []
+        entries = list(getattr(evo_log, "entries", None) or [])
+        if not record_ids:
+            return entries
         return _filter_rebuild_records(
-            list(entries),
-            min_score=min_score,
+            entries,
+            min_score=0.0,
             record_ids=record_ids,
         )
 
@@ -173,9 +183,19 @@ class ExperienceRebuildService:
 
 
 def _normalize_record_ids(record_ids: Optional[Sequence[str]]) -> Optional[List[str]]:
-    """Deduplicate and strip IDs; empty result means no whitelist."""
+    """Deduplicate and strip IDs; empty result means no whitelist.
+
+    A bare ``str`` / ``bytes`` is treated as a single ID (not iterated as
+    characters), so accidental string inputs do not expand into a char list.
+    """
     if not record_ids:
         return None
+    if isinstance(record_ids, bytes):
+        item = record_ids.decode("utf-8", errors="replace").strip()
+        return [item] if item else None
+    if isinstance(record_ids, str):
+        item = record_ids.strip()
+        return [item] if item else None
     normalized: list[str] = []
     seen: set[str] = set()
     for raw in record_ids:

@@ -17,7 +17,10 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionRecord,
     EvolutionRecordSpec,
 )
-from openjiuwen.agent_evolving.experience.rebuild import ExperienceRebuildService
+from openjiuwen.agent_evolving.experience.rebuild import (
+    ExperienceRebuildService,
+    _normalize_record_ids,
+)
 from openjiuwen.agent_evolving.signal.base import EvolutionTarget
 
 
@@ -36,7 +39,6 @@ def _make_record(content: str, *, score: float = 0.8, skip_reason: str | None = 
             score=score,
         )
     )
-    
     record.id = f"ev_{content[:4]}"
     return record
 
@@ -505,6 +507,87 @@ async def test_complete_rebuild_whitelist_bumps_from_selected_then_clears_all(tm
     assert evo_log.entries == []
     assert evo_log.version == "1.0.1"
     assert "version: 1.0.1" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_complete_rebuild_without_whitelist_uses_low_score_and_skip_reason(tmp_path: Path):
+    """CR-001: no record_ids => bump uses full live log, not prepare min_score filters."""
+    root = tmp_path / "skills"
+    skill_dir = root / "skill-a"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nversion: 1.0.0\n---\n\n# Skill\n",
+        encoding="utf-8",
+    )
+    store = EvolutionStore(str(root))
+    high_patch = EvolutionRecord.make(
+        EvolutionRecordSpec(
+            source="execution_failure",
+            context="ctx",
+            change=EvolutionPatch(
+                section="Troubleshooting",
+                action="append",
+                content="high patch",
+                target=EvolutionTarget.BODY,
+            ),
+            score=0.8,
+        )
+    )
+    low_patch = EvolutionRecord.make(
+        EvolutionRecordSpec(
+            source="execution_failure",
+            context="ctx",
+            change=EvolutionPatch(
+                section="Troubleshooting",
+                action="append",
+                content="low patch",
+                target=EvolutionTarget.BODY,
+            ),
+            score=0.3,
+        )
+    )
+    skipped_minor = EvolutionRecord.make(
+        EvolutionRecordSpec(
+            source="user_correction",
+            context="ctx",
+            change=EvolutionPatch(
+                section="Instructions",
+                action="append",
+                content="skipped but minor",
+                target=EvolutionTarget.BODY,
+                skip_reason="duplicate",
+            ),
+            score=0.9,
+        )
+    )
+    await store.append_record("skill-a", high_patch)
+    await store.append_record("skill-a", low_patch)
+    await store.append_record("skill-a", skipped_minor)
+    rebuild_service = ExperienceRebuildService(store=store)
+
+    cleared = await rebuild_service.complete_rebuild(
+        {
+            "skill_name": "skill-a",
+            "archive_path": "evolutions.v1.0.0.json",
+            "min_score": 0.5,
+        },
+    )
+
+    assert cleared is True
+    evo_log = await store.load_full_evolution_log("skill-a")
+    assert evo_log.entries == []
+    # Full log includes Instructions (MINOR); prepare-style filters would yield PATCH only.
+    assert evo_log.version == "1.1.0"
+    assert "version: 1.1.0" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    changelog = (skill_dir / "changelog.md").read_text(encoding="utf-8")
+    assert "## [1.1.0]" in changelog
+
+
+def test_normalize_record_ids_treats_bare_string_as_single_id():
+    assert _normalize_record_ids("ev_abc") == ["ev_abc"]
+    assert _normalize_record_ids("  ") is None
+    assert _normalize_record_ids(b"ev_bytes") == ["ev_bytes"]
+    assert _normalize_record_ids(["ev_a", "ev_a", "  ", "ev_b"]) == ["ev_a", "ev_b"]
 
 
 def test_prepare_rebuild_context_injects_resolved_paths_for_external_skill(tmp_path: Path):
