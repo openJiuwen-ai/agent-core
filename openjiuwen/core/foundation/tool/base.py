@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from openjiuwen.core.common import BaseCard
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.schema import ToolInfo
 
 Input = TypeVar('Input', contravariant=True)
@@ -42,6 +43,17 @@ class _ToolMeta(ABCMeta):
                               inputs=(a, kw))
             try:
                 result = await _original_invoke(*a, **kw)
+                _success = getattr(result, "success", None)
+                if _success is True:
+                    logger.info(
+                        "[Tool] invoke success tool=%s tool_id=%s result=%s",
+                        instance.card.name, instance.card.id, result,
+                    )
+                elif _success is False:
+                    logger.warning(
+                        "[Tool] invoke failed tool=%s tool_id=%s result=%s",
+                        instance.card.name, instance.card.id, result,
+                    )
                 await _fw.trigger(ToolCallEvents.TOOL_CALL_FINISHED,
                                   tool_name=instance.card.name,
                                   tool_id=instance.card.id,
@@ -49,6 +61,10 @@ class _ToolMeta(ABCMeta):
                                   result=result)
                 return result
             except Exception as e:
+                logger.warning(
+                    "[Tool] invoke error tool=%s tool_id=%s error=%s",
+                    instance.card.name, instance.card.id, e,
+                )
                 await _fw.trigger(ToolCallEvents.TOOL_CALL_ERROR,
                                   tool_name=instance.card.name,
                                   tool_id=instance.card.id,
