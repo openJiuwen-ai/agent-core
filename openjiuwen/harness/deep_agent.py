@@ -1008,12 +1008,18 @@ class DeepAgent(BaseAgent):
         """React agent config. For testing only."""
         return self._react_agent.config
 
-    def create_subagent(self, subagent_type: str, subsession_id: str) -> "DeepAgent":
+    def create_subagent(
+        self,
+        subagent_type: str,
+        subsession_id: str,
+        browser_capabilities: Optional[List[str]] = None,
+    ) -> "DeepAgent":
         """Create a subagent instance (shared by TaskTool and SessionSpawnExecutor).
 
         Args:
             subagent_type: Type of subagent to create (e.g., "general-purpose").
             subsession_id: The session id for the subagent.
+            browser_capabilities: Task-scoped browser capability categories.
 
         Returns:
             Configured DeepAgent instance.
@@ -1102,10 +1108,10 @@ class DeepAgent(BaseAgent):
                     create_browser_agent,
                 )
 
-                return create_browser_agent(
-                    **create_kwargs,
-                    **dict(spec.factory_kwargs or {}),
-                )
+                factory_kwargs = dict(spec.factory_kwargs or {})
+                if browser_capabilities is not None:
+                    factory_kwargs["browser_capabilities"] = list(browser_capabilities)
+                return create_browser_agent(**create_kwargs, **factory_kwargs)
             if normalized_factory == "code_agent":
                 from openjiuwen.harness.subagents.code_agent import (
                     create_code_agent,

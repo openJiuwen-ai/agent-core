@@ -1242,6 +1242,35 @@ def test_create_subagent_uses_code_agent_factory(tmp_path) -> None:
     assert Path(call_kwargs["workspace"].root_path).name == "sub_session_id"
 
 
+def test_create_subagent_forwards_browser_capabilities_to_factory(tmp_path) -> None:
+    browser_spec = SubAgentConfig(
+        agent_card=AgentCard(name="browser_agent", description="browser"),
+        system_prompt="browser prompt",
+        factory_name="browser_agent",
+    )
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
+        subagents=[browser_spec],
+    )
+    factory_result = object()
+
+    with patch(
+        "openjiuwen.harness.subagents.browser_agent.create_browser_agent",
+        return_value=factory_result,
+    ) as mock_create_browser_agent:
+        subagent = parent.create_subagent(
+            "browser_agent",
+            "browser_session",
+            browser_capabilities=["pdf", "vision"],
+        )
+
+    assert subagent is factory_result
+    assert mock_create_browser_agent.call_args.kwargs["browser_capabilities"] == ["pdf", "vision"]
+
+
 def test_create_subagent_passes_configured_runtime_fields(tmp_path) -> None:
     workspace_root = tmp_path / "parent_workspace"
     subagent_config = SubAgentConfig(

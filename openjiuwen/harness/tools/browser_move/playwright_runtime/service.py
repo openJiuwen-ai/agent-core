@@ -16,7 +16,7 @@ import socket
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from urllib.request import urlopen
 
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
@@ -128,6 +128,7 @@ class BrowserService:
         guardrails: BrowserRunGuardrails,
         cancel_store: Optional[BaseKVStore] = None,
         instance: Optional[BrowserInstanceConfig] = None,
+        allowed_tool_names: Optional[Iterable[str]] = None,
     ) -> None:
         self.provider = provider
         self.api_key = api_key
@@ -136,6 +137,11 @@ class BrowserService:
         self.mcp_cfg = mcp_cfg
         self.guardrails = guardrails
         self._instance = instance or BrowserInstanceConfig()
+        self._allowed_tool_names = (
+            None
+            if allowed_tool_names is None
+            else tuple(dict.fromkeys(allowed_tool_names))
+        )
         self._cancel_store: BaseKVStore = cancel_store or InMemoryKVStore()
 
         self.started = False
@@ -168,6 +174,11 @@ class BrowserService:
     @browser_agent.setter
     def browser_agent(self, value: Optional[ReActAgent]) -> None:
         self._browser_agent = value
+
+    @property
+    def allowed_tool_names(self) -> Optional[tuple[str, ...]]:
+        """Return the normalized task-scoped Playwright tool allowlist."""
+        return self._allowed_tool_names
 
     @property
     def artifacts_subdir(self) -> str:
@@ -684,6 +695,7 @@ class BrowserService:
             screenshot_subdir=self._screenshot_subdir,
             artifacts_subdir=self._artifacts_subdir,
             tool_result_observer=self._observe_worker_tool_result,
+            allowed_tool_names=self._allowed_tool_names,
         )
 
     def _start_heartbeat(self) -> None:

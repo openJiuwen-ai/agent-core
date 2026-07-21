@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.logging.browser_context import (
@@ -77,6 +77,7 @@ class BrowserAgentRuntime:
         mcp_cfg: McpServerConfig,
         guardrails: BrowserRunGuardrails,
         instance: Optional[BrowserInstanceConfig] = None,
+        allowed_tool_names: Optional[Iterable[str]] = None,
     ) -> None:
         ensure_browser_runtime_client_patch()
         self._instance = instance
@@ -88,6 +89,7 @@ class BrowserAgentRuntime:
             mcp_cfg=mcp_cfg,
             guardrails=guardrails,
             instance=instance,
+            allowed_tool_names=allowed_tool_names,
         )
         self._browser_custom_action_tool = None
         self._browser_list_actions_tool = None
@@ -957,4 +959,8 @@ class BrowserRuntimeRail(AgentRail):
         ability_manager = getattr(agent, "ability_manager", None)
         if ability_manager is None:
             return
-        ability_manager.add(self._runtime.service.mcp_cfg)
+        mcp_cfg = self._runtime.service.mcp_cfg
+        ability_manager.add(mcp_cfg)
+        allowed_tool_names = self._runtime.service.allowed_tool_names
+        if allowed_tool_names is not None:
+            ability_manager.set_mcp_tool_allowlist(mcp_cfg, allowed_tool_names)

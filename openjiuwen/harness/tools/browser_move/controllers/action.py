@@ -560,7 +560,7 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "    step.selector || step.role || step.label || step.placeholder ||\n"
         "    step.text || step.testid\n"
         "  );\n"
-        "  const selectAllKey = process.platform === 'darwin' ? 'Meta+A' : 'Control+A';\n"
+        "  const selectAllKey = 'ControlOrMeta+A';\n"
         "  const locatorFromStep = (step) => {\n"
         "    if (step.selector) return page.locator(String(step.selector)).first();\n"
         "    if (step.role) {\n"
