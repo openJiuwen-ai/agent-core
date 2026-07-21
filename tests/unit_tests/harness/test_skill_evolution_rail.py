@@ -477,6 +477,44 @@ def test_resolve_skill_name(tool_name, tool_args, tool_msg, expected):
     assert SkillEvolutionRail._resolve_skill_name(tool_name, tool_args, tool_msg) == expected
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "tool_args", "tool_msg", "expected"),
+    [
+        ("skill_tool", {"skill_name": "weather", "relative_file_path": "SKILL.md"}, None, "weather"),
+        ("skill_tool", {"skill_name": "weather", "relative_file_path": "docs/REF.md"}, None, "weather"),
+        ("skill_complete", {"skill_name": "travel-planner"}, None, "travel-planner"),
+        (
+            "skill_complete",
+            {},
+            _DummyToolMsg("done", metadata={"skill_name": "meta-skill"}),
+            "meta-skill",
+        ),
+        ("read_file", {"file_path": "/skills/demo/SKILL.md"}, None, "demo"),
+        ("bash", {"command": "ls"}, None, None),
+    ],
+)
+def test_resolve_tracked_skill_name(tool_name, tool_args, tool_msg, expected):
+    assert (
+        SkillEvolutionRail._resolve_tracked_skill_name(tool_name, tool_args, tool_msg)
+        == expected
+    )
+
+
+def test_session_used_skills_remember_and_get(tmp_path):
+    rail = _make_rail(tmp_path)
+    session = SimpleNamespace()
+
+    assert rail._get_session_used_skills(session) == set()
+    rail._remember_session_used_skill(session, "weather")
+    rail._remember_session_used_skill(session, " travel-planner ")
+    rail._remember_session_used_skill(session, "weather")
+    rail._remember_session_used_skill(session, "")
+    rail._remember_session_used_skill(None, "ignored")
+
+    assert rail._get_session_used_skills(session) == {"weather", "travel-planner"}
+    assert rail._get_session_used_skills(None) == set()
+
+
 # =============================================================================
 # after_tool_call Tests
 # =============================================================================
@@ -498,6 +536,77 @@ async def test_after_tool_call_injects_body_experience(tmp_path):
 
     assert inputs.tool_msg.content == "original\nnew experience"
     rail._evolution_store.format_body_experience_text.assert_awaited_once_with("invoice-parser")
+
+
+@pytest.mark.asyncio
+async def test_after_tool_call_remembers_skill_on_session(tmp_path):
+    rail = _make_rail(tmp_path)
+    rail._evolution_store.format_body_experience_text = AsyncMock(return_value="")
+    session = SimpleNamespace()
+
+    await rail.after_tool_call(
+        AgentCallbackContext(
+            agent=None,
+            inputs=ToolCallInputs(
+                tool_name="skill_tool",
+                tool_args={"skill_name": "weather", "relative_file_path": "docs/REF.md"},
+                tool_msg=_DummyToolMsg("ref"),
+            ),
+            session=session,
+        )
+    )
+    await rail.after_tool_call(
+        AgentCallbackContext(
+            agent=None,
+            inputs=ToolCallInputs(
+                tool_name="skill_complete",
+                tool_args={"skill_name": "travel-planner"},
+                tool_msg=_DummyToolMsg("done"),
+            ),
+            session=session,
+        )
+    )
+
+    assert rail._get_session_used_skills(session) == {"weather", "travel-planner"}
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_passes_session_skills_to_detect_user_intent(tmp_path, monkeypatch):
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    session = SimpleNamespace(_skill_evolution_used_skills={"weather", "travel-planner"})
+    captured: dict[str, Any] = {}
+
+    async def _fake_detect_user_intent(self, trajectory, *, extra_skills=None):
+        captured["extra_skills"] = list(extra_skills or [])
+        return [
+            EvolutionSignal(
+                signal_type="user_intent",
+                evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
+                section="Instructions",
+                excerpt="输出不对",
+                skill_name="weather",
+            )
+        ]
+
+    rail._collect_parsed_messages = AsyncMock(
+        return_value=[{"role": "user", "content": "输出不对，没有紫外线"}]
+    )
+    rail._evolution_store.list_skill_names = Mock(return_value=["weather", "travel-planner"])
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    _patch_detected_signals(monkeypatch, [])
+    monkeypatch.setattr(SignalDetector, "detect_user_intent", _fake_detect_user_intent)
+    rail._generate_experience_for_skill = AsyncMock(return_value=[_make_record("weather")])
+    rail._evolution_store.append_record = AsyncMock()
+    monkeypatch.setattr(
+        "openjiuwen.harness.rails.skill_evolution_rail.resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "auto",
+    )
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=session)
+
+    await rail.run_evolution(None, ctx)
+
+    assert captured["extra_skills"] == ["travel-planner", "weather"]
+    rail._generate_experience_for_skill.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -665,6 +774,100 @@ async def test_run_evolution_auto_save_false_emits_events(tmp_path, monkeypatch)
 
     rail._generate_experience_via_optimizer.assert_awaited_once_with("skill-a", signals, parsed_messages)
     rail._emit_generated_records.assert_awaited_once_with(ctx, "skill-a")
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_skips_skill_when_self_evolution_off(tmp_path, monkeypatch):
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    signals = [_make_signal("weather")]
+    rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hello"}])
+    rail._evolution_store.list_skill_names = Mock(return_value=["weather"])
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    _patch_detected_signals(monkeypatch, signals)
+    rail._generate_experience_for_skill = AsyncMock(return_value=[_make_record("weather")])
+    rail._generate_experience_via_optimizer = AsyncMock(return_value=True)
+    rail._evolution_store.append_record = AsyncMock()
+    monkeypatch.setattr(
+        "openjiuwen.harness.rails.skill_evolution_rail.resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "off",
+    )
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+
+    await rail.run_evolution(None, ctx)
+
+    rail._generate_experience_for_skill.assert_not_awaited()
+    rail._generate_experience_via_optimizer.assert_not_awaited()
+    rail._evolution_store.append_record.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_suggest_mode_persists_when_auto_save_true(tmp_path, monkeypatch):
+    """Current rail: with auto_save=True, only action=off is skipped.
+
+    suggest/auto both take the persist path; full off/suggest/auto routing is TBD.
+    """
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    signals = [_make_signal("weather")]
+    records = [_make_record("weather")]
+    parsed_messages = [{"role": "user", "content": "hello"}]
+    rail._collect_parsed_messages = AsyncMock(return_value=parsed_messages)
+    rail._evolution_store.list_skill_names = Mock(return_value=["weather"])
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    _patch_detected_signals(monkeypatch, signals)
+    rail._generate_experience_for_skill = AsyncMock(return_value=records)
+    rail._generate_experience_via_optimizer = AsyncMock(return_value=True)
+    rail._evolution_store.append_record = AsyncMock()
+    rail._emit_generated_records = AsyncMock()
+    monkeypatch.setattr(
+        "openjiuwen.harness.rails.skill_evolution_rail.resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "suggest",
+    )
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+
+    await rail.run_evolution(None, ctx)
+
+    rail._generate_experience_for_skill.assert_awaited_once_with(
+        "weather", signals, parsed_messages
+    )
+    rail._evolution_store.append_record.assert_awaited_once_with("weather", records[0])
+    rail._generate_experience_via_optimizer.assert_not_awaited()
+    rail._emit_generated_records.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_auto_save_false_uses_approval_path_even_if_action_auto(
+    tmp_path, monkeypatch
+):
+    """Current rail: auto_save=False always uses approval path.
+
+    resolve_skill_evolution_action is not consulted on that branch; action=auto
+    does not override rail auto_save=False (full per-skill routing is TBD).
+    """
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=False)
+    signals = [_make_signal("weather")]
+    parsed_messages = [{"role": "user", "content": "hello"}]
+    rail._collect_parsed_messages = AsyncMock(return_value=parsed_messages)
+    rail._evolution_store.list_skill_names = Mock(return_value=["weather"])
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    _patch_detected_signals(monkeypatch, signals)
+    rail._generate_experience_for_skill = AsyncMock(return_value=[_make_record("weather")])
+    rail._generate_experience_via_optimizer = AsyncMock(return_value=True)
+    rail._evolution_store.append_record = AsyncMock()
+    rail._emit_generated_records = AsyncMock()
+    monkeypatch.setattr(
+        "openjiuwen.harness.rails.skill_evolution_rail.resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "auto",
+    )
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+
+    await rail.run_evolution(None, ctx)
+
+    rail._generate_experience_via_optimizer.assert_awaited_once_with(
+        "weather", signals, parsed_messages
+    )
+    rail._emit_generated_records.assert_awaited_once_with(ctx, "weather")
+    rail._generate_experience_for_skill.assert_not_awaited()
+    rail._evolution_store.append_record.assert_not_awaited()
 
 
 @pytest.mark.asyncio

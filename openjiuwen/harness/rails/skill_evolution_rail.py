@@ -37,6 +37,9 @@ from openjiuwen.agent_evolving.signal import (
     EvolutionSignal,
     make_signal_fingerprint,
 )
+from openjiuwen.agent_evolving.skill_self_evolution import (
+    resolve_skill_evolution_action,
+)
 from openjiuwen.agent_evolving.trajectory import (
     Trajectory,
     TrajectoryStore,
@@ -352,6 +355,22 @@ class SkillEvolutionRail(EvolutionRail):
     def auto_scan(self, value: bool) -> None:
         self._auto_scan = value
 
+    def _resolve_skills_dirs_for_self_evolution(self) -> Optional[List[Any]]:
+        """Return EvolutionStore base dirs for capabilities.json lookup, if available."""
+        raw = getattr(self._evolution_store, "base_dirs", None)
+        if raw is None:
+            return None
+        try:
+            dirs = list(raw)
+        except TypeError:
+            return None
+        # Mock / non-path values: only keep real path-like entries
+        resolved: List[Any] = []
+        for item in dirs:
+            if isinstance(item, (str, os.PathLike)):
+                resolved.append(item)
+        return resolved or None
+
     def set_sys_operation(self, sys_operation: SysOperation) -> None:
         """Set sys_operation for both EvolutionRail and EvolutionStore."""
         super().set_sys_operation(sys_operation)
@@ -373,16 +392,24 @@ class SkillEvolutionRail(EvolutionRail):
 
         This override:
         1. Calls super().after_tool_call(ctx) to record trajectory step
-        2. Injects body experiences when reading SKILL.md
-        3. Tracks presented records for scoring
+        2. Remembers skill_tool / skill_complete names on the session (cross-turn)
+        3. Injects body experiences when reading SKILL.md
+        4. Tracks presented records for scoring
         """
         # First, let EvolutionRail record the trajectory step
         await super().after_tool_call(ctx)
 
-        # Then, inject body experiences if reading SKILL.md
         inputs = ctx.inputs
         if not isinstance(inputs, ToolCallInputs):
             return
+
+        tracked = self._resolve_tracked_skill_name(
+            str(inputs.tool_name or ""),
+            inputs.tool_args,
+            inputs.tool_msg,
+        )
+        if tracked:
+            self._remember_session_used_skill(ctx.session, tracked)
 
         skill_name = self._resolve_skill_name(
             str(inputs.tool_name or ""),
@@ -434,18 +461,34 @@ class SkillEvolutionRail(EvolutionRail):
             logger.info("[SkillEvolutionRail] found %d local skills", len(skill_names))
 
             detector = SignalDetector(
-                existing_skills={name for name in skill_names if self._evolution_store.skill_exists(name)}
+                existing_skills={name for name in skill_names if self._evolution_store.skill_exists(name)},
             ).bind_llm(
                 llm=self._evolver.llm,
                 model=self._evolver.model,
                 language=self._language,
             )
+            # Refresh session used-skills from this round's trajectory (covers
+            # cases where after_tool_call did not run or history was replayed).
+            traj_skills = detector.collect_skills_from_messages(parsed_messages)
+            session = getattr(ctx, "session", None)
+            for name in traj_skills:
+                self._remember_session_used_skill(session, name)
+            session_skills = self._get_session_used_skills(session)
+            logger.info(
+                "[SkillEvolutionRail] session used skills=%s (traj=%s)",
+                sorted(session_skills),
+                traj_skills,
+            )
+
             detected = detector.detect_trajectory_signals(
                 trajectory,
                 signal_types={"execution_failure", "script_artifact"},
             )
             try:
-                feedback_signals = await detector.detect_user_intent(trajectory)
+                feedback_signals = await detector.detect_user_intent(
+                    trajectory,
+                    extra_skills=sorted(session_skills),
+                )
             except Exception as _fb_exc:
                 logger.warning(
                     "[SkillEvolutionRail] user feedback signal detection failed: %s",
@@ -454,8 +497,9 @@ class SkillEvolutionRail(EvolutionRail):
                 feedback_signals = []
             if feedback_signals:
                 logger.info(
-                    "[SkillEvolutionRail] detected %d user feedback signal(s)",
+                    "[SkillEvolutionRail] detected %d user feedback signal(s), skills=%s",
                     len(feedback_signals),
+                    sorted({s.skill_name for s in feedback_signals if getattr(s, "skill_name", None)}),
                 )
                 detected = [*detected, *feedback_signals]
 
@@ -504,9 +548,24 @@ class SkillEvolutionRail(EvolutionRail):
                 len(skill_groups),
             )
 
-            # Evolve existing skills (when signals are attributed to known skills)
+            skills_dirs = self._resolve_skills_dirs_for_self_evolution()
+            # Evolve existing skills (when signals are attributed to known skills).
+            # Per-skill capabilities.json ``selfEvolution`` outranks rail auto_save:
+            #   off → no evolve; suggest → approval; auto → persist; missing → rail auto_save.
             for skill_name, skill_signals in skill_groups.items():
                 if self._auto_save:
+                    action = resolve_skill_evolution_action(
+                        skill_name,
+                        default_auto_save=self._auto_save,
+                        skills_dirs=skills_dirs,
+                    )
+                    if action == "off":
+                        logger.info(
+                            "[SkillEvolutionRail] selfEvolution=off after attribution, "
+                            "skipping skill=%s",
+                            skill_name,
+                        )
+                        continue
                     # Auto-save path: persist immediately without user approval
                     records = await self._generate_experience_for_skill(
                         skill_name,
@@ -1280,6 +1339,51 @@ class SkillEvolutionRail(EvolutionRail):
         return cls._format_messages_snippet(messages, start=start)
 
     # Session-level state isolation helpers
+    def _get_session_used_skills(self, session: Any) -> Set[str]:
+        """Return skill names used earlier in this session (cross-turn inheritance)."""
+        if session is None:
+            return set()
+        raw = getattr(session, "_skill_evolution_used_skills", None)
+        if not isinstance(raw, set):
+            return set()
+        return {str(name).strip() for name in raw if str(name).strip()}
+
+    def _remember_session_used_skill(self, session: Any, skill_name: str) -> None:
+        """Record a skill as used in this session for later feedback attribution."""
+        name = (skill_name or "").strip()
+        if session is None or not name:
+            return
+        used = getattr(session, "_skill_evolution_used_skills", None)
+        if not isinstance(used, set):
+            used = set()
+            setattr(session, "_skill_evolution_used_skills", used)
+        if name not in used:
+            used.add(name)
+            logger.info(
+                "[SkillEvolutionRail] remember session used skill=%s total=%d",
+                name,
+                len(used),
+            )
+
+    @classmethod
+    def _resolve_tracked_skill_name(
+        cls,
+        tool_name: str,
+        tool_args: Any,
+        tool_msg: Any = None,
+    ) -> Optional[str]:
+        """Resolve skill name from skill_tool / skill_complete for session tracking."""
+        name = (tool_name or "").lower()
+        args = cls._parse_tool_args_dict(tool_args)
+        if name in ("skill_tool", "skill_complete"):
+            skill = str(args.get("skill_name") or "").strip()
+            if not skill and tool_msg is not None:
+                meta = getattr(tool_msg, "metadata", None) or {}
+                skill = str(meta.get("skill_name") or "").strip()
+            if skill:
+                return skill
+        return cls._resolve_skill_name(tool_name, tool_args, tool_msg)
+
     def _get_session_presented_records(
         self,
         session: Any,
