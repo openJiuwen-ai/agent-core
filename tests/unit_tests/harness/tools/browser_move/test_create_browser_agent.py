@@ -8,6 +8,8 @@ from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
@@ -92,6 +94,41 @@ def test_default_wiring_creates_one_agent() -> None:
         create_browser_agent(_fake_model(), settings=_fake_settings())
 
     assert len(calls) == 1
+
+
+def test_selected_capabilities_are_logged_and_forwarded_to_runtime(caplog) -> None:
+    settings = _fake_settings()
+    calls, fake = _capture_create_deep_agent()
+    ctx, mock_runtime_cls, _mock_build, _tools = _patch_all(fake)
+    caplog.set_level("INFO")
+
+    with ctx:
+        create_browser_agent(
+            _fake_model(),
+            settings=settings,
+            browser_capabilities=["pdf"],
+        )
+
+    del calls
+    allowed_tool_names = mock_runtime_cls.call_args.kwargs["allowed_tool_names"]
+    assert "browser_click" in allowed_tool_names
+    assert "browser_pdf_save" in allowed_tool_names
+    assert "browser_mouse_click_xy" not in allowed_tool_names
+    assert "requested=('pdf',)" in caplog.text
+    assert "selected=('core', 'pdf')" in caplog.text
+    assert "browser_pdf_save" in caplog.text
+
+
+def test_unknown_capability_error_lists_rejected_and_available_names() -> None:
+    with pytest.raises(ValueError) as exc_info:
+        create_browser_agent(
+            _fake_model(),
+            browser_capabilities=["not-a-capability"],
+        )
+
+    message = str(exc_info.value)
+    assert "Unsupported browser capabilities: not-a-capability" in message
+    assert "Available capabilities: core, pdf, vision, devtools, config, network, storage, testing" in message
 
 
 def test_default_wiring_main_agent_card_is_browser_agent() -> None:

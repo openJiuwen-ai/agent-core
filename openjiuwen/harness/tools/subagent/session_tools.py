@@ -282,6 +282,21 @@ class SessionsSpawnTool(Tool):
                 reason=f"Invalid inputs type: {type(inputs)}",
             )
 
+        browser_capabilities: Optional[List[str]] = None
+        if str(subagent_type) == "browser_agent":
+            raw_capabilities = inputs.get("browser_capabilities")
+            if raw_capabilities is None:
+                browser_capabilities = []
+            elif isinstance(raw_capabilities, list) and all(
+                isinstance(capability, str) for capability in raw_capabilities
+            ):
+                browser_capabilities = list(raw_capabilities)
+            else:
+                raise build_error(
+                    StatusCode.TOOL_SESSION_TOOL_INVOKED,
+                    reason="'browser_capabilities' must be a list of strings",
+                )
+
         task_id = uuid.uuid4().hex
         parent_session = kwargs.get("session", None)
         if not isinstance(parent_session, Session):
@@ -292,6 +307,14 @@ class SessionsSpawnTool(Tool):
         parent_session_id = parent_session.get_session_id()
         sub_session_id = f"{parent_session_id}_sub_{secrets.token_hex(4)}"
 
+        task_metadata = {
+            "subagent_type": subagent_type,
+            "task_description": task_description,
+            "sub_session_id": sub_session_id,
+        }
+        if browser_capabilities is not None:
+            task_metadata["browser_capabilities"] = browser_capabilities
+
         await tm.add_task(
             CoreTask(
                 session_id=parent_session_id,
@@ -299,11 +322,7 @@ class SessionsSpawnTool(Tool):
                 task_type=SESSION_SPAWN_TASK_TYPE,
                 description=task_description,
                 status=CoreTaskStatus.SUBMITTED,
-                metadata={
-                    "subagent_type": subagent_type,
-                    "task_description": task_description,
-                    "sub_session_id": sub_session_id,
-                },
+                metadata=task_metadata,
             )
         )
 

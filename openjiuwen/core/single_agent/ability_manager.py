@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import List, Any, Union, Optional, Tuple, Dict
+from typing import List, Any, Union, Optional, Tuple, Dict, Iterable
 from pydantic import BaseModel
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -81,6 +81,7 @@ class AbilityManager:
         self._workflows: Dict[str, WorkflowCard] = {}
         self._agents: Dict[str, AgentCard] = {}
         self._mcp_servers: Dict[str, McpServerConfig] = {}
+        self._mcp_tool_allowlists: Dict[str, frozenset[str]] = {}
         self._context_engine = None
         # Owner agent id used to qualify stateful tool ids on registration so
         # each agent owns an exclusive resource-manager entry.
@@ -89,6 +90,33 @@ class AbilityManager:
     def set_owner_id(self, owner_id: Optional[str]) -> None:
         """Set the owner agent id used to qualify stateful tool ids."""
         self._owner_id = owner_id
+
+    def set_mcp_tool_allowlist(
+            self,
+            mcp_server: McpServerConfig,
+            tool_names: Optional[Iterable[str]],
+    ) -> None:
+        """Set a model-facing and execution allowlist for one MCP server.
+
+        Tool names are the underlying MCP names, before AbilityManager adds
+        its ``mcp_<server_name>_`` model-facing prefix. ``None`` removes the
+        policy and restores the legacy unrestricted behavior; an empty
+        iterable permits no tools from the server.
+        """
+        server_id = str(mcp_server.server_id or "").strip()
+        if not server_id:
+            raise ValueError("MCP server_id is required for a tool allowlist")
+
+        if tool_names is None:
+            self._mcp_tool_allowlists.pop(server_id, None)
+            return
+
+        normalized_names = frozenset(
+            str(tool_name).strip()
+            for tool_name in tool_names
+            if str(tool_name).strip()
+        )
+        self._mcp_tool_allowlists[server_id] = normalized_names
 
     @staticmethod
     def _build_tool_message_content(result: Any) -> str:
@@ -461,6 +489,7 @@ class AbilityManager:
                     ]
                     for tool_name in tools_to_remove:
                         self._tools.pop(tool_name, None)
+                    self._mcp_tool_allowlists.pop(server_id, None)
                 removed = mcp_server
             return removed
         elif isinstance(name, list):
@@ -485,6 +514,7 @@ class AbilityManager:
                         ]
                         for tool_name in tools_to_remove:
                             self._tools.pop(tool_name, None)
+                        self._mcp_tool_allowlists.pop(server_id, None)
                     removed = mcp_server
                 result.append(removed)
             return result
@@ -628,9 +658,13 @@ class AbilityManager:
             from openjiuwen.core.runner import Runner
             if names is None:
                 mcp_tool_infos = await Runner.resource_mgr.get_mcp_tool_infos(server_id=mcp_server_id)
+                allowed_tool_names = self._mcp_tool_allowlists.get(mcp_server_id)
                 for mcp_tool in mcp_tool_infos:
-                    mcp_tool_name = f"mcp_{mcp_server_name}_{mcp_tool.name}"
-                    mcp_tool_id = f'{mcp_server_id}.{mcp_server_name}.{mcp_tool.name}'
+                    underlying_tool_name = mcp_tool.name
+                    if allowed_tool_names is not None and underlying_tool_name not in allowed_tool_names:
+                        continue
+                    mcp_tool_name = f"mcp_{mcp_server_name}_{underlying_tool_name}"
+                    mcp_tool_id = f'{mcp_server_id}.{mcp_server_name}.{underlying_tool_name}'
                     mcp_tool.name = mcp_tool_name
                     self._tools[mcp_tool_name] = ToolCard(id=mcp_tool_id, name=mcp_tool_name,
                                                           description=mcp_tool.description,
@@ -920,6 +954,16 @@ class AbilityManager:
                                         tag=None) -> Tuple[Any, ToolMessage]:
         tool_name = tool_call.name
 
+        mcp_tool_scope = self._resolve_mcp_tool_scope(tool_name)
+        if mcp_tool_scope is not None:
+            mcp_server_id, underlying_tool_name = mcp_tool_scope
+            allowed_tool_names = self._mcp_tool_allowlists.get(mcp_server_id)
+            if allowed_tool_names is not None and underlying_tool_name not in allowed_tool_names:
+                raise self._build_execution_error(
+                    tool_call,
+                    f"MCP tool '{underlying_tool_name}' is not allowed for server '{mcp_server_id}'",
+                )
+
         # Parse arguments
         try:
             tool_args, repaired_arguments = self._parse_tool_arguments_with_repair(tool_call.arguments)
@@ -1045,3 +1089,27 @@ class AbilityManager:
     def _is_tool_in_mcp_server(self, id_in_tool_card):
         mcp_server_id = [mcp_server.server_id for _, mcp_server in self._mcp_servers.items()]
         return any([id_in_tool_card.startswith(f"{mid}.") for mid in mcp_server_id])
+
+    def _resolve_mcp_tool_scope(self, tool_name: str) -> Optional[Tuple[str, str]]:
+        """Return ``(server_id, underlying_name)`` for an MCP tool call."""
+        tool_card = self._tools.get(tool_name)
+        if tool_card is not None:
+            tool_id = str(tool_card.id or "")
+            for server_name, mcp_server in self._mcp_servers.items():
+                id_prefix = f"{mcp_server.server_id}.{server_name}."
+                if tool_id.startswith(id_prefix):
+                    return mcp_server.server_id, tool_id.removeprefix(id_prefix)
+
+        servers_by_prefix_length = sorted(
+            self._mcp_servers.items(),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        )
+        for server_name, mcp_server in servers_by_prefix_length:
+            resource_prefix = f"{mcp_server.server_id}.{server_name}."
+            if tool_name.startswith(resource_prefix):
+                return mcp_server.server_id, tool_name.removeprefix(resource_prefix)
+            model_prefix = f"mcp_{server_name}_"
+            if tool_name.startswith(model_prefix):
+                return mcp_server.server_id, tool_name.removeprefix(model_prefix)
+        return None
