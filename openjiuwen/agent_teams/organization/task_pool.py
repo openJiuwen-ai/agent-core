@@ -19,10 +19,14 @@ from openjiuwen.agent_teams.organization.events import (
     BaseOrgEvent,
     OrgEventMessage,
     OrgLeaderMessageEvent,
+    OrgSummarySourcesUpdatedEvent,
+    OrgSummaryTaskCreatedEvent,
     OrgTaskClaimedEvent,
     OrgTaskCompletedEvent,
     OrgTaskCreatedEvent,
     OrgTaskDelegatedEvent,
+    OrgTaskReviewedEvent,
+    OrgTaskReviewRequestedEvent,
     OrgTopic,
 )
 from openjiuwen.agent_teams.organization.schema import (
@@ -38,6 +42,11 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskOutputContext,
     OrgTaskOutputSpec,
     OrgTaskRecord,
+    OrgTaskReview,
+    OrgTaskReviewRecord,
+    OrgTaskReviewStatus,
+    OrgTaskSource,
+    OrgTaskSourceRecord,
     OrgTaskStatus,
 )
 from openjiuwen.agent_teams.tools.database import TeamDatabase
@@ -125,7 +134,39 @@ class OrgTaskManager:
                 organization_id=row.organization_id,
                 display_name=row.display_name,
                 description=row.description,
+                owner_team_id=_json_loads(row.metadata_json, {}).get("owner_team_id"),
+                owner_leader_id=_json_loads(row.metadata_json, {}).get("owner_leader_id"),
                 metadata=_json_loads(row.metadata_json, {}),
+            )
+
+    async def get_organization(self) -> OrganizationSpec | None:
+        """Return the persisted organization and its registered leaders."""
+
+        await self.initialize()
+        async with self._read() as session:
+            row = await session.get(OrgInfoRecord, self.organization_id)
+            if row is None:
+                return None
+            stmt = select(OrgLeaderRecord).where(OrgLeaderRecord.organization_id == self.organization_id)
+            leaders = (await session.execute(stmt)).scalars().all()
+            metadata = _json_loads(row.metadata_json, {})
+            return OrganizationSpec(
+                organization_id=row.organization_id,
+                display_name=row.display_name,
+                description=row.description,
+                owner_team_id=metadata.get("owner_team_id"),
+                owner_leader_id=metadata.get("owner_leader_id"),
+                leaders=[
+                    OrgLeaderHandle(
+                        organization_id=leader.organization_id,
+                        team_id=leader.team_id,
+                        leader_id=leader.leader_id,
+                        leader_member_name=leader.leader_member_name,
+                        capabilities=_json_loads(leader.capabilities_json, []),
+                    )
+                    for leader in leaders
+                ],
+                metadata=metadata,
             )
 
     async def register_leader(
@@ -347,11 +388,48 @@ class OrgTaskManager:
                 return OrgTaskOpResult(ok=False, reason=f"task is not assigned to team: {team_id}")
             if row.status in {OrgTaskStatus.COMPLETED.value, OrgTaskStatus.CANCELLED.value, OrgTaskStatus.EXPIRED.value}:
                 return OrgTaskOpResult(ok=False, reason=f"task is terminal: {task_id}")
+            child_stmt = select(OrgTaskRecord).where(
+                OrgTaskRecord.organization_id == self.organization_id,
+                OrgTaskRecord.parent_task_id == task_id,
+                OrgTaskRecord.creator_team_id == team_id,
+            )
+            child_rows = (await session.execute(child_stmt)).scalars().all()
+            for child in child_rows:
+                if child.status != OrgTaskStatus.COMPLETED.value:
+                    return OrgTaskOpResult(ok=False, reason=f"child task is not completed: {child.task_id}")
+                child_review = await self._get_latest_review_row(session, child.task_id)
+                if child_review is None or child_review.review_status != OrgTaskReviewStatus.ACCEPTED.value:
+                    return OrgTaskOpResult(ok=False, reason=f"child task review is not accepted: {child.task_id}")
             row.status = OrgTaskStatus.COMPLETED.value
             if context_model is not None:
                 row.output_context_json = _json_dumps(context_model.model_dump())
             row.output_abstract = output_abstract if output_abstract is not None else row.output_abstract
             row.updated_at = now
+            review_event: OrgTaskReviewRequestedEvent | None = None
+            if row.parent_task_id and row.creator_team_id:
+                review = await self._get_latest_review_row(session, row.task_id)
+                if review is None:
+                    review = OrgTaskReviewRecord(
+                        review_id=f"org-review-{uuid.uuid4().hex[:12]}",
+                        task_id=row.task_id,
+                        reviewer_team_id=row.creator_team_id,
+                        review_status=OrgTaskReviewStatus.PENDING.value,
+                        required_changes_json=_json_dumps([]),
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    session.add(review)
+                else:
+                    review.reviewer_team_id = row.creator_team_id
+                    review.review_status = OrgTaskReviewStatus.PENDING.value
+                    review.updated_at = now
+                review_event = OrgTaskReviewRequestedEvent(
+                    organization_id=self.organization_id,
+                    team_id=row.creator_team_id,
+                    task_id=row.task_id,
+                    parent_task_id=row.parent_task_id,
+                    reviewer_team_id=row.creator_team_id,
+                )
             await session.commit()
         task = self._to_task(row)
         await self._publish_event(
@@ -362,7 +440,247 @@ class OrgTaskManager:
                 task_id=task_id,
             )
         )
+        if review_event is not None:
+            await self._publish_event(review_event)
         return OrgTaskOpResult(ok=True, task=task)
+
+    async def list_child_tasks(self, *, parent_task_id: str, creator_team_id: str | None = None) -> list[OrgTask]:
+        await self.initialize()
+        stmt = select(OrgTaskRecord).where(
+            OrgTaskRecord.organization_id == self.organization_id,
+            OrgTaskRecord.parent_task_id == parent_task_id,
+        )
+        if creator_team_id:
+            stmt = stmt.where(OrgTaskRecord.creator_team_id == creator_team_id)
+        stmt = stmt.order_by(OrgTaskRecord.created_at.asc())
+        async with self._read() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+            return [self._to_task(row) for row in rows]
+
+    async def list_pending_reviews(self, *, team_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        await self.initialize()
+        stmt = (
+            select(OrgTaskReviewRecord)
+            .where(
+                OrgTaskReviewRecord.reviewer_team_id == team_id,
+                OrgTaskReviewRecord.review_status == OrgTaskReviewStatus.PENDING.value,
+            )
+            .order_by(OrgTaskReviewRecord.updated_at.desc())
+            .limit(limit)
+        )
+        async with self._read() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+            results = []
+            for row in rows:
+                task_row = await session.get(OrgTaskRecord, row.task_id)
+                if task_row is None or task_row.organization_id != self.organization_id:
+                    continue
+                results.append(
+                    {
+                        "review": self._to_review(row).model_dump(),
+                        "task": self._to_task(task_row).brief(),
+                    }
+                )
+            return results
+
+    async def get_task_review(self, task_id: str) -> OrgTaskReview | None:
+        await self.initialize()
+        async with self._read() as session:
+            task_row = await session.get(OrgTaskRecord, task_id)
+            if task_row is None or task_row.organization_id != self.organization_id:
+                return None
+            row = await self._get_latest_review_row(session, task_id)
+            return self._to_review(row) if row is not None else None
+
+    async def review_task(
+        self,
+        *,
+        task_id: str,
+        reviewer_team_id: str,
+        review_status: OrgTaskReviewStatus | str,
+        verdict: str | None = None,
+        required_changes: list[str] | None = None,
+    ) -> OrgTaskOpResult:
+        await self.initialize()
+        now = get_current_time()
+        status = OrgTaskReviewStatus(str(review_status))
+        async with self._write() as session:
+            task_row = await session.get(OrgTaskRecord, task_id)
+            if task_row is None or task_row.organization_id != self.organization_id:
+                return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
+            if task_row.creator_team_id != reviewer_team_id:
+                return OrgTaskOpResult(ok=False, reason="only the task creator team can review this task")
+            if task_row.status != OrgTaskStatus.COMPLETED.value:
+                return OrgTaskOpResult(ok=False, reason=f"task is not completed: {task_id}")
+            row = await self._get_latest_review_row(session, task_id)
+            if row is None:
+                row = OrgTaskReviewRecord(
+                    review_id=f"org-review-{uuid.uuid4().hex[:12]}",
+                    task_id=task_id,
+                    reviewer_team_id=reviewer_team_id,
+                    review_status=status.value,
+                    verdict=verdict,
+                    required_changes_json=_json_dumps(required_changes or []),
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+            else:
+                row.reviewer_team_id = reviewer_team_id
+                row.review_status = status.value
+                row.verdict = verdict
+                row.required_changes_json = _json_dumps(required_changes or [])
+                row.updated_at = now
+            await session.commit()
+        review = self._to_review(row)
+        await self._publish_event(
+            OrgTaskReviewedEvent(
+                organization_id=self.organization_id,
+                team_id=reviewer_team_id,
+                task_id=task_id,
+                review_id=review.review_id,
+                review_status=review.review_status.value,
+            )
+        )
+        return OrgTaskOpResult(ok=True, task=self._to_task(task_row), data={"review": review.model_dump()})
+
+    async def can_complete_parent_task(self, *, parent_task_id: str, team_id: str) -> bool:
+        await self.initialize()
+        async with self._read() as session:
+            stmt = select(OrgTaskRecord).where(
+                OrgTaskRecord.organization_id == self.organization_id,
+                OrgTaskRecord.parent_task_id == parent_task_id,
+                OrgTaskRecord.creator_team_id == team_id,
+            )
+            child_rows = (await session.execute(stmt)).scalars().all()
+            for child in child_rows:
+                if child.status != OrgTaskStatus.COMPLETED.value:
+                    return False
+                review = await self._get_latest_review_row(session, child.task_id)
+                if review is None or review.review_status != OrgTaskReviewStatus.ACCEPTED.value:
+                    return False
+            return True
+
+    async def create_summary_task(
+        self,
+        *,
+        title: str,
+        description: str,
+        created_by: OrgTaskCreator,
+        task_id: str | None = None,
+        source_task_ids: list[str] | None = None,
+        output_spec: OrgTaskOutputSpec | dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> OrgTaskOpResult:
+        result = await self.create_task(
+            task_id=task_id,
+            title=title,
+            description=description,
+            task_type="organization.summary",
+            required_capabilities=["summary"],
+            output_spec=output_spec,
+            metadata=metadata,
+            created_by=created_by,
+        )
+        if not result.ok or result.task is None:
+            return result
+        if source_task_ids:
+            attach = await self.attach_summary_sources(
+                summary_task_id=result.task.task_id,
+                source_task_ids=source_task_ids,
+            )
+            if not attach.ok:
+                return attach
+        await self._publish_event(
+            OrgSummaryTaskCreatedEvent(
+                organization_id=self.organization_id,
+                team_id=created_by.team_id,
+                leader_id=created_by.creator_id if created_by.creator_type == "team_leader" else None,
+                summary_task_id=result.task.task_id,
+            )
+        )
+        return result
+
+    async def attach_summary_sources(
+        self,
+        *,
+        summary_task_id: str,
+        source_task_ids: list[str],
+        source_role: str | None = None,
+        required: bool = True,
+    ) -> OrgTaskOpResult:
+        await self.initialize()
+        now = get_current_time()
+        async with self._write() as session:
+            summary = await session.get(OrgTaskRecord, summary_task_id)
+            if summary is None or summary.organization_id != self.organization_id:
+                return OrgTaskOpResult(ok=False, reason=f"summary task not found: {summary_task_id}")
+            if summary.task_type != "organization.summary":
+                return OrgTaskOpResult(ok=False, reason=f"task is not a summary task: {summary_task_id}")
+            for source_task_id in source_task_ids:
+                source = await session.get(OrgTaskRecord, source_task_id)
+                if source is None or source.organization_id != self.organization_id:
+                    return OrgTaskOpResult(ok=False, reason=f"source task not found: {source_task_id}")
+                if source.status != OrgTaskStatus.COMPLETED.value:
+                    return OrgTaskOpResult(ok=False, reason=f"source task is not completed: {source_task_id}")
+                review = await self._get_latest_review_row(session, source_task_id)
+                if review is not None and review.review_status != OrgTaskReviewStatus.ACCEPTED.value:
+                    return OrgTaskOpResult(ok=False, reason=f"source task review is not accepted: {source_task_id}")
+                existing = await session.get(OrgTaskSourceRecord, (summary_task_id, source_task_id))
+                if existing is None:
+                    session.add(
+                        OrgTaskSourceRecord(
+                            summary_task_id=summary_task_id,
+                            source_task_id=source_task_id,
+                            source_role=source_role,
+                            required=required,
+                            created_at=now,
+                        )
+                    )
+                else:
+                    existing.source_role = source_role
+                    existing.required = required
+            await session.commit()
+        await self._publish_event(
+            OrgSummarySourcesUpdatedEvent(
+                organization_id=self.organization_id,
+                summary_task_id=summary_task_id,
+            )
+        )
+        return OrgTaskOpResult(ok=True, task=await self.get_task(summary_task_id), data={"source_task_ids": source_task_ids})
+
+    async def list_summary_sources(self, *, summary_task_id: str) -> list[OrgTaskSource]:
+        await self.initialize()
+        async with self._read() as session:
+            summary = await session.get(OrgTaskRecord, summary_task_id)
+            if summary is None or summary.organization_id != self.organization_id:
+                return []
+            stmt = select(OrgTaskSourceRecord).where(OrgTaskSourceRecord.summary_task_id == summary_task_id)
+            rows = (await session.execute(stmt)).scalars().all()
+            return [self._to_source(row) for row in rows]
+
+    async def get_summary_inputs(self, *, summary_task_id: str) -> dict[str, Any] | None:
+        await self.initialize()
+        async with self._read() as session:
+            summary = await session.get(OrgTaskRecord, summary_task_id)
+            if summary is None or summary.organization_id != self.organization_id:
+                return None
+            stmt = select(OrgTaskSourceRecord).where(OrgTaskSourceRecord.summary_task_id == summary_task_id)
+            source_rows = (await session.execute(stmt)).scalars().all()
+            sources = []
+            for source_row in source_rows:
+                task_row = await session.get(OrgTaskRecord, source_row.source_task_id)
+                if task_row is None or task_row.organization_id != self.organization_id:
+                    continue
+                review_row = await self._get_latest_review_row(session, task_row.task_id)
+                sources.append(
+                    {
+                        "source": self._to_source(source_row).model_dump(),
+                        "task": self._to_task(task_row).model_dump(),
+                        "review": self._to_review(review_row).model_dump() if review_row is not None else None,
+                    }
+                )
+            return {"summary_task": self._to_task(summary).model_dump(), "source_tasks": sources}
 
     async def send_leader_message(
         self,
@@ -482,12 +800,29 @@ class OrgTaskManager:
             return
         message = OrgEventMessage.from_event(event)
         await self.messager.publish(OrgTopic.ORG.build(session_id, self.organization_id), message)
-        if isinstance(event, (OrgTaskCreatedEvent, OrgTaskClaimedEvent, OrgTaskDelegatedEvent, OrgTaskCompletedEvent)):
+        if isinstance(
+            event,
+            (
+                OrgTaskCreatedEvent,
+                OrgTaskClaimedEvent,
+                OrgTaskDelegatedEvent,
+                OrgTaskCompletedEvent,
+                OrgTaskReviewRequestedEvent,
+                OrgTaskReviewedEvent,
+                OrgSummaryTaskCreatedEvent,
+                OrgSummarySourcesUpdatedEvent,
+            ),
+        ):
             await self.messager.publish(OrgTopic.TASK.build(session_id, self.organization_id), message)
         if isinstance(event, OrgLeaderMessageEvent):
             await self.messager.publish(OrgTopic.LEADER.build(session_id, self.organization_id), message)
         if team_inbox_id:
             await self.messager.publish(OrgTopic.TEAM_INBOX.build(session_id, self.organization_id, team_inbox_id), message)
+
+    async def publish_event(self, event: BaseOrgEvent, *, team_inbox_id: str | None = None) -> None:
+        """Publish an organization lifecycle event through the configured transport."""
+
+        await self._publish_event(event, team_inbox_id=team_inbox_id)
 
     def _to_task(self, row: OrgTaskRecord) -> OrgTask:
         output_spec = _json_loads(row.output_spec_json, None)
@@ -536,6 +871,39 @@ class OrgTaskManager:
             "read_at": row.read_at,
             "metadata": _json_loads(row.metadata_json, {}),
         }
+
+    @staticmethod
+    def _to_review(row: OrgTaskReviewRecord) -> OrgTaskReview:
+        return OrgTaskReview(
+            review_id=row.review_id,
+            task_id=row.task_id,
+            reviewer_team_id=row.reviewer_team_id,
+            review_status=OrgTaskReviewStatus(row.review_status),
+            verdict=row.verdict,
+            required_changes=_json_loads(row.required_changes_json, []),
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _to_source(row: OrgTaskSourceRecord) -> OrgTaskSource:
+        return OrgTaskSource(
+            summary_task_id=row.summary_task_id,
+            source_task_id=row.source_task_id,
+            source_role=row.source_role,
+            required=row.required,
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    async def _get_latest_review_row(session: Any, task_id: str) -> OrgTaskReviewRecord | None:
+        stmt = (
+            select(OrgTaskReviewRecord)
+            .where(OrgTaskReviewRecord.task_id == task_id)
+            .order_by(OrgTaskReviewRecord.updated_at.desc())
+            .limit(1)
+        )
+        return (await session.execute(stmt)).scalars().first()
 
     @staticmethod
     def _coerce_output_spec(value: OrgTaskOutputSpec | dict[str, Any] | None) -> OrgTaskOutputSpec | None:

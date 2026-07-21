@@ -27,6 +27,10 @@ LEADER_ONLY_TOOLS: set[str] = {
     "async_tasks_list",
     "async_task_output",
     "async_task_cancel",
+    # Organization bootstrap controls are available to every running leader.
+    "org_create_organization",
+    "org_invite_team",
+    "org_view_organization",
     # Organization-level collaboration tools (gated by organization_id).
     "org_view_tasks",
     "org_create_task",
@@ -34,6 +38,12 @@ LEADER_ONLY_TOOLS: set[str] = {
     "org_delegate_task",
     "org_update_task",
     "org_send_leader_message",
+    "org_view_child_tasks",
+    "org_view_pending_reviews",
+    "org_review_task",
+    "org_create_summary_task",
+    "org_attach_summary_sources",
+    "org_view_summary_sources",
 }
 
 # Tools that only members can use

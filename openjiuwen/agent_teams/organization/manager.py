@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Awaitable
+from typing import Any, Awaitable, Callable
 
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.organization.events import OrgTopic
+from openjiuwen.agent_teams.organization.events import BaseOrgEvent, OrgTopic
 from openjiuwen.agent_teams.organization.schema import OrgLeaderHandle, OrganizationSpec
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
 from openjiuwen.agent_teams.tools.database import TeamDatabase
@@ -40,10 +40,12 @@ class TeamOrganizationManager:
         *,
         display_name: str | None = None,
         description: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> OrganizationSpec:
         return await self.task_pool.ensure_organization(
             display_name=display_name,
             description=description,
+            metadata=metadata,
         )
 
     async def register_leader(
@@ -60,6 +62,16 @@ class TeamOrganizationManager:
             leader_member_name=leader_member_name,
             capabilities=capabilities,
         )
+
+    async def get_organization(self) -> OrganizationSpec | None:
+        """Return organization metadata together with its current leaders."""
+
+        return await self.task_pool.get_organization()
+
+    async def publish_event(self, event: BaseOrgEvent, *, team_inbox_id: str | None = None) -> None:
+        """Publish a small organization event after durable state is updated."""
+
+        await self.task_pool.publish_event(event, team_inbox_id=team_inbox_id)
 
     async def subscribe(
         self,

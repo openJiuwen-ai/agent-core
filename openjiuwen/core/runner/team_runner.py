@@ -124,7 +124,21 @@ class _TeamRunnerMixin:
             from openjiuwen.agent_teams.runtime import TeamRuntimeManager
 
             self._team_runtime_manager = TeamRuntimeManager()
+            self._team_runtime_manager.organization_runtime_manager.set_leader_turn_runner(
+                self._run_organization_leader_turn
+            )
         return self._team_runtime_manager
+
+    async def _run_organization_leader_turn(
+        self,
+        team_name: str,
+        session_id: str,
+        inputs: object,
+    ) -> bool:
+        """Run a background organization turn through the normal Runner path."""
+
+        result = await self.run_agent_team(team_name, inputs, session=session_id)
+        return result is not None
 
     @staticmethod
     @contextmanager

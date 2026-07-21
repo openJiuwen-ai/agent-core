@@ -34,7 +34,13 @@ class OrgEvent:
     TASK_CLAIMED = "org_task_claimed"
     TASK_DELEGATED = "org_task_delegated"
     TASK_COMPLETED = "org_task_completed"
+    TASK_REVIEW_REQUESTED = "org_task_review_requested"
+    TASK_REVIEWED = "org_task_reviewed"
+    SUMMARY_TASK_CREATED = "org_summary_task_created"
+    SUMMARY_SOURCES_UPDATED = "org_summary_sources_updated"
     LEADER_MESSAGE = "org_leader_message"
+    TEAM_INVITED = "org_team_invited"
+    TEAM_JOINED = "org_team_joined"
 
 
 class BaseOrgEvent(BaseModel):
@@ -85,6 +91,34 @@ class OrgTaskCompletedEvent(BaseOrgEvent):
     task_id: str
 
 
+class OrgTaskReviewRequestedEvent(BaseOrgEvent):
+    """Published when a completed child task awaits parent-team review."""
+
+    task_id: str
+    parent_task_id: str
+    reviewer_team_id: str
+
+
+class OrgTaskReviewedEvent(BaseOrgEvent):
+    """Published after a parent team reviews a completed child task."""
+
+    task_id: str
+    review_id: str
+    review_status: str
+
+
+class OrgSummaryTaskCreatedEvent(BaseOrgEvent):
+    """Published after a summary task row is created."""
+
+    summary_task_id: str
+
+
+class OrgSummarySourcesUpdatedEvent(BaseOrgEvent):
+    """Published after source tasks are attached to a summary task."""
+
+    summary_task_id: str
+
+
 class OrgLeaderMessageEvent(BaseOrgEvent):
     """Published after a leader-to-leader message row is persisted."""
 
@@ -93,13 +127,33 @@ class OrgLeaderMessageEvent(BaseOrgEvent):
     to_team_id: str | None = None
 
 
+class OrgTeamInvitedEvent(BaseOrgEvent):
+    """Published after an active team is invited into an organization."""
+
+    inviter_team_id: str
+    invited_team_id: str
+
+
+class OrgTeamJoinedEvent(BaseOrgEvent):
+    """Published after an invited team is bound to the organization runtime."""
+
+    joined_team_id: str
+    joined_leader_id: str
+
+
 _EVENT_TYPE_MAP: dict[str, type[BaseOrgEvent]] = {
     OrgEvent.BROADCAST: OrgBroadcastEvent,
     OrgEvent.TASK_CREATED: OrgTaskCreatedEvent,
     OrgEvent.TASK_CLAIMED: OrgTaskClaimedEvent,
     OrgEvent.TASK_DELEGATED: OrgTaskDelegatedEvent,
     OrgEvent.TASK_COMPLETED: OrgTaskCompletedEvent,
+    OrgEvent.TASK_REVIEW_REQUESTED: OrgTaskReviewRequestedEvent,
+    OrgEvent.TASK_REVIEWED: OrgTaskReviewedEvent,
+    OrgEvent.SUMMARY_TASK_CREATED: OrgSummaryTaskCreatedEvent,
+    OrgEvent.SUMMARY_SOURCES_UPDATED: OrgSummarySourcesUpdatedEvent,
     OrgEvent.LEADER_MESSAGE: OrgLeaderMessageEvent,
+    OrgEvent.TEAM_INVITED: OrgTeamInvitedEvent,
+    OrgEvent.TEAM_JOINED: OrgTeamJoinedEvent,
 }
 _EVENT_CLASS_MAP: dict[type[BaseOrgEvent], str] = {v: k for k, v in _EVENT_TYPE_MAP.items()}
 
@@ -131,9 +185,15 @@ __all__ = [
     "OrgEvent",
     "OrgEventMessage",
     "OrgLeaderMessageEvent",
+    "OrgTeamInvitedEvent",
+    "OrgTeamJoinedEvent",
     "OrgTaskClaimedEvent",
     "OrgTaskCompletedEvent",
     "OrgTaskCreatedEvent",
     "OrgTaskDelegatedEvent",
+    "OrgTaskReviewedEvent",
+    "OrgTaskReviewRequestedEvent",
+    "OrgSummarySourcesUpdatedEvent",
+    "OrgSummaryTaskCreatedEvent",
     "OrgTopic",
 ]

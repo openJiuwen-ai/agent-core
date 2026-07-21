@@ -4,6 +4,7 @@
 """Organization-level coordination primitives for multiple in-process teams."""
 
 from openjiuwen.agent_teams.organization.manager import TeamOrganizationManager
+from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
 from openjiuwen.agent_teams.organization.schema import (
     OrgAssignment,
     OrgAssignmentType,
@@ -11,6 +12,9 @@ from openjiuwen.agent_teams.organization.schema import (
     OrganizationSpec,
     OrgTask,
     OrgTaskCreator,
+    OrgTaskReview,
+    OrgTaskReviewStatus,
+    OrgTaskSource,
     OrgTaskStatus,
 )
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager, OrgTaskOpResult
@@ -20,10 +24,14 @@ __all__ = [
     "OrgAssignmentType",
     "OrgLeaderHandle",
     "OrganizationSpec",
+    "OrganizationRuntimeManager",
     "OrgTask",
     "OrgTaskCreator",
     "OrgTaskManager",
     "OrgTaskOpResult",
+    "OrgTaskReview",
+    "OrgTaskReviewStatus",
+    "OrgTaskSource",
     "OrgTaskStatus",
     "TeamOrganizationManager",
 ]

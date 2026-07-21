@@ -35,6 +35,13 @@ class OrgCreatorType(StrEnum):
     TEAM_LEADER = "team_leader"
 
 
+class OrgTaskReviewStatus(StrEnum):
+    PENDING = "PENDING"
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+    NEEDS_REVISION = "NEEDS_REVISION"
+
+
 class OrgTaskCreator(BaseModel):
     creator_type: str = "client"
     creator_id: str
@@ -96,6 +103,25 @@ class OrgTask(BaseModel):
         }
 
 
+class OrgTaskReview(BaseModel):
+    review_id: str
+    task_id: str
+    reviewer_team_id: str
+    review_status: OrgTaskReviewStatus = OrgTaskReviewStatus.PENDING
+    verdict: str | None = None
+    required_changes: list[str] = Field(default_factory=list)
+    created_at: int
+    updated_at: int
+
+
+class OrgTaskSource(BaseModel):
+    summary_task_id: str
+    source_task_id: str
+    source_role: str | None = None
+    required: bool = True
+    created_at: int
+
+
 class OrgLeaderHandle(BaseModel):
     organization_id: str
     team_id: str
@@ -108,6 +134,8 @@ class OrganizationSpec(BaseModel):
     organization_id: str
     display_name: str | None = None
     description: str | None = None
+    owner_team_id: str | None = None
+    owner_leader_id: str | None = None
     leaders: list[OrgLeaderHandle] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -191,6 +219,29 @@ class OrgTaskEventRecord(SQLModel, table=True):
     created_at: int
 
 
+class OrgTaskReviewRecord(SQLModel, table=True):
+    __tablename__ = "org_task_review"
+
+    review_id: str = SQLField(primary_key=True)
+    task_id: str = SQLField(index=True)
+    reviewer_team_id: str = SQLField(index=True)
+    review_status: str = SQLField(index=True)
+    verdict: str | None = None
+    required_changes_json: str | None = None
+    created_at: int
+    updated_at: int
+
+
+class OrgTaskSourceRecord(SQLModel, table=True):
+    __tablename__ = "org_task_source"
+
+    summary_task_id: str = SQLField(primary_key=True)
+    source_task_id: str = SQLField(primary_key=True)
+    source_role: str | None = None
+    required: bool = True
+    created_at: int
+
+
 __all__ = [
     "OrgAssignment",
     "OrgAssignmentType",
@@ -206,5 +257,10 @@ __all__ = [
     "OrgTaskOutputContext",
     "OrgTaskOutputSpec",
     "OrgTaskRecord",
+    "OrgTaskReview",
+    "OrgTaskReviewRecord",
+    "OrgTaskReviewStatus",
+    "OrgTaskSource",
+    "OrgTaskSourceRecord",
     "OrgTaskStatus",
 ]
