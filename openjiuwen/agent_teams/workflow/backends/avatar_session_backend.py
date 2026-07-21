@@ -34,6 +34,9 @@ from openjiuwen.agent_teams.workflow.backends._member_spec import (
     derive_member_build_context,
     derive_member_spec,
 )
+from openjiuwen.agent_teams.workflow.backends._result_text import (
+    prefer_natural_or_structured_text,
+)
 from openjiuwen.agent_teams.tools.structured_output_tool import (
     StructuredOutputFinishRail,
     StructuredOutputTool,
@@ -115,8 +118,9 @@ class AvatarSessionManager:
         t: Translator | None = None,
         messager: Any = None,
         session_id: str | None = None,
+        run_id: str | None = None,
         on_human_prompt: Callable[[str, str, str], None] | None = None,
-        on_human_replied: Callable[[str, str], None] | None = None,
+        on_human_replied: Callable[[str, str, str | None], None] | None = None,
         human_timeout: float | None = None,
     ) -> None:
         self._worker_base_spec = worker_base_spec
@@ -139,6 +143,9 @@ class AvatarSessionManager:
         self._human_timeout = human_timeout if human_timeout is not None else _DEFAULT_HUMAN_TIMEOUT
         self._messager = messager
         self._session_id = session_id
+        # Scopes the reply topic so concurrent runs don't cross-resolve.
+        # None falls back to the legacy session+team scope.
+        self._run_id = run_id
         self._reply_topic_subscribed = False
 
     # ------------------------------------------------------------------
@@ -174,7 +181,7 @@ class AvatarSessionManager:
             return
         from openjiuwen.agent_teams.schema.events import swarmflow_human_reply_topic
 
-        topic = swarmflow_human_reply_topic(self._session_id, self._team_name)
+        topic = swarmflow_human_reply_topic(self._session_id, self._team_name, self._run_id)
         await self._messager.subscribe(topic, self._on_reply_event)
         self._reply_topic_subscribed = True
 
@@ -236,7 +243,9 @@ class AvatarSessionManager:
             from openjiuwen.agent_teams.schema.events import swarmflow_human_reply_topic
 
             try:
-                await self._messager.unsubscribe(swarmflow_human_reply_topic(self._session_id, self._team_name))
+                await self._messager.unsubscribe(
+                    swarmflow_human_reply_topic(self._session_id, self._team_name, self._run_id)
+                )
             except Exception:
                 team_logger.debug("[swarmflow] human-reply unsubscribe failed")
             self._reply_topic_subscribed = False
@@ -394,7 +403,10 @@ class AvatarSessionManager:
                 raise BackendError(
                     f"session '{state.member_name}' did not submit a structured result via structured_output"
                 )
+            # Prefer free-text narration from the round; fall back to JSON capture.
+            text = prefer_natural_or_structured_text(_output_text(result), submit.captured)
             return AgentResult(
+                text=text,
                 structured=submit.captured,
                 tokens=_estimate_tokens(prompt, submit.captured),
             )
@@ -501,7 +513,7 @@ class AvatarSessionManager:
             self._pending_human.pop(corr, None)
         if self._on_human_replied is not None:
             try:
-                self._on_human_replied(state.member_name, corr)
+                self._on_human_replied(state.member_name, corr, raw)
             except Exception:
                 team_logger.debug("[swarmflow] human-replied notify failed for %s", state.member_name)
         return raw
@@ -543,6 +555,10 @@ class AvatarSessionManager:
 def _output_text(result: Any) -> str:
     """Extract the final output text from a round result dict."""
     if isinstance(result, dict):
+        err = result.get("error")
+        if err or result.get("result_type") == "error":
+            msg = str(err or result.get("output") or "session turn failed")
+            raise BackendError(msg)
         return str(result.get("output", ""))
     return str(result or "")
 
