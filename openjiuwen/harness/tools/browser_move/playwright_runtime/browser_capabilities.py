@@ -166,6 +166,7 @@ DEFAULT_BROWSER_CAPABILITIES: tuple[BrowserCapability, ...] = (
     ),
 )
 
+
 def _stable_unique(values: Iterable[str]) -> tuple[str, ...]:
     """Normalize names and preserve their first-seen order."""
     normalized: list[str] = []
