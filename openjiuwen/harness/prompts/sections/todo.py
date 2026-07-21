@@ -36,7 +36,7 @@ Identify the planning need and call todo_create BEFORE starting execution.
 **Task management rules:**
 - Update status in real-time: call todo_modify the moment a task status changes
 - Only one task can be in_progress at a time; complete it before starting the next
-- **Follow list order**: do not skip pending earlier tasks; the tool rejects out-of-order updates
+- **Follow list order**: do not skip pending earlier tasks; the tool rejects out-of-order status changes and task additions
 - Batch updates: consolidate status changes in one todo_modify when order is valid (e.g. complete current, then in_progress next)
 - When marking the current step completed, include the next pending item as in_progress in the same todo_modify batch whenever more work remains
 - Mark unneeded tasks as cancelled via todo_modify (explicit skip)
@@ -46,16 +46,18 @@ Identify the planning need and call todo_create BEFORE starting execution.
 **Before marking a task completed:**
 - Verify the work is fully done (e.g., run tests to confirm)
 - Never mark completed if: partially implemented, tests failing, unresolved errors
-- After completing, check if new follow-up tasks were discovered and append them via todo_modify
+- After completing, check whether new follow-up tasks were discovered. Before append or insert, call todo_list and follow the list-order rules.
 - skill_complete does not update todos — use todo_modify to modify todos
 
-**Interrupt resume and todo tool choice (same for main and sub agents: each checks its own session's todo.json)**
-| This session's todo status | Action |
-| Has pending / in_progress | todo_list → todo_modify to resume; **do not** todo_create |
-| No pending / in_progress, or user asks to restart | todo_create (force=true) |
+**Todo tool choice (same for main and sub agents: each checks its own session's todo.json)**
+| User intent / todo status | Action |
+| Continue or retry while pending / in_progress items exist | todo_list → todo_modify; **do not** todo_create |
+| Independent new request and no active items remain | todo_create a complete new plan |
+| User explicitly asks to restart or replan while active items exist | todo_create(force=true) |
 
 - When the user says "continue" / "retry" / "try again", resume from the in_progress item;
   do not restart from Stage 1
+- Do not rename or reuse an old todo as the first step of an independent new plan
 - Sub-agents have separate sessions; the main agent must **not** block a sub-agent from
   todo_create in its own session because the main session already has todos
 """
@@ -80,7 +82,7 @@ TODO_SYSTEM_PROMPT_CN = """
 **任务管理规则：**
 - 实时更新状态：任务状态变化时立即调用 todo_modify
 - 同一时间只能有一个任务处于 in_progress，完成后再开始下一个
-- **按列表顺序推进**：不得跳过 pending 的前序任务；工具会拒绝跨档 update
+- **按列表顺序推进**：不得跳过 pending 的前序任务；工具会拒绝跨档状态更新和新增任务
 - 批量更新：将多个状态变更合并为一次 todo_modify 调用（须满足顺序：例如先 completed 当前项，再 in_progress 下一项）
 - 将当前步骤标为 completed 时，若仍有后续待办，须在同一批 todo_modify 中把下一项 pending 标为 in_progress
 - 不再需要的任务用 todo_modify 标记为 cancelled（明确跳过）
@@ -90,15 +92,17 @@ TODO_SYSTEM_PROMPT_CN = """
 **将任务标记为已完成前：**
 - 必须仔细验证工作已全部完成（如运行测试用例）
 - 以下情况绝对不能标记为已完成：部分实现、测试失败、存在未解决的错误等
-- 标记完成后，检查实现过程中是否发现新的后续任务，及时通过 todo_modify 追加
+- 标记完成后，检查实现过程中是否发现新的后续任务；append 或 insert 前先 todo_list，并遵守列表顺序规则
 - skill_complete 不更新 todo，修改 todo 请用 todo_modify
 
-**中断续跑与todo工具选择（主 Agent、子 Agent 相同：各看本 session 的 todo.json）**
-| 本 session todo 状态 | 做法 |
-| 有 pending / in_progress | todo_list → todo_modify 续跑；**不要** todo_create |
-| 无 pending / in_progress，或用户要求重来 | todo_create（force=true） |
+**todo 工具选择（主 Agent、子 Agent 相同：各看本 session 的 todo.json）**
+| 用户意图 / 本 session todo 状态 | 做法 |
+| 用户要求继续/重试，且有 pending / in_progress | todo_list → todo_modify 续跑；**不要** todo_create |
+| 独立新请求，且已无活跃项 | todo_create 建立完整新计划 |
+| 用户明确要求重来/重规划，且有活跃项 | todo_create（force=true） |
 
 - 用户说「继续/重试/再试一次」时，从 in_progress 项续跑，勿从 Stage 1 重来
+- 独立新计划不得改名或复用旧 todo 作为首项
 - 子 Agent 拥有独立 session；主 Agent **不得**因主会话已有 todo 而阻止子 Agent 在其自身 session 内正常 todo_create
 """
 

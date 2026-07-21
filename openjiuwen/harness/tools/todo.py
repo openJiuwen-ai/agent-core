@@ -1131,22 +1131,27 @@ class TodoModifyTool(TodoTool):
         Raises:
             ToolError: If duplicate IDs found or validation fails
         """
-        todo_ids = [todo.id for todo in current_todos]
+        current_todo_ids = {todo.id for todo in current_todos}
+        todo_ids = set(current_todo_ids)
+        updated_todos = list(current_todos)
         for todo_data in todos_data:
             self._validate_single_todo_item(todo_data)
             todo_id = todo_data.get("id")
 
             if todo_id in todo_ids:
+                duplicate_source = "current todo list" if todo_id in current_todo_ids else "batch input"
                 raise build_error(
                     StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason=f"Batch append failed: Task with ID '{todo_id}' is duplicated in current todo list"
+                    reason=f"Batch append failed: Task with ID '{todo_id}' is duplicated in {duplicate_source}"
                 )
 
-            current_todos.append(self._convert_to_todo_item(todo_data))
+            updated_todos.append(self._convert_to_todo_item(todo_data))
+            todo_ids.add(todo_id)
 
         # Validate single IN_PROGRESS constraint after updates
-        self._validate_single_in_progress(current_todos)
-        await self.save_todos(current_todos, file_path)
+        self._validate_single_in_progress(updated_todos)
+        self._validate_sequential_update(updated_todos)
+        await self.save_todos(updated_todos, file_path)
 
         result_msg = f"Successfully append {len(todos_data)} task(s)"
         tool_logger.info(
@@ -1203,6 +1208,7 @@ class TodoModifyTool(TodoTool):
 
         # Validate single IN_PROGRESS constraint
         self._validate_single_in_progress(updated_todos)
+        self._validate_sequential_update(updated_todos)
 
         await self.save_todos(updated_todos, file_path)
 
@@ -1261,6 +1267,7 @@ class TodoModifyTool(TodoTool):
 
         # Validate single IN_PROGRESS constraint
         self._validate_single_in_progress(updated_todos)
+        self._validate_sequential_update(updated_todos)
 
         await self.save_todos(updated_todos, file_path)
 

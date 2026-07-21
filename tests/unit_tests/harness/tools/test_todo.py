@@ -531,6 +531,83 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(saved_todos), 4)
         self.assertEqual(saved_todos[-1].id, new_todo_id)
 
+    async def test_invoke_append_reports_duplicate_id_in_current_todo_list(self):
+        """Report when an appended task duplicates an existing task ID."""
+        append_data = [{
+            "id": self.test_todo_ids[0],
+            "content": "Duplicate Task",
+            "activeForm": "Executing Duplicate Task",
+            "status": TodoStatus.PENDING.value,
+        }]
+
+        with self.assertRaises(FrameworkError) as cm:
+            await self.tool.invoke(
+                {"action": "append", "todos": append_data},
+                session=self.mock_session,
+            )
+
+        self.assertIn(
+            f"Task with ID '{self.test_todo_ids[0]}' is duplicated in current todo list",
+            str(cm.exception),
+        )
+        self.tool.save_todos.assert_not_awaited()
+
+    async def test_invoke_append_reports_duplicate_id_in_batch_input(self):
+        """Report when two appended tasks share the same ID."""
+        duplicate_id = str(uuid.uuid4())
+        append_data = [
+            {
+                "id": duplicate_id,
+                "content": "New Task 4",
+                "activeForm": "Executing New Task 4",
+                "status": TodoStatus.PENDING.value,
+            },
+            {
+                "id": duplicate_id,
+                "content": "New Task 5",
+                "activeForm": "Executing New Task 5",
+                "status": TodoStatus.PENDING.value,
+            },
+        ]
+
+        with self.assertRaises(FrameworkError) as cm:
+            await self.tool.invoke(
+                {"action": "append", "todos": append_data},
+                session=self.mock_session,
+            )
+
+        self.assertIn(
+            f"Task with ID '{duplicate_id}' is duplicated in batch input",
+            str(cm.exception),
+        )
+        self.tool.save_todos.assert_not_awaited()
+
+    async def test_invoke_append_rejects_invalid_sequence_without_mutation(self):
+        """Reject append that advances past a pending item without mutating input."""
+        current_todos = [
+            TodoItem.create(content="Pending Task", status=TodoStatus.PENDING),
+        ]
+        self.tool.load_todos = AsyncMock(return_value=current_todos)
+        new_todo_id = str(uuid.uuid4())
+
+        with self.assertRaises(FrameworkError):
+            await self.tool.invoke(
+                {
+                    "action": "append",
+                    "todos": [{
+                        "id": new_todo_id,
+                        "content": "Completed Task",
+                        "activeForm": "Completed Task",
+                        "status": TodoStatus.COMPLETED.value,
+                    }],
+                },
+                session=self.mock_session,
+            )
+
+        self.tool.save_todos.assert_not_awaited()
+        self.assertEqual(len(current_todos), 1)
+        self.assertEqual(current_todos[0].status, TodoStatus.PENDING)
+
     async def test_invoke_insert_after_success(self):
         """Test successful insertion after target task"""
         # Construct insert data
@@ -580,6 +657,125 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         saved_todos = self.tool.save_todos.call_args[0][0]
         self.assertEqual(len(saved_todos), 4)
         self.assertEqual(saved_todos[1].id, new_todo_id)  # Verify insertion position
+
+    async def test_invoke_insert_after_rejects_invalid_sequence_without_save(self):
+        """Reject insertion before an existing completed item."""
+        current_todos = [
+            TodoItem.create(content="Active Task", status=TodoStatus.IN_PROGRESS),
+            TodoItem.create(content="Completed Task", status=TodoStatus.COMPLETED),
+        ]
+        self.tool.load_todos = AsyncMock(return_value=current_todos)
+        new_todo_id = str(uuid.uuid4())
+
+        with self.assertRaises(FrameworkError):
+            await self.tool.invoke(
+                {
+                    "action": "insert_after",
+                    "todo_data": {
+                        "target_id": current_todos[0].id,
+                        "items": [{
+                            "id": new_todo_id,
+                            "content": "Inserted Task",
+                            "activeForm": "Executing inserted task",
+                            "status": TodoStatus.PENDING.value,
+                        }],
+                    },
+                },
+                session=self.mock_session,
+            )
+
+        self.tool.save_todos.assert_not_awaited()
+        self.assertNotIn(new_todo_id, [todo.id for todo in current_todos])
+
+    async def test_invoke_insert_before_rejects_invalid_sequence_without_save(self):
+        """Reject insertion that leaves a pending item before a completed item."""
+        current_todos = [
+            TodoItem.create(content="Pending Task", status=TodoStatus.PENDING),
+            TodoItem.create(content="Completed Task", status=TodoStatus.COMPLETED),
+        ]
+        self.tool.load_todos = AsyncMock(return_value=current_todos)
+        new_todo_id = str(uuid.uuid4())
+
+        with self.assertRaises(FrameworkError):
+            await self.tool.invoke(
+                {
+                    "action": "insert_before",
+                    "todo_data": {
+                        "target_id": current_todos[0].id,
+                        "items": [{
+                            "id": new_todo_id,
+                            "content": "Inserted Task",
+                            "activeForm": "Executing inserted task",
+                            "status": TodoStatus.PENDING.value,
+                        }],
+                    },
+                },
+                session=self.mock_session,
+            )
+
+        self.tool.save_todos.assert_not_awaited()
+        self.assertNotIn(new_todo_id, [todo.id for todo in current_todos])
+
+    async def test_invoke_insert_after_rejects_second_in_progress_without_save(self):
+        """Reject an inserted in-progress item without persisting any new task."""
+        current_todos = [
+            TodoItem.create(content="Active Task", status=TodoStatus.IN_PROGRESS),
+        ]
+        self.tool.load_todos = AsyncMock(return_value=current_todos)
+        new_todo_id = str(uuid.uuid4())
+
+        with self.assertRaises(FrameworkError):
+            await self.tool.invoke(
+                {
+                    "action": "insert_after",
+                    "todo_data": {
+                        "target_id": current_todos[0].id,
+                        "items": [{
+                            "id": new_todo_id,
+                            "content": "Second Active Task",
+                            "activeForm": "Executing second active task",
+                            "status": TodoStatus.IN_PROGRESS.value,
+                        }],
+                    },
+                },
+                session=self.mock_session,
+            )
+
+        self.tool.save_todos.assert_not_awaited()
+        self.assertNotIn(new_todo_id, [todo.id for todo in current_todos])
+
+    async def test_invoke_insert_after_allows_cancelled_suffix(self):
+        """Allow insertion when only cancelled tasks follow the insertion point."""
+        current_todos = [
+            TodoItem.create(content="Active Task", status=TodoStatus.IN_PROGRESS),
+            TodoItem.create(content="Cancelled Task", status=TodoStatus.CANCELLED),
+        ]
+        self.tool.load_todos = AsyncMock(return_value=current_todos)
+        new_todo_id = str(uuid.uuid4())
+
+        result = await self.tool.invoke(
+            {
+                "action": "insert_after",
+                "todo_data": {
+                    "target_id": current_todos[0].id,
+                    "items": [{
+                        "id": new_todo_id,
+                        "content": "Inserted Task",
+                        "activeForm": "Executing inserted task",
+                        "status": TodoStatus.PENDING.value,
+                    }],
+                },
+            },
+            session=self.mock_session,
+        )
+
+        self.assertIn("Successfully inserted 1 task(s)", result["message"])
+        saved_todos = self.tool.save_todos.call_args[0][0]
+        self.assertEqual([todo.id for todo in saved_todos], [
+            current_todos[0].id,
+            new_todo_id,
+            current_todos[1].id,
+        ])
 
     async def test_invoke_cancel_success(self):
         """Test successful cancellation of todo items"""

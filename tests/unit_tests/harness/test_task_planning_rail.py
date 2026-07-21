@@ -1053,6 +1053,17 @@ def test_todo_prompt_contains_no_use_guidance() -> None:
     assert "何时不使用" in cn_prompt
 
 
+def test_todo_prompt_contains_plan_selection_and_addition_rules() -> None:
+    """System prompt aligns task additions and plan selection with todo tools."""
+    en_prompt = build_todo_system_prompt(language="en")
+    cn_prompt = build_todo_system_prompt(language="cn")
+
+    assert "task additions" in en_prompt
+    assert "Independent new request" in en_prompt
+    assert "新增任务" in cn_prompt
+    assert "独立新请求" in cn_prompt
+
+
 def test_build_progress_reminder_user_prompt_chinese() -> None:
     """build_progress_reminder_user_prompt returns Chinese prompt."""
     prompt = build_progress_reminder_user_prompt(language="cn")
