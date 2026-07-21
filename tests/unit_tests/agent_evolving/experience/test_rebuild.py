@@ -17,7 +17,10 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionRecord,
     EvolutionRecordSpec,
 )
-from openjiuwen.agent_evolving.experience.rebuild import ExperienceRebuildService
+from openjiuwen.agent_evolving.experience.rebuild import (
+    ExperienceRebuildService,
+    _normalize_record_ids,
+)
 from openjiuwen.agent_evolving.signal.base import EvolutionTarget
 
 
@@ -36,7 +39,6 @@ def _make_record(content: str, *, score: float = 0.8, skip_reason: str | None = 
             score=score,
         )
     )
-    
     record.id = f"ev_{content[:4]}"
     return record
 
@@ -137,7 +139,7 @@ def test_complete_rebuild_clears_when_archive_path_present():
     )
 
     assert cleared is True
-    store.bump_version_for_rebuild.assert_awaited_once_with("skill-a")
+    store.bump_version_for_rebuild.assert_awaited_once_with("skill-a", entries=[])
     store.append_changelog_for_rebuild.assert_awaited_once()
     store.clear_evolutions.assert_awaited_once_with("skill-a", retain_version="1.0.1")
 
@@ -156,7 +158,7 @@ def test_complete_rebuild_proceeds_when_archive_path_missing():
     )
 
     assert cleared is True
-    store.bump_version_for_rebuild.assert_awaited_once_with("skill-a")
+    store.bump_version_for_rebuild.assert_awaited_once_with("skill-a", entries=[])
     store.clear_evolutions.assert_awaited_once_with("skill-a", retain_version="1.0.1")
 
 
@@ -397,6 +399,195 @@ async def test_complete_rebuild_changelog_idempotent_same_version(tmp_path: Path
     assert wrote is False
     second = (skill_dir / "changelog.md").read_text(encoding="utf-8")
     assert second == first
+
+
+def test_prepare_rebuild_context_whitelist_keeps_low_score_and_skip_reason():
+    high = _make_record("good experience", score=0.8)
+    low = _make_record("bad experience", score=0.3)
+    skipped = _make_record("skipped experience", score=0.9, skip_reason="duplicate")
+    other = _make_record("other experience", score=0.9)
+    low.id = "ev_low"
+    skipped.id = "ev_skipped"
+    high.id = "ev_high"
+    other.id = "ev_other"
+    store = Mock()
+    store.skill_exists.return_value = True
+    store.archive_current_state = AsyncMock(return_value=("SKILL.v1.0.0.md", "evolutions.v1.0.0.json"))
+    store.load_evolution_log = AsyncMock(return_value=Mock(entries=[high, low, skipped, other]))
+    rebuild_service = ExperienceRebuildService(store=store)
+
+    result = asyncio.run(
+        rebuild_service.prepare_rebuild_context(
+            {"kind": "skill", "name": "skill-a"},
+            min_score=0.5,
+            record_ids=["ev_low", "ev_skipped"],
+        )
+    )
+
+    assert result is not None
+    assert result["record_ids"] == ["ev_low", "ev_skipped"]
+    contents = [item["content"] for item in result["records"]]
+    assert set(contents) == {"bad experience", "skipped experience"}
+    assert contents[0] == "skipped experience"
+    assert all(item["content"] != "good experience" for item in result["records"])
+    assert all(item["content"] != "other experience" for item in result["records"])
+
+
+def test_prepare_rebuild_context_empty_record_ids_uses_score_filters():
+    high = _make_record("good experience", score=0.8)
+    low = _make_record("bad experience", score=0.3)
+    store = Mock()
+    store.skill_exists.return_value = True
+    store.archive_current_state = AsyncMock(return_value=("SKILL.v1.0.0.md", "evolutions.v1.0.0.json"))
+    store.load_evolution_log = AsyncMock(return_value=Mock(entries=[high, low]))
+    rebuild_service = ExperienceRebuildService(store=store)
+
+    result = asyncio.run(
+        rebuild_service.prepare_rebuild_context(
+            {"kind": "skill", "name": "skill-a"},
+            min_score=0.5,
+            record_ids=["  ", ""],
+        )
+    )
+
+    assert result is not None
+    assert "record_ids" not in result
+    assert [item["content"] for item in result["records"]] == ["good experience"]
+
+
+@pytest.mark.asyncio
+async def test_complete_rebuild_whitelist_bumps_from_selected_then_clears_all(tmp_path: Path):
+    root = tmp_path / "skills"
+    skill_dir = root / "skill-a"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nversion: 1.0.0\n---\n\n# Skill\n",
+        encoding="utf-8",
+    )
+    store = EvolutionStore(str(root))
+    patch_record = EvolutionRecord.make(
+        EvolutionRecordSpec(
+            source="execution_failure",
+            context="ctx",
+            change=EvolutionPatch(
+                section="Troubleshooting",
+                action="append",
+                content="patch only",
+                target=EvolutionTarget.BODY,
+            ),
+        )
+    )
+    minor_record = EvolutionRecord.make(
+        EvolutionRecordSpec(
+            source="user_correction",
+            context="ctx",
+            change=EvolutionPatch(
+                section="Instructions",
+                action="append",
+                content="would bump minor",
+                target=EvolutionTarget.BODY,
+            ),
+        )
+    )
+    await store.append_record("skill-a", patch_record)
+    await store.append_record("skill-a", minor_record)
+    rebuild_service = ExperienceRebuildService(store=store)
+
+    cleared = await rebuild_service.complete_rebuild(
+        {
+            "skill_name": "skill-a",
+            "archive_path": "evolutions.v1.0.0.json",
+            "record_ids": [patch_record.id],
+            "min_score": 0.5,
+        },
+    )
+
+    assert cleared is True
+    evo_log = await store.load_full_evolution_log("skill-a")
+    assert evo_log.entries == []
+    assert evo_log.version == "1.0.1"
+    assert "version: 1.0.1" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_complete_rebuild_without_whitelist_uses_low_score_and_skip_reason(tmp_path: Path):
+    """CR-001: no record_ids => bump uses full live log, not prepare min_score filters."""
+    root = tmp_path / "skills"
+    skill_dir = root / "skill-a"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nversion: 1.0.0\n---\n\n# Skill\n",
+        encoding="utf-8",
+    )
+    store = EvolutionStore(str(root))
+    high_patch = EvolutionRecord.make(
+        EvolutionRecordSpec(
+            source="execution_failure",
+            context="ctx",
+            change=EvolutionPatch(
+                section="Troubleshooting",
+                action="append",
+                content="high patch",
+                target=EvolutionTarget.BODY,
+            ),
+            score=0.8,
+        )
+    )
+    low_patch = EvolutionRecord.make(
+        EvolutionRecordSpec(
+            source="execution_failure",
+            context="ctx",
+            change=EvolutionPatch(
+                section="Troubleshooting",
+                action="append",
+                content="low patch",
+                target=EvolutionTarget.BODY,
+            ),
+            score=0.3,
+        )
+    )
+    skipped_minor = EvolutionRecord.make(
+        EvolutionRecordSpec(
+            source="user_correction",
+            context="ctx",
+            change=EvolutionPatch(
+                section="Instructions",
+                action="append",
+                content="skipped but minor",
+                target=EvolutionTarget.BODY,
+                skip_reason="duplicate",
+            ),
+            score=0.9,
+        )
+    )
+    await store.append_record("skill-a", high_patch)
+    await store.append_record("skill-a", low_patch)
+    await store.append_record("skill-a", skipped_minor)
+    rebuild_service = ExperienceRebuildService(store=store)
+
+    cleared = await rebuild_service.complete_rebuild(
+        {
+            "skill_name": "skill-a",
+            "archive_path": "evolutions.v1.0.0.json",
+            "min_score": 0.5,
+        },
+    )
+
+    assert cleared is True
+    evo_log = await store.load_full_evolution_log("skill-a")
+    assert evo_log.entries == []
+    # Full log includes Instructions (MINOR); prepare-style filters would yield PATCH only.
+    assert evo_log.version == "1.1.0"
+    assert "version: 1.1.0" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    changelog = (skill_dir / "changelog.md").read_text(encoding="utf-8")
+    assert "## [1.1.0]" in changelog
+
+
+def test_normalize_record_ids_treats_bare_string_as_single_id():
+    assert _normalize_record_ids("ev_abc") == ["ev_abc"]
+    assert _normalize_record_ids("  ") is None
+    assert _normalize_record_ids(b"ev_bytes") == ["ev_bytes"]
+    assert _normalize_record_ids(["ev_a", "ev_a", "  ", "ev_b"]) == ["ev_a", "ev_b"]
 
 
 def test_prepare_rebuild_context_injects_resolved_paths_for_external_skill(tmp_path: Path):

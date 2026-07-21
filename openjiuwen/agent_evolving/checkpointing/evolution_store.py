@@ -1016,8 +1016,18 @@ version: 1.0.0
             return evo_log.version
         return "1.0.0"
 
-    async def bump_version_for_rebuild(self, name: str) -> Optional[str]:
+    async def bump_version_for_rebuild(
+        self,
+        name: str,
+        *,
+        entries: Optional[List[EvolutionRecord]] = None,
+    ) -> Optional[str]:
         """Aggregate experience types and bump SemVer once for a rebuild.
+
+        Args:
+            name: Skill name.
+            entries: Optional subset of evolution records to classify. When
+                ``None``, uses the full live evolution log.
 
         Returns the new version string, or None when there are no entries to classify.
         """
@@ -1026,7 +1036,8 @@ version: 1.0.0
             return None
 
         evo_log = await self._load_full_evolution_log(name)
-        level = aggregate_version_bump(evo_log.entries)
+        bump_entries = evo_log.entries if entries is None else list(entries)
+        level = aggregate_version_bump(bump_entries)
         if level is None:
             return None
 
