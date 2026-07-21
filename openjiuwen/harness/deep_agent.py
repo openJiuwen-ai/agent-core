@@ -192,6 +192,7 @@ class DeepAgent(BaseAgent):
         self._interaction_phase = InteractionPhase.IDLE
         self._active_interaction_round: Optional[ActiveInteractionRound] = None
         self._event_manager = EventManager()
+        self._inherited_artifact_root: Optional[str] = None
         self.goal_manager: Optional[GoalManager] = None
         self._interaction_output = OutputLeaseManager()
         self._interaction_supervisor_task: Optional[asyncio.Task[None]] = None
@@ -918,9 +919,31 @@ class DeepAgent(BaseAgent):
             supported,
         )
 
+    def _apply_inherited_artifact_cwd(self) -> None:
+        """Set cwd from ``_inherited_artifact_root`` for a reused subagent.
+
+        No-op on the main agent (field is unset), so host-seeded runtime cwd
+        is not overwritten on every invoke.
+        """
+        if not self._inherited_artifact_root:
+            return
+        if not (self._deep_config and self._deep_config.workspace):
+            return
+        from openjiuwen.core.sys_operation.cwd import init_cwd
+
+        init_root = self._deep_config.workspace.root_path or os.getcwd()
+        init_cwd(
+            self._inherited_artifact_root,
+            project_root=self._inherited_artifact_root,
+            workspace=init_root,
+        )
+
     async def _ensure_initialized(self) -> None:
         """Perform lazy async initialization."""
         if self._initialized:
+            # Reused subagent instances skip full init; still refresh cwd so
+            # create_subagent does not have to mutate the parent's ContextVar.
+            self._apply_inherited_artifact_cwd()
             return
 
         # Initialize ContextVar CWD in the current asyncio Task context.
@@ -930,10 +953,14 @@ class DeepAgent(BaseAgent):
             from openjiuwen.core.sys_operation.cwd import init_cwd
 
             init_root = self._deep_config.workspace.root_path or os.getcwd()
-            init_cwd(
-                init_root,
-                workspace=self._deep_config.workspace.root_path,
-            )
+            if self._inherited_artifact_root:
+                init_cwd(
+                    self._inherited_artifact_root,
+                    project_root=self._inherited_artifact_root,
+                    workspace=init_root,
+                )
+            else:
+                init_cwd(init_root, workspace=init_root)
 
         await self._register_pending_mcps()
 
@@ -1008,6 +1035,24 @@ class DeepAgent(BaseAgent):
         """React agent config. For testing only."""
         return self._react_agent.config
 
+    @staticmethod
+    def _bind_inherited_artifact_root(subagent: Any) -> Any:
+        """Point subagent file writes at the parent's current artifact root.
+
+        Prefer ``get_cwd()``: after a sibling subagent runs in the same Task,
+        ambient ``get_workspace()`` may point at that sibling's ``sub_agents/``
+        tree while cwd remains the shared artifact root.
+        """
+        from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
+
+        artifact_root = get_cwd() or get_workspace()
+        try:
+            setattr(subagent, "_inherited_artifact_root", artifact_root)
+        except (AttributeError, TypeError):
+            # Test mocks may return bare object(); real DeepAgent always accepts it.
+            pass
+        return subagent
+
     def create_subagent(
         self,
         subagent_type: str,
@@ -1036,7 +1081,9 @@ class DeepAgent(BaseAgent):
 
         if isinstance(spec, DeepAgent):
             logger.info("already get deepagent instance, return it")
-            return spec
+            # Only bind the field here; cwd is applied in _ensure_initialized
+            # so create_subagent does not mutate the parent's ContextVar.
+            return self._bind_inherited_artifact_root(spec)
 
         if not self._deep_config.workspace or isinstance(self._deep_config.workspace, str):
             workspace_path = (
@@ -1111,33 +1158,44 @@ class DeepAgent(BaseAgent):
                 factory_kwargs = dict(spec.factory_kwargs or {})
                 if browser_capabilities is not None:
                     factory_kwargs["browser_capabilities"] = list(browser_capabilities)
-                return create_browser_agent(**create_kwargs, **factory_kwargs)
+                return self._bind_inherited_artifact_root(
+                    create_browser_agent(
+                        **create_kwargs,
+                        **factory_kwargs,
+                    )
+                )
             if normalized_factory == "code_agent":
                 from openjiuwen.harness.subagents.code_agent import (
                     create_code_agent,
                 )
 
-                return create_code_agent(
-                    **create_kwargs,
-                    **dict(spec.factory_kwargs or {}),
+                return self._bind_inherited_artifact_root(
+                    create_code_agent(
+                        **create_kwargs,
+                        **dict(spec.factory_kwargs or {}),
+                    )
                 )
             if normalized_factory == "research_agent":
                 from openjiuwen.harness.subagents.research_agent import (
                     create_research_agent,
                 )
 
-                return create_research_agent(
-                    **create_kwargs,
-                    **dict(spec.factory_kwargs or {}),
+                return self._bind_inherited_artifact_root(
+                    create_research_agent(
+                        **create_kwargs,
+                        **dict(spec.factory_kwargs or {}),
+                    )
                 )
             if normalized_factory in {"mobile_gui_agent", "mobile_agent"}:
                 from openjiuwen.harness.subagents.mobile_gui_agent import (
                     create_mobile_gui_agent,
                 )
 
-                return create_mobile_gui_agent(
-                    **create_kwargs,
-                    **dict(spec.factory_kwargs or {}),
+                return self._bind_inherited_artifact_root(
+                    create_mobile_gui_agent(
+                        **create_kwargs,
+                        **dict(spec.factory_kwargs or {}),
+                    )
                 )
 
             raise build_error(
@@ -1147,7 +1205,9 @@ class DeepAgent(BaseAgent):
 
         from openjiuwen.harness.factory import create_deep_agent
 
-        return create_deep_agent(**create_kwargs, **dict(spec.factory_kwargs or {}))
+        return self._bind_inherited_artifact_root(
+            create_deep_agent(**create_kwargs, **dict(spec.factory_kwargs or {}))
+        )
 
     def _find_subagent_spec(self, subagent_type: str) -> Optional["SubAgentConfig | DeepAgent"]:
         """Find SubAgentConfig matching subagent_type.
