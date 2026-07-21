@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import asyncio
 import os
 import base64
 import json
@@ -25,7 +26,13 @@ from openjiuwen.harness.tools import (
     GlobTool, ListDirTool, GrepTool,
 )
 from openjiuwen.harness.tools import filesystem as filesystem_module
-from openjiuwen.harness.tools.filesystem import _FILE_READ_REGISTRY, _TokenBudget
+from openjiuwen.harness.tools.filesystem import (
+    _FILE_READ_REGISTRY,
+    _TokenBudget,
+    _merge_range,
+    _ranges_cover,
+    _first_unread_offset,
+)
 
 
 @pytest.fixture
@@ -573,8 +580,96 @@ async def test_edit_file_tool_full_workflow(sys_op, temp_dir):
 
 
 @pytest.mark.asyncio
-async def test_edit_file_tool_reads_existing_content_via_sys_operation_fs(sys_op, temp_dir):
+async def test_edit_file_tool_rejects_change_between_edit_read_and_write(sys_op, temp_dir):
+    """The write-time compare-and-swap must prevent a lost concurrent update."""
     write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "concurrent_edit.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "alpha beta"})
+    await read_tool.invoke({"file_path": file_path})
+
+    fs = sys_op.fs()
+    original_write_file = fs.write_file
+    injected = False
+
+    async def concurrent_write(path: str, content: str, **kwargs):
+        nonlocal injected
+        if not injected and kwargs.get("options", {}).get("expected_content_sha256"):
+            injected = True
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("alpha changed-by-another-agent")
+        return await original_write_file(path, content, **kwargs)
+
+    fs.write_file = concurrent_write
+    try:
+        result = await edit_tool.invoke({
+            "file_path": file_path,
+            "old_string": "beta",
+            "new_string": "gamma",
+        })
+    finally:
+        fs.write_file = original_write_file
+
+    assert result.success is False
+    assert "changed while preparing" in result.error
+    with open(file_path, encoding="utf-8") as fh:
+        assert fh.read() == "alpha changed-by-another-agent"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_tool_waits_for_other_instance_and_edits_latest_content(sys_op, temp_dir):
+    """Different agent tool instances share one per-file edit transaction."""
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    first_tool = EditFileTool(sys_op)
+    second_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "shared_agent_edit.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "host=local\nlevel=debug"})
+    await read_tool.invoke({"file_path": file_path})
+
+    first_has_lock = asyncio.Event()
+    release_first = asyncio.Event()
+    second_entered = asyncio.Event()
+    first_unlocked = first_tool._invoke_unlocked
+    second_unlocked = second_tool._invoke_unlocked
+
+    async def delayed_first(self, inputs, **kwargs):
+        first_has_lock.set()
+        await release_first.wait()
+        return await first_unlocked(inputs, **kwargs)
+
+    async def tracked_second(self, inputs, **kwargs):
+        second_entered.set()
+        return await second_unlocked(inputs, **kwargs)
+
+    first_tool._invoke_unlocked = MethodType(delayed_first, first_tool)
+    second_tool._invoke_unlocked = MethodType(tracked_second, second_tool)
+
+    first_task = asyncio.create_task(first_tool.invoke({
+        "file_path": file_path,
+        "old_string": "host=local",
+        "new_string": "host=production",
+    }))
+    await first_has_lock.wait()
+    second_task = asyncio.create_task(second_tool.invoke({
+        "file_path": file_path,
+        "old_string": "level=debug",
+        "new_string": "level=warn",
+    }))
+    await asyncio.sleep(0)
+    assert not second_entered.is_set()
+
+    release_first.set()
+    first_result, second_result = await asyncio.gather(first_task, second_task)
+    assert first_result.success is True
+    assert second_result.success is True
+    with open(file_path, encoding="utf-8") as fh:
+        assert fh.read() == "host=production\nlevel=warn"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_tool_reads_existing_content_via_sys_operation_fs(sys_op, temp_dir):
     read_tool = ReadFileTool(sys_op)
     edit_tool = EditFileTool(sys_op)
     file_path = os.path.join(temp_dir, "edit_via_fs.txt")
@@ -1016,3 +1111,158 @@ class TestEditFileToolHistoryPath(unittest.TestCase):
         path = tool._build_history_path(session)
         filename = os.path.basename(path)
         assert filename == "file_ops_myagent_sess123.json"
+
+
+# ---------------------------------------------------------------------------
+# WriteFileTool cumulative-coverage tests
+#
+# Mirror the EditFileTool partial-read tests above, but for the full-file
+# overwrite tool. WriteFileTool overwrites the whole file, so a partial read
+# (offset/limit) only seeing a window is NOT enough — unread content would be
+# lost on overwrite. The guard therefore tracks the union of every read
+# interval; when the union covers [1, total_lines] the file is "logically
+# fully read" and write is allowed. This unblocks large files (which can only
+# be read in partial windows) while still refusing to overwrite a file that
+# was only partially read.
+# ---------------------------------------------------------------------------
+
+
+def test_merge_range_merges_overlapping_and_adjacent():
+    assert _merge_range([(1, 5)], (3, 7)) == [(1, 7)]
+    assert _merge_range([(1, 5)], (6, 9)) == [(1, 9)]  # adjacent
+    assert _merge_range([(1, 5)], (7, 9)) == [(1, 5), (7, 9)]  # gap kept
+    # Head-tail-middle insertion order still collapses to a single span.
+    assert _merge_range([(1, 100), (2001, 3824)], (101, 2000)) == [(1, 3824)]
+
+
+def test_ranges_cover_detects_full_and_partial_coverage():
+    assert _ranges_cover([(1, 3824)], 1, 3824) is True
+    assert _ranges_cover([(1, 2000), (2001, 3824)], 1, 3824) is True
+    assert _ranges_cover([(1, 100), (2001, 3824)], 1, 3824) is False  # gap
+    assert _ranges_cover([(1, 2000)], 1, 3824) is False  # tail unread
+    assert _ranges_cover([], 1, 3824) is False
+
+
+def test_first_unread_offset_finds_gap_then_tail():
+    assert _first_unread_offset([]) == 0
+    assert _first_unread_offset([(1, 2000)]) == 2000
+    assert _first_unread_offset([(1, 100), (2001, 3824)]) == 100  # gap start
+
+
+@pytest.mark.asyncio
+async def test_write_file_rejects_partial_read_with_resumable_hint(sys_op, temp_dir):
+    # A single partial read covers only a window — overwrite must be refused,
+    # and the error must tell the agent where to resume so it doesn't loop blindly.
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "partial_write.txt")
+    total_lines = ReadFileTool.MAX_LINES_TO_READ + 500
+    lines = [f"line{i}" for i in range(total_lines)]
+    await write_tool.invoke({"file_path": file_path, "content": "\n".join(lines)})
+
+    _FILE_READ_REGISTRY.pop(file_path, None)
+    await read_tool.invoke({"file_path": file_path, "offset": 0, "limit": 1000})
+
+    res = await write_tool.invoke({"file_path": file_path, "content": "overwrite"})
+    assert res.success is False
+    assert "fully read" in res.error
+    assert "offset=" in res.error
+    state = _FILE_READ_REGISTRY[file_path]
+    assert state.total_lines == total_lines
+    assert _first_unread_offset(state.read_ranges) == 1000
+
+
+@pytest.mark.asyncio
+async def test_write_file_allows_after_paginated_read_covers_whole_file(sys_op, temp_dir):
+    # Core deadlock fix: a file larger than MAX_LINES_TO_READ can be read end-to-end
+    # via offset/limit pages alone; once the union covers the whole file, write is
+    # allowed even though every individual read was partial.
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "big_overwrite.txt")
+    total_lines = ReadFileTool.MAX_LINES_TO_READ + 500
+    lines = [f"line{i}" for i in range(total_lines)]
+    await write_tool.invoke({"file_path": file_path, "content": "\n".join(lines)})
+
+    _FILE_READ_REGISTRY.pop(file_path, None)
+    page_size = 1000
+    for offset in range(0, total_lines, page_size):
+        await read_tool.invoke({"file_path": file_path, "offset": offset, "limit": page_size})
+
+    state = _FILE_READ_REGISTRY[file_path]
+    assert _ranges_cover(state.read_ranges, 1, total_lines) is True
+
+    res = await write_tool.invoke({"file_path": file_path, "content": "fully overwritten"})
+    assert res.success is True
+    assert res.data["type"] == "update"
+
+
+@pytest.mark.asyncio
+async def test_write_file_allows_after_head_tail_then_middle_fill(sys_op, temp_dir):
+    # An agent may read head then tail, leaving a middle gap; write must stay
+    # blocked until the gap is filled, then succeed. Verifies range merging.
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "gap_write.txt")
+    total_lines = 3824
+    lines = [f"line{i}" for i in range(total_lines)]
+    await write_tool.invoke({"file_path": file_path, "content": "\n".join(lines)})
+
+    _FILE_READ_REGISTRY.pop(file_path, None)
+    await read_tool.invoke({"file_path": file_path, "offset": 0, "limit": 100})    # 1-100
+    await read_tool.invoke({"file_path": file_path, "offset": 2000})              # 2001-3824, gap 101-2000
+
+    res_gap = await write_tool.invoke({"file_path": file_path, "content": "blocked"})
+    assert res_gap.success is False
+    assert "offset=100" in res_gap.error
+
+    await read_tool.invoke({"file_path": file_path, "offset": 100, "limit": 1900})  # fill 101-2000
+    res_ok = await write_tool.invoke({"file_path": file_path, "content": "merged"})
+    assert res_ok.success is True
+
+
+@pytest.mark.asyncio
+async def test_write_file_partial_read_still_blocks_after_external_modification(sys_op, temp_dir):
+    # Coverage tracking must not weaken safety: after a partial read, an external
+    # modification leaves the cached total/ranges stale. The write must still be
+    # refused — the agent has to re-read before overwriting. (After the external
+    # change, no new read happens, so the cached coverage is partial against the
+    # old total; WriteFileTool blocks it as "not fully read". The next read_file
+    # call detects the mtime/size change and recomputes coverage from scratch.)
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "stale_partial.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "\n".join(f"line{i}" for i in range(20))})
+
+    await read_tool.invoke({"file_path": file_path, "offset": 0, "limit": 10})
+    state_before = _FILE_READ_REGISTRY[file_path]
+    assert state_before.total_lines == 20
+
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("externally changed\n")
+
+    res = await write_tool.invoke({"file_path": file_path, "content": "overwrite"})
+    assert res.success is False  # still refused — safety preserved
+    # The next read must recompute total/ranges because the file changed.
+    await read_tool.invoke({"file_path": file_path, "offset": 0})
+    state_after = _FILE_READ_REGISTRY[file_path]
+    assert state_after.total_lines == 1  # file now has 1 line
+
+
+@pytest.mark.asyncio
+async def test_write_file_small_file_single_full_read_allows_overwrite(sys_op, temp_dir):
+    # Backward compatibility: a small file read in one shot (no offset/limit)
+    # is the old "non-partial" path — it must still be writable immediately,
+    # now via the coverage path (union == [1, total]).
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "small.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "a\nb\nc"})
+
+    _FILE_READ_REGISTRY.pop(file_path, None)
+    await read_tool.invoke({"file_path": file_path})
+    state = _FILE_READ_REGISTRY[file_path]
+    assert _ranges_cover(state.read_ranges, 1, state.total_lines) is True
+
+    res = await write_tool.invoke({"file_path": file_path, "content": "x\ny\nz"})
+    assert res.success is True
