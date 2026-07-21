@@ -3,6 +3,7 @@
 
 import asyncio
 import datetime
+import hashlib
 import os
 import pathlib
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -438,6 +439,23 @@ class FsOperation(BaseFsOperation):
             timeout = self._get_lock_timeout(options)
 
             async with self._file_lock(file_path, "write", timeout):
+                expected_hash = options.get("expected_content_sha256") if options else None
+                if expected_hash is not None:
+                    try:
+                        current_bytes = file_path.read_bytes()
+                    except FileNotFoundError:
+                        current_bytes = b""
+                    current_hash = hashlib.sha256(current_bytes).hexdigest()
+                    if current_hash != expected_hash:
+                        return self._create_error_result(
+                            "write_file",
+                            (
+                                f"File changed while preparing the write: {file_path}. "
+                                "Re-read the file and retry the edit."
+                            ),
+                            WriteFileResult,
+                            _ErrorLogParams(method_name, method_params, start_time),
+                        )
                 if mode == "text":
                     txt = str(content)
                     if prepend_newline:
