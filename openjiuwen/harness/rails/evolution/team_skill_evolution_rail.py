@@ -174,7 +174,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         fuzzy_review_interval: int = 5,
         completion_followup_enabled: Optional[bool] = None,
         review_trigger: Optional[bool] = None,
-        review_agent_max_iterations: int = 20,
+        review_agent_max_iterations: int = 40,
     ) -> None:
         if eval_interval < 1:
             raise ValueError("eval_interval must be >= 1")

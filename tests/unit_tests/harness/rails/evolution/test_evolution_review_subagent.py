@@ -33,7 +33,7 @@ def test_build_evolution_review_agent_config_is_stable_and_restricted():
     assert config.mcps == []
     assert config.skills is None
     assert config.rails == []
-    assert config.max_iterations == 10
+    assert config.max_iterations == 25
     tool_names = [tool.card.name for tool in config.tools]
     assert tool_names == [
         "list_skill_experiences",

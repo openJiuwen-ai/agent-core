@@ -74,7 +74,7 @@ def _make_rail(
     auto_save: bool = True,
     disabled_skills=None,
     language: str = "cn",
-    review_agent_max_iterations: int = 10,
+    review_agent_max_iterations: int = 25,
     fuzzy_review: bool = True,
     fuzzy_review_interval: int = 5,
 ) -> SkillEvolutionRail:
@@ -681,7 +681,7 @@ def test_skill_rail_init_registers_review_agent_with_default_max_iterations(tmp_
         for config in agent.deep_config.subagents
         if getattr(config.agent_card, "name", None) == "evolution_reviewer"
     )
-    assert getattr(configured, "max_iterations", None) == 10
+    assert getattr(configured, "max_iterations", None) == 25
 
 
 def test_skill_rail_init_registers_review_agent_with_custom_max_iterations(tmp_path):

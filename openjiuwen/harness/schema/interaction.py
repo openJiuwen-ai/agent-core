@@ -42,11 +42,13 @@ class InputDispatchMode(str, Enum):
 
 @dataclass(frozen=True)
 class SendInputRequest:
-    """A host request to dispatch user text through the interaction loop.
+    """A host request to dispatch input through the interaction loop.
 
     ``inputs[\"query\"]`` is the only source of user text.  The complete
     mapping is retained so existing DeepAgent invocation metadata (for example
     conversation id and trusted directories) travels with the work item.
+    The query may also be an ``InteractiveInput`` for interrupt recovery;
+    ``mode`` applies only to user text.
     """
 
     request_id: str
