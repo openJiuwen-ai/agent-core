@@ -224,6 +224,44 @@ class TestEvolutionStoreVersionBump:
 
     @staticmethod
     @pytest.mark.asyncio
+    async def test_bump_version_for_rebuild_uses_provided_entries(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(
+            root,
+            "skill-a",
+            "---\nname: skill-a\ndescription: weather\nversion: 1.0.0\n---\n\n# Skill\n",
+        )
+        store = EvolutionStore(str(root))
+        patch = make_record("ev_patch", source="execution_failure", section="Troubleshooting")
+        minor = make_record("ev_minor", source="user_correction", section="Instructions")
+        await store.append_record("skill-a", patch)
+        await store.append_record("skill-a", minor)
+
+        new_version = await store.bump_version_for_rebuild("skill-a", entries=[patch])
+        assert new_version == "1.0.1"
+        skill_md = await store.read_skill_content("skill-a")
+        assert EvolutionStore._extract_version_from_skill_md(skill_md) == "1.0.1"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_bump_version_for_rebuild_none_when_entries_empty(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(
+            root,
+            "skill-a",
+            "---\nversion: 1.0.0\n---\n\n# Skill\n",
+        )
+        store = EvolutionStore(str(root))
+        await store.append_record(
+            "skill-a",
+            make_record("ev_1", source="user_correction", section="Instructions"),
+        )
+        assert await store.bump_version_for_rebuild("skill-a", entries=[]) is None
+        skill_md = await store.read_skill_content("skill-a")
+        assert EvolutionStore._extract_version_from_skill_md(skill_md) == "1.0.0"
+
+    @staticmethod
+    @pytest.mark.asyncio
     async def test_clear_evolutions_retains_version(tmp_path: Path):
         root = tmp_path / "skills"
         prepare_skill(

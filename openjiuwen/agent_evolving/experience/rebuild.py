@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, List, Optional, Sequence
 
 from openjiuwen.agent_evolving.checkpointing.changelog import (
     classify_records_for_changelog,
@@ -46,6 +46,7 @@ class ExperienceRebuildService:
         min_score: float = 0.5,
         max_context_records: int = 40,
         max_context_chars: int = 20000,
+        record_ids: Optional[Sequence[str]] = None,
     ) -> Optional[dict[str, Any]]:
         """Archive current state, filter rebuild inputs, and return structured context."""
         normalized_subject = normalize_subject(subject)
@@ -63,8 +64,13 @@ class ExperienceRebuildService:
             archive_error = exc
             logger.warning("[ExperienceRebuildService] archive failed for '%s': %s", skill_name, exc)
 
+        normalized_ids = _normalize_record_ids(record_ids)
         records_log = await self._store.load_evolution_log(skill_name)
-        filtered_records = _filter_rebuild_records(records_log.entries, min_score=min_score)
+        filtered_records = _filter_rebuild_records(
+            records_log.entries,
+            min_score=min_score,
+            record_ids=normalized_ids,
+        )
         context = _build_rebuild_context_payload(
             filtered_records,
             max_records=max_context_records,
@@ -78,6 +84,8 @@ class ExperienceRebuildService:
             "archive_path": evo_archive,
             "archive_error": archive_error,
         }
+        if normalized_ids is not None:
+            context_payload["record_ids"] = normalized_ids
         if skill_md_path:
             context_payload["skill_md_path"] = skill_md_path
         if skills_base:
@@ -100,20 +108,53 @@ class ExperienceRebuildService:
         skill_name = str(rebuild_context.get("skill_name") or "").strip()
         if not skill_name:
             return False
-        new_version = await self._store.bump_version_for_rebuild(skill_name)
+
+        selected_entries = await self._select_entries_for_rebuild(rebuild_context)
+        new_version = await self._store.bump_version_for_rebuild(
+            skill_name,
+            entries=selected_entries,
+        )
         if new_version:
-            await self._write_changelog_for_rebuild(skill_name, new_version)
+            await self._write_changelog_for_rebuild(
+                skill_name,
+                new_version,
+                entries=selected_entries,
+            )
         await self._store.clear_evolutions(skill_name, retain_version=new_version)
         return True
 
-    async def _write_changelog_for_rebuild(self, skill_name: str, new_version: str) -> None:
-        """Classify live evolution entries and append a version section to changelog.md."""
+    async def _select_entries_for_rebuild(
+        self,
+        rebuild_context: dict[str, Any],
+    ) -> list[EvolutionRecord]:
+        """Load live log and apply the same selection rules as prepare."""
+        skill_name = str(rebuild_context.get("skill_name") or "").strip()
+        min_score_raw = rebuild_context.get("min_score", 0.5)
+        try:
+            min_score = float(min_score_raw)
+        except (TypeError, ValueError):
+            min_score = 0.5
+        record_ids = _normalize_record_ids(rebuild_context.get("record_ids"))
+        evo_log = await self._store.load_evolution_log(skill_name)
+        entries = getattr(evo_log, "entries", None) or []
+        return _filter_rebuild_records(
+            list(entries),
+            min_score=min_score,
+            record_ids=record_ids,
+        )
+
+    async def _write_changelog_for_rebuild(
+        self,
+        skill_name: str,
+        new_version: str,
+        *,
+        entries: Sequence[EvolutionRecord],
+    ) -> None:
+        """Classify selected evolution entries and append a version section to changelog.md."""
         append_changelog = getattr(self._store, "append_changelog_for_rebuild", None)
         if not callable(append_changelog):
             return
         try:
-            evo_log = await self._store.load_evolution_log(skill_name)
-            entries = getattr(evo_log, "entries", None) or []
             classified = await classify_records_for_changelog(
                 entries,
                 llm=self._llm,
@@ -129,6 +170,21 @@ class ExperienceRebuildService:
                 new_version,
                 exc,
             )
+
+
+def _normalize_record_ids(record_ids: Optional[Sequence[str]]) -> Optional[List[str]]:
+    """Deduplicate and strip IDs; empty result means no whitelist."""
+    if not record_ids:
+        return None
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in record_ids:
+        item = str(raw or "").strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        normalized.append(item)
+    return normalized or None
 
 
 def _resolve_skill_paths_from_store(store: Any, skill_name: str) -> tuple[Optional[str], Optional[str]]:
@@ -148,7 +204,21 @@ def _resolve_skill_paths_from_store(store: Any, skill_name: str) -> tuple[Option
     return str(md_path.resolve()), skills_base
 
 
-def _filter_rebuild_records(records: list[EvolutionRecord], *, min_score: float) -> list[EvolutionRecord]:
+def _filter_rebuild_records(
+    records: list[EvolutionRecord],
+    *,
+    min_score: float,
+    record_ids: Optional[Sequence[str]] = None,
+) -> list[EvolutionRecord]:
+    """Select rebuild inputs.
+
+    With a whitelist: keep only matching IDs (ignore min_score / skip_reason).
+    Without a whitelist: apply existing min_score / skip_reason filters.
+    """
+    if record_ids:
+        allowed = set(record_ids)
+        return [record for record in records if getattr(record, "id", None) in allowed]
+
     filtered: list[EvolutionRecord] = []
     for record in records:
         if getattr(record, "score", 0.0) < min_score:
