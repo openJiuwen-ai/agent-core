@@ -308,6 +308,95 @@ def test_prompt_attachment_reminder_is_in_initial_and_hot_reloaded_system_prompt
     assert "<prompt-attachment>" in reloaded_prompt
 
 
+def test_create_deep_agent_separates_tool_owner_from_card_id() -> None:
+    card = AgentCard(id="stable-checkpoint-id", name="deep", description="test")
+    tool = DummyTool("owner_scoped_tool")
+
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=card,
+        tools=[tool],
+        auto_create_workspace=False,
+        ability_owner_id="runtime-owner",
+    )
+    try:
+        assert agent.card.id == "stable-checkpoint-id"
+        assert tool.card.id == "owner_scoped_tool_runtime-owner"
+        assert Runner.resource_mgr.get_tool(tool.card.id) is tool
+    finally:
+        agent.ability_manager.teardown_tools()
+
+
+def test_hot_configure_preserves_explicit_ability_owner_id() -> None:
+    card = AgentCard(id="stable-checkpoint-id", name="deep", description="test")
+    agent = DeepAgent(card).configure(
+        DeepAgentConfig(
+            ability_owner_id="runtime-owner",
+            enable_task_loop=False,
+        )
+    )
+    first = DummyTool("first_owned_tool")
+    second = DummyTool("second_owned_tool")
+    try:
+        agent.ability_manager.add_ability(first.card, first)
+
+        # Hot updates are partial; omitting the owner keeps the explicit value.
+        agent.configure(DeepAgentConfig(enable_task_loop=False))
+        agent.ability_manager.add_ability(second.card, second)
+
+        assert agent.card.id == "stable-checkpoint-id"
+        assert agent.deep_config.ability_owner_id == "runtime-owner"
+        assert first.card.id == "first_owned_tool_runtime-owner"
+        assert second.card.id == "second_owned_tool_runtime-owner"
+        assert Runner.resource_mgr.get_tool(first.card.id) is first
+        assert Runner.resource_mgr.get_tool(second.card.id) is second
+    finally:
+        agent.ability_manager.teardown_tools()
+
+
+def test_configure_rejects_invalid_ability_owner_id() -> None:
+    agent = DeepAgent(AgentCard(id="stable-id", name="deep", description="test"))
+
+    with pytest.raises(TypeError, match="ability_owner_id must be a string or None"):
+        agent.configure(
+            DeepAgentConfig(
+                ability_owner_id=123,  # type: ignore[arg-type]
+                enable_task_loop=False,
+            )
+        )
+
+
+def test_hot_configure_rejects_ability_owner_id_change() -> None:
+    agent = DeepAgent(AgentCard(id="stable-id", name="deep", description="test")).configure(
+        DeepAgentConfig(
+            ability_owner_id="runtime-owner-a",
+            enable_task_loop=False,
+        )
+    )
+
+    with pytest.raises(ValueError, match="cannot change during a DeepAgent lifecycle"):
+        agent.configure(
+            DeepAgentConfig(
+                ability_owner_id="runtime-owner-b",
+                enable_task_loop=False,
+            )
+        )
+
+
+def test_hot_configure_rejects_implicit_ability_owner_id_change() -> None:
+    agent = DeepAgent(AgentCard(id="stable-id", name="deep", description="test")).configure(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+
+    with pytest.raises(ValueError, match="cannot change during a DeepAgent lifecycle"):
+        agent.configure(
+            DeepAgentConfig(
+                ability_owner_id="runtime-owner",
+                enable_task_loop=False,
+            )
+        )
+
+
 @pytest.mark.asyncio
 async def test_add_rail_lazy_register_on_first_invoke() -> None:
     agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=False))

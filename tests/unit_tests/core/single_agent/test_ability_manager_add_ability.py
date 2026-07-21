@@ -44,20 +44,47 @@ def test_stateful_add_ability_qualifies_id_and_resolves() -> None:
     asyncio.run(_run())
 
 
-def test_stateful_add_ability_refreshes_on_same_id() -> None:
+def test_stateful_duplicate_in_same_manager_keeps_original_registration() -> None:
     async def _run():
         await Runner.start()
         am = AbilityManager(owner_id="agent-2")
         first = _make_tool("calc", marker="first")
         second = _make_tool("calc", marker="second")
         try:
-            am.add_ability(first.card, first)
-            # A second instance under the same name+owner rebinds (refresh), no raise.
-            am.add_ability(second.card, second)
+            first_result = am.add_ability(first.card, first)
+            second_result = am.add_ability(second.card, second)
 
-            assert Runner.resource_mgr.get_tool("calc_agent-2") is second
+            assert first_result.added is True
+            assert second_result.added is False
+            assert second_result.reason == "duplicate_tool"
+            assert second.card.id == "calc"
+            assert am.get("calc") is first.card
+            assert Runner.resource_mgr.get_tool("calc_agent-2") is first
         finally:
             am.remove_ability("calc")
+            await Runner.stop()
+
+    asyncio.run(_run())
+
+
+def test_stateful_new_manager_refreshes_same_owner_id() -> None:
+    async def _run():
+        await Runner.start()
+        first_manager = AbilityManager(owner_id="agent-rebuilt")
+        rebuilt_manager = AbilityManager(owner_id="agent-rebuilt")
+        first = _make_tool("calc", marker="first")
+        rebuilt = _make_tool("calc", marker="rebuilt")
+        try:
+            first_result = first_manager.add_ability(first.card, first)
+            rebuilt_result = rebuilt_manager.add_ability(rebuilt.card, rebuilt)
+
+            assert first_result.added is True
+            assert rebuilt_result.added is True
+            assert first.card.id == "calc_agent-rebuilt"
+            assert rebuilt.card.id == "calc_agent-rebuilt"
+            assert Runner.resource_mgr.get_tool("calc_agent-rebuilt") is rebuilt
+        finally:
+            Runner.resource_mgr.remove_tool("calc_agent-rebuilt")
             await Runner.stop()
 
     asyncio.run(_run())

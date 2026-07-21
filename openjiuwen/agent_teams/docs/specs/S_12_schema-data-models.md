@@ -357,7 +357,7 @@ session checkpoint 全局状态根上有一个 `teams` namespace：
 build 顺序：`workspace` → `vision_model` / `audio_model` → `rails`（依赖
 workspace）→ `subagents`（依赖 parent_model + language）→ `sys_operation`（注入
 `Runner.resource_mgr`）→ `tools`（`BuiltinToolSpec` 转 Tool 实例，`ToolCard`
-透传）。
+解析为本节点已注册 Tool 的 canonical card）。
 
 #### `SubAgentSpec`
 
@@ -389,22 +389,21 @@ tool / rail / sys_operation 与 `DeepAgentSpec.build()` 同模式。
 | `type` | `str`（注册表 key） |
 | `params` | `dict[str, Any]` |
 
-`build(*, language, workspace=None) -> AgentRail`：从 `_RAIL_TYPE_REGISTRY`
-解析；构造时若 `language` 在 `__init__` 签名里则自动注入；`type=="skill_use"`
-且未传 `skills_dir` 时从 workspace 的 `skills` 节点解析 + 默认 CLI 目录
-（`~/.openjiuwen/workspace/skills`、`~/.claude/skills`）。
+`build(*, language, workspace=None, context=None) -> AgentRail | list[AgentRail] | None`：
+从 `_RAIL_PROVIDER_REGISTRY` 解析同步 Provider。`None` / 空列表表示条件能力未启用；
+列表内 `None` 被过滤，其他非 `AgentRail` 值直接 `TypeError`。
 
-注册：`register_rail_type(name, cls)`。内置：`task_planning` / `skill_use` /
-`subagent` / `filesystem` + 可选 `context_engineering` / `token_tracking` /
-`tool_tracking` / `ask_user` / `confirm_interrupt`（importable 时登记）。
+注册：`register_rail_provider(name, factory)`；内置与平台 Rail 均经 manifest catalog 注册。
 
 #### `BuiltinToolSpec`
 
-字段同 `RailSpec`。`build(*, language, tool_id=None) -> Any`：从
-`_TOOL_TYPE_REGISTRY` 解析；`language` / `tool_id` 在签名里时自动注入。
-内置（可选）：`web_search` / `web_fetch`。
+字段同 `RailSpec`。`build(*, language, tool_id=None, context=None)` 从
+`_TOOL_PROVIDER_REGISTRY` 解析同步 Provider，只接受 `Tool` / `ToolCard` / 列表 / `None`。
+live `Tool` 交给 AbilityManager 注册；纯 `ToolCard` 必须在当前节点已有真实 Tool，且与
+真实 card 全字段一致。stateful 纯卡还必须按当前 Agent owner 预注册为
+`<tool_name>_<owner_id>`；真正跨 Agent 共享的引用须显式声明 `stateless=True`。
 
-注册：`register_tool_type(name, cls)`。
+注册：`register_tool_provider(name, factory)`。
 
 #### `WorkspaceSpec`
 

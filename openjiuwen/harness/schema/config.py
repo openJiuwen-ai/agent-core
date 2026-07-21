@@ -168,6 +168,11 @@ class DeepAgentConfig:
         model: Pre-constructed Model instance for LLM
             calls.
         card: Agent identity card.
+        ability_owner_id: Optional runtime namespace for stateful Tool resources.
+            This is deliberately independent from ``card.id`` so callers can
+            keep a stable persistence/checkpoint identity while isolating live
+            tool instances. Defaults to ``card.id`` when unset and remains
+            immutable for the lifetime of a configured DeepAgent.
         system_prompt: System prompt injected into the
             ReAct agent's prompt template.
         context_engine_config: Reserved for P1 context
@@ -208,6 +213,7 @@ class DeepAgentConfig:
 
     model: Optional[Model] = None
     card: Optional[AgentCard] = None
+    ability_owner_id: Optional[str] = None
     system_prompt: Optional[str] = None
     context_engine_config: Optional[Any] = None
     kv_cache_affinity_config: Optional[KVCacheAffinityConfig] = None
