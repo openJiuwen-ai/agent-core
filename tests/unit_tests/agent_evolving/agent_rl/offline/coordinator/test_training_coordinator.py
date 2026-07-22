@@ -4,6 +4,7 @@
 import pytest
 
 pytest.importorskip("torch")
+pytest.importorskip("tensordict")
 
 try:
     import torch
