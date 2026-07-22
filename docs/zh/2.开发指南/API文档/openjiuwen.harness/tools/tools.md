@@ -2,7 +2,7 @@
 
 DeepAgent 内置工具实现。所有工具通过 Rails 或 `create_deep_agent()` 的 `tools` 参数注册到智能体的 `AbilityManager`。
 
-[浏览器子智能体](../subagents/browser_agent.md)的工具（Playwright MCP 工具、页面探测、批量交互、自定义动作）单独记录在 [`browser_tools`](./browser_tools.md) 中。
+[浏览器子智能体](../subagents/浏览器子智能体.md)的工具（Playwright MCP 工具、页面探测、批量交互、自定义动作）单独记录在 [`browser_tools`](./浏览器子智能体工具.md) 中。
 
 ---
 
