@@ -212,6 +212,17 @@ class OtelCallbackHandler:
             tracker = get_active_span_tracker()
             span = tracker.peek_current_llm_span() if tracker else None
             state = getattr(span, "_llm_state", None) if span else None
+            # DIAG: chunk callback task vs open task
+            try:
+                import asyncio as _aio
+                _cur_task = id(_aio.current_task())
+            except Exception:
+                _cur_task = 0
+            _sid = state.span.context.span_id if state else 0
+            _open_task = getattr(span, "_llm_open_task", 0) if span else 0
+            if state is None or _cur_task != _open_task:
+                team_logger.info("DIAG on_llm_stream_output span_id={:016x} has_state={} cur_task={} open_task={} cross={}",
+                                 _sid, state is not None, _cur_task, _open_task, _cur_task != _open_task)
 
             if state is None or not state.span.is_recording():
                 return kwargs.get("result")
@@ -250,6 +261,18 @@ class OtelCallbackHandler:
             tracker = get_active_span_tracker()
             span = tracker.pop_current_llm_span() if tracker else None
             state = getattr(span, "_llm_state", None) if span else None
+            # DIAG: trace llm span close path (streaming final) + cross-task
+            try:
+                import asyncio as _aio
+                _cur_task = id(_aio.current_task())
+            except Exception:
+                _cur_task = 0
+            _sid = state.span.context.span_id if state else 0
+            _open_task = getattr(span, "_llm_open_task", 0) if span else 0
+            team_logger.info("DIAG on_llm_output enter span_id={:016x} has_state={} recording={} cur_task={} open_task={} cross={}",
+                             _sid, state is not None,
+                             state.span.is_recording() if state else False,
+                             _cur_task, _open_task, _cur_task != _open_task)
             if state is None:
                 team_logger.debug("otel: on_llm_output — no open LLM span to close")
                 return
@@ -313,6 +336,11 @@ class OtelCallbackHandler:
             # Non-streaming: pop and close
             span = tracker.pop_current_llm_span() if tracker else None
             state = getattr(span, "_llm_state", None) if span else None
+            # DIAG: trace llm span close path (non-streaming)
+            _sid = state.span.context.span_id if state else 0
+            team_logger.info("DIAG on_llm_invoke_output enter span_id={:016x} has_state={} recording={}",
+                             _sid, state is not None,
+                             state.span.is_recording() if state else False)
             if state is None:
                 return kwargs.get("result")
             response = kwargs.get("result")
@@ -337,6 +365,11 @@ class OtelCallbackHandler:
             tracker = get_active_span_tracker()
             span = tracker.pop_current_llm_span() if tracker else None
             state = getattr(span, "_llm_state", None) if span else None
+            # DIAG: trace llm span close path (error)
+            _sid = state.span.context.span_id if state else 0
+            team_logger.info("DIAG on_llm_call_error enter span_id={:016x} has_state={} recording={}",
+                             _sid, state is not None,
+                             state.span.is_recording() if state else False)
 
             if state is None:
                 return
@@ -647,6 +680,14 @@ class OtelCallbackHandler:
 
         _llm_st = LlmSpanState(span=span, start_ns=time.monotonic_ns(), is_streaming=is_streaming)
         span._llm_state = _llm_st  # attach state to span object (context-immune)
+
+        # DIAG: capture the task that opened this span so on_llm_output can
+        # detect a cross-task close (stream output fired on a different task).
+        try:
+            import asyncio as _aio
+            span._llm_open_task = id(_aio.current_task())
+        except Exception:
+            span._llm_open_task = 0
 
         team_logger.info(
             "otel: _open_llm_span name=llm.call trace_id={:032x} span_id={:016x} "

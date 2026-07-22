@@ -568,7 +568,7 @@ async def run_and_verify() -> bool:
         # surfaced here so the ST fails loudly on the regression instead of
         # silently passing on a half-empty trace). Image-probe 400s are
         # excluded: they close via on_llm_call_error (no payload by design).
-        _LEAKED_OUT = (None, "", "cancelled", "Cancelled")
+        _LEAKED_OUT = (None, "", "cancelled", "Cancelled", "stream_finalized")
 
         def _is_leaked(o: dict) -> bool:
             return o.get("output") in _LEAKED_OUT
