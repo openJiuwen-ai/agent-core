@@ -335,6 +335,9 @@ class SwarmflowTool(AsyncTool):
                 text=progress.message,
                 phases=progress.phases,
                 correlation_id=progress.correlation_id,
+                node_type=progress.node_type,
+                agent_id=progress.agent_id,
+                answer=progress.answer,
             )
             message = EventMessage(
                 event_type=TeamEvent.WORKFLOW_PROGRESS,

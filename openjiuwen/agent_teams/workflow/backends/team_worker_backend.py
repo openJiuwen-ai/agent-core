@@ -45,12 +45,32 @@ from openjiuwen.agent_teams.tools.structured_output_tool import (
     StructuredOutputFinishRail,
     StructuredOutputTool,
 )
+from openjiuwen.agent_teams.workflow.backends._result_text import (
+    prefer_natural_or_structured_text,
+)
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.agent_teams.workflow.worktree import SwarmflowWorkerWorktrees
 from openjiuwen.core.common.logging import team_logger
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _text_from_invoke_result(result: Any, *, member_name: str) -> str:
+    """Map a DeepAgent ``invoke`` / task-loop result dict to worker output text.
+
+    Task-loop failures resolve ``wait_completion()`` with ``{"error": "..."}``
+    (no ``output``). Treat that as a backend error so SwarmFlow emits
+    ``agent_failed`` instead of ``agent_completed`` with an empty outcome.
+    A bare empty ``output`` with no error remains a valid success.
+    """
+    if isinstance(result, dict):
+        err = result.get("error")
+        if err or result.get("result_type") == "error":
+            msg = str(err or result.get("output") or "worker task failed")
+            raise BackendError(f"worker '{member_name}' failed: {msg}")
+        return str(result.get("output", ""))
+    return str(result)
 
 
 class TeamWorkerBackend(AgentBackend):
@@ -91,7 +111,7 @@ class TeamWorkerBackend(AgentBackend):
         messager: Any = None,
         session_id: str | None = None,
         on_human_prompt: Callable[[str, str, str], None] | None = None,
-        on_human_replied: Callable[[str, str], None] | None = None,
+        on_human_replied: Callable[[str, str, str | None], None] | None = None,
         run_id: str | None = None,
     ) -> None:
         self._model = model
@@ -140,6 +160,8 @@ class TeamWorkerBackend(AgentBackend):
                     raise BackendError(
                         f"worker '{member_name}' did not submit a structured result via structured_output"
                     )
+                # Prefer free-text narration; fall back to JSON of the capture.
+                text = prefer_natural_or_structured_text(text, submit_tool.captured)
                 return AgentResult(
                     text=text,
                     structured=submit_tool.captured,
@@ -177,6 +199,7 @@ class TeamWorkerBackend(AgentBackend):
                 t=self._t,
                 messager=self._messager,
                 session_id=self._session_id,
+                run_id=self._run_id,
                 on_human_prompt=self._on_human_prompt,
                 on_human_replied=self._on_human_replied,
             )
@@ -339,9 +362,7 @@ class TeamWorkerBackend(AgentBackend):
                 await harness.dispose()
             except Exception:
                 team_logger.debug("worker harness dispose failed for %s", member_name)
-        if isinstance(result, dict):
-            return str(result.get("output", ""))
-        return str(result)
+        return _text_from_invoke_result(result, member_name=member_name)
 
     # ------------------------------------------------------------------
     # Worker workspace setup

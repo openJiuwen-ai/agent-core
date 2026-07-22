@@ -79,7 +79,25 @@ class WorkflowProgressEvent:
       stays valid across a resume. The event itself fires from the backend wait
       path (only when actually waiting on a person), so it is absent on cache-hit
       replays; ``HUMAN_PROMPT`` also carries ``label`` (the avatar member) and
-      ``prompt`` (the question).
+      ``prompt`` (the question). ``AGENT_STARTED`` also carries it — precomputed
+      for ``agent_session`` / ``human_session`` / ``human`` turns (every session
+      send, agent or human; NOT plain ``agent()``, which keys only on
+      ``agent_id``) — so a consumer can locate the node by ``correlation_id``
+      when ``HUMAN_PROMPT`` / ``HUMAN_REPLIED`` arrive (they carry no ``phase``).
+    * ``node_type``           — set only on ``AGENT_STARTED`` to the exact
+      primitive type: ``agent``, ``agent_session``, ``human``, or
+      ``human_session``. This is the sole source of node kind: a consumer
+      derives ``kind="human"`` iff ``node_type in {"human","human_session"}``,
+      else ``kind="agent"`` (``None`` defaults to ``"agent"``); no separate
+      ``is_human`` flag is emitted.
+    * ``agent_id``            — a deterministic, resume-stable per-node id
+      (``AGENT_STARTED`` / ``AGENT_COMPLETED`` / ``AGENT_FAILED``), reused from
+      the journal cache key. A consumer matches ``AGENT_COMPLETED`` /
+      ``AGENT_FAILED`` to its node by this id — the only sound way to
+      disambiguate same-label nodes in for-loops, multi-turn sessions, and
+      ``parallel``.
+    * ``answer``              — the person's raw reply text (``HUMAN_REPLIED``).
+      Absent on all other kinds.
     """
 
     kind: str
@@ -93,6 +111,9 @@ class WorkflowProgressEvent:
     message: str | None = None
     phases: list[PhasePlan] | None = None
     correlation_id: str | None = None
+    node_type: str | None = None
+    agent_id: str | None = None
+    answer: str | None = None
 
 
 #: Signature of ``Runtime.progress_sink``. Default is a no-op so the engine has
