@@ -1,0 +1,254 @@
+# 浏览器子智能体工具
+
+[浏览器子智能体](../subagents/browser_agent.md)可用的工具，分为两层：
+
+1. **Playwright MCP 工具** —— 由官方 Playwright MCP 服务器（`npx @playwright/mcp`）提供的原语级 `browser_*` 工具。模型能看到哪些工具由[能力白名单](../subagents/browser_agent.md#浏览器能力capabilities)控制。
+2. **运行时辅助工具** —— 由 `create_browser_agent` 与原语工具一起注入的确定性辅助工具：页面探测、批量交互、自定义动作、取消和健康检查。
+
+默认系统提示词确立了工作顺序：先探测（`browser_probe_interactives` / `browser_probe_cards`），再基于 `selector_hint` 执行动作（单个原语工具或 `browser_batch_interact`），仅当紧凑路径不足时才回退到 `browser_snapshot` 或 `browser_run_code`。
+
+## Playwright MCP 工具
+
+按能力分组。`core` 始终可用；其余分组必须在派生子智能体时通过 `browser_capabilities` 显式申请。
+
+### core（始终包含）
+
+| 工具 | 说明 |
+|---|---|
+| `browser_navigate` | 导航到 URL |
+| `browser_navigate_back` | 返回上一页 |
+| `browser_click` | 点击元素（基于快照引用） |
+| `browser_type` | 向元素输入文本 |
+| `browser_fill_form` | 一次调用填写多个表单字段 |
+| `browser_select_option` | 在原生下拉框中选择选项 |
+| `browser_hover` | 悬停在元素上 |
+| `browser_drag` / `browser_drop` | 拖动元素并放置到目标上 |
+| `browser_press_key` | 按下键盘按键（如 `Enter`、`Escape`） |
+| `browser_find` | 在页面上查找元素 |
+| `browser_snapshot` | 捕获页面无障碍快照（元素寻址动作的引用来源） |
+| `browser_take_screenshot` | 截取页面或元素的截图 |
+| `browser_evaluate` | 在页面上执行 JavaScript 表达式 |
+| `browser_run_code_unsafe` | 对页面执行任意 Playwright 代码。探测和批量辅助工具内部使用它；提示词限制直接使用时须已知 selector/计算逻辑 |
+| `browser_wait_for` | 等待文本出现/消失或等待时间间隔 |
+| `browser_tabs` | 管理标签页（`list`、`new`、`close`、`select`） |
+| `browser_resize` | 调整浏览器窗口/视口尺寸 |
+| `browser_handle_dialog` | 接受或关闭浏览器对话框（alert/confirm/prompt） |
+| `browser_file_upload` | 为激活的文件选择器提供文件 |
+| `browser_console_messages` | 读取页面控制台消息 |
+| `browser_network_request` / `browser_network_requests` | 查看单个网络请求 / 列出页面发出的请求 |
+| `browser_close` | 关闭页面 |
+
+### pdf
+
+| 工具 | 说明 |
+|---|---|
+| `browser_pdf_save` | 将当前页面保存为 PDF 产物 |
+
+### vision
+
+基于坐标的鼠标控制，用于需要视觉定位的任务（canvas 应用、地图、没有稳定 DOM 句柄的自定义控件）。
+
+| 工具 | 说明 |
+|---|---|
+| `browser_mouse_click_xy` | 在绝对坐标处点击 |
+| `browser_mouse_move_xy` | 将光标移动到坐标处 |
+| `browser_mouse_drag_xy` | 从一个坐标拖动到另一个坐标 |
+| `browser_mouse_down` / `browser_mouse_up` | 按下 / 释放鼠标按键 |
+| `browser_mouse_wheel` | 使用鼠标滚轮滚动 |
+
+### devtools
+
+| 工具 | 说明 |
+|---|---|
+| `browser_highlight` / `browser_hide_highlight` | 高亮页面元素 / 移除高亮 |
+| `browser_annotate` | 在页面上添加标注覆盖层 |
+| `browser_start_tracing` / `browser_stop_tracing` | 开始 / 停止 Playwright trace 录制 |
+| `browser_start_video` / `browser_stop_video` | 开始 / 停止视频录制 |
+| `browser_video_chapter` | 在录制的视频中标记章节 |
+| `browser_video_show_actions` / `browser_video_hide_actions` | 切换视频中的动作覆盖层 |
+| `browser_resume` | 从暂停的调试状态恢复 |
+
+### config
+
+| 工具 | 说明 |
+|---|---|
+| `browser_get_config` | 查看解析后的 Playwright MCP 配置（诊断运行时环境时有用） |
+
+### network
+
+| 工具 | 说明 |
+|---|---|
+| `browser_network_state_set` | 修改浏览器网络状态（如离线模拟） |
+| `browser_route` | 添加请求 mock/路由 |
+| `browser_route_list` | 列出激活的路由 |
+| `browser_unroute` | 移除路由 |
+
+### storage
+
+会话状态访问 —— Cookie、localStorage、sessionStorage 和 Playwright storage state。天然敏感，因此作为单独的按需能力提供。
+
+| 工具 | 说明 |
+|---|---|
+| `browser_cookie_list` / `browser_cookie_get` | 列出 Cookie / 读取单个 Cookie |
+| `browser_cookie_set` / `browser_cookie_delete` / `browser_cookie_clear` | 写入 / 删除 / 清空 Cookie |
+| `browser_localstorage_list` / `browser_localstorage_get` | 列出 / 读取 localStorage 条目 |
+| `browser_localstorage_set` / `browser_localstorage_delete` / `browser_localstorage_clear` | 写入 / 删除 / 清空 localStorage |
+| `browser_sessionstorage_list` / `browser_sessionstorage_get` | 列出 / 读取 sessionStorage 条目 |
+| `browser_sessionstorage_set` / `browser_sessionstorage_delete` / `browser_sessionstorage_clear` | 写入 / 删除 / 清空 sessionStorage |
+| `browser_storage_state` | 导出完整 storage state（Cookie + origins），例如捕获登录态 |
+| `browser_set_storage_state` | 恢复之前保存的 storage state，例如注入登录态 |
+
+### testing
+
+| 工具 | 说明 |
+|---|---|
+| `browser_generate_locator` | 为元素生成稳定的 Playwright locator |
+| `browser_verify_element_visible` | 断言元素可见 |
+| `browser_verify_list_visible` | 断言元素列表可见 |
+| `browser_verify_text_visible` | 断言文本在页面上可见 |
+| `browser_verify_value` | 断言输入框的值 |
+
+---
+
+## 运行时辅助工具
+
+模块：`openjiuwen.harness.tools.browser_move.playwright_runtime.runtime_tools`
+
+由共享的 [`BrowserAgentRuntime`](../subagents/browser_agent.md#class-browseragentruntime) 支撑的确定性辅助工具。无论能力如何选择，它们始终被注入。
+
+| 工具 | 说明 |
+|---|---|
+| [`browser_probe_interactives`](#tool-browser_probe_interactives) | 可见交互元素的紧凑排序列表 |
+| [`browser_probe_cards`](#tool-browser_probe_cards) | 重复卡片/列表结构及其提取字段 |
+| [`browser_batch_interact`](#tool-browser_batch_interact) | 一次调用执行多个确定性交互步骤 |
+| [`browser_custom_action`](#tool-browser_custom_action) | 执行已注册的自定义动作（拖放、坐标解析、文件上传等） |
+| [`browser_list_custom_actions`](#tool-browser_list_custom_actions) | 列出可用自定义动作及其参数文档 |
+| [`browser_cancel_run`](#tool-browser_cancel_run) / [`browser_clear_cancel`](#tool-browser_clear_cancel) | 取消进行中的浏览器任务 / 清除取消标志 |
+| [`browser_runtime_health`](#tool-browser_runtime_health) | 报告运行时就绪状态、心跳状态和 provider/模型配置 |
+
+### 页面探测
+
+两个探测工具生成在页面中运行的 JavaScript（通过 Playwright run-code 工具），返回紧凑的 JSON 摘要。它们的存在使智能体能用几百个 token 理解页面，而不需要完整的无障碍快照或 DOM 转储。二者都返回可直接用于后续动作的 `selector_hint`。
+
+#### tool browser_probe_interactives
+
+返回最多 `max_items` 个可见交互元素，按启发式评分排序（test ID、ARIA 标签、tag/role、query 匹配、位置）。用于页面级控件：按钮、链接、输入框、表单、导航、登录、分页、菜单。
+
+**参数**:
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `max_items` | `int` | `50` | 返回元素上限，硬上限 `100`。提示词建议页面级控件用 20–30 |
+| `viewport_only` | `bool` | `true` | 仅返回当前视口内可见的元素 |
+| `query` | `str` | `""` | 文本过滤。支持同义词：如 `"search"` 也匹配含 搜索、关键词、検索 的 placeholder/标签；`"next"` 匹配 下一页、load more；`"login"` 匹配 登录 |
+
+**结果**: `{ok, url, title, viewport, elements: [...]}`，每个元素包含 `id`、`tag`、`role`、`action_likelihood`（`search` / `input` / `pagination` / `login` / `filter` / `commerce` / `button` / `link`）、可见 `text`、`accessible_name`、`aria_label`、`testid`、`placeholder`、`href`、`disabled`、`bbox` 和 `selector_hint`（优先级：`data-testid` → `#id` → 属性选择器 → `nth-of-type` 路径）。
+
+#### tool browser_probe_cards
+
+检测重复的卡片/列表结构 —— 商品网格、搜索结果、目录、文章列表 —— 并提取每张卡片的结构化字段。在任何包含重复可见卡片或列表行的页面上应**先**调用它；如果返回结果已包含任务所需字段，直接使用，不要再截图或做大范围 DOM 求值。
+
+**参数**:
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `max_cards` | `int` | `20` | 返回卡片上限，硬上限 `50` |
+| `viewport_only` | `bool` | `true` | 仅检查当前视口内可见的卡片 |
+| `include_buttons` | `bool` | `true` | 包含每张卡片内的可见按钮/链接 |
+| `query` | `str` | `""` | 文本过滤，如 `"laptop"` 或 `"cart"` |
+
+**结果**: `{ok, url, title, cards: [...], recurring_signatures, selector_source, ...}`，每张卡片包含 `title`、`primary_link`、`author`、`source`、`summary`、`price`（多币种）、`rating`、`review_count`、`availability`、`buttons`、`has_image`、`bbox`、`quality_score`，以及各字段的 `*_selector_hint`。
+
+容器选择器按三层顺序尝试，在第一个产出足够多高质量卡片的层级停止：
+
+1. **Selector 缓存** —— 同一域名和路由上先前成功探测学习到的选择器。持久化在 `~/.openjiuwen/browser_selector_cache.json`（用 `OPENJIUWEN_BROWSER_SELECTOR_CACHE` 覆盖）。成功的探测会泛化并存储其选择器提示；被拒绝的缓存尝试会被记录，避免持续重试过期条目。
+2. **站点 profile** —— 内置的静态按域名选择器提示。
+3. **通用启发式** —— 一组宽泛的结构选择器（`article`、`li`、`[class*="card"]` 等）。
+
+### tool browser_batch_interact
+
+在一次工具调用中按顺序执行一组确定性浏览器步骤。适用于目标已通过探测确定的多步流程 —— 例如填三个表单字段、提交、等待结果。它是与探测工具同级的一等辅助工具，不经由 `browser_custom_action` 路由。对单个普通可见文本字段，`browser_fill_form` 仍是正确选择。
+
+**参数**:
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `steps` | `list` | *(必填)* | 有序步骤；每步为带 `op` 和目标/取值字段的对象（见下） |
+| `timeout_ms` | `int` | `5000` | 默认单步超时，钳制 250–30000 |
+| `wait_after_each_ms` | `int` | — | 每步成功后的等待，钳制 0–5000 |
+| `continue_on_error` | `bool` | `false` | 步骤失败后继续并按步返回错误 |
+| `global_timeout_ms` | `int` | 按步数计算 | 整批硬超时。默认按步数计算，上限 `90000`；显式值钳制 1000–120000 |
+
+**步骤操作**:
+
+| Op | 说明 |
+|---|---|
+| `click` | 点击解析出的目标 |
+| `fill` | 直接设置输入框的值 |
+| `type` | 先清空字段，再逐键输入值（可选 `delay_ms`） |
+| `autocomplete` | 向目标输入查询词，等待（`wait_after_type_ms`），然后点击匹配的下拉选项（`option_text` / `option_selector` / `option_role`+`option_name`） |
+| `select_visible_text` | 在自定义（非原生）下拉控件中点击可见选项 |
+| `select_option` | 在原生 `<select>` 中按 `values`、可见标签或 `index` 选择 |
+| `press` | 按下键盘 `key`（默认 `Enter`），有目标时作用于目标，否则全局 |
+| `set_checked` | 勾选/取消勾选复选框（`checked`，默认 `true`） |
+| `wait_for_selector` | 等待选择器达到 `state`（默认 `visible`） |
+| `wait_for_text` | 等待可见文本出现 |
+| `wait_for_load_state` | 等待页面加载状态（默认 `domcontentloaded`） |
+| `sleep` | 等待 `ms` 毫秒 |
+| `extract_text` | 返回目标的 inner text（压缩到 `max_chars`，默认 500） |
+| `extract_value` | 返回目标输入框的值 |
+| `screenshot` | 保存截图（`path`、`full_page`） |
+
+**目标解析**：每步按优先级 `selector`（CSS/Playwright —— 优先使用探测返回的 `selector_hint`）→ `role`（+ `name`、`exact`）→ `label` → `placeholder` → `testid` → `text`，取第一个匹配。
+
+**语义**:
+
+- 每批最多 25 步；超出的步骤被丢弃并报告（`truncated`、`dropped_step_count`）。
+- 标记 `optional: true` 的步骤（或整批 `continue_on_error: true`）失败后记录并继续；否则整批中止并返回逐步诊断（目标、错误、耗时）。
+- 结果包含各步骤结果、最终 `url` 和 `title`，以及页面可见文本预览。
+
+### tool browser_custom_action
+
+按名称执行动作注册表中的确定性辅助动作。用于用原语工具难以表达的操作；先调用 [`browser_list_custom_actions`](#tool-browser_list_custom_actions) 发现可用动作及参数。
+
+**参数**:
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `action` | `str` | *(必填)* | 自定义动作名称 |
+| `params` | `dict` | `{}` | 转发给动作的键值参数。坐标类动作接受别名 `source`/`target` 和 `source_x`/`source_y`/`target_x`/`target_y` |
+| `session_id` / `request_id` | `str` | — | 任务作用域；缺省取父工具调用上下文 |
+
+**内置动作**:
+
+| 动作 | 说明 |
+|---|---|
+| `browser_drag_and_drop` | 从源拖动到目标（选择器、可见文本或原始坐标），带插值鼠标移动（`steps`、`delay_ms`） |
+| `browser_get_element_coordinates` | 解析一到两个元素的屏幕坐标。CSS 选择器不匹配时回退到可见文本搜索 |
+| `browser_set_input_files` | 向文件输入框上传文件（`selector` 默认 `input[type="file"]`）。检测到 Playwright strict mode violation 时提示使用更精确的选择器 |
+| `list_upload_files` | 列出 `BROWSER_UPLOAD_ROOT` 目录下可上传的文件 |
+| `browser_task` / `run_browser_task` | 将完整自然语言任务委派给嵌套 browser worker 智能体。已在 worker 内执行时被阻止（`recursive_browser_task_blocked`） |
+| `ping` / `echo` | 健康检查 / 调试回显 |
+
+### tool browser_list_custom_actions
+
+列出可用自定义动作及其摘要、使用时机说明和参数规格。无参数。
+
+### tool browser_cancel_run
+
+取消进行中的浏览器任务。设置取消标志（按会话，或给定 `request_id` 时按请求），并取消匹配的进行中 asyncio 任务。被取消的运行返回 `error="cancelled_by_frontend"`。
+
+**参数**:
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `session_id` | `str` | *(必填)* | 要取消任务的会话 |
+| `request_id` | `str` | — | 定向到会话中的特定请求 |
+
+### tool browser_clear_cancel
+
+清除会话（或特定请求）的取消标志，使新任务可以继续运行。参数与 `browser_cancel_run` 相同。
+
+### tool browser_runtime_health
+
+报告运行时就绪状态与心跳状态：浏览器连接是否健康、运行时是否已启动、最近一次成功心跳的时间戳，以及配置的 provider / API base / 模型名。无参数。

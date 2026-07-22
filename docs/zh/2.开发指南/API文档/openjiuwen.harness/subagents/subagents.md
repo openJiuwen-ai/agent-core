@@ -31,6 +31,8 @@ def create_browser_agent(
 
 创建浏览器子智能体，配备 Playwright 运行时工具。自动注入 `BrowserRuntimeRail` 和浏览器运行时工具。
 
+浏览器子智能体的完整文档见 [`browser_agent`](./browser_agent.md)（能力白名单、无头模式等浏览器选项、驱动模式、实例隔离、guardrails、进度/可恢复性、配置）；完整工具参考见 [`browser_tools`](../tools/browser_tools.md)（按能力分组的 Playwright MCP 工具、页面探测、批量交互、自定义动作）。
+
 **参数**:
 
 | 参数 | 类型 | 默认值 | 说明 |

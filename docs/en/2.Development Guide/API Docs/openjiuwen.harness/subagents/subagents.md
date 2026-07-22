@@ -32,6 +32,8 @@ create_browser_agent(
 
 Create a sub-agent equipped with Playwright browser automation tools for web interaction tasks such as navigating pages, filling forms, clicking elements, and extracting data.
 
+See [`browser_agent`](./browser_agent.md) for full documentation of the browser sub-agent (capability allowlist, browser options such as headless mode, driver modes, instance isolation, guardrails, progress/resumability, configuration) and [`browser_tools`](../tools/browser_tools.md) for the full tool reference (Playwright MCP tools by capability, page probes, batch interaction, custom actions).
+
 **Parameters**:
 
 - **model** (str | BaseChatModel): LLM model name or instance.
