@@ -212,6 +212,11 @@ __marimo__/
 
 .idea/
 .vscode/
+.ua
+.codegraph
+.codex
+.agents
+
 
 *_tracer.json
 **/logs/
