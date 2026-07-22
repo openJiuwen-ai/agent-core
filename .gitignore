@@ -258,3 +258,9 @@ images/
 *.bin
 *.sqlite3
 tests/system_tests/config_llm_local.yaml
+
+# ppt_agent example runtime workspace: agent identity/memory state
+# (AGENT.md/IDENTITY.md/memory.db/...), skill packages, reference PDFs,
+# and generated outputs — all regenerated or placed manually per checkout.
+# logs/ under this example is already covered by the **/logs/ rule above.
+examples/ppt_agent/workspace/
