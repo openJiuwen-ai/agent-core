@@ -14,6 +14,7 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
@@ -60,6 +61,7 @@ async def inprocess_spawn(
 
     teammate = _TeamAgent(card)
     teammate.configure(spec, ctx)
+    kv_cache_hooks.share_registry_with_teammate(team_agent, teammate)
 
     # Empty query means "no first round": the teammate comes up, subscribes,
     # and idles until a real mailbox message arrives. Only a genuine

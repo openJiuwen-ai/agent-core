@@ -36,6 +36,7 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import Workspace, create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.schema.config import (
     DeepAgentConfig,
@@ -276,6 +277,35 @@ def test_configure_set_react_agent_and_is_initialized() -> None:
     assert agent.is_initialized is True
 
     assert agent.loop_coordinator is None
+
+
+def test_prompt_attachment_reminder_is_in_initial_and_hot_reloaded_system_prompt() -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
+        DeepAgentConfig(
+            enable_task_loop=False,
+            language="en",
+            system_prompt="initial identity",
+        )
+    )
+
+    assert agent.system_prompt_builder is not None
+    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is not None
+    initial_prompt = agent._react_agent.config.prompt_template[0]["content"]
+    assert "initial identity" in initial_prompt
+    assert "<prompt-attachment>" in initial_prompt
+
+    agent.configure(
+        DeepAgentConfig(
+            enable_task_loop=False,
+            language="en",
+            system_prompt="updated identity",
+        )
+    )
+
+    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is not None
+    reloaded_prompt = agent._react_agent.config.prompt_template[0]["content"]
+    assert "updated identity" in reloaded_prompt
+    assert "<prompt-attachment>" in reloaded_prompt
 
 
 @pytest.mark.asyncio

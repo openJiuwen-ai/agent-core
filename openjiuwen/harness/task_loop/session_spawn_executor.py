@@ -21,6 +21,7 @@ from openjiuwen.core.controller.schema.dataframe import (
 )
 from openjiuwen.core.controller.schema.event import EventType
 from openjiuwen.core.controller.modules.task_manager import TaskFilter
+from openjiuwen.harness.kv_cache import kv_cache_hooks
 
 if TYPE_CHECKING:
     from openjiuwen.core.session.agent import Session
@@ -62,8 +63,17 @@ class SessionSpawnExecutor(TaskExecutor):
         meta = tasks[0].metadata or {}
         subagent_type = meta.get("subagent_type", "general-purpose")
         query = meta.get("task_description", "")
-        cid = meta.get("sub_session_id", "")
         browser_capabilities = meta.get("browser_capabilities")
+        affinity_enabled = kv_cache_hooks.affinity_enabled(self._deep_agent)
+        parent_session_id = meta.get("parent_session_id") or session.get_session_id()
+        if affinity_enabled:
+            cid = kv_cache_hooks.resolve_sub_session_id(
+                task_id=task_id,
+                parent_session_id=parent_session_id,
+                metadata=meta,
+            )
+        else:
+            cid = meta.get("sub_session_id", "")
 
         logger.info(
             f"[SessionSpawnExecutor] Executing task_id={task_id}, "
@@ -79,7 +89,13 @@ class SessionSpawnExecutor(TaskExecutor):
                 )
             else:
                 subagent = self._deep_agent.create_subagent(subagent_type, cid)
-            result = await subagent.invoke({"query": query, "conversation_id": cid})
+            subagent_inputs = {
+                "query": query,
+                "conversation_id": cid,
+            }
+            if affinity_enabled:
+                subagent_inputs["parent_session_id"] = parent_session_id
+            result = await subagent.invoke(subagent_inputs)
             payload = result.get("output", "") if isinstance(result, dict) else str(result)
 
             logger.info(
@@ -104,6 +120,13 @@ class SessionSpawnExecutor(TaskExecutor):
                 f"[SessionSpawnExecutor] task_id={task_id} failed: {exc}"
             )
             yield self._build_error_chunk(task_id, str(exc))
+        finally:
+            if affinity_enabled:
+                await kv_cache_hooks.evict_subagent(
+                    self._deep_agent,
+                    sub_session_id=cid,
+                    parent_session_id=parent_session_id,
+                )
 
     def _build_error_chunk(
         self, task_id: str, error: str
@@ -143,6 +166,28 @@ class SessionSpawnExecutor(TaskExecutor):
         """
         # already canceled in TaskScheduler
         logger.info(f"[SessionSpawnExecutor] Cancelling task_id={task_id}")
+        if not kv_cache_hooks.affinity_enabled(self._deep_agent):
+            return True
+        tasks = await self._task_manager.get_task(TaskFilter(task_id=task_id))
+        if not tasks:
+            logger.warning(
+                "[SessionSpawnExecutor] Skip KV evict for cancelled task: task_id=%s not found",
+                task_id,
+            )
+            return True
+
+        meta = tasks[0].metadata or {}
+        parent_session_id = meta.get("parent_session_id") or session.get_session_id()
+        sub_session_id = kv_cache_hooks.resolve_sub_session_id(
+            task_id=task_id,
+            parent_session_id=parent_session_id,
+            metadata=meta,
+        )
+        await kv_cache_hooks.evict_subagent(
+            self._deep_agent,
+            sub_session_id=sub_session_id,
+            parent_session_id=parent_session_id,
+        )
         return True
 
 

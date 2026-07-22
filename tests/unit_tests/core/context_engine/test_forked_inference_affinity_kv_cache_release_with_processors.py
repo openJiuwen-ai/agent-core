@@ -2,11 +2,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 """
-Integration tests for ContextEngine + InferenceAffinityModel + processors (CE + model layer).
+Integration tests for ContextEngine processors and the agent-owned KV-cache hook.
 
 **Scope**: Full flow from ContextEngine.create_context + MessageSummaryOffloader to
-get_context_window(model=...) and release() call/logs. Uses mocked InferenceAffinityModel
-invoke and patched InferenceAffinityModelClient.release. Verifies:
+get_context_window() + KVCacheModelCallHook and release() call/logs. Uses mocked
+InferenceAffinityModel invoke and patched InferenceAffinityModelClient.release. Verifies:
 - When processors (e.g. MessageSummaryOffloader) modify context, release is triggered and
   session_id / block_released / cache_salt are correct in call and logs.
 - When no processors modify context, release is NOT called and no release logs.
@@ -32,7 +32,9 @@ from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import UserMessage, ToolMessage, AssistantMessage
 from openjiuwen.core.foundation.llm.inference_affinity_model import InferenceAffinityModel
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
+from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.session.agent import create_agent_session
+from openjiuwen.core.single_agent.kv_cache.kv_cache_hooks import KVCacheModelCallHook
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("refactored_context_processors")]
 
@@ -167,9 +169,7 @@ async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_r
     mock_release.side_effect = mock_release_impl
     caplog.set_level(logging.INFO)
 
-    # Configure ContextEngine with KV cache release enabled
     engine_config = ContextEngineConfig(
-        enable_kv_cache_release=True,
         default_window_message_num=100,
         context_window_tokens=100,
     )
@@ -181,6 +181,11 @@ async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_r
     affinity_model = _build_mock_inference_affinity_model()
     agent_session = create_agent_session()
     session_id = agent_session.get_session_id()
+    kv_cache_hook = KVCacheModelCallHook()
+    kv_runtime = kv_cache_hook.resolve_runtime(
+        affinity_model,
+        KVCacheAffinityConfig(enable_kv_cache_release=True),
+    )
 
     initial_messages: List = [UserMessage(content="u0")]
     for index, character in enumerate(("X", "Y", "Z"), start=1):
@@ -211,7 +216,16 @@ async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_r
 
     processor = context._processors[0]
     processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
-    ctx_before = await context.get_context_window(model=affinity_model)
+    ctx_before = await context.get_context_window()
+    await kv_cache_hook.handle_context_window_change(
+        runtime=kv_runtime,
+        llm=affinity_model,
+        context=context,
+        context_window=ctx_before,
+        session_id=session_id,
+        parent_session_id=None,
+        model_name="mock-model",
+    )
     messages_for_model = ctx_before.get_messages()
     await affinity_model.invoke(
         messages=messages_for_model,
@@ -225,7 +239,16 @@ async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_r
     release_call_details.clear()
 
     processor._rule_pipeline._time_func = MagicMock(return_value=120.0)
-    ctx_after = await context.get_context_window(model=affinity_model)
+    ctx_after = await context.get_context_window()
+    await kv_cache_hook.handle_context_window_change(
+        runtime=kv_runtime,
+        llm=affinity_model,
+        context=context,
+        context_window=ctx_after,
+        session_id=session_id,
+        parent_session_id=None,
+        model_name="mock-model",
+    )
 
     # === Verification Phase ===
 
@@ -317,9 +340,7 @@ async def test_inference_affinity_kv_cache_no_release_without_modification(mock_
     """
     caplog.set_level(logging.INFO)
 
-    # Configure ContextEngine with KV cache release enabled
     engine_config = ContextEngineConfig(
-        enable_kv_cache_release=True,
         default_window_message_num=100,
     )
     engine = ContextEngine(engine_config)
@@ -328,6 +349,11 @@ async def test_inference_affinity_kv_cache_no_release_without_modification(mock_
     affinity_model = _build_mock_inference_affinity_model()
     agent_session = create_agent_session()
     session_id = agent_session.get_session_id()
+    kv_cache_hook = KVCacheModelCallHook()
+    kv_runtime = kv_cache_hook.resolve_runtime(
+        affinity_model,
+        KVCacheAffinityConfig(enable_kv_cache_release=True),
+    )
 
     # Simple initial messages without any large content
     initial_messages: List = [
@@ -346,7 +372,16 @@ async def test_inference_affinity_kv_cache_no_release_without_modification(mock_
     )
 
     # Initial model invocation
-    ctx_before = await context.get_context_window(model=affinity_model)
+    ctx_before = await context.get_context_window()
+    await kv_cache_hook.handle_context_window_change(
+        runtime=kv_runtime,
+        llm=affinity_model,
+        context=context,
+        context_window=ctx_before,
+        session_id=session_id,
+        parent_session_id=None,
+        model_name="mock-model",
+    )
     await affinity_model.invoke(
         messages=ctx_before.get_messages(),
         model="mock-model",
@@ -363,7 +398,16 @@ async def test_inference_affinity_kv_cache_no_release_without_modification(mock_
         UserMessage(content="How are you?"),
     ])
 
-    await context.get_context_window(model=affinity_model)
+    ctx_after = await context.get_context_window()
+    await kv_cache_hook.handle_context_window_change(
+        runtime=kv_runtime,
+        llm=affinity_model,
+        context=context,
+        context_window=ctx_after,
+        session_id=session_id,
+        parent_session_id=None,
+        model_name="mock-model",
+    )
 
     # === Verification Phase ===
 

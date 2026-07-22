@@ -27,6 +27,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
+from openjiuwen.agent_teams.kv_cache.kv_cache_cleanup import cancellation_safe_evict_then_dispose
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
@@ -228,10 +230,16 @@ class AvatarSessionManager:
         state = self._sessions.pop(session_id, None)
         if state is None or state.harness is None:
             return
+        binding = kv_cache_hooks.build_current_harness_binding(state.harness)
         try:
-            await state.harness.dispose()
-        except Exception:
-            team_logger.debug("[swarmflow] session dispose failed for %s", session_id)
+            await cancellation_safe_evict_then_dispose(
+                binding=binding,
+                dispose=state.harness.dispose,
+                reason="swarmflow-stateful-session-close",
+                owner_id=session_id,
+            )
+        finally:
+            kv_cache_hooks.clear_harness_session_hooks(state.harness)
 
     async def aclose(self) -> None:
         """Cancel pending human waits, unsubscribe, and dispose every session."""
@@ -318,6 +326,7 @@ class AvatarSessionManager:
             member_name=state.member_name,
             language=self._language,
         )
+        harness = None
         try:
             harness = TeamHarness.build(
                 agent_spec=spec,
@@ -330,12 +339,19 @@ class AvatarSessionManager:
             harness.add_rail(StructuredOutputFinishRail())
             # Cold start: the harness creates and owns its child session, so
             # DeepAgentState / context persist across this session's turns.
+            kv_cache_hooks.configure_harness_session_hooks(
+                harness,
+                product_session_id=self._session_id,
+                evict_on_finish=False,
+            )
             await harness.start()
             await harness.subscribe(
                 on_state=self._make_state_cb(state),
                 on_round=self._make_round_cb(state),
             )
         except Exception as e:
+            if harness is not None:
+                kv_cache_hooks.clear_harness_session_hooks(harness)
             team_logger.exception("[swarmflow] session avatar build/start failed for %s", state.member_name)
             raise BackendError(f"session avatar build/start failed for {state.member_name}: {e}") from e
         state.harness = harness
