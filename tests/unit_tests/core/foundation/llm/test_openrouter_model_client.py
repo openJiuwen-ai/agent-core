@@ -740,7 +740,7 @@ class TestOpenRouterModelIntegration:
         if request_headers is not None:
             invoke_kwargs["custom_headers"] = request_headers
 
-        with patch.object(model._client, "_create_async_openai_client", return_value=mock_async_client):
+        with patch.object(model._client, "_create_async_openai_client", new=AsyncMock(return_value=mock_async_client)):
             await model.invoke(messages=[UserMessage(content="hello")], **invoke_kwargs)
 
         sent_params = mock_async_client.chat.completions.create.call_args.kwargs
@@ -843,7 +843,7 @@ class TestOpenRouterModelIntegration:
         mock_async_client = AsyncMock()
         mock_async_client.chat.completions.create = AsyncMock(return_value=chunk_generator())
 
-        with patch.object(model._client, "_create_async_openai_client", return_value=mock_async_client):
+        with patch.object(model._client, "_create_async_openai_client", new=AsyncMock(return_value=mock_async_client)):
             async for _ in model.stream(messages=[UserMessage(content="hello")]):
                 pass
 

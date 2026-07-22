@@ -86,7 +86,7 @@ async def _invoke_and_get_sent_params(mode: str) -> dict:
     mock_async_client = AsyncMock()
     mock_async_client.chat.completions.create = AsyncMock(return_value=_build_mock_response())
 
-    with patch.object(model._client, "_create_async_openai_client", return_value=mock_async_client):
+    with patch.object(model._client, "_create_async_openai_client", new=AsyncMock(return_value=mock_async_client)):
         await model.invoke(messages=[UserMessage(content="hello")])
 
     return mock_async_client.chat.completions.create.call_args.kwargs
@@ -101,7 +101,7 @@ async def _stream_and_get_sent_params(mode: str) -> dict:
     mock_async_client = AsyncMock()
     mock_async_client.chat.completions.create = AsyncMock(return_value=_chunk_generator())
 
-    with patch.object(model._client, "_create_async_openai_client", return_value=mock_async_client):
+    with patch.object(model._client, "_create_async_openai_client", new=AsyncMock(return_value=mock_async_client)):
         async for _ in model.stream(messages=[UserMessage(content="hello")]):
             pass
 

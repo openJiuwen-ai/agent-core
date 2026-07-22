@@ -31,6 +31,7 @@ settings, and `Makefile` defines the common lint/test entry points.
 
 ## Instruction Priority
 
+- If asked in english, answer in english thoughout the whole session.
 - Follow system, tool, and user instructions first, then this file, then
   module-local docs.
 - Before changing behavior, inspect the touched module, its exported
@@ -63,6 +64,17 @@ settings, and `Makefile` defines the common lint/test entry points.
 
 `make check` and `make type-check` operate on staged files by default.
 Pass `COMMITS=N` to check recent commits instead.
+
+## OpenWiki
+
+This repository has documentation located in the /openwiki directory.
+
+Start here:
+- [OpenWiki quickstart](openwiki/quickstart.md)
+
+OpenWiki includes repository overview, architecture notes, workflows, domain concepts, operations, integrations, testing guidance, and source maps.
+
+When working in this repository, read the OpenWiki quickstart first, then follow its links to the relevant architecture, workflow, domain, operation, and testing notes.
 
 ## More Detail
 

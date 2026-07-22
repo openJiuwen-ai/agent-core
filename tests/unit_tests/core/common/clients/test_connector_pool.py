@@ -40,6 +40,22 @@ class TestConnectorPool:
 
 @pytest.mark.asyncio
 class TestTcpConnectorPoolIntegration:
+    @pytest.fixture(autouse=True)
+    def _reset_connector_pool_manager(self):
+        """Reset the shared ConnectorPoolManager singleton between tests.
+
+        ConnectorPoolManager is a Singleton, so ConnectorPoolManager(max_pools=N)
+        returns the same process-global instance and ignores N. Without a reset,
+        pools created by earlier tests (here or in other files, e.g. HttpX pools
+        registered by the LLM client) leak in and break exact-count assertions.
+        """
+        manager = ConnectorPoolManager()
+        manager._connector_pools.clear()
+        manager._closed = False
+        yield
+        manager._connector_pools.clear()
+        manager._closed = False
+
     async def test_with_connector_pool_manager(self):
         manager = ConnectorPoolManager(max_pools=5)
         config = ConnectorPoolConfig(limit=50, limit_per_host=10)
@@ -84,3 +100,28 @@ class TestTcpConnectorPoolIntegration:
         assert pool1.ref_count == 2  # 初始1 + 1次获取
         await manager.release_connector_pool(config=config)
         await manager.release_connector_pool(config=config)
+
+    async def test_shared_pool_does_not_increment_ref(self):
+        """increment_ref=False keeps ref_count at 1 across many fetches.
+
+        Shared singletons (the LLM httpx transport, the aiohttp connector) are
+        never released per call, so they opt out of the per-fetch ref bump —
+        otherwise ref_count would grow unbounded with every request.
+        """
+        manager = ConnectorPoolManager(max_pools=5)
+        manager._closed = False
+        manager._connector_pools.clear()
+        config = ConnectorPoolConfig(limit=77, limit_per_host=7)
+
+        pool = await manager.get_connector_pool(config=config, increment_ref=False)
+        assert pool.ref_count == 1  # creation ref only
+
+        for _ in range(5):
+            again = await manager.get_connector_pool(config=config, increment_ref=False)
+            assert again is pool
+        assert pool.ref_count == 1  # no growth across repeated shared fetches
+
+        # Default (increment_ref=True) still bumps — backward compatible.
+        pooled = await manager.get_connector_pool(config=config)
+        assert pooled is pool
+        assert pooled.ref_count == 2

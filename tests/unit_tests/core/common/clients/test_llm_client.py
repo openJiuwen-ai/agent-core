@@ -1,7 +1,11 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import asyncio
+import importlib.util
 from unittest.mock import AsyncMock, MagicMock, patch, ANY, Mock
+
+import httpx
 import pytest
 
 from openjiuwen.core.common.clients.llm_client import (
@@ -9,10 +13,13 @@ from openjiuwen.core.common.clients.llm_client import (
     HttpXConnectorPool,
     create_httpx_client,
     create_async_openai_client,
+    create_async_anthropic_client,
     create_openai_client,
 )
 from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.foundation.llm import ModelClientConfig
+
+_ANTHROPIC_AVAILABLE = importlib.util.find_spec("anthropic") is not None
 
 
 class TestHttpXConnectorPoolConfig:
@@ -85,12 +92,12 @@ class TestHttpXConnectorPool:
     """Test cases for HttpXConnectorPool."""
 
     @pytest.fixture
-    def mock_async_connection_pool(self):
-        """Mock AsyncConnectionPool."""
-        with patch('httpcore.AsyncConnectionPool') as mock_pool:
+    def mock_httpx_transport(self):
+        """Mock the httpx transport that HttpXConnectorPool builds."""
+        with patch('httpx.AsyncHTTPTransport') as mock_transport:
             mock_instance = AsyncMock()
-            mock_pool.return_value = mock_instance
-            yield mock_pool, mock_instance
+            mock_transport.return_value = mock_instance
+            yield mock_transport, mock_instance
 
     @pytest.fixture
     def basic_config(self):
@@ -103,18 +110,20 @@ class TestHttpXConnectorPool:
         )
 
     @pytest.mark.asyncio
-    async def test_initialization_basic(self, mock_async_connection_pool, basic_config):
+    async def test_initialization_basic(self, mock_httpx_transport, basic_config):
         """Test basic initialization of HttpXConnectorPool."""
-        mock_pool_class, mock_instance = mock_async_connection_pool
+        mock_transport_class, mock_instance = mock_httpx_transport
 
         pool = HttpXConnectorPool(basic_config)
 
-        # Verify AsyncConnectionPool was created with correct arguments
-        mock_pool_class.assert_called_once()
-        call_kwargs = mock_pool_class.call_args[1]
-        assert call_kwargs['max_connections'] == 100
-        assert call_kwargs['max_keepalive_connections'] == 20
-        assert call_kwargs['keepalive_expiry'] == 60
+        # The httpx transport is built with pooled limits; proxy is left at the
+        # httpx default (None) and therefore absent from the call kwargs.
+        mock_transport_class.assert_called_once()
+        call_kwargs = mock_transport_class.call_args[1]
+        limits = call_kwargs['limits']
+        assert limits.max_connections == 100
+        assert limits.max_keepalive_connections == 20
+        assert limits.keepalive_expiry == 60
         assert 'proxy' not in call_kwargs or call_kwargs['proxy'] is None
 
         # Test conn() method
@@ -124,29 +133,24 @@ class TestHttpXConnectorPool:
         await pool.close()
 
     @pytest.mark.asyncio
-    async def test_initialization_with_proxy(self, mock_async_connection_pool):
-        """Test initialization with proxy configuration."""
-        mock_pool_class, mock_instance = mock_async_connection_pool
+    async def test_initialization_with_proxy(self, mock_httpx_transport):
+        """Proxy is forwarded to the transport verbatim (no httpx.Proxy wrapping)."""
+        mock_transport_class, mock_instance = mock_httpx_transport
 
         config = HttpXConnectorPoolConfig(
             proxy="http://proxy.example.com:8080",
             ssl_verify=True
         )
 
-        with patch('httpx.Proxy') as mock_proxy_class:
-            mock_proxy = MagicMock()
-            mock_proxy_class.return_value = mock_proxy
+        pool = HttpXConnectorPool(config)
 
-            pool = HttpXConnectorPool(config)
-
-            mock_proxy_class.assert_called_once_with("http://proxy.example.com:8080")
-            call_kwargs = mock_pool_class.call_args[1]
-            assert call_kwargs['proxy'] == mock_proxy
+        call_kwargs = mock_transport_class.call_args[1]
+        assert call_kwargs['proxy'] == "http://proxy.example.com:8080"
 
     @pytest.mark.asyncio
-    async def test_initialization_with_local_address(self, mock_async_connection_pool):
+    async def test_initialization_with_local_address(self, mock_httpx_transport):
         """Test initialization with local address binding."""
-        mock_pool_class, mock_instance = mock_async_connection_pool
+        mock_transport_class, mock_instance = mock_httpx_transport
 
         config = HttpXConnectorPoolConfig(
             local_address="192.168.1.100"
@@ -154,13 +158,13 @@ class TestHttpXConnectorPool:
 
         pool = HttpXConnectorPool(config)
 
-        call_kwargs = mock_pool_class.call_args[1]
+        call_kwargs = mock_transport_class.call_args[1]
         assert call_kwargs['local_address'] == "192.168.1.100"
 
     @pytest.mark.asyncio
-    async def test_initialization_with_ssl_context(self, mock_async_connection_pool):
+    async def test_initialization_with_ssl_context(self, mock_httpx_transport):
         """Test initialization with SSL context."""
-        mock_pool_class, mock_instance = mock_async_connection_pool
+        mock_transport_class, mock_instance = mock_httpx_transport
 
         config = HttpXConnectorPoolConfig(
             ssl_verify=True,
@@ -174,31 +178,29 @@ class TestHttpXConnectorPool:
             pool = HttpXConnectorPool(config)
 
             mock_ssl.assert_called_once_with("/path/to/cert.pem")
-            call_kwargs = mock_pool_class.call_args[1]
-            assert call_kwargs['ssl_context'] == mock_ssl_context
+            call_kwargs = mock_transport_class.call_args[1]
+            assert call_kwargs['verify'] == mock_ssl_context
 
     @pytest.mark.asyncio
-    async def test_initialization_with_extend_params(self, mock_async_connection_pool):
-        """Test initialization with extended parameters."""
-        mock_pool_class, mock_instance = mock_async_connection_pool
+    async def test_initialization_with_extend_params(self, mock_httpx_transport):
+        """Extended params (e.g. http2) are forwarded to the transport."""
+        mock_transport_class, mock_instance = mock_httpx_transport
 
         config = HttpXConnectorPoolConfig(
             extend_params={
                 'http2': True,
-                'ud': 'extra_param'
             }
         )
 
         pool = HttpXConnectorPool(config)
 
-        call_kwargs = mock_pool_class.call_args[1]
+        call_kwargs = mock_transport_class.call_args[1]
         assert call_kwargs['http2'] is True
-        assert call_kwargs['ud'] == 'extra_param'
 
     @pytest.mark.asyncio
     async def test_inherited_methods(self, basic_config):
         """Test inherited methods from ConnectorPool."""
-        with patch('httpcore.AsyncConnectionPool'):
+        with patch('httpx.AsyncHTTPTransport'):
             pool = HttpXConnectorPool(basic_config)
 
             # Test is_expired
@@ -208,6 +210,65 @@ class TestHttpXConnectorPool:
             stats = pool.stat()
             assert 'closed' in stats
             assert 'created_at' in stats['ref_detail']
+
+
+class TestHttpXConnectorPoolTransport:
+    """Regression guard: the cached object must be a real httpx transport.
+
+    ``HttpXConnectorPool`` previously stored a raw ``httpcore.AsyncConnectionPool``
+    and passed it to ``httpx.AsyncClient(transport=...)``. A raw httpcore pool is
+    NOT a valid httpx transport, so every request failed (surfaced by the OpenAI
+    SDK as ``APIConnectionError("Connection error.")``). These tests prove the
+    cached transport is a proper httpx transport that can drive a request.
+    """
+
+    @staticmethod
+    async def _serve_once(host: str = "127.0.0.1"):
+        """Start a one-shot HTTP/1.1 server returning ``{"ok": true}``."""
+
+        async def handler(reader, writer):
+            await reader.read(4096)
+            body = b'{"ok": true}'
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"Connection: close\r\n\r\n" + body
+            )
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handler, host, 0)
+        port = server.sockets[0].getsockname()[1]
+        return server, f"http://{host}:{port}/v1/test"
+
+    @pytest.mark.asyncio
+    async def test_conn_is_a_valid_httpx_transport(self):
+        """conn() must return an httpx.AsyncBaseTransport, not a raw httpcore pool."""
+        pool = HttpXConnectorPool(HttpXConnectorPoolConfig(need_async=True))
+        assert isinstance(pool.conn(), httpx.AsyncBaseTransport)
+
+    @pytest.mark.asyncio
+    async def test_transport_is_cached_per_pool(self):
+        """conn() returns the same transport object on repeat calls (the reuse)."""
+        pool = HttpXConnectorPool(HttpXConnectorPoolConfig(need_async=True))
+        assert pool.conn() is pool.conn()
+
+    @pytest.mark.asyncio
+    async def test_shared_transport_drives_a_request(self, monkeypatch):
+        """The cached transport actually completes a round-trip request."""
+        # Keep the test deterministic regardless of host proxy env.
+        for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                    "http_proxy", "https_proxy", "all_proxy"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+
+        server, url = await self._serve_once()
+        async with server:
+            pool = HttpXConnectorPool(HttpXConnectorPoolConfig(need_async=True))
+            async with httpx.AsyncClient(transport=pool.conn()) as client:
+                resp = await client.get(url)
+                assert resp.status_code == 200
+                assert resp.json() == {"ok": True}
 
 
 class TestCreateHttpxClient:
@@ -246,10 +307,11 @@ class TestCreateHttpxClient:
 
             client = await create_httpx_client(config_dict, need_async=False)
 
-            # Verify connector pool was requested
+            # Verify connector pool was requested as a shared singleton (no per-call ref bump)
             mock_manager.get_connector_pool.assert_called_once_with(
                 "httpx",
-                config=ANY
+                config=ANY,
+                increment_ref=False,
             )
 
             # Verify config was converted to HttpXConnectorPoolConfig
@@ -259,11 +321,10 @@ class TestCreateHttpxClient:
             assert call_args.ssl_verify is False
             assert call_args.limit == 200
 
-            # Verify client was created with transport - now this will be a MagicMock, not a coroutine
+            # Verify client was created with the shared transport only — the
+            # transport already owns SSL/proxy, so they must not be re-passed.
             mock_httpx_client.assert_called_once_with(
                 transport=mock_pool.conn.return_value,
-                verify=False,
-                proxy="http://proxy:8080"
             )
             assert client == mock_client_instance
 
@@ -288,14 +349,13 @@ class TestCreateHttpxClient:
             # Verify connector pool was requested with same config object
             mock_manager.get_connector_pool.assert_called_once_with(
                 "httpx",
-                config=config_obj
+                config=config_obj,
+                increment_ref=False,
             )
 
-            # Verify async client was created - now this will be a MagicMock, not a coroutine
+            # Verify async client was created with the shared transport only.
             mock_async_client.assert_called_once_with(
                 transport=mock_pool.conn.return_value,
-                verify=False,
-                proxy="http://proxy:8080"
             )
             assert client == mock_client_instance
 
@@ -496,6 +556,121 @@ class TestCreateOpenAIClients:
         assert any('openai' in name for name in factory_names)
 
 
+class TestCreateAnthropicClients:
+    """Test cases for the Anthropic client factory function."""
+
+    pytestmark = pytest.mark.skipif(
+        not _ANTHROPIC_AVAILABLE, reason="anthropic SDK not installed"
+    )
+
+    @pytest.fixture
+    def mock_create_httpx_client(self):
+        """Mock create_httpx_client function."""
+        with patch('openjiuwen.core.common.clients.llm_client.create_httpx_client') as mock:
+            mock_async_http_client = MagicMock()
+
+            async def async_side_effect(config, need_async=False):
+                if need_async:
+                    return mock_async_http_client
+                return MagicMock()
+
+            mock.side_effect = async_side_effect
+            yield mock, mock_async_http_client
+
+    @pytest.fixture
+    def mock_anthropic(self):
+        """Mock anthropic module."""
+        with patch('anthropic.AsyncAnthropic') as mock_async_anthropic:
+            mock_async_instance = MagicMock()
+            mock_async_anthropic.return_value = mock_async_instance
+            yield {'AsyncAnthropic': mock_async_anthropic, 'async_instance': mock_async_instance}
+
+    @pytest.fixture
+    def mock_url_utils(self):
+        """Mock UrlUtils.get_global_proxy_url."""
+        with patch('openjiuwen.core.common.clients.llm_client.UrlUtils.get_global_proxy_url') as mock:
+            mock.return_value = "http://global-proxy:8080"
+            yield mock
+
+    @pytest.mark.asyncio
+    async def test_create_async_anthropic_client_with_dict_config(
+            self, mock_create_httpx_client, mock_anthropic, mock_url_utils
+    ):
+        """Test creating async Anthropic client with dictionary configuration."""
+        config_dict = {
+            "api_key": "test-api-key",
+            "api_base": "https://api.anthropic.com",
+            "timeout": 30,
+            "max_retries": 3,
+            "client_provider": "anthropic",
+        }
+
+        client = await create_async_anthropic_client(config_dict)
+
+        assert client == mock_anthropic['async_instance']
+        call_kwargs = mock_anthropic['AsyncAnthropic'].call_args.kwargs
+        assert call_kwargs["api_key"] == "test-api-key"
+        assert call_kwargs["base_url"] == "https://api.anthropic.com"
+        assert call_kwargs["timeout"] == 30
+        assert call_kwargs["max_retries"] == 3
+        # No custom_headers configured -> default_headers must not be set.
+        assert "default_headers" not in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_create_async_anthropic_client_forwards_sanitized_custom_headers(
+            self, mock_create_httpx_client, mock_anthropic, mock_url_utils
+    ):
+        """Parity with OpenAI: sanitized config-level custom headers become default_headers."""
+        config_obj = ModelClientConfig(
+            api_key="test-api-key",
+            api_base="https://api.anthropic.com",
+            timeout=30,
+            max_retries=3,
+            verify_ssl=False,
+            client_provider="anthropic",
+            custom_headers={
+                "x-default": "custom-override",
+                "x-tenant": "tenant-a",
+                "X-Request-Num": 7,
+                "Authorization": "Bearer blocked",
+                "Content-Length": "blocked",
+                "X-Blank": "   ",
+            },
+        )
+
+        await create_async_anthropic_client(config_obj)
+
+        call_kwargs = mock_anthropic['AsyncAnthropic'].call_args.kwargs
+        assert call_kwargs["default_headers"] == {
+            "x-default": "custom-override",
+            "x-tenant": "tenant-a",
+            "X-Request-Num": "7",
+        }
+
+    @pytest.mark.asyncio
+    async def test_create_async_anthropic_client_honors_base_url_override(
+            self, mock_create_httpx_client, mock_anthropic, mock_url_utils
+    ):
+        """Explicit base_url override (e.g. /v1-stripped) wins over config.api_base."""
+        config_obj = ModelClientConfig(
+            api_key="test-api-key",
+            api_base="https://openrouter.ai/api/v1",
+            verify_ssl=False,
+            client_provider="anthropic",
+        )
+
+        await create_async_anthropic_client(config_obj, base_url="https://openrouter.ai/api")
+
+        call_kwargs = mock_anthropic['AsyncAnthropic'].call_args.kwargs
+        assert call_kwargs["base_url"] == "https://openrouter.ai/api"
+
+    def test_registration_with_client_registry(self):
+        """Test that the Anthropic client factory is properly registered."""
+        registered_clients = get_client_registry().list_clients()
+        factory_names = [name for name in registered_clients]
+        assert any('async_anthropic' in name for name in factory_names)
+
+
 class TestIntegration:
     """Integration tests for llm_client with registry and pool manager."""
 
@@ -530,9 +705,7 @@ class TestIntegration:
                 # Verify the factory was called correctly
                 mock_get_pool_manager.assert_called_once()
                 mock_httpx_client.assert_called_once_with(
-                    transport=mock_transport,  # Use the stored transport mock
-                    verify=False,
-                    proxy='http://proxy:8080'
+                    transport=mock_transport,
                 )
 
     @pytest.mark.asyncio
@@ -577,9 +750,7 @@ class TestIntegration:
 
             # Verify httpx client was created with the transport from mock_pool.conn.return_value
             mock_httpx_client.assert_called_once_with(
-                transport=mock_transport,  # Use the stored transport mock
-                verify=False,
-                proxy='http://proxy:8080'
+                transport=mock_transport,
             )
 
             # Verify OpenAI client was created

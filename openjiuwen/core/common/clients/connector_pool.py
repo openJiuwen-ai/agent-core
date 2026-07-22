@@ -1,6 +1,8 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import asyncio
+import atexit
+import logging
 import time
 from typing import Any, Callable, Dict, Optional
 from abc import abstractmethod
@@ -262,12 +264,18 @@ class ConnectorPoolManager(metaclass=Singleton):
         return decorator
 
     async def get_connector_pool(self, connector_pool_type: str = "default", *,
-                                 config: Optional[ConnectorPoolConfig] = None) -> ConnectorPool:
+                                 config: Optional[ConnectorPoolConfig] = None,
+                                 increment_ref: bool = True) -> ConnectorPool:
         """Get or create a connector pool.
 
         Args:
             connector_pool_type: Type of connector pool to get/create.
             config: Optional configuration for the pool.
+            increment_ref: If True (default), bump the pool's reference count on
+                every fetch. Long-lived shared singletons (e.g. the LLM httpx
+                transport, which is never released per call) pass False so the
+                ref count stays at its creation value of 1 instead of growing
+                per request.
 
         Returns:
             A connector pool instance.
@@ -282,13 +290,13 @@ class ConnectorPoolManager(metaclass=Singleton):
         connector_config = config or self._default_config
         key = connector_config.generate_key() if config else self._default_config_key
 
-        logger.debug(f"Getting connector pool: type={connector_pool_type}, key={key}")
+        logger.debug("Getting connector pool: type=%s, key=%s", connector_pool_type, key)
 
         async with self._lock:
             # Check for existing pool
             if key in self._connector_pools:
                 connector_pool = self._connector_pools[key]
-                logger.debug(f"Found existing connector pool with key={key}, ref_count={connector_pool.ref_count}")
+                logger.debug("Found existing connector pool with key=%s, ref_count=%s", key, connector_pool.ref_count)
 
                 # Check if pool is already closed
                 if connector_pool.closed:
@@ -296,9 +304,13 @@ class ConnectorPoolManager(metaclass=Singleton):
                     del self._connector_pools[key]
                     logger.warning(f"Removed closed connector pool, key={key}, config={config}")
                 else:
-                    # Increment reference count and return
-                    connector_pool.increment_ref()
-                    logger.debug(f"Incremented ref count for pool {key}, now ref_count={connector_pool.ref_count}")
+                    # Increment reference count and return. Shared singletons pass
+                    # increment_ref=False so the count stays at 1 for the pool's
+                    # lifetime instead of growing on every request.
+                    if increment_ref:
+                        connector_pool.increment_ref()
+                        logger.debug("Incremented ref count for pool %s, now ref_count=%s",
+                            key, connector_pool.ref_count)
                     return connector_pool
 
             # Check if maximum number of pools is reached
@@ -366,11 +378,11 @@ class ConnectorPoolManager(metaclass=Singleton):
             raise ValueError(f"Unknown connector type: {connector_pool_type}")
 
         connector_class = self._connector_pool_providers[connector_pool_type]
-        logger.debug(f"Creating connector pool using provider: {connector_pool_type}")
+        logger.debug("Creating connector pool using provider: %s", connector_pool_type)
 
         result = connector_class(config)
         if asyncio.iscoroutine(result):
-            logger.debug(f"Awaiting coroutine result from provider: {connector_pool_type}")
+            logger.debug("Awaiting coroutine result from provider: %s", connector_pool_type)
             result = await result
 
         logger.info(f"Successfully created connector pool of type: {connector_pool_type}")
@@ -388,14 +400,14 @@ class ConnectorPoolManager(metaclass=Singleton):
 
         if config:
             key = config.generate_key()
-            logger.debug(f"Releasing connector pool: key={key}")
+            logger.debug("Releasing connector pool: key=%s", key)
 
             async with self._lock:
                 if key in self._connector_pools:
                     pool = self._connector_pools[key]
                     old_ref = pool.ref_count
                     pool.decrement_ref()
-                    logger.debug(f"Released pool {key}: ref_count changed from {old_ref} to {pool.ref_count}")
+                    logger.debug("Released pool %s: ref_count changed from %s to %s", key, old_ref, pool.ref_count)
                 else:
                     logger.warning(f"Attempted to release non-existent pool: {key}")
         else:
@@ -450,7 +462,7 @@ class ConnectorPoolManager(metaclass=Singleton):
                 close_tasks.append(self._force_remove_pool(key))
 
             if close_tasks:
-                logger.debug(f"Waiting for {len(close_tasks)} pools to close")
+                logger.debug("Waiting for %s pools to close", len(close_tasks))
                 results = await asyncio.gather(*close_tasks, return_exceptions=True)
 
                 # Log any errors from close operations
@@ -459,6 +471,32 @@ class ConnectorPoolManager(metaclass=Singleton):
                         logger.error(f"Error closing pool: {result}")
 
         logger.info("All connector pools closed")
+
+    def atexit_close(self) -> None:
+        """Best-effort synchronous close of all pools at interpreter shutdown.
+
+        Connections are also reclaimed by GC and the manager evicts idle pools
+        by TTL/max-idle; this gives short-lived processes a clean shutdown.
+        Safe with or without a running event loop. ``close_all`` gathers
+        per-pool errors internally (``return_exceptions=True``) and does not
+        raise. At interpreter shutdown the project logger's handlers may be
+        closed or lack a running event loop, so ``logging.raiseExceptions`` is
+        cleared for the duration of teardown to keep their errors from printing
+        "Logging error" tracebacks. This is not ``logging.disable``: records
+        are still emitted wherever handlers still work.
+        """
+        if self._closed or not self._connector_pools:
+            return
+        logging.raiseExceptions = False
+        try:
+            asyncio.get_running_loop()
+            # A loop is still running at exit (unusual); cannot safely schedule
+            # async close here, so defer to GC/eviction.
+            return
+        except RuntimeError:
+            asyncio.run(self.close_all())
+        finally:
+            logging.raiseExceptions = True
 
     def get_stats(self) -> Dict:
         """Get statistics for all connector pools.
@@ -484,6 +522,18 @@ def get_connector_pool_manager():
 
 # Global instance
 _connector_pool_manager = get_connector_pool_manager()
+
+
+def _atexit_close_connector_pools() -> None:
+    """Best-effort cleanup of all connector pools at interpreter shutdown.
+
+    Delegates to :meth:`ConnectorPoolManager.atexit_close`, which is safe with
+    or without a running event loop.
+    """
+    get_connector_pool_manager().atexit_close()
+
+
+atexit.register(_atexit_close_connector_pools)
 
 
 @ConnectorPoolManager.register("default")

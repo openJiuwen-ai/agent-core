@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Optional, AsyncIterator, Union
 from contextlib import asynccontextmanager
 import aiohttp
 
+from openjiuwen.core.common.clients.connector_pool import ConnectorPoolConfig, get_connector_pool_manager
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import llm_logger, LogEventType
@@ -74,20 +75,34 @@ class InferenceAffinityModelClient(BaseModelClient):
         return params
 
     @asynccontextmanager
-    async def _create_session(self, timeout: Optional[float] = None):
-        """Create a new aiohttp session for each request
+    async def _create_session(self):
+        """Yield a pooled aiohttp session reused across requests.
 
-        Args:
-            timeout: Optional timeout override for this specific request
+        The underlying ``ClientSession``/``TCPConnector`` is drawn from the
+        shared :class:`HttpSessionManager` so connections are reused instead of
+        being rebuilt per request. Per-request timeout is applied at the
+        ``post()`` call via :meth:`_request_timeout`.
         """
-        final_timeout = timeout if timeout is not None else self.model_client_config.timeout
-        timeout_obj = aiohttp.ClientTimeout(
-            total=final_timeout,
-            connect=getattr(self.model_client_config, 'connect_timeout', 30),
-            sock_read=final_timeout
+        pool_config = ConnectorPoolConfig(
+            ssl_verify=self.model_client_config.verify_ssl,
+            ssl_cert=self.model_client_config.ssl_cert,
         )
-        async with aiohttp.ClientSession(timeout=timeout_obj) as session:
+        connector_pool = await get_connector_pool_manager().get_connector_pool(
+            connector_pool_type="default", config=pool_config, increment_ref=False,
+        )
+        async with aiohttp.ClientSession(
+            connector=connector_pool.conn(), connector_owner=False
+        ) as session:
             yield session
+
+    def _request_timeout(self, timeout: Optional[float]) -> aiohttp.ClientTimeout:
+        """Build a per-request timeout, falling back to the configured default."""
+        total = timeout if timeout is not None else self.model_client_config.timeout
+        return aiohttp.ClientTimeout(
+            total=total,
+            connect=getattr(self.model_client_config, 'connect_timeout', 30),
+            sock_read=total,
+        )
 
     async def invoke(
             self,
@@ -453,7 +468,9 @@ class InferenceAffinityModelClient(BaseModelClient):
             headers = {"Content-Type": "application/json"}
 
             async with self._create_session() as http_session:
-                async with http_session.post(url, headers=headers, json=release_params) as response:
+                async with http_session.post(
+                    url, headers=headers, json=release_params, timeout=self._request_timeout(None)
+                ) as response:
                     response_text = await response.text()
 
                     if response.status == 200:
@@ -555,8 +572,10 @@ class InferenceAffinityModelClient(BaseModelClient):
                     metadata={"attempt": attempt + 1}
                 )
 
-                async with self._create_session(timeout=timeout) as http_session:
-                    async with http_session.post(url, headers=headers, json=params) as response:
+                async with self._create_session() as http_session:
+                    async with http_session.post(
+                        url, headers=headers, json=params, timeout=self._request_timeout(timeout)
+                    ) as response:
                         if response.status != 200:
                             error_text = await response.text()
                             raise Exception(f"API returned error {response.status}: {error_text}")
@@ -767,8 +786,10 @@ class InferenceAffinityModelClient(BaseModelClient):
         url = f"{self.model_client_config.api_base.rstrip('/')}/v1/chat/completions"
         headers = {"Content-Type": "application/json"}
 
-        async with self._create_session(timeout=timeout) as http_session:
-            async with http_session.post(url, headers=headers, json=params) as response:
+        async with self._create_session() as http_session:
+            async with http_session.post(
+                url, headers=headers, json=params, timeout=self._request_timeout(timeout)
+            ) as response:
                 if response.status != 200:
                     error_text = await response.text()
                     raise Exception(f"API returned error {response.status}: {error_text}")

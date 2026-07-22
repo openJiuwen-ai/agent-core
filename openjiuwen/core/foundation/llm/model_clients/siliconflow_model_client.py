@@ -5,10 +5,10 @@ from typing import List, Optional, AsyncIterator, Union, Dict, Any
 from contextlib import asynccontextmanager
 import aiohttp
 
+from openjiuwen.core.common.clients.connector_pool import ConnectorPoolConfig, get_connector_pool_manager
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import llm_logger, LogEventType
-from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.foundation.llm.schema.config import ProviderType
 from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
@@ -84,12 +84,17 @@ class SiliconFlowModelClient(BaseModelClient):
         if not api_url.endswith('/chat/completions'):
             api_url = f"{api_url}/chat/completions"
 
-        ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
-        if ssl_verify:
-            ssl_context = SslUtils.create_strict_ssl_context(ssl_cert)
-            connector = aiohttp.TCPConnector(ssl=ssl_context)
-        else:
-            connector = aiohttp.TCPConnector(ssl=False)
+        # Shared TCP connector (the connection pool), reused across calls — same
+        # pattern as the OpenAI/Anthropic httpx transport. The ClientSession is a
+        # lightweight per-request wrapper; connector_owner=False keeps the shared
+        # connector alive when the session closes.
+        pool_config = ConnectorPoolConfig(
+            ssl_verify=self.model_client_config.verify_ssl,
+            ssl_cert=self.model_client_config.ssl_cert,
+        )
+        connector_pool = await get_connector_pool_manager().get_connector_pool(
+            connector_pool_type="default", config=pool_config, increment_ref=False,
+        )
 
         # Use method-level timeout if provided, otherwise use config timeout
         final_timeout = timeout if timeout is not None else self.model_client_config.timeout
@@ -101,7 +106,9 @@ class SiliconFlowModelClient(BaseModelClient):
             timeout=final_timeout
         )
 
-        async with aiohttp.ClientSession(connector=connector) as session:
+        async with aiohttp.ClientSession(
+            connector=connector_pool.conn(), connector_owner=False
+        ) as session:
             async with session.post(
                     url=api_url,
                     proxy=UrlUtils.get_global_proxy_url(api_url),
