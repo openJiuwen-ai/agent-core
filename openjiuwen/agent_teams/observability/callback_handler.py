@@ -70,9 +70,8 @@ from openjiuwen.agent_teams.observability.span_context import (
     LlmSpanState,
     get_team_span,
     get_current_agent_span,
-    pop_llm_span_state,
+    get_active_span_tracker,
     pop_tool_span,
-    push_llm_span_state,
     push_tool_span,
 )
 from openjiuwen.core.common.logging import team_logger
@@ -210,26 +209,22 @@ class OtelCallbackHandler:
 
     async def on_llm_stream_output(self, *args: Any, **kwargs: Any) -> Any:
         try:
-            state = pop_llm_span_state(peek=True)
-            if state is None:
-                return kwargs.get("result")
+            tracker = get_active_span_tracker()
+            span = tracker.peek_current_llm_span() if tracker else None
+            state = getattr(span, "_llm_state", None) if span else None
 
-            if not state.span.is_recording():
+            if state is None or not state.span.is_recording():
                 return kwargs.get("result")
 
             chunk = kwargs.get("result")
-            seq = state.next_chunk_seq()
             if state.first_chunk_ns is None:
                 state.first_chunk_ns = time.monotonic_ns()
                 ttft_ms = (state.first_chunk_ns - state.start_ns) / 1_000_000.0
                 if state.span.is_recording():
                     state.span.set_attribute(GEN_AI_RESPONSE_TTFT_MS, ttft_ms)
             delta = _coerce_message_content(_message_content(chunk))
-            if delta:
-                state.accumulated_content += delta
             reasoning_chunk = str(getattr(chunk, "reasoning_content", "") or "")
             if reasoning_chunk:
-                state.accumulated_reasoning += reasoning_chunk
                 # Record reasoning timing from chunk callbacks. SDK chunks have
                 # no timestamps, so monotonic_ns here is the best available point.
                 now_ns = time.monotonic_ns()
@@ -237,11 +232,10 @@ class OtelCallbackHandler:
                     state.reasoning_first_ns = now_ns
                     state.reasoning_start_wall_ns = time.time_ns()
                 state.reasoning_last_ns = now_ns
-            if state.span.is_recording():
+            if state.span.is_recording() and delta:
                 state.span.add_event(
                     name="llm.chunk",
                     attributes={
-                        "seq": seq,
                         "delta_chars": len(delta),
                     },
                 )
@@ -253,7 +247,9 @@ class OtelCallbackHandler:
     async def on_llm_output(self, *args: Any, **kwargs: Any) -> None:
         state = None
         try:
-            state = pop_llm_span_state()
+            tracker = get_active_span_tracker()
+            span = tracker.pop_current_llm_span() if tracker else None
+            state = getattr(span, "_llm_state", None) if span else None
             if state is None:
                 team_logger.debug("otel: on_llm_output — no open LLM span to close")
                 return
@@ -261,7 +257,7 @@ class OtelCallbackHandler:
                 team_logger.debug("otel: on_llm_output — span already ended")
                 return
 
-            completion_text = state.accumulated_content or str(kwargs.get("response") or "")
+            completion_text = str(kwargs.get("response") or "")
             # Prefer the reasoning_content carried by the LLM_OUTPUT trigger
             # (the business layer already assembled the full text on the
             # final_message), so the collector does not re-stitch chunks.
@@ -270,8 +266,6 @@ class OtelCallbackHandler:
                 resp_obj = kwargs.get("response")
                 if resp_obj is not None and not isinstance(resp_obj, str):
                     reasoning_text = str(getattr(resp_obj, "reasoning_content", "") or "")
-            if not reasoning_text:
-                reasoning_text = state.accumulated_reasoning
 
             tool_calls = kwargs.get("tool_calls") or getattr(kwargs.get("response"), "tool_calls", None)
             tc_json = _serialize_tool_calls(tool_calls)
@@ -308,12 +302,19 @@ class OtelCallbackHandler:
     async def on_llm_invoke_output(self, *args: Any, **kwargs: Any) -> Any:
         state = None
         try:
-            state = pop_llm_span_state(peek=True)
+            tracker = get_active_span_tracker()
+            # Peek first to check if it's streaming (leave to on_llm_output)
+            span_peek = tracker.peek_current_llm_span() if tracker else None
+            state_peek = getattr(span_peek, "_llm_state", None) if span_peek else None
+            if state_peek is None:
+                return kwargs.get("result")
+            if state_peek.is_streaming:
+                return kwargs.get("result")
+            # Non-streaming: pop and close
+            span = tracker.pop_current_llm_span() if tracker else None
+            state = getattr(span, "_llm_state", None) if span else None
             if state is None:
                 return kwargs.get("result")
-            if state.is_streaming:
-                return kwargs.get("result")
-            state = pop_llm_span_state()
             response = kwargs.get("result")
             self._close_llm_span(state, response)
         except BaseException as exc:
@@ -333,7 +334,10 @@ class OtelCallbackHandler:
     async def on_llm_call_error(self, *args: Any, **kwargs: Any) -> None:
         state = None
         try:
-            state = pop_llm_span_state()
+            tracker = get_active_span_tracker()
+            span = tracker.pop_current_llm_span() if tracker else None
+            state = getattr(span, "_llm_state", None) if span else None
+
             if state is None:
                 return
 
@@ -641,15 +645,14 @@ class OtelCallbackHandler:
         self._propagate_team_context(span)
         self._stamp_parent_member_name(span)
 
-        push_llm_span_state(
-            LlmSpanState(span=span, start_ns=time.monotonic_ns(), is_streaming=is_streaming),
-        )
+        _llm_st = LlmSpanState(span=span, start_ns=time.monotonic_ns(), is_streaming=is_streaming)
+        span._llm_state = _llm_st  # attach state to span object (context-immune)
 
         team_logger.info(
             "otel: _open_llm_span name=llm.call trace_id={:032x} span_id={:016x} "
-            "parent_span_id={:016x}",
+            "parent_span_id={:016x} streaming={}",
             span.context.trace_id, span.context.span_id,
-            span.parent.span_id if span.parent else 0,
+            span.parent.span_id if span.parent else 0, is_streaming,
         )
 
     def _close_llm_span(self, state: LlmSpanState, response: Any) -> None:

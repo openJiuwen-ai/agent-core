@@ -58,7 +58,6 @@ from openjiuwen.agent_teams.observability.span_context import (
     get_current_agent_span,
     set_current_agent_span,
     get_team_span,
-    _llm_span_stack,
     _tool_span_map,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -523,7 +522,9 @@ class ObservabilityRail(DeepAgentRail):
                 "(current member: {})",
                 prev_member, member_name,
             )
-            _llm_span_stack.set([])
+            # Clear the tool span ContextVar so the new member starts clean.
+            # LLM span stacks are now managed by ActiveSpanTracker per-task,
+            # so no ContextVar cleanup is needed for llm spans.
             _tool_span_map.set({})
         set_current_agent_span(None)
 

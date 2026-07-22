@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -24,10 +25,16 @@ class ActiveSpanTracker(SpanProcessor):
     ``on_end`` so they don't accumulate; only spans that were never
     explicitly ended (e.g. the owning task was cancelled) remain in
     the set and are closed by ``flush_all_spans``.
+
+    Also indexes spans by asyncio task (``_spans_by_task``) so that
+    the current recording llm.call span can be retrieved without a
+    ContextVar (which is unreliable across streaming async generator
+    yield/resume context switches).
     """
 
     def __init__(self):
         self._spans_by_trace: dict[int, set[Span]] = {}
+        self._spans_by_task: dict[int, list[Span]] = {}
         self._lock = threading.Lock()
         self._on_start_count = 0
         self._on_end_count = 0
@@ -55,10 +62,14 @@ class ActiveSpanTracker(SpanProcessor):
         try:
             if hasattr(span, 'context') and span.context:
                 trace_id = span.context.trace_id
+                try:
+                    tid = id(asyncio.current_task())  # 0 if no task (sync context)
+                except Exception:
+                    tid = 0
                 with self._lock:
-                    if trace_id not in self._spans_by_trace:
-                        self._spans_by_trace[trace_id] = set()
-                    self._spans_by_trace[trace_id].add(span)
+                    self._spans_by_trace.setdefault(trace_id, set()).add(span)
+                    # per-task stack of spans (most recent last)
+                    self._spans_by_task.setdefault(tid, []).append(span)
                 self._on_start_count += 1
                 self._dump_state()
         except Exception as exc:
@@ -73,9 +84,57 @@ class ActiveSpanTracker(SpanProcessor):
                     trace_set = self._spans_by_trace.get(trace_id)
                     if trace_set is not None:
                         trace_set.discard(cast(Span, span))
+                    # Remove from all task stacks
+                    for tid, stack in self._spans_by_task.items():
+                        try:
+                            stack.remove(cast(Span, span))
+                        except ValueError:
+                            pass
                 self._on_end_count += 1
         except Exception as exc:
             team_logger.warning("ActiveSpanTracker.on_end failed: {}", exc)
+
+    def peek_current_llm_span(self) -> Span | None:
+        """Return the most recent recording llm.call span on the current asyncio task, or None."""
+        try:
+            tid = id(asyncio.current_task())
+        except Exception:
+            return None
+        if tid == 0:
+            return None
+        with self._lock:
+            stack = self._spans_by_task.get(tid, [])
+            # return topmost recording llm.call span
+            for span in reversed(stack):
+                if hasattr(span, 'name') and span.name == "llm.call" and span.is_recording():
+                    return span
+        return None
+
+    def pop_current_llm_span(self) -> Span | None:
+        """Pop the topmost recording llm.call span from the current task stack."""
+        try:
+            tid = id(asyncio.current_task())
+        except Exception:
+            return None
+        if tid == 0:
+            return None
+        with self._lock:
+            stack = self._spans_by_task.get(tid, [])
+            for i in range(len(stack) - 1, -1, -1):
+                span = stack[i]
+                if hasattr(span, 'name') and span.name == "llm.call" and span.is_recording():
+                    stack.pop(i)
+                    return span
+        return None
+
+    def clear_task_llm_spans(self, tid: int) -> None:
+        """End and remove all llm.call spans for a given task (cascade-close path)."""
+        with self._lock:
+            stack = self._spans_by_task.pop(tid, [])
+            for span in stack:
+                if hasattr(span, 'name') and span.name == "llm.call" and span.is_recording():
+                    _stamp_cancelled_if_empty(span)
+                    span.end()
 
     def _on_ending(self, span: Span) -> None:
         pass
@@ -91,7 +150,12 @@ class ActiveSpanTracker(SpanProcessor):
         return True
 
     def flush_spans_for_trace(self, trace_id: int, exclude_team_span: bool = True) -> int:
-        """Close all active spans for a specific trace (multi-team isolation)."""
+        """Close all active spans for a specific trace (multi-team isolation).
+
+        Spans that carry ``_llm_state`` are finalized with a proper
+        output attribute (from the state object) instead of being
+        stamped ``cancelled``.
+        """
         from opentelemetry.trace import Status, StatusCode
 
         closed_count = 0
@@ -107,7 +171,12 @@ class ActiveSpanTracker(SpanProcessor):
                 if exclude_team_span and hasattr(span, 'name') and span.name.startswith("team."):
                     continue
 
-                _stamp_cancelled_if_empty(span)
+                # Spans with _llm_state get proper finalization
+                state = getattr(span, "_llm_state", None)
+                if state is not None:
+                    _finalize_llm_span_from_state(span, state)
+                else:
+                    _stamp_cancelled_if_empty(span)
                 span.set_status(Status(StatusCode.OK))
                 span.end()
                 closed_count += 1
@@ -128,6 +197,7 @@ class ActiveSpanTracker(SpanProcessor):
         with self._lock:
             all_traces = list(self._spans_by_trace.items())
             self._spans_by_trace.clear()
+            self._spans_by_task.clear()
             team_logger.info(
                 "ActiveSpanTracker.flush_all_spans BEFORE: traces={} "
                 "trace_ids=[{}]",
@@ -144,7 +214,11 @@ class ActiveSpanTracker(SpanProcessor):
                     if exclude_team_span and hasattr(span, 'name') and span.name.startswith("team."):
                         continue
 
-                    _stamp_cancelled_if_empty(span)
+                    state = getattr(span, "_llm_state", None)
+                    if state is not None:
+                        _finalize_llm_span_from_state(span, state)
+                    else:
+                        _stamp_cancelled_if_empty(span)
                     span.set_status(Status(StatusCode.OK))
                     span.end()
                     closed_count += 1
@@ -174,26 +248,26 @@ def set_active_span_tracker(tracker: ActiveSpanTracker | None) -> None:
 class LlmSpanState:
     """Per-call state attached to one open LLM span.
 
+    State is stored on the span object itself (``span._llm_state``),
+    not in a ContextVar, so it survives asyncio context switches in
+    streaming generators.
+
     Attributes:
         span: The open OTel span for this LLM call.
         start_ns: Monotonic-ns timestamp of when the span was opened.
-        context_token: Token returned by ``context.attach`` when the
-            span was attached as the current OTel context. Held so the
-            close handler can ``context.detach(token)`` and restore the
-            previous parent.
+        is_streaming: Whether this is a streaming (chunk-by-chunk) call.
         first_chunk_ns: Monotonic-ns of the first stream chunk; None until
             the first chunk arrives.
-        chunk_count: Running count of stream chunks seen so far.
+        reasoning_first_ns: Monotonic-ns of the first reasoning chunk.
+        reasoning_last_ns: Monotonic-ns of the last reasoning chunk.
+        reasoning_start_wall_ns: Wall-clock epoch (time.time_ns) captured
+            at the first reasoning chunk.
     """
 
     span: Span
     start_ns: int
-    context_token: Any | None = None
-    first_chunk_ns: int | None = None
-    chunk_count: int = 0
-    accumulated_content: str = ""
-    accumulated_reasoning: str = ""
     is_streaming: bool = False
+    first_chunk_ns: int | None = None
     reasoning_first_ns: int | None = None
     reasoning_last_ns: int | None = None
     # Wall-clock epoch (time.time_ns) captured at the first reasoning chunk.
@@ -201,11 +275,6 @@ class LlmSpanState:
     # is a monotonic delta (reasoning_last_ns - reasoning_first_ns). end_time
     # is set to start + that delta so the UI span duration equals reasoning time.
     reasoning_start_wall_ns: int | None = None
-
-    def next_chunk_seq(self) -> int:
-        """Increment and return the next chunk sequence number."""
-        self.chunk_count += 1
-        return self.chunk_count
 
 
 _team_span_ctx: ContextVar[Span | None] = ContextVar("_team_span_ctx", default=None)
@@ -288,6 +357,24 @@ def _stamp_cancelled_if_empty(span: Span) -> None:
         span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, "cancelled")
 
 
+def _finalize_llm_span_from_state(span: Span, state: LlmSpanState) -> None:
+    """Finalize a llm.call span using its attached state (flush path).
+
+    Used by ``flush_spans_for_trace`` and ``flush_all_spans`` when a span
+    still has ``_llm_state`` attached. Sets a minimal output attribute so
+    the span is not stamped ``cancelled``, even though the final response
+    payload is unavailable at flush time.
+    """
+    from openjiuwen.agent_teams.observability.semconv import (
+        LANGFUSE_OBSERVATION_OUTPUT,
+        LANGFUSE_OBSERVATION_TYPE,
+    )
+
+    # State gives us the observation type; set output to indicate
+    # the span was finalized (not cancelled — it had a real open state).
+    span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, "stream_finalized")
+
+
 def cascade_close_children() -> None:
     """End all open child llm/tool spans on the current context.
 
@@ -305,11 +392,15 @@ def cascade_close_children() -> None:
                 ts.end()
     _tool_span_map.set({})
 
-    for state in _llm_span_stack.get():
-        if state.span.is_recording():
-            _stamp_cancelled_if_empty(state.span)
-            state.span.end()
-    _llm_span_stack.set([])
+    # Close llm.call spans for the current task via the tracker.
+    tracker = get_active_span_tracker()
+    if tracker is not None:
+        try:
+            tid = id(asyncio.current_task())
+        except Exception:
+            tid = 0
+        if tid != 0:
+            tracker.clear_task_llm_spans(tid)
 
 
 def close_team_agent_spans(team_name: str) -> None:
@@ -329,35 +420,6 @@ def close_team_agent_spans(team_name: str) -> None:
         current.set_status(Status(StatusCode.OK))
         current.end()
         _current_agent_span.set(None)
-
-
-# LLM spans nest (e.g. an inner agent calls back into another LLM); use a stack.
-_llm_span_stack: ContextVar[list[LlmSpanState]] = ContextVar("_otel_llm_span_stack", default=[])
-
-
-def push_llm_span_state(state: LlmSpanState) -> None:
-    """Push a new LLM span state onto the per-task stack."""
-    stack = list(_llm_span_stack.get())
-    stack.append(state)
-    _llm_span_stack.set(stack)
-
-
-def pop_llm_span_state(*, peek: bool = False) -> LlmSpanState | None:
-    """Pop (or peek) the top LLM span state for the current task.
-
-    Args:
-        peek: When True, return the top entry without removing it. Used by
-            the streaming chunk handler that fires repeatedly between
-            input/output events.
-    """
-    stack = list(_llm_span_stack.get())
-    if not stack:
-        return None
-    if peek:
-        return stack[-1]
-    state = stack.pop()
-    _llm_span_stack.set(stack)
-    return state
 
 
 # Tool spans are keyed by tool_name because the framework triggers
@@ -468,7 +530,6 @@ def reset_all() -> None:
     """Reset all per-task span trackers. Used by tests between cases."""
     _team_span_ctx.set(None)
     _current_agent_span.set(None)
-    _llm_span_stack.set([])
     _tool_span_map.set({})
 
 
