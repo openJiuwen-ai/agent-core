@@ -18,7 +18,7 @@ free of any agent_teams import so it can be unit-tested in isolation with the
 from __future__ import annotations
 
 from .backends import SKIP, AgentBackend, AgentResult, MockBackend
-from .errors import LintError, MetaError, SchemaError, WorkflowError
+from .errors import EngineError, LintError, MetaError, SchemaError
 from .journal import Journal
 from .loader import LoadedWorkflow, load_workflow_source
 from .primitives import (
@@ -85,7 +85,7 @@ __all__ = [
     "WorkflowProgressEvent",
     "noop_progress_sink",
     # errors
-    "WorkflowError",
+    "EngineError",
     "MetaError",
     "LintError",
     "SchemaError",
