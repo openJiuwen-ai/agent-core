@@ -139,6 +139,8 @@ class EvolutionRecord:
     usage_stats: Optional[UsageStats] = None
     skill_version: Optional[str] = None
     summary: Optional[str] = None
+    # suggest-mode review lifecycle: "suggest" | "auto" | "accepted" | None
+    review_status: Optional[str] = None
 
     @classmethod
     def make(cls, spec: EvolutionRecordSpec) -> "EvolutionRecord":
@@ -170,6 +172,8 @@ class EvolutionRecord:
             payload["skill_version"] = self.skill_version
         if self.summary:
             payload["summary"] = self.summary
+        if self.review_status:
+            payload["review_status"] = self.review_status
         return payload
 
     @classmethod
@@ -187,6 +191,7 @@ class EvolutionRecord:
             usage_stats=usage_stats,
             skill_version=data.get("skill_version"),
             summary=data.get("summary"),
+            review_status=data.get("review_status"),
         )
 
     @property

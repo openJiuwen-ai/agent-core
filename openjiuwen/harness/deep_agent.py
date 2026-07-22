@@ -899,6 +899,9 @@ class DeepAgent(BaseAgent):
             await self._react_agent.agent_callback_manager.unregister_rail(
                 rail, self._react_agent
             )
+        cancel_pending = getattr(rail, "cancel_pending_evolution", None)
+        if callable(cancel_pending):
+            await cancel_pending()
         rail.uninit(self)
         return self
 

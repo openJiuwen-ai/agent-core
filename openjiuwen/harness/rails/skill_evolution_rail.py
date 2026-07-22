@@ -3,13 +3,17 @@
 """SkillEvolutionRail for online auto-evolution.
 
 This rail inherits EvolutionRail and gains automatic trajectory collection.
-The evolution logic runs in after_invoke (after complete conversation) rather
-than after_task_iteration (after each turn), because skill evolution needs
+The evolution logic is scheduled from after_invoke (after complete conversation)
+rather than after_task_iteration (after each turn), because skill evolution needs
 the full conversation context for signal detection and experience extraction.
+
+Evolution itself runs as a background asyncio task so the main dialogue path
+is not blocked by LLM-based experience generation or evaluation.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -229,12 +233,33 @@ _SKILL_CREATE_APPROVAL_HEADER = {
 }
 
 
+def _log_evolution_task_exception(task: asyncio.Task) -> None:
+    """Done-callback: surface unexpected background evolution failures."""
+    task_name = task.get_name()
+    try:
+        task.result()
+        logger.info("[SkillEvolutionRail] background evolution task [%s] completed", task_name)
+    except asyncio.CancelledError:
+        logger.info("[SkillEvolutionRail] background evolution task [%s] cancelled", task_name)
+    except Exception as exc:
+        logger.exception(
+            "[SkillEvolutionRail] background evolution task [%s] failed: %s",
+            task_name,
+            exc,
+        )
+
+
 class SkillEvolutionRail(EvolutionRail):
     """Online auto-evolution rail for skill patching and persistence.
 
     Inherits EvolutionRail to gain automatic trajectory collection.
-    Evolution logic runs in after_invoke (after complete conversation) because
-    skill evolution needs full conversation context for signal detection.
+    Evolution is scheduled from after_invoke (after complete conversation) because
+    skill evolution needs full conversation context for signal detection. The
+    heavy work runs in a background task so the main dialogue is not blocked.
+
+    Hosts that need UI summary / approval events after auto evolution should call
+    ``await rail.wait_for_pending_evolution()`` before ``take_run_summary`` /
+    ``drain_pending_approval_events``.
 
     Note: This class uses two stores:
     - trajectory_store (from EvolutionRail): stores execution trajectories
@@ -311,6 +336,13 @@ class SkillEvolutionRail(EvolutionRail):
         self._language = language
         # Last run_evolution summary for host to emit after stream closes (auto_save path).
         self._run_summary: Optional[Dict[str, Any]] = None
+        # Serialize concurrent evolution jobs (shared store / signal / summary state).
+        self._evolution_lock = asyncio.Lock()
+        # Short critical section for usage_stats read-modify-write (track vs eval).
+        self._stats_lock = asyncio.Lock()
+        self._pending_evolution_tasks: Set[asyncio.Task[Any]] = set()
+        # Strong ref for sync-uninit drain so cancelled tasks are not GC'd mid-write.
+        self._uninit_drain_task: Optional[asyncio.Task[Any]] = None
 
     @property
     def store(self) -> EvolutionStore:
@@ -387,6 +419,196 @@ class SkillEvolutionRail(EvolutionRail):
         """Clear signal fingerprints, typically on conversation boundary."""
         self._processed_signal_keys.clear()
 
+    def uninit(self, agent: Any) -> None:
+        """Cancel in-flight background evolution tasks on rail teardown.
+
+        ``task.cancel()`` only *requests* cancellation. Prefer
+        ``await cancel_pending_evolution()`` from async teardown so tasks can
+        finish or unwind (e.g. mid ``evolutions.json`` write) before the rail
+        is dropped. This sync path still cancels and either awaits when no loop
+        is running, or schedules a drain task (strong-referenced) otherwise.
+        """
+        pending = [task for task in list(self._pending_evolution_tasks) if not task.done()]
+        for task in pending:
+            task.cancel()
+
+        if pending:
+            async def _drain_cancelled() -> None:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop is not None:
+                # Same-thread async caller cannot block the loop; schedule drain
+                # and retain a strong reference so tasks are not GC'd mid-write.
+                self._uninit_drain_task = loop.create_task(
+                    _drain_cancelled(),
+                    name="skill_evolution_uninit_drain",
+                )
+            else:
+                try:
+                    asyncio.run(_drain_cancelled())
+                except Exception as exc:
+                    logger.warning(
+                        "[SkillEvolutionRail] uninit failed to await cancelled tasks: %s",
+                        exc,
+                    )
+                self._uninit_drain_task = None
+
+        self._pending_evolution_tasks.clear()
+        super().uninit(agent)
+
+    async def cancel_pending_evolution(self, timeout: Optional[float] = None) -> None:
+        """Cancel background evolution tasks and wait until they settle.
+
+        Async teardown (e.g. ``unregister_rail``) should call this so a task
+        cancelled mid ``append_record`` / ``update_record_scores`` can finish or
+        roll back instead of being destroyed while ``evolutions.json`` is open.
+        """
+        pending = [task for task in list(self._pending_evolution_tasks) if not task.done()]
+        for task in pending:
+            task.cancel()
+
+        if pending:
+            gather_coro = asyncio.gather(*pending, return_exceptions=True)
+            try:
+                if timeout is None:
+                    await gather_coro
+                else:
+                    await asyncio.wait_for(gather_coro, timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[SkillEvolutionRail] cancel_pending_evolution timed out after %.1fs "
+                    "(%d task(s) still running)",
+                    timeout,
+                    sum(1 for task in pending if not task.done()),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[SkillEvolutionRail] cancel_pending_evolution wait failed: %s",
+                    exc,
+                )
+
+        drain = getattr(self, "_uninit_drain_task", None)
+        if drain is not None and not drain.done():
+            try:
+                if timeout is None:
+                    await drain
+                else:
+                    await asyncio.wait_for(asyncio.shield(drain), timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[SkillEvolutionRail] cancel_pending_evolution drain timed out after %.1fs",
+                    timeout,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[SkillEvolutionRail] cancel_pending_evolution drain wait failed: %s",
+                    exc,
+                )
+        self._uninit_drain_task = None
+        self._pending_evolution_tasks.clear()
+
+    @property
+    def has_pending_evolution(self) -> bool:
+        """Whether any background evolution task is still running."""
+        return any(not task.done() for task in self._pending_evolution_tasks)
+
+    async def wait_for_pending_evolution(self, timeout: Optional[float] = None) -> None:
+        """Wait for background evolution tasks scheduled from after_invoke.
+
+        Hosts should call this before ``take_run_summary`` /
+        ``drain_pending_approval_events`` when they need those results in the
+        current turn. Pass ``timeout`` to bound the wait; timed-out tasks keep
+        running in the background.
+        """
+        pending = [task for task in self._pending_evolution_tasks if not task.done()]
+        if not pending:
+            return
+        gather_coro = asyncio.gather(*pending, return_exceptions=True)
+        if timeout is None:
+            await gather_coro
+            return
+        try:
+            await asyncio.wait_for(gather_coro, timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[SkillEvolutionRail] wait_for_pending_evolution timed out after %.1fs "
+                "(%d task(s) still running)",
+                timeout,
+                sum(1 for task in pending if not task.done()),
+            )
+
+    async def _dispatch_run_evolution(
+        self,
+        trajectory: Trajectory,
+        ctx: AgentCallbackContext,
+    ) -> None:
+        """Schedule skill evolution in the background; do not block after_invoke.
+
+        Claim this invoke's presented-record queue immediately so a later
+        overlapping invoke cannot steal or mix evaluation ownership.
+        """
+        if not self._auto_scan:
+            logger.info("[SkillEvolutionRail] auto_scan disabled, skip background evolution")
+            return
+        session = getattr(ctx, "session", None)
+        presented_snapshot = list(self._get_session_presented_records(session))
+        self._set_session_presented_records(session, [])
+        self._schedule_evolution(trajectory, ctx, presented_snapshot)
+
+    def _schedule_evolution(
+        self,
+        trajectory: Trajectory,
+        ctx: AgentCallbackContext,
+        presented_snapshot: Optional[List[tuple[str, Any, str]]] = None,
+    ) -> asyncio.Task[Any]:
+        """Create a tracked background task for ``run_evolution``."""
+        snapshot = list(presented_snapshot or [])
+        task = asyncio.create_task(
+            self._background_evolution(trajectory, ctx, snapshot),
+            name="skill_evolution",
+        )
+        self._pending_evolution_tasks.add(task)
+
+        def _on_done(done_task: asyncio.Task) -> None:
+            self._pending_evolution_tasks.discard(done_task)
+            _log_evolution_task_exception(done_task)
+
+        task.add_done_callback(_on_done)
+        logger.info(
+            "[SkillEvolutionRail] scheduled background evolution task "
+            "(%d pending, %d presented claimed)",
+            len(self._pending_evolution_tasks),
+            len(snapshot),
+        )
+        return task
+
+    async def _background_evolution(
+        self,
+        trajectory: Trajectory,
+        ctx: AgentCallbackContext,
+        presented_snapshot: List[tuple[str, Any, str]],
+    ) -> None:
+        """Background entry that awaits ``run_evolution`` (which owns the lock)."""
+        try:
+            await self.run_evolution(
+                trajectory,
+                ctx,
+                presented_snapshot=presented_snapshot,
+            )
+        except asyncio.CancelledError:
+            session = getattr(ctx, "session", None)
+            self._restore_session_presented_records(session, presented_snapshot)
+            raise
+        except Exception:
+            session = getattr(ctx, "session", None)
+            self._restore_session_presented_records(session, presented_snapshot)
+            raise
+
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Inject body experiences, track presented records, and record trajectory step.
 
@@ -433,23 +655,52 @@ class SkillEvolutionRail(EvolutionRail):
             # after_invoke from the full conversation (see _build_evaluation_snippet).
             await self._track_presented_records(ctx, skill_name, "")
 
-    async def run_evolution(self, trajectory: Trajectory, ctx: AgentCallbackContext) -> None:
+    async def run_evolution(
+        self,
+        trajectory: Trajectory,
+        ctx: AgentCallbackContext,
+        *,
+        presented_snapshot: Optional[List[tuple[str, Any, str]]] = None,
+    ) -> None:
         """Run skill evolution based on the collected trajectory.
 
-        This is called by EvolutionRail.after_invoke after the trajectory is saved.
-        SkillEvolutionRail implements evolution logic here instead of in after_invoke
-        to align with EvolutionRail's design pattern.
+        When invoked via the rail lifecycle, ``_dispatch_run_evolution`` schedules
+        this method on a background task so after_invoke returns immediately.
+        Direct callers (unit tests / manual evolve) still await this method.
 
         Args:
             trajectory: Complete OTLP trajectory for this conversation
             ctx: Callback context
+            presented_snapshot: Presented records claimed at schedule time for
+                this invoke. When None, evaluation drains the live session queue
+                (direct-call / test compatibility).
         """
+        async with self._evolution_lock:
+            await self._run_evolution_locked(
+                trajectory,
+                ctx,
+                presented_snapshot=presented_snapshot,
+            )
+
+    async def _run_evolution_locked(
+        self,
+        trajectory: Trajectory,
+        ctx: AgentCallbackContext,
+        *,
+        presented_snapshot: Optional[List[tuple[str, Any, str]]] = None,
+    ) -> None:
+        """Core evolution body; caller must hold ``_evolution_lock``."""
         logger.info("[SkillEvolutionRail] run_evolution called, auto_scan=%s", self._auto_scan)
         self._run_summary = None
         if not self._auto_scan:
             logger.info("[SkillEvolutionRail] auto_scan disabled, skipping")
             return
 
+        # Snapshot claimed at schedule time. If we never hand it to evaluation
+        # (early exit / hard failure), restore it so a later round can retry.
+        claimed = list(presented_snapshot) if presented_snapshot is not None else None
+        evaluation_handed_off = False
+        session = getattr(ctx, "session", None)
         try:
             parsed_messages = await self._collect_parsed_messages(trajectory)
             logger.info("[SkillEvolutionRail] collected %d parsed messages", len(parsed_messages))
@@ -470,7 +721,6 @@ class SkillEvolutionRail(EvolutionRail):
             # Refresh session used-skills from this round's trajectory (covers
             # cases where after_tool_call did not run or history was replayed).
             traj_skills = detector.collect_skills_from_messages(parsed_messages)
-            session = getattr(ctx, "session", None)
             for name in traj_skills:
                 self._remember_session_used_skill(session, name)
             session_skills = self._get_session_used_skills(session)
@@ -538,7 +788,12 @@ class SkillEvolutionRail(EvolutionRail):
                         "cancelling skill evolution review"
                     )
                 logger.info("[SkillEvolutionRail] %s", message)
-                await self._trigger_async_evaluation(ctx, parsed_messages)
+                await self._trigger_async_evaluation(
+                    ctx,
+                    parsed_messages,
+                    presented_snapshot=claimed,
+                )
+                evaluation_handed_off = True
                 return
 
             attributed_signal_count = sum(len(skill_signals) for skill_signals in skill_groups.values())
@@ -551,51 +806,56 @@ class SkillEvolutionRail(EvolutionRail):
             skills_dirs = self._resolve_skills_dirs_for_self_evolution()
             # Evolve existing skills (when signals are attributed to known skills).
             # Per-skill capabilities.json ``selfEvolution`` outranks rail auto_save:
-            #   off → no evolve; suggest → approval; auto → persist; missing → rail auto_save.
+            #   off → skip; suggest/auto → write evolutions.json only (not SKILL.md);
+            #   review_status records the action; missing → rail auto_save.
             for skill_name, skill_signals in skill_groups.items():
-                if self._auto_save:
-                    action = resolve_skill_evolution_action(
+                action = resolve_skill_evolution_action(
+                    skill_name,
+                    default_auto_save=self._auto_save,
+                    skills_dirs=skills_dirs,
+                )
+                if action == "off":
+                    logger.info(
+                        "[SkillEvolutionRail] selfEvolution=off after attribution, "
+                        "skipping skill=%s",
                         skill_name,
-                        default_auto_save=self._auto_save,
-                        skills_dirs=skills_dirs,
                     )
-                    if action == "off":
-                        logger.info(
-                            "[SkillEvolutionRail] selfEvolution=off after attribution, "
-                            "skipping skill=%s",
+                    continue
+                # Persist to evolutions.json for both suggest and auto; never touch SKILL.md here.
+                records = await self._generate_experience_for_skill(
+                    skill_name,
+                    skill_signals,
+                    parsed_messages,
+                )
+                if records:
+                    for record in records:
+                        record.review_status = action
+                        await self._evolution_store.append_record(
                             skill_name,
+                            record,
+                            update_skill_md=False,
                         )
-                        continue
-                    # Auto-save path: persist immediately without user approval
-                    records = await self._generate_experience_for_skill(
+                    self._record_skill_evolution(skill_name, records, skill_signals)
+                    logger.info(
+                        "[SkillEvolutionRail] persisted %d record(s) for skill=%s action=%s",
+                        len(records),
                         skill_name,
-                        skill_signals,
-                        parsed_messages,
+                        action,
                     )
-                    if records:
-                        for record in records:
-                            await self._evolution_store.append_record(skill_name, record)
-                        self._record_skill_evolution(skill_name, records, skill_signals)
-                        logger.info(
-                            "[SkillEvolutionRail] persisted %d record(s) for skill=%s",
-                            len(records),
-                            skill_name,
-                        )
-                    else:
-                        logger.info(
-                            "[SkillEvolutionRail] auto_save: no records generated for skill=%s",
-                            skill_name,
-                        )
                 else:
-                    # Approval-required path: stage records and emit approval request
-                    has_staged = await self._generate_experience_via_optimizer(
-                        skill_name, skill_signals, parsed_messages
+                    logger.info(
+                        "[SkillEvolutionRail] no records generated for skill=%s action=%s",
+                        skill_name,
+                        action,
                     )
-                    if has_staged:
-                        await self._emit_generated_records(ctx, skill_name)
 
             # Trigger async evaluation if interval reached
-            await self._trigger_async_evaluation(ctx, parsed_messages)
+            await self._trigger_async_evaluation(
+                ctx,
+                parsed_messages,
+                presented_snapshot=claimed,
+            )
+            evaluation_handed_off = True
             if self._run_summary:
                 self._run_summary["display_text"] = await self._generate_ui_summary_text(
                     self._run_summary,
@@ -611,9 +871,17 @@ class SkillEvolutionRail(EvolutionRail):
                 logger.info("[SkillEvolutionRail] run_evolution finished with no UI summary")
         except Exception as exc:
             logger.warning("[SkillEvolutionRail] auto evolution failed: %s", exc)
+        finally:
+            if claimed and not evaluation_handed_off:
+                self._restore_session_presented_records(session, claimed)
 
     def take_run_summary(self) -> Optional[Dict[str, Any]]:
-        """Return and clear the last run_evolution summary for host UI delivery."""
+        """Return and clear the last run_evolution summary for host UI delivery.
+
+        Because evolution runs in the background after ``after_invoke``, hosts
+        should ``await wait_for_pending_evolution()`` first when they need the
+        summary in the current turn.
+        """
         summary = self._run_summary
         self._run_summary = None
         if not summary:
@@ -871,6 +1139,10 @@ class SkillEvolutionRail(EvolutionRail):
         Called by the host (JiuWenClaw) after the streaming loop ends,
         because ``after_invoke`` fires *after* the session stream is
         closed and ``session.write_stream`` can no longer deliver data.
+
+        Evolution is scheduled in the background; call
+        ``await wait_for_pending_evolution()`` first if events from the
+        current turn are required immediately.
         """
         events = list(self._pending_approval_events)
         self._pending_approval_events.clear()
@@ -1387,11 +1659,12 @@ class SkillEvolutionRail(EvolutionRail):
     def _get_session_presented_records(
         self,
         session: Any,
-    ) -> List[tuple[str, EvolutionRecord, str]]:
+    ) -> List[tuple[str, Any, str]]:
         """Get presented records stored in session for concurrency isolation.
 
-        Each entry is (skill_name, record, snippet) where snippet is the
-        conversation context captured at the time of presentation.
+        Each entry is ``(skill_name, record_id | EvolutionRecord, snippet)``.
+        Production path stores ``record_id`` strings; legacy callers/tests may
+        still pass full ``EvolutionRecord`` objects.
         """
         if session is None:
             return []
@@ -1400,11 +1673,50 @@ class SkillEvolutionRail(EvolutionRail):
     def _set_session_presented_records(
         self,
         session: Any,
-        records: List[tuple[str, EvolutionRecord, str]],
+        records: List[tuple[str, Any, str]],
     ) -> None:
         """Store presented records in session for concurrency isolation."""
         if session is not None:
             setattr(session, "_skill_evolution_presented", records)
+
+    def _restore_session_presented_records(
+        self,
+        session: Any,
+        claimed: List[tuple[str, Any, str]],
+    ) -> None:
+        """Return claimed presented records to the session queue after a failed/skipped eval.
+
+        Claimed entries are prepended (older ownership first). Duplicates already
+        present in the live queue (same skill + record id) are skipped.
+        """
+        if session is None or not claimed:
+            return
+        existing = list(self._get_session_presented_records(session))
+        seen: Set[tuple[str, str]] = set()
+        merged: List[tuple[str, Any, str]] = []
+        for skill_name, record_or_id, snippet in list(claimed) + existing:
+            record_id = self._presented_entry_record_id(record_or_id)
+            key = (skill_name, record_id)
+            if record_id and key in seen:
+                continue
+            if record_id:
+                seen.add(key)
+            merged.append((skill_name, record_or_id, snippet))
+        self._set_session_presented_records(session, merged)
+        logger.info(
+            "[SkillEvolutionRail] restored %d claimed presented record(s) to session "
+            "(queue_size=%d)",
+            len(claimed),
+            len(merged),
+        )
+
+    @staticmethod
+    def _presented_entry_record_id(record_or_id: Any) -> str:
+        """Normalize a presented-entry payload to a record id string."""
+        if isinstance(record_or_id, str):
+            return record_or_id
+        record_id = getattr(record_or_id, "id", None)
+        return str(record_id) if record_id else ""
 
     def _get_session_eval_counter(self, session: Any) -> int:
         """Get evaluation counter from session."""
@@ -1425,67 +1737,66 @@ class SkillEvolutionRail(EvolutionRail):
     ) -> None:
         """Track presented records for scoring statistics.
 
-        Updates times_presented and stores (skill_name, record, snippet) in
-        session for later evaluation.  The snippet placeholder is ignored at
+        Updates times_presented and stores ``(skill_name, record_id, snippet)``
+        in session for later evaluation.  The snippet placeholder is ignored at
         evaluation time; ``_trigger_async_evaluation`` rebuilds the snippet
         from the full after-invoke conversation anchored at the last SKILL.md load.
 
-        Builds the update payload from snapshots of current stats to avoid
-        mutating records before a successful DB write.
+        Builds the update payload from freshly loaded store stats under
+        ``_stats_lock`` so concurrent evaluation writebacks cannot clobber
+        ``times_presented``.
         """
         try:
-            records = await self._evolution_store.get_records_by_score(
-                skill_name,
-                min_score=0.5,
-            )
-            if not records:
-                return
-
-            # Only track BODY records: those are the ones actually injected into
-            # the SKILL.md tool result.  DESCRIPTION records are surfaced through
-            # the index block and are not individually injected, so inflating their
-            # times_presented here would produce misleading utilisation scores.
-            # Backward/forward compatible: some tests and historical code may set
-            # `record.target` directly, while the canonical location is
-            # `record.change.target`.
-            body_records = [
-                r
-                for r in records
-                if getattr(r, "target", r.change.target) == EvolutionTarget.BODY
-            ]
-            if not body_records:
-                return
-
-            updates: Dict[str, Dict[str, Any]] = {}
-            now = datetime.now(tz=timezone.utc).isoformat()
-
-            # Build update payload without touching the in-memory records yet
-            for record in body_records[:5]:  # Track top 5 body records
-                existing_stats = record.usage_stats or UsageStats()
-                new_stats = UsageStats(
-                    times_presented=existing_stats.times_presented + 1,
-                    times_used=existing_stats.times_used,
-                    times_positive=existing_stats.times_positive,
-                    times_negative=existing_stats.times_negative,
-                    last_presented_at=now,
-                    last_evaluated_at=existing_stats.last_evaluated_at,
+            async with self._stats_lock:
+                records = await self._evolution_store.get_records_by_score(
+                    skill_name,
+                    min_score=0.5,
                 )
-                updates[record.id] = {
-                    "score": record.score,
-                    "usage_stats": new_stats.to_dict(),
-                }
+                if not records:
+                    return
 
-            # Persist first; only update in-memory objects and session after success
-            await self._evolution_store.update_record_scores(skill_name, updates)
+                # Only track BODY records: those are the ones actually injected into
+                # the SKILL.md tool result.  DESCRIPTION records are surfaced through
+                # the index block and are not individually injected, so inflating their
+                # times_presented here would produce misleading utilisation scores.
+                # Backward/forward compatible: some tests and historical code may set
+                # `record.target` directly, while the canonical location is
+                # `record.change.target`.
+                body_records = [
+                    r
+                    for r in records
+                    if getattr(r, "target", r.change.target) == EvolutionTarget.BODY
+                ]
+                if not body_records:
+                    return
 
-            presented_entries: List[tuple[str, EvolutionRecord, str]] = []
-            for record in body_records[:5]:
-                if record.id in updates:
-                    # Now safe to apply to in-memory object
-                    record.usage_stats = UsageStats.from_dict(updates[record.id]["usage_stats"])
-                    presented_entries.append((skill_name, record, presentation_snippet))
+                updates: Dict[str, Dict[str, Any]] = {}
+                now = datetime.now(tz=timezone.utc).isoformat()
 
-            # Store in session for concurrency isolation
+                # Build update payload without touching the in-memory records yet
+                for record in body_records[:5]:  # Track top 5 body records
+                    existing_stats = record.usage_stats or UsageStats()
+                    new_stats = UsageStats(
+                        times_presented=existing_stats.times_presented + 1,
+                        times_used=existing_stats.times_used,
+                        times_positive=existing_stats.times_positive,
+                        times_negative=existing_stats.times_negative,
+                        last_presented_at=now,
+                        last_evaluated_at=existing_stats.last_evaluated_at,
+                    )
+                    updates[record.id] = {
+                        "score": record.score,
+                        "usage_stats": new_stats.to_dict(),
+                    }
+
+                await self._evolution_store.update_record_scores(skill_name, updates)
+
+            presented_entries: List[tuple[str, Any, str]] = [
+                (skill_name, record_id, presentation_snippet)
+                for record_id in updates
+            ]
+
+            # Store ids only — evaluation reloads fresh stats from the store.
             session = ctx.session if hasattr(ctx, "session") else None
             existing = self._get_session_presented_records(session)
             self._set_session_presented_records(session, existing + presented_entries)
@@ -1502,12 +1813,19 @@ class SkillEvolutionRail(EvolutionRail):
         self,
         ctx: AgentCallbackContext,
         parsed_messages: List[dict],
+        *,
+        presented_snapshot: Optional[List[tuple[str, Any, str]]] = None,
     ) -> None:
         """Trigger async evaluation of presented experiences.
 
         Evaluates whether presented experiences were effectively used.
         Each record is evaluated against the conversation **after** the last
         SKILL.md load for that skill (assistant replies and tool calls included).
+
+        Prefer ``presented_snapshot`` claimed at schedule time so overlapping
+        background evolution tasks do not steal each other's presented queue.
+        Before applying score deltas, records are reloaded from the store so
+        stale presentation-time ``usage_stats`` cannot overwrite newer counters.
         """
         session = ctx.session if hasattr(ctx, "session") else None
         counter = self._get_session_eval_counter(session)
@@ -1515,12 +1833,19 @@ class SkillEvolutionRail(EvolutionRail):
         self._set_session_eval_counter(session, counter)
 
         if counter < self._eval_interval:
+            # Interval not reached: put claimed entries back so a later round
+            # can evaluate them. Live-queue drain path never cleared yet.
+            if presented_snapshot:
+                self._restore_session_presented_records(session, presented_snapshot)
             return
 
-        # Reset counter and get presented records
+        # Reset counter and resolve presented records for this evaluation round.
         self._set_session_eval_counter(session, 0)
-        presented_entries = self._get_session_presented_records(session)
-        self._set_session_presented_records(session, [])
+        if presented_snapshot is not None:
+            presented_entries = list(presented_snapshot)
+        else:
+            presented_entries = self._get_session_presented_records(session)
+            self._set_session_presented_records(session, [])
 
         if not presented_entries:
             return
@@ -1528,71 +1853,97 @@ class SkillEvolutionRail(EvolutionRail):
         try:
             eval_messages = parsed_messages
             if not eval_messages:
+                self._restore_session_presented_records(session, presented_entries)
                 return
 
-            by_skill_records: Dict[str, List[EvolutionRecord]] = {}
+            by_skill_ids: Dict[str, List[str]] = {}
             seen_ids: Dict[str, Set[str]] = {}
-            for skill_name, record, _ in presented_entries:
-                seen = seen_ids.setdefault(skill_name, set())
-                if record.id in seen:
+            for skill_name, record_or_id, _ in presented_entries:
+                record_id = self._presented_entry_record_id(record_or_id)
+                if not record_id:
                     continue
-                seen.add(record.id)
-                by_skill_records.setdefault(skill_name, []).append(record)
+                seen = seen_ids.setdefault(skill_name, set())
+                if record_id in seen:
+                    continue
+                seen.add(record_id)
+                by_skill_ids.setdefault(skill_name, []).append(record_id)
 
             by_skill_snippet: Dict[str, str] = {}
-            for skill_name in by_skill_records:
+            for skill_name in by_skill_ids:
                 by_skill_snippet[skill_name] = self._build_evaluation_snippet(
                     eval_messages,
                     skill_name,
                 )
 
-            for skill_name, records in by_skill_records.items():
+            for skill_name, record_ids in by_skill_ids.items():
                 snippet = by_skill_snippet.get(skill_name, "")
+                # Load records for the scorer prompt (content/summary), then
+                # reload again under the stats lock before applying deltas.
+                store_records = await self._evolution_store.get_records_by_score(
+                    skill_name,
+                    min_score=None,
+                )
+                id_to_record = {record.id: record for record in store_records}
+                records = [
+                    id_to_record[record_id]
+                    for record_id in record_ids
+                    if record_id in id_to_record
+                ]
+                if not records:
+                    continue
+
                 eval_results = await self._scorer.evaluate(snippet, records)
                 if not eval_results:
                     continue
 
-                # Update records with evaluation results
-                updates: Dict[str, Dict[str, Any]] = {}
-                for result in eval_results:
-                    record_id = result.get("record_id")
-                    if not record_id:
-                        continue
-                    for record in records:
-                        if record.id == record_id:
-                            new_score = update_score(record, result)
-                            if record.usage_stats is None:
-                                record.usage_stats = UsageStats()
-                            updates[record_id] = {
-                                "score": new_score,
-                                "usage_stats": record.usage_stats.to_dict(),
-                            }
-                            break
-
-                if updates:
-                    await self._evolution_store.update_record_scores(skill_name, updates)
-                    logger.info(
-                        "[SkillEvolutionRail] async evaluation updated %d record(s) for skill=%s "
-                        "results=%s usage=%s",
-                        len(updates),
+                async with self._stats_lock:
+                    fresh_records = await self._evolution_store.get_records_by_score(
                         skill_name,
-                        [
-                            {
-                                "record_id": item.get("record_id"),
-                                "used": item.get("used"),
-                                "positive": item.get("positive"),
-                                "negative": item.get("negative"),
-                            }
-                            for item in eval_results
-                            if item.get("record_id") in updates
-                        ],
-                        {
-                            record_id: payload.get("usage_stats")
-                            for record_id, payload in updates.items()
-                        },
+                        min_score=None,
                     )
+                    fresh_by_id = {record.id: record for record in fresh_records}
+
+                    updates: Dict[str, Dict[str, Any]] = {}
+                    for result in eval_results:
+                        record_id = result.get("record_id")
+                        if not record_id:
+                            continue
+                        record = fresh_by_id.get(record_id)
+                        if record is None:
+                            continue
+                        new_score = update_score(record, result)
+                        if record.usage_stats is None:
+                            record.usage_stats = UsageStats()
+                        updates[record_id] = {
+                            "score": new_score,
+                            "usage_stats": record.usage_stats.to_dict(),
+                        }
+
+                    if updates:
+                        await self._evolution_store.update_record_scores(skill_name, updates)
+                        logger.info(
+                            "[SkillEvolutionRail] async evaluation updated %d record(s) for skill=%s "
+                            "results=%s usage=%s",
+                            len(updates),
+                            skill_name,
+                            [
+                                {
+                                    "record_id": item.get("record_id"),
+                                    "used": item.get("used"),
+                                    "positive": item.get("positive"),
+                                    "negative": item.get("negative"),
+                                }
+                                for item in eval_results
+                                if item.get("record_id") in updates
+                            ],
+                            {
+                                record_id: payload.get("usage_stats")
+                                for record_id, payload in updates.items()
+                            },
+                        )
         except Exception as exc:
             logger.warning("[SkillEvolutionRail] async evaluation failed: %s", exc, exc_info=True)
+            self._restore_session_presented_records(session, presented_entries)
 
     async def _should_propose_new_skill(
         self,

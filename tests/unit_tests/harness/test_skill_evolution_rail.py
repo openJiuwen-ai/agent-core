@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -28,7 +29,12 @@ from openjiuwen.agent_evolving.trajectory import (
     TrajectoryStep,
     trajectory_from_legacy,
 )
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    AgentCallbackEvent,
+    InvokeInputs,
+    ToolCallInputs,
+)
 from openjiuwen.harness.rails.skill_evolution_rail import (
     SkillEvolutionRail,
     _MAX_PROCESSED_SIGNAL_KEYS,
@@ -726,6 +732,136 @@ async def test_after_tool_call_skips_invalid_cases(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_after_invoke_schedules_evolution_without_blocking(tmp_path):
+    """after_invoke must return before background evolution finishes."""
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def _slow_evolution(trajectory, ctx, *, presented_snapshot=None):
+        started.set()
+        await release.wait()
+        finished.set()
+
+    rail.run_evolution = _slow_evolution  # type: ignore[method-assign]
+
+    invoke_inputs = InvokeInputs(query="hello", conversation_id="conv-async")
+    before_ctx = AgentCallbackContext(
+        agent=None,
+        inputs=invoke_inputs,
+        session=None,
+        event=AgentCallbackEvent.BEFORE_INVOKE,
+    )
+    await rail.before_invoke(before_ctx)
+
+    after_ctx = AgentCallbackContext(
+        agent=None,
+        inputs=invoke_inputs,
+        session=None,
+        event=AgentCallbackEvent.AFTER_INVOKE,
+    )
+    await asyncio.wait_for(rail.after_invoke(after_ctx), timeout=1.0)
+
+    assert rail.has_pending_evolution
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert not finished.is_set()
+
+    release.set()
+    await rail.wait_for_pending_evolution(timeout=1.0)
+    assert finished.is_set()
+    assert not rail.has_pending_evolution
+
+
+@pytest.mark.asyncio
+async def test_after_invoke_skips_background_when_auto_scan_disabled(tmp_path):
+    rail = _make_rail(tmp_path, auto_scan=False)
+    rail.run_evolution = AsyncMock()  # type: ignore[method-assign]
+
+    invoke_inputs = InvokeInputs(query="hello", conversation_id="conv-skip")
+    before_ctx = AgentCallbackContext(
+        agent=None,
+        inputs=invoke_inputs,
+        session=None,
+        event=AgentCallbackEvent.BEFORE_INVOKE,
+    )
+    await rail.before_invoke(before_ctx)
+    after_ctx = AgentCallbackContext(
+        agent=None,
+        inputs=invoke_inputs,
+        session=None,
+        event=AgentCallbackEvent.AFTER_INVOKE,
+    )
+    await rail.after_invoke(after_ctx)
+
+    assert not rail.has_pending_evolution
+    rail.run_evolution.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_pending_evolution_noop_when_idle(tmp_path):
+    rail = _make_rail(tmp_path)
+    await rail.wait_for_pending_evolution()
+    assert not rail.has_pending_evolution
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_evolution_awaits_cancelled_tasks(tmp_path):
+    """cancel_pending_evolution must await tasks so cancellation can unwind cleanly."""
+    rail = _make_rail(tmp_path)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def slow_job():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    task = asyncio.create_task(slow_job(), name="skill_evolution")
+    rail._pending_evolution_tasks.add(task)
+    await started.wait()
+
+    await rail.cancel_pending_evolution()
+
+    assert task.done()
+    assert cancelled.is_set()
+    assert not rail.has_pending_evolution
+    assert rail._pending_evolution_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_uninit_schedules_drain_for_cancelled_tasks(tmp_path):
+    """Sync uninit under a running loop must retain and drain cancelled tasks."""
+    rail = _make_rail(tmp_path)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def slow_job():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    task = asyncio.create_task(slow_job(), name="skill_evolution")
+    rail._pending_evolution_tasks.add(task)
+    await started.wait()
+
+    rail.uninit(None)
+
+    drain = rail._uninit_drain_task
+    assert drain is not None
+    await drain
+    assert task.done()
+    assert cancelled.is_set()
+    assert not rail.has_pending_evolution
+
+
+@pytest.mark.asyncio
 async def test_run_evolution_returns_immediately_when_auto_scan_disabled(tmp_path):
     rail = _make_rail(tmp_path, auto_scan=False)
     rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "x"}])
@@ -751,29 +887,46 @@ async def test_run_evolution_auto_save_appends_records(tmp_path, monkeypatch):
     await rail.run_evolution(None, ctx)
 
     assert rail._evolution_store.append_record.await_count == 2
-    rail._evolution_store.append_record.assert_any_await("skill-a", records[0])
-    rail._evolution_store.append_record.assert_any_await("skill-a", records[1])
+    rail._evolution_store.append_record.assert_any_await(
+        "skill-a", records[0], update_skill_md=False
+    )
+    rail._evolution_store.append_record.assert_any_await(
+        "skill-a", records[1], update_skill_md=False
+    )
     rail._emit_generated_records.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_run_evolution_auto_save_false_emits_events(tmp_path, monkeypatch):
+async def test_run_evolution_auto_save_false_still_persists_evolutions_json(
+    tmp_path, monkeypatch
+):
+    """auto_save=False resolves to suggest, but still writes evolutions.json only."""
     rail = _make_rail(tmp_path, auto_scan=True, auto_save=False)
     signals = [_make_signal("skill-a")]
+    records = [_make_record("skill-a")]
     parsed_messages = [{"role": "user", "content": "hello"}]
 
     rail._collect_parsed_messages = AsyncMock(return_value=parsed_messages)
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
     rail._evolution_store.skill_exists = Mock(return_value=True)
     _patch_detected_signals(monkeypatch, signals)
+    rail._generate_experience_for_skill = AsyncMock(return_value=records)
     rail._generate_experience_via_optimizer = AsyncMock(return_value=True)
+    rail._evolution_store.append_record = AsyncMock()
     rail._emit_generated_records = AsyncMock()
     ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
 
     await rail.run_evolution(None, ctx)
 
-    rail._generate_experience_via_optimizer.assert_awaited_once_with("skill-a", signals, parsed_messages)
-    rail._emit_generated_records.assert_awaited_once_with(ctx, "skill-a")
+    rail._generate_experience_for_skill.assert_awaited_once_with(
+        "skill-a", signals, parsed_messages
+    )
+    rail._evolution_store.append_record.assert_awaited_once_with(
+        "skill-a", records[0], update_skill_md=False
+    )
+    assert records[0].review_status == "suggest"
+    rail._generate_experience_via_optimizer.assert_not_awaited()
+    rail._emit_generated_records.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -801,11 +954,8 @@ async def test_run_evolution_skips_skill_when_self_evolution_off(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_run_evolution_suggest_mode_persists_when_auto_save_true(tmp_path, monkeypatch):
-    """Current rail: with auto_save=True, only action=off is skipped.
-
-    suggest/auto both take the persist path; full off/suggest/auto routing is TBD.
-    """
+async def test_run_evolution_suggest_mode_persists_evolutions_json(tmp_path, monkeypatch):
+    """suggest/auto both write evolutions.json with update_skill_md=False."""
     rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
     signals = [_make_signal("weather")]
     records = [_make_record("weather")]
@@ -829,28 +979,28 @@ async def test_run_evolution_suggest_mode_persists_when_auto_save_true(tmp_path,
     rail._generate_experience_for_skill.assert_awaited_once_with(
         "weather", signals, parsed_messages
     )
-    rail._evolution_store.append_record.assert_awaited_once_with("weather", records[0])
+    rail._evolution_store.append_record.assert_awaited_once_with(
+        "weather", records[0], update_skill_md=False
+    )
+    assert records[0].review_status == "suggest"
     rail._generate_experience_via_optimizer.assert_not_awaited()
     rail._emit_generated_records.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_run_evolution_auto_save_false_uses_approval_path_even_if_action_auto(
+async def test_run_evolution_action_auto_persists_even_if_auto_save_false(
     tmp_path, monkeypatch
 ):
-    """Current rail: auto_save=False always uses approval path.
-
-    resolve_skill_evolution_action is not consulted on that branch; action=auto
-    does not override rail auto_save=False (full per-skill routing is TBD).
-    """
+    """Per-skill selfEvolution=auto outranks rail auto_save=False; still no SKILL.md write."""
     rail = _make_rail(tmp_path, auto_scan=True, auto_save=False)
     signals = [_make_signal("weather")]
+    records = [_make_record("weather")]
     parsed_messages = [{"role": "user", "content": "hello"}]
     rail._collect_parsed_messages = AsyncMock(return_value=parsed_messages)
     rail._evolution_store.list_skill_names = Mock(return_value=["weather"])
     rail._evolution_store.skill_exists = Mock(return_value=True)
     _patch_detected_signals(monkeypatch, signals)
-    rail._generate_experience_for_skill = AsyncMock(return_value=[_make_record("weather")])
+    rail._generate_experience_for_skill = AsyncMock(return_value=records)
     rail._generate_experience_via_optimizer = AsyncMock(return_value=True)
     rail._evolution_store.append_record = AsyncMock()
     rail._emit_generated_records = AsyncMock()
@@ -862,12 +1012,15 @@ async def test_run_evolution_auto_save_false_uses_approval_path_even_if_action_a
 
     await rail.run_evolution(None, ctx)
 
-    rail._generate_experience_via_optimizer.assert_awaited_once_with(
+    rail._generate_experience_for_skill.assert_awaited_once_with(
         "weather", signals, parsed_messages
     )
-    rail._emit_generated_records.assert_awaited_once_with(ctx, "weather")
-    rail._generate_experience_for_skill.assert_not_awaited()
-    rail._evolution_store.append_record.assert_not_awaited()
+    rail._evolution_store.append_record.assert_awaited_once_with(
+        "weather", records[0], update_skill_md=False
+    )
+    assert records[0].review_status == "auto"
+    rail._generate_experience_via_optimizer.assert_not_awaited()
+    rail._emit_generated_records.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2157,12 +2310,21 @@ async def test_trigger_async_evaluation_builds_snippet_from_messages(tmp_path):
     record_a = _make_record("skill_a")
     record_b = _make_record("skill_b")
 
+    async def fake_get_records(skill_name, min_score=None):
+        if skill_name == "skill_a":
+            return [record_a]
+        if skill_name == "skill_b":
+            return [record_b]
+        return []
+
+    rail._evolution_store.get_records_by_score = AsyncMock(side_effect=fake_get_records)
+
     session = SimpleNamespace()
-    # Production path stores "" at presentation time; legacy non-empty values are ignored.
+    # Production path stores record_id (+ empty snippet); legacy record objects also work.
     rail._set_session_presented_records(
         session,
         [
-            ("skill_a", record_a, ""),
+            ("skill_a", record_a.id, ""),
             ("skill_b", record_b, "stale_snippet_should_be_ignored"),
         ],
     )
@@ -2204,6 +2366,189 @@ async def test_trigger_async_evaluation_builds_snippet_from_messages(tmp_path):
     assert "unrelated preamble" not in skill_a_snippet
 
 
+@pytest.mark.asyncio
+async def test_trigger_async_evaluation_reloads_fresh_usage_stats(tmp_path):
+    """Eval must reload store stats so a stale presented snapshot cannot clobber times_used."""
+    from openjiuwen.agent_evolving.checkpointing.types import UsageStats
+
+    rail = _make_rail(tmp_path)
+    rail._eval_interval = 1
+
+    # Snapshot taken at first presentation (used=0). Disk later has used=1 from a prior eval.
+    stale_record = _make_record("weather")
+    stale_record.id = "ev_uv"
+    stale_record.usage_stats = UsageStats(
+        times_presented=2,
+        times_used=0,
+        times_positive=0,
+        times_negative=0,
+    )
+
+    fresh_record = _make_record("weather")
+    fresh_record.id = "ev_uv"
+    fresh_record.usage_stats = UsageStats(
+        times_presented=2,
+        times_used=1,
+        times_positive=1,
+        times_negative=0,
+    )
+
+    rail._evolution_store.get_records_by_score = AsyncMock(return_value=[fresh_record])
+    rail._evolution_store.update_record_scores = AsyncMock()
+
+    async def fake_evaluate(snippet, records):
+        return [{"record_id": "ev_uv", "used": True, "positive": True, "negative": False}]
+
+    rail._scorer = Mock()
+    rail._scorer.evaluate = fake_evaluate
+
+    session = SimpleNamespace()
+    ctx = Mock()
+    ctx.session = session
+
+    await rail._trigger_async_evaluation(
+        ctx,
+        [{"role": "assistant", "content": "武汉天气，紫外线指数 7"}],
+        presented_snapshot=[("weather", stale_record, "")],
+    )
+
+    updates = rail._evolution_store.update_record_scores.await_args.args[1]
+    stats = updates["ev_uv"]["usage_stats"]
+    assert stats["times_presented"] == 2
+    assert stats["times_used"] == 2
+    assert stats["times_positive"] == 2
+
+
+@pytest.mark.asyncio
+async def test_dispatch_claims_presented_queue_for_background_task(tmp_path):
+    """Scheduling must claim presented entries so a later invoke cannot steal them."""
+    rail = _make_rail(tmp_path)
+    session = SimpleNamespace()
+    rail._set_session_presented_records(session, [("weather", "ev_1", "")])
+
+    captured: dict[str, Any] = {}
+
+    async def fake_background(trajectory, ctx, presented_snapshot):
+        captured["snapshot"] = list(presented_snapshot)
+
+    rail._background_evolution = fake_background  # type: ignore[method-assign]
+
+    ctx = Mock()
+    ctx.session = session
+    await rail._dispatch_run_evolution(None, ctx)
+    await asyncio.sleep(0)
+    await rail.wait_for_pending_evolution(timeout=1.0)
+
+    assert captured["snapshot"] == [("weather", "ev_1", "")]
+    assert rail._get_session_presented_records(session) == []
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_restores_presented_on_failure(tmp_path, monkeypatch):
+    """Claimed presented records must return to the session if evolution fails."""
+    rail = _make_rail(tmp_path)
+    session = SimpleNamespace()
+    claimed = [("weather", "ev_fail", "")]
+    # Newer records may arrive while the background task runs.
+    rail._set_session_presented_records(session, [("weather", "ev_new", "")])
+    ctx = Mock()
+    ctx.session = session
+
+    rail._collect_parsed_messages = AsyncMock(side_effect=RuntimeError("llm timeout"))
+
+    await rail.run_evolution(
+        None,
+        ctx,
+        presented_snapshot=claimed,
+    )
+
+    restored = rail._get_session_presented_records(session)
+    assert restored[0] == ("weather", "ev_fail", "")
+    assert ("weather", "ev_new", "") in restored
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_restores_presented_when_no_messages(tmp_path):
+    """Early skip before evaluation must restore the claimed presented queue."""
+    rail = _make_rail(tmp_path)
+    session = SimpleNamespace()
+    claimed = [("weather", "ev_1", "")]
+    rail._set_session_presented_records(session, [])
+    ctx = Mock()
+    ctx.session = session
+    rail._collect_parsed_messages = AsyncMock(return_value=[])
+
+    await rail.run_evolution(None, ctx, presented_snapshot=claimed)
+
+    assert rail._get_session_presented_records(session) == claimed
+
+
+@pytest.mark.asyncio
+async def test_trigger_async_evaluation_restores_when_interval_not_reached(tmp_path):
+    """Claimed snapshot must not be dropped when eval_interval has not elapsed."""
+    rail = _make_rail(tmp_path)
+    rail._eval_interval = 3
+    session = SimpleNamespace()
+    rail._set_session_eval_counter(session, 0)
+    ctx = Mock()
+    ctx.session = session
+    claimed = [("weather", "ev_1", "")]
+
+    await rail._trigger_async_evaluation(
+        ctx,
+        [{"role": "user", "content": "hi"}],
+        presented_snapshot=claimed,
+    )
+
+    assert rail._get_session_eval_counter(session) == 1
+    assert rail._get_session_presented_records(session) == claimed
+
+
+@pytest.mark.asyncio
+async def test_trigger_async_evaluation_restores_on_scorer_failure(tmp_path):
+    """Evaluation exceptions must put claimed presented records back on the session."""
+    rail = _make_rail(tmp_path)
+    rail._eval_interval = 1
+    session = SimpleNamespace()
+    ctx = Mock()
+    ctx.session = session
+    record = _make_record("weather")
+    record.id = "ev_1"
+    claimed = [("weather", "ev_1", "")]
+    rail._evolution_store.get_records_by_score = AsyncMock(return_value=[record])
+    rail._scorer.evaluate = AsyncMock(side_effect=RuntimeError("api error"))
+    rail._build_evaluation_snippet = Mock(return_value="snippet")
+
+    await rail._trigger_async_evaluation(
+        ctx,
+        [{"role": "user", "content": "hi"}],
+        presented_snapshot=claimed,
+    )
+
+    assert rail._get_session_presented_records(session) == claimed
+
+
+@pytest.mark.asyncio
+async def test_background_evolution_restores_on_uncaught_exception(tmp_path):
+    """Uncaught background failures must restore claimed presented records."""
+    rail = _make_rail(tmp_path)
+    session = SimpleNamespace()
+    claimed = [("weather", "ev_bg", "")]
+    rail._set_session_presented_records(session, [])
+    ctx = Mock()
+    ctx.session = session
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    rail.run_evolution = boom  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await rail._background_evolution(None, ctx, claimed)
+
+    assert rail._get_session_presented_records(session) == claimed
+
+
 # =============================================================================
 # Fix #3: Only BODY records are tracked as presented
 # =============================================================================
@@ -2237,10 +2582,10 @@ async def test_track_presented_records_only_body_records(tmp_path):
     assert body_record.id in updates
     assert desc_record.id not in updates
 
-    # Session must only contain the body record
+    # Session must only contain the body record id
     entries = rail._get_session_presented_records(session)
     assert len(entries) == 1
-    assert entries[0][1].id == body_record.id
+    assert entries[0][1] == body_record.id
 
 
 @pytest.mark.asyncio
