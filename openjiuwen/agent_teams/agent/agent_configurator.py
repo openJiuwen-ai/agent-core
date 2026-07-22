@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.agent.payload import SpawnPayloadBuilder
 from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
 from openjiuwen.agent_teams.harness import TeamHarness
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.messager import (
     Messager,
     create_messager,
@@ -279,6 +280,9 @@ class AgentConfigurator:
             )
 
             self.model_allocator = build_model_allocator(spec, ctx.team_spec)
+
+        if ctx.role == TeamRole.LEADER:
+            kv_cache_hooks.ensure_leader_registry(self)
 
         self.setup_team_backend(
             spec,

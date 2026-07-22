@@ -41,6 +41,11 @@ def _builtin_model_client(provider, client_config: ModelClientConfig, model_conf
             InferenceAffinityModelClient
         return InferenceAffinityModelClient(model_config=model_config, model_client_config=client_config)
 
+    if provider == ProviderType.AscendAffinity.value:
+        from openjiuwen.core.foundation.llm.model_clients.ascend_affinity_model_client import \
+            AscendAffinityModelClient
+        return AscendAffinityModelClient(model_config=model_config, model_client_config=client_config)
+
     if provider == ProviderType.DeepSeek.value:
         from openjiuwen.core.foundation.llm.model_clients.deepseek_model_client import \
             DeepSeekModelClient

@@ -117,6 +117,9 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 )
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.identity import build_identity_section
+from openjiuwen.harness.prompts.sections.prompt_attachments import (
+    build_prompt_attachments_section,
+)
 from openjiuwen.harness.resources import (
     LoadRecord,
     find_expert_harness_manifest,
@@ -365,6 +368,8 @@ class DeepAgent(BaseAgent):
         )
         if config.context_engine_config is not None:
             new_react_config.context_engine_config = config.context_engine_config
+        if config.kv_cache_affinity_config is not None:
+            new_react_config.kv_cache_affinity_config = config.kv_cache_affinity_config
         self._react_agent.configure(new_react_config)
         self._sync_prompt_builder_references()
         logger.info("[DeepAgent] Model configuration hot reloaded")
@@ -433,6 +438,7 @@ class DeepAgent(BaseAgent):
             ))
         else:
             prompt_builder.add_section(build_identity_section(language))
+        prompt_builder.add_section(build_prompt_attachments_section(language))
         prompt = prompt_builder.build()
         new_react_config = self._react_agent.config.model_copy()
         new_react_config.prompt_template = [{"role": "system", "content": prompt}]
@@ -799,6 +805,8 @@ class DeepAgent(BaseAgent):
         )
         if cfg.context_engine_config is not None:
             react_config.context_engine_config = cfg.context_engine_config
+        if cfg.kv_cache_affinity_config is not None:
+            react_config.kv_cache_affinity_config = cfg.kv_cache_affinity_config
         react_config.workspace = cfg.workspace
         if cfg.sys_operation is not None:
             react_config.sys_operation_id = cfg.sys_operation.id
@@ -818,6 +826,7 @@ class DeepAgent(BaseAgent):
             ))
         else:
             prompt_builder.add_section(build_identity_section(language))
+        prompt_builder.add_section(build_prompt_attachments_section(language))
         prompt = prompt_builder.build()
         react_config.prompt_template = [{"role": "system", "content": prompt}]
 
@@ -1238,6 +1247,7 @@ class DeepAgent(BaseAgent):
         if isinstance(inputs, dict):
             query = inputs.get("query", "")
             conversation_id = inputs.get("conversation_id")
+            parent_session_id = inputs.get("parent_session_id")
             run = inputs.get("run", {})
             run_kind = None
             run_context = None
@@ -1268,11 +1278,13 @@ class DeepAgent(BaseAgent):
         elif isinstance(inputs, str):
             query = inputs
             conversation_id = None
+            parent_session_id = None
             run_kind = None
             run_context = None
         elif isinstance(inputs, InteractiveInput):
             query = inputs
             conversation_id = None
+            parent_session_id = None
             run_kind = None
             run_context = None
         else:
@@ -1285,7 +1297,8 @@ class DeepAgent(BaseAgent):
             query=query,
             conversation_id=conversation_id,
             run_kind=run_kind,
-            run_context=run_context
+            run_context=run_context,
+            parent_session_id=parent_session_id,
         )
         return invoke_inputs
 
@@ -1331,6 +1344,8 @@ class DeepAgent(BaseAgent):
         effective_inputs: Dict[str, Any] = {"query": invoke_inputs.query}
         if invoke_inputs.conversation_id is not None:
             effective_inputs["conversation_id"] = invoke_inputs.conversation_id
+        if invoke_inputs.parent_session_id is not None:
+            effective_inputs["parent_session_id"] = invoke_inputs.parent_session_id
         if invoke_inputs.run_kind is not None:
             effective_inputs["run_kind"] = invoke_inputs.run_kind
         if invoke_inputs.run_context is not None:

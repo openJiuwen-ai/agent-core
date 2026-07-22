@@ -20,6 +20,7 @@ class ProviderType(str, Enum):
     DashScope = "DashScope"
     DeepSeek = "DeepSeek"
     InferenceAffinity = "InferenceAffinity"
+    AscendAffinity = "AscendAffinity"
     IntelliRouter = "intelli_router"
 
 

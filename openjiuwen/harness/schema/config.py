@@ -8,6 +8,7 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
+from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm.model import Model
 
 from openjiuwen.core.single_agent.rail.base import AgentRail
@@ -173,6 +174,9 @@ class DeepAgentConfig:
             engineering configuration. If set, applied
             as the inner ReAct agent's ``ContextEngineConfig``
             when the embedded agent is created.
+        kv_cache_affinity_config: KV cache affinity configuration
+            applied as the inner ReAct agent's
+            ``KVCacheAffinityConfig`` when the embedded agent is created.
         enable_task_loop: Whether to enable the outer
             task loop (P1).
         enable_async_subagent: Enable async subagent mode (default False).
@@ -206,6 +210,7 @@ class DeepAgentConfig:
     card: Optional[AgentCard] = None
     system_prompt: Optional[str] = None
     context_engine_config: Optional[Any] = None
+    kv_cache_affinity_config: Optional[KVCacheAffinityConfig] = None
     enable_task_loop: bool = False
     enable_async_subagent: bool = False
     add_general_purpose_agent: bool = False

@@ -79,12 +79,14 @@ class InvokeInputs:
         result: Agent invoke result (filled after invoke)
         run_kind: Run kind (normal or heartbeat)
         run_context: Structured runtime context
+        parent_session_id: Optional parent session id for lineage-aware runtimes
     """
     query: Optional[str, InteractiveInput]
     conversation_id: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
     run_kind: Optional[RunKind] = None
     run_context: Optional[RunContext] = None
+    parent_session_id: Optional[str] = None
 
     def is_heartbeat(self) -> bool:
         """Check if this is a heartbeat run."""
