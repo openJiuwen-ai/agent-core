@@ -1546,3 +1546,49 @@ def test_create_subagent_unrestricted_when_both_unrestricted(tmp_path) -> None:
     call_kwargs = mock_create.call_args.kwargs
     # 父子均不限制，保持 False
     assert call_kwargs["restrict_to_work_dir"] is False
+
+
+@pytest.mark.asyncio
+async def test_create_subagent_writes_relative_files_to_inherited_artifact_root(
+    tmp_path: Path,
+) -> None:
+    """Subagent keeps an isolated workspace but cwd is the parent's artifact_root."""
+    from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace, init_cwd
+    from openjiuwen.harness.schema.config import SubAgentConfig
+
+    parent_ws = tmp_path / "parent_ws"
+    artifact_root = tmp_path / "projects" / "sess-1"
+    parent_ws.mkdir()
+    artifact_root.mkdir(parents=True)
+    init_cwd(str(artifact_root), workspace=str(artifact_root))
+
+    parent = DeepAgent(AgentCard(name="parent", description="test")).configure(
+        DeepAgentConfig(
+            model=_create_dummy_model(),
+            workspace=Workspace(root_path=str(parent_ws)),
+            auto_create_workspace=False,
+            enable_task_loop=False,
+            add_general_purpose_agent=False,
+            subagents=[
+                SubAgentConfig(
+                    agent_card=AgentCard(name="worker", description="worker"),
+                    system_prompt="do work",
+                )
+            ],
+        )
+    )
+    parent.set_react_agent(FakeReactAgent(), initialized=True)
+
+    sub = parent.create_subagent("worker", "sub_sess")
+    assert sub._inherited_artifact_root == str(artifact_root.resolve())
+
+    await sub.ensure_initialized()
+    assert Path(get_cwd()).resolve() == artifact_root.resolve()
+    assert "sub_agents" in str(Path(get_workspace()).resolve())
+    assert Path(get_workspace()).resolve() != artifact_root.resolve()
+
+    # After a sibling has polluted ambient workspace, the next create still
+    # inherits cwd (shared artifact root), not the sibling sub_agents path.
+    sub2 = parent.create_subagent("worker", "sub_sess_2")
+    assert sub2._inherited_artifact_root == str(artifact_root.resolve())
+    assert "sub_agents" not in sub2._inherited_artifact_root
