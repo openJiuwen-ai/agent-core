@@ -140,35 +140,38 @@ class ReadWriteLockManager:
                     "Deferred read-write lock database cleanup because exclusive access is unavailable, lock_file=%s",
                     lock_file,
                 )
-                return False
-
-            async with cls._get_state_lock():
-                if lock_file in cls._locks:
-                    return False
-                try:
-                    lock_file.unlink()
-                    cls._idle_deadlines.pop(lock_file, None)
-                    sys_operation_logger.info("Deleted expired read-write lock database, lock_file=%s", lock_file)
-                    return True
-                except FileNotFoundError:
-                    sys_operation_logger.debug(
-                        "Read-write lock database was already deleted, lock_file=%s",
-                        lock_file,
-                    )
-                    return False
-                except OSError as exc:
-                    sys_operation_logger.warning(
-                        "Failed to delete expired read-write lock database, lock_file=%s, error=%s",
-                        lock_file,
-                        exc,
-                    )
-                    return False
         finally:
             try:
                 if acquired:
                     await probe.file_lock.release()
             finally:
                 await probe.close()
+
+        if not acquired:
+            return False
+
+        # Windows cannot unlink an SQLite database while the probe still has it open.
+        async with cls._get_state_lock():
+            if lock_file in cls._locks:
+                return False
+            try:
+                lock_file.unlink()
+                cls._idle_deadlines.pop(lock_file, None)
+                sys_operation_logger.info("Deleted expired read-write lock database, lock_file=%s", lock_file)
+                return True
+            except FileNotFoundError:
+                sys_operation_logger.debug(
+                    "Read-write lock database was already deleted, lock_file=%s",
+                    lock_file,
+                )
+                return False
+            except OSError as exc:
+                sys_operation_logger.warning(
+                    "Failed to delete expired read-write lock database, lock_file=%s, error=%s",
+                    lock_file,
+                    exc,
+                )
+                return False
 
     @classmethod
     async def cleanup_expired_locks(cls) -> None:
