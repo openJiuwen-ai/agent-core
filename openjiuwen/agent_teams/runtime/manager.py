@@ -409,7 +409,9 @@ class TeamRuntimeManager:
         # the interact gate (a lightweight publish, not a leader round).
         reply = self._as_swarmflow_human_reply(payloads)
         if reply is not None:
-            return await self._route_swarmflow_human_reply(entry, reply[0], reply[1])
+            return await self._route_swarmflow_human_reply(
+                entry, reply[0], reply[1], reply[2]
+            )
 
         ticket = await entry.interact_gate.admit()
         if ticket is None:
@@ -425,13 +427,16 @@ class TeamRuntimeManager:
             await entry.interact_gate.consume_done(ticket)
 
     @staticmethod
-    def _as_swarmflow_human_reply(payloads: list[InteractPayload]) -> Optional[tuple[str, str]]:
-        """Detect a swarmflow human-session reply, returning ``(corr, answer)`` or None.
+    def _as_swarmflow_human_reply(
+        payloads: list[InteractPayload],
+    ) -> Optional[tuple[str | None, str, str]]:
+        """Detect a swarmflow human-session reply, returning ``(run_id, corr, answer)`` or None.
 
         A reply is a single ``HumanAgentMessage`` whose ``target`` is
-        ``"swarmflow:<correlation_id>"`` — the convention a UI uses to answer a
-        pending swarmflow human turn (the correlation id rode out on the
-        ``human_prompt`` progress event).
+        ``"swarmflow:<correlation_id>"`` (legacy) or
+        ``"swarmflow:<run_id>:<correlation_id>"`` (run-scoped). Engine-style
+        correlation ids contain colons; colon-count rules in
+        ``parse_swarmflow_human_reply_target`` keep the two formats distinct.
         """
         prefix = "swarmflow:"
         if len(payloads) != 1:
@@ -441,12 +446,18 @@ class TeamRuntimeManager:
             return None
         if not item.target.startswith(prefix):
             return None
-        corr = item.target[len(prefix):]
-        return (corr, item.body) if corr else None
+        rest = item.target[len(prefix):]
+        if not rest:
+            return None
+        from openjiuwen.agent_teams.schema.events import parse_swarmflow_human_reply_target
+
+        run_id, corr = parse_swarmflow_human_reply_target(rest)
+        return (run_id, corr, item.body) if corr else None
 
     @staticmethod
     async def _route_swarmflow_human_reply(
         entry: "ActiveTeam",
+        run_id: str | None,
         correlation_id: str,
         answer: str,
     ) -> DeliverResult:
@@ -461,7 +472,9 @@ class TeamRuntimeManager:
         messager = getattr(backend, "messager", None) if backend is not None else None
         if messager is None:
             return DeliverResult.failure("no_messager")
-        topic = swarmflow_human_reply_topic(entry.current_session_id, entry.team_name)
+        topic = swarmflow_human_reply_topic(
+            entry.current_session_id, entry.team_name, run_id
+        )
         message = EventMessage(
             event_type=TeamEvent.WORKFLOW_HUMAN_REPLY,
             payload={"correlation_id": correlation_id, "answer": answer},

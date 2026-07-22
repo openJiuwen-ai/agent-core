@@ -113,6 +113,60 @@ def test_run_with_mock_backend_and_progress_events(tmp_path):
     assert started and started[0].phase == "Greet" and started[0].prompt == "say hi"
 
 
+_FOR_LOOP_SAME_LABEL_SCRIPT = '''
+from swarmflow import agent, parallel
+
+META = {"name": "for-loop-same-label", "description": "for loop same label", "phases": []}
+
+async def run(args):
+    results = []
+    for i in range(3):
+        results.append(await agent(f"do {i}", label="x"))
+    # Two same-label agents in parallel (distinct path scopes).
+    await parallel([
+        lambda: agent("pa", label="same"),
+        lambda: agent("pb", label="same"),
+    ])
+    return results
+'''
+
+
+def test_for_loop_and_parallel_same_label_get_unique_agent_ids(tmp_path):
+    """Same-label agents in a for-loop and in parallel each get a unique agent_id.
+
+    AGENT_COMPLETED for each node matches its AGENT_STARTED by agent_id (no
+    cross-talk: the 2nd loop iteration's completion never lands on the 1st).
+    """
+    script = _write(tmp_path, "forloop.py", _FOR_LOOP_SAME_LABEL_SCRIPT)
+    events: list[WorkflowProgressEvent] = []
+    asyncio.run(
+        run_workflow(str(script), backend=MockBackend(), progress_sink=events.append)
+    )
+
+    started = [e for e in events if e.kind == ProgressKind.AGENT_STARTED]
+    completed = [e for e in events if e.kind == ProgressKind.AGENT_COMPLETED]
+    assert len(started) == len(completed) == 5
+
+    # All agent_ids present and globally unique within the run (5 distinct).
+    ids = [e.agent_id for e in started]
+    assert all(i is not None for i in ids)
+    assert len(set(ids)) == 5
+
+    # The three for-loop "x" nodes each get a distinct id.
+    x_ids = [e.agent_id for e in started if e.label == "x"]
+    assert len(x_ids) == 3 and len(set(x_ids)) == 3
+
+    # The two parallel "same" nodes each get a distinct id (different path scope).
+    same_ids = [e.agent_id for e in started if e.label == "same"]
+    assert len(same_ids) == 2 and len(set(same_ids)) == 2
+
+    # Every AGENT_COMPLETED matches a started node by agent_id (exact, not label).
+    started_by_id = {e.agent_id: e for e in started}
+    for c in completed:
+        assert c.agent_id in started_by_id
+        assert started_by_id[c.agent_id].label == c.label
+
+
 def test_resume_replays_from_journal_without_backend(tmp_path):
     """A second run with --resume is a pure cache replay: zero backend calls."""
 

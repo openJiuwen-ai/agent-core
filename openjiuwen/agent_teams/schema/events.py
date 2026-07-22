@@ -41,14 +41,53 @@ class TeamTopic(str, Enum):
         return f"session:{session_id}:team:{team_name}:{self.value}"
 
 
-def swarmflow_human_reply_topic(session_id: str, team_name: str) -> str:
+def swarmflow_human_reply_topic(
+    session_id: str, team_name: str, run_id: str | None = None
+) -> str:
     """Topic for a real person's reply to a swarmflow human-session turn.
 
     A dedicated channel (not the shared ``TeamTopic.TEAM``) so the swarmflow run's
     reply subscriber never collides with the leader's team-event subscription on
-    the same messager.
+    the same messager. When ``run_id`` is given, the topic is run-scoped so
+    concurrent runs under the same session+team never cross-resolve a reply;
+    ``None`` falls back to the legacy session+team scope (single-run safe).
     """
+    if run_id:
+        return f"session:{session_id}:team:{team_name}:run:{run_id}:swarmflow_human_reply"
     return f"session:{session_id}:team:{team_name}:swarmflow_human_reply"
+
+
+def format_swarmflow_human_reply_target(
+    correlation_id: str, run_id: str | None = None
+) -> str:
+    """Build the ``HumanAgentMessage.target`` for a swarmflow human reply.
+
+    Legacy (no run_id): ``swarmflow:<correlation_id>`` — corr may contain colons
+    (``{phase}:{label}:{turn}``).
+
+    Run-scoped: ``swarmflow:<run_id>:<correlation_id>`` — first colon separates
+    run_id (never contains colons) from corr.
+    """
+    if run_id:
+        return f"swarmflow:{run_id}:{correlation_id}"
+    return f"swarmflow:{correlation_id}"
+
+
+def parse_swarmflow_human_reply_target(rest: str) -> tuple[str | None, str]:
+    """Parse the body after ``swarmflow:`` into ``(run_id, correlation_id)``.
+
+    Engine correlation ids are ``{phase}:{label}:{turn}`` (two colons). Run-scoped
+    targets prepend ``<run_id>:`` (run ids never contain colons). Distinguish by
+    colon count in ``rest``:
+
+    * 0 or 2 colons — legacy, entire ``rest`` is the correlation id.
+    * 1 or ≥3 colons — run-scoped, ``split(":", 1)``.
+    """
+    colon_count = rest.count(":")
+    if colon_count == 1 or colon_count >= 3:
+        run_id, corr = rest.split(":", 1)
+        return run_id, corr
+    return None, rest
 
 
 class TeamEvent:
@@ -390,7 +429,23 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
         default=None, description="Static phase plan from META, on workflow_started"
     )
     correlation_id: Optional[str] = Field(
-        default=None, description="Pending human turn id, on human_prompt / human_replied"
+        default=None,
+        description="Precomputed session-turn id ({phase}:{label}:{turn}), on AGENT_STARTED for "
+                    "agent_session / human_session / human turns (NOT plain agent(), which keys "
+                    "only on agent_id); on human_prompt / human_replied to route a pending human "
+                    "turn's reply.",
+    )
+    node_type: Optional[str] = Field(
+        default=None,
+        description="Exact primitive type on agent_started: agent / agent_session / human / human_session. "
+                    "Sole source of node kind: consumer derives kind=human if "
+                    "node_type in {human, human_session}, else agent (None defaults to agent).",
+    )
+    agent_id: Optional[str] = Field(
+        default=None, description="Deterministic resume-stable per-node id, on agent_*"
+    )
+    answer: Optional[str] = Field(
+        default=None, description="Person's raw reply text, on human_replied"
     )
 
 

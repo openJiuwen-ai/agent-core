@@ -190,13 +190,14 @@ async def run_swarmflow(
             )
         )
 
-    def _on_human_replied(member_name: str, correlation_id: str) -> None:
-        """Signal that a pending human turn was answered."""
+    def _on_human_replied(member_name: str, correlation_id: str, answer: str | None) -> None:
+        """Signal that a pending human turn was answered (answer = raw reply)."""
         observer.emit(
             WorkflowProgressEvent(
                 kind=ProgressKind.HUMAN_REPLIED,
                 label=member_name,
                 correlation_id=correlation_id,
+                answer=answer,
             )
         )
 
