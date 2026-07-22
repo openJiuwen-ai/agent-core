@@ -14,7 +14,6 @@ import hashlib
 import json
 import asyncio
 import time
-import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -46,6 +45,11 @@ from openjiuwen.core.foundation.llm import (
     UserMessage,
     SystemMessage
 )
+from openjiuwen.core.foundation.kv_cache import (
+    KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
+    KVCacheAffinityConfig,
+)
+from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.session import with_session
 from openjiuwen.core.session.agent import Session, create_agent_session
@@ -236,6 +240,10 @@ class ReActAgentConfig(BaseModel):
         ),
         description="Context engine configuration"
     )
+    kv_cache_affinity_config: KVCacheAffinityConfig = Field(
+        default_factory=KVCacheAffinityConfig,
+        description="KV cache release and affinity configuration",
+    )
 
     context_processors: List[Tuple[str, BaseModel]] = Field(
         default=None,
@@ -314,7 +322,7 @@ class ReActAgentConfig(BaseModel):
             self,
             max_context_message_num: Optional[int] = None,
             default_window_round_num: Optional[int] = None,
-            enable_kv_cache_release: bool = False,
+            enable_reload: bool = False,
     ) -> 'ReActAgentConfig':
         """
         Configure the context-engine parameters that control how conversation history
@@ -330,15 +338,29 @@ class ReActAgentConfig(BaseModel):
             user message → final assistant reply without tool calls).  When set,
             it takes precedence over `default_window_message_num`.  Must be > 0
             if given.
-        enable_kv_cache_release : bool, default False
-            Whether to release GPU KV-cache for offloaded messages via the
-            inference backend (e.g. InferenceAffinity).  Matches
-            ``ContextEngineConfig.enable_kv_cache_release``.
+        enable_reload : bool, default False
+            Whether the agent is allowed to **automatically reload** messages that
+            were previously off-loaded (via hints such as `[[OFFLOAD:...]]`).
+            Enable this if you want the model to retrieve long content on demand;
+            disable it to keep hints as plain text.
         """
         self.context_engine_config = ContextEngineConfig(
             max_context_message_num=max_context_message_num,
             default_window_round_num=default_window_round_num,
+            enable_reload=enable_reload,
+        )
+        return self
+
+    def configure_kv_cache_affinity(
+            self,
+            *,
+            enable_kv_cache_release: bool = False,
+            enable_kv_cache_affinity: bool = False,
+    ) -> 'ReActAgentConfig':
+        """Configure provider-side KV-cache release or Ascend affinity."""
+        self.kv_cache_affinity_config = KVCacheAffinityConfig(
             enable_kv_cache_release=enable_kv_cache_release,
+            enable_kv_cache_affinity=enable_kv_cache_affinity,
         )
         return self
 
@@ -506,7 +528,7 @@ class ReActAgent(BaseAgent):
         super().__init__(card)
         self._hitl_handler = ToolInterruptHandler(self)
         self._ability_manager.set_context_engine(self.context_engine)
-        self._kv_release_warning_logged: bool = False
+        self._kv_cache_model_call_hook = kv_cache_hooks.KVCacheModelCallHook()
 
     def _create_default_config(self) -> ReActAgentConfig:
         """Create default configuration"""
@@ -558,13 +580,16 @@ class ReActAgent(BaseAgent):
         config = self._with_context_engine_model_name(config)
         old_config = self._config
         self._config = config
+        kv_config_changed = old_config.kv_cache_affinity_config != config.kv_cache_affinity_config
 
         # Reset LLM if model config changed
         if (old_config.model_provider != config.model_provider or
                 old_config.api_key != config.api_key or
                 old_config.api_base != config.api_base):
             self._llm = None
-            self._kv_release_warning_logged = False
+            self._kv_cache_model_call_hook.reset_warnings()
+        elif kv_config_changed:
+            self._kv_cache_model_call_hook.reset_warnings()
 
         # Get sys_operation from Runner.resource_mgr if sys_operation_id is configured
         sys_operation = None
@@ -738,6 +763,31 @@ class ReActAgent(BaseAgent):
 
         return ai_message
 
+    def _build_context_window_kwargs(
+            self,
+            ctx: AgentCallbackContext,
+            final_system: List[SystemMessage],
+    ) -> dict:
+        """Build the final ContextWindow inputs after model-call rails run."""
+        context_window_kwargs = {
+            "system_messages": final_system,
+            "tools": ctx.inputs.tools if ctx.inputs.tools else None,
+        }
+
+        prompt_attachment_manager = getattr(self, "prompt_attachment_manager", None)
+        make_window_mutator = getattr(prompt_attachment_manager, "make_window_mutator", None)
+        if callable(make_window_mutator):
+            session_id = (
+                ctx.session.get_session_id()
+                if ctx.session is not None
+                else ctx.context.session_id()
+            )
+            context_window_kwargs["window_mutators"] = [
+                make_window_mutator(session_id)
+            ]
+
+        return context_window_kwargs
+
     @rail(
         before=AgentCallbackEvent.BEFORE_MODEL_CALL,
         after=AgentCallbackEvent.AFTER_MODEL_CALL,
@@ -760,55 +810,17 @@ class ReActAgent(BaseAgent):
         """
         # --- Finalize system message and context window (post-rails) ---
         final_system = [SystemMessage(content=self.prompt_builder.build())]
-
-        # KV cache release:
-        # When ContextEngineConfig.enable_kv_cache_release=True and the current
-        # model supports release (InferenceAffinity), pass `model=llm` into
-        # get_context_window() so KVCacheManager can decide whether/when
-        # to call release().
         llm = self._get_llm()
-
-        ce_config = self._config.context_engine_config or ContextEngineConfig()
-        enable_kv_release = getattr(ce_config, "enable_kv_cache_release", False)
-        supports_kv_release = False
-        supports_fn = getattr(llm, "supports_kv_cache_release", None)
-        if callable(supports_fn):
-            supports_kv_release = bool(supports_fn())
-
-        # When KV cache release is enabled but the LLM does not support it,
-        # log a one-time warning so users understand the setting is ineffective.
-        if (
-                enable_kv_release
-                and not supports_kv_release
-                and not self._kv_release_warning_logged
-        ):
-            logger.warning(
-                "ContextEngineConfig.enable_kv_cache_release is True, "
-                "but the current LLM does not support KV cache release; "
-                "KV cache release will not take effect."
-            )
-            self._kv_release_warning_logged = True
-
-        context_window_kwargs = {
-            "system_messages": final_system,
-            "tools": ctx.inputs.tools if ctx.inputs.tools else None,
-        }
-        prompt_attachment_manager = getattr(self, "prompt_attachment_manager", None)
-        make_window_mutator = getattr(prompt_attachment_manager, "make_window_mutator", None)
-        if callable(make_window_mutator):
-            session_id = (
-                ctx.session.get_session_id()
-                if ctx.session is not None
-                else ctx.context.session_id()
-            )
-            context_window_kwargs["window_mutators"] = [
-                make_window_mutator(session_id)
-            ]
-        if enable_kv_release and supports_kv_release:
-            context_window_kwargs["model"] = llm
+        kv_runtime = self._kv_cache_model_call_hook.resolve_runtime(
+            llm,
+            self._config.kv_cache_affinity_config,
+        )
 
         context_window = await ctx.context.get_context_window(
-            **context_window_kwargs
+            **self._build_context_window_kwargs(
+                ctx,
+                final_system,
+            )
         )
         # Update ctx.inputs: after_model_call hooks inspect these to see
         # what was actually sent. (LLM call uses them too, but could
@@ -820,16 +832,29 @@ class ReActAgent(BaseAgent):
         # --- End context window finalization ---
 
         session = ctx.session
+        session_id, parent_session_id = self._kv_cache_model_call_hook.resolve_lineage(
+            kv_runtime,
+            session,
+            ctx.context.session_id(),
+        )
         image_input_present = self._messages_contain_image_input(ctx.inputs.messages)
 
-        # Build extra kwargs for LLM calls when KV cache release is enabled.
-        extra_kwargs: dict = {}
-        build_kwargs_fn = getattr(llm, "build_kv_cache_invoke_kwargs", None)
-        if callable(build_kwargs_fn):
-            extra_kwargs.update(build_kwargs_fn(
-                session=session,
-                enable_kv_cache_release=enable_kv_release,
-            ))
+        await self._kv_cache_model_call_hook.handle_context_window_change(
+            runtime=kv_runtime,
+            llm=llm,
+            context=ctx.context,
+            context_window=context_window,
+            session_id=session_id,
+            parent_session_id=parent_session_id,
+            model_name=self._config.model_name,
+        )
+        extra_kwargs = self._kv_cache_model_call_hook.build_invoke_kwargs(
+            runtime=kv_runtime,
+            llm=llm,
+            session=session,
+            session_id=session_id,
+            parent_session_id=parent_session_id,
+        )
 
         if self._config.llm_return_token_ids:
             extra_kwargs["return_token_ids"] = True
@@ -1669,8 +1694,18 @@ class ReActAgent(BaseAgent):
         need_cleanup = False
         if session is None:
             session_id = conversation_id or "default_session"
+            parent_session_id = (
+                inputs.get("parent_session_id")
+                if isinstance(inputs, dict)
+                else None
+            )
+            session_kwargs = {}
+            if parent_session_id:
+                session_kwargs["envs"] = {
+                    KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV: parent_session_id,
+                }
             session = create_agent_session(
-                session_id=session_id, card=self.card
+                session_id=session_id, card=self.card, **session_kwargs
             )
             await session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
             need_cleanup = True
@@ -1944,8 +1979,18 @@ class ReActAgent(BaseAgent):
             else:
                 conversation_id = None
             session_id = conversation_id or "default_session"
+            parent_session_id = (
+                inputs.get("parent_session_id")
+                if isinstance(inputs, dict)
+                else None
+            )
+            session_kwargs = {}
+            if parent_session_id:
+                session_kwargs["envs"] = {
+                    KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV: parent_session_id,
+                }
             session = create_agent_session(
-                session_id=session_id, card=self.card
+                session_id=session_id, card=self.card, **session_kwargs
             )
             need_cleanup = True
 

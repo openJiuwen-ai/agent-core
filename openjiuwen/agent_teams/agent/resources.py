@@ -19,6 +19,7 @@ from typing import (
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
+    from openjiuwen.agent_teams.kv_cache.kv_cache_lifecycle import TeamKVCacheRegistry
     from openjiuwen.agent_teams.models.allocator import ModelAllocator
     from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
     from openjiuwen.harness.tools.worktree import WorktreeManager
@@ -39,6 +40,7 @@ class PrivateAgentResources:
     worktree_manager: Optional["WorktreeManager"] = None
     memory_manager: Optional["TeamMemoryManager"] = None
     model_allocator: Optional["ModelAllocator"] = None  # leader-only
+    team_kv_cache_registry: Optional["TeamKVCacheRegistry"] = None
 
 
 __all__ = ["PrivateAgentResources"]

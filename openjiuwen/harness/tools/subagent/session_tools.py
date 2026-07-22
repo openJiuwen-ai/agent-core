@@ -313,6 +313,7 @@ class SessionsSpawnTool(Tool):
             "subagent_type": subagent_type,
             "task_description": task_description,
             "sub_session_id": sub_session_id,
+            "parent_session_id": parent_session_id,
         }
         if browser_capabilities is not None:
             task_metadata["browser_capabilities"] = browser_capabilities

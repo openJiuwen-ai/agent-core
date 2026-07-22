@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -17,6 +18,7 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
@@ -157,6 +159,7 @@ class CoordinationKernel:
             # runtime's outputs, so the runtime must be started first.
             if resources.harness is not None:
                 await resources.harness.start(team_session=session)
+                await kv_cache_hooks.register_harness_binding(host, resources.harness)
                 await host.stream_controller.start()
         else:
             sess_mgr.release_session()
@@ -472,7 +475,19 @@ class CoordinationKernel:
                 e,
             )
 
-    async def stop(self) -> None:
+    async def stop(
+        self,
+        *,
+        on_quiesced: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        """Quiesce coordination and then tear down its runtime resources.
+
+        ``on_quiesced`` runs after new scheduler admission is disabled, the
+        active agent task is drained, and allocator state is persisted, but
+        before memory, transport, harness, and session resources are released.
+        The hook is best-effort: its failure is logged and never blocks the
+        original Team stop path.
+        """
         # Idempotent: terminal state. Pause -> stop is allowed (resources
         # still need close), running -> stop is the normal path, idle/stopped
         # are no-ops.
@@ -484,6 +499,11 @@ class CoordinationKernel:
             self._scheduler.deactivate()
         await self.drain_agent_task()
         host.persist_allocator_state()
+        if on_quiesced is not None:
+            try:
+                await on_quiesced()
+            except Exception as exc:
+                team_logger.warning("[{}] quiesced stop hook failed: {}", host.member_name or "?", exc)
         # Final memory extraction before permanent teardown. Only extract
         # when transitioning directly from running (session still bound).
         # When coming from paused, extraction already happened in pause()

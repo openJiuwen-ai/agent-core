@@ -37,6 +37,7 @@ import json
 import re
 from typing import Any, Callable, Sequence
 
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
 from openjiuwen.agent_teams.tools.locales import make_translator
@@ -334,6 +335,13 @@ class TeamWorkerBackend(AgentBackend):
                 member_name=member_name,
                 build_context=worker_build_context,
             )
+            kv_cache_hooks.configure_harness_session_hooks(
+                harness,
+                product_session_id=self._session_id,
+                evict_on_finish=True,
+                reason="swarmflow-worker-finish",
+                owner_id=member_name,
+            )
             if has_schema:
                 # End the round as soon as structured_output is captured, so the
                 # model can't loop re-calling it (the ack carries no stop signal).
@@ -362,6 +370,8 @@ class TeamWorkerBackend(AgentBackend):
                 await harness.dispose()
             except Exception:
                 team_logger.debug("worker harness dispose failed for %s", member_name)
+            finally:
+                kv_cache_hooks.clear_harness_session_hooks(harness)
         return _text_from_invoke_result(result, member_name=member_name)
 
     # ------------------------------------------------------------------

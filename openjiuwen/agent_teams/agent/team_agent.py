@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -770,12 +771,24 @@ class TeamAgent(BaseAgent):
         """Pause coordination without tearing down teammate processes."""
         await self._pause_coordination()
 
-    async def _stop_coordination(self) -> None:
-        await self._coordination.stop()
+    async def _stop_coordination(
+        self,
+        *,
+        on_quiesced: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        await self._coordination.stop(on_quiesced=on_quiesced)
 
-    async def stop_coordination(self) -> None:
-        """Stop coordination and shut down all spawned teammates."""
-        await self._stop_coordination()
+    async def stop_coordination(
+        self,
+        *,
+        on_quiesced: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        """Stop coordination and shut down all spawned teammates.
+
+        ``on_quiesced`` is forwarded to the coordination kernel and runs
+        before the kernel and tiny-agent resources are torn down.
+        """
+        await self._stop_coordination(on_quiesced=on_quiesced)
         await self._dispose_tiny_agents()
 
     def _close_stream(self) -> None:

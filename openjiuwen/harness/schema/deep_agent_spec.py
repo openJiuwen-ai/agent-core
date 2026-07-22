@@ -32,6 +32,7 @@ from typing import (
 )
 from pydantic import BaseModel
 
+from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import (
     Model,
     ModelClientConfig,
@@ -472,6 +473,7 @@ class DeepAgentSpec(BaseModel):
     progressive_tool: Optional[ProgressiveToolSpec] = None
     approval_required_tools: Optional[list[str]] = None
     context_engine_config: Optional[Any] = None
+    kv_cache_affinity_config: Optional[KVCacheAffinityConfig] = None
     """Context engine configuration forwarded to ``DeepAgentConfig``.
 
     When set, this is passed to ``resolve_deep_agent_parts()`` and ultimately to
@@ -591,6 +593,7 @@ class DeepAgentSpec(BaseModel):
             auto_create_workspace=self.auto_create_workspace,
             completion_timeout=self.completion_timeout,
             context_engine_config=self.context_engine_config,
+            kv_cache_affinity_config=self.kv_cache_affinity_config,
             **self._progressive_tool_kwargs(),
         )
 
