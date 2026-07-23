@@ -7,6 +7,8 @@ import asyncio
 import os
 import re
 from asyncio import CancelledError
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import (
@@ -24,6 +26,7 @@ from openjiuwen.agent_teams.monitor import (
     TeamStreamLogger,
 )
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.logging.log_config import configure_log_config
 from openjiuwen.core.runner.runner import Runner
@@ -114,20 +117,21 @@ def _write(text: str) -> None:
     os.write(1, text.encode())
 
 
-def _flush_buffer(chunk_type: str, buf: list[str]) -> None:
+def _flush_buffer(chunk_type: str, buf: list[str], source_member: str | None = None) -> None:
     if not buf:
         return
     text = "".join(buf)
     if not text.strip():
         return
+    source = f"[{source_member}]" if source_member else ""
     if chunk_type == _CHUNK_LLM_REASONING:
-        _write(f"{_COLOR_DIM}[Reasoning] {text}{_COLOR_RESET}\n")
+        _write(f"{_COLOR_DIM}[Reasoning]{source} {text}{_COLOR_RESET}\n")
     elif chunk_type == _CHUNK_LLM_OUTPUT:
-        _write(f"{_COLOR_GREEN}[Output] {_COLOR_RESET}{text}\n")
+        _write(f"{_COLOR_GREEN}[Output]{source} {_COLOR_RESET}{text}\n")
     elif chunk_type == _CHUNK_ANSWER:
-        _write(f"{_COLOR_YELLOW}[Answer] {_COLOR_RESET}{text}\n")
+        _write(f"{_COLOR_YELLOW}[Answer]{source} {_COLOR_RESET}{text}\n")
     else:
-        _write(f"[{chunk_type}] {text}\n")
+        _write(f"[{chunk_type}]{source} {text}\n")
 
 
 def _extract_content(payload: Any) -> str:
@@ -136,6 +140,127 @@ def _extract_content(payload: Any) -> str:
     if isinstance(payload, str):
         return payload
     return str(payload)
+
+
+@dataclass(slots=True)
+class _OrderedEntry:
+    """One source-owned stream run ordered by its first arriving chunk."""
+
+    source_key: tuple[str | None, str | None]
+    source_member: str | None
+    chunk_type: str
+    payload: Any = None
+    buf: list[str] = field(default_factory=list)
+    complete: bool = False
+
+
+class _FirstArrivalRenderer:
+    """Serialize interleaved member chunks by first-arrival order.
+
+    Text deltas are accumulated independently for each member.  A run becomes
+    complete when that same member changes stream category or emits a discrete
+    chunk (for example a tool call).  Completed runs are printed only when all
+    earlier-arriving runs are also complete, so another member can no longer
+    split a sentence in the terminal.  Remaining runs are completed when the
+    team stream closes.
+    """
+
+    _TEXT_TYPES = {_CHUNK_LLM_OUTPUT, _CHUNK_LLM_REASONING, _CHUNK_ANSWER}
+
+    def __init__(self) -> None:
+        self._entries: deque[_OrderedEntry] = deque()
+        self._active: dict[tuple[str | None, str | None], _OrderedEntry] = {}
+        self._llm_output_seen: set[tuple[str | None, str | None]] = set()
+
+    @staticmethod
+    def _source(chunk: Any) -> tuple[tuple[str | None, str | None], str | None]:
+        if not isinstance(chunk, TeamOutputSchema):
+            return (None, None), None
+        role = chunk.role.value if chunk.role is not None else None
+        return (chunk.source_member, role), chunk.source_member
+
+    def feed(self, chunk: Any) -> None:
+        chunk_type = getattr(chunk, "type", "")
+        payload = getattr(chunk, "payload", None)
+        source_key, source_member = self._source(chunk)
+
+        if chunk_type == _CHUNK_ANSWER and source_key in self._llm_output_seen:
+            return
+
+        if chunk_type in self._TEXT_TYPES:
+            content = _extract_content(payload)
+            if not content:
+                return
+            active = self._active.get(source_key)
+            if active is None or active.chunk_type != chunk_type:
+                self._finish_source(source_key)
+                active = _OrderedEntry(
+                    source_key=source_key,
+                    source_member=source_member,
+                    chunk_type=chunk_type,
+                )
+                self._active[source_key] = active
+                self._entries.append(active)
+            active.buf.append(content)
+            if chunk_type == _CHUNK_LLM_OUTPUT:
+                self._llm_output_seen.add(source_key)
+            self._drain_ready()
+            return
+
+        self._finish_source(source_key)
+        self._entries.append(
+            _OrderedEntry(
+                source_key=source_key,
+                source_member=source_member,
+                chunk_type=chunk_type,
+                payload=payload,
+                complete=True,
+            )
+        )
+        self._drain_ready()
+
+    def flush(self) -> None:
+        for entry in self._active.values():
+            entry.complete = True
+        self._active.clear()
+        self._drain_ready()
+
+    def _finish_source(self, source_key: tuple[str | None, str | None]) -> None:
+        active = self._active.pop(source_key, None)
+        if active is not None:
+            active.complete = True
+
+    def _drain_ready(self) -> None:
+        while self._entries and self._entries[0].complete:
+            self._render(self._entries.popleft())
+
+    @staticmethod
+    def _render(entry: _OrderedEntry) -> None:
+        chunk_type = entry.chunk_type
+        payload = entry.payload
+        member = f"[{entry.source_member}] " if entry.source_member else ""
+        if chunk_type in _FirstArrivalRenderer._TEXT_TYPES:
+            _flush_buffer(chunk_type, entry.buf, entry.source_member)
+            return
+        if chunk_type == _CHUNK_TOOL_CALL:
+            tool_name = payload.get("tool_name", "") if isinstance(payload, dict) else ""
+            tool_args = payload.get("tool_args", "") if isinstance(payload, dict) else ""
+            text = f"{_COLOR_CYAN}{member}● {tool_name}{_COLOR_RESET}"
+            if tool_args:
+                text += f"{_COLOR_DIM}({tool_args}){_COLOR_RESET}"
+            _write(text + "\n")
+            return
+        if chunk_type == _CHUNK_TOOL_RESULT:
+            tool_result = payload.get("tool_result", "") if isinstance(payload, dict) else str(payload)
+            _write(f"{_COLOR_DIM}{member}  ⎿ {str(tool_result)[:200]}{_COLOR_RESET}\n\n")
+            return
+        if chunk_type == _CHUNK_MESSAGE:
+            _write(f"{_COLOR_DIM}{member}  ⚙ {_extract_content(payload)}{_COLOR_RESET}\n")
+            return
+        if chunk_type == _CHUNK_INTERACTION:
+            _write(f"{_COLOR_YELLOW}{member}[Interaction] {payload}{_COLOR_RESET}\n")
+            return
+        _flush_buffer(chunk_type, [_extract_content(payload)], entry.source_member)
 
 
 def _format_monitor_event(evt: MonitorEvent) -> str:
@@ -163,6 +288,7 @@ async def consume_stream(
     session_id: str,
     *,
     on_runtime_ready: Optional[OnRuntimeReady] = None,
+    ordered_output: bool = False,
 ) -> None:
     """Drive ``Runner.run_agent_team_streaming`` for ``spec`` and render chunks.
 
@@ -177,6 +303,9 @@ async def consume_stream(
             yields a ``team.runtime_ready`` event. Use it to wire up
             facade APIs that need the team to be in the pool (e.g.
             ``Runner.register_human_agent_inbound``).
+        ordered_output: Buffer each member's text independently and render
+            completed runs in first-arrival order. This prevents concurrent
+            members from splitting one another's sentences in E2E output.
 
     A ``TeamMonitor`` is attached on the same ``team.runtime_ready``
     signal (once the team is in the pool) and every monitor event is
@@ -187,6 +316,7 @@ async def consume_stream(
     cur_type = ""
     buf: list[str] = []
     has_llm_output = False
+    ordered_renderer = _FirstArrivalRenderer() if ordered_output else None
     ready_pending = on_runtime_ready
     monitor: TeamMonitor | None = None
     monitor_task: asyncio.Task[None] | None = None
@@ -219,6 +349,10 @@ async def consume_stream(
                     if monitor is not None:
                         await monitor.start()
                         monitor_task = asyncio.create_task(_drain_monitor(monitor))
+
+            if ordered_renderer is not None:
+                ordered_renderer.feed(chunk)
+                continue
 
             if chunk_type == _CHUNK_TOOL_CALL:
                 _flush_buffer(cur_type, buf)
@@ -264,6 +398,8 @@ async def consume_stream(
 
         _flush_buffer(cur_type, buf)
     finally:
+        if ordered_renderer is not None:
+            ordered_renderer.flush()
         if monitor is not None:
             await monitor.stop()
         if monitor_task is not None:

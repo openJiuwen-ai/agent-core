@@ -192,12 +192,18 @@ async def external_cli_spawn(
             cwd=cwd,
             add_dirs=add_dirs,
             command_override=tuple(cli_cfg.command) if cli_cfg.command else None,
+            codex_bin=cli_cfg.codex_bin,
             inject_mcp=cli_cfg.inject_mcp,
+            mcp_default_tools_approval_mode=cli_cfg.mcp_default_tools_approval_mode,
+            codex_bypass_approvals_and_sandbox=cli_cfg.codex_bypass_approvals_and_sandbox,
+            codex_turn_idle_timeout_s=cli_cfg.codex_turn_idle_timeout_s,
+            codex_turn_idle_retries=cli_cfg.codex_turn_idle_retries,
             mcp_server_command=tuple(cli_cfg.mcp_server_command),
             system_prompt=system_prompt,
             extra_env=cli_cfg.env or None,
             ssh_transport=cli_cfg.ssh_transport,
             resume_external_backend=resume_external_backend,
+            member_agent_id=card.id,
         )
     else:
         cwd, add_dirs = _resolve_external_paths(
@@ -212,6 +218,7 @@ async def external_cli_spawn(
             add_dirs=add_dirs,
             system_prompt=system_prompt,
             resume_external_backend=resume_external_backend,
+            member_agent_id=card.id,
         )
 
     teammate = _TeamAgent(card)

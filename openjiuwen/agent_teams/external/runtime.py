@@ -156,11 +156,11 @@ class CliRuntimeBase(ABC):
     # ------------------------------------------------------------------
 
     async def start(self, *, team_session: Optional[Any] = None) -> None:
-        """Prepare the runtime for one run cycle (the subprocess owns its session).
+        """Prepare the base CLI runtime for one run cycle.
 
-        ``team_session`` is ignored: a CLI subprocess manages its own session,
-        so cross-cycle state lives in the subprocess, not a shared team session.
-        Resets the output channel + phase so a reused instance starts clean.
+        The base subprocess implementation ignores ``team_session``. Dedicated
+        SDK subclasses may derive a member AgentSession before or after this
+        reset to persist backend-native resume state.
         """
         _ = team_session
         self._output_queue = asyncio.Queue()

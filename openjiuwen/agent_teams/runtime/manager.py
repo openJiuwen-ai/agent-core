@@ -21,6 +21,10 @@ from typing import (
     Optional,
 )
 
+from openjiuwen.agent_teams.context import (
+    reset_session_id,
+    set_session_id,
+)
 from openjiuwen.agent_teams.interaction import (
     DeliverResult,
     ExternalTeamEvent,
@@ -681,7 +685,15 @@ class TeamRuntimeManager:
         entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
         if entry is None:
             return None
-        return create_monitor(entry.agent, hide_dm=hide_dm)
+        # SDK/CLI consumers may call this from an asyncio task whose inherited
+        # context belongs to another session. Bind the already-resolved target
+        # session while the factory captures it; TeamMonitor rebinds that
+        # captured value around each later database query.
+        token = set_session_id(session_id)
+        try:
+            return create_monitor(entry.agent, hide_dm=hide_dm)
+        finally:
+            reset_session_id(token)
 
     async def list_active_teams(self) -> list["ActiveTeamInfo"]:
         """Return read-only snapshots of every team currently in the pool.

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.models.pool import ModelPoolEntry
@@ -240,13 +240,24 @@ class ExternalCliAgentSpec(BaseModel):
 
     cli_agent: str
     """External agent kind identifier (``"claude"`` / ``"codex"`` /
-    ``"openclaw"`` / ``"hermes"``). ``"claude"`` selects the SDK backend;
-    other values select built-in CLI adapters. This is the value passed to
-    ``spawn_member(cli_agent=...)``. See ``agent_teams/external/cli_agent``."""
+    ``"openclaw"`` / ``"hermes"``). ``"claude"`` selects the SDK backend,
+    ``"codex"`` the Codex Python SDK backend, and other values built-in adapters.
+    This is passed to ``spawn_member(cli_agent=...)``. See
+    ``agent_teams/external/cli_agent``."""
 
     command: Optional[list[str]] = None
-    """Full launch argv overriding the adapter's built-in command (e.g. an
-    absolute binary path or extra flags). ``None`` uses the built-in command."""
+    """Full launch argv overriding an adapter backend's built-in command.
+
+    SDK backends do not accept a complete argv: Claude uses its SDK defaults
+    and Codex uses :attr:`codex_bin` when a custom executable is required.
+    """
+
+    codex_bin: str | None = None
+    """Optional Codex executable path passed to ``CodexConfig.codex_bin``.
+
+    This field is valid only for ``cli_agent="codex"``. The Codex SDK remains
+    responsible for constructing its ``app-server`` arguments.
+    """
 
     cwd: Optional[str] = None
     """Working directory for the CLI subprocess. ``None`` inherits the team
@@ -258,6 +269,37 @@ class ExternalCliAgentSpec(BaseModel):
     so it gets the team collaboration tools (read_inbox / claim_task / ...).
     Injection is backend-specific (Claude SDK MCP options, codex
     ``-c mcp_servers...``); adapters without an injection strategy ignore it."""
+
+    mcp_default_tools_approval_mode: Literal["auto", "prompt", "writes", "approve"] | None = None
+    """Optional Codex approval policy for tools exposed by the injected MCP server.
+
+    ``None`` preserves the user's Codex configuration. Headless trusted-server
+    scenarios may opt into ``"approve"`` without changing approval behavior for
+    shell commands, other MCP servers, or non-Codex backends.
+    """
+
+    codex_bypass_approvals_and_sandbox: bool = False
+    """Run a Codex member with no approval prompts and no SDK sandbox.
+
+    This is an explicit high-risk opt-in for externally isolated, headless
+    environments. It is valid only for ``cli_agent="codex"`` and never becomes
+    the framework default.
+    """
+
+    codex_turn_idle_timeout_s: float | None = Field(default=None, gt=0)
+    """Optional Codex turn inactivity ceiling in seconds.
+
+    The runtime default is used when unset. Any SDK notification, including a
+    retryable transport error, refreshes the timer.
+    """
+
+    codex_turn_idle_retries: int | None = Field(default=None, ge=0)
+    """Optional retries for a Codex turn that produced no SDK notifications.
+
+    Retries reuse the same thread and are attempted only after the stalled turn
+    was interrupted successfully. Turns that emitted any notification are not
+    replayed because they may already have produced external side effects.
+    """
 
     mcp_server_command: list[str] = Field(default_factory=lambda: ["openjiuwen-team-mcp"])
     """Launch argv for the team MCP stdio server registered with the CLI.
@@ -275,6 +317,29 @@ class ExternalCliAgentSpec(BaseModel):
     through ``OPENJIUWEN_TEAM_JOIN`` so a stdio MCP child process can inherit
     this member identity when remote DB and messager endpoints are reachable.
     """
+
+    @model_validator(mode="after")
+    def _validate_backend_launch_override(self) -> "ExternalCliAgentSpec":
+        """Keep SDK binary selection separate from adapter argv overrides."""
+        if self.cli_agent == "codex" and self.command is not None:
+            raise ValueError(
+                "Codex SDK config does not support command; use codex_bin to select a custom executable",
+            )
+        if self.cli_agent != "codex" and self.codex_bin is not None:
+            raise ValueError("codex_bin is only valid when cli_agent='codex'")
+        if self.cli_agent != "codex" and self.mcp_default_tools_approval_mode is not None:
+            raise ValueError(
+                "mcp_default_tools_approval_mode is only valid when cli_agent='codex'",
+            )
+        if self.cli_agent != "codex" and self.codex_bypass_approvals_and_sandbox:
+            raise ValueError(
+                "codex_bypass_approvals_and_sandbox is only valid when cli_agent='codex'",
+            )
+        if self.cli_agent != "codex" and self.codex_turn_idle_timeout_s is not None:
+            raise ValueError("codex_turn_idle_timeout_s is only valid when cli_agent='codex'")
+        if self.cli_agent != "codex" and self.codex_turn_idle_retries is not None:
+            raise ValueError("codex_turn_idle_retries is only valid when cli_agent='codex'")
+        return self
 
 
 class TeamSpec(BaseModel):
@@ -372,11 +437,11 @@ class TeamRuntimeContext(BaseModel):
     """Absolute cwd override for a teammate running in an isolated worktree."""
     cli_agent: Optional[str] = None
     """When set, this teammate is driven by an external agent backend (e.g.
-    ``"claude"`` SDK or a named CLI adapter like ``"codex"``) instead of a
-    local DeepAgent.
+    ``"claude"`` SDK, ``"codex"`` SDK, or a named CLI adapter) instead
+    of a local DeepAgent.
 
     The spawn path launches the CLI as a subprocess and the configurator
-    builds an ``ExternalCliRuntime`` in place of ``TeamHarness``. ``None``
+    builds a ``CliRuntimeBase`` implementation in place of ``TeamHarness``. ``None``
     (default) keeps the standard DeepAgent-backed member. See
     ``agent_teams/external/cli_agent``.
     """
