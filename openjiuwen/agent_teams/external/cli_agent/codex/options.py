@@ -36,6 +36,7 @@ def build_codex_config(
     inject_mcp: bool,
     mcp_server_name: str,
     mcp_server_command: tuple[str, ...],
+    mcp_default_tools_approval_mode: str | None,
     member_name: str,
     codex_bin: str | None,
     sdk: Any | None = None,
@@ -53,6 +54,7 @@ def build_codex_config(
         config_overrides = codex_mcp_config_overrides(
             server_name=mcp_server_name,
             server_command=mcp_server_command,
+            default_tools_approval_mode=mcp_default_tools_approval_mode,
         )
 
     return sdk.CodexConfig(
@@ -70,13 +72,19 @@ def build_codex_thread_options(
     *,
     cwd: str | None,
     system_prompt: str | None,
+    bypass_approvals_and_sandbox: bool = False,
+    sdk: Any | None = None,
 ) -> dict[str, Any]:
-    """Build thread start/resume options, leaving sandbox policy unset."""
+    """Build thread options, applying full-access bypass only when requested."""
     options: dict[str, Any] = {"ephemeral": False}
     if cwd:
         options["cwd"] = cwd
     if system_prompt:
         options["developer_instructions"] = system_prompt
+    if bypass_approvals_and_sandbox:
+        sdk = sdk or load_codex_sdk()
+        options["approval_mode"] = sdk.ApprovalMode.deny_all
+        options["sandbox"] = sdk.Sandbox.full_access
     return options
 
 
@@ -84,6 +92,7 @@ def codex_mcp_config_overrides(
     *,
     server_name: str,
     server_command: tuple[str, ...],
+    default_tools_approval_mode: str | None = None,
 ) -> tuple[str, ...]:
     """Render ``mcp_servers.*`` entries for ``CodexConfig.config_overrides``."""
     if not server_command:
@@ -100,6 +109,11 @@ def codex_mcp_config_overrides(
             f"mcp_servers.{key}.required=true",
         ]
     )
+    if default_tools_approval_mode is not None:
+        overrides.append(
+            f"mcp_servers.{key}.default_tools_approval_mode="
+            f"{json.dumps(default_tools_approval_mode)}"
+        )
     return tuple(overrides)
 
 

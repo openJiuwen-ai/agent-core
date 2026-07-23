@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from typing import AsyncIterator, Awaitable, Callable
+from typing import AsyncIterator
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.external.cli_agent.adapters import CliAgentAdapter, build_adapter
@@ -169,12 +169,13 @@ async def build_cli_runtime(
     inject_mcp: bool = True,
     mcp_server_name: str = "openjiuwen-team",
     mcp_server_command: tuple[str, ...] = ("openjiuwen-team-mcp",),
+    mcp_default_tools_approval_mode: str | None = None,
+    codex_bypass_approvals_and_sandbox: bool = False,
     system_prompt: str | None = None,
     extra_env: dict[str, str] | None = None,
     ssh_transport: SshTransportConfig | None = None,
     resume_external_backend: bool = False,
-    external_session_id: str | None = None,
-    on_external_session_id: Callable[[str], Awaitable[None]] | None = None,
+    member_agent_id: str | None = None,
 ) -> CliRuntimeBase:
     """Build the member runtime for ``ctx.cli_agent``.
 
@@ -200,6 +201,10 @@ async def build_cli_runtime(
             register their MCP server out of band.
         mcp_server_name: Logical name the CLI registers the MCP server under.
         mcp_server_command: Launch argv for the team MCP stdio server.
+        mcp_default_tools_approval_mode: Optional Codex-only approval policy
+            scoped to tools from the injected team MCP server.
+        codex_bypass_approvals_and_sandbox: Explicit high-risk Codex-only mode
+            that disables approval prompts and the SDK sandbox.
         system_prompt: The member's team-rail system prompt. Claude receives it
             through SDK options, Codex through SDK thread options, and other CLIs
             may receive it as a launch arg.
@@ -212,10 +217,8 @@ async def build_cli_runtime(
             by the Claude SDK backend.
         resume_external_backend: When True, resume the derived backend session
             instead of starting it as a fresh session.
-        external_session_id: Backend-native resume id restored from the
-            current Jiuwen team-session checkpoint.
-        on_external_session_id: Async sink called when an SDK backend allocates
-            a new native session id that must be checkpointed.
+        member_agent_id: Stable TeamAgent card id used to address this
+            external member's own AgentSession checkpoint.
     """
     if not ctx.cli_agent:
         raise_error(
@@ -275,26 +278,24 @@ async def build_cli_runtime(
                 ctx.member_name,
                 cwd,
             )
-        thread_id = external_session_id if resume_external_backend else None
-        if resume_external_backend and not thread_id:
+        if not member_agent_id:
             raise_error(
-                StatusCode.AGENT_TEAM_EXECUTION_ERROR,
-                error_msg=(
-                    f"cannot resume Codex member '{ctx.member_name}' without a saved external_session_id; "
-                    "strict resume forbids starting a replacement thread"
-                ),
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason=f"Codex SDK member '{ctx.member_name}' requires a stable member_agent_id",
             )
         return await build_codex_runtime(
             member_name=ctx.member_name or "",
+            member_agent_id=member_agent_id,
             cwd=cwd,
             env=env,
             inject_mcp=inject_mcp,
             mcp_server_name=mcp_server_name,
             mcp_server_command=mcp_server_command,
+            mcp_default_tools_approval_mode=mcp_default_tools_approval_mode,
+            bypass_approvals_and_sandbox=codex_bypass_approvals_and_sandbox,
             system_prompt=system_prompt,
             codex_bin=codex_bin,
-            thread_id=thread_id,
-            on_thread_id=on_external_session_id,
+            resume_external_backend=resume_external_backend,
         )
     if ssh_transport is not None:
         raise_error(

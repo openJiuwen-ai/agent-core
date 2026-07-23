@@ -270,6 +270,22 @@ class ExternalCliAgentSpec(BaseModel):
     Injection is backend-specific (Claude SDK MCP options, codex
     ``-c mcp_servers...``); adapters without an injection strategy ignore it."""
 
+    mcp_default_tools_approval_mode: Literal["auto", "prompt", "writes", "approve"] | None = None
+    """Optional Codex approval policy for tools exposed by the injected MCP server.
+
+    ``None`` preserves the user's Codex configuration. Headless trusted-server
+    scenarios may opt into ``"approve"`` without changing approval behavior for
+    shell commands, other MCP servers, or non-Codex backends.
+    """
+
+    codex_bypass_approvals_and_sandbox: bool = False
+    """Run a Codex member with no approval prompts and no SDK sandbox.
+
+    This is an explicit high-risk opt-in for externally isolated, headless
+    environments. It is valid only for ``cli_agent="codex"`` and never becomes
+    the framework default.
+    """
+
     mcp_server_command: list[str] = Field(default_factory=lambda: ["openjiuwen-team-mcp"])
     """Launch argv for the team MCP stdio server registered with the CLI.
     Defaults to the ``openjiuwen-team-mcp`` console-script entry."""
@@ -296,6 +312,14 @@ class ExternalCliAgentSpec(BaseModel):
             )
         if self.cli_agent != "codex" and self.codex_bin is not None:
             raise ValueError("codex_bin is only valid when cli_agent='codex'")
+        if self.cli_agent != "codex" and self.mcp_default_tools_approval_mode is not None:
+            raise ValueError(
+                "mcp_default_tools_approval_mode is only valid when cli_agent='codex'",
+            )
+        if self.cli_agent != "codex" and self.codex_bypass_approvals_and_sandbox:
+            raise ValueError(
+                "codex_bypass_approvals_and_sandbox is only valid when cli_agent='codex'",
+            )
         return self
 
 

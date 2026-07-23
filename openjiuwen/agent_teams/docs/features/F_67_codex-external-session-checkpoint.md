@@ -1,5 +1,9 @@
 # Codex external session checkpoint 与冷续接
 
+> **后续修订**：本特性建立的冷续接语义继续有效，但 resume id 的所有权已在
+> [[F_68_codex-member-session-checkpoint]] 中从 leader team-session namespace
+> 迁移到每个外部成员自己的 `AgentSession` checkpoint。本文件保留原始决策背景。
+
 ## 元信息
 
 | 项 | 值 |

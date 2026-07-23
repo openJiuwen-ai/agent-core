@@ -45,6 +45,34 @@ def test_codex_static_config_uses_explicit_binary_not_full_command():
         ExternalCliAgentSpec(cli_agent="generic", codex_bin="/opt/codex")
 
 
+def test_mcp_approval_mode_is_explicit_and_codex_only():
+    config = ExternalCliAgentSpec(
+        cli_agent="codex",
+        mcp_default_tools_approval_mode="approve",
+    )
+    assert config.mcp_default_tools_approval_mode == "approve"
+
+    with pytest.raises(ValidationError, match="mcp_default_tools_approval_mode is only valid"):
+        ExternalCliAgentSpec(
+            cli_agent="claude",
+            mcp_default_tools_approval_mode="approve",
+        )
+
+
+def test_full_access_bypass_is_explicit_and_codex_only():
+    config = ExternalCliAgentSpec(
+        cli_agent="codex",
+        codex_bypass_approvals_and_sandbox=True,
+    )
+    assert config.codex_bypass_approvals_and_sandbox
+
+    with pytest.raises(ValidationError, match="codex_bypass_approvals_and_sandbox is only valid"):
+        ExternalCliAgentSpec(
+            cli_agent="claude",
+            codex_bypass_approvals_and_sandbox=True,
+        )
+
+
 def test_unknown_backend_returns_none():
     """Unknown backend names are rejected by registry helpers."""
     assert backend_for("not-a-real-cli") is None

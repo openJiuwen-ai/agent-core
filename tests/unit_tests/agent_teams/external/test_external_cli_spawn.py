@@ -237,7 +237,12 @@ async def test_build_cli_runtime_dispatches_codex_to_sdk_backend(monkeypatch):
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-    sdk = SimpleNamespace(CodexConfig=FakeCodexConfig, AsyncCodex=object)
+    sdk = SimpleNamespace(
+        CodexConfig=FakeCodexConfig,
+        AsyncCodex=object,
+        ApprovalMode=SimpleNamespace(deny_all="deny-all"),
+        Sandbox=SimpleNamespace(full_access="full-access"),
+    )
     monkeypatch.setattr(
         "openjiuwen.agent_teams.external.cli_agent.codex.runtime.load_codex_sdk",
         lambda: sdk,
@@ -248,8 +253,11 @@ async def test_build_cli_runtime_dispatches_codex_to_sdk_backend(monkeypatch):
             _ctx(member="dev-1", cli_agent="codex"),
             cwd="/workspace",
             codex_bin="/opt/codex",
-            inject_mcp=False,
+            inject_mcp=True,
+            mcp_default_tools_approval_mode="approve",
+            codex_bypass_approvals_and_sandbox=True,
             system_prompt="ROLE: isolated developer",
+            member_agent_id="ext_team_dev-1",
         )
     finally:
         reset_session_id(token)
@@ -259,22 +267,28 @@ async def test_build_cli_runtime_dispatches_codex_to_sdk_backend(monkeypatch):
         "ephemeral": False,
         "cwd": "/workspace",
         "developer_instructions": "ROLE: isolated developer",
+        "approval_mode": "deny-all",
+        "sandbox": "full-access",
     }
     assert runtime._config.kwargs["cwd"] == "/workspace"
     assert runtime._config.kwargs["codex_bin"] == "/opt/codex"
+    assert (
+        'mcp_servers.openjiuwen_team.default_tools_approval_mode="approve"'
+        in runtime._config.kwargs["config_overrides"]
+    )
+    assert runtime._member_agent_id == "ext_team_dev-1"
 
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_build_cli_runtime_codex_strict_resume_requires_saved_thread_id():
+async def test_build_cli_runtime_codex_requires_stable_member_agent_id():
     token = set_session_id("sess-1")
     try:
-        with pytest.raises(BaseError, match="strict resume forbids"):
+        with pytest.raises(BaseError, match="stable member_agent_id"):
             await build_cli_runtime(
                 _ctx(member="dev-1", cli_agent="codex"),
                 inject_mcp=False,
                 resume_external_backend=True,
-                external_session_id=None,
             )
     finally:
         reset_session_id(token)
@@ -290,6 +304,7 @@ async def test_build_cli_runtime_codex_rejects_full_command_override():
                 _ctx(member="dev-1", cli_agent="codex"),
                 command_override=("codex", "app-server", "--listen", "stdio://"),
                 inject_mcp=False,
+                member_agent_id="ext_team_dev-1",
             )
     finally:
         reset_session_id(token)

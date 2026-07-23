@@ -52,15 +52,24 @@ interrupt 契约。
    - 自定义 Codex 可执行文件以 `ExternalCliAgentSpec.codex_bin` 显式配置并传给
      `CodexConfig.codex_bin`；不接受完整 `command`，app-server argv 由 SDK 构造。
    - 角色提示词经 `developer_instructions` 传入 thread 启动/恢复选项。
-   - 不硬编码 `approval_mode`，不设置 `sandbox`，也不在 Jiuwen 中自动批准
-     app-server 请求。
+   - 不硬编码 thread 级 `approval_mode`，也不设置 `sandbox`。
+   - `ExternalCliAgentSpec.mcp_default_tools_approval_mode` 可选地映射到当前注入服务的
+     `mcp_servers.<id>.default_tools_approval_mode`；默认 `None`，保持用户 Codex
+     配置不变。无交互且信任 Jiuwen Team MCP 的场景可显式设为 `approve`，其作用域
+     不扩散到 shell、其它 MCP 服务或全局 app-server 请求。
+   - `ExternalCliAgentSpec.codex_bypass_approvals_and_sandbox` 默认 `False`。只有
+     外部已隔离的无交互环境可显式启用；SDK 参数映射为
+     `ApprovalMode.deny_all`（`approval_policy=never`）和 `Sandbox.full_access`
+     （`dangerFullAccess`）。普通 Codex 成员不继承该权限。
 
 ## 拒绝的方案
 
 - **保留 raw app-server 并只改名为 SDK**：分类变更不等于 SDK 接入，无法消除自维护协议的风险。
 - **每轮新建 `AsyncCodex`**：会丢失成员跨任务上下文，也无法精确 steer 活跃 turn。
 - **多个成员共享一个 thread**：会泄露私有角色提示词与工作上下文。
-- **默认 `danger-full-access` 或无审批模式**：超出 Jiuwen external backend 应自动获得的权限范围。
+- **默认 `danger-full-access` 或全局无审批模式**：超出 Jiuwen external backend
+  应自动获得的权限范围；可信 Team MCP 的按服务显式配置以及测试环境主动设置的
+  full-access 开关不改变默认边界。
 
 ## 验证
 
@@ -69,7 +78,10 @@ interrupt 契约。
 - strict resume 验证恢复 RPC 失败时原样终止，绝不调用 `thread_start()` 创建替代 thread。
 - fake RPC 错误验证 active-turn 终态竞态会转为同 thread 后续 turn，
   且不相干的 steer 错误不会被吞掉。
-- MCP config override 验证 command / args / join env / startup timeout / required。
+- MCP config override 验证 command / args / join env / startup timeout / required，
+  并验证可选的按服务工具审批模式。
+- Codex thread options 验证默认不设置审批/sandbox，同时覆盖显式 full-access
+  opt-in 到 SDK 枚举的映射。
 - external CLI 单测：123 passed。
 
 ## 已知遗留
@@ -78,3 +90,10 @@ interrupt 契约。
   [[F_67_codex-external-session-checkpoint]] 完成。
 - 尚需真实 Codex 环境 E2E 验收 MCP 可见性、团队任务工具调用和 pause/resume。
 - Codex SDK 当前是本地 app-server subprocess 模式，没有实现 SSH transport。
+
+## 后续修复：保留 MCP 合法 falsy 结果（2026-07-23）
+
+Codex MCP item 的 `result` 允许返回 `[]`、`{}`、`0`、空字符串或 `False`。结果转换
+不得使用 `result or error`，否则 Python truthiness 会把这些合法结果误判为缺失。
+runtime 现在仅在 `result is None` 时回退到 `error`，并通过参数化单测覆盖上述五类
+falsy 值以及真正错误的回退路径。

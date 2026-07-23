@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from enum import Enum
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncIterator
 
 from openjiuwen.agent_teams.external.cli_agent.codex.options import (
     build_codex_config,
@@ -28,6 +28,10 @@ _REASONING_METHODS = {
     "item/reasoning/summaryTextDelta",
     "item/reasoning/textDelta",
 }
+_EXTERNAL_RUNTIME_STATE_KEY = "external_runtime"
+_EXTERNAL_BACKEND_KEY = "backend"
+_EXTERNAL_SESSION_ID_KEY = "external_session_id"
+_CODEX_BACKEND = "codex"
 
 
 class CodexSdkRuntime(CliRuntimeBase):
@@ -37,19 +41,21 @@ class CodexSdkRuntime(CliRuntimeBase):
         self,
         *,
         member_name: str,
+        member_agent_id: str,
         sdk: Any,
         config: Any,
         thread_options: dict[str, Any],
-        thread_id: str | None = None,
-        on_thread_id: Callable[[str], Awaitable[None]] | None = None,
+        resume_external_backend: bool = False,
     ) -> None:
         super().__init__(member_name=member_name)
+        self._member_agent_id = member_agent_id
         self._sdk = sdk
         self._config = config
         self._thread_options = dict(thread_options)
-        self._thread_id = thread_id
-        self._reported_thread_id = thread_id
-        self._on_thread_id = on_thread_id
+        self._resume_external_backend = resume_external_backend
+        self._thread_id: str | None = None
+        self._persisted_thread_id: str | None = None
+        self._member_session: Any | None = None
         self._client: Any | None = None
         self._thread: Any | None = None
         self._active_turn: Any | None = None
@@ -63,14 +69,77 @@ class CodexSdkRuntime(CliRuntimeBase):
         return self._thread_id
 
     async def start(self, *, team_session: Any | None = None) -> None:
-        """Initialize the SDK client and create or resume this member's thread."""
+        """Restore the member checkpoint, then create or resume its SDK thread."""
         await super().start(team_session=team_session)
+        await self._ensure_member_session(team_session)
         await self._ensure_thread()
+
+    async def _ensure_member_session(self, team_session: Any | None) -> Any:
+        """Open this external member's stable child AgentSession once."""
+        if self._member_session is not None:
+            return self._member_session
+        if team_session is None:
+            raise RuntimeError(
+                f"Codex SDK member {self._member_name!r} requires a team_session "
+                "to restore its member checkpoint",
+            )
+
+        member_session = team_session.create_agent_session(
+            agent_id=self._member_agent_id,
+            share_stream_writer=False,
+        )
+        await member_session.pre_run()
+        self._member_session = member_session
+
+        restored_thread_id = self._read_persisted_thread_id(member_session)
+        self._persisted_thread_id = restored_thread_id
+        if self._resume_external_backend:
+            if restored_thread_id is None:
+                raise RuntimeError(
+                    f"cannot resume Codex member {self._member_name!r} without a saved "
+                    "external_session_id in its member checkpoint; strict resume "
+                    "forbids starting a replacement thread",
+                )
+            self._thread_id = restored_thread_id
+        return member_session
+
+    @staticmethod
+    def _read_persisted_thread_id(member_session: Any) -> str | None:
+        """Read a Codex thread id from one member AgentSession state."""
+        state = member_session.get_state(_EXTERNAL_RUNTIME_STATE_KEY)
+        if not isinstance(state, dict) or state.get(_EXTERNAL_BACKEND_KEY) != _CODEX_BACKEND:
+            return None
+        value = state.get(_EXTERNAL_SESSION_ID_KEY)
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value or None
+
+    async def _persist_thread_id(self) -> None:
+        """Commit a changed Codex thread id to this member's checkpoint."""
+        thread_id = self._thread_id
+        if not thread_id or thread_id == self._persisted_thread_id:
+            return
+        member_session = self._member_session
+        if member_session is None:
+            raise RuntimeError(
+                f"cannot persist Codex thread for {self._member_name!r} without a member session",
+            )
+        member_session.update_state(
+            {
+                _EXTERNAL_RUNTIME_STATE_KEY: {
+                    _EXTERNAL_BACKEND_KEY: _CODEX_BACKEND,
+                    _EXTERNAL_SESSION_ID_KEY: thread_id,
+                }
+            }
+        )
+        await member_session.commit()
+        self._persisted_thread_id = thread_id
 
     async def _ensure_thread(self) -> Any:
         """Lazily initialize ``AsyncCodex`` and this runtime's single thread."""
         if self._thread is not None:
-            await self._report_thread_id()
+            await self._persist_thread_id()
             return self._thread
         if self._client is None:
             self._client = self._sdk.AsyncCodex(config=self._config)
@@ -98,7 +167,7 @@ class CodexSdkRuntime(CliRuntimeBase):
             self._thread = await self._client.thread_start(**options)
             activation = "started"
         self._thread_id = self._thread.id
-        await self._report_thread_id()
+        await self._persist_thread_id()
         team_logger.info(
             "[external-cli] member {} {} codex SDK thread {}",
             self._member_name,
@@ -107,14 +176,16 @@ class CodexSdkRuntime(CliRuntimeBase):
         )
         return self._thread
 
-    async def _report_thread_id(self) -> None:
-        """Persist a newly allocated thread id through the owning team session."""
-        thread_id = self._thread_id
-        if not thread_id or thread_id == self._reported_thread_id:
-            return
-        if self._on_thread_id is not None:
-            await self._on_thread_id(thread_id)
-        self._reported_thread_id = thread_id
+    async def stop(self) -> None:
+        """Stop Codex and finalize this member's child AgentSession once."""
+        try:
+            await super().stop()
+        finally:
+            member_session = self._member_session
+            if member_session is not None:
+                await member_session.post_run()
+                if self._member_session is member_session:
+                    self._member_session = None
 
     async def _drive(self, inputs: dict[str, Any]) -> AsyncIterator[Any]:
         """Run queued messages as SDK turns on this member's one thread."""
@@ -349,7 +420,10 @@ def _tool_args(item: Any) -> Any:
 def _tool_result(item: Any) -> Any:
     item_type = _item_type(item)
     if item_type == "mcpToolCall":
-        return _jsonable(getattr(item, "result", None) or getattr(item, "error", None))
+        result = getattr(item, "result", None)
+        if result is None:
+            result = getattr(item, "error", None)
+        return _jsonable(result)
     if item_type == "dynamicToolCall":
         return _jsonable(getattr(item, "content_items", None))
     if item_type == "commandExecution":
@@ -382,15 +456,17 @@ def _jsonable(value: Any) -> Any:
 async def build_codex_runtime(
     *,
     member_name: str,
+    member_agent_id: str,
     cwd: str | None,
     env: dict[str, str],
     inject_mcp: bool,
     mcp_server_name: str,
     mcp_server_command: tuple[str, ...],
+    mcp_default_tools_approval_mode: str | None,
+    bypass_approvals_and_sandbox: bool,
     system_prompt: str | None,
     codex_bin: str | None,
-    thread_id: str | None = None,
-    on_thread_id: Callable[[str], Awaitable[None]] | None = None,
+    resume_external_backend: bool = False,
 ) -> CodexSdkRuntime:
     """Build a Codex Python SDK runtime without starting its thread eagerly."""
     sdk = load_codex_sdk()
@@ -400,18 +476,24 @@ async def build_codex_runtime(
         inject_mcp=inject_mcp,
         mcp_server_name=mcp_server_name,
         mcp_server_command=mcp_server_command,
+        mcp_default_tools_approval_mode=mcp_default_tools_approval_mode,
         member_name=member_name,
         codex_bin=codex_bin,
         sdk=sdk,
     )
-    thread_options = build_codex_thread_options(cwd=cwd, system_prompt=system_prompt)
+    thread_options = build_codex_thread_options(
+        cwd=cwd,
+        system_prompt=system_prompt,
+        bypass_approvals_and_sandbox=bypass_approvals_and_sandbox,
+        sdk=sdk,
+    )
     return CodexSdkRuntime(
         member_name=member_name,
+        member_agent_id=member_agent_id,
         sdk=sdk,
         config=config,
         thread_options=thread_options,
-        thread_id=thread_id,
-        on_thread_id=on_thread_id,
+        resume_external_backend=resume_external_backend,
     )
 
 

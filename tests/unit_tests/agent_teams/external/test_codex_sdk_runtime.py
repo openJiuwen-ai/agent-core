@@ -10,7 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from openjiuwen.agent_teams.external.cli_agent.codex.runtime import CodexSdkRuntime
+from openjiuwen.agent_teams.external.cli_agent.codex.runtime import (
+    CodexSdkRuntime,
+    _tool_result,
+)
 
 
 def _notification(method: str, **payload):
@@ -116,11 +119,59 @@ class _FakeAsyncCodex:
         self.close_count += 1
 
 
-def _runtime(*, thread, thread_id=None, on_thread_id=None, resume_error=None):
+class _FakeMemberSession:
+    def __init__(self, state=None):
+        self.state = dict(state or {})
+        self.pre_run_count = 0
+        self.commit_count = 0
+        self.post_run_count = 0
+
+    async def pre_run(self):
+        self.pre_run_count += 1
+
+    def get_state(self, key=None):
+        return self.state if key is None else self.state.get(key)
+
+    def update_state(self, data):
+        self.state.update(data)
+
+    async def commit(self):
+        self.commit_count += 1
+
+    async def post_run(self):
+        self.post_run_count += 1
+        await self.commit()
+
+
+class _FakeTeamSession:
+    def __init__(self, member_session):
+        self.member_session = member_session
+        self.created: list[tuple[str, bool]] = []
+
+    def create_agent_session(self, *, agent_id, share_stream_writer):
+        self.created.append((agent_id, share_stream_writer))
+        return self.member_session
+
+
+def _saved_state(thread_id: str):
+    return {
+        "external_runtime": {
+            "backend": "codex",
+            "external_session_id": thread_id,
+        }
+    }
+
+
+def _runtime(*, thread, thread_id=None, resume_error=None, member_state=None):
     client = _FakeAsyncCodex(config=None, thread=thread, resume_error=resume_error)
     sdk = SimpleNamespace(AsyncCodex=lambda *, config: client)
+    member_session = _FakeMemberSession(
+        member_state if member_state is not None else (_saved_state(thread_id) if thread_id else None)
+    )
+    team_session = _FakeTeamSession(member_session)
     runtime = CodexSdkRuntime(
         member_name="developer",
+        member_agent_id="team_developer",
         sdk=sdk,
         config=SimpleNamespace(name="config"),
         thread_options={
@@ -128,10 +179,15 @@ def _runtime(*, thread, thread_id=None, on_thread_id=None, resume_error=None):
             "cwd": "/workspace",
             "developer_instructions": "role prompt",
         },
-        thread_id=thread_id,
-        on_thread_id=on_thread_id,
+        resume_external_backend=thread_id is not None,
     )
+    runtime._test_team_session = team_session
+    runtime._test_member_session = member_session
     return runtime, client
+
+
+async def _start(runtime):
+    await runtime.start(team_session=runtime._test_team_session)
 
 
 @pytest.mark.asyncio
@@ -160,7 +216,7 @@ async def test_codex_sdk_runtime_reuses_thread_and_maps_stream_events():
     thread = _FakeThread("thread-developer", [first_turn, second_turn])
     runtime, client = _runtime(thread=thread)
 
-    await runtime.start()
+    await _start(runtime)
     first = [chunk async for chunk in runtime._drive({"query": "first"})]
     second = [chunk async for chunk in runtime._drive({"query": "second"})]
 
@@ -188,13 +244,45 @@ async def test_codex_sdk_runtime_reuses_thread_and_maps_stream_events():
     assert client.close_count == 1
 
 
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param([], id="empty-list"),
+        pytest.param({}, id="empty-dict"),
+        pytest.param(0, id="zero"),
+        pytest.param("", id="empty-string"),
+        pytest.param(False, id="false"),
+    ],
+)
+@pytest.mark.level0
+def test_codex_sdk_runtime_preserves_falsy_mcp_tool_results(result):
+    item = SimpleNamespace(
+        type="mcpToolCall",
+        result=result,
+        error={"message": "must not replace a valid falsy result"},
+    )
+
+    actual = _tool_result(item)
+
+    assert actual == result
+    assert type(actual) is type(result)
+
+
+@pytest.mark.level0
+def test_codex_sdk_runtime_uses_mcp_error_when_result_is_none():
+    error = {"message": "tool failed"}
+    item = SimpleNamespace(type="mcpToolCall", result=None, error=error)
+
+    assert _tool_result(item) == error
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_codex_sdk_runtime_resumes_saved_thread_id_without_ephemeral():
     thread = _FakeThread("thread-saved", [[]])
     runtime, client = _runtime(thread=thread, thread_id="thread-saved")
 
-    await runtime.start()
+    await _start(runtime)
 
     assert client.start_calls == []
     assert client.resume_calls == [
@@ -216,7 +304,7 @@ async def test_codex_sdk_runtime_resume_failure_never_starts_replacement_thread(
     )
 
     with pytest.raises(RuntimeError, match="strict resume forbids"):
-        await runtime.start()
+        await _start(runtime)
 
     assert client.resume_calls == [
         (
@@ -234,7 +322,7 @@ async def test_codex_sdk_runtime_rejects_unexpected_resumed_thread_id():
     runtime, client = _runtime(thread=thread, thread_id="thread-saved")
 
     with pytest.raises(RuntimeError, match="resumed unexpected thread"):
-        await runtime.start()
+        await _start(runtime)
 
     assert runtime._thread is None
     assert runtime.session_id == "thread-saved"
@@ -243,40 +331,61 @@ async def test_codex_sdk_runtime_rejects_unexpected_resumed_thread_id():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_codex_sdk_runtime_reports_new_thread_id_once():
-    reported: list[str] = []
-
-    async def _report(thread_id: str) -> None:
-        reported.append(thread_id)
-
+async def test_codex_sdk_runtime_checkpoints_new_thread_id_once():
     thread = _FakeThread("thread-new", [[], []])
-    runtime, _ = _runtime(thread=thread, on_thread_id=_report)
+    runtime, _ = _runtime(thread=thread)
 
-    await runtime.start()
-    await runtime.start()
+    await _start(runtime)
+    await _start(runtime)
     _ = [chunk async for chunk in runtime._drive({"query": "first"})]
 
-    assert reported == ["thread-new"]
+    assert runtime._test_member_session.state == _saved_state("thread-new")
+    assert runtime._test_member_session.commit_count == 1
+    assert runtime._test_team_session.created == [("team_developer", False)]
 
 
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_codex_sdk_runtime_does_not_rewrite_restored_thread_id():
-    reported: list[str] = []
-
-    async def _report(thread_id: str) -> None:
-        reported.append(thread_id)
-
     thread = _FakeThread("thread-saved", [[]])
+    runtime, _ = _runtime(thread=thread, thread_id="thread-saved")
+
+    await _start(runtime)
+
+    assert runtime._test_member_session.commit_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_strict_resume_rejects_missing_member_checkpoint():
+    thread = _FakeThread("thread-new", [[]])
+    runtime, client = _runtime(thread=thread)
+    runtime._resume_external_backend = True
+
+    with pytest.raises(RuntimeError, match="strict resume forbids"):
+        await _start(runtime)
+
+    assert client.start_calls == []
+    assert client.resume_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_ignores_other_backend_checkpoint_on_strict_resume():
+    thread = _FakeThread("thread-new", [[]])
     runtime, _ = _runtime(
         thread=thread,
-        thread_id="thread-saved",
-        on_thread_id=_report,
+        member_state={
+            "external_runtime": {
+                "backend": "claude",
+                "external_session_id": "claude-session",
+            }
+        },
     )
+    runtime._resume_external_backend = True
 
-    await runtime.start()
-
-    assert reported == []
+    with pytest.raises(RuntimeError, match="strict resume forbids"):
+        await _start(runtime)
 
 
 @pytest.mark.asyncio
@@ -284,7 +393,7 @@ async def test_codex_sdk_runtime_does_not_rewrite_restored_thread_id():
 async def test_codex_sdk_runtime_steers_and_interrupts_active_turn():
     thread = _FakeThread("thread-developer", [[]])
     runtime, client = _runtime(thread=thread)
-    await runtime.start()
+    await _start(runtime)
     handle = _FakeTurnHandle([])
     runtime._active_turn = handle
 
@@ -335,6 +444,7 @@ async def test_codex_sdk_runtime_reports_non_retryable_sdk_errors():
     turn = [_notification("error", error=error, will_retry=False)]
     thread = _FakeThread("thread-developer", [turn])
     runtime, _ = _runtime(thread=thread)
+    await _start(runtime)
 
     with pytest.raises(RuntimeError, match="codex SDK turn failed"):
         async for _ in runtime._drive({"query": "fail"}):
@@ -346,6 +456,7 @@ async def test_codex_sdk_runtime_reports_non_retryable_sdk_errors():
 async def test_codex_sdk_runtime_queues_follow_up_for_same_thread():
     thread = _FakeThread("thread-developer", [[], []])
     runtime, _ = _runtime(thread=thread)
+    await _start(runtime)
     await runtime.follow_up("next")
 
     chunks = [chunk async for chunk in runtime._drive({"query": "first"})]
@@ -359,7 +470,7 @@ async def test_codex_sdk_runtime_queues_follow_up_for_same_thread():
 async def test_codex_sdk_runtime_stop_does_not_wait_for_stuck_stream():
     thread = _BlockingThread("thread-developer")
     runtime, client = _runtime(thread=thread)
-    await runtime.start()
+    await _start(runtime)
     await runtime.send("long task")
     await thread.handle.streaming.wait()
 
@@ -367,3 +478,7 @@ async def test_codex_sdk_runtime_stop_does_not_wait_for_stuck_stream():
 
     assert thread.handle.interrupt_count == 1
     assert client.close_count == 1
+    assert runtime._test_member_session.post_run_count == 1
+
+    await runtime.stop()
+    assert runtime._test_member_session.post_run_count == 1

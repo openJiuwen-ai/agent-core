@@ -11,10 +11,6 @@ from typing import Any
 
 import pytest
 
-from openjiuwen.agent_teams.runtime.metadata import (
-    merge_external_session_id,
-    read_external_session_id,
-)
 from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, TeamAgentSpec
 from openjiuwen.agent_teams.schema.build_context import BuildContext
 from openjiuwen.agent_teams.schema.status import MemberMode
@@ -69,21 +65,6 @@ class _FakeTeamAgent:
         self.spec = spec
         self.team_backend = None
         self.session_manager = SimpleNamespace(team_session=team_session)
-
-
-class _FakeTeamSession:
-    def __init__(self) -> None:
-        self.state: dict[str, Any] = {}
-        self.flush_count = 0
-
-    def update_state(self, data: dict[str, Any]) -> None:
-        self.state.update(data)
-
-    def get_state(self, key: str | None = None) -> Any:
-        return self.state if key is None else self.state.get(key)
-
-    async def flush_checkpoint(self) -> None:
-        self.flush_count += 1
 
 
 async def _empty_outputs() -> Any:
@@ -242,8 +223,8 @@ async def test_external_cli_spawn_resume_passes_backend_flag(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_codex_spawn_restores_and_checkpoints_member_thread_id(monkeypatch):
-    """Cold Codex rebuilds resume only their own checkpointed SDK thread."""
+async def test_codex_spawn_passes_stable_member_agent_id(monkeypatch):
+    """Codex runtime addresses its own checkpoint with the TeamAgent card id."""
     runtime = _FakeRuntime()
     started = asyncio.Event()
     build_kwargs: dict[str, Any] = {}
@@ -269,9 +250,7 @@ async def test_codex_spawn_restores_and_checkpoints_member_thread_id(monkeypatch
         teammate_mode=MemberMode.BUILD_MODE,
         external_cli_agents=[{"cli_agent": "codex", "codex_bin": "/opt/codex"}],
     )
-    session = _FakeTeamSession()
-    merge_external_session_id(session, "ext_team", "codex-1", "codex", "thread-old")
-    agent = _FakeTeamAgent(spec, session)
+    agent = _FakeTeamAgent(spec)
     ctx = TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
         member_name="codex-1",
@@ -287,11 +266,9 @@ async def test_codex_spawn_restores_and_checkpoints_member_thread_id(monkeypatch
     )
     await started.wait()
 
-    assert build_kwargs["external_session_id"] == "thread-old"
+    assert build_kwargs["member_agent_id"] == "ext_team_codex-1"
+    assert build_kwargs["resume_external_backend"] is True
     assert build_kwargs["codex_bin"] == "/opt/codex"
-    await build_kwargs["on_external_session_id"]("thread-new")
-    assert read_external_session_id(session, "ext_team", "codex-1", "codex") == "thread-new"
-    assert session.flush_count == 1
 
     await handle.force_kill()
 

@@ -155,6 +155,8 @@ def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
                 "cli_agent": "codex",
                 "cwd": str(workspace_path),
                 "inject_mcp": True,
+                "mcp_default_tools_approval_mode": "approve",
+                "codex_bypass_approvals_and_sandbox": True,
                 "mcp_server_command": _MCP_SERVER_COMMAND,
             }
         ],

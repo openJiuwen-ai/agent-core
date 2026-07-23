@@ -22,10 +22,6 @@ from openjiuwen.agent_teams.external.cli_agent.backends import backend_for
 from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_runtime
 from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
-from openjiuwen.agent_teams.runtime.metadata import (
-    merge_external_session_id,
-    read_external_session_id,
-)
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
 from openjiuwen.core.common.logging import team_logger
 
@@ -174,41 +170,6 @@ async def external_cli_spawn(
     system_prompt = await _build_member_system_prompt(team_agent, spec, ctx, member_name)
     backend = backend_for(ctx.cli_agent) if ctx.cli_agent else None
 
-    # Backend-native session ids are runtime state, scoped below the leader's
-    # current Jiuwen team-session checkpoint. Each member gets a separate key,
-    # so two Codex roles can never resume one another's thread.
-    session_manager = getattr(team_agent, "session_manager", None)
-    team_session = getattr(session_manager, "team_session", None)
-    external_session_id = None
-    if resume_external_backend and team_session is not None and member_name and ctx.cli_agent:
-        external_session_id = read_external_session_id(
-            team_session,
-            team_name,
-            member_name,
-            ctx.cli_agent,
-        )
-
-    async def _persist_external_session_id(value: str) -> None:
-        if team_session is None or not member_name or not ctx.cli_agent:
-            return
-        current_session = getattr(getattr(team_agent, "session_manager", None), "team_session", None)
-        if current_session is not team_session:
-            raise RuntimeError(
-                f"refusing to persist external session for stale team session: {team_name}/{member_name}"
-            )
-        merge_external_session_id(
-            team_session,
-            team_name,
-            member_name,
-            ctx.cli_agent,
-            value,
-        )
-        await team_session.flush_checkpoint()
-
-    external_session_sink = (
-        _persist_external_session_id if team_session is not None and member_name and ctx.cli_agent else None
-    )
-
     # Resolve the static launch config declared on the spec for this CLI kind.
     # The member was registered through ``spawn_external_cli_agent`` which
     # already validated a matching entry exists; fall back to defaults if it
@@ -233,13 +194,14 @@ async def external_cli_spawn(
             command_override=tuple(cli_cfg.command) if cli_cfg.command else None,
             codex_bin=cli_cfg.codex_bin,
             inject_mcp=cli_cfg.inject_mcp,
+            mcp_default_tools_approval_mode=cli_cfg.mcp_default_tools_approval_mode,
+            codex_bypass_approvals_and_sandbox=cli_cfg.codex_bypass_approvals_and_sandbox,
             mcp_server_command=tuple(cli_cfg.mcp_server_command),
             system_prompt=system_prompt,
             extra_env=cli_cfg.env or None,
             ssh_transport=cli_cfg.ssh_transport,
             resume_external_backend=resume_external_backend,
-            external_session_id=external_session_id,
-            on_external_session_id=external_session_sink,
+            member_agent_id=card.id,
         )
     else:
         cwd, add_dirs = _resolve_external_paths(
@@ -254,8 +216,7 @@ async def external_cli_spawn(
             add_dirs=add_dirs,
             system_prompt=system_prompt,
             resume_external_backend=resume_external_backend,
-            external_session_id=external_session_id,
-            on_external_session_id=external_session_sink,
+            member_agent_id=card.id,
         )
 
     teammate = _TeamAgent(card)

@@ -67,6 +67,7 @@ def test_build_codex_config_uses_sdk_config_and_mcp_overrides():
         inject_mcp=True,
         mcp_server_name="openjiuwen-team",
         mcp_server_command=("openjiuwen-team-mcp", "--stdio"),
+        mcp_default_tools_approval_mode="approve",
         member_name="developer",
         codex_bin=None,
         sdk=_FAKE_SDK,
@@ -78,6 +79,10 @@ def test_build_codex_config_uses_sdk_config_and_mcp_overrides():
     assert config.kwargs["client_name"] == "openjiuwen_agent_team"
     assert 'mcp_servers.openjiuwen_team.command="openjiuwen-team-mcp"' in config.kwargs["config_overrides"]
     assert 'mcp_servers.openjiuwen_team.args=["--stdio"]' in config.kwargs["config_overrides"]
+    assert (
+        'mcp_servers.openjiuwen_team.default_tools_approval_mode="approve"'
+        in config.kwargs["config_overrides"]
+    )
 
 
 def test_build_codex_config_uses_custom_binary_without_rebuilding_app_server_argv():
@@ -89,6 +94,7 @@ def test_build_codex_config_uses_custom_binary_without_rebuilding_app_server_arg
         inject_mcp=True,
         mcp_server_name="team",
         mcp_server_command=("team-mcp",),
+        mcp_default_tools_approval_mode=None,
         member_name="developer",
         codex_bin="/opt/codex",
         sdk=_FAKE_SDK,
@@ -96,6 +102,10 @@ def test_build_codex_config_uses_custom_binary_without_rebuilding_app_server_arg
 
     assert config.kwargs["codex_bin"] == "/opt/codex"
     assert 'mcp_servers.team.command="team-mcp"' in config.kwargs["config_overrides"]
+    assert not any(
+        "default_tools_approval_mode" in item
+        for item in config.kwargs["config_overrides"]
+    )
     assert "launch_args_override" not in config.kwargs
 
 
@@ -116,6 +126,24 @@ def test_build_codex_thread_options_leave_approval_and_sandbox_unset():
     assert "sandbox" not in options
 
 
+def test_build_codex_thread_options_can_explicitly_bypass_safety_boundaries():
+    from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_thread_options
+
+    sdk = SimpleNamespace(
+        ApprovalMode=SimpleNamespace(deny_all="deny-all"),
+        Sandbox=SimpleNamespace(full_access="full-access"),
+    )
+    options = build_codex_thread_options(
+        cwd="/workspace",
+        system_prompt=None,
+        bypass_approvals_and_sandbox=True,
+        sdk=sdk,
+    )
+
+    assert options["approval_mode"] == "deny-all"
+    assert options["sandbox"] == "full-access"
+
+
 def test_build_codex_config_requires_mcp_command():
     from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_config
 
@@ -126,6 +154,7 @@ def test_build_codex_config_requires_mcp_command():
             inject_mcp=True,
             mcp_server_name="team",
             mcp_server_command=(),
+            mcp_default_tools_approval_mode=None,
             member_name="developer",
             codex_bin=None,
             sdk=_FAKE_SDK,
