@@ -346,3 +346,132 @@ def test_task_loop_controller_can_enqueue_follow_up() -> None:
 
     assert controller.has_follow_up()
     assert controller.drain_follow_up() == ["confirm completion"]
+
+
+@pytest.mark.asyncio
+async def test_goal_round_error_blocks_instead_of_continue() -> None:
+    """Only when task-loop ctx.exception is set (invoke raised) → BLOCKED.
+
+    Soft result_type=error without exception must not block (retries that
+    succeeded never leave exception on this outer ctx).
+    """
+    from openjiuwen.harness.goal.schema import GoalStatus
+
+    record = GoalRecord.create(session_id="s1", objective="ship it")
+    assessments: list[GoalAssessment] = []
+
+    class _Store:
+        def load(self):
+            return record
+
+    class _Manager:
+        def get_store(self, session_id=None):
+            return _Store()
+
+        async def apply_assessment(self, *, goal_id, revision, assessment):
+            assessments.append(assessment)
+            record.status = GoalStatus.BLOCKED
+            record.last_assessment = assessment
+            return record
+
+    rail = TaskCompletionRail()
+    rail.set_goal_manager(_Manager())
+    rail._is_goal_round = True
+    rail._current_goal_id = record.goal_id
+    rail._current_revision = record.revision
+    rail._current_session_id = record.session_id
+
+    inputs = SimpleNamespace(
+        result={"result_type": "error", "error": "Invalid API Key"},
+        run_context={
+            "goal_id": record.goal_id,
+            "revision": record.revision,
+            "session_id": record.session_id,
+        },
+    )
+    ctx = AgentCallbackContext(agent=object(), inputs=inputs)
+    ctx.exception = RuntimeError("Invalid API Key")
+
+    await rail._do_goal_after_iteration(ctx)
+
+    assert len(assessments) == 1
+    assert assessments[0].status is GoalAssessmentStatus.BLOCKED
+    assert "Invalid API Key" in assessments[0].evidence
+    assert record.status is GoalStatus.BLOCKED
+
+
+@pytest.mark.asyncio
+async def test_goal_interrupt_skips_assessment() -> None:
+    """HITL/permission interrupt must not run transcript assessor or apply_assessment."""
+    from openjiuwen.harness.goal.schema import GoalStatus
+
+    record = GoalRecord.create(session_id="s1", objective="ship it")
+    assessments: list[GoalAssessment] = []
+    assessor_calls = {"n": 0}
+
+    class _Store:
+        def load(self):
+            return record
+
+    class _Manager:
+        def get_store(self, session_id=None):
+            return _Store()
+
+        async def apply_assessment(self, *, goal_id, revision, assessment):
+            assessments.append(assessment)
+            return record
+
+    class _Evaluator:
+        strategy = None
+
+        def assess(self, **kwargs):
+            raise AssertionError("assess should not run on interrupt")
+
+    rail = TaskCompletionRail()
+    rail.set_goal_manager(_Manager())
+    rail._goal_evaluator = _Evaluator()
+    rail._is_goal_round = True
+    rail._current_goal_id = record.goal_id
+    rail._current_revision = record.revision
+    rail._current_session_id = record.session_id
+
+    async def _should_not_invoke(*args, **kwargs):
+        assessor_calls["n"] += 1
+        raise AssertionError("transcript assessor should not run on interrupt")
+
+    rail._maybe_invoke_transcript_assessor = _should_not_invoke  # type: ignore[method-assign]
+
+    inputs = SimpleNamespace(
+        result={"result_type": "interrupt", "component_ids": ["tool_1"]},
+        run_context={
+            "goal_id": record.goal_id,
+            "revision": record.revision,
+            "session_id": record.session_id,
+        },
+    )
+    ctx = AgentCallbackContext(agent=object(), inputs=inputs)
+
+    await rail._do_goal_after_iteration(ctx)
+
+    assert assessments == []
+    assert assessor_calls["n"] == 0
+    assert record.status is GoalStatus.ACTIVE
+
+
+def test_extract_goal_round_error_requires_thrown_exception() -> None:
+    ctx_exc = AgentCallbackContext(agent=object(), inputs=SimpleNamespace(result=None))
+    ctx_exc.exception = ValueError("token rejected")
+    assert TaskCompletionRail._extract_goal_round_error(ctx_exc) == "token rejected"
+
+    # result_type=error alone is not enough (could be soft return; retries OK).
+    ctx_result_only = AgentCallbackContext(
+        agent=object(),
+        inputs=SimpleNamespace(result={"result_type": "error", "error": "boom"}),
+    )
+    assert TaskCompletionRail._extract_goal_round_error(ctx_result_only) is None
+
+    ctx_ok = AgentCallbackContext(
+        agent=object(),
+        inputs=SimpleNamespace(result={"result_type": "answer", "output": "ok"}),
+    )
+    assert TaskCompletionRail._extract_goal_round_error(ctx_ok) is None
