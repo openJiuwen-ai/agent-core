@@ -6,12 +6,15 @@ from __future__ import annotations
 from openjiuwen.agent_teams.runtime.metadata import (
     TEAM_DB_STATE_CREATED,
     TEAM_DB_STATE_KEY,
+    TEAM_EXTERNAL_SESSIONS_KEY,
     TEAM_PENDING_RESUME_KEY,
     TEAMS_KEY,
     clear_pending_resume,
+    merge_external_session_id,
     merge_pending_resume,
     merge_team_db_state,
     merge_team_namespace,
+    read_external_session_id,
     read_pending_resume,
     read_team_db_state,
     read_team_names_in_session,
@@ -155,3 +158,37 @@ def test_read_pending_resume_ignores_non_dict_payload():
     session = _StubSession()
     write_team_namespace(session, "alpha", {TEAM_PENDING_RESUME_KEY: "nope"})
     assert read_pending_resume(session, "alpha") is None
+
+
+def test_external_session_ids_are_isolated_by_team_member_and_backend():
+    session = _StubSession()
+    write_team_namespace(session, "alpha", {"spec": {"team_name": "alpha"}})
+
+    merge_external_session_id(session, "alpha", "codex-1", "codex", "thread-1")
+    merge_external_session_id(session, "alpha", "codex-2", "codex", "thread-2")
+    merge_external_session_id(session, "beta", "codex-1", "codex", "thread-beta")
+
+    assert read_external_session_id(session, "alpha", "codex-1", "codex") == "thread-1"
+    assert read_external_session_id(session, "alpha", "codex-2", "codex") == "thread-2"
+    assert read_external_session_id(session, "beta", "codex-1", "codex") == "thread-beta"
+    assert read_external_session_id(session, "alpha", "codex-1", "claude") is None
+    assert read_team_namespace(session, "alpha")["spec"] == {"team_name": "alpha"}
+
+
+def test_external_session_reader_rejects_invalid_checkpoint_entries():
+    session = _StubSession()
+    write_team_namespace(
+        session,
+        "alpha",
+        {
+            TEAM_EXTERNAL_SESSIONS_KEY: {
+                "bad-entry": "thread-1",
+                "bad-id": {"backend": "codex", "external_session_id": 7},
+                "blank-id": {"backend": "codex", "external_session_id": "  "},
+            }
+        },
+    )
+
+    assert read_external_session_id(session, "alpha", "bad-entry", "codex") is None
+    assert read_external_session_id(session, "alpha", "bad-id", "codex") is None
+    assert read_external_session_id(session, "alpha", "blank-id", "codex") is None

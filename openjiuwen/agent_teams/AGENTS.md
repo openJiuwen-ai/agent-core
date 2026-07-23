@@ -263,11 +263,15 @@ openclaw 无已知注册方式则 `mcp_inject=none` + 大声告警。MCP server 
 Claude 经 SDK system prompt / Codex 经 `thread_start(developer_instructions=...)` /
 codex-exec 经 `-c developer_instructions` / 其余 prepend 下发。Codex 的每个 Jiuwen 成员各自
 持有一个 `AsyncCodex` client 和一个独立 thread，多轮任务在同一 thread 上执行，成员间不共享
-上下文；Leader shutdown 先对活跃 `AsyncTurnHandle` 执行 `interrupt()`，再调用
+上下文；首次 `thread_start()` 返回的 thread id 以
+`state["teams"][team_name]["external_sessions"][member_name]` 写入当前 team-session checkpoint，
+冷重建时仅为同 team、同 member、同 backend 回填并调用 `thread_resume()`；该运行态 id 不进入
+`TeamAgentSpec`。Leader shutdown 先对活跃 `AsyncTurnHandle` 执行 `interrupt()`，再调用
 `AsyncCodex.close()` 关闭 SDK 资源。SDK 内部仍使用 app-server，但 Jiuwen 不再自行实现 JSON-RPC。其
 SDK 输出经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内成员同路 fan-out。
 详见 [[F_22]]、[[F_25_external-cli-hardening-and-gemini]] 与
-[[F_58_codex-app-server-runtime]]、[[F_66_codex-python-sdk-runtime]]。
+[[F_58_codex-app-server-runtime]]、[[F_66_codex-python-sdk-runtime]]、
+[[F_67_codex-external-session-checkpoint]]。
 
 设计文档见 `docs/features/F_21_external-agent-access.md`（接入面 + spawn 接线）与
 `docs/features/F_22_external-cli-spawn-member-and-mcp-injection.md`（external_cli spawn 工具 +

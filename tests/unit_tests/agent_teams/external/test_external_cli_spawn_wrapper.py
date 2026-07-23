@@ -6,12 +6,17 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from openjiuwen.agent_teams.schema.build_context import BuildContext
+from openjiuwen.agent_teams.runtime.metadata import (
+    merge_external_session_id,
+    read_external_session_id,
+)
 from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, TeamAgentSpec
+from openjiuwen.agent_teams.schema.build_context import BuildContext
 from openjiuwen.agent_teams.schema.status import MemberMode
 from openjiuwen.agent_teams.schema.team import TeamLifecycle, TeamRole, TeamRuntimeContext, TeamSpec
 from openjiuwen.agent_teams.spawn import external_cli_spawn as spawn_mod
@@ -60,9 +65,25 @@ class _FakeRuntime:
 
 
 class _FakeTeamAgent:
-    def __init__(self, spec: TeamAgentSpec) -> None:
+    def __init__(self, spec: TeamAgentSpec, team_session: Any | None = None) -> None:
         self.spec = spec
         self.team_backend = None
+        self.session_manager = SimpleNamespace(team_session=team_session)
+
+
+class _FakeTeamSession:
+    def __init__(self) -> None:
+        self.state: dict[str, Any] = {}
+        self.flush_count = 0
+
+    def update_state(self, data: dict[str, Any]) -> None:
+        self.state.update(data)
+
+    def get_state(self, key: str | None = None) -> Any:
+        return self.state if key is None else self.state.get(key)
+
+    async def flush_checkpoint(self) -> None:
+        self.flush_count += 1
 
 
 async def _empty_outputs() -> Any:
@@ -217,6 +238,61 @@ async def test_external_cli_spawn_resume_passes_backend_flag(monkeypatch):
 
     assert build_kwargs["resume_external_backend"] is True
     assert run_inputs == {"query": ""}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_spawn_restores_and_checkpoints_member_thread_id(monkeypatch):
+    """Cold Codex rebuilds resume only their own checkpointed SDK thread."""
+    runtime = _FakeRuntime()
+    started = asyncio.Event()
+    build_kwargs: dict[str, Any] = {}
+
+    async def _fake_build_cli_runtime(*args: Any, **kwargs: Any) -> _FakeRuntime:
+        _ = args
+        build_kwargs.update(kwargs)
+        return runtime
+
+    async def _fake_run_agent_team(*args: Any, **kwargs: Any) -> None:
+        _ = args, kwargs
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(spawn_mod, "build_cli_runtime", _fake_build_cli_runtime)
+    monkeypatch.setattr(Runner, "run_agent_team", _fake_run_agent_team)
+
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        team_name="ext_team",
+        display_name="Ext",
+        lifecycle=TeamLifecycle.PERSISTENT,
+        teammate_mode=MemberMode.BUILD_MODE,
+        external_cli_agents=[{"cli_agent": "codex"}],
+    )
+    session = _FakeTeamSession()
+    merge_external_session_id(session, "ext_team", "codex-1", "codex", "thread-old")
+    agent = _FakeTeamAgent(spec, session)
+    ctx = TeamRuntimeContext(
+        role=TeamRole.TEAMMATE,
+        member_name="codex-1",
+        cli_agent="codex",
+        team_spec=TeamSpec(team_name="ext_team", display_name="Ext"),
+    )
+
+    handle = await spawn_mod.external_cli_spawn(
+        agent,
+        ctx,
+        session_id="sess-1",
+        resume_external_backend=True,
+    )
+    await started.wait()
+
+    assert build_kwargs["external_session_id"] == "thread-old"
+    await build_kwargs["on_external_session_id"]("thread-new")
+    assert read_external_session_id(session, "ext_team", "codex-1", "codex") == "thread-new"
+    assert session.flush_count == 1
+
+    await handle.force_kill()
 
 
 @pytest.mark.asyncio

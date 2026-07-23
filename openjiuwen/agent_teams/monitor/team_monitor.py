@@ -294,7 +294,12 @@ class TeamMonitor:
         self._event_queue.put_nowait(monitor_event)
 
 
-def create_monitor(team_agent: TeamAgent, *, hide_dm: bool = False) -> TeamMonitor:
+def create_monitor(
+    team_agent: TeamAgent,
+    *,
+    hide_dm: bool = False,
+    session_id: str | None = None,
+) -> TeamMonitor:
     """Create a TeamMonitor bound to a leader TeamAgent.
 
     Args:
@@ -302,6 +307,10 @@ def create_monitor(team_agent: TeamAgent, *, hide_dm: bool = False) -> TeamMonit
         hide_dm: Forwarded to ``TeamMonitor``; when True, every
             non-broadcast message is filtered from both query results
             and the live event stream. Defaults to False.
+        session_id: Session whose dynamic database tables the monitor must
+            query. Callers that already resolved a runtime should pass it
+            explicitly; direct callers may omit it to use the current
+            session context.
 
     Returns:
         A new TeamMonitor ready to be started.
@@ -321,7 +330,7 @@ def create_monitor(team_agent: TeamAgent, *, hide_dm: bool = False) -> TeamMonit
 
     return TeamMonitor(
         team_name=backend.team_name,
-        session_id=get_session_id(),
+        session_id=session_id if session_id is not None else get_session_id(),
         db=backend.db,
         team_agent=team_agent,
         hide_dm=hide_dm,

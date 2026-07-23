@@ -53,6 +53,7 @@ os.environ.setdefault("IS_SENSITIVE", "false")
 _MEMBERS = ("codex-1", "codex-2", "codex-3", "codex-4")
 _SESSION_ID = "codex_cli_session"
 _RUN_TIMEOUT_S = 1200.0
+_VERIFY_POLL_INTERVAL_S = 0.2
 _MCP_SERVER_COMMAND = [sys.executable, "-m", "openjiuwen.agent_teams.mcp"]
 
 
@@ -148,33 +149,117 @@ def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
 
 
 def _god_view_query(workspace_path: Path) -> str:
-    roster = "\n".join(
-        f"   - {name}：任务 ID 为 task-{name}，写入 {name}.md" for name in _MEMBERS
-    )
+    roster = "\n".join(f"   - {name}：任务 ID 为 task-{name}，写入 {name}.md" for name in _MEMBERS)
     return (
         "请组建一个 4 人临时团队，完成 Codex CLI 协同写文件验证，全程自主推进：\n\n"
         "1. 调用 build_team 建立团队。\n"
         "2. 调用 spawn_external_cli 创建以下成员，cli_agent 都必须是 codex：\n"
         f"{roster}\n"
-        "3. 团队使用自主认领模式。在成员全部创建成功后，用一次 create_task "
-        "批量创建 4 个任务；不要用 update_task 设置 assignee。"
-        "每个任务的标题和内容必须写明唯一的目标成员和对应任务 ID，"
-        "仅允许该成员认领。\n"
-        "4. 任务创建成功后，分别用 send_message 将对应任务 ID 发给每个成员。"
-        "成员收到消息后必须先调用 claim_task(claimed) 认领指定任务，"
-        "再写文件，最后调用 claim_task(completed) 完成任务，"
-        "并用 send_message 向 leader 汇报。\n"
+        "3. 团队使用自主认领模式。成员全部创建成功后，用一次 create_task "
+        "批量创建 4 个任务。tasks 中每项只填写 task_id、title、content，"
+        "不得添加 assignee、depends_on、depended_by 或 reviewer。"
+        "title 和 content 都必须是单行短文本；content 不得包含双引号、反斜杠、"
+        "换行、绝对路径、JSON 示例或具体操作步骤。严格使用以下四项：\n"
+        "   - task-codex-1｜codex-1 写入 codex-1.md｜仅 codex-1 认领 task-codex-1 并产出 codex-1.md\n"
+        "   - task-codex-2｜codex-2 写入 codex-2.md｜仅 codex-2 认领 task-codex-2 并产出 codex-2.md\n"
+        "   - task-codex-3｜codex-3 写入 codex-3.md｜仅 codex-3 认领 task-codex-3 并产出 codex-3.md\n"
+        "   - task-codex-4｜codex-4 写入 codex-4.md｜仅 codex-4 认领 task-codex-4 并产出 codex-4.md\n"
+        "4. 任务创建成功后，分别用 send_message 把完整执行要求发给对应成员。"
+        "消息中写明对应任务 ID、共享工作目录和文件名，并要求成员严格依次执行："
+        "先调用 claim_task(claimed) 认领指定任务，再写文件，"
+        "然后调用 claim_task(completed) 完成任务，最后用 send_message 向 leader 汇报。\n"
         f"   共享工作目录：{workspace_path}\n"
         "   文件内容固定为一行：<member> reporting in.\n"
         "5. 用 view_task 跟踪，只有四个任务都 completed 才继续。\n"
-        "6. 确认四个文件都存在后，对四个成员逐一调用 "
-        "shutdown_member(member_name=<member>, force=true)，不要发 shutdown 提示词。\n"
-        "7. 全部关停成功后调用 clean_team，最后简要汇报。\n"
+        "6. 四个任务都 completed 且四个文件都存在后，保持团队和工作区不变，"
+        "等待 GodView 发送‘外部文件验证已通过，可以清理团队’。在收到这条消息前，"
+        "严禁调用 shutdown_member 或 clean_team。\n"
+        "7. 收到该 GodView 消息后，先再次确认四个任务都 completed，"
+        "再对四个成员逐一调用 shutdown_member(member_name=<member>, force=true)，"
+        "不要发 shutdown 提示词。全部关停成功后调用 clean_team，最后简要汇报。\n"
     )
 
 
 def _expected_files(workspace_path: Path) -> list[Path]:
     return [workspace_path / f"{member}.md" for member in _MEMBERS]
+
+
+def _verified_files(workspace_path: Path) -> list[Path]:
+    """Return files whose contents already satisfy the E2E contract."""
+    verified: list[Path] = []
+    for member, path in zip(_MEMBERS, _expected_files(workspace_path)):
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            continue
+        if content == f"{member} reporting in.":
+            verified.append(path)
+    return verified
+
+
+async def _verify_before_cleanup(
+    workspace_path: Path,
+    *,
+    team_name: str,
+    stream_task: asyncio.Task[None],
+    runtime_ready: asyncio.Event,
+) -> list[Path]:
+    """Release cleanup only after artifacts and team tasks are complete."""
+    from openjiuwen.agent_teams.schema.status import TaskStatus
+    from sqlalchemy.exc import OperationalError
+
+    await runtime_ready.wait()
+    expected_task_ids = {f"task-{member}" for member in _MEMBERS}
+    monitor = None
+    while True:
+        verified = _verified_files(workspace_path)
+        if monitor is None:
+            monitor = await Runner.get_agent_team_monitor(
+                team_name=team_name,
+                session_id=_SESSION_ID,
+            )
+
+        completed_task_ids: set[str] = set()
+        if monitor is not None:
+            try:
+                tasks = await monitor.get_tasks()
+            except OperationalError as exc:
+                # ``team.runtime_ready`` is emitted after the runtime enters
+                # the pool but just before ``TeamAgent.stream()`` creates the
+                # session-scoped task tables. Treat only that startup race as
+                # transient; every other database error must still fail fast.
+                if "no such table: team_task_" not in str(exc):
+                    raise
+                await asyncio.sleep(_VERIFY_POLL_INTERVAL_S)
+                continue
+            completed_task_ids = {
+                task.task_id
+                for task in tasks
+                if task.task_id in expected_task_ids and task.status == TaskStatus.COMPLETED.value
+            }
+
+        files_ready = len(verified) == len(_MEMBERS)
+        tasks_ready = completed_task_ids == expected_task_ids
+        if files_ready and tasks_ready:
+            for path in verified:
+                print(f"[verified-before-clean] {path}")
+            print(f"[verified-before-clean] completed tasks: {sorted(completed_task_ids)}")
+            result = await Runner.interact_agent_team(
+                "外部文件验证已通过，可以清理团队。",
+                team_name=team_name,
+                session_id=_SESSION_ID,
+            )
+            if not result.ok:
+                raise RuntimeError(f"failed to release team cleanup: {result.reason}")
+            return verified
+        if stream_task.done():
+            await stream_task
+            raise RuntimeError(
+                "team stream ended before all four artifacts and tasks were completed: "
+                f"files={len(verified)}/{len(_MEMBERS)}, "
+                f"completed_tasks={sorted(completed_task_ids)}"
+            )
+        await asyncio.sleep(_VERIFY_POLL_INTERVAL_S)
 
 
 async def _run() -> int:
@@ -196,23 +281,49 @@ async def _run() -> int:
     print("codex=one AsyncCodex client and one independent thread per member")
 
     await Runner.start()
+    verified_files: list[Path] = []
+    cleanup_gate_passed = False
+    runtime_ready = asyncio.Event()
+
+    async def _on_runtime_ready(_team_name: str, _session_id: str) -> None:
+        runtime_ready.set()
+
+    stream_task = asyncio.create_task(
+        consume_stream(
+            spec,
+            _god_view_query(workspace_path),
+            _SESSION_ID,
+            on_runtime_ready=_on_runtime_ready,
+            ordered_output=True,
+        )
+    )
+    verification_task = asyncio.create_task(
+        _verify_before_cleanup(
+            workspace_path,
+            team_name=team_name,
+            stream_task=stream_task,
+            runtime_ready=runtime_ready,
+        )
+    )
     try:
-        await asyncio.wait_for(
-            consume_stream(
-                spec,
-                _god_view_query(workspace_path),
-                _SESSION_ID,
-                ordered_output=True,
-            ),
+        _, verified_files = await asyncio.wait_for(
+            asyncio.gather(stream_task, verification_task),
             timeout=_RUN_TIMEOUT_S,
         )
+        cleanup_gate_passed = True
     except asyncio.TimeoutError:
         logger.error("run exceeded {}s budget; checking partial output", _RUN_TIMEOUT_S)
     finally:
-        present = [path for path in _expected_files(workspace_path) if path.is_file()]
-        missing_files = [path for path in _expected_files(workspace_path) if not path.is_file()]
-        for path in present:
-            print(f"[ok]      {path}")
+        for task in (stream_task, verification_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(stream_task, verification_task, return_exceptions=True)
+        if not verified_files:
+            verified_files = _verified_files(workspace_path)
+        present = set(verified_files)
+        missing_files = [path for path in _expected_files(workspace_path) if path not in present]
+        for path in verified_files:
+            print(f"[ok-before-clean] {path}")
         for path in missing_files:
             print(f"[MISSING] {path}")
         try:
@@ -221,8 +332,12 @@ async def _run() -> int:
             logger.warning("cleanup failed for team {}: {}", team_name, exc)
         await Runner.stop()
 
-    print(f"RESULT: {'PASS' if not missing_files else 'FAIL'} — {len(present)}/{len(_MEMBERS)} files")
-    return 0 if not missing_files else 1
+    passed = cleanup_gate_passed and not missing_files
+    print(
+        f"RESULT: {'PASS' if passed else 'FAIL'} — "
+        f"{len(present)}/{len(_MEMBERS)} files; cleanup_gate_passed={cleanup_gate_passed}"
+    )
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":

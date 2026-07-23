@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from typing import AsyncIterator
+from typing import AsyncIterator, Awaitable, Callable
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.external.cli_agent.adapters import CliAgentAdapter, build_adapter
@@ -172,6 +172,8 @@ async def build_cli_runtime(
     extra_env: dict[str, str] | None = None,
     ssh_transport: SshTransportConfig | None = None,
     resume_external_backend: bool = False,
+    external_session_id: str | None = None,
+    on_external_session_id: Callable[[str], Awaitable[None]] | None = None,
 ) -> CliRuntimeBase:
     """Build the member runtime for ``ctx.cli_agent``.
 
@@ -206,6 +208,10 @@ async def build_cli_runtime(
             by the Claude SDK backend.
         resume_external_backend: When True, resume the derived backend session
             instead of starting it as a fresh session.
+        external_session_id: Backend-native resume id restored from the
+            current Jiuwen team-session checkpoint.
+        on_external_session_id: Async sink called when an SDK backend allocates
+            a new native session id that must be checkpointed.
     """
     if not ctx.cli_agent:
         raise_error(
@@ -255,10 +261,10 @@ async def build_cli_runtime(
                 ctx.member_name,
                 cwd,
             )
-        if resume_external_backend:
+        thread_id = external_session_id if resume_external_backend else None
+        if resume_external_backend and thread_id is None:
             team_logger.warning(
-                "[external-cli] cold-rebuilt codex member {} starts a new SDK thread; "
-                "in-process multi-turn continuity is preserved, cold thread resume is not yet persisted",
+                "[external-cli] cold-rebuilt codex member {} has no saved SDK thread; starting a new thread",
                 ctx.member_name,
             )
         return await build_codex_runtime(
@@ -270,6 +276,8 @@ async def build_cli_runtime(
             mcp_server_command=mcp_server_command,
             system_prompt=system_prompt,
             command_override=command_override,
+            thread_id=thread_id,
+            on_thread_id=on_external_session_id,
         )
     if ssh_transport is not None:
         raise_error(
@@ -295,9 +303,7 @@ async def build_cli_runtime(
 
     mcp_args: tuple[str, ...] = ()
     if inject_mcp:
-        mcp_args = tuple(
-            adapter.mcp_launch_args(server_name=mcp_server_name, server_command=mcp_server_command)
-        )
+        mcp_args = tuple(adapter.mcp_launch_args(server_name=mcp_server_name, server_command=mcp_server_command))
         if not mcp_args:
             # No launch-injection flag for this CLI: register the team MCP
             # server out of band (e.g. `gemini mcp add`) so the member still

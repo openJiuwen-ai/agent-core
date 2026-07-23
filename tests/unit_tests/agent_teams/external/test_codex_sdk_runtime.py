@@ -76,6 +76,23 @@ class _BlockingThread(_FakeThread):
         return self.handle
 
 
+class _FakeRpcError(Exception):
+    def __init__(self, code: int, message: str):
+        super().__init__(f"JSON-RPC error {code}: {message}")
+        self.code = code
+        self.message = message
+
+
+class _RejectingSteerHandle(_FakeTurnHandle):
+    def __init__(self, error: Exception):
+        super().__init__([])
+        self.error = error
+
+    async def steer(self, content: str):
+        self.steered.append(content)
+        raise self.error
+
+
 class _FakeAsyncCodex:
     def __init__(self, *, config, thread):
         self.config = config
@@ -96,7 +113,7 @@ class _FakeAsyncCodex:
         self.close_count += 1
 
 
-def _runtime(*, thread, thread_id=None):
+def _runtime(*, thread, thread_id=None, on_thread_id=None):
     client = _FakeAsyncCodex(config=None, thread=thread)
     sdk = SimpleNamespace(AsyncCodex=lambda *, config: client)
     runtime = CodexSdkRuntime(
@@ -109,6 +126,7 @@ def _runtime(*, thread, thread_id=None):
             "developer_instructions": "role prompt",
         },
         thread_id=thread_id,
+        on_thread_id=on_thread_id,
     )
     return runtime, client
 
@@ -186,6 +204,44 @@ async def test_codex_sdk_runtime_resumes_saved_thread_id_without_ephemeral():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_codex_sdk_runtime_reports_new_thread_id_once():
+    reported: list[str] = []
+
+    async def _report(thread_id: str) -> None:
+        reported.append(thread_id)
+
+    thread = _FakeThread("thread-new", [[], []])
+    runtime, _ = _runtime(thread=thread, on_thread_id=_report)
+
+    await runtime.start()
+    await runtime.start()
+    _ = [chunk async for chunk in runtime._drive({"query": "first"})]
+
+    assert reported == ["thread-new"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_does_not_rewrite_restored_thread_id():
+    reported: list[str] = []
+
+    async def _report(thread_id: str) -> None:
+        reported.append(thread_id)
+
+    thread = _FakeThread("thread-saved", [[]])
+    runtime, _ = _runtime(
+        thread=thread,
+        thread_id="thread-saved",
+        on_thread_id=_report,
+    )
+
+    await runtime.start()
+
+    assert reported == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_codex_sdk_runtime_steers_and_interrupts_active_turn():
     thread = _FakeThread("thread-developer", [[]])
     runtime, client = _runtime(thread=thread)
@@ -200,6 +256,37 @@ async def test_codex_sdk_runtime_steers_and_interrupts_active_turn():
     assert handle.interrupt_count == 1
     await runtime.aclose()
     assert client.close_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_queues_steer_when_server_turn_already_ended():
+    thread = _FakeThread("thread-developer", [[]])
+    runtime, _ = _runtime(thread=thread)
+    handle = _RejectingSteerHandle(_FakeRpcError(-32600, "no active turn to steer"))
+    runtime._active_turn = handle
+
+    await runtime.steer("deliver on next turn")
+
+    assert handle.steered == ["deliver on next turn"]
+    assert runtime._active_turn is None
+    assert runtime._pending == ["deliver on next turn"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_does_not_queue_unrelated_steer_errors():
+    thread = _FakeThread("thread-developer", [[]])
+    runtime, _ = _runtime(thread=thread)
+    error = _FakeRpcError(-32600, "invalid steer input")
+    handle = _RejectingSteerHandle(error)
+    runtime._active_turn = handle
+
+    with pytest.raises(_FakeRpcError, match="invalid steer input"):
+        await runtime.steer("bad input")
+
+    assert runtime._active_turn is handle
+    assert runtime._pending == []
 
 
 @pytest.mark.asyncio

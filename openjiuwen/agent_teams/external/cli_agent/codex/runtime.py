@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from enum import Enum
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from openjiuwen.agent_teams.external.cli_agent.codex.options import (
     build_codex_config,
@@ -21,6 +21,8 @@ from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.stream.base import OutputSchema
 
 _INTERRUPT_TIMEOUT_S = 5.0
+_NO_ACTIVE_TURN_ERROR_CODE = -32600
+_NO_ACTIVE_TURN_ERROR_MESSAGE = "no active turn to steer"
 _TOOL_ITEM_TYPES = {"commandExecution", "dynamicToolCall", "fileChange", "mcpToolCall"}
 _REASONING_METHODS = {
     "item/reasoning/summaryTextDelta",
@@ -39,12 +41,15 @@ class CodexSdkRuntime(CliRuntimeBase):
         config: Any,
         thread_options: dict[str, Any],
         thread_id: str | None = None,
+        on_thread_id: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(member_name=member_name)
         self._sdk = sdk
         self._config = config
         self._thread_options = dict(thread_options)
         self._thread_id = thread_id
+        self._reported_thread_id = thread_id
+        self._on_thread_id = on_thread_id
         self._client: Any | None = None
         self._thread: Any | None = None
         self._active_turn: Any | None = None
@@ -65,6 +70,7 @@ class CodexSdkRuntime(CliRuntimeBase):
     async def _ensure_thread(self) -> Any:
         """Lazily initialize ``AsyncCodex`` and this runtime's single thread."""
         if self._thread is not None:
+            await self._report_thread_id()
             return self._thread
         if self._client is None:
             self._client = self._sdk.AsyncCodex(config=self._config)
@@ -78,6 +84,7 @@ class CodexSdkRuntime(CliRuntimeBase):
             self._thread = await self._client.thread_start(**options)
             activation = "started"
         self._thread_id = self._thread.id
+        await self._report_thread_id()
         team_logger.info(
             "[external-cli] member {} {} codex SDK thread {}",
             self._member_name,
@@ -85,6 +92,15 @@ class CodexSdkRuntime(CliRuntimeBase):
             self._thread_id,
         )
         return self._thread
+
+    async def _report_thread_id(self) -> None:
+        """Persist a newly allocated thread id through the owning team session."""
+        thread_id = self._thread_id
+        if not thread_id or thread_id == self._reported_thread_id:
+            return
+        if self._on_thread_id is not None:
+            await self._on_thread_id(thread_id)
+        self._reported_thread_id = thread_id
 
     async def _drive(self, inputs: dict[str, Any]) -> AsyncIterator[Any]:
         """Run queued messages as SDK turns on this member's one thread."""
@@ -140,7 +156,23 @@ class CodexSdkRuntime(CliRuntimeBase):
         if handle is None:
             self._pending.append(content)
             return
-        await handle.steer(content)
+        try:
+            await handle.steer(content)
+        except Exception as exc:  # noqa: BLE001 - the optional SDK error type is loaded lazily
+            if not _is_no_active_turn_to_steer(exc):
+                raise
+            # The app-server is authoritative: it may finish the turn before
+            # the terminal stream notification reaches this runtime and clears
+            # ``_active_turn``. Preserve the input as the next turn on the same
+            # thread instead of dropping it at that completion boundary.
+            if self._active_turn is handle:
+                self._active_turn = None
+            self._pending.append(content)
+            team_logger.info(
+                "[external-cli] member {} codex SDK turn ended before steer; "
+                "queued input for the next turn",
+                self._member_name,
+            )
 
     async def follow_up(self, content: str) -> None:
         """Queue an ordinary message as the next turn on the same thread."""
@@ -185,6 +217,16 @@ class CodexSdkRuntime(CliRuntimeBase):
             self._client = None
             with contextlib.suppress(Exception):
                 await client.close()
+
+
+def _is_no_active_turn_to_steer(exc: Exception) -> bool:
+    """Return whether Codex rejected steer because its turn already ended."""
+    message = getattr(exc, "message", None)
+    return (
+        getattr(exc, "code", None) == _NO_ACTIVE_TURN_ERROR_CODE
+        and isinstance(message, str)
+        and _NO_ACTIVE_TURN_ERROR_MESSAGE in message.lower()
+    )
 
 
 def _notification_chunks(notification: Any, start_index: int) -> list[OutputSchema]:
@@ -334,6 +376,7 @@ async def build_codex_runtime(
     system_prompt: str | None,
     command_override: tuple[str, ...] | None,
     thread_id: str | None = None,
+    on_thread_id: Callable[[str], Awaitable[None]] | None = None,
 ) -> CodexSdkRuntime:
     """Build a Codex Python SDK runtime without starting its thread eagerly."""
     sdk = load_codex_sdk()
@@ -354,6 +397,7 @@ async def build_codex_runtime(
         config=config,
         thread_options=thread_options,
         thread_id=thread_id,
+        on_thread_id=on_thread_id,
     )
 
 

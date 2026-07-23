@@ -14,6 +14,12 @@ context, allocator state, and lifecycle hint for one team.
         "lifecycle": "running"|"paused",  # optional, written by pause path
         "db_state": "pending_create"|"created"|"cleaned",
         "pending_resume": {"query": ...}, # optional, set by pause / consumed by start
+        "external_sessions": {            # optional, runtime state by member
+            member_name: {
+                "backend": "codex",
+                "external_session_id": "...",
+            },
+        },
     }
 
 ``pending_resume`` is what makes ``pause -> stop -> start`` equivalent to
@@ -39,6 +45,9 @@ from typing import Any
 TEAMS_KEY = "teams"
 TEAM_PENDING_RESUME_KEY = "pending_resume"
 TEAM_DB_STATE_KEY = "db_state"
+TEAM_EXTERNAL_SESSIONS_KEY = "external_sessions"
+EXTERNAL_SESSION_BACKEND_KEY = "backend"
+EXTERNAL_SESSION_ID_KEY = "external_session_id"
 TEAM_DB_STATE_PENDING_CREATE = "pending_create"
 TEAM_DB_STATE_CREATED = "created"
 TEAM_DB_STATE_CLEANED = "cleaned"
@@ -113,6 +122,58 @@ def merge_pending_resume(session, team_name: str, payload: dict[str, Any]) -> No
     merge_team_namespace(session, team_name, {TEAM_PENDING_RESUME_KEY: dict(payload)})
 
 
+def read_external_session_id(
+    session,
+    team_name: str,
+    member_name: str,
+    backend: str,
+) -> str | None:
+    """Return one member's backend-native resume id from the team checkpoint.
+
+    Backend matching is deliberate: a member name may be reused after its
+    external backend changes, and a Codex thread id must never be handed to a
+    different SDK or adapter.
+    """
+    bucket = read_team_namespace(session, team_name)
+    if bucket is None:
+        return None
+    sessions = bucket.get(TEAM_EXTERNAL_SESSIONS_KEY)
+    if not isinstance(sessions, dict):
+        return None
+    entry = sessions.get(member_name)
+    if not isinstance(entry, dict) or entry.get(EXTERNAL_SESSION_BACKEND_KEY) != backend:
+        return None
+    value = entry.get(EXTERNAL_SESSION_ID_KEY)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def merge_external_session_id(
+    session,
+    team_name: str,
+    member_name: str,
+    backend: str,
+    external_session_id: str,
+) -> None:
+    """Persist one external member's backend-native resume id.
+
+    The mapping lives below the current Jiuwen team-session checkpoint rather
+    than in ``TeamAgentSpec``: specs are static launch configuration, whereas
+    this id is runtime state scoped to one team, member, and Jiuwen session.
+    """
+    sessions: dict[str, Any] = {}
+    bucket = read_team_namespace(session, team_name)
+    if bucket is not None and isinstance(bucket.get(TEAM_EXTERNAL_SESSIONS_KEY), dict):
+        sessions.update(bucket[TEAM_EXTERNAL_SESSIONS_KEY])
+    sessions[member_name] = {
+        EXTERNAL_SESSION_BACKEND_KEY: backend,
+        EXTERNAL_SESSION_ID_KEY: external_session_id,
+    }
+    merge_team_namespace(session, team_name, {TEAM_EXTERNAL_SESSIONS_KEY: sessions})
+
+
 def clear_pending_resume(session, team_name: str) -> bool:
     """Drop the pending-resume marker once consumed. ``True`` when removed."""
     teams = dict(read_teams_bucket(session))
@@ -138,6 +199,9 @@ __all__ = [
     "TEAMS_KEY",
     "TEAM_PENDING_RESUME_KEY",
     "TEAM_DB_STATE_KEY",
+    "TEAM_EXTERNAL_SESSIONS_KEY",
+    "EXTERNAL_SESSION_BACKEND_KEY",
+    "EXTERNAL_SESSION_ID_KEY",
     "TEAM_DB_STATE_PENDING_CREATE",
     "TEAM_DB_STATE_CREATED",
     "TEAM_DB_STATE_CLEANED",
@@ -148,6 +212,8 @@ __all__ = [
     "write_team_namespace",
     "merge_team_namespace",
     "merge_team_db_state",
+    "read_external_session_id",
+    "merge_external_session_id",
     "read_pending_resume",
     "merge_pending_resume",
     "clear_pending_resume",

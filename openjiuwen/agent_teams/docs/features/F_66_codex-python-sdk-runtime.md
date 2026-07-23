@@ -34,6 +34,9 @@ interrupt 契约。
 
 3. **交互语义直接映射 SDK handle**
    - 当前 turn 的紧急消息调用 `handle.steer()`。
+   - app-server 可能先于终态 stream notification 完成 turn；此窗口内
+     `handle.steer()` 返回 `-32600: no active turn to steer` 时，runtime 会将原消息
+     降级到 pending，在同一 thread 的下一 turn 投递。其它 steer 错误仍原样上抛。
    - 普通在途消息排队，当前 turn 结束后在同一 thread 上开新 turn。
    - abort / shutdown 调用 `handle.interrupt()`；关闭调用 `AsyncCodex.close()`，并保证幂等。
 
@@ -61,12 +64,14 @@ interrupt 契约。
 
 - 可选依赖延迟导入，未安装时返回 Codex 专属配置错误。
 - fake SDK 验证 thread start/resume、多 turn 复用、事件转换、steer、interrupt 和幂等关闭。
+- fake RPC 错误验证 active-turn 终态竞态会转为同 thread 后续 turn，
+  且不相干的 steer 错误不会被吞掉。
 - MCP config override 验证 command / args / join env / startup timeout / required。
 - external CLI 单测：123 passed。
 
 ## 已知遗留
 
-- `CodexSdkRuntime` 已支持使用传入的 `thread_id` 执行 `thread_resume()`，但
-  spawn/TeamAgent checkpoint 尚未持久化和回填该 id；冷重建仍会建新 thread。
+- spawn/TeamAgent checkpoint 的 thread id 持久化与冷续接已在
+  [[F_67_codex-external-session-checkpoint]] 完成。
 - 尚需真实 Codex 环境 E2E 验收 MCP 可见性、团队任务工具调用和 pause/resume。
 - Codex SDK 当前是本地 app-server subprocess 模式，没有实现 SSH transport。
