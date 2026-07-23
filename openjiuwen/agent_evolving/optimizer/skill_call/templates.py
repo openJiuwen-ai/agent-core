@@ -124,7 +124,7 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 
 ## 数量限制
 
-最终输出的有效经验（action 为 append 的条目）：**文本经验不超过 2 条，脚本经验不超过 1 条**，独立计数互不影响。
+最终输出的有效经验（action 为 append 的条目）：**文本经验不超过 5 条，脚本经验不超过 3 条**，独立计数互不影响。
 如果候选经验超过限制，按以下优先级保留最重要的，其余标记为 skip：
 1. 导致任务失败或产出错误结果的问题 > 导致效率低下但最终成功的问题
 2. 高频/可复现的模式 > 单次偶发现象
@@ -150,7 +150,7 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 - 全新：与已有记录无关 -> 继续第三步
 
 ### 第三步：优先级筛选与生成
-将所有通过前两步的候选经验按优先级排序，仅为排名前 2 的文本候选和排名第 1 的脚本候选生成内容，其余输出 {{"action": "skip", "skip_reason": "low_priority"}}。不要用 low_priority 跳过唯一可归因 signal。
+将所有通过前两步的候选经验按优先级排序，仅为排名前 5 的文本候选和排名前 3 的脚本候选生成内容，其余输出 {{"action": "skip", "skip_reason": "low_priority"}}。不要用 low_priority 跳过唯一可归因 signal。
 确定经验归属层（target）和章节（section），然后生成内容。
 
 **target 判断（三选一）：**
@@ -171,7 +171,7 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 5. 提取可复用的通用规则，非临时补丁（好："遇到 X 错误时，先检查 Y 再执行 Z"；差："某用户某次提到某问题"）
 6. 内容必须是 Skill 中未提及的新知识，精炼简洁
 7. 多个发现指向同一问题时合并为一条；不同问题分别生成
-8. 文本经验（action 为 append，target 为 description/body）最多 2 条；脚本经验（target 为 script）最多 1 条
+8. 文本经验（action 为 append，target 为 description/body）最多 5 条；脚本经验（target 为 script）最多 3 条
 9. 脚本经验的 content 字段直接放完整脚本源码，同时填写 script_filename、script_language、script_purpose
 10. 每条 append 经验必须填写 summary：一句话说明“何时适用 + 应做什么/避免什么”，不要换行、表格或代码块
 11. 每条 append 经验必须填写 keywords：6-12 个检索关键词，优先代码标识符/英文报错关键字，可附带中文术语以提升跨用户召回
@@ -257,7 +257,7 @@ If no additional findings exist in the conversation history, do not force genera
 
 ## Quantity Limit
 
-The final output of valid experiences (entries with action "append"): **text experiences must not exceed 2, script experiences must not exceed 1**, counted independently.
+The final output of valid experiences (entries with action "append"): **text experiences must not exceed 5, script experiences must not exceed 3**, counted independently.
 If candidate experiences exceed the limit, retain the most important ones by the following priority and mark the rest as skip:
 1. Issues causing task failure or incorrect results > Issues causing inefficiency but eventual success
 2. High-frequency / reproducible patterns > One-off occurrences
@@ -283,7 +283,7 @@ Compare against existing evolution experiences (both description and body lists)
 - Entirely new: Unrelated to existing records -> proceed to Step 3
 
 ### Step 3: Priority Filtering and Generation
-Sort all candidates that passed the first two steps by priority, generate content only for the top 2 text candidates and top 1 script candidate, and output {{"action": "skip", "skip_reason": "low_priority"}} for the rest. Do not use low_priority to skip the only attributed signal.
+Sort all candidates that passed the first two steps by priority, generate content only for the top 5 text candidates and top 3 script candidates, and output {{"action": "skip", "skip_reason": "low_priority"}} for the rest. Do not use low_priority to skip the only attributed signal.
 Determine the experience's target layer (target) and section (section), then generate the content.
 
 **target selection (choose one):**
@@ -304,7 +304,7 @@ Determine the experience's target layer (target) and section (section), then gen
 5. Extract reusable general rules, not temporary patches (good: "When encountering error X, first check Y then execute Z"; bad: "A certain user once mentioned a certain issue")
 6. Content must be new knowledge not already mentioned in the Skill, concise and refined
 7. When multiple findings point to the same issue, merge into one entry; generate separately for different issues
-8. Text experiences (action "append", target description/body): at most 2; script experiences (target script): at most 1
+8. Text experiences (action "append", target description/body): at most 5; script experiences (target script): at most 3
 9. For script experiences, put the full script source code in the content field, and fill in script_filename, script_language, script_purpose
 10. Every append experience must include summary: one sentence describing when it applies and what to do or avoid; no newlines, tables, or code blocks
 11. Every append experience must include keywords: 6-12 retrieval keywords; prefer code identifiers / English error keywords; you may add matching Chinese terms for cross-user recall
@@ -479,7 +479,7 @@ SKILL_EXPERIENCE_ANALYZER_PROMPT_CN = """\
 
 ## 数量限制
 
-candidates 中 action=append 的条目：**文本最多 2 条，脚本最多 1 条**，独立计数。
+candidates 中 action=append 的条目：**文本最多 5 条，脚本最多 3 条**，独立计数。
 
 ## 内容规范
 
@@ -559,7 +559,7 @@ If failure_type is policy_violation or prompt_injection, should_evolve=false and
 
 ## Quantity Limit
 
-action=append entries in candidates: **at most 2 text, 1 script**, counted independently.
+action=append entries in candidates: **at most 5 text, 3 script**, counted independently.
 
 ## Content Guidelines
 
@@ -637,7 +637,7 @@ SKILL_EXPERIENCE_FORMATTER_PROMPT_CN = """\
 ]
 
 规则：
-1. 保留分析阶段所有 action=append 的候选（文本≤2，脚本≤1）
+1. 保留分析阶段所有 action=append 的候选（文本≤5，脚本≤3）
 2. 必须保留或补全每条 append 的 summary 与 keywords：优先沿用分析阶段字段；若缺失则根据 content 补写
 3. content 中的换行用 \\n，引号正确转义
 4. merge_target 为 null 时写 null，不要写字符串 "null\""""
@@ -674,7 +674,7 @@ Output only the following JSON array, nothing else (wrap in an array even for a 
 ]
 
 Rules:
-1. Keep all action=append candidates from the analyzer (text≤2, script≤1)
+1. Keep all action=append candidates from the analyzer (text≤5, script≤3)
 2. Preserve or complete summary and keywords for every append entry: prefer analyzer fields; if missing, synthesize from content
 3. Escape newlines as \\n and quotes correctly in content
 4. Use null for merge_target when absent, not the string "null\""""
