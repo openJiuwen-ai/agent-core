@@ -286,6 +286,21 @@ class ExternalCliAgentSpec(BaseModel):
     the framework default.
     """
 
+    codex_turn_idle_timeout_s: float | None = Field(default=None, gt=0)
+    """Optional Codex turn inactivity ceiling in seconds.
+
+    The runtime default is used when unset. Any SDK notification, including a
+    retryable transport error, refreshes the timer.
+    """
+
+    codex_turn_idle_retries: int | None = Field(default=None, ge=0)
+    """Optional retries for a Codex turn that produced no SDK notifications.
+
+    Retries reuse the same thread and are attempted only after the stalled turn
+    was interrupted successfully. Turns that emitted any notification are not
+    replayed because they may already have produced external side effects.
+    """
+
     mcp_server_command: list[str] = Field(default_factory=lambda: ["openjiuwen-team-mcp"])
     """Launch argv for the team MCP stdio server registered with the CLI.
     Defaults to the ``openjiuwen-team-mcp`` console-script entry."""
@@ -320,6 +335,10 @@ class ExternalCliAgentSpec(BaseModel):
             raise ValueError(
                 "codex_bypass_approvals_and_sandbox is only valid when cli_agent='codex'",
             )
+        if self.cli_agent != "codex" and self.codex_turn_idle_timeout_s is not None:
+            raise ValueError("codex_turn_idle_timeout_s is only valid when cli_agent='codex'")
+        if self.cli_agent != "codex" and self.codex_turn_idle_retries is not None:
+            raise ValueError("codex_turn_idle_retries is only valid when cli_agent='codex'")
         return self
 
 

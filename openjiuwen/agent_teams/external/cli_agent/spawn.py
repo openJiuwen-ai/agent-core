@@ -171,6 +171,8 @@ async def build_cli_runtime(
     mcp_server_command: tuple[str, ...] = ("openjiuwen-team-mcp",),
     mcp_default_tools_approval_mode: str | None = None,
     codex_bypass_approvals_and_sandbox: bool = False,
+    codex_turn_idle_timeout_s: float | None = None,
+    codex_turn_idle_retries: int | None = None,
     system_prompt: str | None = None,
     extra_env: dict[str, str] | None = None,
     ssh_transport: SshTransportConfig | None = None,
@@ -205,6 +207,10 @@ async def build_cli_runtime(
             scoped to tools from the injected team MCP server.
         codex_bypass_approvals_and_sandbox: Explicit high-risk Codex-only mode
             that disables approval prompts and the SDK sandbox.
+        codex_turn_idle_timeout_s: Optional Codex-only inactivity ceiling for
+            one SDK turn. Every received SDK notification refreshes it.
+        codex_turn_idle_retries: Optional number of same-thread retries when a
+            stalled turn emitted no SDK notifications and was interrupted.
         system_prompt: The member's team-rail system prompt. Claude receives it
             through SDK options, Codex through SDK thread options, and other CLIs
             may receive it as a launch arg.
@@ -296,6 +302,8 @@ async def build_cli_runtime(
             system_prompt=system_prompt,
             codex_bin=codex_bin,
             resume_external_backend=resume_external_backend,
+            turn_idle_timeout_s=codex_turn_idle_timeout_s,
+            turn_idle_retries=codex_turn_idle_retries,
         )
     if ssh_transport is not None:
         raise_error(

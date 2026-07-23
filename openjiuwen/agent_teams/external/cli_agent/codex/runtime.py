@@ -21,6 +21,8 @@ from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.stream.base import OutputSchema
 
 _INTERRUPT_TIMEOUT_S = 5.0
+_DEFAULT_TURN_IDLE_TIMEOUT_S = 180.0
+_DEFAULT_TURN_IDLE_RETRIES = 1
 _NO_ACTIVE_TURN_ERROR_CODE = -32600
 _NO_ACTIVE_TURN_ERROR_MESSAGE = "no active turn to steer"
 _TOOL_ITEM_TYPES = {"commandExecution", "dynamicToolCall", "fileChange", "mcpToolCall"}
@@ -32,6 +34,25 @@ _EXTERNAL_RUNTIME_STATE_KEY = "external_runtime"
 _EXTERNAL_BACKEND_KEY = "backend"
 _EXTERNAL_SESSION_ID_KEY = "external_session_id"
 _CODEX_BACKEND = "codex"
+
+
+class _CodexTurnIdleTimeout(RuntimeError):
+    """Signal that one Codex turn stopped producing SDK notifications."""
+
+    def __init__(
+        self,
+        *,
+        member_name: str,
+        timeout_s: float,
+        notifications_seen: int,
+        interrupted: bool,
+    ) -> None:
+        super().__init__(
+            f"Codex SDK member {member_name!r} produced no turn events for "
+            f"{timeout_s:g}s; interrupt_succeeded={interrupted}",
+        )
+        self.notifications_seen = notifications_seen
+        self.interrupted = interrupted
 
 
 class CodexSdkRuntime(CliRuntimeBase):
@@ -46,13 +67,21 @@ class CodexSdkRuntime(CliRuntimeBase):
         config: Any,
         thread_options: dict[str, Any],
         resume_external_backend: bool = False,
+        turn_idle_timeout_s: float = _DEFAULT_TURN_IDLE_TIMEOUT_S,
+        turn_idle_retries: int = _DEFAULT_TURN_IDLE_RETRIES,
     ) -> None:
         super().__init__(member_name=member_name)
+        if turn_idle_timeout_s <= 0:
+            raise ValueError("turn_idle_timeout_s must be greater than zero")
+        if turn_idle_retries < 0:
+            raise ValueError("turn_idle_retries must be non-negative")
         self._member_agent_id = member_agent_id
         self._sdk = sdk
         self._config = config
         self._thread_options = dict(thread_options)
         self._resume_external_backend = resume_external_backend
+        self._turn_idle_timeout_s = turn_idle_timeout_s
+        self._turn_idle_retries = turn_idle_retries
         self._thread_id: str | None = None
         self._persisted_thread_id: str | None = None
         self._member_session: Any | None = None
@@ -80,8 +109,7 @@ class CodexSdkRuntime(CliRuntimeBase):
             return self._member_session
         if team_session is None:
             raise RuntimeError(
-                f"Codex SDK member {self._member_name!r} requires a team_session "
-                "to restore its member checkpoint",
+                f"Codex SDK member {self._member_name!r} requires a team_session to restore its member checkpoint",
             )
 
         member_session = team_session.create_agent_session(
@@ -158,8 +186,7 @@ class CodexSdkRuntime(CliRuntimeBase):
             resumed_thread_id = getattr(resumed_thread, "id", None)
             if resumed_thread_id != requested_thread_id:
                 raise RuntimeError(
-                    f"Codex SDK resumed unexpected thread {resumed_thread_id!r}; "
-                    f"expected {requested_thread_id!r}",
+                    f"Codex SDK resumed unexpected thread {resumed_thread_id!r}; expected {requested_thread_id!r}",
                 )
             self._thread = resumed_thread
             activation = "resumed"
@@ -195,9 +222,32 @@ class CodexSdkRuntime(CliRuntimeBase):
         chunk_index = 0
         thread = await self._ensure_thread()
         while prompt is not None and not self._aborted:
-            async for chunk in self._run_turn(thread, prompt, chunk_index):
-                yield chunk
-                chunk_index = chunk.index + 1
+            idle_retries = 0
+            while True:
+                try:
+                    async for chunk in self._run_turn(thread, prompt, chunk_index):
+                        yield chunk
+                        chunk_index = chunk.index + 1
+                except _CodexTurnIdleTimeout as exc:
+                    can_retry = (
+                        idle_retries < self._turn_idle_retries
+                        and exc.notifications_seen == 0
+                        and exc.interrupted
+                        and not self._aborted
+                    )
+                    if not can_retry:
+                        raise
+                    idle_retries += 1
+                    team_logger.warning(
+                        "[external-cli] member {} codex SDK turn was silent for {}s; "
+                        "retrying prompt on the same thread ({}/{})",
+                        self._member_name,
+                        self._turn_idle_timeout_s,
+                        idle_retries,
+                        self._turn_idle_retries,
+                    )
+                    continue
+                break
             prompt = None if self._aborted else self._drain_pending()
 
     async def _run_turn(
@@ -212,8 +262,26 @@ class CodexSdkRuntime(CliRuntimeBase):
         if self._aborted:
             await self._interrupt_handle(handle)
         index = start_index
+        notifications_seen = 0
         try:
-            async for notification in handle.stream():
+            stream = handle.stream().__aiter__()
+            while True:
+                try:
+                    notification = await asyncio.wait_for(
+                        anext(stream),
+                        timeout=self._turn_idle_timeout_s,
+                    )
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError as exc:
+                    interrupted = await self._interrupt_handle(handle)
+                    raise _CodexTurnIdleTimeout(
+                        member_name=self._member_name,
+                        timeout_s=self._turn_idle_timeout_s,
+                        notifications_seen=notifications_seen,
+                        interrupted=interrupted,
+                    ) from exc
+                notifications_seen += 1
                 chunks = _notification_chunks(notification, index)
                 for chunk in chunks:
                     team_logger.debug(
@@ -254,8 +322,7 @@ class CodexSdkRuntime(CliRuntimeBase):
                 self._active_turn = None
             self._pending.append(content)
             team_logger.info(
-                "[external-cli] member {} codex SDK turn ended before steer; "
-                "queued input for the next turn",
+                "[external-cli] member {} codex SDK turn ended before steer; queued input for the next turn",
                 self._member_name,
             )
 
@@ -467,6 +534,8 @@ async def build_codex_runtime(
     system_prompt: str | None,
     codex_bin: str | None,
     resume_external_backend: bool = False,
+    turn_idle_timeout_s: float | None = None,
+    turn_idle_retries: int | None = None,
 ) -> CodexSdkRuntime:
     """Build a Codex Python SDK runtime without starting its thread eagerly."""
     sdk = load_codex_sdk()
@@ -494,6 +563,8 @@ async def build_codex_runtime(
         config=config,
         thread_options=thread_options,
         resume_external_backend=resume_external_backend,
+        turn_idle_timeout_s=(_DEFAULT_TURN_IDLE_TIMEOUT_S if turn_idle_timeout_s is None else turn_idle_timeout_s),
+        turn_idle_retries=(_DEFAULT_TURN_IDLE_RETRIES if turn_idle_retries is None else turn_idle_retries),
     )
 
 
