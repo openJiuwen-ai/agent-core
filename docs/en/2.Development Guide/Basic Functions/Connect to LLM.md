@@ -51,6 +51,59 @@ model = Model(
 > - Users need to register accounts on SiliconFlow or OpenAI vendor websites to obtain available model `api_key` and model invocation URL address `api_base`.
 > - `client_provider` currently has built-in support for `OpenAI` and `SiliconFlow`. The framework will automatically select the corresponding model client implementation based on this configuration.
 
+### Sign In with OpenAI Account OAuth
+
+In addition to `api_key`-based access, `client_provider` also supports `OpenAIAccount`: this connects using OAuth credentials from an OpenAI account, so no `api_key` needs to be configured in `ModelClientConfig`. The framework resolves an access token from the local credential store at call time and automatically refreshes it before it expires.
+
+Before first use, you need to complete a device-code login once. The resulting credentials are saved to a local credential file (default path `~/.openjiuwen/auth.json`, configurable via the `OPENJIUWEN_AUTH_FILE` environment variable):
+
+```python
+from openjiuwen.extensions.external_provider.openai_auth import OpenAIAccountAuthManager
+
+manager = OpenAIAccountAuthManager()
+
+
+def on_device_code(device_code):
+    print(f"Open this URL in your browser: {device_code.verification_uri}")
+    print(f"Then enter this code: {device_code.user_code}")
+
+
+manager.login_with_device_code(on_device_code=on_device_code)
+```
+
+You can also run the command-line script directly to log in, check login status, or log out:
+
+```bash
+python -m openjiuwen.extensions.external_provider.openai_auth.openai_account_login login
+python -m openjiuwen.extensions.external_provider.openai_auth.openai_account_login status
+python -m openjiuwen.extensions.external_provider.openai_auth.openai_account_login logout
+```
+
+Once signed in, you can create a model client just like with any other vendor:
+
+```python
+from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
+
+model_client_config = ModelClientConfig(
+    client_provider="OpenAIAccount",                     # Sign in with OpenAI account OAuth, no api_key required
+    api_base="https://chatgpt.com/backend-api/codex",     # Required: OpenAI account backend address
+)
+
+model_request_config = ModelRequestConfig(
+    model="gpt-5.5",
+)
+
+model = Model(
+    model_client_config=model_client_config,
+    model_config=model_request_config,
+)
+```
+
+> **Note**
+> - `ModelClientConfig` validation only requires `api_key` for providers other than `OpenAIAccount`. However, `api_base` is required for every built-in provider, including `OpenAIAccount` — it is never auto-filled, and omitting it raises an error as soon as `ModelClientConfig` is constructed.
+> - The address used above matches the built-in default used by `OpenAIAccountAuthManager` / `OpenAIAccountModelCatalog`. The `OPENJIUWEN_OPENAI_ACCOUNT_BASE_URL` environment variable only affects the default `base_url` for those two classes when it isn't passed explicitly — it does not substitute for the required `ModelClientConfig.api_base` field.
+> - Use `OpenAIAccountModelCatalog.list_model_ids()` to fetch the models currently available to the account; if the live endpoint is unreachable, it falls back to the local cache and then to the built-in model list.
+
 ### Configure Custom Headers
 
 When the model service is based on an OpenAI-compatible protocol and requires extra request headers, you can use `custom_headers` to inject custom headers. Examples include multi-tenant identifiers, business-side user identifiers, or gateway extension headers.

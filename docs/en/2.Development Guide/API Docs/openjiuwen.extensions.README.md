@@ -10,3 +10,4 @@
 | [checkpointer](./openjiuwen.extensions/checkpointer.README.md) | Checkpoint extensions, such as Redis. |
 | [a2a](./openjiuwen.extensions/a2a/README.md) | A2A protocol integration for remote clients and server adapters. |
 | [tracer_otel](./openjiuwen.extensions/tracer_otel.README.md) | OpenTelemetry tracing extension that exports Agent and workflow execution events as OTel spans. |
+| [external_provider](./openjiuwen.extensions/external_provider/README.md) | External account provider abstraction and registry, e.g. OpenAI account OAuth sign-in. |
