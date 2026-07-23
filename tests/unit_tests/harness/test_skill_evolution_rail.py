@@ -2367,40 +2367,21 @@ async def test_trigger_async_evaluation_builds_snippet_from_messages(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_trigger_async_evaluation_reloads_fresh_usage_stats(tmp_path):
-    """Eval must reload store stats so a stale presented snapshot cannot clobber times_used."""
-    from openjiuwen.agent_evolving.checkpointing.types import UsageStats
-
+async def test_trigger_async_evaluation_does_not_write_back(tmp_path):
+    """Eval must not call update_record_scores — evolutions.json stays as initially written."""
     rail = _make_rail(tmp_path)
     rail._eval_interval = 1
 
-    # Snapshot taken at first presentation (used=0). Disk later has used=1 from a prior eval.
-    stale_record = _make_record("weather")
-    stale_record.id = "ev_uv"
-    stale_record.usage_stats = UsageStats(
-        times_presented=2,
-        times_used=0,
-        times_positive=0,
-        times_negative=0,
-    )
+    record = _make_record("weather")
+    record.id = "ev_uv"
 
-    fresh_record = _make_record("weather")
-    fresh_record.id = "ev_uv"
-    fresh_record.usage_stats = UsageStats(
-        times_presented=2,
-        times_used=1,
-        times_positive=1,
-        times_negative=0,
-    )
-
-    rail._evolution_store.get_records_by_score = AsyncMock(return_value=[fresh_record])
+    rail._evolution_store.get_records_by_score = AsyncMock(return_value=[record])
     rail._evolution_store.update_record_scores = AsyncMock()
 
-    async def fake_evaluate(snippet, records):
-        return [{"record_id": "ev_uv", "used": True, "positive": True, "negative": False}]
-
     rail._scorer = Mock()
-    rail._scorer.evaluate = fake_evaluate
+    rail._scorer.evaluate = AsyncMock(
+        return_value=[{"record_id": "ev_uv", "used": True, "positive": True, "negative": False}]
+    )
 
     session = SimpleNamespace()
     ctx = Mock()
@@ -2409,14 +2390,11 @@ async def test_trigger_async_evaluation_reloads_fresh_usage_stats(tmp_path):
     await rail._trigger_async_evaluation(
         ctx,
         [{"role": "assistant", "content": "武汉天气，紫外线指数 7"}],
-        presented_snapshot=[("weather", stale_record, "")],
+        presented_snapshot=[("weather", record.id, "")],
     )
 
-    updates = rail._evolution_store.update_record_scores.await_args.args[1]
-    stats = updates["ev_uv"]["usage_stats"]
-    assert stats["times_presented"] == 2
-    assert stats["times_used"] == 2
-    assert stats["times_positive"] == 2
+    rail._evolution_store.update_record_scores.assert_not_called()
+    rail._scorer.evaluate.assert_awaited_once()  # observe-only; still evaluates
 
 
 @pytest.mark.asyncio
@@ -2556,7 +2534,7 @@ async def test_background_evolution_restores_on_uncaught_exception(tmp_path):
 
 @pytest.mark.asyncio
 async def test_track_presented_records_only_body_records(tmp_path):
-    """_track_presented_records must only update BODY records, not DESCRIPTION records."""
+    """_track_presented_records must only queue BODY records, not DESCRIPTION records."""
     rail = _make_rail(tmp_path)
 
     body_record = _make_record("sk")
@@ -2576,11 +2554,8 @@ async def test_track_presented_records_only_body_records(tmp_path):
 
     await rail._track_presented_records(ctx, "sk", "some_snippet")
 
-    # update_record_scores must only contain the body record id
-    call_args = rail._evolution_store.update_record_scores.call_args
-    updates: dict = call_args[0][1]
-    assert body_record.id in updates
-    assert desc_record.id not in updates
+    # No writeback to evolutions.json
+    rail._evolution_store.update_record_scores.assert_not_called()
 
     # Session must only contain the body record id
     entries = rail._get_session_presented_records(session)
