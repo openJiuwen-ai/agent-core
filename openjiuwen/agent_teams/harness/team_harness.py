@@ -200,6 +200,8 @@ class TeamHarness:
         (idempotent) and drops its ``sys_operation`` so a discarded
         member/session does not leak it. No-op when no native was ever built.
         """
+        if self._active_agent_session is not None:
+            await self._active_agent_session.commit()
         if self._native is not None:
             await self._native.dispose()
 
