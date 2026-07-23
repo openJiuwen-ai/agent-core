@@ -784,20 +784,20 @@ class SkillExperienceOptimizer(BaseOptimizer):
                 logger.info("[SkillExperienceOptimizer] %s", empty_log_message)
                 continue
             is_script = patch.target == EvolutionTarget.SCRIPT
-            if is_script and len(script_records) >= 1:
+            if is_script and len(script_records) >= 3:
                 logger.info(
                     "[SkillExperienceOptimizer] %sskipped draft due to script limit "
-                    "(kept=%d, limit=1, section=%s, summary=%r)",
+                    "(kept=%d, limit=3, section=%s, summary=%r)",
                     generated_log_prefix,
                     len(script_records),
                     patch.section,
                     (draft.summary or "")[:80],
                 )
                 continue
-            if not is_script and len(text_records) >= 2:
+            if not is_script and len(text_records) >= 5:
                 logger.info(
                     "[SkillExperienceOptimizer] %sskipped draft due to text limit "
-                    "(kept=%d, limit=2, section=%s, target=%s, summary=%r)",
+                    "(kept=%d, limit=5, section=%s, target=%s, summary=%r)",
                     generated_log_prefix,
                     len(text_records),
                     patch.section,

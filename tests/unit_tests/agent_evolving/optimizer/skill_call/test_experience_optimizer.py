@@ -209,18 +209,24 @@ class TestSkillExperienceOptimizerGenerate:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_generate_filters_skip_empty_and_truncates_to_two():
+    async def test_generate_filters_skip_empty_and_truncates_to_five():
         llm = MagicMock()
         candidates = [
             {"action": "append", "target": "body", "section": "Troubleshooting", "content": "A"},
             {"action": "append", "target": "description", "section": "Instructions", "content": "B"},
             {"action": "append", "target": "body", "section": "Examples", "content": "C"},
+            {"action": "append", "target": "body", "section": "Examples", "content": "D"},
+            {"action": "append", "target": "body", "section": "Examples", "content": "E"},
+            {"action": "append", "target": "body", "section": "Examples", "content": "F-overflow"},
         ]
         patches = [
             {"action": "skip", "skip_reason": "duplicate"},
             {"action": "append", "target": "body", "section": "Troubleshooting", "content": "A", "merge_target": None},
             {"action": "append", "target": "description", "section": "Instructions", "content": "B", "merge_target": None},
             {"action": "append", "target": "body", "section": "Examples", "content": "C", "merge_target": None},
+            {"action": "append", "target": "body", "section": "Examples", "content": "D", "merge_target": None},
+            {"action": "append", "target": "body", "section": "Examples", "content": "E", "merge_target": None},
+            {"action": "append", "target": "body", "section": "Examples", "content": "F-overflow", "merge_target": None},
             {"action": "append", "target": "body", "section": "Examples", "content": "   ", "merge_target": None},
         ]
         llm.invoke = AsyncMock(side_effect=_two_stage_llm_side_effect(candidates, patches))
@@ -234,9 +240,8 @@ class TestSkillExperienceOptimizerGenerate:
             existing_body_records=[make_record("ev_b1", "body old")],
         )
         records = await optimizer.generate_records(ctx)
-        assert len(records) == 2
-        assert records[0].change.content == "A"
-        assert records[1].change.content == "B"
+        assert len(records) == 5
+        assert [r.change.content for r in records] == ["A", "B", "C", "D", "E"]
 
     @staticmethod
     @pytest.mark.asyncio
@@ -781,18 +786,31 @@ class TestScriptLimit:
     async def test_text_and_script_limits_independent():
         llm = MagicMock()
         candidates = [
-            {"action": "append", "target": "body", "section": "Troubleshooting", "content": "A"},
-            {"action": "append", "target": "body", "section": "Examples", "content": "B"},
-            {"action": "append", "target": "body", "section": "Instructions", "content": "C-overflow"},
+            {"action": "append", "target": "body", "section": "Troubleshooting", "content": "T1"},
+            {"action": "append", "target": "body", "section": "Examples", "content": "T2"},
+            {"action": "append", "target": "body", "section": "Instructions", "content": "T3"},
+            {"action": "append", "target": "description", "section": "Instructions", "content": "T4"},
+            {"action": "append", "target": "body", "section": "Troubleshooting", "content": "T5"},
+            {"action": "append", "target": "body", "section": "Examples", "content": "T6-overflow"},
             {
                 "action": "append", "target": "script", "section": "Scripts",
-                "content": "import os", "script_filename": "s.py",
-                "script_language": "python", "script_purpose": "test",
+                "content": "import os", "script_filename": "s1.py",
+                "script_language": "python", "script_purpose": "test1",
             },
             {
                 "action": "append", "target": "script", "section": "Scripts",
                 "content": "import sys", "script_filename": "s2.py",
                 "script_language": "python", "script_purpose": "test2",
+            },
+            {
+                "action": "append", "target": "script", "section": "Scripts",
+                "content": "import json", "script_filename": "s3.py",
+                "script_language": "python", "script_purpose": "test3",
+            },
+            {
+                "action": "append", "target": "script", "section": "Scripts",
+                "content": "import pathlib", "script_filename": "s4.py",
+                "script_language": "python", "script_purpose": "test4-overflow",
             },
         ]
         patches = candidates
@@ -809,7 +827,7 @@ class TestScriptLimit:
         records = await optimizer.generate_records(ctx)
         text_recs = [r for r in records if r.change.target != EvolutionTarget.SCRIPT]
         script_recs = [r for r in records if r.change.target == EvolutionTarget.SCRIPT]
-        assert len(text_recs) == 2
-        assert len(script_recs) == 1
-        assert text_recs[0].change.content == "A"
-        assert text_recs[1].change.content == "B"
+        assert len(text_recs) == 5
+        assert len(script_recs) == 3
+        assert [r.change.content for r in text_recs] == ["T1", "T2", "T3", "T4", "T5"]
+        assert [r.change.content for r in script_recs] == ["import os", "import sys", "import json"]
