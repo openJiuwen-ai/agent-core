@@ -46,6 +46,7 @@ from openjiuwen.core.context_engine.processor.compressor.full_compact_processor 
     FullCompactProcessorConfig,
 )
 from openjiuwen.core.context_engine.processor.compressor.reasoning_tool_loop_compact_processor import (
+    LOOP_COMPACT_BAILOUT_STATE_KEY,
     ReasoningToolLoopCompactProcessor,
     ReasoningToolLoopCompactProcessorConfig,
 )
@@ -96,6 +97,7 @@ _PROCESSORS_CLASSES = [
     "FullCompactProcessor",
     "FullCompactProcessorConfig",
     # reasoning + tool-call loop compact
+    "LOOP_COMPACT_BAILOUT_STATE_KEY",
     "ReasoningToolLoopCompactProcessor",
     "ReasoningToolLoopCompactProcessorConfig",
 ]
