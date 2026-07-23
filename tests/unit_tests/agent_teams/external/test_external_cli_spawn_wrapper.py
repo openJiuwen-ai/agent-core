@@ -267,7 +267,7 @@ async def test_codex_spawn_restores_and_checkpoints_member_thread_id(monkeypatch
         display_name="Ext",
         lifecycle=TeamLifecycle.PERSISTENT,
         teammate_mode=MemberMode.BUILD_MODE,
-        external_cli_agents=[{"cli_agent": "codex"}],
+        external_cli_agents=[{"cli_agent": "codex", "codex_bin": "/opt/codex"}],
     )
     session = _FakeTeamSession()
     merge_external_session_id(session, "ext_team", "codex-1", "codex", "thread-old")
@@ -288,6 +288,7 @@ async def test_codex_spawn_restores_and_checkpoints_member_thread_id(monkeypatch
     await started.wait()
 
     assert build_kwargs["external_session_id"] == "thread-old"
+    assert build_kwargs["codex_bin"] == "/opt/codex"
     await build_kwargs["on_external_session_id"]("thread-new")
     assert read_external_session_id(session, "ext_team", "codex-1", "codex") == "thread-new"
     assert session.flush_count == 1

@@ -68,19 +68,19 @@ def test_build_codex_config_uses_sdk_config_and_mcp_overrides():
         mcp_server_name="openjiuwen-team",
         mcp_server_command=("openjiuwen-team-mcp", "--stdio"),
         member_name="developer",
-        command_override=None,
+        codex_bin=None,
         sdk=_FAKE_SDK,
     )
 
     assert config.kwargs["cwd"] == "/workspace"
     assert config.kwargs["env"] == {"TEAM": "one"}
-    assert config.kwargs["launch_args_override"] is None
+    assert config.kwargs["codex_bin"] is None
     assert config.kwargs["client_name"] == "openjiuwen_agent_team"
     assert 'mcp_servers.openjiuwen_team.command="openjiuwen-team-mcp"' in config.kwargs["config_overrides"]
     assert 'mcp_servers.openjiuwen_team.args=["--stdio"]' in config.kwargs["config_overrides"]
 
 
-def test_build_codex_config_injects_overrides_before_custom_app_server_command():
+def test_build_codex_config_uses_custom_binary_without_rebuilding_app_server_argv():
     from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_config
 
     config = build_codex_config(
@@ -90,18 +90,13 @@ def test_build_codex_config_injects_overrides_before_custom_app_server_command()
         mcp_server_name="team",
         mcp_server_command=("team-mcp",),
         member_name="developer",
-        command_override=("/opt/codex", "app-server", "--listen", "stdio://"),
+        codex_bin="/opt/codex",
         sdk=_FAKE_SDK,
     )
 
-    argv = config.kwargs["launch_args_override"]
-    assert argv[:3] == (
-        "/opt/codex",
-        "--config",
-        'mcp_servers.team.command="team-mcp"',
-    )
-    assert argv[-3:] == ("app-server", "--listen", "stdio://")
-    assert config.kwargs["config_overrides"] == ()
+    assert config.kwargs["codex_bin"] == "/opt/codex"
+    assert 'mcp_servers.team.command="team-mcp"' in config.kwargs["config_overrides"]
+    assert "launch_args_override" not in config.kwargs
 
 
 def test_build_codex_thread_options_leave_approval_and_sandbox_unset():
@@ -132,6 +127,6 @@ def test_build_codex_config_requires_mcp_command():
             mcp_server_name="team",
             mcp_server_command=(),
             member_name="developer",
-            command_override=None,
+            codex_bin=None,
             sdk=_FAKE_SDK,
         )

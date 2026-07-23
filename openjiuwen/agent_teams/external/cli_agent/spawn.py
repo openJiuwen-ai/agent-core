@@ -165,6 +165,7 @@ async def build_cli_runtime(
     cwd: str | None = None,
     add_dirs: tuple[str, ...] = (),
     command_override: tuple[str, ...] | None = None,
+    codex_bin: str | None = None,
     inject_mcp: bool = True,
     mcp_server_name: str = "openjiuwen-team",
     mcp_server_command: tuple[str, ...] = ("openjiuwen-team-mcp",),
@@ -189,6 +190,9 @@ async def build_cli_runtime(
         cwd: Working directory for the subprocess(es).
         add_dirs: Extra directories exposed to SDK backends that support them.
         command_override: Optional full launch argv (e.g. an absolute path).
+            Adapter backends only; Codex accepts ``codex_bin`` instead.
+        codex_bin: Optional Codex executable path. The SDK constructs all
+            app-server arguments around this binary.
         inject_mcp: When True (default), configure the backend to register the
             team MCP server so the CLI gets the team collaboration tools.
             Adapter-backed CLIs without an injection strategy ignore this.
@@ -225,6 +229,11 @@ async def build_cli_runtime(
             reason="external CLI runtime requires session_id in context",
         )
     if ctx.cli_agent == "claude":
+        if codex_bin is not None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason="codex_bin is only supported for Codex SDK members",
+            )
         if command_override is not None:
             raise_error(
                 StatusCode.AGENT_TEAM_CONFIG_INVALID,
@@ -249,6 +258,11 @@ async def build_cli_runtime(
             resume_external_backend=resume_external_backend,
         )
     if ctx.cli_agent == "codex":
+        if command_override is not None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason="Codex SDK members do not support command_override; configure codex_bin instead",
+            )
         if ssh_transport is not None:
             raise_error(
                 StatusCode.AGENT_TEAM_CONFIG_INVALID,
@@ -262,10 +276,13 @@ async def build_cli_runtime(
                 cwd,
             )
         thread_id = external_session_id if resume_external_backend else None
-        if resume_external_backend and thread_id is None:
-            team_logger.warning(
-                "[external-cli] cold-rebuilt codex member {} has no saved SDK thread; starting a new thread",
-                ctx.member_name,
+        if resume_external_backend and not thread_id:
+            raise_error(
+                StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+                error_msg=(
+                    f"cannot resume Codex member '{ctx.member_name}' without a saved external_session_id; "
+                    "strict resume forbids starting a replacement thread"
+                ),
             )
         return await build_codex_runtime(
             member_name=ctx.member_name or "",
@@ -275,7 +292,7 @@ async def build_cli_runtime(
             mcp_server_name=mcp_server_name,
             mcp_server_command=mcp_server_command,
             system_prompt=system_prompt,
-            command_override=command_override,
+            codex_bin=codex_bin,
             thread_id=thread_id,
             on_thread_id=on_external_session_id,
         )
@@ -283,6 +300,11 @@ async def build_cli_runtime(
         raise_error(
             StatusCode.AGENT_TEAM_CONFIG_INVALID,
             reason="ssh transport is only supported for claude SDK external CLI members",
+        )
+    if codex_bin is not None:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="codex_bin is only supported for Codex SDK members",
         )
 
     adapter: CliAgentAdapter = build_adapter(ctx.cli_agent, command_override=command_override)

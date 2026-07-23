@@ -49,6 +49,8 @@ interrupt 契约。
 5. **配置、MCP 与权限边界**
    - `openai-codex>=0.144.4` 是可选 extra，只在构建 Codex 成员时延迟导入。
    - 团队 MCP 以 `CodexConfig.config_overrides` 的 `mcp_servers.<id>.*` 注入。
+   - 自定义 Codex 可执行文件以 `ExternalCliAgentSpec.codex_bin` 显式配置并传给
+     `CodexConfig.codex_bin`；不接受完整 `command`，app-server argv 由 SDK 构造。
    - 角色提示词经 `developer_instructions` 传入 thread 启动/恢复选项。
    - 不硬编码 `approval_mode`，不设置 `sandbox`，也不在 Jiuwen 中自动批准
      app-server 请求。
@@ -64,6 +66,7 @@ interrupt 契约。
 
 - 可选依赖延迟导入，未安装时返回 Codex 专属配置错误。
 - fake SDK 验证 thread start/resume、多 turn 复用、事件转换、steer、interrupt 和幂等关闭。
+- strict resume 验证恢复 RPC 失败时原样终止，绝不调用 `thread_start()` 创建替代 thread。
 - fake RPC 错误验证 active-turn 终态竞态会转为同 thread 后续 turn，
   且不相干的 steer 错误不会被吞掉。
 - MCP config override 验证 command / args / join env / startup timeout / required。

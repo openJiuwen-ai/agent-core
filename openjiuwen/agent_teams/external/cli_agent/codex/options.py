@@ -37,7 +37,7 @@ def build_codex_config(
     mcp_server_name: str,
     mcp_server_command: tuple[str, ...],
     member_name: str,
-    command_override: tuple[str, ...] | None,
+    codex_bin: str | None,
     sdk: Any | None = None,
 ) -> Any:
     """Build ``CodexConfig`` without importing the optional SDK eagerly."""
@@ -55,13 +55,8 @@ def build_codex_config(
             server_command=mcp_server_command,
         )
 
-    launch_args_override = None
-    if command_override is not None:
-        launch_args_override = _inject_config_into_command(command_override, config_overrides)
-        config_overrides = ()
-
     return sdk.CodexConfig(
-        launch_args_override=launch_args_override,
+        codex_bin=codex_bin,
         config_overrides=config_overrides,
         cwd=cwd,
         env=env,
@@ -106,20 +101,6 @@ def codex_mcp_config_overrides(
         ]
     )
     return tuple(overrides)
-
-
-def _inject_config_into_command(
-    command: tuple[str, ...],
-    config_overrides: tuple[str, ...],
-) -> tuple[str, ...]:
-    """Insert SDK config flags before an overridden app-server subcommand."""
-    if not config_overrides:
-        return command
-    argv = list(command)
-    insert_at = argv.index("app-server") if "app-server" in argv else len(argv)
-    flags = [part for value in config_overrides for part in ("--config", value)]
-    argv[insert_at:insert_at] = flags
-    return tuple(argv)
 
 
 __all__ = [

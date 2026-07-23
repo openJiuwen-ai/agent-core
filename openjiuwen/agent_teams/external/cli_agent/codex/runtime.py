@@ -77,8 +77,22 @@ class CodexSdkRuntime(CliRuntimeBase):
 
         options = dict(self._thread_options)
         if self._thread_id:
+            requested_thread_id = self._thread_id
             options.pop("ephemeral", None)
-            self._thread = await self._client.thread_resume(self._thread_id, **options)
+            try:
+                resumed_thread = await self._client.thread_resume(requested_thread_id, **options)
+            except Exception as exc:  # noqa: BLE001 - SDK errors are optional dependency types
+                raise RuntimeError(
+                    f"failed to resume Codex SDK thread {requested_thread_id!r}; "
+                    "strict resume forbids starting a replacement thread",
+                ) from exc
+            resumed_thread_id = getattr(resumed_thread, "id", None)
+            if resumed_thread_id != requested_thread_id:
+                raise RuntimeError(
+                    f"Codex SDK resumed unexpected thread {resumed_thread_id!r}; "
+                    f"expected {requested_thread_id!r}",
+                )
+            self._thread = resumed_thread
             activation = "resumed"
         else:
             self._thread = await self._client.thread_start(**options)
@@ -374,7 +388,7 @@ async def build_codex_runtime(
     mcp_server_name: str,
     mcp_server_command: tuple[str, ...],
     system_prompt: str | None,
-    command_override: tuple[str, ...] | None,
+    codex_bin: str | None,
     thread_id: str | None = None,
     on_thread_id: Callable[[str], Awaitable[None]] | None = None,
 ) -> CodexSdkRuntime:
@@ -387,7 +401,7 @@ async def build_codex_runtime(
         mcp_server_name=mcp_server_name,
         mcp_server_command=mcp_server_command,
         member_name=member_name,
-        command_override=command_override,
+        codex_bin=codex_bin,
         sdk=sdk,
     )
     thread_options = build_codex_thread_options(cwd=cwd, system_prompt=system_prompt)

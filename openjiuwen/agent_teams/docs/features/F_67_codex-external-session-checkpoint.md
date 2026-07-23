@@ -42,7 +42,8 @@ spawn 路径没有地方读写该 id，新 runtime 只能再建一条 thread。
    - 仅 `resume_external_backend=True` 时读 checkpoint 并向 Codex runtime 传
      `thread_id`。
    - 普通新 spawn 不使用旧 id，仍新建 thread。
-   - 旧 checkpoint 或损坏/空值条目按“未保存”处理：新建 thread，然后按新契约回写。
+   - strict resume 下旧 checkpoint 缺失、损坏或空值直接报错，不允许新建替代 thread。
+   - `thread_resume()` 抛错或返回不同 id 同样报错；恢复路径不会调用 `thread_start()`。
 
 ## 数据流
 
@@ -71,6 +72,7 @@ cold rebuild
 
 - metadata 单测验证 team/member/backend 隔离、非法 checkpoint 容错、其他 team bucket 字段保留。
 - fake Codex SDK 单测验证新 thread id 仅回调一次，已恢复 id 不重复改写。
+- fake Codex SDK 单测验证 resume 失败时不启动 replacement thread。
 - spawn 单测验证冷重建读取指定成员 id，新 id 写回后立即 flush。
 - 针对性单测：40 passed。
 

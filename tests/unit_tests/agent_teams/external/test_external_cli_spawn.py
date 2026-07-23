@@ -19,6 +19,7 @@ from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime, Reinvoke
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
+from openjiuwen.core.common.exception.errors import BaseError
 
 # A streaming stand-in CLI: read a line from stdin, echo it, then emit the
 # generic adapter's turn-completion marker. Exercises the real subprocess +
@@ -246,6 +247,7 @@ async def test_build_cli_runtime_dispatches_codex_to_sdk_backend(monkeypatch):
         runtime = await build_cli_runtime(
             _ctx(member="dev-1", cli_agent="codex"),
             cwd="/workspace",
+            codex_bin="/opt/codex",
             inject_mcp=False,
             system_prompt="ROLE: isolated developer",
         )
@@ -259,3 +261,35 @@ async def test_build_cli_runtime_dispatches_codex_to_sdk_backend(monkeypatch):
         "developer_instructions": "ROLE: isolated developer",
     }
     assert runtime._config.kwargs["cwd"] == "/workspace"
+    assert runtime._config.kwargs["codex_bin"] == "/opt/codex"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_codex_strict_resume_requires_saved_thread_id():
+    token = set_session_id("sess-1")
+    try:
+        with pytest.raises(BaseError, match="strict resume forbids"):
+            await build_cli_runtime(
+                _ctx(member="dev-1", cli_agent="codex"),
+                inject_mcp=False,
+                resume_external_backend=True,
+                external_session_id=None,
+            )
+    finally:
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_codex_rejects_full_command_override():
+    token = set_session_id("sess-1")
+    try:
+        with pytest.raises(BaseError, match="configure codex_bin instead"):
+            await build_cli_runtime(
+                _ctx(member="dev-1", cli_agent="codex"),
+                command_override=("codex", "app-server", "--listen", "stdio://"),
+                inject_mcp=False,
+            )
+    finally:
+        reset_session_id(token)

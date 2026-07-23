@@ -33,7 +33,7 @@ _SDK_BACKENDS: dict[str, ExternalCliBackend] = {
     "codex": ExternalCliBackend(
         name="codex",
         kind="sdk",
-        supports_command_override=True,
+        supports_command_override=False,
         injects_system_prompt_via_arg=True,
     ),
 }

@@ -60,6 +60,8 @@ os.environ.setdefault("IS_SENSITIVE", "false")
 _REQUIRED_ENV = ("API_BASE", "MODEL_NAME")
 _SESSION_ID = "codex_cli_pause_resume_session"
 _MEMBER_NAME = "codex-1"
+_BEFORE_TASK_ID = "before-pause-task"
+_AFTER_TASK_ID = "after-resume-task"
 _ACK_PHRASE = "Codex会话暗号已接收"
 _RUN_TIMEOUT_S = 1200.0
 _MCP_SERVER_COMMAND = [sys.executable, "-m", "openjiuwen.agent_teams.mcp"]
@@ -167,14 +169,16 @@ def _first_query(workspace_path: Path, marker: str) -> str:
         "1. 先调用 build_team。\n"
         f"2. 调用 spawn_external_cli 创建 {_MEMBER_NAME}，cli_agent='codex'。\n\n"
         "第一轮必须先创建任务和指派任务，再发送包含暗号的 direct message：\n"
-        "3. 用 create_task 创建一个 before_pause.md 任务。任务标题和内容都不能包含下面的 SESSION_TOKEN。"
+        f"3. 用 create_task 创建 task_id={_BEFORE_TASK_ID} 的 before_pause.md 任务。"
+        "任务标题和内容都不能包含下面的 SESSION_TOKEN。"
         f"任务内容要求 {_MEMBER_NAME} 严格按顺序执行："
-        'claim_task(status="claimed")；'
+        f'先用 view_task(action="get", task_id="{_BEFORE_TASK_ID}") 读取已指派给自己的任务；'
         f"根据它收到的 <team-inbound> direct message 中 <session-resume-check> 的 ACK_PHRASE，在 {workspace_path} 写入 before_pause.md；"
         "文件内容只能是 ACK_PHRASE，不能写 SESSION_TOKEN；"
         '调用 claim_task(status="completed")；'
         "调用 send_message 向 team_leader 汇报。\n"
-        f"4. 用 update_task 把该任务指派给 {_MEMBER_NAME}。\n"
+        f"4. 用 update_task 把 {_BEFORE_TASK_ID} 指派给 {_MEMBER_NAME}。"
+        "update_task 指派后任务已是 in_progress，不要再要求成员 claim_task(status=claimed)。\n"
         f'5. 通过 send_message(to="{_MEMBER_NAME}") 发送下面这段消息，只有这条消息可以包含 SESSION_TOKEN：\n'
         "「请阅读并遵守这个 Codex thread 恢复检查块：\n"
         "<session-resume-check>\n"
@@ -186,8 +190,13 @@ def _first_query(workspace_path: Path, marker: str) -> str:
         "3. 不要在 send_message 汇报中复述 SESSION_TOKEN。\n"
         "4. 完成 before_pause.md 后，汇报只包含 ACK_PHRASE。\n"
         "</session-resume-check>\n"
+        f"任务 {_BEFORE_TASK_ID} 已由 Leader 指派给你并处于 in_progress。"
+        f'请直接调用 view_task(action="get", task_id="{_BEFORE_TASK_ID}") 读取任务；'
+        "不要调用 view_task(action=claimable)，不要重复 claim_task(status=claimed)。"
         "现在请完成 before_pause.md 任务。」\n"
-        "6. 持续用 view_task 跟踪，只有任务 status=completed 才算完成。\n"
+        f'6. 指派后最多调用一次 view_task(action="get", task_id="{_BEFORE_TASK_ID}") 确认任务进入 in_progress，'
+        "然后结束当前 turn，等待 task_completed 事件或成员完成消息自动唤醒；严禁循环轮询 view_task。"
+        "收到完成事件后只再查询一次，确认 status=completed 才继续。\n"
         f"7. 任务完成后读取 {workspace_path / 'before_pause.md'}，确认内容是 ACK_PHRASE 且不包含 SESSION_TOKEN。\n"
         "确认后结束本轮。不要 clean_team，不要 shutdown_member，不要继续轮询。"
     )
@@ -199,19 +208,24 @@ def _resume_query(workspace_path: Path) -> str:
         "这是同一 team_name 和 Jiuwen session_id 的恢复轮。"
         "不要新建成员，必须恢复已有的 codex-1，并让它续接原来的 Codex thread。"
         "不要在 create_task、update_task、send_message、任务标题、任务内容或任何新文本里重复上一轮 SESSION_TOKEN。\n\n"
-        "1. 用 create_task 创建一个 after_resume.md 任务。"
+        f"1. 用 create_task 创建 task_id={_AFTER_TASK_ID} 的 after_resume.md 任务。"
         f"任务内容要求 {_MEMBER_NAME} 严格按顺序执行："
-        'claim_task(status="claimed")；'
+        f'先用 view_task(action="get", task_id="{_AFTER_TASK_ID}") 读取已指派给自己的任务；'
         f"仅依靠自己续接的 Codex thread 回忆第一轮 <session-resume-check> 里的 SESSION_TOKEN，并写入 {workspace_path / 'after_resume.md'}；"
         "文件内容必须只包含 SESSION_TOKEN，不要写 ACK_PHRASE；"
         "如果确实无法回忆才写 UNKNOWN；"
         '调用 claim_task(status="completed")；'
         "调用 send_message 向 team_leader 汇报。\n"
-        f"2. 用 update_task 把该任务指派给 {_MEMBER_NAME}。\n"
+        f"2. 用 update_task 把 {_AFTER_TASK_ID} 指派给 {_MEMBER_NAME}。"
+        "update_task 指派后任务已是 in_progress，不要再要求成员 claim_task(status=claimed)。\n"
         f'3. 用 send_message(to="{_MEMBER_NAME}") 告诉它按 after_resume.md 任务执行，'
+        f'明确任务 ID 是 {_AFTER_TASK_ID}，让它直接调用 view_task(action="get", task_id="{_AFTER_TASK_ID}")；'
+        "不要调用 view_task(action=claimable)，不要重复 claim_task(status=claimed)；"
         "只从续接的 Codex thread 回忆上一轮 SESSION_TOKEN，不要查找工作区文件中的暗号；"
         '完成后必须 claim_task(status="completed") 并 send_message 汇报。\n'
-        "4. 持续用 view_task 跟踪，只有 after_resume.md 任务 status=completed 才算完成。\n"
+        f'4. 指派后最多调用一次 view_task(action="get", task_id="{_AFTER_TASK_ID}") 确认任务进入 in_progress，'
+        "然后结束当前 turn，等待 task_completed 事件或成员完成消息自动唤醒；严禁循环轮询 view_task。"
+        "收到完成事件后只再查询一次，确认 status=completed 才继续。\n"
         "5. 任务完成后确认 after_resume.md 存在，然后结束本轮。"
         "不要 clean_team，不要 shutdown_member，不要继续轮询。"
     )

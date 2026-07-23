@@ -3,7 +3,11 @@
 
 """Tests for external CLI backend registry."""
 
+import pytest
+from pydantic import ValidationError
+
 from openjiuwen.agent_teams.external.cli_agent.backends import available_backends, backend_for, is_known_backend
+from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec
 
 
 def test_available_backends_includes_sdk_and_adapter_kinds():
@@ -26,8 +30,19 @@ def test_codex_backend_metadata_marks_sdk_prompt_injection():
     backend = backend_for("codex")
     assert backend is not None
     assert backend.kind == "sdk"
-    assert backend.supports_command_override
+    assert not backend.supports_command_override
     assert backend.injects_system_prompt_via_arg
+
+
+def test_codex_static_config_uses_explicit_binary_not_full_command():
+    config = ExternalCliAgentSpec(cli_agent="codex", codex_bin="/opt/codex")
+    assert config.codex_bin == "/opt/codex"
+
+    with pytest.raises(ValidationError, match="use codex_bin"):
+        ExternalCliAgentSpec(cli_agent="codex", command=["codex", "app-server"])
+
+    with pytest.raises(ValidationError, match="only valid"):
+        ExternalCliAgentSpec(cli_agent="generic", codex_bin="/opt/codex")
 
 
 def test_unknown_backend_returns_none():

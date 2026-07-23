@@ -94,9 +94,10 @@ class _RejectingSteerHandle(_FakeTurnHandle):
 
 
 class _FakeAsyncCodex:
-    def __init__(self, *, config, thread):
+    def __init__(self, *, config, thread, resume_error: Exception | None = None):
         self.config = config
         self.thread = thread
+        self.resume_error = resume_error
         self.start_calls: list[dict] = []
         self.resume_calls: list[tuple[str, dict]] = []
         self.close_count = 0
@@ -107,14 +108,16 @@ class _FakeAsyncCodex:
 
     async def thread_resume(self, thread_id: str, **options):
         self.resume_calls.append((thread_id, options))
+        if self.resume_error is not None:
+            raise self.resume_error
         return self.thread
 
     async def close(self):
         self.close_count += 1
 
 
-def _runtime(*, thread, thread_id=None, on_thread_id=None):
-    client = _FakeAsyncCodex(config=None, thread=thread)
+def _runtime(*, thread, thread_id=None, on_thread_id=None, resume_error=None):
+    client = _FakeAsyncCodex(config=None, thread=thread, resume_error=resume_error)
     sdk = SimpleNamespace(AsyncCodex=lambda *, config: client)
     runtime = CodexSdkRuntime(
         member_name="developer",
@@ -200,6 +203,42 @@ async def test_codex_sdk_runtime_resumes_saved_thread_id_without_ephemeral():
             {"cwd": "/workspace", "developer_instructions": "role prompt"},
         )
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_resume_failure_never_starts_replacement_thread():
+    thread = _FakeThread("thread-saved", [[]])
+    runtime, client = _runtime(
+        thread=thread,
+        thread_id="thread-saved",
+        resume_error=RuntimeError("thread missing"),
+    )
+
+    with pytest.raises(RuntimeError, match="strict resume forbids"):
+        await runtime.start()
+
+    assert client.resume_calls == [
+        (
+            "thread-saved",
+            {"cwd": "/workspace", "developer_instructions": "role prompt"},
+        )
+    ]
+    assert client.start_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_rejects_unexpected_resumed_thread_id():
+    thread = _FakeThread("thread-other", [[]])
+    runtime, client = _runtime(thread=thread, thread_id="thread-saved")
+
+    with pytest.raises(RuntimeError, match="resumed unexpected thread"):
+        await runtime.start()
+
+    assert runtime._thread is None
+    assert runtime.session_id == "thread-saved"
+    assert client.start_calls == []
 
 
 @pytest.mark.asyncio

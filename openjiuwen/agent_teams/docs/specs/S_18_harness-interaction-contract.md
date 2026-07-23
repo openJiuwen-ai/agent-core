@@ -153,12 +153,15 @@ client、thread id 和模型上下文均隔离。SDK 内部仍可启动 `codex a
 team-session checkpoint：
 `state["teams"][team_name]["external_sessions"][member_name]`。冷重建仅在
 `resume_external_backend=True` 时读取，并且同时校验 team、member 和 backend，命中后调用
-`thread_resume(thread_id)`；旧 checkpoint 无此字段时兼容性地新建 thread 并立即补写。
+`thread_resume(thread_id)`。严格恢复不允许退化：checkpoint 缺少 id、resume RPC 失败或 SDK
+返回不同 thread id 时直接报错，禁止静默创建 replacement thread。
 `external_session_id` 是运行态，不写入静态 `TeamAgentSpec.external_cli_agents`。`openai-codex`
 是可选依赖，经 `codex.options.load_codex_sdk()` 在构建 Codex runtime 时延迟导入；
 模块导入和其它 backend 不要求安装 SDK。线程启动不显式设置 `approval_mode`
 或 `sandbox`，使用 SDK 自身的审批默认值并保持 sandbox 未设置。旧的单次路径以显式名称
-`cli_agent="codex-exec"` 保留为兼容兜底。详见 [[F_58_codex-app-server-runtime]]、
+`cli_agent="codex-exec"` 保留为兼容兜底。自定义 Codex 可执行文件只通过静态配置字段
+`codex_bin` 传给 `CodexConfig.codex_bin`；不接受完整 `command`，也不使用
+`launch_args_override` 手工拼装 app-server argv。详见 [[F_58_codex-app-server-runtime]]、
 [[F_66_codex-python-sdk-runtime]]、[[F_67_codex-external-session-checkpoint]]。
 
 快照由 `PhaseSnapshotRail` 经 **harness back-ref**（公共只读属性 `harness.active_round`）维护：
