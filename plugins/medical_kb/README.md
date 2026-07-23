@@ -17,13 +17,13 @@
 pip install medical-ai-innovation
 
 # 2. 测试插件
-python -m medical_kb
+python -m plugins.medical_kb
 ```
 
 ## 使用方法
 
 ```python
-from medical_kb import MedicalKnowledgeBasePlugin
+from plugins.medical_kb import MedicalKnowledgeBasePlugin
 
 # 初始化插件
 plugin = MedicalKnowledgeBasePlugin()

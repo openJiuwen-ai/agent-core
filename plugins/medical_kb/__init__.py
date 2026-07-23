@@ -14,14 +14,24 @@ import sys
 import os
 from typing import Optional
 
-# 将 medical-ai-innovation 加入路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-
-from medical_ai_innovation.knowledge_base.schemas import (
-    Guideline, GuidelineSection, GuidelineClause, RetrievalResult, AnswerWithCitations
-)
-from medical_ai_innovation.knowledge_base.kb_engine import KnowledgeBaseEngine
-from medical_ai_innovation.knowledge_base.rag_pipeline import RAGPipeline
+# 将 medical-ai-innovation 加入路径（相对路径，安装后可不依赖）
+try:
+    from medical_ai_innovation.knowledge_base.schemas import (
+        Guideline, RetrievalResult, AnswerWithCitations
+    )
+    from medical_ai_innovation.knowledge_base.kb_engine import KnowledgeBaseEngine
+    from medical_ai_innovation.knowledge_base.rag_pipeline import RAGPipeline
+except ImportError:
+    # 开发模式：通过相对路径查找
+    _plugin_dir = os.path.dirname(os.path.abspath(__file__))
+    _project_root = os.path.abspath(os.path.join(_plugin_dir, "..", "..", ".."))
+    if _project_root not in sys.path:
+        sys.path.insert(0, _project_root)
+    from medical_ai_innovation.knowledge_base.schemas import (
+        Guideline, RetrievalResult, AnswerWithCitations
+    )
+    from medical_ai_innovation.knowledge_base.kb_engine import KnowledgeBaseEngine
+    from medical_ai_innovation.knowledge_base.rag_pipeline import RAGPipeline
 
 
 class MedicalKnowledgeBasePlugin:
@@ -74,19 +84,23 @@ class MedicalKnowledgeBasePlugin:
             include_version_compare=include_version_compare,
         )
 
+        citations = []
+        for r in result.citations:
+            clause = r.clause
+            if not clause:
+                continue
+            citations.append({
+                "content": clause.content or "",
+                "source": f"{clause.guideline_id or ''} | {clause.clause_num or ''} {clause.title or ''}",
+                "score": getattr(r, "score", 0.0) or 0.0,
+                "method": getattr(r, "method", "") or "",
+                "evidence_level": clause.evidence_level or "",
+                "recommendation": clause.recommendation or "",
+            })
+
         return {
             "answer": result.answer,
-            "citations": [
-                {
-                    "content": r.clause.content,
-                    "source": f"{r.clause.guideline_id} | {r.clause.clause_num} {r.clause.title}",
-                    "score": r.score,
-                    "method": r.method,
-                    "evidence_level": r.clause.evidence_level,
-                    "recommendation": r.clause.recommendation,
-                }
-                for r in result.citations
-            ],
+            "citations": citations,
             "total_found": len(result.citations),
             "plugin": "medical_kb",
             "retrieval_methods": result.retrieval_methods,
@@ -109,8 +123,8 @@ class MedicalKnowledgeBasePlugin:
 
     def load_demo_guidelines(self):
         """加载内置示例指南（糖尿病+高血压）"""
-        from medical_ai_innovation.knowledge_base.cli import _build_demo_guidelines
-        self.load_guidelines(_build_demo_guidelines())
+        from medical_ai_innovation.knowledge_base.demo_data import get_demo_guidelines
+        self.load_guidelines(get_demo_guidelines())
 
     def get_guideline_list(self) -> list[dict]:
         """获取已加载的指南列表"""
@@ -156,7 +170,8 @@ def main():
     plugin = MedicalKnowledgeBasePlugin()
     plugin.load_demo_guidelines()
 
-    print(f"📚 已加载 {plugin.get_stats()['guidelines']} 部指南")
+    stats = plugin.get_stats()
+    print(f"📚 已加载 {stats.get('guidelines', 0)} 部指南")
     print()
 
     while True:
@@ -171,10 +186,15 @@ def main():
             break
 
         result = plugin.search(q, include_version_compare=True)
-        print(f"\n🤖 {result['answer'][:300]}...\n")
+        answer_preview = result["answer"][:300]
+        print(f"\n🤖 {answer_preview}")
+        if len(result["answer"]) > 300:
+            print("   ...(回答已截断，完整内容请查看引用)")
         print(f"📚 引用 {result['total_found']} 条")
         for i, c in enumerate(result["citations"][:3], 1):
-            print(f"  [{i}] {c['source']} (score: {c['score']})")
+            source = c.get("source", "未知来源")
+            score = c.get("score", 0)
+            print(f"  [{i}] {source} (score: {score})")
         print()
 
 
