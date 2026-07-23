@@ -605,7 +605,6 @@ class OtelCallbackHandler:
                     pass
 
         is_first_call = prev_count_raw == 0 or msg_count < prev_count_raw
-        delta_start = 0 if is_first_call else prev_count_raw
 
         # Update the per-member count on the team span for the next LLM call
         # of this member (across iterations). Also keep the per-span display
@@ -628,10 +627,12 @@ class OtelCallbackHandler:
         # leaves headroom); covers the 1 system message too.
         writable_msg_count = max((self._config.max_attributes - non_prompt_budget) // attrs_per_msg, 0)
 
-        # Non-system delta message indices (delta_start .. end). System is
+        # All non-system messages (full prompt, not delta). System is
         # always emitted separately, so it does not consume the writable budget
         # for non-system messages.
-        delta_idxs = [i for i in range(delta_start, msg_count) if _message_role(messages[i]) != "system"]
+        # langfuse.observation.input still uses delta (messages[prev_count_raw:])
+        # so each iteration shows only the new prompt content.
+        delta_idxs = [i for i in range(0, msg_count) if _message_role(messages[i]) != "system"]
         if len(delta_idxs) > writable_msg_count:
             # Keep only the trailing N so the oldest prompt slots — not the
             # top-level attrs — are the ones dropped by FIFO.
