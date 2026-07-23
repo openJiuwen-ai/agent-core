@@ -716,6 +716,8 @@ class BrowserService:
                 endpoint_ready_fn = getattr(self._managed_driver, "_is_endpoint_ready", None)
             ready = await asyncio.to_thread(endpoint_ready_fn)
             if not ready:
+                if self._managed_driver:
+                    self._managed_driver.clear()
                 raise RuntimeError("Chrome CDP endpoint not responding")
         server_id = (self.mcp_cfg.server_id or "").strip() or self.mcp_cfg.server_name
         client = get_registered_client(server_id)
