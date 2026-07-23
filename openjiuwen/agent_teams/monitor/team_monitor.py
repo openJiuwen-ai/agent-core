@@ -294,7 +294,11 @@ class TeamMonitor:
         self._event_queue.put_nowait(monitor_event)
 
 
-def create_monitor(team_agent: TeamAgent, *, hide_dm: bool = False) -> TeamMonitor:
+def create_monitor(
+    team_agent: TeamAgent,
+    *,
+    hide_dm: bool = False,
+) -> TeamMonitor:
     """Create a TeamMonitor bound to a leader TeamAgent.
 
     Args:

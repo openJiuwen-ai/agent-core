@@ -30,8 +30,8 @@ def test_clis_without_system_prompt_flag_get_empty_args(name):
 
 @pytest.mark.level0
 def test_codex_system_prompt_uses_developer_instructions():
-    # codex injects the system prompt via -c developer_instructions (no prepend).
-    adapter = build_adapter("codex")
+    # The one-shot compatibility backend still uses -c developer_instructions.
+    adapter = build_adapter("codex-exec")
     assert adapter.injects_system_prompt_via_arg()
     args = adapter.system_prompt_args("be terse")
     assert args[0] == "-c"
@@ -40,8 +40,8 @@ def test_codex_system_prompt_uses_developer_instructions():
 
 
 @pytest.mark.level0
-def test_codex_uses_json_output_and_turn_completed_sentinel():
-    adapter = build_adapter("codex")
+def test_codex_exec_uses_json_output_and_turn_completed_sentinel():
+    adapter = build_adapter("codex-exec")
     assert "--json" in adapter.build_command()
     assert adapter.is_turn_complete('{"type": "turn.completed"}')
     assert not adapter.is_turn_complete('{"type": "item.completed"}')
@@ -81,7 +81,7 @@ def test_hermes_registers_mcp_via_subcommand():
 
 
 @pytest.mark.level0
-@pytest.mark.parametrize("name", ["codex"])
+@pytest.mark.parametrize("name", ["codex-exec"])
 def test_launch_inject_clis_have_no_register_command(name):
     # Codex injects MCP at launch, so there is no out-of-band registration command.
     adapter = build_adapter(name)
@@ -100,7 +100,7 @@ def test_openclaw_cannot_auto_inject_mcp():
 
 @pytest.mark.level0
 def test_codex_summarize_extracts_item_text_skips_turn_completed():
-    adapter = build_adapter("codex")
+    adapter = build_adapter("codex-exec")
     assert adapter.summarize_output_line('{"type":"item.completed","item":{"text":"done the work"}}') == "done the work"
     assert adapter.summarize_output_line('{"type":"turn.completed"}') is None
 
