@@ -22,13 +22,7 @@ class ActiveSpanTracker(SpanProcessor):
     Uses strong references (regular ``set``) to ensure spans survive
     asyncio task cancellation.  Properly ended spans are removed in
     ``on_end`` so they don't accumulate; only spans that were never
-    explicitly ended (e.g. the owning task was cancelled) remain in
-    the set and are closed by ``flush_all_spans``.
-
-    The current recording llm.call span is found by searching the
-    current trace's span set and matching by OTel parent span identity
-    — this is independent of asyncio task id, so it works reliably
-    across streaming callback task switches.
+    explicitly ended remain in the set and are closed by ``flush_all_spans``.
     """
 
     def __init__(self):
@@ -81,58 +75,39 @@ class ActiveSpanTracker(SpanProcessor):
             team_logger.warning("ActiveSpanTracker.on_end failed: {}", exc)
 
     def peek_current_llm_span(self) -> Span | None:
-        """Return the most recent recording llm.call span visible from current context.
-
-        Searches the current trace's span set (``_spans_by_trace``) instead
-        of a per-task index — independent of asyncio task id so streaming
-        callbacks that fire on a different task still find their span.
-
-        Disambiguation when multiple recording llm spans exist in the same
-        trace (concurrent workers):
-          1. Exact parent match: the span whose ``parent.span_id`` equals
-             the current agent span's ``span_id``. This works when the
-             close callback fires on the same task as the agent span was
-             opened.
-          2. Fallback: the most recently opened recording llm span in this
-             trace (by ``LlmSpanState.start_ns``), used when the agent span
-             ContextVar is stale (cross-task callback).
-        """
         return self._find_llm_span(pop=False)
 
     def pop_current_llm_span(self) -> Span | None:
-        """Pop the most recent recording llm.call span visible from current context.
-
-        Same lookup strategy as :meth:`peek_current_llm_span` but removes the
-        span from ``_spans_by_trace`` so it is not eligible for subsequent
-        lookups.  The span is still properly ended via ``on_end`` when
-        ``span.end()`` is called.
-        """
         return self._find_llm_span(pop=True)
 
     def close_llm_spans_by_parent(self, parent_span_id: int) -> int:
-        """End all recording llm.call spans whose parent matches *parent_span_id*.
+        """End recording llm.call spans whose parent matches *parent_span_id*.
 
-        Used by ``cascade_close_children`` to precisely close only the
-        llm spans belonging to the agent span that is being closed,
-        without touching spans from other concurrent workers (which may
-        share the same asyncio task but have different parent agent spans).
+        An llm span reaching this path means its normal close callback did
+        not fire — logged at error level.
         """
-        trace_id = self._resolve_trace_id()
-        if trace_id is None:
-            return 0
-
         from opentelemetry.trace import Status, StatusCode
+
+        team_span = _team_span_ctx.get()
+        if team_span is None:
+            return 0
+        trace_id = team_span.context.trace_id
 
         closed = 0
         with self._lock:
             spans = list(self._spans_by_trace.get(trace_id, set()))
         for span in spans:
-            if not self._is_recording_llm(span):
+            if span.name != "llm.call" or not span.is_recording():
                 continue
-            if not self._parent_matches(span, parent_span_id):
+            parent = span.parent
+            if parent is None or parent.span_id != parent_span_id:
                 continue
             try:
-                _stamp_cancelled_if_empty(span)
+                team_logger.error(
+                    "ORPHAN LLM span in cascade-close: span_id={:016x} "
+                    "parent_span_id={:016x} — close callback did not fire",
+                    span.context.span_id, parent_span_id,
+                )
                 span.set_status(Status(StatusCode.OK))
                 span.end()
                 closed += 1
@@ -150,58 +125,29 @@ class ActiveSpanTracker(SpanProcessor):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _is_recording_llm(span: Span) -> bool:
-        return (
-            hasattr(span, 'name')
-            and span.name == "llm.call"
-            and span.is_recording()
-        )
-
-    @staticmethod
-    def _parent_matches(span: Span, parent_span_id: int | None) -> bool:
-        if parent_span_id is None:
-            return False
-        parent = getattr(span, 'parent', None)
-        return parent is not None and parent.span_id == parent_span_id
-
-    def _resolve_trace_id(self) -> int | None:
-        """Return the trace_id of the current team span, or None."""
-        team_span = _team_span_ctx.get()
-        if team_span is not None and hasattr(team_span, 'context') and team_span.context:
-            return team_span.context.trace_id
-        return None
-
-    @staticmethod
     def _resolve_parent_span_id() -> int | None:
-        """Return the span_id of the current agent span (preferred) or team span."""
         agent_span = _current_agent_span.get()
         if agent_span is not None and agent_span.is_recording():
-            if hasattr(agent_span, 'context') and agent_span.context:
-                return agent_span.context.span_id
+            return agent_span.context.span_id
         team_span = _team_span_ctx.get()
         if team_span is not None and team_span.is_recording():
-            if hasattr(team_span, 'context') and team_span.context:
-                return team_span.context.span_id
+            return team_span.context.span_id
         return None
 
-    @staticmethod
-    def _most_recent_by_start_ns(spans: list[Span]) -> Span | None:
-        """Return the span with the largest ``LlmSpanState.start_ns`` (most recently opened)."""
-        best: Span | None = None
-        best_ns: int = -1
-        for s in spans:
-            st = getattr(s, "_llm_state", None)
-            ns = getattr(st, "start_ns", 0) if st is not None else 0
-            if ns > best_ns:
-                best_ns = ns
-                best = s
-        return best
-
     def _find_llm_span(self, *, pop: bool) -> Span | None:
-        """Core lookup: find the right recording llm.call span for current context."""
-        trace_id = self._resolve_trace_id()
-        if trace_id is None:
+        """Find the recording llm.call span for the current context.
+
+        Searches ``_spans_by_trace`` by parent span identity.  When the
+        agent span ContextVar is available, matches by parent_span_id for
+        precise disambiguation across concurrent workers.  Falls back to
+        the most recently opened recording llm span in this trace when
+        parent matching yields no result (cross-task streaming callback,
+        or pre-iteration calls like image probes).
+        """
+        team_span = _team_span_ctx.get()
+        if team_span is None:
             return None
+        trace_id = team_span.context.trace_id
         parent_id = self._resolve_parent_span_id()
 
         with self._lock:
@@ -210,25 +156,31 @@ class ActiveSpanTracker(SpanProcessor):
                 return None
             all_spans = list(span_set)
 
-        # Collect recording llm.call spans
-        candidates = [s for s in all_spans if self._is_recording_llm(s)]
+        candidates = [s for s in all_spans if s.name == "llm.call" and s.is_recording()]
         if not candidates:
             return None
 
-        # 1) Exact parent match (works when callback fires on correct task)
-        exact = [s for s in candidates if self._parent_matches(s, parent_id)]
-        if exact:
-            result = self._most_recent_by_start_ns(exact)
-        else:
-            # 2) Cross-task fallback: most recently opened in this trace
-            result = self._most_recent_by_start_ns(candidates)
+        # Prefer exact parent match for precise disambiguation.
+        if parent_id is not None:
+            exact = [s for s in candidates
+                     if s.parent is not None and s.parent.span_id == parent_id]
+            if exact:
+                result = max(exact, key=lambda s: getattr(getattr(s, "_otel_llm_state", None), "start_ns", 0))
+                if pop and result is not None:
+                    with self._lock:
+                        ts = self._spans_by_trace.get(trace_id)
+                        if ts is not None:
+                            ts.discard(result)
+                return result
 
-        if result is not None and pop:
+        # Fallback: most recently opened in this trace (cross-task callback,
+        # or pre-iteration call with no agent span in context).
+        result = max(candidates, key=lambda s: getattr(getattr(s, "_otel_llm_state", None), "start_ns", 0))
+        if pop and result is not None:
             with self._lock:
                 ts = self._spans_by_trace.get(trace_id)
                 if ts is not None:
                     ts.discard(result)
-
         return result
 
     def _on_ending(self, span: Span) -> None:
@@ -247,9 +199,10 @@ class ActiveSpanTracker(SpanProcessor):
     def flush_spans_for_trace(self, trace_id: int, exclude_team_span: bool = True) -> int:
         """Close all active spans for a specific trace (multi-team isolation).
 
-        Spans that carry ``_llm_state`` are finalized with a proper
-        output attribute (from the state object) instead of being
-        stamped ``cancelled``.
+        Spans that carry ``_otel_llm_state`` are leaked LLM spans whose normal
+        close callback never fired — logged at error level.  Other spans
+        (tool / task / event) reaching this path are also unexpected and
+        logged as errors.
         """
         from opentelemetry.trace import Status, StatusCode
 
@@ -266,12 +219,18 @@ class ActiveSpanTracker(SpanProcessor):
                 if exclude_team_span and hasattr(span, 'name') and span.name.startswith("team."):
                     continue
 
-                # Spans with _llm_state get proper finalization
-                state = getattr(span, "_llm_state", None)
+                # Spans with _llm_state are leaked LLM spans — log, don't
+                # stamp (silent fixups mask real bugs).
+                state = getattr(span, "_otel_llm_state", None)
                 if state is not None:
-                    _finalize_llm_span_from_state(span, state)
+                    _log_orphan_llm_span(span, state)
                 else:
-                    _stamp_cancelled_if_empty(span)
+                    team_logger.error(
+                        "ORPHAN non-LLM span at flush: name={} span_id={:016x} "
+                        "— span was never properly closed",
+                        span.name if hasattr(span, 'name') else '<no-name>',
+                        span.context.span_id if hasattr(span, 'context') and span.context else 0,
+                    )
                 span.set_status(Status(StatusCode.OK))
                 span.end()
                 closed_count += 1
@@ -308,11 +267,16 @@ class ActiveSpanTracker(SpanProcessor):
                     if exclude_team_span and hasattr(span, 'name') and span.name.startswith("team."):
                         continue
 
-                    state = getattr(span, "_llm_state", None)
+                    state = getattr(span, "_otel_llm_state", None)
                     if state is not None:
-                        _finalize_llm_span_from_state(span, state)
+                        _log_orphan_llm_span(span, state)
                     else:
-                        _stamp_cancelled_if_empty(span)
+                        team_logger.error(
+                            "ORPHAN non-LLM span at flush: name={} span_id={:016x} "
+                            "— span was never properly closed",
+                            span.name if hasattr(span, 'name') else '<no-name>',
+                            span.context.span_id if hasattr(span, 'context') and span.context else 0,
+                        )
                     span.set_status(Status(StatusCode.OK))
                     span.end()
                     closed_count += 1
@@ -439,44 +403,28 @@ def set_current_agent_span(span: Span | None) -> None:
     _current_agent_span.set(span)
 
 
-def _stamp_cancelled_if_empty(span: Span) -> None:
-    """Set a cancelled marker on a span that was never given proper output.
+def _log_orphan_llm_span(span: Span, state: LlmSpanState) -> None:
+    """Log and close an orphan LLM span that reached the flush path.
 
-    Spans reaching the cascade-close paths had their normal close callback
-    interrupted (e.g. task cancelled mid-LLM-call).
+    A span with ``_otel_llm_state`` reaching ``flush_spans_for_trace`` or
+    ``flush_all_spans`` means it was opened normally but its close
+    callback (on_llm_output / on_llm_invoke_output) never fired AND
+    cascade-close missed it.  This is a real bug — log at error level
+    so the root cause can be investigated.
+
+    Unlike the old ``_finalize_llm_span_from_state``, this does NOT set a
+    "stream_finalized" output attribute, because that would mask the fact
+    that the span was leaked.
     """
-    from openjiuwen.agent_teams.observability.semconv import LANGFUSE_OBSERVATION_OUTPUT
-
-    if not span.attributes.get(LANGFUSE_OBSERVATION_OUTPUT):
-        span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, "cancelled")
-
-
-def _finalize_llm_span_from_state(span: Span, state: LlmSpanState) -> None:
-    """Finalize a llm.call span using its attached state (flush path).
-
-    Used by ``flush_spans_for_trace`` and ``flush_all_spans`` when a span
-    still has ``_llm_state`` attached. Sets a minimal output attribute so
-    the span is not stamped ``cancelled``, even though the final response
-    payload is unavailable at flush time.
-    """
-    from openjiuwen.agent_teams.observability.semconv import (
-        LANGFUSE_OBSERVATION_OUTPUT,
-        LANGFUSE_OBSERVATION_TYPE,
+    team_logger.error(
+        "ORPHAN LLM span at flush: span_id={:016x} streaming={} "
+        "recording={} first_chunk_ns={} — span was opened but never "
+        "properly closed; its normal close callback did not fire",
+        span.context.span_id if hasattr(span, 'context') and span.context else 0,
+        getattr(state, "is_streaming", None),
+        span.is_recording(),
+        getattr(state, "first_chunk_ns", None),
     )
-
-    # DIAG: trace which spans fall through to the flush-fallback path
-    try:
-        team_logger.info("DIAG _finalize_llm_span_from_state span_id={:016x} streaming={} recording={} first_chunk_ns={}",
-                         span.context.span_id if hasattr(span, 'context') and span.context else 0,
-                         getattr(state, "is_streaming", None),
-                         span.is_recording(),
-                         getattr(state, "first_chunk_ns", None))
-    except Exception:
-        pass
-
-    # State gives us the observation type; set output to indicate
-    # the span was finalized (not cancelled — it had a real open state).
-    span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, "stream_finalized")
 
 
 def cascade_close_children() -> None:
@@ -484,26 +432,25 @@ def cascade_close_children() -> None:
 
     The single source of truth for cascade-close — called from
     ``AgentSpanScope.close`` (rail) and ``close_team_agent_spans`` below.
-    Replaces the triplicated loop that used to live in after_task_iteration
-    / after_invoke / close_team_agent_spans. Do NOT set Status(OK) here:
-    these spans only reach this path when their normal close callback did
-    not fire, so leaving status UNSET makes them stand out.
+    Spans reaching this path had their normal close callback fail to fire
+    — this is a real bug, logged at error level without any silent stamping.
     """
     for bucket in _tool_span_map.get().values():
         for ts in bucket:
             if ts.is_recording():
-                _stamp_cancelled_if_empty(ts)
+                team_logger.error(
+                    "ORPHAN tool span in cascade-close: name={} span_id={:016x} — "
+                    "on_tool_call_finished/on_tool_call_error did not fire",
+                    ts.name if hasattr(ts, 'name') else '<no-name>',
+                    ts.context.span_id if hasattr(ts, 'context') and ts.context else 0,
+                )
                 ts.end()
     _tool_span_map.set({})
 
     # Close llm.call spans belonging to the current agent span.
-    # Uses parent span identity (not task id) so cascade-close is precise:
-    # only the llm spans nested under this agent span are closed, leaving
-    # spans from other concurrent workers untouched even if they share the
-    # same asyncio task.
     tracker = get_active_span_tracker()
     agent_span = _current_agent_span.get()
-    if tracker is not None and agent_span is not None and hasattr(agent_span, 'context') and agent_span.context:
+    if tracker is not None and agent_span is not None:
         tracker.close_llm_spans_by_parent(agent_span.context.span_id)
 
 
@@ -524,6 +471,20 @@ def close_team_agent_spans(team_name: str) -> None:
         current.set_status(Status(StatusCode.OK))
         current.end()
         _current_agent_span.set(None)
+
+
+def get_current_llm_span() -> Span | None:
+    tracker = get_active_span_tracker()
+    if tracker is None:
+        return None
+    return tracker.peek_current_llm_span()
+
+
+def pop_current_llm_span() -> Span | None:
+    tracker = get_active_span_tracker()
+    if tracker is None:
+        return None
+    return tracker.pop_current_llm_span()
 
 
 # Tool spans are keyed by tool_name because the framework triggers

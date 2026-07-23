@@ -1771,3 +1771,138 @@ async def test_max_attributes_cap_keeps_top_level_prompt_attrs(
     assert user_prompt_idxs[-1] == 300
 
     remove_team_span("test_team")
+
+
+# ---------------------------------------------------------------------------
+# Concurrent worker span disambiguation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_find_llm_span_disambiguates_concurrent_workers(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Two concurrent workers each with one LLM span — peek must return the right one for each."""
+    from openjiuwen.agent_teams.observability.span_context import (
+        get_active_span_tracker,
+        remove_team_span,
+        set_current_agent_span,
+    )
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+    from opentelemetry.trace import SpanKind, set_span_in_context
+    from opentelemetry import context as otel_context
+    import time
+
+    team_span = _create_team_span("test_team")
+    tracer = get_tracer("test")
+    tracker = get_active_span_tracker()
+
+    agent_a = tracer.start_span(
+        "agent.worker_a.task_iteration.1",
+        context=set_span_in_context(team_span),
+        kind=SpanKind.INTERNAL,
+    )
+    agent_b = tracer.start_span(
+        "agent.worker_b.task_iteration.1",
+        context=set_span_in_context(team_span),
+        kind=SpanKind.INTERNAL,
+    )
+
+    from openjiuwen.agent_teams.observability.span_context import LlmSpanState
+
+    set_current_agent_span(agent_a)
+    llm_a = tracer.start_span(
+        "llm.call", context=set_span_in_context(agent_a, otel_context.get_current()),
+        kind=SpanKind.CLIENT,
+    )
+    llm_a._llm_state = LlmSpanState(span=llm_a, start_ns=time.monotonic_ns())
+
+    set_current_agent_span(agent_b)
+    llm_b = tracer.start_span(
+        "llm.call", context=set_span_in_context(agent_b, otel_context.get_current()),
+        kind=SpanKind.CLIENT,
+    )
+    llm_b._llm_state = LlmSpanState(span=llm_b, start_ns=time.monotonic_ns())
+
+    # ContextVar is agent_b → _find_llm_span should return llm_b (parent match).
+    peek_b = tracker.peek_current_llm_span()
+    assert peek_b is not None and peek_b.context.span_id == llm_b.context.span_id
+
+    # Switch to agent_a → should return llm_a.
+    set_current_agent_span(agent_a)
+    peek_a = tracker.peek_current_llm_span()
+    assert peek_a is not None and peek_a.context.span_id == llm_a.context.span_id
+
+    llm_a.end()
+    llm_b.end()
+    agent_a.end()
+    agent_b.end()
+    set_current_agent_span(None)
+    remove_team_span("test_team")
+
+
+# ---------------------------------------------------------------------------
+# Subagent invoke span nesting under leader iteration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subagent_invoke_span_nests_under_leader_iteration(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A subagent invoke span must nest under the parent agent iteration span."""
+    from openjiuwen.agent_teams.observability.span_context import (
+        get_current_agent_span,
+        remove_team_span,
+        set_current_agent_span,
+    )
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+    from openjiuwen.agent_teams.observability.semconv import AT_MEMBER_NAME, AT_AGENT_NAME
+    from opentelemetry.trace import SpanKind, set_span_in_context
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+
+    team_span = _create_team_span("test_team")
+    tracer = get_tracer("test")
+
+    # Leader iteration span.
+    leader_span = tracer.start_span(
+        "agent.leader.task_iteration.1",
+        context=set_span_in_context(team_span),
+        kind=SpanKind.INTERNAL,
+    )
+    leader_span.set_attribute(AT_MEMBER_NAME, "leader")
+    leader_span.set_attribute(AT_AGENT_NAME, "leader")
+    set_current_agent_span(leader_span)
+
+    # Simulate ObservabilityRail.before_invoke for a subagent (enable_task_loop=False).
+    rail = ObservabilityRail()
+    ctx = AgentCallbackContext(
+        inputs=type("In", (), {"query": "list files"})(),
+        agent=type("A", (), {
+            "member_name": "explore_agent",
+            "team_name": "test_team",
+            "deep_config": type("DC", (), {"enable_task_loop": False})(),
+            "card": type("C", (), {"name": "explore_agent"})(),
+            "role": None,
+        })(),
+        exception=None,
+    )
+    await rail.before_invoke(ctx)
+
+    # Verify invoke span nests under leader iteration.
+    invoke_span = get_current_agent_span()
+    assert invoke_span is not None
+    assert ".invoke" in invoke_span.name
+    assert invoke_span.parent is not None
+    assert invoke_span.parent.span_id == leader_span.context.span_id, (
+        f"subagent invoke parent should be leader iteration"
+    )
+
+    # after_invoke restores the parent agent span.
+    await rail.after_invoke(ctx)
+    restored = get_current_agent_span()
+    assert restored is not None and restored.context.span_id == leader_span.context.span_id
+
+    set_current_agent_span(None)
+    leader_span.end()
+    remove_team_span("test_team")

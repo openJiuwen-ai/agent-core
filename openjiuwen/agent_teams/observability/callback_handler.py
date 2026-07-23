@@ -70,9 +70,10 @@ from openjiuwen.agent_teams.observability.semconv import (
 )
 from openjiuwen.agent_teams.observability.span_context import (
     LlmSpanState,
+    get_current_llm_span,
     get_team_span,
     get_current_agent_span,
-    get_active_span_tracker,
+    pop_current_llm_span,
     pop_tool_span,
     push_tool_span,
 )
@@ -211,20 +212,8 @@ class OtelCallbackHandler:
 
     async def on_llm_stream_output(self, *args: Any, **kwargs: Any) -> Any:
         try:
-            tracker = get_active_span_tracker()
-            span = tracker.peek_current_llm_span() if tracker else None
-            state = getattr(span, "_llm_state", None) if span else None
-            # DIAG: chunk callback task vs open task
-            try:
-                import asyncio as _aio
-                _cur_task = id(_aio.current_task())
-            except Exception:
-                _cur_task = 0
-            _sid = state.span.context.span_id if state else 0
-            _open_task = getattr(span, "_llm_open_task", 0) if span else 0
-            if state is None or _cur_task != _open_task:
-                team_logger.info("DIAG on_llm_stream_output span_id={:016x} has_state={} cur_task={} open_task={} cross={}",
-                                 _sid, state is not None, _cur_task, _open_task, _cur_task != _open_task)
+            span = get_current_llm_span()
+            state = getattr(span, "_otel_llm_state", None) if span else None
 
             if state is None or not state.span.is_recording():
                 return kwargs.get("result")
@@ -260,21 +249,8 @@ class OtelCallbackHandler:
     async def on_llm_output(self, *args: Any, **kwargs: Any) -> None:
         state = None
         try:
-            tracker = get_active_span_tracker()
-            span = tracker.pop_current_llm_span() if tracker else None
-            state = getattr(span, "_llm_state", None) if span else None
-            # DIAG: trace llm span close path (streaming final) + cross-task
-            try:
-                import asyncio as _aio
-                _cur_task = id(_aio.current_task())
-            except Exception:
-                _cur_task = 0
-            _sid = state.span.context.span_id if state else 0
-            _open_task = getattr(span, "_llm_open_task", 0) if span else 0
-            team_logger.info("DIAG on_llm_output enter span_id={:016x} has_state={} recording={} cur_task={} open_task={} cross={}",
-                             _sid, state is not None,
-                             state.span.is_recording() if state else False,
-                             _cur_task, _open_task, _cur_task != _open_task)
+            span = pop_current_llm_span()
+            state = getattr(span, "_otel_llm_state", None) if span else None
             if state is None:
                 team_logger.debug("otel: on_llm_output — no open LLM span to close")
                 return
@@ -327,22 +303,16 @@ class OtelCallbackHandler:
     async def on_llm_invoke_output(self, *args: Any, **kwargs: Any) -> Any:
         state = None
         try:
-            tracker = get_active_span_tracker()
             # Peek first to check if it's streaming (leave to on_llm_output)
-            span_peek = tracker.peek_current_llm_span() if tracker else None
-            state_peek = getattr(span_peek, "_llm_state", None) if span_peek else None
+            span_peek = get_current_llm_span()
+            state_peek = getattr(span_peek, "_otel_llm_state", None) if span_peek else None
             if state_peek is None:
                 return kwargs.get("result")
             if state_peek.is_streaming:
                 return kwargs.get("result")
             # Non-streaming: pop and close
-            span = tracker.pop_current_llm_span() if tracker else None
-            state = getattr(span, "_llm_state", None) if span else None
-            # DIAG: trace llm span close path (non-streaming)
-            _sid = state.span.context.span_id if state else 0
-            team_logger.info("DIAG on_llm_invoke_output enter span_id={:016x} has_state={} recording={}",
-                             _sid, state is not None,
-                             state.span.is_recording() if state else False)
+            span = pop_current_llm_span()
+            state = getattr(span, "_otel_llm_state", None) if span else None
             if state is None:
                 return kwargs.get("result")
             response = kwargs.get("result")
@@ -364,14 +334,8 @@ class OtelCallbackHandler:
     async def on_llm_call_error(self, *args: Any, **kwargs: Any) -> None:
         state = None
         try:
-            tracker = get_active_span_tracker()
-            span = tracker.pop_current_llm_span() if tracker else None
-            state = getattr(span, "_llm_state", None) if span else None
-            # DIAG: trace llm span close path (error)
-            _sid = state.span.context.span_id if state else 0
-            team_logger.info("DIAG on_llm_call_error enter span_id={:016x} has_state={} recording={}",
-                             _sid, state is not None,
-                             state.span.is_recording() if state else False)
+            span = pop_current_llm_span()
+            state = getattr(span, "_otel_llm_state", None) if span else None
 
             if state is None:
                 return
@@ -721,15 +685,8 @@ class OtelCallbackHandler:
         self._stamp_parent_member_name(span)
 
         _llm_st = LlmSpanState(span=span, start_ns=time.monotonic_ns(), is_streaming=is_streaming)
-        span._llm_state = _llm_st  # attach state to span object (context-immune)
+        span._otel_llm_state = _llm_st  # attach state to span object (context-immune)
 
-        # DIAG: capture the task that opened this span so on_llm_output can
-        # detect a cross-task close (stream output fired on a different task).
-        try:
-            import asyncio as _aio
-            span._llm_open_task = id(_aio.current_task())
-        except Exception:
-            span._llm_open_task = 0
 
         team_logger.info(
             "otel: _open_llm_span name=llm.call trace_id={:032x} span_id={:016x} "
@@ -875,7 +832,7 @@ class OtelCallbackHandler:
                 rt = getattr(usage, "reasoning_tokens", 0) or 0
                 if rt:
                     reasoning_span.set_attribute(GEN_AI_USAGE_REASONING_TOKENS, int(rt))
-                self._stamp_parent_member_name(reasoning_span, fallback=state.span)
+                self._stamp_parent_member_name(reasoning_span)
                 reasoning_span.set_status(Status(StatusCode.OK))
                 if has_timing:
                     dur_ns = reasoning_last_ns - reasoning_first_ns  # type: ignore[operator]
@@ -987,33 +944,30 @@ class OtelCallbackHandler:
             team_logger.warning("callback_handler: failed to propagate team context: {}", exc)
 
     @staticmethod
-    def _stamp_parent_member_name(span: Span, *, fallback: Span | None = None) -> None:
-        """Stamp ``agentteam.member.name`` from the parent agent span.
+    def _stamp_parent_member_name(span: Span) -> None:
+        """Stamp ``agentteam.member.name`` from the current agent span.
 
-        The outer agent iteration span already carries ``AT_MEMBER_NAME``
+        The current agent iteration/invoke span carries ``AT_MEMBER_NAME``
         (stamped by ``ObservabilityRail._stamp_agent_attributes``).  Child
-        llm.call / reasoning / tool spans do not, so when the agent span is
-        closed abnormally these orphans can no longer be traced back to the
-        teammate that produced them.  This copies the member name down so
-        every child span stays attributable.
+        llm.call / reasoning / tool spans do not, so this copies the member
+        name down so every child span stays attributable.
 
-        Reads ``get_current_agent_span()`` first; if that is gone (agent span
-        already ended) falls back to ``fallback.attributes`` (e.g. the parent
-        llm.call span for a reasoning sub-span, which was stamped at open
-        time).  Silent no-op when neither carries the attribute.
+        The call sites are inside callback handlers that normally fire during
+        an agent iteration, but pre-iteration LLM calls (e.g. image probe
+        during ``_ensure_initialized``) legitimately have no agent span.
         """
         try:
-            member_name: str = ""
             agent_span = get_current_agent_span()
-            if agent_span is not None:
-                raw = agent_span.attributes.get(AT_MEMBER_NAME)
-                if raw is not None:
-                    member_name = str(raw)
-            if not member_name and fallback is not None:
-                raw = fallback.attributes.get(AT_MEMBER_NAME)
-                if raw is not None:
-                    member_name = str(raw)
-            if member_name:
-                span.set_attribute(AT_MEMBER_NAME, member_name)
+            if agent_span is None:
+                team_logger.warning(
+                    "callback_handler: _stamp_parent_member_name — "
+                    "no agent span in context; span={} will not carry agentteam.member.name",
+                    span.name,
+                )
+                return
+            raw = agent_span.attributes.get(AT_MEMBER_NAME)
+            raw = agent_span.attributes.get(AT_MEMBER_NAME)
+            if raw is not None:
+                span.set_attribute(AT_MEMBER_NAME, str(raw))
         except Exception as exc:
             team_logger.warning("callback_handler: failed to stamp member name: {}", exc)
