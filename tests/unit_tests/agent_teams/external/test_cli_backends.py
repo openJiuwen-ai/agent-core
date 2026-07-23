@@ -21,6 +21,15 @@ def test_claude_backend_metadata_marks_sdk_prompt_injection():
     assert backend.injects_system_prompt_via_arg
 
 
+def test_codex_backend_metadata_marks_sdk_prompt_injection():
+    """Codex is an SDK backend, not a generic CLI adapter."""
+    backend = backend_for("codex")
+    assert backend is not None
+    assert backend.kind == "sdk"
+    assert backend.supports_command_override
+    assert backend.injects_system_prompt_via_arg
+
+
 def test_unknown_backend_returns_none():
     """Unknown backend names are rejected by registry helpers."""
     assert backend_for("not-a-real-cli") is None

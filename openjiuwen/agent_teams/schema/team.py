@@ -240,9 +240,10 @@ class ExternalCliAgentSpec(BaseModel):
 
     cli_agent: str
     """External agent kind identifier (``"claude"`` / ``"codex"`` /
-    ``"openclaw"`` / ``"hermes"``). ``"claude"`` selects the SDK backend;
-    other values select built-in CLI adapters. This is the value passed to
-    ``spawn_member(cli_agent=...)``. See ``agent_teams/external/cli_agent``."""
+    ``"openclaw"`` / ``"hermes"``). ``"claude"`` selects the SDK backend,
+    ``"codex"`` the Codex Python SDK backend, and other values built-in adapters.
+    This is passed to ``spawn_member(cli_agent=...)``. See
+    ``agent_teams/external/cli_agent``."""
 
     command: Optional[list[str]] = None
     """Full launch argv overriding the adapter's built-in command (e.g. an
@@ -372,11 +373,11 @@ class TeamRuntimeContext(BaseModel):
     """Absolute cwd override for a teammate running in an isolated worktree."""
     cli_agent: Optional[str] = None
     """When set, this teammate is driven by an external agent backend (e.g.
-    ``"claude"`` SDK or a named CLI adapter like ``"codex"``) instead of a
-    local DeepAgent.
+    ``"claude"`` SDK, ``"codex"`` SDK, or a named CLI adapter) instead
+    of a local DeepAgent.
 
     The spawn path launches the CLI as a subprocess and the configurator
-    builds an ``ExternalCliRuntime`` in place of ``TeamHarness``. ``None``
+    builds a ``CliRuntimeBase`` implementation in place of ``TeamHarness``. ``None``
     (default) keeps the standard DeepAgent-backed member. See
     ``agent_teams/external/cli_agent``.
     """

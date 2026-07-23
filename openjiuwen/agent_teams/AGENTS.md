@@ -248,18 +248,26 @@ messager，不经本地 avatar 代理。与 F_07 bridge（本地完整 DeepAgent
 `TeamAgentSpec.external_cli_agents`（`ExternalCliAgentSpec` 列表：`cli_agent` 种类标识 +
 `command`/`cwd`/`inject_mcp`/`mcp_server_command`/`env`/`ssh_transport`），非空集即外部 CLI 成员的能力上限。
 leader 用 `spawn_external_cli(cli_agent=<name>)` 按名引用，不在 spawn
-调用里传启动细节。当前内置 adapter：claude / codex / gemini / openclaw / hermes / generic。
-spawn 路径（`external_cli_spawn` → `build_cli_runtime`）按 adapter 注入团队 MCP server——
-有 launch flag 的 claude `--mcp-config <inline-json>`、codex `-c mcp_servers...`；无 flag 的
+调用里传启动细节。当前内置 backend：claude（Agent SDK）/ codex（SDK backend，由
+独立 `AsyncCodex` runtime 执行）/
+codex-exec（单次兼容后端）/ gemini / openclaw / hermes / generic。
+spawn 路径（`external_cli_spawn` → `build_cli_runtime`）按 backend 注入团队 MCP server——
+Claude 经 SDK options 注入；Codex 以可选 `openai-codex` 依赖延迟加载，并经
+`CodexConfig.config_overrides` 注入 `mcp_servers.*`；无 flag 的
 gemini / hermes 由 spawn 路径跑一次 `<cli> mcp add ...` 带外注册（`mcp_register_command`），
 openclaw 无已知注册方式则 `mcp_inject=none` + 大声告警。MCP server 是 CLI 子进程，继承
-`OPENJIUWEN_TEAM_JOIN` env，自动绑定成员身份。`ssh_transport` 配置后 CLI 进程在远程 SSH 端点
-启动，`command` / `cwd` / `mcp_server_command` 均按远程主机解释；DB / messager 可达性由部署保证。
+`OPENJIUWEN_TEAM_JOIN` env，自动绑定成员身份。当前 `ssh_transport` 仅由 Claude SDK backend
+支持；Codex SDK backend 和通用 adapter backend 在 spawn 边界显式拒绝 SSH。
 外部 CLI 成员的**系统提示词**复用 team-rail 的
 `build_team_static_sections`（role/workflow/lifecycle/private-prompt，排除其它 DeepAgent rail），经
-claude `--append-system-prompt` / codex `-c developer_instructions` / 其余 prepend 下发；其
-stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内成员同路 fan-out。
-详见 [[F_22]] 与 [[F_25_external-cli-hardening-and-gemini]]。
+Claude 经 SDK system prompt / Codex 经 `thread_start(developer_instructions=...)` /
+codex-exec 经 `-c developer_instructions` / 其余 prepend 下发。Codex 的每个 Jiuwen 成员各自
+持有一个 `AsyncCodex` client 和一个独立 thread，多轮任务在同一 thread 上执行，成员间不共享
+上下文；Leader shutdown 先对活跃 `AsyncTurnHandle` 执行 `interrupt()`，再调用
+`AsyncCodex.close()` 关闭 SDK 资源。SDK 内部仍使用 app-server，但 Jiuwen 不再自行实现 JSON-RPC。其
+SDK 输出经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内成员同路 fan-out。
+详见 [[F_22]]、[[F_25_external-cli-hardening-and-gemini]] 与
+[[F_58_codex-app-server-runtime]]、[[F_66_codex-python-sdk-runtime]]。
 
 设计文档见 `docs/features/F_21_external-agent-access.md`（接入面 + spawn 接线）与
 `docs/features/F_22_external-cli-spawn-member-and-mcp-injection.md`（external_cli spawn 工具 +

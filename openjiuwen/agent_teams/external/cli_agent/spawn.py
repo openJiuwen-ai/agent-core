@@ -23,6 +23,7 @@ from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.external.cli_agent.adapters import CliAgentAdapter, build_adapter
 from openjiuwen.agent_teams.external.cli_agent.claude import build_claude_runtime
 from openjiuwen.agent_teams.external.cli_agent.claude.options import strip_parent_claude_env
+from openjiuwen.agent_teams.external.cli_agent.codex import build_codex_runtime
 from openjiuwen.agent_teams.external.cli_agent.injector import StdinPipeInjector
 from openjiuwen.agent_teams.external.cli_agent.transport.base import StreamReaderLike
 from openjiuwen.agent_teams.external.cli_agent.transport.local import LocalTransport
@@ -174,7 +175,7 @@ async def build_cli_runtime(
 ) -> CliRuntimeBase:
     """Build the member runtime for ``ctx.cli_agent``.
 
-    Claude is handled by its dedicated SDK backend. Other CLI agents are
+    Claude and Codex are handled by their dedicated SDK backends. Other CLI agents are
     picked by the adapter's ``supports_stdin_injection``: streaming CLIs launch
     one long-lived subprocess and return an :class:`ExternalCliRuntime`;
     one-shot CLIs (openclaw / hermes) return a :class:`ReinvokeCliRuntime` that
@@ -194,7 +195,8 @@ async def build_cli_runtime(
         mcp_server_name: Logical name the CLI registers the MCP server under.
         mcp_server_command: Launch argv for the team MCP stdio server.
         system_prompt: The member's team-rail system prompt. Claude receives it
-            through SDK options; other CLIs may receive it as a launch arg.
+            through SDK options, Codex through SDK thread options, and other CLIs
+            may receive it as a launch arg.
             CLIs without a flag get it prepended to their first user message by
             the caller, so it is ignored here for them.
         extra_env: Extra environment merged over the inherited env + the
@@ -239,6 +241,35 @@ async def build_cli_runtime(
             ssh_transport=ssh_transport,
             team_session_id=descriptor.session_id,
             resume_external_backend=resume_external_backend,
+        )
+    if ctx.cli_agent == "codex":
+        if ssh_transport is not None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason="ssh transport is not yet supported for Codex SDK members",
+            )
+        env = {**dict(os.environ), **(extra_env or {}), **descriptor.to_env()}
+        if add_dirs:
+            team_logger.debug(
+                "[external-cli] codex member {} uses cwd {}; extra add_dirs are not supported by the Codex SDK",
+                ctx.member_name,
+                cwd,
+            )
+        if resume_external_backend:
+            team_logger.warning(
+                "[external-cli] cold-rebuilt codex member {} starts a new SDK thread; "
+                "in-process multi-turn continuity is preserved, cold thread resume is not yet persisted",
+                ctx.member_name,
+            )
+        return await build_codex_runtime(
+            member_name=ctx.member_name or "",
+            cwd=cwd,
+            env=env,
+            inject_mcp=inject_mcp,
+            mcp_server_name=mcp_server_name,
+            mcp_server_command=mcp_server_command,
+            system_prompt=system_prompt,
+            command_override=command_override,
         )
     if ssh_transport is not None:
         raise_error(

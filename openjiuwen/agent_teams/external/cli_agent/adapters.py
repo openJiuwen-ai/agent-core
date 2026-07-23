@@ -59,7 +59,7 @@ MCP_INJECT_HERMES_ADD = "hermes_add"
 # ---- system-prompt injection strategies ----
 # How to give the member a per-member system prompt (its role / prompt).
 SYSTEM_PROMPT_NONE = "none"
-# Codex: inject the prompt as the developer-message layer via
+# Codex exec compatibility backend: inject the prompt as the developer-message layer via
 # ``-c developer_instructions=<json>`` (additive — keeps codex's own base
 # instructions). Verified accepted by ``codex exec --strict-config``.
 SYSTEM_PROMPT_CODEX_DEVELOPER = "codex_developer"
@@ -406,7 +406,7 @@ def _json_field_equals(line: str, path: tuple[str, ...], expected: str) -> bool:
 # conventions where known. NOT validated against the real binaries — verify
 # command, input framing and completion detection per CLI version.
 _BUILTIN: dict[str, CliAgentAdapter] = {
-    # Codex CLI (>= 0.13x) — `codex exec --json` runs one prompt
+    # Codex CLI compatibility backend — `codex exec --json` runs one prompt
     # non-interactively, streams JSONL events, and exits (one-shot, so it runs
     # under the re-invoke runtime). The prompt is the trailing positional argv;
     # the final per-turn event is {"type": "turn.completed"} and the process
@@ -417,8 +417,11 @@ _BUILTIN: dict[str, CliAgentAdapter] = {
     # `-c mcp_servers.<name>...` (codex_override) and the member system prompt
     # via `-c developer_instructions=<json>` (codex_developer), both applied on
     # every re-invocation.
-    "codex": CliAgentAdapter(
-        name="codex",
+    # The primary ``codex`` backend is the long-lived Python SDK runtime in
+    # ``cli_agent/codex``. Keep this explicit ``codex-exec`` name as a
+    # one-shot fallback for older Codex CLI installations.
+    "codex-exec": CliAgentAdapter(
+        name="codex-exec",
         command=(
             "codex",
             "exec",

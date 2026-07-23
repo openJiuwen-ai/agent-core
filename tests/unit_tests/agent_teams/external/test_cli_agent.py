@@ -13,6 +13,7 @@ from openjiuwen.agent_teams.external.cli_agent.adapters import (
     available_adapters,
     build_adapter,
 )
+from openjiuwen.agent_teams.external.cli_agent.codex.options import codex_mcp_config_overrides
 from openjiuwen.agent_teams.external.cli_agent.injector import StdinPipeInjector
 from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.harness import TeamHarness
@@ -46,21 +47,23 @@ def test_build_adapter_unknown_raises():
 @pytest.mark.level1
 def test_available_adapters_includes_known_clis():
     names = set(available_adapters())
-    assert {"codex", "openclaw", "hermes", "generic"} <= names
+    assert {"codex-exec", "openclaw", "hermes", "generic"} <= names
     assert "claude" not in names
+    assert "codex" not in names
 
 
 @pytest.mark.level0
-def test_codex_mcp_launch_args_use_config_override():
-    adapter = build_adapter("codex")
-    args = adapter.mcp_launch_args(server_name="openjiuwen-team", server_command=("openjiuwen-team-mcp", "--flag"))
-    assert args[0] == "-c"
+def test_codex_mcp_config_overrides_use_sdk_config_shape():
+    overrides = codex_mcp_config_overrides(
+        server_name="openjiuwen-team",
+        server_command=("openjiuwen-team-mcp", "--flag"),
+    )
     # Hyphen in the server name is normalised to an underscore for the TOML key.
-    assert 'mcp_servers.openjiuwen_team.command="openjiuwen-team-mcp"' == args[1]
-    assert 'mcp_servers.openjiuwen_team.args=["--flag"]' == args[3]
-    assert 'mcp_servers.openjiuwen_team.env_vars=["OPENJIUWEN_TEAM_JOIN"]' in args
-    assert "mcp_servers.openjiuwen_team.startup_timeout_sec=120" in args
-    assert "mcp_servers.openjiuwen_team.required=true" in args
+    assert 'mcp_servers.openjiuwen_team.command="openjiuwen-team-mcp"' == overrides[0]
+    assert 'mcp_servers.openjiuwen_team.args=["--flag"]' == overrides[1]
+    assert 'mcp_servers.openjiuwen_team.env_vars=["OPENJIUWEN_TEAM_JOIN"]' in overrides
+    assert "mcp_servers.openjiuwen_team.startup_timeout_sec=120" in overrides
+    assert "mcp_servers.openjiuwen_team.required=true" in overrides
 
 
 @pytest.mark.level1

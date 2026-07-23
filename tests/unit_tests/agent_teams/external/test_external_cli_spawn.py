@@ -5,6 +5,7 @@
 
 import asyncio
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +14,7 @@ from openjiuwen.agent_teams.external.cli_agent.spawn import (
     build_cli_runtime,
     descriptor_from_context,
 )
+from openjiuwen.agent_teams.external.cli_agent.codex.runtime import CodexSdkRuntime
 from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
@@ -225,3 +227,35 @@ async def test_reinvoke_surfaces_chunks_live_during_turn():
     # are bridged live through the queue, not batched at turn end.
     early_at = arrivals[0][1]
     assert early_at < 0.3, f"first chunk arrived at {early_at:.2f}s: not surfaced live"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_dispatches_codex_to_sdk_backend(monkeypatch):
+    class FakeCodexConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    sdk = SimpleNamespace(CodexConfig=FakeCodexConfig, AsyncCodex=object)
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.external.cli_agent.codex.runtime.load_codex_sdk",
+        lambda: sdk,
+    )
+    token = set_session_id("sess-1")
+    try:
+        runtime = await build_cli_runtime(
+            _ctx(member="dev-1", cli_agent="codex"),
+            cwd="/workspace",
+            inject_mcp=False,
+            system_prompt="ROLE: isolated developer",
+        )
+    finally:
+        reset_session_id(token)
+
+    assert isinstance(runtime, CodexSdkRuntime)
+    assert runtime._thread_options == {
+        "ephemeral": False,
+        "cwd": "/workspace",
+        "developer_instructions": "ROLE: isolated developer",
+    }
+    assert runtime._config.kwargs["cwd"] == "/workspace"
