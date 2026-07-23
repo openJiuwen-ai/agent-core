@@ -180,3 +180,126 @@ def test_runtime_rail_limits_repeated_navigation_keys_by_key_value() -> None:
     assert blocked_escape.extra["_skip_tool"] is True
     assert blocked_escape.inputs.tool_result["reason"] == "repeated_key_limited"
     assert blocked_escape.inputs.tool_result["key"] == "Escape"
+
+
+def test_runtime_rail_allows_snapshot_after_semantic_failure_then_blocks_same_target() -> None:
+    rail = _runtime_rail()
+    semantic_ctx = _tool_context(
+        "browser_select_dropdown_option",
+        {"field_selector": "#states", "option_text": "Atlantis", "exact": True},
+        tool_result={
+            "ok": False,
+            "error": "dropdown_option_not_found",
+            "resolved_field_selector": "#states",
+            "target_family": "semantic_dropdown:https://example.test/:#states",
+        },
+    )
+    _run(rail.after_tool_call(semantic_ctx))
+
+    snapshot_ctx = _tool_context("mcp_playwright-official_browser_snapshot", {})
+    _run(rail.before_tool_call(snapshot_ctx))
+    assert "_skip_tool" not in snapshot_ctx.extra
+    snapshot_ctx.inputs.tool_result = {"ok": True, "url": "https://example.test/"}
+    _run(rail.after_tool_call(snapshot_ctx))
+
+    raw_ctx = _tool_context(
+        "mcp_playwright-official_browser_select_option",
+        {"target": "#states", "values": ["AL"]},
+    )
+    _run(rail.before_tool_call(raw_ctx))
+
+    assert raw_ctx.extra["_skip_tool"] is True
+    assert raw_ctx.inputs.tool_result["reason"] == "raw_fallback_after_semantic_widget_failure"
+
+
+def test_runtime_rail_does_not_arm_fallback_for_generic_batch_failure() -> None:
+    rail = _runtime_rail()
+    batch_ctx = _tool_context(
+        "browser_batch_interact",
+        {"steps": [{"op": "click", "selector": "#missing"}]},
+        tool_result={
+            "ok": False,
+            "error": "one_or_more_steps_failed",
+            "steps_ok": 0,
+            "steps_failed": 1,
+        },
+    )
+    _run(rail.after_tool_call(batch_ctx))
+
+    snapshot_ctx = _tool_context("mcp_playwright-official_browser_snapshot", {})
+    _run(rail.before_tool_call(snapshot_ctx))
+
+    assert "_skip_tool" not in snapshot_ctx.extra
+    assert rail.mcp_usage_limiter.last_failure_semantic_context is False
+
+
+def test_runtime_rail_blocks_fifth_probe_then_escalates_identical_retry(monkeypatch) -> None:
+    monkeypatch.setenv("BROWSER_TASK_PROGRESS_SOFT_LIMIT", "5")
+    monkeypatch.setenv("BROWSER_TASK_PROGRESS_HARD_LIMIT", "8")
+    rail = _runtime_rail()
+    navigation = _tool_context(
+        "browser_navigate",
+        {"url": "https://sg.trip.com/flights"},
+        tool_result={"ok": True, "url": "https://sg.trip.com/flights"},
+    )
+    _run(rail.after_tool_call(navigation))
+    args = {"query": "Search flights", "max_items": 10}
+
+    for expected_turns in range(1, 5):
+        probe = _tool_context(
+            "browser_probe_interactives",
+            args,
+            tool_result={"ok": True, "url": "https://sg.trip.com/flights", "elements": []},
+        )
+        _run(rail.before_tool_call(probe))
+        assert "_skip_tool" not in probe.extra
+        _run(rail.after_tool_call(probe))
+        assert rail.mcp_usage_limiter.no_progress_turns == expected_turns
+
+    fifth_probe = _tool_context("browser_probe_interactives", args)
+    _run(rail.before_tool_call(fifth_probe))
+
+    assert fifth_probe.extra["_skip_tool"] is True
+    assert fifth_probe.inputs.tool_result["reason"] == "task_progress_strategy_change_required"
+    assert fifth_probe.inputs.tool_result["no_progress_turns"] == 5
+    assert "observation" in fifth_probe.inputs.tool_result["blocked_families"]
+
+    _run(rail.after_tool_call(fifth_probe))
+    assert rail.mcp_usage_limiter.no_progress_turns == 5
+
+    sixth_probe = _tool_context("browser_probe_interactives", args)
+    _run(rail.before_tool_call(sixth_probe))
+
+    assert sixth_probe.extra["_skip_tool"] is True
+    assert sixth_probe.inputs.tool_result["reason"] == "task_progress_budget_exhausted"
+    assert sixth_probe.inputs.tool_result["no_progress_turns"] == 5
+
+
+def test_runtime_rail_blocks_all_browser_calls_after_progress_budget_exhaustion(monkeypatch) -> None:
+    monkeypatch.setenv("BROWSER_TASK_PROGRESS_SOFT_LIMIT", "2")
+    monkeypatch.setenv("BROWSER_TASK_PROGRESS_HARD_LIMIT", "4")
+    monkeypatch.setenv("BROWSER_TASK_OBSERVATION_PROGRESS_LIMIT", "0")
+    rail = _runtime_rail()
+    completed = [
+        _tool_context("browser_wait_for", {"time": 100}, tool_result={"ok": True}),
+        _tool_context("browser_click", {"target": "#a"}, tool_result={"ok": True}),
+        _tool_context(
+            "browser_navigate",
+            {"url": "https://example.test/seen"},
+            tool_result={"ok": False, "error": "navigation_failed"},
+        ),
+        _tool_context(
+            "browser_batch_interact",
+            {"steps": []},
+            tool_result={"ok": False, "error": "one_or_more_steps_failed"},
+        ),
+    ]
+    for ctx in completed:
+        _run(rail.after_tool_call(ctx))
+
+    blocked = _tool_context("browser_probe_form_fields", {})
+    _run(rail.before_tool_call(blocked))
+
+    assert blocked.extra["_skip_tool"] is True
+    assert blocked.inputs.tool_result["reason"] == "task_progress_budget_exhausted"
+    assert blocked.inputs.tool_result["no_progress_turns"] == 4

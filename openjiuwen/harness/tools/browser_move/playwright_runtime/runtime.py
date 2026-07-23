@@ -52,6 +52,7 @@ _BROWSER_PROGRESS_STATE_KEY = "__browser_subagent_progress_state__"
 _BROWSER_PROGRESS_TASK_KEY = "__browser_subagent_last_task__"
 _BROWSER_PROGRESS_SECTION_NAME = "browser_progress_continuation"
 _BROWSER_PROGRESS_FORMAT_SECTION_NAME = "browser_progress_format"
+_BROWSER_PROGRESS_GUARD_SECTION_NAME = "browser_progress_guard"
 _BROWSER_LOG_CONTEXT_TOKEN_KEY = "__browser_agent_log_context_token__"
 _BROWSER_PROGRESS_TAG_RE = re.compile(
     r"<browser_progress>\s*(\{.*?\})\s*</browser_progress>",
@@ -72,6 +73,31 @@ _BROWSER_PROGRESS_FORMAT_GUIDANCE = {
         "包含以下紧凑字段：status、completed_steps、remaining_steps、next_step、"
         "completion_evidence、missing_requirements。"
     ),
+}
+
+_BROWSER_PROGRESS_GUARD_GUIDANCE = {
+    "en": {
+        "strategy": (
+            "Browser progress guard: recent browser calls did not produce meaningful progress. "
+            "Do not repeat the blocked tool family. Choose a materially different strategy, use a target-specific "
+            "semantic helper, navigate to a genuinely new workflow stage, or report the exact blocker."
+        ),
+        "exhausted": (
+            "Browser progress budget exhausted. Do not call another browser tool. Return a concise partial-progress "
+            "report containing the current page or stage, completed steps, blocking condition, and recommended "
+            "next step."
+        ),
+    },
+    "cn": {
+        "strategy": (
+            "浏览器进度守卫：最近的浏览器调用没有产生有意义的进展。不要重复被阻止的工具类别。"
+            "请选择实质不同的策略、使用针对目标的语义工具、进入真正新的流程阶段，或报告明确阻塞原因。"
+        ),
+        "exhausted": (
+            "浏览器进度预算已耗尽。不要再调用浏览器工具。请返回简洁的部分进度报告，包含当前页面或阶段、"
+            "已完成步骤、阻塞条件和建议的下一步。"
+        ),
+    },
 }
 
 
@@ -1023,6 +1049,29 @@ class BrowserRuntimeRail(AgentRail):
         if session is None or builder is None:
             return
 
+        builder.remove_section(_BROWSER_PROGRESS_GUARD_SECTION_NAME)
+        guard_language = getattr(builder, "language", "cn")
+        guard_messages = _BROWSER_PROGRESS_GUARD_GUIDANCE.get(
+            guard_language,
+            _BROWSER_PROGRESS_GUARD_GUIDANCE["en"],
+        )
+        if self._mcp_usage_limiter.progress_budget_exhausted:
+            builder.add_section(
+                PromptSection(
+                    name=_BROWSER_PROGRESS_GUARD_SECTION_NAME,
+                    content=guard_messages["exhausted"],
+                    priority=99,
+                )
+            )
+        elif self._mcp_usage_limiter.strategy_change_required:
+            builder.add_section(
+                PromptSection(
+                    name=_BROWSER_PROGRESS_GUARD_SECTION_NAME,
+                    content=guard_messages["strategy"],
+                    priority=96,
+                )
+            )
+
         builder.add_section(
             PromptSection(
                 name=_BROWSER_PROGRESS_FORMAT_SECTION_NAME,
@@ -1154,6 +1203,16 @@ class BrowserRuntimeRail(AgentRail):
                 "boundary=browser_runtime_rail.after_tool_call tool=%s target_family=%s",
                 tool_name,
                 self._mcp_usage_limiter.last_semantic_failure_target_family,
+            )
+        if self._mcp_usage_limiter.last_progress_event:
+            browser_agent_log_warning(
+                "[BROWSER_PROGRESS_GUARD] event=%s no_progress_turns=%s "
+                "soft_limit=%s hard_limit=%s blocked_families=%s",
+                self._mcp_usage_limiter.last_progress_event,
+                self._mcp_usage_limiter.no_progress_turns,
+                self._mcp_usage_limiter.progress_soft_limit,
+                self._mcp_usage_limiter.progress_hard_limit,
+                sorted(self._mcp_usage_limiter.strategy_blocked_families),
             )
 
         session = getattr(ctx, "session", None)
