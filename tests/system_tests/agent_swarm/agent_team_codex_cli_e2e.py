@@ -148,18 +148,24 @@ def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
 
 
 def _god_view_query(workspace_path: Path) -> str:
-    roster = "\n".join(f"   - {name}：写入 {name}.md" for name in _MEMBERS)
+    roster = "\n".join(
+        f"   - {name}：任务 ID 为 task-{name}，写入 {name}.md" for name in _MEMBERS
+    )
     return (
         "请组建一个 4 人临时团队，完成 Codex CLI 协同写文件验证，全程自主推进：\n\n"
         "1. 调用 build_team 建立团队。\n"
-        "2. 用一次 create_task 批量创建 4 个任务，每个任务要求成员："
-        "claim_task(claimed) 认领，写文件，claim_task(completed) 完成，"
-        "再用 send_message 向 leader 汇报。\n"
+        "2. 调用 spawn_external_cli 创建以下成员，cli_agent 都必须是 codex：\n"
+        f"{roster}\n"
+        "3. 团队使用自主认领模式。在成员全部创建成功后，用一次 create_task "
+        "批量创建 4 个任务；不要用 update_task 设置 assignee。"
+        "每个任务的标题和内容必须写明唯一的目标成员和对应任务 ID，"
+        "仅允许该成员认领。\n"
+        "4. 任务创建成功后，分别用 send_message 将对应任务 ID 发给每个成员。"
+        "成员收到消息后必须先调用 claim_task(claimed) 认领指定任务，"
+        "再写文件，最后调用 claim_task(completed) 完成任务，"
+        "并用 send_message 向 leader 汇报。\n"
         f"   共享工作目录：{workspace_path}\n"
         "   文件内容固定为一行：<member> reporting in.\n"
-        "3. 调用 spawn_external_cli 创建以下成员，cli_agent 都必须是 codex：\n"
-        f"{roster}\n"
-        "4. 将任务分配给对应成员，并用 send_message 下发任务。\n"
         "5. 用 view_task 跟踪，只有四个任务都 completed 才继续。\n"
         "6. 确认四个文件都存在后，对四个成员逐一调用 "
         "shutdown_member(member_name=<member>, force=true)，不要发 shutdown 提示词。\n"
@@ -192,7 +198,12 @@ async def _run() -> int:
     await Runner.start()
     try:
         await asyncio.wait_for(
-            consume_stream(spec, _god_view_query(workspace_path), _SESSION_ID),
+            consume_stream(
+                spec,
+                _god_view_query(workspace_path),
+                _SESSION_ID,
+                ordered_output=True,
+            ),
             timeout=_RUN_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
