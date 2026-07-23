@@ -248,7 +248,14 @@ async def test_codex_spawn_passes_stable_member_agent_id(monkeypatch):
         display_name="Ext",
         lifecycle=TeamLifecycle.PERSISTENT,
         teammate_mode=MemberMode.BUILD_MODE,
-        external_cli_agents=[{"cli_agent": "codex", "codex_bin": "/opt/codex"}],
+        external_cli_agents=[
+            {
+                "cli_agent": "codex",
+                "codex_bin": "/opt/codex",
+                "codex_turn_idle_timeout_s": 45.0,
+                "codex_turn_idle_retries": 2,
+            }
+        ],
     )
     agent = _FakeTeamAgent(spec)
     ctx = TeamRuntimeContext(
@@ -269,6 +276,8 @@ async def test_codex_spawn_passes_stable_member_agent_id(monkeypatch):
     assert build_kwargs["member_agent_id"] == "ext_team_codex-1"
     assert build_kwargs["resume_external_backend"] is True
     assert build_kwargs["codex_bin"] == "/opt/codex"
+    assert build_kwargs["codex_turn_idle_timeout_s"] == 45.0
+    assert build_kwargs["codex_turn_idle_retries"] == 2
 
     await handle.force_kill()
 

@@ -256,6 +256,8 @@ async def test_build_cli_runtime_dispatches_codex_to_sdk_backend(monkeypatch):
             inject_mcp=True,
             mcp_default_tools_approval_mode="approve",
             codex_bypass_approvals_and_sandbox=True,
+            codex_turn_idle_timeout_s=45.0,
+            codex_turn_idle_retries=2,
             system_prompt="ROLE: isolated developer",
             member_agent_id="ext_team_dev-1",
         )
@@ -277,6 +279,8 @@ async def test_build_cli_runtime_dispatches_codex_to_sdk_backend(monkeypatch):
         in runtime._config.kwargs["config_overrides"]
     )
     assert runtime._member_agent_id == "ext_team_dev-1"
+    assert runtime._turn_idle_timeout_s == 45.0
+    assert runtime._turn_idle_retries == 2
 
 
 @pytest.mark.asyncio

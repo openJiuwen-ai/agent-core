@@ -53,6 +53,7 @@ os.environ.setdefault("IS_SENSITIVE", "false")
 _MEMBERS = ("codex-1", "codex-2", "codex-3", "codex-4")
 _SESSION_ID = "codex_cli_session"
 _RUN_TIMEOUT_S = 1200.0
+_NO_PROGRESS_TIMEOUT_S = 360.0
 _VERIFY_POLL_INTERVAL_S = 0.2
 _MCP_SERVER_COMMAND = [sys.executable, "-m", "openjiuwen.agent_teams.mcp"]
 
@@ -143,6 +144,8 @@ def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
                 "inject_mcp": True,
                 "mcp_default_tools_approval_mode": "approve",
                 "codex_bypass_approvals_and_sandbox": True,
+                "codex_turn_idle_timeout_s": 120.0,
+                "codex_turn_idle_retries": 1,
                 "mcp_server_command": _MCP_SERVER_COMMAND,
             },
         ],
@@ -213,6 +216,9 @@ async def _verify_before_cleanup(
     await runtime_ready.wait()
     expected_task_ids = {f"task-{member}" for member in _MEMBERS}
     monitor = None
+    loop = asyncio.get_running_loop()
+    last_progress_at = loop.time()
+    last_progress: tuple[int, frozenset[str]] | None = None
     while True:
         verified = _verified_files(workspace_path)
         if monitor is None:
@@ -240,6 +246,11 @@ async def _verify_before_cleanup(
                 if task.task_id in expected_task_ids and task.status == TaskStatus.COMPLETED.value
             }
 
+        progress = (len(verified), frozenset(completed_task_ids))
+        if progress != last_progress:
+            last_progress = progress
+            last_progress_at = loop.time()
+
         files_ready = len(verified) == len(_MEMBERS)
         tasks_ready = completed_task_ids == expected_task_ids
         if files_ready and tasks_ready:
@@ -260,6 +271,14 @@ async def _verify_before_cleanup(
                 "team stream ended before all four artifacts and tasks were completed: "
                 f"files={len(verified)}/{len(_MEMBERS)}, "
                 f"completed_tasks={sorted(completed_task_ids)}"
+            )
+        stalled_for = loop.time() - last_progress_at
+        if stalled_for >= _NO_PROGRESS_TIMEOUT_S:
+            raise RuntimeError(
+                f"team made no artifact/task progress for {stalled_for:.0f}s: "
+                f"files={len(verified)}/{len(_MEMBERS)}, "
+                f"completed_tasks={sorted(completed_task_ids)}; "
+                "inspect Codex turn timeout/retry logs for the stalled member"
             )
         await asyncio.sleep(_VERIFY_POLL_INTERVAL_S)
 
@@ -315,6 +334,8 @@ async def _run() -> int:
         cleanup_gate_passed = True
     except asyncio.TimeoutError:
         logger.error("run exceeded {}s budget; checking partial output", _RUN_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 - report E2E failure before teardown
+        logger.error("run failed before cleanup gate: {}", exc)
     finally:
         for task in (stream_task, verification_task):
             if not task.done():

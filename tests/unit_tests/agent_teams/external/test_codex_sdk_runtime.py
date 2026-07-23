@@ -79,6 +79,25 @@ class _BlockingThread(_FakeThread):
         return self.handle
 
 
+class _HandleSequenceThread(_FakeThread):
+    def __init__(self, thread_id: str, handles):
+        super().__init__(thread_id, [])
+        self._handles = list(handles)
+
+    async def turn(self, prompt: str):
+        self.prompts.append(prompt)
+        handle = self._handles.pop(0)
+        self.handles.append(handle)
+        return handle
+
+
+class _NotificationThenBlockingTurnHandle(_BlockingTurnHandle):
+    async def stream(self):
+        self.streaming.set()
+        yield _notification("item/agentMessage/delta", delta="started")
+        await self.block.wait()
+
+
 class _FakeRpcError(Exception):
     def __init__(self, code: int, message: str):
         super().__init__(f"JSON-RPC error {code}: {message}")
@@ -162,7 +181,15 @@ def _saved_state(thread_id: str):
     }
 
 
-def _runtime(*, thread, thread_id=None, resume_error=None, member_state=None):
+def _runtime(
+    *,
+    thread,
+    thread_id=None,
+    resume_error=None,
+    member_state=None,
+    turn_idle_timeout_s=180.0,
+    turn_idle_retries=1,
+):
     client = _FakeAsyncCodex(config=None, thread=thread, resume_error=resume_error)
     sdk = SimpleNamespace(AsyncCodex=lambda *, config: client)
     member_session = _FakeMemberSession(
@@ -180,6 +207,8 @@ def _runtime(*, thread, thread_id=None, resume_error=None, member_state=None):
             "developer_instructions": "role prompt",
         },
         resume_external_backend=thread_id is not None,
+        turn_idle_timeout_s=turn_idle_timeout_s,
+        turn_idle_retries=turn_idle_retries,
     )
     runtime._test_team_session = team_session
     runtime._test_member_session = member_session
@@ -449,6 +478,82 @@ async def test_codex_sdk_runtime_reports_non_retryable_sdk_errors():
     with pytest.raises(RuntimeError, match="codex SDK turn failed"):
         async for _ in runtime._drive({"query": "fail"}):
             pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_retries_silent_turn_on_same_thread():
+    stalled = _BlockingTurnHandle()
+    recovered = _FakeTurnHandle(
+        [
+            _notification("item/agentMessage/delta", delta="recovered"),
+            _notification("turn/completed", turn=SimpleNamespace(status="completed")),
+        ]
+    )
+    thread = _HandleSequenceThread("thread-developer", [stalled, recovered])
+    runtime, client = _runtime(
+        thread=thread,
+        turn_idle_timeout_s=0.01,
+        turn_idle_retries=1,
+    )
+    await _start(runtime)
+
+    chunks = await asyncio.wait_for(_collect_drive(runtime, "same prompt"), timeout=1.0)
+
+    assert [chunk.payload["content"] for chunk in chunks] == ["recovered"]
+    assert thread.prompts == ["same prompt", "same prompt"]
+    assert stalled.interrupt_count == 1
+    assert len(client.start_calls) == 1
+    assert client.resume_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_does_not_replay_turn_after_any_notification():
+    stalled = _NotificationThenBlockingTurnHandle()
+    unused = _FakeTurnHandle([])
+    thread = _HandleSequenceThread("thread-developer", [stalled, unused])
+    runtime, _ = _runtime(
+        thread=thread,
+        turn_idle_timeout_s=0.01,
+        turn_idle_retries=1,
+    )
+    await _start(runtime)
+    chunks = []
+
+    with pytest.raises(RuntimeError, match="produced no turn events"):
+        async for chunk in runtime._drive({"query": "do not replay"}):
+            chunks.append(chunk)
+
+    assert [chunk.payload["content"] for chunk in chunks] == ["started"]
+    assert thread.prompts == ["do not replay"]
+    assert stalled.interrupt_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_bounds_silent_turn_retries():
+    first = _BlockingTurnHandle()
+    second = _BlockingTurnHandle()
+    thread = _HandleSequenceThread("thread-developer", [first, second])
+    runtime, _ = _runtime(
+        thread=thread,
+        turn_idle_timeout_s=0.01,
+        turn_idle_retries=1,
+    )
+    await _start(runtime)
+
+    with pytest.raises(RuntimeError, match="produced no turn events"):
+        async for _ in runtime._drive({"query": "bounded"}):
+            pass
+
+    assert thread.prompts == ["bounded", "bounded"]
+    assert first.interrupt_count == 1
+    assert second.interrupt_count == 1
+
+
+async def _collect_drive(runtime, query):
+    return [chunk async for chunk in runtime._drive({"query": query})]
 
 
 @pytest.mark.asyncio

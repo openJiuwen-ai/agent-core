@@ -73,6 +73,25 @@ def test_full_access_bypass_is_explicit_and_codex_only():
         )
 
 
+def test_codex_turn_stall_policy_is_validated_and_codex_only():
+    config = ExternalCliAgentSpec(
+        cli_agent="codex",
+        codex_turn_idle_timeout_s=45.0,
+        codex_turn_idle_retries=2,
+    )
+    assert config.codex_turn_idle_timeout_s == 45.0
+    assert config.codex_turn_idle_retries == 2
+
+    with pytest.raises(ValidationError, match="greater than 0"):
+        ExternalCliAgentSpec(cli_agent="codex", codex_turn_idle_timeout_s=0)
+
+    with pytest.raises(ValidationError, match="codex_turn_idle_timeout_s is only valid"):
+        ExternalCliAgentSpec(cli_agent="claude", codex_turn_idle_timeout_s=45.0)
+
+    with pytest.raises(ValidationError, match="codex_turn_idle_retries is only valid"):
+        ExternalCliAgentSpec(cli_agent="generic", codex_turn_idle_retries=1)
+
+
 def test_unknown_backend_returns_none():
     """Unknown backend names are rejected by registry helpers."""
     assert backend_for("not-a-real-cli") is None
