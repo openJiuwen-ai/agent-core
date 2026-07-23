@@ -33,10 +33,10 @@ override it without standing up a real LLM.
 """
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, Callable, Sequence
 
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
 from openjiuwen.agent_teams.tools.locales import make_translator
@@ -45,12 +45,33 @@ from openjiuwen.agent_teams.tools.structured_output_tool import (
     StructuredOutputFinishRail,
     StructuredOutputTool,
 )
+from openjiuwen.agent_teams.workflow.backends._result_text import (
+    prefer_natural_or_structured_text,
+)
+from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.agent_teams.workflow.worktree import SwarmflowWorkerWorktrees
 from openjiuwen.core.common.logging import team_logger
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _text_from_invoke_result(result: Any, *, member_name: str) -> str:
+    """Map a DeepAgent ``invoke`` / task-loop result dict to worker output text.
+
+    Task-loop failures resolve ``wait_completion()`` with ``{"error": "..."}``
+    (no ``output``). Treat that as a backend error so SwarmFlow emits
+    ``agent_failed`` instead of ``agent_completed`` with an empty outcome.
+    A bare empty ``output`` with no error remains a valid success.
+    """
+    if isinstance(result, dict):
+        err = result.get("error")
+        if err or result.get("result_type") == "error":
+            msg = str(err or result.get("output") or "worker task failed")
+            raise BackendError(f"worker '{member_name}' failed: {msg}")
+        return str(result.get("output", ""))
+    return str(result)
 
 
 class TeamWorkerBackend(AgentBackend):
@@ -91,9 +112,10 @@ class TeamWorkerBackend(AgentBackend):
         messager: Any = None,
         session_id: str | None = None,
         on_human_prompt: Callable[[str, str, str], None] | None = None,
-        on_human_replied: Callable[[str, str], None] | None = None,
+        on_human_replied: Callable[[str, str, str | None], None] | None = None,
         run_id: str | None = None,
     ) -> None:
+        super().__init__()
         self._model = model
         self._team_name = team_name
         self._language = language
@@ -122,6 +144,10 @@ class TeamWorkerBackend(AgentBackend):
     async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
         member_name = self._next_member_name(opts)
         model = self._resolve_model(opts.get("model"))
+        # One rail per call: it bills this worker's model calls to the run's
+        # shared ledger (and cuts the worker short once that ledger is dry),
+        # while its own tally is what this ``agent()`` call reports as its cost.
+        budget_rail = SwarmflowBudgetRail(self.budget)
         try:
             await self._worktrees.ensure(member_name, opts)
             if schema_json is not None:
@@ -135,15 +161,18 @@ class TeamWorkerBackend(AgentBackend):
                     member_name=member_name,
                     has_schema=True,
                     model=model,
+                    budget_rail=budget_rail,
                 )
                 if not (submit_tool.called and submit_tool.captured is not None):
                     raise BackendError(
                         f"worker '{member_name}' did not submit a structured result via structured_output"
                     )
+                # Prefer free-text narration; fall back to JSON of the capture.
+                text = prefer_natural_or_structured_text(text, submit_tool.captured)
                 return AgentResult(
                     text=text,
                     structured=submit_tool.captured,
-                    tokens=self._estimate_tokens(prompt, submit_tool.captured),
+                    tokens=budget_rail.call_tokens,
                 )
             text = await self._execute_worker(
                 prompt,
@@ -151,8 +180,9 @@ class TeamWorkerBackend(AgentBackend):
                 member_name=member_name,
                 has_schema=False,
                 model=model,
+                budget_rail=budget_rail,
             )
-            return AgentResult(text=text, tokens=self._estimate_tokens(prompt, text))
+            return AgentResult(text=text, tokens=budget_rail.call_tokens)
         finally:
             await self._worktrees.finalize(member_name)
 
@@ -175,8 +205,10 @@ class TeamWorkerBackend(AgentBackend):
                 model_resolver=self._model_resolver,
                 build_context=self._build_context,
                 t=self._t,
+                budget=self.budget,
                 messager=self._messager,
                 session_id=self._session_id,
+                run_id=self._run_id,
                 on_human_prompt=self._on_human_prompt,
                 on_human_replied=self._on_human_replied,
             )
@@ -249,6 +281,7 @@ class TeamWorkerBackend(AgentBackend):
         member_name: str,
         has_schema: bool,
         model: Any,
+        budget_rail: SwarmflowBudgetRail | None = None,
     ) -> str:
         """Build a worker ``TeamHarness`` and run it for one execution.
 
@@ -261,6 +294,9 @@ class TeamWorkerBackend(AgentBackend):
                 required.
             model: The resolved ``TeamModelConfig`` for this worker, or ``None``
                 to inherit the base spec's model (see :meth:`_resolve_model`).
+            budget_rail: This call's token rail, mounted on the worker harness so
+                the run's ceiling binds the worker's own loop. ``None`` (tests
+                overriding this method) leaves the worker unmetered.
 
         Returns:
             The worker's final free-text output (only meaningful when no schema
@@ -311,6 +347,15 @@ class TeamWorkerBackend(AgentBackend):
                 member_name=member_name,
                 build_context=worker_build_context,
             )
+            if budget_rail is not None:
+                harness.add_rail(budget_rail)
+            kv_cache_hooks.configure_harness_session_hooks(
+                harness,
+                product_session_id=self._session_id,
+                evict_on_finish=True,
+                reason="swarmflow-worker-finish",
+                owner_id=member_name,
+            )
             if has_schema:
                 # End the round as soon as structured_output is captured, so the
                 # model can't loop re-calling it (the ack carries no stop signal).
@@ -339,9 +384,9 @@ class TeamWorkerBackend(AgentBackend):
                 await harness.dispose()
             except Exception:
                 team_logger.debug("worker harness dispose failed for %s", member_name)
-        if isinstance(result, dict):
-            return str(result.get("output", ""))
-        return str(result)
+            finally:
+                kv_cache_hooks.clear_harness_session_hooks(harness)
+        return _text_from_invoke_result(result, member_name=member_name)
 
     # ------------------------------------------------------------------
     # Worker workspace setup
@@ -414,14 +459,6 @@ class TeamWorkerBackend(AgentBackend):
         if self._run_prefix:
             return f"{self._run_prefix}-{slug}-{n}"
         return f"wf-{slug}-{n}"
-
-    @staticmethod
-    def _estimate_tokens(prompt: str, result: Any) -> int:
-        try:
-            payload = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
-        except Exception:
-            payload = str(result)
-        return len(prompt) // 4 + len(payload) // 4
 
     @staticmethod
     def _run_id_prefix(run_id: str | None) -> str | None:

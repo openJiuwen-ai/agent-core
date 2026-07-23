@@ -6,9 +6,15 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+from openjiuwen.core.foundation.tool import McpServerConfig, ToolInfo
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.prompts.builder import SystemPromptBuilder
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
+    resolve_browser_capabilities,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserAgentRuntime, BrowserRuntimeRail
 from openjiuwen.harness.tools.browser_move.playwright_runtime.service import MAX_ITERATION_MESSAGE
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -23,6 +29,15 @@ def _run(coro):
 
 def _make_ctx() -> AgentCallbackContext:
     return AgentCallbackContext(agent=MagicMock())
+
+
+def _playwright_mcp_config() -> McpServerConfig:
+    return McpServerConfig(
+        server_id="playwright_official_stdio",
+        server_name="playwright-official",
+        server_path="stdio://playwright",
+        client_type="stdio",
+    )
 
 
 class _FakeSession:
@@ -55,12 +70,69 @@ def test_before_invoke_calls_ensure_runtime_ready() -> None:
     runtime.ensure_runtime_ready = AsyncMock()
     runtime.service = MagicMock()
     runtime.service.mcp_cfg = MagicMock()
+    runtime.service.allowed_tool_names = ("browser_click", "browser_pdf_save")
     rail = BrowserRuntimeRail(runtime)
     ctx = _make_ctx()
     ctx.agent.ability_manager = MagicMock()
     _run(rail.before_invoke(ctx))
     runtime.ensure_runtime_ready.assert_called_once_with()
     ctx.agent.ability_manager.add.assert_called_once_with(runtime.service.mcp_cfg)
+    ctx.agent.ability_manager.set_mcp_tool_allowlist.assert_called_once_with(
+        runtime.service.mcp_cfg,
+        runtime.service.allowed_tool_names,
+    )
+
+
+def test_before_invoke_with_none_allowlist_preserves_unrestricted_mode() -> None:
+    runtime = MagicMock(spec=BrowserAgentRuntime)
+    runtime.ensure_runtime_ready = AsyncMock()
+    runtime.service = MagicMock()
+    runtime.service.mcp_cfg = MagicMock()
+    runtime.service.allowed_tool_names = None
+    rail = BrowserRuntimeRail(runtime)
+    ctx = _make_ctx()
+    ctx.agent.ability_manager = MagicMock()
+
+    _run(rail.before_invoke(ctx))
+
+    ctx.agent.ability_manager.add.assert_called_once_with(runtime.service.mcp_cfg)
+    ctx.agent.ability_manager.set_mcp_tool_allowlist.assert_not_called()
+
+
+def test_pdf_allowlist_filters_active_browser_agent_schemas() -> None:
+    runtime = MagicMock(spec=BrowserAgentRuntime)
+    runtime.ensure_runtime_ready = AsyncMock()
+    runtime.service = MagicMock()
+    runtime.service.mcp_cfg = _playwright_mcp_config()
+    runtime.service.allowed_tool_names = resolve_browser_capabilities(["pdf"]).allowed_tool_names
+    rail = BrowserRuntimeRail(runtime)
+    agent = MagicMock()
+    agent.ability_manager = AbilityManager()
+    ctx = AgentCallbackContext(agent=agent)
+
+    _run(rail.before_invoke(ctx))
+
+    registered_tools = [
+        ToolInfo(name="browser_click", description="core", parameters={}),
+        ToolInfo(name="browser_pdf_save", description="pdf", parameters={}),
+        ToolInfo(name="browser_get_config", description="config", parameters={}),
+        ToolInfo(name="browser_cookie_list", description="storage", parameters={}),
+        ToolInfo(name="browser_mouse_click_xy", description="vision", parameters={}),
+    ]
+    with patch.object(
+        Runner.resource_mgr,
+        "get_mcp_tool_infos",
+        new=AsyncMock(return_value=registered_tools),
+    ):
+        visible_names = {
+            tool.name for tool in _run(agent.ability_manager.list_tool_info())
+        }
+
+    assert "mcp_playwright-official_browser_click" in visible_names
+    assert "mcp_playwright-official_browser_pdf_save" in visible_names
+    assert "mcp_playwright-official_browser_get_config" not in visible_names
+    assert "mcp_playwright-official_browser_cookie_list" not in visible_names
+    assert "mcp_playwright-official_browser_mouse_click_xy" not in visible_names
 
 
 def test_before_invoke_called_twice_delegates_twice() -> None:
@@ -69,6 +141,7 @@ def test_before_invoke_called_twice_delegates_twice() -> None:
     runtime.ensure_runtime_ready = AsyncMock()
     runtime.service = MagicMock()
     runtime.service.mcp_cfg = MagicMock()
+    runtime.service.allowed_tool_names = ("browser_click", "browser_pdf_save")
     rail = BrowserRuntimeRail(runtime)
     ctx1 = _make_ctx()
     ctx1.agent.ability_manager = MagicMock()
@@ -77,6 +150,14 @@ def test_before_invoke_called_twice_delegates_twice() -> None:
     _run(rail.before_invoke(ctx1))
     _run(rail.before_invoke(ctx2))
     assert runtime.ensure_runtime_ready.call_count == 2
+    ctx1.agent.ability_manager.set_mcp_tool_allowlist.assert_called_once_with(
+        runtime.service.mcp_cfg,
+        runtime.service.allowed_tool_names,
+    )
+    ctx2.agent.ability_manager.set_mcp_tool_allowlist.assert_called_once_with(
+        runtime.service.mcp_cfg,
+        runtime.service.allowed_tool_names,
+    )
 
 
 def test_rail_registered_for_before_invoke_event() -> None:

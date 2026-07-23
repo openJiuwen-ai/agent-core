@@ -42,7 +42,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence, TypeVar, overload
 
-from .errors import WorkflowAborted, WorkflowError
+from .errors import BudgetExhausted, WorkflowAborted, WorkflowError
 from .journal import call_signature, key_str
 from .progress import ProgressKind, WorkflowProgressEvent
 from .schema import coerce, resolve_schema
@@ -168,6 +168,18 @@ def _preview(value: Any) -> str | None:
     return body
 
 
+def _outcome_from_result(raw_text: str | None, result: Any) -> str | None:
+    """Build AGENT_COMPLETED outcome text from backend raw text or coerced result.
+
+    Prefer non-empty ``raw_text``. Empty string is treated as missing — structured
+    schema agents often capture a dict via StructuredOutputTool with ``raw_text=""``,
+    and UI must fall back to a JSON preview of ``result``.
+    """
+    if isinstance(raw_text, str) and raw_text.strip():
+        return raw_text
+    return _preview(result)
+
+
 def _check_abort(rt) -> None:
     """Raise ``WorkflowAborted`` when an external pause signal is set.
 
@@ -182,7 +194,32 @@ def _check_abort(rt) -> None:
         raise WorkflowAborted()
 
 
-def _emit_agent_started(rt, opts: dict, prompt: str) -> None:
+def _check_budget(rt) -> None:
+    """Raise ``BudgetExhausted`` when the run has burned its token ceiling.
+
+    The run's hard ceiling, checked once per ``agent()`` / session ``send()``,
+    at the entry gate only: a call already paid for must reach its journal
+    record, or a resume would rerun (and re-pay for) it.
+
+    This gate alone cannot hold the line — one agent's own loop can burn the
+    whole budget long before it returns here. It is the backend's rails that
+    stop an agent mid-loop; this stops the *next* one from starting.
+    """
+    if rt.budget.exhausted:
+        raise BudgetExhausted(
+            f"token budget exhausted: {rt.budget.spent}/{rt.budget.total}"
+        )
+
+
+def _emit_agent_started(
+    rt,
+    opts: dict,
+    prompt: str,
+    *,
+    node_type: str,
+    agent_id: str | None = None,
+    correlation_id: str | None = None,
+) -> None:
     rt.progress_sink(
         WorkflowProgressEvent(
             kind=ProgressKind.AGENT_STARTED,
@@ -190,11 +227,16 @@ def _emit_agent_started(rt, opts: dict, prompt: str) -> None:
             label=opts.get("label"),
             prompt=prompt,
             model=opts.get("model"),
+            agent_id=agent_id,
+            node_type=node_type,
+            correlation_id=correlation_id,
         )
     )
 
 
-def _emit_agent_completed(rt, opts: dict, outcome_text: str | None) -> None:
+def _emit_agent_completed(
+    rt, opts: dict, outcome_text: str | None, *, agent_id: str | None = None
+) -> None:
     """Emit an AGENT_COMPLETED progress event.
 
     ``outcome_text`` is a human-readable summary of the agent's result —
@@ -207,17 +249,21 @@ def _emit_agent_completed(rt, opts: dict, outcome_text: str | None) -> None:
             phase=opts.get("phase") or rt.current_phase,
             label=opts.get("label"),
             outcome=_preview(outcome_text),
+            agent_id=agent_id,
         )
     )
 
 
-def _emit_agent_failed(rt, opts: dict, message: str) -> None:
+def _emit_agent_failed(
+    rt, opts: dict, message: str, *, agent_id: str | None = None
+) -> None:
     rt.progress_sink(
         WorkflowProgressEvent(
             kind=ProgressKind.AGENT_FAILED,
             phase=opts.get("phase") or rt.current_phase,
             label=opts.get("label"),
             message=message,
+            agent_id=agent_id,
         )
     )
 
@@ -331,7 +377,7 @@ async def agent(
     ks = key_str(_path.get() + (("call", _next_ordinal()),))
     sig = call_signature(prompt, opts, json_schema)
 
-    _emit_agent_started(rt, opts, prompt)
+    _emit_agent_started(rt, opts, prompt, node_type="agent", agent_id=ks)
 
     cached = rt.journal.get_cached(ks, sig)
     if cached is not None:  # resume hit — no semaphore, no backend
@@ -339,15 +385,17 @@ async def agent(
         result = _rehydrate(cached, model_cls)
         # Prefer stored raw_text; if absent (old journal), fall back to
         # preamble + structured data via _preview()
-        outcome_text = cached.get("raw_text") or _preview(result)
-        _emit_agent_completed(rt, opts, outcome_text)
+        outcome_text = _outcome_from_result(cached.get("raw_text"), result)
+        _emit_agent_completed(rt, opts, outcome_text, agent_id=ks)
         return result
 
     _check_abort(rt)  # entry gate: a paused run starts no new agent()
+    _check_budget(rt)  # entry gate: a run out of tokens starts no new agent()
 
     if rt.spawn_count >= rt.spawn_limit:
         rt.log_sink(f"[wf] spawn limit {rt.spawn_limit} reached; skipping {opts.get('label')!r}")
-        _emit_agent_failed(rt, opts, f"spawn limit {rt.spawn_limit} reached; skipping {opts.get('label')!r}")
+        _emit_agent_failed(rt, opts, f"spawn limit {rt.spawn_limit} reached; skipping {opts.get('label')!r}",
+                           agent_id=ks)
         return None
 
     gate = _resolve_agent_gate(rt)
@@ -364,7 +412,7 @@ async def agent(
         msg = f"agent {label!r} failed after {attempts} attempts"
         if call_result.error_detail:
             msg = f"{msg}: {call_result.error_detail}"
-        _emit_agent_failed(rt, opts, msg)
+        _emit_agent_failed(rt, opts, msg, agent_id=ks)
         return None
 
     _check_abort(rt)  # pre-journal guard: a call finished mid-pause does not persist
@@ -382,8 +430,8 @@ async def agent(
             )
         ),
     )
-    outcome_text = call_result.raw_text or _preview(call_result.result)
-    _emit_agent_completed(rt, opts, outcome_text)
+    outcome_text = _outcome_from_result(call_result.raw_text, call_result.result)
+    _emit_agent_completed(rt, opts, outcome_text, agent_id=ks)
     return call_result.result
 
 
@@ -422,7 +470,8 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
                 f"[wf] agent {label!r} attempt {attempt}/{attempts} failed: {str(e)}"
             )
             continue
-        rt.tokens_spent += res.tokens
+        # No token accounting here: the backend already billed this call to the
+        # shared ledger as its model calls returned (``AgentBackend.bind_budget``).
         if res.skipped:
             detail = "backend declined (skipped)"
             rt.log_sink(f"[wf] agent {label!r} skipped")
@@ -537,7 +586,7 @@ class AgentSession:
     """
 
     __slots__ = (
-        "_label", "_phase", "_instructions", "_options", "_human",
+        "_label", "_phase", "_instructions", "_options", "_human", "_node_type",
         "_history", "_sid", "_in_flight",
     )
 
@@ -549,12 +598,14 @@ class AgentSession:
         instructions: str | None = None,
         options: dict | None = None,
         _human: bool = False,
+        _node_type: str = "agent_session",
     ) -> None:
         self._label = label
         self._phase = phase
         self._instructions = instructions
         self._options = dict(options or {})
         self._human = _human
+        self._node_type = _node_type
         self._history: list[dict] = []
         self._sid: str | None = None
         self._in_flight = False
@@ -604,26 +655,31 @@ class AgentSession:
         ks = key_str(_path.get() + (("call", _next_ordinal()),))
         sig = call_signature(prompt, opts, json_schema, history=self._history)
 
+        correlation_id = self._correlation_id(opts)
+
         if self._in_flight:
             _warn_concurrent_session(rt)
         self._in_flight = True
         try:
-            _emit_agent_started(rt, opts, prompt)
+            _emit_agent_started(
+                rt, opts, prompt,
+                node_type=self._node_type,
+                agent_id=ks,
+                correlation_id=correlation_id,
+            )
 
             cached = rt.journal.get_cached(ks, sig)
             if cached is not None:  # resume hit — no backend, no harness, no person
                 await rt.journal.use(ks, cached)
                 result = _rehydrate(cached, model_cls)
                 self._append_history(prompt, result, model_cls)
-                outcome_text = cached.get("raw_text") or _preview(result)
-                _emit_agent_completed(rt, opts, outcome_text)
+                outcome_text = _outcome_from_result(cached.get("raw_text"), result)
+                _emit_agent_completed(rt, opts, outcome_text, agent_id=ks)
                 return None if notify else result
 
             _check_abort(rt)  # entry gate: a paused run starts no new turn
+            _check_budget(rt)  # entry gate: a run out of tokens starts no new turn
 
-            # A human turn carries a deterministic correlation id (phase:label:turn)
-            # so a person's reply matches even across a resume — never a uuid.
-            correlation_id = self._correlation_id(opts) if self._human else None
             req = _TurnRequest(
                 prompt=prompt,
                 opts=opts,
@@ -639,7 +695,7 @@ class AgentSession:
                 msg = f"{who} session {label!r} failed after {attempts} attempts"
                 if call_result.error_detail:
                     msg = f"{msg}: {call_result.error_detail}"
-                _emit_agent_failed(rt, opts, msg)
+                _emit_agent_failed(rt, opts, msg, agent_id=ks)
                 return None
 
             result = call_result.result
@@ -658,8 +714,8 @@ class AgentSession:
                 ),
             )
             self._append_history(prompt, result, model_cls)
-            outcome_text = call_result.raw_text or _preview(result)
-            _emit_agent_completed(rt, opts, outcome_text)
+            outcome_text = _outcome_from_result(call_result.raw_text, result)
+            _emit_agent_completed(rt, opts, outcome_text, agent_id=ks)
             return None if notify else result
         finally:
             self._in_flight = False
@@ -707,10 +763,11 @@ class AgentSession:
         )
 
     def _correlation_id(self, opts: dict) -> str:
-        """Deterministic id for a human turn: ``{phase}:{label}:{turn}``.
+        """Deterministic id for a session turn: ``{phase}:{label}:{turn}``.
 
-        The script flow is deterministic, so this is stable across a resume — the
-        same interaction point yields the same id, which keeps a person's reply
+        Applies to both agent and human sessions. The script flow is
+        deterministic, so this is stable across a resume — the same
+        interaction point yields the same id, which keeps a person's reply
         valid even if the run was interrupted while waiting. ``turn`` is this
         session's send index (``len(history) // 2``); it advances on every send
         (hit or miss) because history is appended each turn, so replay matches.
@@ -746,7 +803,13 @@ def agent_session(
     options: dict | None = None,
 ) -> AgentSession:
     """Open a stateful, multi-turn agent — ``send()`` it repeatedly; context persists."""
-    return AgentSession(label=label, phase=phase, instructions=instructions, options=options)
+    return AgentSession(
+        label=label,
+        phase=phase,
+        instructions=instructions,
+        options=options,
+        _node_type="agent_session",
+    )
 
 
 def human_session(
@@ -758,7 +821,12 @@ def human_session(
 ) -> AgentSession:
     """Open a stateful, multi-turn human participant (each turn's input from a person)."""
     return AgentSession(
-        label=label, phase=phase, instructions=instructions, options=options, _human=True
+        label=label,
+        phase=phase,
+        instructions=instructions,
+        options=options,
+        _human=True,
+        _node_type="human_session",
     )
 
 
@@ -801,7 +869,12 @@ async def human(prompt, *, schema=None, label=None, phase=None, options=None):
     ``phase`` mirror :func:`agent` / :func:`human_session`: they name the turn in
     progress events and the deterministic human correlation id.
     """
-    s = AgentSession(_human=True, label=label, phase=phase)
+    s = AgentSession(
+        _human=True,
+        _node_type="human",
+        label=label,
+        phase=phase,
+    )
     try:
         return await s.send(prompt, schema=schema, options=options)
     finally:
@@ -911,20 +984,24 @@ def log(message: Any) -> None:
 
 
 class _Budget:
-    """Reads the active run's budget via the contextvar — importable & run-agnostic."""
+    """Reads the active run's ledger via the contextvar — importable & run-agnostic.
+
+    Live rather than end-of-call: the ledger is written by the backend as each
+    model call returns, so a script polling ``remaining()`` sees the burn of
+    every agent currently in flight, not just the ones that have returned.
+    """
 
     @property
     def total(self) -> int | None:
-        return _rt.get().budget_total
+        return _rt.get().budget.total
 
     @staticmethod
     def spent() -> int:
-        return _rt.get().tokens_spent
+        return _rt.get().budget.spent
 
     @staticmethod
     def remaining() -> int | None:
-        rt = _rt.get()
-        return None if rt.budget_total is None else rt.budget_total - rt.tokens_spent
+        return _rt.get().budget.remaining()
 
 
 #: Importable singleton: `from swarmflow import budget` then `budget.spent()`.

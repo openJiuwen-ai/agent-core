@@ -118,11 +118,16 @@ class TaskLoopEventExecutor(TaskExecutor):
 
         cid = session.get_session_id()
 
-        # Read is_follow_up from task metadata written by handler.
+        # Read is_follow_up / run_kind / run_context from task metadata
+        # written by the handler.
         is_follow_up = False
+        task_run_kind = None
+        task_run_context = None
         if tasks:
             meta = tasks[0].metadata or {}
             is_follow_up = bool(meta.get("is_follow_up", False))
+            task_run_kind = meta.get("run_kind")
+            task_run_context = meta.get("run_context")
 
         coordinator = agent.loop_coordinator
         iteration = (
@@ -154,6 +159,8 @@ class TaskLoopEventExecutor(TaskExecutor):
             conversation_id=cid,
             query=query,
             is_follow_up=is_follow_up,
+            run_kind=task_run_kind,
+            run_context=task_run_context,
         )
         ctx = AgentCallbackContext(
             agent=agent,
@@ -184,6 +191,10 @@ class TaskLoopEventExecutor(TaskExecutor):
                 effective["run_kind"] = metadata.get("run_kind")
             if metadata.get("run_context") is not None:
                 effective["run_context"] = metadata.get("run_context")
+            # Continuation round (NativeHarness.resume): the inner loop must not
+            # append a new user turn — it resumes the preserved context.
+            if metadata.get("_resume_continuation"):
+                effective["_resume_continuation"] = True
 
         # Pass steering queue reference so the inner
         # ReAct loop can drain it before each model call.

@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.agent.payload import SpawnPayloadBuilder
 from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
 from openjiuwen.agent_teams.harness import TeamHarness
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.messager import (
     Messager,
     create_messager,
@@ -26,7 +27,6 @@ from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.paths import (
     team_memory_dir as default_team_memory_dir,
 )
-from openjiuwen.agent_teams.prompts import role_policy
 from openjiuwen.agent_teams.runtime.team_plan import is_team_plan_enabled
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec, SysOperationSpec, WorkspaceSpec
@@ -259,7 +259,6 @@ class AgentConfigurator:
             card=self._card,
             spec=spec,
             ctx=ctx,
-            role_policy=role_policy(ctx.role, language=resolved_language),
             language=resolved_language,
         )
         self._spawn_payload_builder = SpawnPayloadBuilder(spec, ctx)
@@ -281,6 +280,9 @@ class AgentConfigurator:
             )
 
             self.model_allocator = build_model_allocator(spec, ctx.team_spec)
+
+        if ctx.role == TeamRole.LEADER:
+            kv_cache_hooks.ensure_leader_registry(self)
 
         self.setup_team_backend(
             spec,
@@ -521,6 +523,7 @@ class AgentConfigurator:
                 type=TEAM_TOOL,
                 params={
                     "teammate_mode": teammate_mode,
+                    "dispatch_mode": spec.dispatch_mode,
                     "lifecycle": spec.lifecycle,
                     "exclude_tools": exclude,
                     "qualify_ids": spec.spawn_mode == "inprocess",
@@ -531,10 +534,11 @@ class AgentConfigurator:
             RailSpec(
                 type=TEAM_POLICY,
                 params={
-                    "persona": ctx.persona or "",
+                    "prompt": ctx.prompt or "",
                     "lifecycle": spec.lifecycle,
                     "teammate_mode": teammate_mode,
                     "team_mode": _resolve_team_mode(spec),
+                    "dispatch_mode": spec.dispatch_mode,
                     "base_prompt": agent_spec.system_prompt,
                     "team_workspace_mount": team_workspace_mount,
                     "team_workspace_path": team_workspace_path,
@@ -640,6 +644,7 @@ class AgentConfigurator:
         swarmflow_worker_base_spec = None
         swarmflow_human_base_spec = None
         swarmflow_concurrency_governor = None
+        swarmflow_budget = None
         if ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
             team_spec_for_models = ctx.team_spec
 
@@ -666,7 +671,7 @@ class AgentConfigurator:
             swarmflow_worker_base_spec = base_specs.get("teammate") or base_specs.get("leader")
             # Human-session avatars derive from the human_agent spec; fall back to
             # the worker base spec so human_session still works when no dedicated
-            # human_agent spec is configured (it just lacks human-tuned persona).
+            # human_agent spec is configured (it just lacks human-tuned desc).
             swarmflow_human_base_spec = base_specs.get("human_agent") or swarmflow_worker_base_spec
 
             # Workers also need the observability rail for agent spans.
@@ -689,6 +694,13 @@ class AgentConfigurator:
                 agents_per_run_cap=l2_cap,
             )
 
+            from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
+
+            # One ledger per leader, shared by every run it launches (like the
+            # governor's L3): concurrent runs draw down one pool. ``total=None``
+            # keeps it unbounded while still giving scripts a live ``spent()``.
+            swarmflow_budget = BudgetLedger(total=spec.swarmflow_budget)
+
         inject_team_handles(
             member_build_context.extras,
             team_backend=self.team_backend,
@@ -700,6 +712,7 @@ class AgentConfigurator:
             swarmflow_worker_base_spec=swarmflow_worker_base_spec,
             swarmflow_human_base_spec=swarmflow_human_base_spec,
             swarmflow_concurrency_governor=swarmflow_concurrency_governor,
+            swarmflow_budget=swarmflow_budget,
             reliability_components=reliability_components,
             permissions_override=ctx.permissions_override,
             worktree_manager=self.worktree_manager,
@@ -844,8 +857,11 @@ class AgentConfigurator:
             predefined_members=spec.predefined_members or None,
             model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
             leader_allocation=self.leader_allocation if is_leader else None,
+            leader_prompt=ctx.prompt if is_leader else "",
             enable_hitt=spec.enable_hitt,
             enable_bridge=spec.enable_bridge,
+            dispatch_mode=spec.dispatch_mode,
+            enable_task_verification=spec.enable_task_verification,
             external_cli_agents=spec.external_cli_agents,
             on_before_team_cleaned=on_before_team_cleaned,
             on_team_cleaned=on_team_cleaned,
@@ -912,10 +928,6 @@ class AgentConfigurator:
     @property
     def ctx(self) -> Optional[TeamRuntimeContext]:
         return self._blueprint.ctx if self._blueprint else None
-
-    @property
-    def role_policy(self) -> str:
-        return self._blueprint.role_policy if self._blueprint else ""
 
     @property
     def team_spec(self) -> Optional[TeamSpec]:

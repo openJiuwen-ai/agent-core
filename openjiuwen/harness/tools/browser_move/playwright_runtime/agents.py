@@ -9,7 +9,7 @@ import asyncio
 import inspect
 import json
 import os
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Iterable, Optional
 
 import anyio
 
@@ -40,7 +40,6 @@ def _build_dialogue_compressor_config(
         logger.warning("DialogueCompressor disabled: model_name is empty.")
         return None
     return DialogueCompressorConfig(
-        tokens_threshold=50000,
         messages_to_keep=10,
         keep_last_round=True,
         model_client=ModelClientConfig(
@@ -383,7 +382,17 @@ def build_browser_worker_agent(
     screenshot_subdir: str = "screenshots",
     artifacts_subdir: str = "artifacts",
     tool_result_observer: ToolResultObserver | None = None,
+    allowed_tool_names: Optional[Iterable[str]] = None,
 ) -> ReActAgent:
+    resolved_allowed_tool_names = (
+        None
+        if allowed_tool_names is None
+        else tuple(dict.fromkeys(allowed_tool_names))
+    )
+    logger.info(
+        "Playwright worker received tool allowlist: %s",
+        resolved_allowed_tool_names,
+    )
     screenshot_subdir = (
         (screenshot_subdir or "screenshots").strip().replace("\\", "/").strip("/") or "screenshots"
     )
@@ -425,6 +434,10 @@ def build_browser_worker_agent(
         config.model_config_obj.top_p = worker_top_p
     agent = ReActAgent(card=card).configure(config)
     agent.ability_manager.add(mcp_cfg)
+    if resolved_allowed_tool_names is not None:
+        agent.ability_manager.set_mcp_tool_allowlist(
+            mcp_cfg,
+            resolved_allowed_tool_names,
+        )
     ensure_execute_signature_compat(agent, tool_result_observer=tool_result_observer)
     return agent
-

@@ -88,18 +88,18 @@ async def test_bridge_spawn_rejected_when_disabled(db, messager):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_bridge_spawn_requires_desc(db, messager):
+async def test_bridge_spawn_requires_prompt(db, messager):
     backend = await _build_backend(db, messager, enable_bridge=True)
     tool = _make_tool(backend)
     out = await tool.invoke(
         {
             "member_name": "codex",
             "display_name": "Codex",
-            "desc": "",
+            "prompt": "",
         },
     )
     assert out.success is False
-    assert "persona" in (out.error or "").lower() or "desc" in (out.error or "").lower()
+    assert "prompt" in (out.error or "").lower()
 
 
 @pytest.mark.asyncio
@@ -112,6 +112,7 @@ async def test_bridge_spawn_happy_path(db, messager):
             "member_name": "codex",
             "display_name": "Codex",
             "desc": "senior python reviewer",
+            "prompt": "act as a senior python reviewer",
             "mailbox_inject_mode": "rephrase",
             "protocol": "codex",
             "adapter_config": {"endpoint": "stdio://codex"},
@@ -140,7 +141,7 @@ async def test_bridge_spawn_rejects_bad_inject_mode(db, messager):
         {
             "member_name": "codex",
             "display_name": "Codex",
-            "desc": "x",
+            "prompt": "x",
             "mailbox_inject_mode": "summarize",  # not a valid enum
         },
     )
@@ -157,7 +158,7 @@ async def test_bridge_spawn_rejects_non_dict_adapter_config(db, messager):
         {
             "member_name": "codex",
             "display_name": "Codex",
-            "desc": "x",
+            "prompt": "x",
             "adapter_config": "not-a-dict",
         },
     )

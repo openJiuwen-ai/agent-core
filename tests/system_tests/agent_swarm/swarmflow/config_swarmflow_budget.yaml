@@ -1,0 +1,76 @@
+# Swarmflow budget E2E configuration — a leader with a hard token ceiling.
+#
+# Same shape as config_swarmflow.yaml, plus `swarmflow_budget`: the tokens all
+# of this leader's swarmflow runs may burn, counted from what each worker's
+# model client reports. The budget_guard.py script would run 30 rounds if
+# nothing stopped it; this ceiling is what ends it.
+#
+# Sized against the measured cost of a round (~400-1000 tokens on a flash model):
+# ~9 rounds — enough that reaching the ceiling takes real accumulation across many
+# workers (one worker blowing the whole thing would prove much less), and well
+# under budget_guard.py's 30-round bound, which the run must never reach.
+#
+# Model endpoint + key are injected via env vars sourced from
+# config_llm_local.yaml (API_BASE / LEADER_API_KEY / TEAMMATE_API_KEY / MODEL_NAME).
+
+team_name: swarmflow_budget_e2e_team
+lifecycle: persistent
+spawn_mode: inprocess
+enable_swarmflow: true
+swarmflow_budget: 6000
+
+leader:
+  member_name: team_leader
+  display_name: TeamLeader
+  persona: "工作流编排负责人,擅长用 swarmflow 工具把任务交给一组 agent 完成"
+
+x-model-template: &model_template
+  model_client_config:
+    client_provider: OpenAI
+    api_base: "${API_BASE}"
+    api_key: "${LEADER_API_KEY}"
+    timeout: 120
+    rate_limit: 2.0
+    verify_ssl: false
+  model_request_config:
+    model: "${MODEL_NAME}"
+    temperature: 0.2
+    top_p: 0.9
+
+x-shared-agent-spec: &shared_agent_spec
+  language: cn
+  max_iterations: 60
+  completion_timeout: 600.0
+  enable_task_planning: false
+  restrict_to_sandbox: false
+
+agents:
+  leader:
+    <<: *shared_agent_spec
+    model:
+      <<: *model_template
+      model_client_config:
+        client_provider: OpenAI
+        api_base: "${API_BASE}"
+        api_key: "${LEADER_API_KEY}"
+        timeout: 120
+        rate_limit: 2.0
+        verify_ssl: false
+
+  teammate:
+    <<: *shared_agent_spec
+    model:
+      <<: *model_template
+      model_client_config:
+        client_provider: OpenAI
+        api_base: "${API_BASE}"
+        api_key: "${TEAMMATE_API_KEY}"
+        timeout: 120
+        rate_limit: 2.0
+        verify_ssl: false
+
+transport:
+  type: inprocess
+
+storage:
+  type: sqlite

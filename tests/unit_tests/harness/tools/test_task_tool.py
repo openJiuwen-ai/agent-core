@@ -139,14 +139,23 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
         tool = TaskTool(card=card, parent_agent=parent_agent)
 
         session = Session(session_id="parent_session")
-        with patch.object(parent_agent, "create_subagent", return_value=FakeSubAgent()):
+        with patch.object(parent_agent, "create_subagent", return_value=FakeSubAgent()) as mock_create_subagent:
             result = await tool.invoke(
-                {"subagent_type": "browser_agent", "task_description": "continue browser task"},
+                {
+                    "subagent_type": "browser_agent",
+                    "task_description": "continue browser task",
+                    "browser_capabilities": ["pdf", "vision"],
+                },
                 session=session,
             )
 
         self.assertTrue(result.success)
         self.assertEqual(called_inputs["conversation_id"], "parent_session_sub_browser_agent")
+        mock_create_subagent.assert_called_once_with(
+            "browser_agent",
+            "parent_session_sub_browser_agent",
+            browser_capabilities=["pdf", "vision"],
+        )
 
 
 class TestTaskToolSync(unittest.TestCase):

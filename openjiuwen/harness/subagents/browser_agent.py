@@ -7,7 +7,7 @@ from __future__ import annotations
 import dataclasses
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from openjiuwen.core.context_engine import ToolResultWindowProcessorConfig
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard
 from openjiuwen.core.single_agent.rail.base import AgentRail
@@ -15,7 +15,6 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
-from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     BrowserInstanceConfig,
@@ -23,6 +22,10 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     build_browser_guardrails,
     build_playwright_mcp_config,
     build_runtime_settings,
+)
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
+    DEFAULT_BROWSER_CAPABILITIES,
+    resolve_browser_capabilities,
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
     BrowserAgentRuntime,
@@ -264,9 +267,36 @@ def create_browser_agent(
     settings: Optional[RuntimeSettings] = None,
     browser_key: Optional[str] = None,
     browser_instance: Optional[BrowserInstanceConfig | Dict[str, Any]] = None,
+    browser_capabilities: Optional[List[str]] = None,
     **config_kwargs: Any,
 ) -> DeepAgent:
-    """Create the browser subagent with direct browser MCP tools and helper tools."""
+    """Create the browser subagent with task-scoped capability context.
+
+    ``browser_capabilities`` is resolved against the trusted capability
+    catalog here. The resolved allowlist does not yet alter registered tools.
+    """
+    if browser_capabilities is not None and (
+        not isinstance(browser_capabilities, list)
+        or not all(isinstance(capability, str) for capability in browser_capabilities)
+    ):
+        raise ValueError("browser_capabilities must be a list of strings")
+
+    resolved_capabilities = resolve_browser_capabilities(browser_capabilities)
+    if resolved_capabilities.rejected_names:
+        rejected = ", ".join(resolved_capabilities.rejected_names)
+        available = ", ".join(capability.name for capability in DEFAULT_BROWSER_CAPABILITIES)
+        raise ValueError(
+            f"Unsupported browser capabilities: {rejected}. "
+            f"Available capabilities: {available}"
+        )
+
+    logger.info(
+        "Resolved browser capabilities: requested=%s, selected=%s, allowed_tools=%s",
+        resolved_capabilities.requested_names,
+        resolved_capabilities.selected_names,
+        resolved_capabilities.allowed_tool_names,
+    )
+
     resolved_language = resolve_language(language)
     instance = _coerce_browser_instance(browser_instance, browser_key)
     resolved_settings = _resolve_runtime_settings(model, settings, instance)
@@ -283,15 +313,18 @@ def create_browser_agent(
         DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT["cn"],
     )
 
-    browser_backend = BrowserAgentRuntime(
-        provider=resolved_settings.provider,
-        api_key=resolved_settings.api_key,
-        api_base=resolved_settings.api_base,
-        model_name=resolved_settings.model_name,
-        mcp_cfg=resolved_settings.mcp_cfg,
-        guardrails=resolved_settings.guardrails,
-        instance=resolved_settings.instance,
-    )
+    runtime_kwargs: Dict[str, Any] = {
+        "provider": resolved_settings.provider,
+        "api_key": resolved_settings.api_key,
+        "api_base": resolved_settings.api_base,
+        "model_name": resolved_settings.model_name,
+        "mcp_cfg": resolved_settings.mcp_cfg,
+        "guardrails": resolved_settings.guardrails,
+        "instance": resolved_settings.instance,
+    }
+    if browser_capabilities is not None:
+        runtime_kwargs["allowed_tool_names"] = resolved_capabilities.allowed_tool_names
+    browser_backend = BrowserAgentRuntime(**runtime_kwargs)
     injected_tools = build_browser_runtime_tools(browser_backend, language=resolved_language)
     injected_rails: List[AgentRail] = [BrowserRuntimeRail(browser_backend)]
 

@@ -321,19 +321,12 @@ def test_prompt_attachments_section_explains_system_reminder_tags():
 
 
 @pytest.mark.asyncio
-async def test_context_window_mutator_runs_before_kv_release():
-    released_messages = []
-
+async def test_context_window_mutator_runs_before_window_statistics():
     async def mutator(context, window):
         del context
         messages = list(window.context_messages)
         messages[-1] = UserMessage(content=f"{messages[-1].content}\n\nattached")
         return window.model_copy(update={"context_messages": messages})
-
-    class FakeKVCacheManager:
-        async def release(self, window, **kwargs):
-            del kwargs
-            released_messages.extend(window.get_messages())
 
     context = SessionModelContext(
         "ctx",
@@ -343,10 +336,8 @@ async def test_context_window_mutator_runs_before_kv_release():
         processors=[],
         window_mutators=[mutator],
     )
-    context._kv_cache_manager = FakeKVCacheManager()
 
     window = await context.get_context_window(system_messages=[SystemMessage(content="sys")])
 
     assert window.get_messages()[-1].content == "query\n\nattached"
-    assert released_messages[-1].content == "query\n\nattached"
     assert window.statistic.total_messages == 2

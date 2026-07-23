@@ -38,3 +38,18 @@ class WorkflowAborted(BaseException):
     exactly like ``CancelledError`` — the in-flight call neither journals its
     result nor maps to ``None``; the run unwinds so a later resume reruns it.
     """
+
+
+class BudgetExhausted(BaseException):
+    """The run hit its token ceiling at an ``agent()`` / ``send()`` budget gate.
+
+    A ``BaseException`` for the same reason as :class:`WorkflowAborted`: a
+    ceiling a script can swallow with ``except Exception`` (and keep spawning
+    agents from) is not a ceiling. Scripts that want to finish gracefully poll
+    ``budget.remaining()`` and stop on their own; this is the backstop for the
+    ones that do not.
+
+    Unlike an abort, exhaustion is terminal rather than resumable — no resume
+    reruns the blocked call, so the run's completed prefix stays journalled and
+    the exception surfaces as a run failure.
+    """

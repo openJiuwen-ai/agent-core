@@ -31,6 +31,7 @@ from typing import (
     Optional,
 )
 
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import logger
@@ -123,6 +124,7 @@ class TeamHarness:
         if self._bg_controller is not None:
             self._native.background_task_controller = self._bg_controller
         child = self._make_child_session(team_session)
+        kv_cache_hooks.on_harness_session_created(self, child)
         await child.pre_run()
         await self._native.start(session=child)
         self._native_session_id = self._session_id_of(team_session)
@@ -169,6 +171,7 @@ class TeamHarness:
         if self._native is None or self._native.state is HarnessState.TERMINATED:
             self._native = NativeHarness(self._agent_spec, self._build_context)
         child = self._make_child_session(team_session)
+        kv_cache_hooks.on_harness_session_created(self, child)
         await child.pre_run()
         self._active_agent_session = child
         try:
@@ -178,7 +181,16 @@ class TeamHarness:
                 await child.post_run()
             except Exception:
                 logger.debug("[TeamHarness] post_run raised during teardown, ignoring", exc_info=True)
-            self._active_agent_session = None
+            finally:
+                try:
+                    await kv_cache_hooks.after_harness_session_finished(self, child)
+                except Exception:
+                    logger.debug(
+                        "[TeamHarness] session-finished hook raised during teardown, ignoring",
+                        exc_info=True,
+                    )
+                finally:
+                    self._active_agent_session = None
 
     async def dispose(self) -> None:
         """Permanently destroy the native and release its process-global resources.
@@ -210,6 +222,10 @@ class TeamHarness:
         from openjiuwen.core.session.agent import create_agent_session
 
         return create_agent_session(card=card)
+
+    def current_session(self) -> Any | None:
+        """Return the active child Session, if this harness is running."""
+        return self._active_agent_session
 
     def _seed_initial_plan_mode(self, session: Any) -> None:
         """Seed the leader into plan mode on the first cycle when configured."""
@@ -269,9 +285,29 @@ class TeamHarness:
             await self._native.abort(immediate=immediate)
 
     async def pause(self) -> None:
-        """Pause the active round; the next send restarts it (no-op when idle)."""
+        """Pause the active round at its nearest inner iteration boundary.
+
+        The round stays resumable in place (see :meth:`resume`). A no-op when no
+        run cycle is live.
+        """
         if self._is_cycle_active():
             await self._native.pause()
+
+    async def resume(self, *, query: str | None = None) -> None:
+        """Continue a paused round in place, from its preserved context.
+
+        A no-op when no run cycle is live. ``query`` drives a cold resume after
+        the native was rebuilt (see :meth:`NativeHarness.resume`).
+        """
+        if self._is_cycle_active():
+            await self._native.resume(query=query)
+
+    @property
+    def paused_query(self) -> Optional[str]:
+        """The paused round's originating query, or None when not paused."""
+        if self._native is None:
+            return None
+        return self._native.paused_query
 
     def _is_cycle_active(self) -> bool:
         """Return whether a run cycle is live (native started, not yet stopped).

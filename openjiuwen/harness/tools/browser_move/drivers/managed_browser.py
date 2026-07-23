@@ -233,6 +233,9 @@ class ManagedBrowserDriver:
             f"--user-data-dir={user_data_dir}",
             "--no-first-run",
             "--no-default-browser-check",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
             "about:blank",
         ]
         args.extend(self.profile.extra_args)
@@ -310,3 +313,17 @@ class ManagedBrowserDriver:
                 process.kill()
             except Exception:
                 pass
+
+    def clear(self):
+        # Reap a Chrome child that exited (e.g. user closed the window) but
+        # whose Popen handle still sits on the driver.
+        if self._process is None:
+            return
+        process = self._process
+        self._process = None
+        self._owns_process = False
+        if process is None:
+            return
+        from openjiuwen.core.common.logging import logger as _logger
+        _logger.info("ManagedBrowser: clear handle process")
+        process.poll()

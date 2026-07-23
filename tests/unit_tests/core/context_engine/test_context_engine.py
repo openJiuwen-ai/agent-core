@@ -2,7 +2,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import asyncio
+import time
 from unittest.mock import (
+    AsyncMock,
     MagicMock,
     patch,
 )
@@ -20,15 +22,16 @@ from openjiuwen.core.context_engine import (
     ContextEngineConfig,
 )
 from openjiuwen.core.context_engine.context.context import SessionModelContext
-from openjiuwen.core.context_engine.processor.base import ContextProcessor
-from openjiuwen.core.context_engine.processor.compressor.micro_compact_processor import MicroCompactProcessorConfig
-from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloaderConfig
+from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
+from openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor import DialogueCompressorConfig
+from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import CompressionResult
+from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader import MessageSummaryOffloaderConfig
 from openjiuwen.core.context_engine.schema.messages import OffloadUserMessage
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     SystemMessage,
     ToolMessage,
-    UserMessage, BaseMessage, ToolCall,
+    UserMessage, BaseMessage,
 )
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
@@ -55,6 +58,51 @@ class BlockingCompressor(ContextProcessor):
         if _blocking_release is not None:
             await _blocking_release.wait()
         return None, messages_to_add
+
+    def load_state(self, state):
+        return
+
+    def save_state(self):
+        return {}
+
+
+class ActiveCompactingCompressorConfig(BaseModel):
+    replacement: str = "[COMPRESSED]"
+
+
+@ContextEngine.register_processor()
+class ActiveCompactingCompressor(ContextProcessor):
+    async def on_add_messages(self, context, messages_to_add, **kwargs):
+        messages = context.get_messages()
+        if not messages:
+            return None, messages_to_add
+        updated = list(messages)
+        updated[0] = UserMessage(content=self.config.replacement)
+        context.set_messages(updated)
+        return ContextEvent(event_type=self.processor_type(), messages_to_modify=[0]), messages_to_add
+
+    def load_state(self, state):
+        return
+
+    def save_state(self):
+        return {}
+
+
+class GetOnlyActiveCompressorConfig(BaseModel):
+    replacement: str = "[GET-COMPRESSED]"
+
+
+@ContextEngine.register_processor()
+class GetOnlyActiveCompressor(ContextProcessor):
+    async def on_get_context_window(self, context, context_window, **kwargs):
+        if not context_window.context_messages:
+            return None, context_window
+        context_window.context_messages = [UserMessage(content=self.config.replacement)]
+        return ContextEvent(
+            event_type=self.processor_type(),
+            messages_to_modify=[0],
+            compact_summary=self.config.replacement,
+        ), context_window
 
     def load_state(self, state):
         return
@@ -243,12 +291,13 @@ class TestContextEngine:
         assert context.token_counter() is token_counter
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("refactored_context_processors")
     async def test_create_context_with_registered_processor(self, engine, session):
-        config = MessageOffloaderConfig(tokens_threshold=1000, large_message_threshold=500)
+        config = MessageSummaryOffloaderConfig()
         context = await engine.create_context(
             context_id="ctx",
             session=session,
-            processors=[("MessageOffloader", config)],
+            processors=[("MessageSummaryOffloader", config)],
         )
         assert context is not None
         assert len(getattr(context, "_processors")) == 1
@@ -270,22 +319,22 @@ class TestContextEngine:
 
     @pytest.mark.asyncio
     async def test_create_context_processor_init_fails_raises(self, engine, session):
-        from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
-            MessageOffloaderConfig
+        from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader import (
+            MessageSummaryOffloaderConfig
         )
         with patch.object(
             engine,
             "_create_processor",
             side_effect=build_error(
                 StatusCode.CONTEXT_EXECUTION_ERROR,
-                msg=f"init processor type 'MessageOffloader' failed",
+                msg="init processor type 'MessageSummaryOffloader' failed",
             )
         ):
             with pytest.raises(BaseError) as exc_info:
                 await engine.create_context(
                     context_id="ctx",
                     session=session,
-                    processors=[("MessageOffloader", MessageOffloaderConfig())],
+                    processors=[("MessageSummaryOffloader", MessageSummaryOffloaderConfig())],
                 )
         assert exc_info.value.code == StatusCode.CONTEXT_EXECUTION_ERROR.code
 
@@ -295,34 +344,214 @@ class TestContextEngine:
             context_id="ctx",
             session=session,
             processors=[(
-                "MicroCompactProcessor",
-                MicroCompactProcessorConfig(
-                    trigger_threshold=999,
-                    compactable_tool_names=["grep"],
-                    keep_recent_per_tool=1,
-                    cleared_marker="[CLEARED]",
-                ),
+                "ActiveCompactingCompressor",
+                ActiveCompactingCompressorConfig(replacement="[COMPRESSED]"),
             )],
         )
-        messages = [
-            UserMessage(content="search one"),
-            AssistantMessage(content="", tool_calls=[ToolCall(id="call-1", name="grep", type="function", arguments="{}")]),
-            ToolMessage(content="first grep result", tool_call_id="call-1", name="grep"),
-            AssistantMessage(content="done one"),
-            UserMessage(content="search two"),
-            AssistantMessage(content="", tool_calls=[ToolCall(id="call-2", name="grep", type="function", arguments="{}")]),
-            ToolMessage(content="second grep result", tool_call_id="call-2", name="grep"),
-            AssistantMessage(content="done two"),
-        ]
-        await context.add_messages(messages)
+        await context.add_messages([UserMessage(content="large historical context")])
 
         result = await engine.compress_context(context_id="ctx", session=session)
 
         assert result == "compressed"
-        processed_messages = context.get_messages()
-        assert isinstance(processed_messages[2], ToolMessage)
-        assert processed_messages[2].content == "[CLEARED]"
-        assert processed_messages[6].content == "second grep result"
+        assert context.get_messages()[0].content == "[COMPRESSED]"
+
+    @pytest.mark.asyncio
+    async def test_compress_context_force_executes_get_window_compressor(self, engine, session):
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[(
+                "GetOnlyActiveCompressor",
+                GetOnlyActiveCompressorConfig(replacement="[GET-COMPACTED]"),
+            )],
+        )
+        await context.add_messages([UserMessage(content="large historical context")])
+
+        result = await engine.compress_context(context_id="ctx", session=session, return_state=True)
+
+        assert result["result"] == "compressed"
+        assert result["compact_summary"] == "[GET-COMPACTED]"
+        assert context.get_messages()[0].content == "[GET-COMPACTED]"
+
+    @pytest.mark.asyncio
+    async def test_compress_context_persists_and_commits_compressed_messages(self, engine, session):
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[(
+                "GetOnlyActiveCompressor",
+                GetOnlyActiveCompressorConfig(replacement="[GET-COMPACTED]"),
+            )],
+        )
+        await context.add_messages([UserMessage(content="large historical context")])
+        await engine.save_contexts(session)
+        session.commit = AsyncMock()
+
+        result = await engine.compress_context(
+            context_id="ctx",
+            session_id=session.get_session_id(),
+            return_state=True,
+        )
+
+        assert result["result"] == "compressed"
+        persisted_messages = session.get_state("context")["ctx"]["messages"]
+        assert [message.content for message in persisted_messages] == ["[GET-COMPACTED]"]
+        session.commit.assert_awaited_once_with()
+
+        restored_context = await engine.create_context(context_id="ctx", session=session)
+        assert [message.content for message in restored_context.get_messages()] == ["[GET-COMPACTED]"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("refactored_context_processors")
+    async def test_compress_context_runs_offloader_ttl_before_compressor(self, session):
+        engine = ContextEngine(ContextEngineConfig(context_window_tokens=100))
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[
+                (
+                    "MessageSummaryOffloader",
+                    MessageSummaryOffloaderConfig(
+                        add_message_threshold_ratio=10,
+                        ttl_seconds=10,
+                        ttl_context_occupancy_ratio=0.1,
+                        ttl_message_threshold_ratio=0.1,
+                    ),
+                ),
+                (
+                    "GetOnlyActiveCompressor",
+                    GetOnlyActiveCompressorConfig(replacement="[GET-COMPACTED]"),
+                ),
+            ],
+        )
+        await context.add_messages(
+            [
+                UserMessage(content="please inspect the large tool output"),
+                ToolMessage(content="tool output " * 80, tool_call_id="tc-compact-ttl"),
+            ]
+        )
+        context.set_last_context_window_access_at(time.time() - 20)
+
+        result = await engine.compress_context(context_id="ctx", session=session, return_state=True)
+
+        assert result["result"] == "compressed"
+        history = result["state"]
+        assert history["processor"] == "GetOnlyActiveCompressor"
+        state_history = context._processor_state_recorder.history()
+        assert any(
+            state["status"] == "completed" and state["processor"] == "MessageSummaryOffloader"
+            for state in state_history
+        )
+        assert context.get_messages()[0].content == "[GET-COMPACTED]"
+        assert context.get_messages()[0].content != "tool output " * 80
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("refactored_context_processors")
+    async def test_compress_context_skips_offloader_ttl_before_expiration(self, session):
+        engine = ContextEngine(ContextEngineConfig(context_window_tokens=100))
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[
+                (
+                    "MessageSummaryOffloader",
+                    MessageSummaryOffloaderConfig(
+                        add_message_threshold_ratio=10,
+                        ttl_seconds=10,
+                        ttl_context_occupancy_ratio=0.1,
+                        ttl_message_threshold_ratio=0.1,
+                    ),
+                ),
+                (
+                    "GetOnlyActiveCompressor",
+                    GetOnlyActiveCompressorConfig(replacement="[GET-COMPACTED]"),
+                ),
+            ],
+        )
+        await context.add_messages(
+            [
+                UserMessage(content="please inspect the large tool output"),
+                ToolMessage(content="tool output " * 80, tool_call_id="tc-compact-ttl"),
+            ]
+        )
+        context.set_last_context_window_access_at(time.time())
+
+        result = await engine.compress_context(context_id="ctx", session=session, return_state=True)
+
+        assert result["result"] == "compressed"
+        state_history = context._processor_state_recorder.history()
+        assert not any(state["processor"] == "MessageSummaryOffloader" for state in state_history)
+        assert result["state"]["processor"] == "GetOnlyActiveCompressor"
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("refactored_context_processors")
+    async def test_compress_context_ttl_offloader_noops_without_processable_messages(self, session):
+        engine = ContextEngine(ContextEngineConfig(context_window_tokens=100))
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[
+                (
+                    "MessageSummaryOffloader",
+                    MessageSummaryOffloaderConfig(
+                        add_message_threshold_ratio=10,
+                        ttl_seconds=10,
+                        ttl_context_occupancy_ratio=0.1,
+                        ttl_message_threshold_ratio=0.1,
+                    ),
+                ),
+            ],
+        )
+        await context.add_messages([UserMessage(content="plain user content " * 80)])
+        context.set_last_context_window_access_at(time.time() - 20)
+
+        result = await engine.compress_context(context_id="ctx", session=session, return_state=True)
+
+        assert result["result"] == "noop"
+        state_history = context._processor_state_recorder.history()
+        assert not any(
+            state["status"] == "completed" and state["processor"] == "MessageSummaryOffloader"
+            for state in state_history
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("refactored_context_processors")
+    async def test_compress_context_skips_dialogue_when_history_target_below_trigger(self, session):
+        engine = ContextEngine(ContextEngineConfig(context_window_tokens=100))
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[(
+                "DialogueCompressor",
+                DialogueCompressorConfig(min_target_context_ratio=0.5),
+            )],
+        )
+        processor = context._processors[0]
+        processor._compression_executor = MagicMock()
+        processor._compression_executor.invoke = AsyncMock(
+            return_value=CompressionResult(AssistantMessage(content="historical compact state"))
+        )
+        await context.add_messages(
+            [
+                UserMessage(content="tiny history"),
+                UserMessage(content="Current task"),
+                AssistantMessage(content="protected current work " * 150),
+            ]
+        )
+
+        result = await engine.compress_context(
+            context_id="ctx",
+            session=session,
+            processor_types=["DialogueCompressor"],
+            return_state=True,
+        )
+
+        assert result["result"] == "noop"
+        assert not any(
+            state["status"] == "started" and state["processor"] == "DialogueCompressor"
+            for state in context._processor_state_recorder.history()
+        )
+        processor._compression_executor.invoke.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_compress_context_returns_busy_message_when_passive_compression_running(self, engine, session):
@@ -380,13 +609,8 @@ class TestContextEngine:
             context_id="ctx",
             session=session,
             processors=[(
-                "MicroCompactProcessor",
-                MicroCompactProcessorConfig(
-                    trigger_threshold=999,
-                    compactable_tool_names=["grep"],
-                    keep_recent_per_tool=1,
-                    cleared_marker="[CLEARED]",
-                ),
+                "ActiveCompactingCompressor",
+                ActiveCompactingCompressorConfig(),
             )],
         )
 

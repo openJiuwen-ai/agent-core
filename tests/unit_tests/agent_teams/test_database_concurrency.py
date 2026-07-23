@@ -24,7 +24,6 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
 )
 from openjiuwen.agent_teams.tools.database.engine import DbSessions, retry_on_locked
-from openjiuwen.agent_teams.tools.memory_database import InMemoryTeamDatabase
 from openjiuwen.core.single_agent import AgentCard
 
 
@@ -66,6 +65,116 @@ async def test_sqlite_pragmas_enable_wal_normal_sync_and_read_tuning(file_db: Te
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_file_db_splits_read_and_write_engines(file_db: TeamDatabase) -> None:
+    """File-backed SQLite runs a separate reader pool from the single writer."""
+    assert file_db.engine is not None
+    assert file_db.read_engine is not None
+    assert file_db.read_engine is not file_db.engine
+    assert file_db.read_session_local is not file_db.session_local
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_reader_connection_uses_smaller_cache(file_db: TeamDatabase) -> None:
+    """Reader connections carry the small per-connection cache (default 8 MiB)."""
+    async with file_db.read_session_local() as session:
+        cache_size = (await session.execute(text("PRAGMA cache_size"))).scalar()
+    # read_cache_size_kb default 8192 -> negative KiB form.
+    assert cache_size == -8192
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_memory_db_shares_single_engine(tmp_path) -> None:
+    """A :memory: db cannot split — read/write share one StaticPool engine."""
+    token = set_session_id("mem_split_session")
+    database = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    try:
+        await database.initialize()
+        assert database.engine is not None
+        assert database.read_engine is database.engine
+        assert database.read_session_local is database.session_local
+    finally:
+        await database.close()
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_pool_and_cache_knobs_are_honored(tmp_path) -> None:
+    """DatabaseConfig pool / cache knobs flow through to the engines."""
+    token = set_session_id("knob_session")
+    config = DatabaseConfig(
+        db_type=DatabaseType.SQLITE,
+        connection_string=str(tmp_path / "team.db"),
+        read_pool_size=3,
+        read_cache_size_kb=4096,
+        write_cache_size_kb=32768,
+    )
+    database = TeamDatabase(config)
+    try:
+        await database.initialize()
+        assert database.read_engine.pool.size() == 3
+        async with database.read_session_local() as session:
+            read_cache = (await session.execute(text("PRAGMA cache_size"))).scalar()
+        async with database.session_local() as session:
+            write_cache = (await session.execute(text("PRAGMA cache_size"))).scalar()
+        assert read_cache == -4096
+        assert write_cache == -32768
+    finally:
+        await database.close()
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_default_config_keeps_in_commit_autocheckpoint(file_db: TeamDatabase) -> None:
+    """Default (wal_checkpoint_interval_s=0): no background task, autocheckpoint=1000."""
+    assert file_db._checkpoint_task is None
+    async with file_db.session_local() as session:
+        writer_ckpt = (await session.execute(text("PRAGMA wal_autocheckpoint"))).scalar()
+    assert writer_ckpt == 1000
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_background_checkpointer_moves_checkpoint_off_write_path(tmp_path) -> None:
+    """wal_checkpoint_interval_s>0 disables the writer's in-commit checkpoint.
+
+    The writer connection reports ``wal_autocheckpoint=0`` (so no commit ever
+    stalls on a checkpoint) while a background task drives PASSIVE checkpoints;
+    the reader keeps the configured threshold. ``close()`` cancels the task.
+    """
+    token = set_session_id("ckpt_session")
+    config = DatabaseConfig(
+        db_type=DatabaseType.SQLITE,
+        connection_string=str(tmp_path / "team.db"),
+        wal_checkpoint_interval_s=0.05,
+    )
+    database = TeamDatabase(config)
+    try:
+        await database.initialize()
+        assert database._checkpoint_task is not None
+        assert not database._checkpoint_task.done()
+
+        async with database.session_local() as session:
+            writer_ckpt = (await session.execute(text("PRAGMA wal_autocheckpoint"))).scalar()
+        async with database.read_session_local() as session:
+            reader_ckpt = (await session.execute(text("PRAGMA wal_autocheckpoint"))).scalar()
+        assert writer_ckpt == 0
+        assert reader_ckpt == 1000
+
+        # The loop ticks at least once without crashing.
+        await asyncio.sleep(0.12)
+        assert not database._checkpoint_task.done()
+    finally:
+        await database.close()
+        reset_session_id(token)
+    assert database._checkpoint_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_concurrent_claims_do_not_exhaust_pool(file_db: TeamDatabase) -> None:
     """More concurrent writers than pool_size must all succeed, not time out."""
     team = "team1"
@@ -78,6 +187,29 @@ async def test_concurrent_claims_do_not_exhaust_pool(file_db: TeamDatabase) -> N
         *[file_db.task.claim_task(f"task{i}", f"m{i}") for i in range(count)]
     )
     assert all(results)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_concurrent_claim_same_task_single_winner(file_db: TeamDatabase) -> None:
+    """Racing claims on ONE pending task: the CAS lets exactly one win.
+
+    Guards the single-statement claim (WHERE assignee IS NULL AND status =
+    pending): only the first caller matches the row, later callers see it no
+    longer pending and get rowcount 0, so exactly one True comes back.
+    """
+    team = "team1"
+    await file_db.team.create_team(team, "Team 1", "leader")
+    await file_db.task.create_task("t1", team, "T1", "content", TaskStatus.PENDING.value)
+
+    results = await asyncio.gather(
+        *[file_db.task.claim_task("t1", f"m{i}") for i in range(10)]
+    )
+    assert sum(results) == 1
+
+    task = await file_db.task.get_task("t1")
+    assert task.status == TaskStatus.IN_PROGRESS.value
+    assert task.assignee is not None
 
 
 @pytest.mark.asyncio
@@ -161,6 +293,30 @@ async def test_mark_messages_read_batch_direct_and_broadcast(file_db: TeamDataba
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
+async def test_mark_messages_read_batch_multiple_broadcasts(file_db: TeamDatabase) -> None:
+    """Two broadcasts in one DAO batch collapse to a single watermark row.
+
+    Regression: the broadcast branch INSERTs the (member, team) watermark row
+    on first sight. The session runs autoflush=False, so before the fix a
+    second broadcast in the same transaction did not see the pending INSERT,
+    re-inserted the same PK, and the commit raised an ``IntegrityError`` on
+    the UNIQUE (member_name, team_name) constraint. The manager layer now
+    collapses broadcasts before the DAO, but the DAO must stay safe on its
+    own for direct callers — hence this test drives the DAO directly.
+    """
+    team = "team1"
+    await file_db.team.create_team(team, "Team 1", "leader")
+    await file_db.member.create_member("m1", team, "M1", "{}", MemberStatus.UNSTARTED.value)
+    await file_db.message.create_message("b1", team, "leader", "all-1", broadcast=True)
+    await file_db.message.create_message("b2", team, "leader", "all-2", broadcast=True)
+
+    marked = await file_db.message.mark_messages_read(["b1", "b2"], "m1")
+    assert marked == 2
+    assert await file_db.message.get_broadcast_messages(team, "m1", unread_only=True) == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.level1
 async def test_mark_messages_read_skips_missing(file_db: TeamDatabase) -> None:
     """Missing ids are skipped; the count reflects only applied marks."""
@@ -186,27 +342,22 @@ async def test_mark_messages_read_empty_is_noop(file_db: TeamDatabase) -> None:
 async def test_nested_write_no_deadlock(file_db: TeamDatabase) -> None:
     """A public write that delegates to another write must not self-deadlock.
 
-    ``add_task_with_bidirectional_dependencies`` calls
-    ``mutate_dependency_graph`` internally; only the latter opens the
-    write session, so the non-reentrant lock is acquired once. A regression
+    ``verify_and_fix_task_consistency`` delegates to
+    ``_verify_and_fix_blocked_tasks``; only the latter opens the write
+    session, so the non-reentrant lock is acquired once. A regression
     (double acquire) would hang, which ``wait_for`` surfaces as a timeout.
     """
     team = "team1"
     await file_db.team.create_team(team, "Team 1", "leader")
-    await file_db.task.create_task("base", team, "Base", "content", TaskStatus.PENDING.value)
+    await file_db.task.create_task("base", team, "Base", "content", TaskStatus.BLOCKED.value)
 
-    ok = await asyncio.wait_for(
-        file_db.task.add_task_with_bidirectional_dependencies(
-            "child",
-            team,
-            "Child",
-            "content",
-            TaskStatus.PENDING.value,
-            dependencies=["base"],
-        ),
+    refreshed = await asyncio.wait_for(
+        file_db.task.verify_and_fix_task_consistency(team),
         timeout=5.0,
     )
-    assert ok is True
+    # The blocked task has no unresolved edges, so the sweep flips it back
+    # to PENDING — proving the delegated write completed without deadlock.
+    assert [t.task_id for t in refreshed] == ["base"]
 
 
 @pytest.mark.asyncio
@@ -246,22 +397,24 @@ async def test_retry_on_locked_succeeds_first_try() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_in_memory_mark_messages_read_batch() -> None:
-    """The in-memory backend mirrors the SQL batch mark-read API."""
-    db = InMemoryTeamDatabase()
-    await db.initialize()
-    await db.create_member(
+async def test_mark_messages_read_batch(file_db: TeamDatabase) -> None:
+    """The batch mark-read API marks a whole mailbox drain in one call."""
+    db = file_db
+    await db.team.create_team(team_name="t1", display_name="T1", leader_member_name="leader")
+    await db.member.create_member(
         member_name="dev",
         team_name="t1",
         display_name="dev",
         agent_card=AgentCard().model_dump_json(),
         status="ready",
     )
-    await db.create_message(
+    await db.message.create_message(
         message_id="d1", team_name="t1", from_member_name="leader", content="a", to_member_name="dev"
     )
-    await db.create_message(message_id="b1", team_name="t1", from_member_name="leader", content="all", broadcast=True)
+    await db.message.create_message(
+        message_id="b1", team_name="t1", from_member_name="leader", content="all", broadcast=True
+    )
 
-    marked = await db.mark_messages_read(["d1", "b1", "missing"], "dev")
+    marked = await db.message.mark_messages_read(["d1", "b1", "missing"], "dev")
     assert marked == 2
-    assert await db.has_unread_messages("t1") is False
+    assert await db.message.has_unread_messages("t1") is False

@@ -92,7 +92,7 @@ async def team_backend(db, messager):
                 member_name=HUMAN,
                 display_name="Alice",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="user avatar",
+                desc="user avatar",
             ),
         ],
         enable_hitt=True,

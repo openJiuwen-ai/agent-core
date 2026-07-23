@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import dataclasses
 import importlib
 import os
 import sys
 import uuid
+from contextlib import suppress
+import warnings
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -34,7 +38,7 @@ from openjiuwen.core.controller.schema.event import (
 )
 from openjiuwen.core.controller.schema.task import TaskStatus
 from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
-from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -50,9 +54,6 @@ from openjiuwen.core.single_agent.rail.base import (
     RunKind,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.harness.harness_config.loader import (
-    HarnessConfigLoader,
-)
 from openjiuwen.harness.image_modality_probe import probe_image_support
 from openjiuwen.harness.rails import DeepAgentRail
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
@@ -83,6 +84,21 @@ from openjiuwen.harness.task_loop.task_loop_event_handler import (
     TaskLoopEventHandler,
 )
 from openjiuwen.harness.tools import SessionToolkit, is_free_search_enabled, is_paid_search_enabled
+from openjiuwen.harness.goal.manager import GoalManager
+from openjiuwen.harness.goal.schema import GoalRecord, GoalStatus
+from openjiuwen.harness.schema.interaction import (
+    ActiveInteractionRound,
+    InteractionEvent,
+    InteractionPhase,
+    InteractionOutputStream,
+    OutputLease,
+    OutputLeaseManager,
+    InputDispatchMode,
+    RoundOutcome,
+    RoundWorkItem,
+    SendInputRequest,
+)
+from openjiuwen.harness.task_loop.event_manager import EventManager
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.event_queue import (
@@ -101,6 +117,17 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 )
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.identity import build_identity_section
+from openjiuwen.harness.prompts.sections.prompt_attachments import (
+    build_prompt_attachments_section,
+)
+from openjiuwen.harness.resources import (
+    LoadRecord,
+    find_expert_harness_manifest,
+    load_expert_harness_spec,
+)
+from openjiuwen.harness.resources.expert_harness_parts import ExpertHarnessParts, ResolvedSkill
+from openjiuwen.harness.schema.build_context import BuildContext
+from openjiuwen.harness.schema.expert_harness_spec import ExpertHarnessSpec
 from openjiuwen.harness.workspace.workspace import Workspace
 
 # Events bridged to the inner ReActAgent.
@@ -138,6 +165,9 @@ _DEEP_EVENTS = frozenset(
 _SUB_AGENTS_DIR = "sub_agents"
 
 
+_ROUND_BOUNDARY = object()
+
+
 class DeepAgent(BaseAgent):
     """High-level agent that delegates to an internal ReActAgent."""
 
@@ -157,9 +187,27 @@ class DeepAgent(BaseAgent):
         self._stream_process_task: Optional[asyncio.Task] = None
         self._auto_invoke_scheduled: bool = False
         self._bound_session_id: Optional[str] = None
+        self._load_records: dict[str, LoadRecord] = {}
         self._session_toolkit: SessionToolkit | None = None
         self._pending_harness_configs: List[str] = []
         self.prompt_attachment_manager: PromptAttachmentManager = PromptAttachmentManager()
+        self._interaction_session: Optional[Session] = None
+        self._interaction_phase = InteractionPhase.IDLE
+        self._active_interaction_round: Optional[ActiveInteractionRound] = None
+        self._event_manager = EventManager()
+        self._inherited_artifact_root: Optional[str] = None
+        self.goal_manager: Optional[GoalManager] = None
+        self._interaction_output = OutputLeaseManager()
+        self._interaction_supervisor_task: Optional[asyncio.Task[None]] = None
+        self._interaction_forwarder_task: Optional[asyncio.Task[None]] = None
+        self._interaction_round_task: Optional[asyncio.Task[None]] = None
+        self._interaction_emit_tasks: set[asyncio.Task[Any]] = set()
+        self._interaction_round_forwarded: Optional[asyncio.Event] = None
+        self._interaction_start_lock = asyncio.Lock()
+        self._interaction_control_lock = asyncio.Lock()
+        self._interaction_send_lock = asyncio.Lock()
+        self._interaction_wakeup = asyncio.Event()
+        self._interaction_started = False
         super().__init__(card)
 
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
@@ -320,6 +368,8 @@ class DeepAgent(BaseAgent):
         )
         if config.context_engine_config is not None:
             new_react_config.context_engine_config = config.context_engine_config
+        if config.kv_cache_affinity_config is not None:
+            new_react_config.kv_cache_affinity_config = config.kv_cache_affinity_config
         self._react_agent.configure(new_react_config)
         self._sync_prompt_builder_references()
         logger.info("[DeepAgent] Model configuration hot reloaded")
@@ -388,6 +438,7 @@ class DeepAgent(BaseAgent):
             ))
         else:
             prompt_builder.add_section(build_identity_section(language))
+        prompt_builder.add_section(build_prompt_attachments_section(language))
         prompt = prompt_builder.build()
         new_react_config = self._react_agent.config.model_copy()
         new_react_config.prompt_template = [{"role": "system", "content": prompt}]
@@ -418,6 +469,24 @@ class DeepAgent(BaseAgent):
                 rail.system_prompt_builder = builder
             if hasattr(rail, "_system_prompt_builder"):
                 setattr(rail, "_system_prompt_builder", builder)
+
+    def apply_prompt_builder_to_react_agent(self) -> None:
+        """Re-render the current system_prompt_builder into the inner ReActAgent.
+
+        Public entry point for resource binding targets after a prompt section
+        mutation: rebuilds ``react_agent.config.prompt_template`` from the
+        builder's current output and reconfigures the ReActAgent, then syncs
+        every prompt participant to the same builder reference via
+        :meth:`_sync_prompt_builder_references`. Keeps the binding target from
+        touching ``react_agent.config`` / ``react_agent.configure`` directly.
+        """
+        builder = self.system_prompt_builder
+        if builder is None or self._react_agent is None:
+            return
+        new_react_config = self._react_agent.config.model_copy()
+        new_react_config.prompt_template = [{"role": "system", "content": builder.build()}]
+        self._react_agent.configure(new_react_config)
+        self._sync_prompt_builder_references()
 
     def _queue_pending_rails(self, config: DeepAgentConfig) -> None:
         """Append config-driven rails to _pending_rails for lazy registration."""
@@ -736,6 +805,8 @@ class DeepAgent(BaseAgent):
         )
         if cfg.context_engine_config is not None:
             react_config.context_engine_config = cfg.context_engine_config
+        if cfg.kv_cache_affinity_config is not None:
+            react_config.kv_cache_affinity_config = cfg.kv_cache_affinity_config
         react_config.workspace = cfg.workspace
         if cfg.sys_operation is not None:
             react_config.sys_operation_id = cfg.sys_operation.id
@@ -755,6 +826,7 @@ class DeepAgent(BaseAgent):
             ))
         else:
             prompt_builder.add_section(build_identity_section(language))
+        prompt_builder.add_section(build_prompt_attachments_section(language))
         prompt = prompt_builder.build()
         react_config.prompt_template = [{"role": "system", "content": prompt}]
 
@@ -856,9 +928,31 @@ class DeepAgent(BaseAgent):
             supported,
         )
 
+    def _apply_inherited_artifact_cwd(self) -> None:
+        """Set cwd from ``_inherited_artifact_root`` for a reused subagent.
+
+        No-op on the main agent (field is unset), so host-seeded runtime cwd
+        is not overwritten on every invoke.
+        """
+        if not self._inherited_artifact_root:
+            return
+        if not (self._deep_config and self._deep_config.workspace):
+            return
+        from openjiuwen.core.sys_operation.cwd import init_cwd
+
+        init_root = self._deep_config.workspace.root_path or os.getcwd()
+        init_cwd(
+            self._inherited_artifact_root,
+            project_root=self._inherited_artifact_root,
+            workspace=init_root,
+        )
+
     async def _ensure_initialized(self) -> None:
         """Perform lazy async initialization."""
         if self._initialized:
+            # Reused subagent instances skip full init; still refresh cwd so
+            # create_subagent does not have to mutate the parent's ContextVar.
+            self._apply_inherited_artifact_cwd()
             return
 
         # Initialize ContextVar CWD in the current asyncio Task context.
@@ -868,10 +962,14 @@ class DeepAgent(BaseAgent):
             from openjiuwen.core.sys_operation.cwd import init_cwd
 
             init_root = self._deep_config.workspace.root_path or os.getcwd()
-            init_cwd(
-                init_root,
-                workspace=self._deep_config.workspace.root_path,
-            )
+            if self._inherited_artifact_root:
+                init_cwd(
+                    self._inherited_artifact_root,
+                    project_root=self._inherited_artifact_root,
+                    workspace=init_root,
+                )
+            else:
+                init_cwd(init_root, workspace=init_root)
 
         await self._register_pending_mcps()
 
@@ -946,12 +1044,36 @@ class DeepAgent(BaseAgent):
         """React agent config. For testing only."""
         return self._react_agent.config
 
-    def create_subagent(self, subagent_type: str, subsession_id: str) -> "DeepAgent":
+    @staticmethod
+    def _bind_inherited_artifact_root(subagent: Any) -> Any:
+        """Point subagent file writes at the parent's current artifact root.
+
+        Prefer ``get_cwd()``: after a sibling subagent runs in the same Task,
+        ambient ``get_workspace()`` may point at that sibling's ``sub_agents/``
+        tree while cwd remains the shared artifact root.
+        """
+        from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
+
+        artifact_root = get_cwd() or get_workspace()
+        try:
+            setattr(subagent, "_inherited_artifact_root", artifact_root)
+        except (AttributeError, TypeError):
+            # Test mocks may return bare object(); real DeepAgent always accepts it.
+            pass
+        return subagent
+
+    def create_subagent(
+        self,
+        subagent_type: str,
+        subsession_id: str,
+        browser_capabilities: Optional[List[str]] = None,
+    ) -> "DeepAgent":
         """Create a subagent instance (shared by TaskTool and SessionSpawnExecutor).
 
         Args:
             subagent_type: Type of subagent to create (e.g., "general-purpose").
             subsession_id: The session id for the subagent.
+            browser_capabilities: Task-scoped browser capability categories.
 
         Returns:
             Configured DeepAgent instance.
@@ -968,7 +1090,9 @@ class DeepAgent(BaseAgent):
 
         if isinstance(spec, DeepAgent):
             logger.info("already get deepagent instance, return it")
-            return spec
+            # Only bind the field here; cwd is applied in _ensure_initialized
+            # so create_subagent does not mutate the parent's ContextVar.
+            return self._bind_inherited_artifact_root(spec)
 
         if not self._deep_config.workspace or isinstance(self._deep_config.workspace, str):
             workspace_path = (
@@ -1040,36 +1164,47 @@ class DeepAgent(BaseAgent):
                     create_browser_agent,
                 )
 
-                return create_browser_agent(
-                    **create_kwargs,
-                    **dict(spec.factory_kwargs or {}),
+                factory_kwargs = dict(spec.factory_kwargs or {})
+                if browser_capabilities is not None:
+                    factory_kwargs["browser_capabilities"] = list(browser_capabilities)
+                return self._bind_inherited_artifact_root(
+                    create_browser_agent(
+                        **create_kwargs,
+                        **factory_kwargs,
+                    )
                 )
             if normalized_factory == "code_agent":
                 from openjiuwen.harness.subagents.code_agent import (
                     create_code_agent,
                 )
 
-                return create_code_agent(
-                    **create_kwargs,
-                    **dict(spec.factory_kwargs or {}),
+                return self._bind_inherited_artifact_root(
+                    create_code_agent(
+                        **create_kwargs,
+                        **dict(spec.factory_kwargs or {}),
+                    )
                 )
             if normalized_factory == "research_agent":
                 from openjiuwen.harness.subagents.research_agent import (
                     create_research_agent,
                 )
 
-                return create_research_agent(
-                    **create_kwargs,
-                    **dict(spec.factory_kwargs or {}),
+                return self._bind_inherited_artifact_root(
+                    create_research_agent(
+                        **create_kwargs,
+                        **dict(spec.factory_kwargs or {}),
+                    )
                 )
             if normalized_factory in {"mobile_gui_agent", "mobile_agent"}:
                 from openjiuwen.harness.subagents.mobile_gui_agent import (
                     create_mobile_gui_agent,
                 )
 
-                return create_mobile_gui_agent(
-                    **create_kwargs,
-                    **dict(spec.factory_kwargs or {}),
+                return self._bind_inherited_artifact_root(
+                    create_mobile_gui_agent(
+                        **create_kwargs,
+                        **dict(spec.factory_kwargs or {}),
+                    )
                 )
 
             raise build_error(
@@ -1079,7 +1214,9 @@ class DeepAgent(BaseAgent):
 
         from openjiuwen.harness.factory import create_deep_agent
 
-        return create_deep_agent(**create_kwargs, **dict(spec.factory_kwargs or {}))
+        return self._bind_inherited_artifact_root(
+            create_deep_agent(**create_kwargs, **dict(spec.factory_kwargs or {}))
+        )
 
     def _find_subagent_spec(self, subagent_type: str) -> Optional["SubAgentConfig | DeepAgent"]:
         """Find SubAgentConfig matching subagent_type.
@@ -1110,6 +1247,7 @@ class DeepAgent(BaseAgent):
         if isinstance(inputs, dict):
             query = inputs.get("query", "")
             conversation_id = inputs.get("conversation_id")
+            parent_session_id = inputs.get("parent_session_id")
             run = inputs.get("run", {})
             run_kind = None
             run_context = None
@@ -1118,7 +1256,17 @@ class DeepAgent(BaseAgent):
                 run_kind = RunKind(kind)
                 context_data = run.get("context")
                 if context_data:
-                    run_context = RunContext(**context_data)
+                    _rc_fields = {f.name for f in dataclasses.fields(RunContext)}
+                    extra = dict(context_data.get("extra") or {})
+                    for k, v in context_data.items():
+                        if k not in _rc_fields:
+                            extra[k] = v
+                    rc_kwargs = {
+                        k: v for k, v in context_data.items()
+                        if k in _rc_fields
+                    }
+                    rc_kwargs["extra"] = extra
+                    run_context = RunContext(**rc_kwargs)
             # Merge raw_query into RunContext.extra
             # (without affecting run_kind for normal queries)
             raw_query = inputs.get("raw_query", "")
@@ -1130,11 +1278,13 @@ class DeepAgent(BaseAgent):
         elif isinstance(inputs, str):
             query = inputs
             conversation_id = None
+            parent_session_id = None
             run_kind = None
             run_context = None
         elif isinstance(inputs, InteractiveInput):
             query = inputs
             conversation_id = None
+            parent_session_id = None
             run_kind = None
             run_context = None
         else:
@@ -1147,7 +1297,8 @@ class DeepAgent(BaseAgent):
             query=query,
             conversation_id=conversation_id,
             run_kind=run_kind,
-            run_context=run_context
+            run_context=run_context,
+            parent_session_id=parent_session_id,
         )
         return invoke_inputs
 
@@ -1193,6 +1344,8 @@ class DeepAgent(BaseAgent):
         effective_inputs: Dict[str, Any] = {"query": invoke_inputs.query}
         if invoke_inputs.conversation_id is not None:
             effective_inputs["conversation_id"] = invoke_inputs.conversation_id
+        if invoke_inputs.parent_session_id is not None:
+            effective_inputs["parent_session_id"] = invoke_inputs.parent_session_id
         if invoke_inputs.run_kind is not None:
             effective_inputs["run_kind"] = invoke_inputs.run_kind
         if invoke_inputs.run_context is not None:
@@ -1268,6 +1421,34 @@ class DeepAgent(BaseAgent):
             return []
         return [rail for rail in (*self._pending_rails, *self._registered_rails) if isinstance(rail, rail_types)]
 
+    def find_rail_by_name(self, name: str) -> Optional[AgentRail]:
+        """Return a pending or registered rail by its materialized class name."""
+        return next(
+            (
+                rail
+                for rail in (*self._pending_rails, *self._registered_rails)
+                if type(rail).__name__ == name
+            ),
+            None,
+        )
+
+    def find_pending_rails_by_type(self, rail_type: type) -> List[AgentRail]:
+        """Return pending rails matching the given type."""
+        return [rail for rail in self._pending_rails if isinstance(rail, rail_type)]
+
+    def is_pending_rail(self, rail: AgentRail) -> bool:
+        """Return True when rail is queued for lazy registration."""
+        return rail in self._pending_rails
+
+    def is_registered_rail(self, rail: AgentRail) -> bool:
+        """Return True when rail is registered in the active runtime."""
+        return rail in self._registered_rails
+
+    def remove_pending_rail(self, rail: AgentRail) -> "DeepAgent":
+        """Remove a specific rail from the pending queue by object identity."""
+        self._pending_rails = [queued for queued in self._pending_rails if queued is not rail]
+        return self
+
     def strip_rails_by_type(self, rail_types: tuple[type, ...]) -> int:
         """Remove queued rails by type and mark registered ones as stale.
 
@@ -1322,347 +1503,186 @@ class DeepAgent(BaseAgent):
         rail.uninit(self)
         return self
 
-    async def load_harness_config(
+    async def load_expert_harness(
         self,
-        config_path: str,
-    ) -> list[str]:
-        """Hot-load resources from a harness_config.yaml.
+        path: str,
+        *,
+        context: BuildContext | None = None,
+    ) -> LoadRecord:
+        """Hot-load a file-backed ExpertHarness package.
 
-        Parses the config and registers any declared rails,
-        tools, and skills onto this agent instance.
+        Reads the manifest at ``path`` into an ExpertHarnessSpec, then delegates
+        to ``load_expert_harness_from_spec``.
+        """
+        try:
+            spec = load_expert_harness_spec(path)
+        except Exception as exc:
+            raise build_error(
+                StatusCode.DEEPAGENT_LOAD_EXPERT_HARNESS_ERROR,
+                error_msg=str(exc),
+                cause=exc,
+            ) from exc
+        return await self.load_expert_harness_from_spec(spec, context=context)
+
+    async def load_expert_harness_from_spec(
+        self,
+        spec: ExpertHarnessSpec,
+        *,
+        context: BuildContext | None = None,
+    ) -> LoadRecord:
+        """Hot-load an in-memory ExpertHarnessSpec via resolve Parts + apply_hot."""
+        try:
+            if context is not None:
+                ctx = context.derive()
+                ctx.extras = dict(ctx.extras)
+            else:
+                ctx = BuildContext(
+                    language=self.deep_config.language or "cn",
+                    workspace=self.deep_config.workspace,
+                    member_card_id=self.card.id,
+                )
+            ctx.extras.setdefault(
+                "source_root",
+                (spec.source.root if spec.source else ".") or ".",
+            )
+            ctx.extras["_parent_model"] = self.deep_config.model
+
+            from openjiuwen.harness.resources.expert_harness_parts import (
+                resolve_expert_harness_parts,
+            )
+            from openjiuwen.harness.expert_harness_runtime import apply_expert_harness_hot
+
+            parts = resolve_expert_harness_parts(spec, ctx)
+            source_uri = None
+            if spec.source is not None:
+                source_uri = spec.source.uri or spec.source.root
+            record = LoadRecord(
+                source_uri=source_uri,
+                refs=await apply_expert_harness_hot(self, parts),
+            )
+            self._load_records[record.load_id] = record.model_copy(deep=True)
+            return record
+        except Exception as exc:
+            raise build_error(
+                StatusCode.DEEPAGENT_LOAD_EXPERT_HARNESS_ERROR,
+                error_msg=str(exc),
+                cause=exc,
+            ) from exc
+
+    async def load_expert_harness_ability(
+        self,
+        *,
+        tools: Tool | ToolCard | list[Tool | ToolCard] | None = None,
+        rails: AgentRail | list[AgentRail] | None = None,
+        skills: ResolvedSkill | list[ResolvedSkill] | None = None,
+    ) -> LoadRecord:
+        """Hot-load pre-built tools / rails / skills onto this agent.
+
+        Accepts already-constructed instances only. Assembles
+        ``ExpertHarnessParts`` and delegates to ``apply_expert_harness_hot``.
+        Unload via :meth:`unload_expert_harness`.
+        """
+        try:
+            from openjiuwen.harness.expert_harness_runtime import apply_expert_harness_hot
+
+            def _as_ability_list(value):
+                if value is None:
+                    return []
+                if isinstance(value, list):
+                    return [item for item in value if item is not None]
+                return [value]
+
+            parts = ExpertHarnessParts(
+                tools=_as_ability_list(tools),
+                rails=_as_ability_list(rails),
+                skills=_as_ability_list(skills),
+            )
+            record = LoadRecord(refs=await apply_expert_harness_hot(self, parts))
+            self._load_records[record.load_id] = record.model_copy(deep=True)
+            return record
+        except Exception as exc:
+            raise build_error(
+                StatusCode.DEEPAGENT_LOAD_EXPERT_HARNESS_ERROR,
+                error_msg=str(exc),
+                cause=exc,
+            ) from exc
+
+    async def unload_expert_harness(self, record: LoadRecord) -> list[str]:
+        """Unload resources produced by a successful ExpertHarness load.
+
+        Resolves ``record.load_id`` against this agent's ``_load_records`` ledger.
+        Unknown / already-unloaded ids are a no-op. Only the ledger-owned refs
+        are applied; the caller's ``record.refs`` are ignored.
+        """
+        try:
+            from openjiuwen.harness.expert_harness_runtime import unapply_expert_harness_hot
+
+            owned = self._load_records.get(record.load_id)
+            if owned is None:
+                return []
+            labels = await unapply_expert_harness_hot(self, owned.refs)
+            self._load_records.pop(record.load_id, None)
+            return labels
+        except Exception as exc:
+            raise build_error(
+                StatusCode.DEEPAGENT_LOAD_EXPERT_HARNESS_ERROR,
+                error_msg=str(exc),
+                cause=exc,
+            ) from exc
+
+    async def load_harness_config(self, config_path: str) -> list[str]:
+        """Deprecated hot-load entry. Use :meth:`load_expert_harness` instead.
 
         Args:
-            config_path: Absolute path to harness_config.yaml.
+            config_path: Path to a harness_config.yaml manifest or its parent
+                directory. Resolved the same way as ``load_expert_harness``.
 
         Returns:
-            List of human-readable names of loaded resources.
+            List of human-readable resource labels (same shape the old
+            implementation returned).
         """
-        from openjiuwen.harness.harness_config.builder import (
-            _resolve_rails,
-            _resolve_tools,
+        warnings.warn(
+            "DeepAgent.load_harness_config is deprecated; "
+            "use load_expert_harness instead.",
+            DeprecationWarning,
+            stacklevel=2,
         )
+        record = await self.load_expert_harness(config_path)
+        return self._load_record_labels(record)
 
-        resolved = HarnessConfigLoader.load(config_path)
-        resources = resolved.config.resources
-        if not resources:
-            return []
+    async def unload_harness_config(self, config_path: str) -> list[str]:
+        """Deprecated unload entry. Use :meth:`unload_expert_harness` instead.
 
-        loaded: list[str] = []
-        config_path_obj = Path(config_path).resolve()
-        runtime_ext = self._runtime_extension_artifact_for_config(
-            config_path_obj,
-            resources,
-        )
-
-        # Rails
-        if resources.rails:
-            if runtime_ext is not None:
-                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
-                    load_runtime_rails,
-                )
-
-                rail_classes = load_runtime_rails(
-                    runtime_ext,
-                    session_id=self._runtime_extension_session_id(),
-                )
-                rails = [rail_cls() for rail_cls in rail_classes]
-            else:
-                rails = _resolve_rails(resources)
-            for rail in rails:
-                await self.register_rail(rail)
-                loaded.append(
-                    f"rail:{type(rail).__name__}"
-                )
-
-        # Tools
-        if resources.tools:
-            if runtime_ext is not None:
-                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
-                    load_runtime_tools,
-                )
-
-                tool_classes = load_runtime_tools(
-                    runtime_ext,
-                    session_id=self._runtime_extension_session_id(),
-                )
-                tools = [tool_cls() for tool_cls in tool_classes]
-            else:
-                sys_op = self.deep_config.sys_operation
-                tools = _resolve_tools(
-                    resources, sys_op
-                )
-            for tool in tools:
-                existing = Runner.resource_mgr.get_tool(
-                    tool.card.id
-                )
-                if existing is None:
-                    Runner.resource_mgr.add_tool(tool)
-                self.ability_manager.add(tool.card)
-                loaded.append(
-                    f"tool:{type(tool).__name__}"
-                )
-
-        # Skills
-        if resources.skills and resources.skills.dirs:
-            from openjiuwen.harness.rails.skills.skill_use_rail import (
-                SkillUseRail,
-            )
-
-            if runtime_ext is not None:
-                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
-                    load_runtime_skill_dirs,
-                )
-
-                skill_dirs = load_runtime_skill_dirs(runtime_ext)
-            else:
-                source_dir = config_path_obj.parent
-                skill_dirs = [
-                    str((source_dir / d).resolve())
-                    for d in resources.skills.dirs
-                ]
-            # Try appending to existing SkillUseRail
-            # Check both _registered_rails (already initialized) and
-            # _pending_rails (queued during configure() but not yet initialized)
-            existing_skill_rail: (
-                SkillUseRail | None
-            ) = None
-            for r in (*self._registered_rails, *self._pending_rails):
-                if isinstance(r, SkillUseRail):
-                    existing_skill_rail = r
-                    break
-            if existing_skill_rail is not None:
-                cur = existing_skill_rail.skills_dir
-                if isinstance(cur, str):
-                    existing_skill_rail.skills_dir = [
-                        *skill_dirs,
-                        cur,
-                    ]
-                else:
-                    existing = list(cur)
-                    existing = [
-                        d
-                        for d in existing
-                        if d not in skill_dirs
-                    ]
-                    existing_skill_rail.skills_dir = [
-                        *skill_dirs,
-                        *existing,
-                    ]
-                existing_skill_rail.enable_cache = False
-                # Ensure sys_operation is set for reading SKILL.md files
-                if existing_skill_rail.sys_operation is None:
-                    existing_skill_rail.set_sys_operation(
-                        self.deep_config.sys_operation
-                    )
-                await existing_skill_rail.reload_skills()
-            else:
-                mode = (
-                    resources.skills.mode or "all"
-                )
-                new_rail = SkillUseRail(
-                    skills_dir=skill_dirs,
-                    skill_mode=mode,
-                )
-                await self.register_rail(new_rail)
-                await new_rail.reload_skills()
-            for sd in skill_dirs:
-                loaded.append(f"skill_dir:{sd}")
-
-        return loaded
-
-    async def unload_harness_config(
-        self,
-        config_path: str,
-    ) -> list[str]:
-        """Unload resources declared in a harness_config.yaml.
-
-        Parses the config and removes rails, tools, and skill directories
-        that match the declarations in the config file.
-
-        This method does NOT track which resources were previously loaded.
-        Instead, it re-parses the config file and removes matching resources
-        by type/name/module. This means:
-        - Rails are removed by matching type (class name and module)
-        - Tools are removed by matching card.id and card.name
-        - Skill dirs are removed from SkillUseRail if present
+        Locates the ``LoadRecord`` previously produced by ``load_harness_config``
+        via ``_load_records`` (keyed by the resolved manifest path),
+        then delegates to ``unload_expert_harness``. Returns an empty list when
+        no matching record is found, mirroring the old "no-op on missing" behavior.
 
         Args:
-            config_path: Absolute path to harness_config.yaml.
-
-        Returns:
-            List of human-readable names of unloaded resources.
-
-        Raises:
-            FileNotFoundError: If the config file does not exist.
-            ValueError: If parsing the config fails.
+            config_path: Path originally passed to ``load_harness_config``.
         """
-        config_path_obj = Path(config_path).resolve()
-        if not config_path_obj.exists():
-            raise FileNotFoundError(
-                f"Harness config file not found: {config_path_obj}"
-            )
-
-        resolved = HarnessConfigLoader.load(config_path)
-        resources = resolved.config.resources
-        if not resources:
-            return []
-
-        unloaded: list[str] = []
-        runtime_ext = self._runtime_extension_artifact_for_config(
-            config_path_obj,
-            resources,
+        warnings.warn(
+            "DeepAgent.unload_harness_config is deprecated; "
+            "use unload_expert_harness instead.",
+            DeprecationWarning,
+            stacklevel=2,
         )
+        try:
+            resolved = str(find_expert_harness_manifest(config_path))
+        except FileNotFoundError:
+            return []
+        target_record: LoadRecord | None = None
+        for record in self._load_records.values():
+            if record.source_uri == resolved:
+                target_record = record
+                break
+        if target_record is None:
+            return []
+        return await self.unload_expert_harness(target_record)
 
-        # Unload rails
-        if resources.rails:
-            rail_types_to_remove: set[type] = set()
-            if runtime_ext is not None:
-                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
-                    load_runtime_rails,
-                )
-
-                rail_classes = load_runtime_rails(
-                    runtime_ext,
-                    session_id=self._runtime_extension_session_id(),
-                )
-                rail_types_to_remove = set(rail_classes)
-            else:
-                for spec in resources.rails:
-                    if spec.type == "builtin" and spec.name:
-                        from openjiuwen.harness.harness_config.builder import (
-                            _BUILTIN_RAIL_REGISTRY,
-                            _load_dotted_path,
-                        )
-                        dotted = _BUILTIN_RAIL_REGISTRY.get(spec.name)
-                        if dotted:
-                            rail_types_to_remove.add(_load_dotted_path(dotted))
-                    elif spec.type == "package" and spec.module and spec.class_name:
-                        dotted = f"{spec.module}.{spec.class_name}"
-                        from openjiuwen.harness.harness_config.builder import (
-                            _load_dotted_path,
-                        )
-                        rail_types_to_remove.add(_load_dotted_path(dotted))
-                    elif spec.type == "entry_point" and spec.name:
-                        from openjiuwen.harness.harness_config.builder import (
-                            _load_from_entry_point,
-                        )
-                        rail_types_to_remove.add(
-                            _load_from_entry_point(spec.name, "openjiuwen.rail")
-                        )
-
-            for rail in list(self._registered_rails):
-                if type(rail) in rail_types_to_remove:
-                    await self.unregister_rail(rail)
-                    unloaded.append(f"rail:{type(rail).__name__}")
-
-        # Unload tools
-        if resources.tools:
-            tool_ids_to_remove: list[str] = []
-            tool_names_to_remove: list[str] = []
-            if runtime_ext is not None:
-                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
-                    load_runtime_tools,
-                )
-
-                tool_classes = load_runtime_tools(
-                    runtime_ext,
-                    session_id=self._runtime_extension_session_id(),
-                )
-                for cls in tool_classes:
-                    # Instantiate to get card info
-                    tool_instance = cls()
-                    tool_ids_to_remove.append(tool_instance.card.id)
-                    tool_names_to_remove.append(tool_instance.card.name)
-            else:
-                for spec in resources.tools:
-                    if spec.type == "builtin":
-                        from openjiuwen.harness.harness_config.builder import (
-                            _BUILTIN_TOOL_GROUPS,
-                        )
-                        names = spec.names or ([spec.name] if spec.name else [])
-                        for group in names:
-                            entry = _BUILTIN_TOOL_GROUPS.get(group)
-                            if entry:
-                                module_path, class_names, _ = entry
-                                mod = importlib.import_module(module_path)
-                                for cls_name in class_names:
-                                    cls = getattr(mod, cls_name)
-                                    tool_instance = cls()
-                                    tool_ids_to_remove.append(tool_instance.card.id)
-                                    tool_names_to_remove.append(tool_instance.card.name)
-                    elif spec.type == "package" and spec.module and spec.class_name:
-                        from openjiuwen.harness.harness_config.builder import (
-                            _load_dotted_path,
-                        )
-                        cls = _load_dotted_path(f"{spec.module}.{spec.class_name}")
-                        tool_instance = cls()
-                        tool_ids_to_remove.append(tool_instance.card.id)
-                        tool_names_to_remove.append(tool_instance.card.name)
-                    elif spec.type == "entry_point" and spec.name:
-                        from openjiuwen.harness.harness_config.builder import (
-                            _load_from_entry_point,
-                        )
-                        cls = _load_from_entry_point(spec.name, "openjiuwen.tool")
-                        tool_instance = cls()
-                        tool_ids_to_remove.append(tool_instance.card.id)
-                        tool_names_to_remove.append(tool_instance.card.name)
-
-            for tool_id in tool_ids_to_remove:
-                Runner.resource_mgr.remove_tool(tool_id)
-                unloaded.append(f"tool_id:{tool_id}")
-
-            for tool_name in tool_names_to_remove:
-                self.ability_manager.remove(tool_name)
-                unloaded.append(f"tool:{tool_name}")
-
-        # Unload skill dirs
-        if resources.skills and resources.skills.dirs:
-            from openjiuwen.harness.rails.skills.skill_use_rail import (
-                SkillUseRail,
-            )
-
-            if runtime_ext is not None:
-                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
-                    load_runtime_skill_dirs,
-                )
-
-                skill_dirs = load_runtime_skill_dirs(runtime_ext)
-            else:
-                source_dir = config_path_obj.parent
-                skill_dirs = [
-                    str((source_dir / d).resolve())
-                    for d in resources.skills.dirs
-                ]
-
-            for r in self._registered_rails:
-                if isinstance(r, SkillUseRail):
-                    cur = r.skills_dir
-                    if isinstance(cur, str):
-                        if cur in skill_dirs:
-                            r.skills_dir = []
-                    else:
-                        remaining = [
-                            d for d in cur if d not in skill_dirs
-                        ]
-                        r.skills_dir = remaining
-
-                    # Force clear cache for removed skill dirs
-                    if not r.skills_dir:
-                        r.clear_skills()
-                    else:
-                        # Temporarily disable cache to force refresh, then restore
-                        original_cache = r.enable_cache
-                        r.enable_cache = False
-                        try:
-                            await r.reload_skills()
-                        finally:
-                            r.enable_cache = original_cache
-                    break
-
-            for sd in skill_dirs:
-                unloaded.append(f"skill_dir:{sd}")
-
-        return unloaded
+    @staticmethod
+    def _load_record_labels(record: LoadRecord) -> list[str]:
+        return [f"{ref.kind.value}:{ref.identity}" for ref in record.refs]
 
     def _runtime_extension_session_id(self) -> str:
         """Return a stable namespace key for runtime extension imports."""
@@ -1671,45 +1691,6 @@ class DeepAgent(BaseAgent):
             or self.card.id
             or self.card.name
             or "deep_agent"
-        )
-
-    @staticmethod
-    def _runtime_extension_artifact_for_config(
-        config_path: Path,
-        resources: Any,
-    ) -> Any | None:
-        """Build runtime extension metadata for auto-harness package configs.
-
-        Runtime extensions are stored outside the installed Python package but
-        still declare modules under ``openjiuwen.extensions.harness.<name>``.
-        The normal harness_config package resolver cannot import those modules,
-        so they must be loaded through the runtime extension loader.
-        """
-        extension_name = config_path.parent.name
-        prefix = f"openjiuwen.extensions.harness.{extension_name}"
-        modules: list[str] = []
-        for spec in [
-            *(resources.rails or []),
-            *(resources.tools or []),
-        ]:
-            module = getattr(spec, "module", None)
-            if (
-                getattr(spec, "type", None) == "package"
-                and isinstance(module, str)
-            ):
-                modules.append(module)
-        if not any(
-            module == prefix or module.startswith(f"{prefix}.")
-            for module in modules
-        ):
-            return None
-
-        from openjiuwen.auto_harness.schema import RuntimeExtensionArtifact
-
-        return RuntimeExtensionArtifact(
-            extension_name=extension_name,
-            runtime_path=str(config_path.parent),
-            config_path=str(config_path),
         )
 
     def enqueue_harness_config(
@@ -1725,11 +1706,11 @@ class DeepAgent(BaseAgent):
         while self._pending_harness_configs:
             path = self._pending_harness_configs.pop(0)
             try:
-                loaded = await self.load_harness_config(path)
+                record = await self.load_expert_harness(path)
                 logger.info(
                     "Auto-loaded harness config %s: %s",
                     path,
-                    loaded,
+                    self._load_record_labels(record),
                 )
             except Exception:
                 logger.exception(
@@ -2378,7 +2359,7 @@ class DeepAgent(BaseAgent):
         ):
             yield chunk
 
-    async def invoke(  # type: ignore[override]
+    async def invoke(
         self,
         inputs: Any,
         session: Optional[Session] = None,
@@ -2419,7 +2400,7 @@ class DeepAgent(BaseAgent):
         finally:
             self._invoke_active = False
 
-    async def stream(  # type: ignore[override]
+    async def stream(
         self,
         inputs: Any,
         session: Optional[Session] = None,
@@ -2634,6 +2615,631 @@ class DeepAgent(BaseAgent):
             )
             await handler.on_abort()
         await self._cancel_stream_process_task()
+
+    # ----------------------------------------------------------------
+    # long-lived session
+    # ----------------------------------------------------------------
+    async def prepare_interaction_task_loop(
+        self,
+        session: Session,
+    ) -> Tuple[LoopCoordinator, TaskLoopController]:
+        """Prepare and bind the task-loop kernel for the long-lived interaction loop."""
+        coordinator, controller = await self._setup_task_loop(session)
+        session_id = session.get_session_id()
+        if self._bound_session_id != session_id:
+            await controller.bind_session(session)
+            self._bound_session_id = session_id
+        self._loop_session = session
+        return coordinator, controller
+
+    async def run_one_round(
+        self,
+        work: RoundWorkItem,
+        task_id: str,
+        session: Session,
+    ) -> RoundOutcome:
+        """Execute one interaction work item and optionally propose follow-up work."""
+        self._invoke_active = True
+        try:
+            coordinator, controller = await self.prepare_interaction_task_loop(session)
+            if work.reset_loop:
+                coordinator.reset()
+                state = self.load_state(session)
+                state.stop_condition_state = None
+                self.save_state(session, state)
+
+            inputs = copy.deepcopy(work.inputs)
+            if work.kind == "goal":
+                inputs["run"] = {
+                    "kind": "goal",
+                    "context": copy.deepcopy(work.context),
+                }
+            invoke_inputs = self._normalize_inputs(inputs)
+            is_resume_input = self._is_resume_input(invoke_inputs)
+            ctx = AgentCallbackContext(
+                agent=self, inputs=invoke_inputs, session=session
+            )
+            async with ctx.lifecycle(
+                AgentCallbackEvent.BEFORE_INVOKE,
+                AgentCallbackEvent.AFTER_INVOKE,
+            ):
+                if is_resume_input:
+                    result = await self._run_single_round_invoke(ctx, session)
+                else:
+                    await controller.submit_round(
+                        session,
+                        str(work.query),
+                        is_follow_up=work.is_follow_up,
+                        run_kind=invoke_inputs.run_kind,
+                        run_context=invoke_inputs.run_context,
+                        task_id=task_id,
+                    )
+                    timeout = (
+                        self._deep_config.completion_timeout
+                        if self._deep_config
+                        else 600.0
+                    )
+                    result = await controller.wait_round_completion(timeout=timeout)
+                await self._write_round_result_to_stream(result, session)
+                invoke_inputs.result = result
+                next_work = (
+                    None
+                    if is_resume_input
+                    else self._build_interaction_next_work(
+                        work=work,
+                        result=result,
+                        session=session,
+                        coordinator=coordinator,
+                        controller=controller,
+                    )
+                )
+
+            self.save_state(session)
+            self.clear_state(session)
+            return RoundOutcome(next_work=next_work)
+        except Exception:
+            logger.exception("[DeepAgent] interaction round execution failed")
+            return RoundOutcome(
+                error_code="round_execution_error",
+                error_message="interaction round execution failed",
+            )
+        finally:
+            self._invoke_active = False
+
+    def _build_interaction_next_work(
+        self,
+        *,
+        work: RoundWorkItem,
+        result: Dict[str, Any],
+        session: Session,
+        coordinator: Any,
+        controller: Any,
+    ) -> Optional[RoundWorkItem]:
+        """Decide whether another user work item should follow this round."""
+        coordinator.increment_iteration()
+        coordinator.set_last_result(result)
+        state = self.load_state(session)
+        state.stop_condition_state = coordinator.get_state()
+        state.pending_follow_ups.extend(controller.drain_follow_up())
+        self.save_state(session, state)
+
+        if result.get("result_type") == "interrupt" or coordinator.is_aborted:
+            return None
+        if not coordinator.should_continue() or work.kind == "goal":
+            return None
+
+        state = self.load_state(session)
+        if state.pending_follow_ups:
+            query = state.pending_follow_ups.pop(0)
+            self.save_state(session, state)
+            inputs = copy.deepcopy(work.inputs)
+            inputs["query"] = query
+            return RoundWorkItem.user(
+                request_id=work.request_id,
+                inputs=inputs,
+                is_follow_up=True,
+                reset_loop=False,
+            )
+        if self._has_remaining_tasks(session):
+            return RoundWorkItem.user(
+                request_id=work.request_id,
+                inputs=work.inputs,
+                reset_loop=False,
+            )
+        return None
+
+    @property
+    def phase(self) -> InteractionPhase:
+        return self._interaction_phase
+
+    @property
+    def interaction_started(self) -> bool:
+        """Whether ``start()`` has bound this session's interaction loop."""
+        return self._interaction_started
+
+    @property
+    def active_round(self) -> Optional[ActiveInteractionRound]:
+        return self._active_interaction_round
+
+    @property
+    def event_manager(self) -> EventManager:
+        return self._event_manager
+
+    def has_output_stream(self) -> bool:
+        return self._interaction_output.has_consumer()
+
+    async def start(
+        self,
+        *,
+        session: Optional[Session] = None,
+    ) -> None:
+        """Bind the task-loop kernel and start the passive output forwarder.
+
+        Hosts should pass the product ``Session`` they own.  When ``session`` is
+        omitted, a fresh agent session is created with id ``\"default\"`` (useful
+        for unit tests and simple embeddings).
+        """
+        async with self._interaction_start_lock:
+            if session is None:
+                from openjiuwen.core.session.agent import create_agent_session
+
+                session = create_agent_session(
+                    session_id="default",
+                    card=getattr(self, "card", None),
+                )
+                await session.pre_run(inputs={})
+
+            sid = session.get_session_id()
+
+            if self._interaction_started:
+                if self._bound_session_id == sid:
+                    return
+                raise RuntimeError(
+                    f"Interaction loop already bound to session {self._bound_session_id}; "
+                    f"cannot bind {sid}."
+                )
+
+            self._interaction_session = session
+            await self.prepare_interaction_task_loop(session)
+            if self._task_completion_rail is None:
+                await self.register_rail(TaskCompletionRail())
+
+            from openjiuwen.harness.goal.store import SessionGoalStore
+
+            self.goal_manager = GoalManager(
+                store=SessionGoalStore(session),
+                event_manager=self._event_manager,
+                control_lock=self._interaction_control_lock,
+                has_output_stream=self.has_output_stream,
+                cancel_active_round=self._cancel_active_round,
+                emit_event=self._emit_interaction_event,
+                notify_work=self._notify_work,
+            )
+            self._interaction_phase = InteractionPhase.IDLE
+            self._interaction_started = True
+            self._interaction_forwarder_task = asyncio.create_task(
+                self._forward_session_stream(), name=f"interaction_forwarder[{sid}]"
+            )
+
+            rail = self._task_completion_rail
+            if rail is not None and hasattr(rail, "set_goal_manager"):
+                rail.set_goal_manager(self.goal_manager)
+                try:
+                    rail.init(self)
+                except Exception:
+                    logger.exception("[DeepAgent] Failed to register goal tools")
+
+            self._ensure_supervisor_running()
+            logger.info("[DeepAgent] Started for session %s", sid)
+
+    async def stop(self) -> None:
+        """Terminate the interaction loop and wake any attached output consumer."""
+        if not self._interaction_started:
+            return
+        self._interaction_phase = InteractionPhase.TERMINATED
+        await self._interaction_output.shutdown()
+        self._event_manager.discard_all_work()
+        await self._cancel_active_round(reason="stop")
+
+        for task in (self._interaction_supervisor_task, self._interaction_forwarder_task):
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await task
+        self._interaction_supervisor_task = None
+        self._interaction_forwarder_task = None
+
+        emit_tasks = list(self._interaction_emit_tasks)
+        self._interaction_emit_tasks.clear()
+        for task in emit_tasks:
+            if not task.done():
+                task.cancel()
+        for task in emit_tasks:
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+
+        if self._interaction_session is not None:
+            with suppress(Exception):
+                await self._interaction_session.close_stream()
+        controller = self.loop_controller
+        if controller is not None and self._interaction_session is not None:
+            with suppress(Exception):
+                await controller.unbind_session(self._interaction_session)
+            with suppress(Exception):
+                await controller.stop()
+
+        self._interaction_started = False
+        self._active_interaction_round = None
+        self._interaction_round_task = None
+
+    async def attach_output(self) -> Optional[InteractionOutputStream]:
+        """Claim the sole output reader for this interaction.
+
+        Returns ``None`` when another consumer already holds the lease.
+
+        If an ACTIVE goal exists, missing goal work is ensured even when this
+        call does not obtain the lease, so an already-attached reader continues
+        to receive goal progress (session switch / concurrent attach_goal).
+        """
+        if not self._interaction_started or self._interaction_phase is InteractionPhase.TERMINATED:
+            raise RuntimeError("interaction_terminated")
+
+        async with self._interaction_send_lock:
+            async with self._interaction_control_lock:
+                stream = await self._attach_output_locked()
+                if self.goal_manager is not None:
+                    record = self._load_goal_record_locked()
+                    if record is not None and record.status is GoalStatus.ACTIVE:
+                        self.goal_manager.ensure_active_goal_work_locked()
+                        self._notify_work()
+                return stream
+
+    async def send_input(self, request: SendInputRequest) -> None:
+        """Dispatch user text or interrupt-resume input.
+
+        Hosts that need to read output must call ``attach_output`` first (or
+        already hold a stream).  Steer / follow-up requests typically skip
+        attach and let the existing consumer receive output.  Dispatch modes
+        do not apply to ``InteractiveInput`` recovery requests.
+        """
+        if not self._interaction_started or self._interaction_phase is InteractionPhase.TERMINATED:
+            raise RuntimeError("interaction_terminated")
+
+        async with self._interaction_send_lock:
+            await self._send_user(request)
+
+    async def _send_user(self, request: SendInputRequest) -> None:
+        inputs = request.inputs
+        if not isinstance(inputs, dict):
+            raise ValueError(
+                "send_input requires inputs['query'] to be a non-empty string "
+                "or InteractiveInput"
+            )
+        query = inputs.get("query")
+        is_resume_input = isinstance(query, InteractiveInput)
+        if not is_resume_input and (
+            not isinstance(query, str) or not query.strip()
+        ):
+            raise ValueError(
+                "send_input requires inputs['query'] to be a non-empty string "
+                "or InteractiveInput"
+            )
+
+        async with self._interaction_control_lock:
+            if is_resume_input:
+                self._event_manager.push_user(
+                    RoundWorkItem.user(
+                        request_id=request.request_id,
+                        inputs=inputs,
+                        reset_loop=False,
+                    )
+                )
+                self._notify_work()
+                return
+
+            loop = self.loop_controller
+            try:
+                mode = (
+                    InputDispatchMode.FOLLOW_UP
+                    if request.mode is None
+                    else InputDispatchMode(request.mode)
+                )
+            except ValueError as exc:
+                raise ValueError(f"unsupported input dispatch mode: {request.mode}") from exc
+
+            if mode is InputDispatchMode.STEER and self._active_interaction_round is not None:
+                if loop is None:
+                    raise RuntimeError("active interaction round cannot accept steer without loop_controller")
+                loop.enqueue_steer(str(inputs["query"]))
+                self._notify_work()
+                return
+
+            keep_open = self._should_keep_interaction_open_locked()
+            if keep_open:
+                self._event_manager.push_user(
+                    RoundWorkItem.user(
+                        request_id=request.request_id,
+                        inputs=inputs,
+                        is_follow_up=True,
+                        reset_loop=False,
+                    )
+                )
+                self._notify_work()
+                return
+
+            # Fresh user turn.  Output lease ownership stays with the host via
+            # ``attach_output``; send_input never steals or creates a stream.
+            self._event_manager.push_user(
+                RoundWorkItem.user(request_id=request.request_id, inputs=inputs)
+            )
+            self._notify_work()
+
+    async def _attach_output_locked(self) -> Optional[InteractionOutputStream]:
+        lease = await self._interaction_output.attach()
+        return InteractionOutputStream(self, lease) if lease is not None else None
+
+    async def next_output(self, lease: OutputLease) -> Optional[Any]:
+        return await self._interaction_output.next_item(lease)
+
+    async def detach_output(self, token: str, *, abort_active_round: bool) -> None:
+        async with self._interaction_control_lock:
+            detached = await self._interaction_output.detach(token)
+            if not detached:
+                return
+            self._event_manager.discard_all_work()
+            if abort_active_round:
+                await self._cancel_active_round(reason="output_detached")
+
+    async def _detach_current_output_locked(self, *, abort_active_round: bool) -> None:
+        lease = self._interaction_output.current_lease()
+        if lease is None:
+            return
+        if await self._interaction_output.detach(lease.token):
+            self._event_manager.discard_all_work()
+            if abort_active_round:
+                await self._cancel_active_round(reason="output_replaced")
+
+    def _emit_interaction_event(self, event: InteractionEvent) -> None:
+        # The callback is synchronous because rails can invoke it from several
+        # lifecycle hooks.  Capture the lease now so a delayed task cannot put
+        # an old event into a replacement request's output stream.
+        # Fire-and-forget is required (cannot await here); track the task so
+        # stop() can cancel outstanding emits instead of leaking them.
+        token = self._interaction_output.current_token()
+        if token is not None:
+            task = asyncio.create_task(
+                self._interaction_output.emit(event.to_output_schema(), expected_token=token)
+            )
+            self._interaction_emit_tasks.add(task)
+            task.add_done_callback(self._interaction_emit_tasks.discard)
+
+    async def cancel_round(
+        self,
+        *,
+        reason: str,
+    ) -> bool:
+        """Cancel the current active round without stopping the interaction loop.
+
+        Works for both user and goal rounds. Does not modify GoalRecord: an
+        ACTIVE goal stays ACTIVE until ``goal_manager.pause/clear`` (or
+        evaluation reaches a terminal status). Hosts that need to stop the
+        in-flight attempt while keeping the persistent goal should call this
+        (or close the output stream with ``abort_active_round=True``).
+        """
+        active = self._active_interaction_round
+        if active is None:
+            return False
+        await self._cancel_active_round(reason=reason)
+        return True
+
+    async def _cancel_active_round(
+        self,
+        *,
+        reason: str,
+        expected_run_kind: Optional[str] = None,
+        expected_goal_id: Optional[str] = None,
+        expected_revision: Optional[int] = None,
+    ) -> None:
+        active = self._active_interaction_round
+        if active is None:
+            return
+        if expected_run_kind is not None and active.run_kind != expected_run_kind:
+            return
+        if expected_goal_id is not None and active.goal_id != expected_goal_id:
+            return
+        if expected_revision is not None and active.revision != expected_revision:
+            return
+
+        logger.info("[DeepAgent] cancelling %s round: %s", active.run_kind, reason)
+        controller = self.loop_controller
+        scheduler = getattr(controller, "task_scheduler", None) if controller else None
+        if active.task_id and scheduler is not None:
+            with suppress(Exception):
+                await scheduler.cancel_task(active.task_id)
+        with suppress(Exception):
+            await self.abort(self._interaction_session)
+        task = self._interaction_round_task
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+
+    def _notify_work(self) -> None:
+        self._interaction_wakeup.set()
+        self._ensure_supervisor_running()
+
+    def _ensure_supervisor_running(self) -> None:
+        if self._interaction_supervisor_task is None or self._interaction_supervisor_task.done():
+            self._interaction_supervisor_task = asyncio.create_task(self._supervisor_loop())
+
+    async def _supervisor_loop(self) -> None:
+        try:
+            while self._interaction_started and self._interaction_phase is not InteractionPhase.TERMINATED:
+                if not self._interaction_output.has_consumer():
+                    self._interaction_phase = InteractionPhase.IDLE
+                    self._interaction_wakeup.clear()
+                    await self._interaction_wakeup.wait()
+                    continue
+
+                work = self._event_manager.next_work()
+                if work is None:
+                    await self._promote_loop_follow_ups()
+                    work = self._event_manager.next_work()
+                if work is None:
+                    await self._close_idle_output_if_finished()
+                    self._interaction_phase = InteractionPhase.IDLE
+                    self._interaction_wakeup.clear()
+                    if self._event_manager.has_pending_work():
+                        continue
+                    await self._interaction_wakeup.wait()
+                    continue
+
+                self._interaction_round_task = asyncio.create_task(self._execute_round(work))
+                await asyncio.wait({self._interaction_round_task})
+                if self._interaction_round_forwarded is not None:
+                    with suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(self._interaction_round_forwarded.wait(), timeout=2.0)
+                self._interaction_round_task = None
+                self._interaction_round_forwarded = None
+        except asyncio.CancelledError:
+            logger.debug("[DeepAgent] supervisor cancelled")
+        except Exception:
+            logger.exception("[DeepAgent] supervisor failed")
+            self._interaction_phase = InteractionPhase.IDLE
+
+    async def _promote_loop_follow_ups(self) -> None:
+        controller = self.loop_controller
+        if controller is None or not controller.has_follow_up():
+            return
+        for query in controller.drain_follow_up():
+            self._event_manager.push_user(
+                RoundWorkItem.user(
+                    request_id=None,
+                    inputs={"query": query},
+                    is_follow_up=True,
+                    reset_loop=False,
+                )
+            )
+
+    async def _close_idle_output_if_finished(self) -> None:
+        """End an ordinary response stream after its final queued round."""
+        async with self._interaction_control_lock:
+            if self._should_keep_interaction_open_locked():
+                return
+            await self._interaction_output.finish_current()
+
+    def _should_keep_interaction_open_locked(self) -> bool:
+        """Return whether the current output stream still owns live work.
+
+        The caller must hold ``_interaction_control_lock``.  A goal stream spans
+        multiple attempts, so an ACTIVE goal keeps the interaction open.
+
+        Side effect (intentional): when the GoalRecord is ACTIVE, this method
+        also calls ``ensure_active_goal_work_locked()`` so the next attempt is
+        queued before the host can observe an idle completion.  Callers must
+        treat a True result as both "keep open" and "goal work ensured".
+        """
+        if self._event_manager.has_pending_work() or self._active_interaction_round is not None:
+            return True
+        record = self._load_goal_record_locked()
+        if record is not None and record.status is GoalStatus.ACTIVE:
+            if self.goal_manager is not None:
+                self.goal_manager.ensure_active_goal_work_locked()
+            return True
+        return False
+
+    async def _forward_session_stream(self) -> None:
+        session = self._interaction_session
+        if session is None:
+            return
+        try:
+            async for chunk in session.stream_iterator():
+                if chunk is _ROUND_BOUNDARY:
+                    if self._interaction_round_forwarded is not None:
+                        self._interaction_round_forwarded.set()
+                    continue
+                await self._interaction_output.emit(chunk)
+        except Exception:
+            logger.exception("[DeepAgent] output forwarder failed")
+            self._emit_interaction_event(
+                InteractionEvent.execution_error(
+                    code="forwarder_crashed", message="output forwarder crashed"
+                )
+            )
+
+    async def _emit_round_boundary(self, session: "Session") -> bool:
+        """Emit an internal round-boundary marker into the session stream.
+
+        Uses ``session._inner`` because the public Session API has no way to
+        inject a non-payload control frame into ``stream_iterator()`` ordering.
+        ``_ROUND_BOUNDARY`` is filtered by ``_forward_session_stream`` and must
+        not go through ``write_stream`` / ``write_custom_stream``.
+        """
+        try:
+            manager = getattr(session, "_inner").stream_writer_manager()
+            await manager.stream_emitter().emit(_ROUND_BOUNDARY)
+            return True
+        except Exception:
+            logger.debug("[DeepAgent] unable to emit ordered round boundary", exc_info=True)
+            return False
+
+    async def _execute_round(self, work: RoundWorkItem) -> None:
+        session = self._interaction_session
+        task_id = uuid.uuid4().hex
+        forwarded = asyncio.Event()
+        self._interaction_round_forwarded = forwarded
+        self._active_interaction_round = ActiveInteractionRound(work=work, task_id=task_id)
+        self._event_manager.mark_started(work)
+        self._interaction_phase = InteractionPhase.RUNNING
+        try:
+            if session is None or not self._interaction_output.has_consumer():
+                return
+            if work.kind == "goal":
+                if self.goal_manager is None:
+                    return
+                started = await self.goal_manager.begin_attempt(
+                    goal_id=str(work.context["goal_id"]),
+                    revision=int(work.context["revision"]),
+                )
+                if started is None:
+                    return
+
+            outcome: RoundOutcome = await self.run_one_round(
+                work, task_id, session
+            )
+            if outcome.next_work is not None:
+                self._event_manager.push_user(outcome.next_work)
+                self._notify_work()
+            if outcome.error_code is not None:
+                self._emit_interaction_event(
+                    InteractionEvent.execution_error(
+                        code=outcome.error_code,
+                        message=outcome.error_message or "",
+                    )
+                )
+        except asyncio.CancelledError:
+            logger.info("[DeepAgent] round cancelled")
+        except Exception:
+            logger.exception("[DeepAgent] round execution failed")
+            self._emit_interaction_event(
+                InteractionEvent.execution_error(
+                    code="round_execution_error",
+                    message="round execution failed",
+                )
+            )
+        finally:
+            self._event_manager.mark_finished(work)
+            if session is not None:
+                emitted = await self._emit_round_boundary(session)
+                if not emitted:
+                    forwarded.set()
+            self._active_interaction_round = None
+            if self._interaction_phase is InteractionPhase.RUNNING:
+                self._interaction_phase = InteractionPhase.IDLE
+
+    def _load_goal_record_locked(self) -> Optional[GoalRecord]:
+        if self.goal_manager is None:
+            return None
+        return self.goal_manager.get_store().load()
+
 
 
 __all__ = [

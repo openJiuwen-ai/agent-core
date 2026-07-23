@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/concurrency.py`、`workflow/engine/admission.py`、`workflow/engine/cap.py`、`workflow/engine/runtime.py`、`workflow/engine/primitives.py`、`workflow/engine/runner.py`、`workflow/tool_swarmflow.py`、`workflow/runner.py`、`workflow/backends/team_worker_backend.py`、`harness/async_tools.py`、`harness/native_harness.py`、`schema/blueprint.py`、`agent/agent_configurator.py`、`rails/team_context.py`、`rails/team_tool_rail.py`、`tools/tool_factory.py`、`agent/coordination/handlers/workflow.py`、`i18n.py` |
-| 最近一次修订日期 | 2026-07-01 |
+| 最近一次修订日期 | 2026-07-16 |
 | 关联 feature | `F_47_swarmflow-concurrency-governor.md`、`F_48_swarmflow-inline-script-execution.md` |
 
 ## 范围 / 边界
@@ -23,7 +23,7 @@
 
 - 跨 Team / 跨进程全局限制。
 - workflow 脚本内 cap 配置（engine 铁律：脚本不感知）。
-- Token 预算（`Runtime.budget_total`，独立机制）。
+- Token 预算（`Runtime.budget` / `BudgetLedger`，独立机制，见 `S_18` 与 `F_66`）。
 - journal 路径选择（仍 `(team, session, workflow_name)`，`run_id` 不参与路径）。
 
 ## 三层限制（不变量）
@@ -99,8 +99,8 @@ per-Leader 单例）。`agents_per_run_cap` 由 `validate_swarmflow_concurrency`
 
 0. 校验 script source（`script_path` / `script` / `name` / `resume_id` 四源 one-of，**`script_path`（磁盘）
    与 `script`（内联源码）当下可执行**，`name` / `resume_id` 返回 "not supported yet"）；四源全缺返回
-   `ToolOutput(success=False)`。内联 `script` 在 `run_background` 落盘到 `workflows/{META.name}/script.py`
-   后复用 path-based 加载链路。
+   `ToolOutput(success=False)`。内联 `script` 在 `invoke`（admit 之后）落盘到 `workflows/{META.name}/script.py`、
+   把绝对 `script_path` 回填 enriched + 进 launched 回执后复用 path-based 加载；materialize 失败先 release ticket 再返回错误。
 1. `governor is None` → `ToolOutput(success=False, error="Swarmflow concurrency governor is not configured")`。
 2. `admit_workflow()` → `None` → 拒绝，**不生成** `run_id`。
 3. `new_swarmflow_run_id()` → `wf_{12hex}`（`tool_swarmflow.py` 模块级函数，**仅在 invoke 铸造**；

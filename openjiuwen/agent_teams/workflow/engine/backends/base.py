@@ -14,6 +14,8 @@ import abc
 from dataclasses import dataclass
 from typing import Any, Sequence
 
+from ..budget import BudgetLedger
+
 
 @dataclass
 class AgentResult:
@@ -21,7 +23,8 @@ class AgentResult:
 
     * ``text``       - free text, when no schema was requested.
     * ``structured`` - a JSON-able object conforming to the schema, when one was.
-    * ``tokens``     - tokens consumed (drives ``budget.spent()``).
+    * ``tokens``     - tokens this one call consumed, for reporting. The engine
+      does **not** accumulate it — see :meth:`AgentBackend.bind_budget`.
     * ``skipped``    - the backend declined to answer; the call returns ``None``
       (also how a human turn signals a timeout / no answer).
     """
@@ -48,6 +51,29 @@ class AgentBackend(abc.ABC):
     #: ``_ENGINE_OPTIONS | backend.KNOWN_OPTIONS`` and fails fast on anything
     #: else, so a typo never silently no-ops. Empty by default.
     KNOWN_OPTIONS: frozenset[str] = frozenset()
+
+    def __init__(self) -> None:
+        self._budget = BudgetLedger()
+
+    @property
+    def budget(self) -> BudgetLedger:
+        """The run's token ledger — unbounded until ``run_workflow`` binds one."""
+        return self._budget
+
+    def bind_budget(self, budget: BudgetLedger) -> None:
+        """Adopt the run's ledger; called once by ``run_workflow`` before the run.
+
+        **The backend is the ledger's only writer.** It is the only layer that
+        knows what a call really cost: one ``agent()`` is a whole agent loop, so
+        the engine — which sees only the call's start and end — cannot account
+        for it, and used to guess (prompt length / 4) instead. A backend reports
+        real usage as each model call returns, which is also what makes the
+        ceiling enforceable mid-loop rather than only between ``agent()`` calls.
+
+        Overriding is only needed to fan the ledger out further (e.g. into rails
+        the backend attaches to the agents it spawns); call ``super()`` first.
+        """
+        self._budget = budget
 
     @abc.abstractmethod
     async def run(

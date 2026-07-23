@@ -8,13 +8,15 @@ from typing import List, TYPE_CHECKING
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import ToolCard
-from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.tools import get_tool_description
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.tools import SessionToolkit, build_session_tools, create_task_tool
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
+    DEFAULT_BROWSER_CAPABILITIES,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -165,8 +167,7 @@ class SubagentRail(DeepAgentRail):
         "explore_agent": "bash, glob, grep, list_files, read_file",
         "plan_agent": "bash, glob, grep, list_files, read_file",
         "browser_agent": (
-            "Playwright browser MCP tools, browser_probe_cards, "
-            "browser_probe_interactives, browser_custom_action, "
+            "browser_probe_cards, browser_probe_interactives, browser_custom_action, "
             "browser_list_custom_actions, browser_runtime_health"
         ),
     }
@@ -187,6 +188,11 @@ class SubagentRail(DeepAgentRail):
             agent_name, agent_desc = self._extract_agent_meta(spec)
             tools_str = self._extract_agent_tools(spec, agent_name)
             lines.append(f"- {agent_name}: {agent_desc} (Tools: {tools_str})")
+            if agent_name == "browser_agent":
+                lines.append("  Available Playwright capabilities:")
+                for capability in DEFAULT_BROWSER_CAPABILITIES:
+                    tool_names = ", ".join(capability.tool_names)
+                    lines.append(f"    - {capability.name}: {capability.description} (Tools: {tool_names})")
 
         return "\n".join(lines)
 

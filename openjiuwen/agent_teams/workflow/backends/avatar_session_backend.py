@@ -27,6 +27,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
+from openjiuwen.agent_teams.kv_cache.kv_cache_cleanup import cancellation_safe_evict_then_dispose
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
@@ -34,23 +36,28 @@ from openjiuwen.agent_teams.workflow.backends._member_spec import (
     derive_member_build_context,
     derive_member_spec,
 )
+from openjiuwen.agent_teams.workflow.backends._result_text import (
+    prefer_natural_or_structured_text,
+)
 from openjiuwen.agent_teams.tools.structured_output_tool import (
     StructuredOutputFinishRail,
     StructuredOutputTool,
 )
+from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
+from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.core.common.logging import team_logger
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
-# Multi-turn persona — the session counterpart of the worker's single-shot prompt.
+# Multi-turn role prompt — the session counterpart of the worker's single-shot prompt.
 _SESSION_SYS_PROMPT_AGENT = (
     "You are a stateful swarmflow session agent in a multi-turn conversation. "
     "You remember every prior turn; answer each new message directly and "
     "concisely, using the accumulated context. Do not restate the whole history."
 )
-# Persona for a human session's avatar: it does NOT invent answers — it renders a
+# Role prompt for a human session's avatar: it does NOT invent answers — it renders a
 # real person's reply faithfully into the form the turn asked for.
 _SESSION_SYS_PROMPT_HUMAN = (
     "You are the avatar of a human team member in a multi-turn conversation. Each "
@@ -77,6 +84,10 @@ class _SessionState:
     spec_base: Any  # base DeepAgentSpec this session derives from
     instructions: str | None
     member_name: str
+    budget_rail: SwarmflowBudgetRail
+    """This avatar's token rail, mounted for the session's whole life (unlike a
+    worker's, which lives for one call). Its tally is cumulative across turns, so
+    a turn's own cost is the delta across the round."""
     harness: Any = None  # TeamHarness, built lazily by open_session
     turns_executed: int = 0
     # Per-turn rendezvous: the round driver awaits ``turn_future``; the harness
@@ -101,6 +112,9 @@ class AvatarSessionManager:
         model_resolver: Optional ``agent(model=...)`` name → ``TeamModelConfig``
             resolver (same contract as the worker backend).
         build_context: Optional leader ``BuildContext`` forwarded to each avatar.
+        budget: The run's shared token ledger — every avatar bills its model
+            calls to it and is cut short once it is dry, so sessions draw down
+            the same pool as single-shot workers. ``None`` runs unbounded.
     """
 
     def __init__(
@@ -115,10 +129,13 @@ class AvatarSessionManager:
         t: Translator | None = None,
         messager: Any = None,
         session_id: str | None = None,
+        run_id: str | None = None,
         on_human_prompt: Callable[[str, str, str], None] | None = None,
-        on_human_replied: Callable[[str, str], None] | None = None,
+        on_human_replied: Callable[[str, str, str | None], None] | None = None,
         human_timeout: float | None = None,
+        budget: BudgetLedger | None = None,
     ) -> None:
+        self._budget = budget if budget is not None else BudgetLedger()
         self._worker_base_spec = worker_base_spec
         self._human_base_spec = human_base_spec
         self._team_name = team_name
@@ -139,6 +156,9 @@ class AvatarSessionManager:
         self._human_timeout = human_timeout if human_timeout is not None else _DEFAULT_HUMAN_TIMEOUT
         self._messager = messager
         self._session_id = session_id
+        # Scopes the reply topic so concurrent runs don't cross-resolve.
+        # None falls back to the legacy session+team scope.
+        self._run_id = run_id
         self._reply_topic_subscribed = False
 
     # ------------------------------------------------------------------
@@ -156,6 +176,7 @@ class AvatarSessionManager:
             spec_base=base,
             instructions=instructions,
             member_name=member_name,
+            budget_rail=SwarmflowBudgetRail(self._budget),
         )
         self._sessions[member_name] = state
         if kind == "human":
@@ -174,7 +195,7 @@ class AvatarSessionManager:
             return
         from openjiuwen.agent_teams.schema.events import swarmflow_human_reply_topic
 
-        topic = swarmflow_human_reply_topic(self._session_id, self._team_name)
+        topic = swarmflow_human_reply_topic(self._session_id, self._team_name, self._run_id)
         await self._messager.subscribe(topic, self._on_reply_event)
         self._reply_topic_subscribed = True
 
@@ -221,10 +242,16 @@ class AvatarSessionManager:
         state = self._sessions.pop(session_id, None)
         if state is None or state.harness is None:
             return
+        binding = kv_cache_hooks.build_current_harness_binding(state.harness)
         try:
-            await state.harness.dispose()
-        except Exception:
-            team_logger.debug("[swarmflow] session dispose failed for %s", session_id)
+            await cancellation_safe_evict_then_dispose(
+                binding=binding,
+                dispose=state.harness.dispose,
+                reason="swarmflow-stateful-session-close",
+                owner_id=session_id,
+            )
+        finally:
+            kv_cache_hooks.clear_harness_session_hooks(state.harness)
 
     async def aclose(self) -> None:
         """Cancel pending human waits, unsubscribe, and dispose every session."""
@@ -236,7 +263,9 @@ class AvatarSessionManager:
             from openjiuwen.agent_teams.schema.events import swarmflow_human_reply_topic
 
             try:
-                await self._messager.unsubscribe(swarmflow_human_reply_topic(self._session_id, self._team_name))
+                await self._messager.unsubscribe(
+                    swarmflow_human_reply_topic(self._session_id, self._team_name, self._run_id)
+                )
             except Exception:
                 team_logger.debug("[swarmflow] human-reply unsubscribe failed")
             self._reply_topic_subscribed = False
@@ -309,6 +338,7 @@ class AvatarSessionManager:
             member_name=state.member_name,
             language=self._language,
         )
+        harness = None
         try:
             harness = TeamHarness.build(
                 agent_spec=spec,
@@ -316,17 +346,28 @@ class AvatarSessionManager:
                 member_name=state.member_name,
                 build_context=build_context,
             )
+            # Meter the avatar for its whole life: an ``agent_session`` keeps its
+            # harness across turns, so the run's ceiling has to bind every one of
+            # them, not just the turn that happens to cross it.
+            harness.add_rail(state.budget_rail)
             # End each schema turn's round as soon as structured_output is
             # captured (added before start so it registers with the harness).
             harness.add_rail(StructuredOutputFinishRail())
             # Cold start: the harness creates and owns its child session, so
             # DeepAgentState / context persist across this session's turns.
+            kv_cache_hooks.configure_harness_session_hooks(
+                harness,
+                product_session_id=self._session_id,
+                evict_on_finish=False,
+            )
             await harness.start()
             await harness.subscribe(
                 on_state=self._make_state_cb(state),
                 on_round=self._make_round_cb(state),
             )
         except Exception as e:
+            if harness is not None:
+                kv_cache_hooks.clear_harness_session_hooks(harness)
             team_logger.exception("[swarmflow] session avatar build/start failed for %s", state.member_name)
             raise BackendError(f"session avatar build/start failed for {state.member_name}: {e}") from e
         state.harness = harness
@@ -370,6 +411,7 @@ class AvatarSessionManager:
         """Drive one agent-session round; capture structured output when requested."""
         submit: StructuredOutputTool | None = None
         turn_prompt = prompt
+        tokens_before = state.budget_rail.call_tokens
         if schema_json is not None:
             # Mount the capture tool only for this turn; the harness is IDLE
             # between turns so add/remove is safe. The ability manager owner-
@@ -389,17 +431,22 @@ class AvatarSessionManager:
         state.turns_executed += 1
         self._raise_on_interrupt_or_fail(state, result)
 
+        turn_tokens = state.budget_rail.call_tokens - tokens_before
+
         if submit is not None:
             if not (submit.called and submit.captured is not None):
                 raise BackendError(
                     f"session '{state.member_name}' did not submit a structured result via structured_output"
                 )
+            # Prefer free-text narration from the round; fall back to JSON capture.
+            text = prefer_natural_or_structured_text(_output_text(result), submit.captured)
             return AgentResult(
+                text=text,
                 structured=submit.captured,
-                tokens=_estimate_tokens(prompt, submit.captured),
+                tokens=turn_tokens,
             )
         text = _output_text(result)
-        return AgentResult(text=text, tokens=_estimate_tokens(prompt, text))
+        return AgentResult(text=text, tokens=turn_tokens)
 
     @staticmethod
     async def _drive_round(state: _SessionState, prompt: str) -> dict | None:
@@ -457,7 +504,7 @@ class AvatarSessionManager:
             "Render their reply faithfully into the answer for this turn; do not "
             "add anything they did not express."
         )
-        # The avatar (human persona) formats the raw reply; reuse the agent turn
+        # The avatar (human stand-in) formats the raw reply; reuse the agent turn
         # path so schema capture / round settling work identically.
         return await self._agent_turn(state, format_prompt, schema_json)
 
@@ -501,7 +548,7 @@ class AvatarSessionManager:
             self._pending_human.pop(corr, None)
         if self._on_human_replied is not None:
             try:
-                self._on_human_replied(state.member_name, corr)
+                self._on_human_replied(state.member_name, corr, raw)
             except Exception:
                 team_logger.debug("[swarmflow] human-replied notify failed for %s", state.member_name)
         return raw
@@ -512,7 +559,7 @@ class AvatarSessionManager:
 
     @staticmethod
     def _session_system_prompt(state: _SessionState) -> str:
-        """Compose the avatar's system prompt: role persona + caller instructions."""
+        """Compose the avatar's system prompt: role prompt + caller instructions."""
         base = _SESSION_SYS_PROMPT_HUMAN if state.kind == "human" else _SESSION_SYS_PROMPT_AGENT
         if state.instructions:
             return f"{base}\n\n{state.instructions}"
@@ -543,19 +590,12 @@ class AvatarSessionManager:
 def _output_text(result: Any) -> str:
     """Extract the final output text from a round result dict."""
     if isinstance(result, dict):
+        err = result.get("error")
+        if err or result.get("result_type") == "error":
+            msg = str(err or result.get("output") or "session turn failed")
+            raise BackendError(msg)
         return str(result.get("output", ""))
     return str(result or "")
-
-
-def _estimate_tokens(prompt: str, result: Any) -> int:
-    """Rough token estimate for budget accounting (cf. the worker backend)."""
-    import json
-
-    try:
-        payload = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
-    except Exception:
-        payload = str(result)
-    return len(prompt) // 4 + len(payload) // 4
 
 
 __all__ = ["AvatarSessionManager"]

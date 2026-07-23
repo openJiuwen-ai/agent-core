@@ -176,17 +176,38 @@ def parse_embedding(data: Any) -> Optional[List[float]]:
     return None
 
 
-def build_fts_query(query: str) -> str:
-    """Build FTS5 query from user input."""
+def split_query_tokens(query: str) -> tuple[list[str], list[str]]:
+    """Split a query into (long_tokens, short_tokens) by the 3-char trigram threshold.
+
+    Short tokens (<3 chars, e.g. 2-char Chinese words) can't match the trigram
+    FTS index and are served by the caller's LIKE fallback instead.
+    """
     cleaned = query.strip()
     if not cleaned:
-        return ""
-    
+        return [], []
+
     tokens = re.findall(r'\w+', cleaned)
-    if not tokens:
+    long_tokens: list[str] = []
+    short_tokens: list[str] = []
+    for t in tokens[:10]:
+        if len(t) < 3:
+            short_tokens.append(t)
+        else:
+            long_tokens.append(t)
+    return long_tokens, short_tokens
+
+
+def build_fts_query(query: str) -> str:
+    """Build FTS5 MATCH expression from long tokens only.
+
+    Short tokens are excluded (see ``split_query_tokens``) and handled by the
+    caller's LIKE fallback. Returns "" when no long token is present.
+    """
+    long_tokens, _ = split_query_tokens(query)
+    if not long_tokens:
         return ""
-    
-    return " OR ".join(f'"{t}"' for t in tokens[:10])
+
+    return " OR ".join(f'"{t}"' for t in long_tokens)
 
 
 def bm25_rank_to_score(rank: float) -> float:

@@ -26,9 +26,12 @@ from openjiuwen.agent_evolving.optimizer.skill_call.experience_draft_parser impo
 from openjiuwen.agent_evolving.optimizer.skill_call.templates import (
     JSON_FIX_PROMPT,
     JSON_FIX_PROMPT_STRICT,
+    SKILL_EXPERIENCE_ANALYZER_PROMPT,
+    SKILL_EXPERIENCE_FORMATTER_PROMPT,
     SKILL_EXPERIENCE_GENERATE_PROMPT,
     TEAM_EXPERIENCE_GENERATE_PROMPT,
 )
+from openjiuwen.agent_evolving.optimizer.skill_call.tool_call_chain import build_tool_call_chain
 from openjiuwen.agent_evolving.protocols import EXPERIENCES_TARGET
 from openjiuwen.agent_evolving.signal.base import EvolutionSignal
 from openjiuwen.agent_evolving.signal.team import build_team_trajectory_summary
@@ -51,6 +54,7 @@ GENERATE_RECORDS_LLM_POLICY = LLMInvokePolicy(
     max_attempts=2,
 )
 _RETRY_PARSE_TIMEOUT_SECS = 20
+_ANALYZER_LOG_MAX_CHARS = 500
 
 # When the model is deployed on Huawei Cloud ModelArts MaaS, bump max_tokens
 # explicitly to avoid JSON truncation.
@@ -175,12 +179,39 @@ def _preview_section(section: str, preview_chars: int = _SECTION_PREVIEW_CHARS) 
     return f"{heading}\n{body[:preview_chars]}..."
 
 
+def _strip_outer_markdown_fence(text: str) -> str:
+    """Remove only the outermost markdown code fence, preserving inner fences in JSON strings."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    first_newline = stripped.find("\n")
+    if first_newline == -1:
+        return stripped
+
+    first_line = stripped[:first_newline].strip()
+    if not re.fullmatch(r"```(?:json|JSON)?", first_line):
+        return stripped
+
+    content_start = first_newline + 1
+    inner = stripped[content_start:].rstrip()
+    if inner.endswith("```"):
+        last_newline = inner.rfind("\n")
+        if last_newline != -1:
+            last_line = inner[last_newline + 1:].strip()
+        else:
+            last_line = inner.strip()
+        if last_line == "```":
+            inner = inner[:last_newline] if last_newline != -1 else ""
+    return inner.strip()
+
+
 def _fix_json_text(text: str) -> str:
     """Apply common fixes to malformed JSON produced by LLMs."""
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
-    text = re.sub(r"```\s*$", "", text, flags=re.MULTILINE)
-    text = re.sub(r"//[^\n]*", "", text)
+    text = _strip_outer_markdown_fence(text.strip())
+    # Strip // comments outside URLs: whole-line or after , / [ / {.
+    # Keep https:// and other scheme:// sequences intact.
+    text = re.sub(r"(^|[,\[\{])(\s*)//[^\n]*", r"\1\2", text, flags=re.MULTILINE)
     text = re.sub(r",\s*([}\]])", r"\1", text)
     return text.strip()
 
@@ -297,6 +328,32 @@ def _limit_summary_lines(summary: str, max_lines: int) -> str:
     return "\n".join(summary.splitlines()[:max_lines])
 
 
+def _parse_analyzer_response(raw: str) -> Optional[dict]:
+    """Parse analyzer-stage JSON object. Returns None on failure."""
+    data = _extract_json(raw)
+    if not isinstance(data, dict):
+        return None
+    if "candidates" not in data:
+        data["candidates"] = []
+    if "root_causes" not in data:
+        data["root_causes"] = []
+    return data
+
+
+def _filter_analyzer_candidates(candidates: list) -> list:
+    """Keep only append candidates with non-empty content."""
+    result: list = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        if item.get("action", "append") != "append":
+            continue
+        if not str(item.get("content", "")).strip():
+            continue
+        result.append(item)
+    return result
+
+
 class SkillExperienceOptimizer(BaseOptimizer):
     """Online Skill experience optimizer.
 
@@ -314,6 +371,8 @@ class SkillExperienceOptimizer(BaseOptimizer):
         language: str = "cn",
         generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
         profile: str = "regular",
+        *,
+        two_stage: bool = False,
     ) -> None:
         super().__init__()
         if profile not in {"regular", "team"}:
@@ -323,6 +382,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
         self._language = language
         self._generate_records_llm_policy = generate_records_llm_policy
         self._profile = profile
+        self._two_stage = two_stage
         self._online_contexts: Dict[str, EvolutionContext] = {}
 
     @property
@@ -415,7 +475,14 @@ class SkillExperienceOptimizer(BaseOptimizer):
             return []
         if self._profile == "team":
             return await self._generate_team_records(ctx)
+        return await self._generate_regular_records(ctx)
 
+    def _build_generation_inputs(self, ctx: EvolutionContext) -> dict:
+        """Shared prompt inputs for analyzer / single-stage paths."""
+        tool_call_chain = ctx.tool_call_chain or build_tool_call_chain(
+            ctx.messages,
+            language=self._language,
+        )
         conversation_snippet = _build_conversation_snippet(ctx.messages, language=self._language)
         signals_json = json.dumps(
             [signal.to_dict() for signal in ctx.signals],
@@ -424,42 +491,212 @@ class SkillExperienceOptimizer(BaseOptimizer):
         )
         desc_summary = _build_existing_summary(ctx.existing_desc_records, label="description")
         body_summary = _build_existing_summary(ctx.existing_body_records, label="body")
-        skill_content = _summarize_skill_content(ctx.skill_content)
-        prompt = SKILL_EXPERIENCE_GENERATE_PROMPT[self._language].format(
-            skill_content=skill_content,
-            signals_json=signals_json,
-            conversation_snippet=(conversation_snippet or "").strip(),
-            existing_desc_summary=desc_summary or self._default_existing_summary(),
-            existing_body_summary=body_summary or self._default_existing_summary(),
-            user_query=self._default_user_query(ctx.user_query),
-        )
-        retry_prompt = SKILL_EXPERIENCE_GENERATE_PROMPT[self._language].format(
-            skill_content=_summarize_skill_content(ctx.skill_content, max_chars=2500),
-            signals_json=json.dumps([signal.to_dict() for signal in ctx.signals], ensure_ascii=False),
-            conversation_snippet=_build_conversation_snippet(
+        return {
+            "skill_content": _summarize_skill_content(ctx.skill_content),
+            "signals_json": signals_json,
+            "tool_call_chain": tool_call_chain.strip() or (
+                "(无)" if self._language == "cn" else "(none)"
+            ),
+            "conversation_snippet": (conversation_snippet or "").strip(),
+            "existing_desc_summary": desc_summary or self._default_existing_summary(),
+            "existing_body_summary": body_summary or self._default_existing_summary(),
+            "user_query": self._default_user_query(ctx.user_query),
+        }
+
+    def _build_analyzer_retry_inputs(self, ctx: EvolutionContext, inputs: dict) -> dict:
+        """Shorter analyzer prompt inputs for timeout retry (mirrors single-stage retry)."""
+        return {
+            "skill_content": _summarize_skill_content(ctx.skill_content, max_chars=2500),
+            "signals_json": json.dumps(
+                [signal.to_dict() for signal in ctx.signals],
+                ensure_ascii=False,
+            ),
+            "tool_call_chain": inputs["tool_call_chain"],
+            "conversation_snippet": _build_conversation_snippet(
                 ctx.messages,
                 max_messages=10,
                 content_preview_chars=100,
                 language=self._language,
             ).strip(),
-            existing_desc_summary=_limit_summary_lines(desc_summary, 2)
+            "existing_desc_summary": _limit_summary_lines(inputs["existing_desc_summary"], 2)
             or self._default_existing_summary(),
-            existing_body_summary=_limit_summary_lines(body_summary, 2)
+            "existing_body_summary": _limit_summary_lines(inputs["existing_body_summary"], 2)
             or self._default_existing_summary(),
-            user_query=self._default_user_query(ctx.user_query, max_chars=500),
+            "user_query": self._default_user_query(ctx.user_query, max_chars=500),
+        }
+
+    def _build_formatter_retry_prompt(self, analyzer_data: dict) -> str:
+        """Shorter formatter prompt for timeout retry."""
+        analyzer_output = json.dumps(analyzer_data, ensure_ascii=False, indent=2)
+        analyzer_output = self._limit_text(analyzer_output, 4000)
+        return SKILL_EXPERIENCE_FORMATTER_PROMPT[self._language].format(
+            analyzer_output=analyzer_output,
         )
 
-        logger.info("[SkillExperienceOptimizer] calling LLM (skill=%s)", ctx.skill_name)
-        try:
-            drafts = await self._generate_drafts_with_retries(
-                prompt=prompt,
-                retry_prompt=retry_prompt,
+    async def _invoke_llm(
+        self,
+        prompt: str,
+        *,
+        retry_prompt: str | None = None,
+    ) -> str:
+        raw, _ = await invoke_text_with_retry_and_prompt(
+            llm=self._llm,
+            model=self._model,
+            prompt=prompt,
+            retry_prompt=retry_prompt,
+            policy=self._generate_records_llm_policy,
+        )
+        return raw
+
+    async def _run_analyzer(
+        self,
+        ctx: EvolutionContext,
+        inputs: dict,
+    ) -> Optional[dict]:
+        prompt = SKILL_EXPERIENCE_ANALYZER_PROMPT[self._language].format(**inputs)
+        retry_prompt = SKILL_EXPERIENCE_ANALYZER_PROMPT[self._language].format(
+            **self._build_analyzer_retry_inputs(ctx, inputs),
+        )
+        logger.info(
+            "[SkillExperienceOptimizer] analyzer stage (skill=%s)",
+            ctx.skill_name,
+        )
+        raw = await self._invoke_llm(prompt, retry_prompt=retry_prompt)
+        data = _parse_analyzer_response(raw)
+        if data is None:
+            logger.warning(
+                "[SkillExperienceOptimizer] analyzer parse failed (preview: %s)",
+                raw[:200],
             )
-        except BaseError as exc:
-            logger.error("[SkillExperienceOptimizer] LLM call failed: %s", exc)
-            raise
-        except ValueError:
-            logger.warning("[SkillExperienceOptimizer] all retries exhausted, returning no records")
+            retry_raw = await self._invoke_llm(prompt, retry_prompt=retry_prompt)
+            if retry_raw:
+                data = _parse_analyzer_response(retry_raw)
+        if data is None:
+            return None
+        data["candidates"] = _filter_analyzer_candidates(data.get("candidates", []))
+        analyzer_preview = json.dumps(data, ensure_ascii=False)
+        if len(analyzer_preview) > _ANALYZER_LOG_MAX_CHARS:
+            analyzer_preview = analyzer_preview[:_ANALYZER_LOG_MAX_CHARS] + "..."
+        logger.info(
+            "[SkillExperienceOptimizer] analyzer data (skill=%s): %s",
+            ctx.skill_name,
+            analyzer_preview,
+        )
+        if not data["candidates"]:
+            causes = data.get("root_causes", [])
+            logger.info(
+                "[SkillExperienceOptimizer] analyzer produced 0 candidates "
+                "(root_causes=%d, skill=%s)",
+                len(causes),
+                ctx.skill_name,
+            )
+        return data
+
+    async def _run_formatter(
+        self,
+        analyzer_data: dict,
+        skill_name: str,
+    ) -> List[ParsedExperienceDraft]:
+        analyzer_output = json.dumps(analyzer_data, ensure_ascii=False, indent=2)
+        prompt = SKILL_EXPERIENCE_FORMATTER_PROMPT[self._language].format(
+            analyzer_output=analyzer_output,
+        )
+        retry_prompt = self._build_formatter_retry_prompt(analyzer_data)
+        logger.info(
+            "[SkillExperienceOptimizer] formatter stage (skill=%s)",
+            skill_name,
+        )
+        raw = await self._invoke_llm(prompt, retry_prompt=retry_prompt)
+        drafts, last_error = parse_experience_drafts_with_error(raw, _extract_json_with_error)
+        if drafts is not None:
+            return drafts
+
+        last_raw = raw
+        for attempt in range(2, 4):
+            logger.warning(
+                "[SkillExperienceOptimizer] formatter parse failed, repair attempt %d/3",
+                attempt,
+            )
+            repaired, retry_raw = await self.retry_parse_drafts(
+                broken_raw=last_raw,
+                original_prompt=prompt,
+                attempt_number=attempt,
+                parse_error=last_error,
+            )
+            if repaired is not None:
+                return repaired
+            if retry_raw:
+                last_raw = retry_raw
+                _, last_error = parse_experience_drafts_with_error(retry_raw, _extract_json_with_error)
+        return []
+
+    async def _generate_regular_records(self, ctx: EvolutionContext) -> List[EvolutionRecord]:
+        """Generate regular-profile records via two-stage or single-stage pipeline."""
+        inputs = self._build_generation_inputs(ctx)
+
+        if self._two_stage:
+            logger.info(
+                "[SkillExperienceOptimizer] two-stage pipeline (skill=%s, signals=%d)",
+                ctx.skill_name,
+                len(ctx.signals),
+            )
+            try:
+                analyzer_data = await self._run_analyzer(ctx, inputs)
+                if not analyzer_data or not analyzer_data.get("candidates"):
+                    root_cause_count = len((analyzer_data or {}).get("root_causes", []))
+                    logger.info(
+                        "[SkillExperienceOptimizer] two-stage early exit (skill=%s): "
+                        "no candidates (root_causes=%d)",
+                        ctx.skill_name,
+                        root_cause_count,
+                    )
+                    return []
+                candidates = analyzer_data.get("candidates", [])
+                logger.info(
+                    "[SkillExperienceOptimizer] analyzer done (skill=%s): "
+                    "candidates=%d, entering formatter",
+                    ctx.skill_name,
+                    len(candidates),
+                )
+                drafts = await self._run_formatter(analyzer_data, ctx.skill_name)
+            except BaseError as exc:
+                logger.error("[SkillExperienceOptimizer] LLM call failed: %s", exc)
+                raise
+        else:
+            prompt = SKILL_EXPERIENCE_GENERATE_PROMPT[self._language].format(**inputs)
+            retry_prompt = SKILL_EXPERIENCE_GENERATE_PROMPT[self._language].format(
+                skill_content=_summarize_skill_content(ctx.skill_content, max_chars=2500),
+                signals_json=json.dumps([signal.to_dict() for signal in ctx.signals], ensure_ascii=False),
+                tool_call_chain=inputs["tool_call_chain"],
+                conversation_snippet=_build_conversation_snippet(
+                    ctx.messages,
+                    max_messages=10,
+                    content_preview_chars=100,
+                    language=self._language,
+                ).strip(),
+                existing_desc_summary=_limit_summary_lines(inputs["existing_desc_summary"], 2)
+                or self._default_existing_summary(),
+                existing_body_summary=_limit_summary_lines(inputs["existing_body_summary"], 2)
+                or self._default_existing_summary(),
+                user_query=self._default_user_query(ctx.user_query, max_chars=500),
+            )
+            logger.info(
+                "[SkillExperienceOptimizer] single-stage LLM (skill=%s)",
+                ctx.skill_name,
+            )
+            try:
+                drafts = await self._generate_drafts_with_retries(
+                    prompt=prompt,
+                    retry_prompt=retry_prompt,
+                )
+            except BaseError as exc:
+                logger.error("[SkillExperienceOptimizer] LLM call failed: %s", exc)
+                raise
+            except ValueError:
+                logger.warning("[SkillExperienceOptimizer] all retries exhausted, returning no records")
+                return []
+
+        if not drafts:
             return []
         return self._build_records_from_drafts(
             drafts,

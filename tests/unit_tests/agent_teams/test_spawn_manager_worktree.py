@@ -117,6 +117,7 @@ def _member(**overrides) -> SimpleNamespace:
         "role": TeamRole.TEAMMATE.value,
         "status": MemberStatus.READY.value,
         "desc": "developer",
+        "prompt": None,
         "options": None,
     }
     data.update(overrides)
@@ -161,7 +162,7 @@ def _stored_worktree(
     )
 
 
-def _spawn_manager(member: SimpleNamespace, manager: _FakeWorktreeManager, project_dir: str) -> SpawnManager:
+def _spawn_manager(member: SimpleNamespace, manager: _FakeWorktreeManager, project_dir: str | None) -> SpawnManager:
     team_spec = TeamSpec(
         team_name=member.team_name,
         display_name=member.team_name,
@@ -193,6 +194,42 @@ def _spawn_manager(member: SimpleNamespace, manager: _FakeWorktreeManager, proje
         configurator=configurator,
         team_agent_getter=lambda: None,
     )
+
+
+@pytest.mark.asyncio
+async def test_team_clean_skips_member_without_worktree_or_project_dir(tmp_path):
+    openjiuwen_home = tmp_path / "openjiuwen-home"
+    configure_openjiuwen_home(openjiuwen_home)
+    try:
+        member = _member()
+        manager = _FakeWorktreeManager()
+        spawn_manager = _spawn_manager(member, manager, None)
+
+        await spawn_manager.worktree_lifecycle.finalize_all_member_worktrees_for_team_clean()
+
+        manager.count_changes.assert_not_awaited()
+        manager.remove_worktree.assert_not_awaited()
+    finally:
+        reset_openjiuwen_home()
+
+
+@pytest.mark.asyncio
+async def test_team_clean_requires_project_dir_for_existing_worktree(tmp_path):
+    project_dir = _project(tmp_path)
+    worktree_path = tmp_path / "member-worktree"
+    worktree_path.mkdir()
+    member = _member(
+        options=build_member_options(
+            worktree=_stored_worktree(path=str(worktree_path), project_dir=project_dir)
+        )
+    )
+    manager = _FakeWorktreeManager()
+    spawn_manager = _spawn_manager(member, manager, None)
+
+    with pytest.raises(RuntimeError, match="build_context.project_dir"):
+        await spawn_manager.worktree_lifecycle.finalize_all_member_worktrees_for_team_clean()
+
+    manager.remove_worktree.assert_not_awaited()
 
 
 @pytest.mark.asyncio

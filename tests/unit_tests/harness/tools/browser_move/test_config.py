@@ -96,8 +96,50 @@ def test_build_runtime_settings_respects_env_overrides() -> None:
         assert settings.api_key == "test-key"
         assert settings.model_name == "google/gemini-3.1-pro-preview"
         assert settings.guardrails.timeout_s == 45
-        assert settings.mcp_cfg.params["args"] == ["-y", "@playwright/mcp@latest", "--headless"]
+        assert settings.mcp_cfg.params["args"] == [
+            "-y",
+            "@playwright/mcp@latest",
+            "--headless",
+            "--caps=pdf,vision,devtools,config,network,storage,testing",
+        ]
         assert settings.mcp_cfg.params["timeout_s"] == 45
+
+
+def test_build_playwright_mcp_config_enables_all_optional_capabilities_by_default() -> None:
+    with patch.dict(os.environ, {}, clear=True):
+        cfg = build_playwright_mcp_config()
+
+    assert cfg.params["args"][-1] == "--caps=pdf,vision,devtools,config,network,storage,testing"
+
+
+def test_build_playwright_mcp_config_preserves_other_capabilities() -> None:
+    with patch.dict(
+        os.environ,
+        {"PLAYWRIGHT_MCP_ARGS": "-y @playwright/mcp@latest --caps=vision,devtools"},
+        clear=True,
+    ):
+        cfg = build_playwright_mcp_config()
+
+    assert cfg.params["args"] == [
+        "-y",
+        "@playwright/mcp@latest",
+        "--caps=vision,devtools,pdf,config,network,storage,testing",
+    ]
+
+
+def test_build_playwright_mcp_config_deduplicates_capabilities() -> None:
+    with patch.dict(
+        os.environ,
+        {"PLAYWRIGHT_MCP_ARGS": "-y @playwright/mcp@latest --caps pdf,vision,pdf"},
+        clear=True,
+    ):
+        cfg = build_playwright_mcp_config()
+
+    assert cfg.params["args"] == [
+        "-y",
+        "@playwright/mcp@latest",
+        "--caps=pdf,vision,devtools,config,network,storage,testing",
+    ]
 
 
 def test_parse_command_args_accepts_json_list() -> None:

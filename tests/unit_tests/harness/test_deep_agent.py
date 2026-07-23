@@ -36,6 +36,7 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import Workspace, create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.schema.config import (
     DeepAgentConfig,
@@ -276,6 +277,35 @@ def test_configure_set_react_agent_and_is_initialized() -> None:
     assert agent.is_initialized is True
 
     assert agent.loop_coordinator is None
+
+
+def test_prompt_attachment_reminder_is_in_initial_and_hot_reloaded_system_prompt() -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
+        DeepAgentConfig(
+            enable_task_loop=False,
+            language="en",
+            system_prompt="initial identity",
+        )
+    )
+
+    assert agent.system_prompt_builder is not None
+    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is not None
+    initial_prompt = agent._react_agent.config.prompt_template[0]["content"]
+    assert "initial identity" in initial_prompt
+    assert "<prompt-attachment>" in initial_prompt
+
+    agent.configure(
+        DeepAgentConfig(
+            enable_task_loop=False,
+            language="en",
+            system_prompt="updated identity",
+        )
+    )
+
+    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is not None
+    reloaded_prompt = agent._react_agent.config.prompt_template[0]["content"]
+    assert "updated identity" in reloaded_prompt
+    assert "<prompt-attachment>" in reloaded_prompt
 
 
 @pytest.mark.asyncio
@@ -1242,6 +1272,106 @@ def test_create_subagent_uses_code_agent_factory(tmp_path) -> None:
     assert Path(call_kwargs["workspace"].root_path).name == "sub_session_id"
 
 
+def test_create_subagent_forwards_browser_capabilities_to_factory(tmp_path) -> None:
+    browser_spec = SubAgentConfig(
+        agent_card=AgentCard(name="browser_agent", description="browser"),
+        system_prompt="browser prompt",
+        factory_name="browser_agent",
+    )
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
+        subagents=[browser_spec],
+    )
+    factory_result = object()
+
+    with patch(
+        "openjiuwen.harness.subagents.browser_agent.create_browser_agent",
+        return_value=factory_result,
+    ) as mock_create_browser_agent:
+        subagent = parent.create_subagent(
+            "browser_agent",
+            "browser_session",
+            browser_capabilities=["pdf", "vision"],
+        )
+
+    assert subagent is factory_result
+    assert mock_create_browser_agent.call_args.kwargs["browser_capabilities"] == ["pdf", "vision"]
+
+
+def test_create_subagent_passes_configured_runtime_fields(tmp_path) -> None:
+    workspace_root = tmp_path / "parent_workspace"
+    subagent_config = SubAgentConfig(
+        agent_card=AgentCard(name="reviewer", description="reviewer"),
+        system_prompt="Review strictly.",
+        factory_name=CODE_AGENT_FACTORY_NAME,
+        factory_kwargs={"sandbox": True},
+        enable_task_loop=True,
+        max_iterations=5,
+        enable_plan_mode=True,
+        parallel_tool_calls=False,
+        restrict_to_work_dir=True,
+        prompt_mode="concise",
+        language="en",
+    )
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path=str(workspace_root)),
+        restrict_to_work_dir=False,
+        subagents=[subagent_config],
+    )
+    factory_result = object()
+
+    with patch(
+        "openjiuwen.harness.subagents.code_agent.create_code_agent",
+        return_value=factory_result,
+    ) as mock_create_code_agent:
+        sub = parent.create_subagent("reviewer", "sub_session_id")
+
+    assert sub is factory_result
+    call_kwargs = mock_create_code_agent.call_args.kwargs
+    assert call_kwargs["enable_task_loop"] is True
+    assert call_kwargs["max_iterations"] == 5
+    assert call_kwargs["enable_plan_mode"] is True
+    assert call_kwargs["parallel_tool_calls"] is False
+    assert call_kwargs["restrict_to_work_dir"] is True
+    assert call_kwargs["prompt_mode"] == "concise"
+    assert call_kwargs["language"] == "en"
+    assert call_kwargs["sandbox"] is True
+
+
+def test_create_subagent_keeps_parent_work_dir_restriction_when_stricter(tmp_path) -> None:
+    workspace_root = tmp_path / "parent_workspace"
+    subagent_config = SubAgentConfig(
+        agent_card=AgentCard(name="reviewer", description="reviewer"),
+        system_prompt="Review strictly.",
+        factory_name=CODE_AGENT_FACTORY_NAME,
+        restrict_to_work_dir=False,
+    )
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path=str(workspace_root)),
+        restrict_to_work_dir=True,
+        subagents=[subagent_config],
+    )
+    factory_result = object()
+
+    with patch(
+        "openjiuwen.harness.subagents.code_agent.create_code_agent",
+        return_value=factory_result,
+    ) as mock_create_code_agent:
+        sub = parent.create_subagent("reviewer", "sub_session_id")
+
+    assert sub is factory_result
+    assert mock_create_code_agent.call_args.kwargs["restrict_to_work_dir"] is True
+
+
 def test_create_subagent_uses_research_agent_factory(tmp_path) -> None:
     workspace_root = tmp_path / "parent_workspace"
     parent = create_deep_agent(
@@ -1446,3 +1576,49 @@ def test_create_subagent_unrestricted_when_both_unrestricted(tmp_path) -> None:
     call_kwargs = mock_create.call_args.kwargs
     # 父子均不限制，保持 False
     assert call_kwargs["restrict_to_work_dir"] is False
+
+
+@pytest.mark.asyncio
+async def test_create_subagent_writes_relative_files_to_inherited_artifact_root(
+    tmp_path: Path,
+) -> None:
+    """Subagent keeps an isolated workspace but cwd is the parent's artifact_root."""
+    from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace, init_cwd
+    from openjiuwen.harness.schema.config import SubAgentConfig
+
+    parent_ws = tmp_path / "parent_ws"
+    artifact_root = tmp_path / "projects" / "sess-1"
+    parent_ws.mkdir()
+    artifact_root.mkdir(parents=True)
+    init_cwd(str(artifact_root), workspace=str(artifact_root))
+
+    parent = DeepAgent(AgentCard(name="parent", description="test")).configure(
+        DeepAgentConfig(
+            model=_create_dummy_model(),
+            workspace=Workspace(root_path=str(parent_ws)),
+            auto_create_workspace=False,
+            enable_task_loop=False,
+            add_general_purpose_agent=False,
+            subagents=[
+                SubAgentConfig(
+                    agent_card=AgentCard(name="worker", description="worker"),
+                    system_prompt="do work",
+                )
+            ],
+        )
+    )
+    parent.set_react_agent(FakeReactAgent(), initialized=True)
+
+    sub = parent.create_subagent("worker", "sub_sess")
+    assert sub._inherited_artifact_root == str(artifact_root.resolve())
+
+    await sub.ensure_initialized()
+    assert Path(get_cwd()).resolve() == artifact_root.resolve()
+    assert "sub_agents" in str(Path(get_workspace()).resolve())
+    assert Path(get_workspace()).resolve() != artifact_root.resolve()
+
+    # After a sibling has polluted ambient workspace, the next create still
+    # inherits cwd (shared artifact root), not the sibling sub_agents path.
+    sub2 = parent.create_subagent("worker", "sub_sess_2")
+    assert sub2._inherited_artifact_root == str(artifact_root.resolve())
+    assert "sub_agents" not in sub2._inherited_artifact_root

@@ -10,7 +10,7 @@ import tempfile
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import Literal
 
 from filelock import Timeout as FileLockTimeout
 
@@ -27,15 +27,16 @@ class _RwLockEntry:
 
 
 class ReadWriteLockManager:
-    """Manage the process-local lifecycle of cross-process file locks."""
+    """Manage process-local locks and cross-process database cleanup."""
 
-    _lock_dir: Optional[pathlib.Path] = None
-    _locks: Dict[pathlib.Path, _RwLockEntry] = {}
-    _generations: Dict[pathlib.Path, int] = {}
-    _idle_heap: List[Tuple[float, int, pathlib.Path]] = []
-    _cleanup_task: Optional[asyncio.Task] = None
+    _lock_dir: pathlib.Path | None = None
+    _locks: dict[pathlib.Path, _RwLockEntry] = {}
+    _state_lock: asyncio.Lock | None = None
+    _cleanup_task: asyncio.Task | None = None
+    _idle_heap: list[tuple[float, pathlib.Path]] = []
+    _idle_deadlines: dict[pathlib.Path, float] = {}
     _idle_ttl = 2 * 60
-    _cleanup_interval = 20 * 60
+    _cleanup_interval = 60
 
     @classmethod
     def get_lock_file(cls, file_path: pathlib.Path) -> pathlib.Path:
@@ -53,20 +54,28 @@ class ReadWriteLockManager:
         return cls._lock_dir
 
     @classmethod
+    def _get_state_lock(cls) -> asyncio.Lock:
+        if cls._state_lock is None:
+            cls._state_lock = asyncio.Lock()
+        return cls._state_lock
+
+    @classmethod
     async def close_locks(cls) -> None:
-        """Close all read-write lock resources cached by this process."""
-        entries = tuple(cls._locks.values())
-        for entry in entries:
-            await entry.lock.close()
-        cls._locks.clear()
+        """Detach and close every business lock cached by this process."""
+        async with cls._get_state_lock():
+            entries = tuple(cls._locks.values())
+            cls._locks.clear()
+            for entry in entries:
+                entry.lock.evict_singleton()
+                await entry.lock.close()
 
     @classmethod
     async def stop(cls) -> None:
-        """Stop local cleanup work and perform one final expired-lock scan."""
+        """Stop cleanup work, close local resources, and process final due entries."""
         sys_operation_logger.info(
             "Stopping read-write lock cleanup, cached_locks=%s, pending_cleanup=%s",
             len(cls._locks),
-            len(cls._idle_heap),
+            len(cls._idle_deadlines),
         )
         task = cls._cleanup_task
         cls._cleanup_task = None
@@ -76,31 +85,23 @@ class ReadWriteLockManager:
                 await task
             except asyncio.CancelledError:
                 pass
-        await cls.cleanup_expired_locks()
+
         await cls.close_locks()
+        await cls.cleanup_expired_locks()
         cls._idle_heap.clear()
-        cls._generations.clear()
+        cls._idle_deadlines.clear()
+        cls._state_lock = None
         sys_operation_logger.info("Stopped read-write lock cleanup")
 
     @classmethod
     def start(cls) -> None:
-        """Start the periodic cleanup task for idle lock databases."""
+        """Start the periodic cleanup task."""
         if cls._cleanup_task is not None and not cls._cleanup_task.done():
             return
 
         lock_dir = cls.ensure_lock_dir()
-        loop = asyncio.get_running_loop()
-        restored_count = 0
-        for lock_file in lock_dir.glob("*.db"):
-            remaining = max(0.0, lock_file.stat().st_mtime + cls._idle_ttl - time.time())
-            cls._schedule_idle_lock(lock_file, loop.time() + remaining)
-            restored_count += 1
-        cls._cleanup_task = loop.create_task(cls._run_cleanup())
-        sys_operation_logger.info(
-            "Started read-write lock cleanup, lock_dir=%s, restored_locks=%s",
-            lock_dir,
-            restored_count,
-        )
+        cls._cleanup_task = asyncio.get_running_loop().create_task(cls._run_cleanup())
+        sys_operation_logger.info("Started read-write lock cleanup, lock_dir=%s", lock_dir)
 
     @classmethod
     async def _run_cleanup(cls) -> None:
@@ -110,71 +111,92 @@ class ReadWriteLockManager:
 
     @classmethod
     def _schedule_idle_lock(cls, lock_file: pathlib.Path, deadline: float) -> None:
-        generation = cls._generations.get(lock_file, 0)
-        heapq.heappush(cls._idle_heap, (deadline, generation, lock_file))
-        sys_operation_logger.debug(
-            "Scheduled read-write lock cleanup, lock_file=%s, generation=%s, delay_seconds=%.3f",
-            lock_file,
-            generation,
-            max(0.0, deadline - asyncio.get_running_loop().time()),
-        )
+        if lock_file in cls._idle_deadlines:
+            return
+        cls._idle_deadlines[lock_file] = deadline
+        heapq.heappush(cls._idle_heap, (deadline, lock_file))
 
     @classmethod
-    async def cleanup_expired_locks(cls) -> None:
-        """Delete expired databases that can be exclusively acquired now."""
-        now = asyncio.get_running_loop().time()
+    def _pop_due_locks(cls, now: float) -> list[pathlib.Path]:
+        due_locks = []
         while cls._idle_heap and cls._idle_heap[0][0] <= now:
-            _, generation, lock_file = heapq.heappop(cls._idle_heap)
-            entry = cls._locks.get(lock_file)
-            current_generation = cls._generations.get(lock_file, 0)
-            if generation != current_generation:
-                sys_operation_logger.debug(
-                    "Skipped stale read-write lock cleanup, lock_file=%s, queued_generation=%s, current_generation=%s",
-                    lock_file,
-                    generation,
-                    current_generation,
-                )
+            deadline, lock_file = heapq.heappop(cls._idle_heap)
+            if cls._idle_deadlines.get(lock_file) != deadline:
                 continue
-            if entry is not None and entry.lease_count:
-                sys_operation_logger.debug(
-                    "Skipped active read-write lock cleanup, lock_file=%s, lease_count=%s",
-                    lock_file,
-                    entry.lease_count,
-                )
-                continue
+            cls._idle_deadlines.pop(lock_file, None)
+            due_locks.append(lock_file)
+        return due_locks
 
-            if entry is None:
-                entry = cls._get_or_create_lock(lock_file)
+    @classmethod
+    async def _try_delete_database(cls, lock_file: pathlib.Path) -> bool:
+        probe = HybridAsyncReadWriteLock(lock_file, is_singleton=False)
+        acquired = False
+        try:
             try:
-                await entry.lock.file_lock.acquire_write(timeout=0, blocking=False)
+                await probe.file_lock.acquire_write(timeout=0, blocking=False)
+                acquired = True
             except FileLockTimeout:
-                current_entry = cls._locks.get(lock_file)
-                if generation == cls._generations.get(lock_file, 0) and (
-                        current_entry is None or not current_entry.lease_count
-                ):
-                    cls._schedule_idle_lock(lock_file, now + cls._cleanup_interval)
-                    sys_operation_logger.debug(
-                        "Deferred read-write lock cleanup because exclusive access is unavailable, lock_file=%s",
-                        lock_file,
-                    )
-                continue
-            await entry.lock.file_lock.release()
+                sys_operation_logger.debug(
+                    "Deferred read-write lock database cleanup because exclusive access is unavailable, lock_file=%s",
+                    lock_file,
+                )
+        finally:
+            try:
+                if acquired:
+                    await probe.file_lock.release()
+            finally:
+                await probe.close()
 
-            current_entry = cls._locks.get(lock_file)
-            if (generation != cls._generations.get(lock_file, 0) or current_entry
-                    is not None and current_entry.lease_count):
-                continue
+        if not acquired:
+            return False
+
+        # Windows cannot unlink an SQLite database while the probe still has it open.
+        async with cls._get_state_lock():
+            if lock_file in cls._locks:
+                return False
             try:
                 lock_file.unlink()
+                cls._idle_deadlines.pop(lock_file, None)
                 sys_operation_logger.info("Deleted expired read-write lock database, lock_file=%s", lock_file)
+                return True
             except FileNotFoundError:
-                sys_operation_logger.debug("Read-write lock database was already deleted, lock_file=%s", lock_file)
+                sys_operation_logger.debug(
+                    "Read-write lock database was already deleted, lock_file=%s",
+                    lock_file,
+                )
+                return False
             except OSError as exc:
                 sys_operation_logger.warning(
                     "Failed to delete expired read-write lock database, lock_file=%s, error=%s",
                     lock_file,
                     exc,
                 )
+                return False
+
+    @classmethod
+    async def cleanup_expired_locks(cls) -> None:
+        """Process due heap entries and delete databases that are exclusively available."""
+        loop = asyncio.get_running_loop()
+        due_locks = cls._pop_due_locks(loop.time())
+        deleted_count = 0
+        for lock_file in due_locks:
+            try:
+                remaining = lock_file.stat().st_mtime + cls._idle_ttl - time.time()
+            except FileNotFoundError:
+                continue
+            if remaining > 0:
+                cls._schedule_idle_lock(lock_file, loop.time() + remaining)
+                continue
+
+            if await cls._try_delete_database(lock_file):
+                deleted_count += 1
+            elif lock_file.exists() and lock_file not in cls._idle_deadlines:
+                cls._schedule_idle_lock(lock_file, loop.time())
+        sys_operation_logger.debug(
+            "Completed read-write lock database cleanup, due_count=%s, deleted_count=%s",
+            len(due_locks),
+            deleted_count,
+        )
 
     @classmethod
     def get_lock(cls, file_path: pathlib.Path) -> HybridAsyncReadWriteLock:
@@ -190,22 +212,31 @@ class ReadWriteLockManager:
         return entry
 
     @classmethod
-    def _acquire_lease(cls, file_path: pathlib.Path) -> Tuple[pathlib.Path, _RwLockEntry]:
-        cls.start()
+    async def _acquire_lease(cls, file_path: pathlib.Path) -> tuple[pathlib.Path, _RwLockEntry]:
         lock_file = cls.get_lock_file(file_path)
-        entry = cls._get_or_create_lock(lock_file)
-        cls._generations[lock_file] = cls._generations.get(lock_file, 0) + 1
-        entry.lease_count += 1
-        return lock_file, entry
+        async with cls._get_state_lock():
+            entry = cls._get_or_create_lock(lock_file)
+            entry.lease_count += 1
+            return lock_file, entry
 
     @classmethod
     async def _release_lease(cls, lock_file: pathlib.Path, entry: _RwLockEntry) -> None:
-        entry.lease_count -= 1
-        if entry.lease_count:
-            return
+        async with cls._get_state_lock():
+            entry.lease_count -= 1
+            if entry.lease_count:
+                return
 
-        lock_file.touch(exist_ok=True)
-        cls._schedule_idle_lock(lock_file, asyncio.get_running_loop().time() + cls._idle_ttl)
+            if cls._locks.get(lock_file) is entry:
+                cls._locks.pop(lock_file, None)
+            entry.lock.evict_singleton()
+            try:
+                await entry.lock.close()
+            finally:
+                lock_file.touch(exist_ok=True)
+                cls._schedule_idle_lock(
+                    lock_file,
+                    asyncio.get_running_loop().time() + cls._idle_ttl,
+                )
 
     @classmethod
     @asynccontextmanager
@@ -215,9 +246,13 @@ class ReadWriteLockManager:
             mode: Literal["read", "write"],
             timeout: float,
     ):
-        """Acquire a file lock while tracking its process-local lease."""
-        lock_file, entry = cls._acquire_lease(file_path)
-        guard = entry.lock.read(timeout) if mode == "read" else entry.lock.write(timeout)
+        """Acquire the requested business file lock with a process-local lease."""
+        cls.start()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        lock_file, entry = await cls._acquire_lease(file_path)
+        remaining = max(0.0, deadline - loop.time())
+        guard = entry.lock.read(remaining) if mode == "read" else entry.lock.write(remaining)
         try:
             async with guard:
                 yield
