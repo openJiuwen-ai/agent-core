@@ -644,6 +644,7 @@ class AgentConfigurator:
         swarmflow_worker_base_spec = None
         swarmflow_human_base_spec = None
         swarmflow_concurrency_governor = None
+        swarmflow_budget = None
         if ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
             team_spec_for_models = ctx.team_spec
 
@@ -693,6 +694,13 @@ class AgentConfigurator:
                 agents_per_run_cap=l2_cap,
             )
 
+            from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
+
+            # One ledger per leader, shared by every run it launches (like the
+            # governor's L3): concurrent runs draw down one pool. ``total=None``
+            # keeps it unbounded while still giving scripts a live ``spent()``.
+            swarmflow_budget = BudgetLedger(total=spec.swarmflow_budget)
+
         inject_team_handles(
             member_build_context.extras,
             team_backend=self.team_backend,
@@ -704,6 +712,7 @@ class AgentConfigurator:
             swarmflow_worker_base_spec=swarmflow_worker_base_spec,
             swarmflow_human_base_spec=swarmflow_human_base_spec,
             swarmflow_concurrency_governor=swarmflow_concurrency_governor,
+            swarmflow_budget=swarmflow_budget,
             reliability_components=reliability_components,
             permissions_override=ctx.permissions_override,
             worktree_manager=self.worktree_manager,

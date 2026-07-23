@@ -1,0 +1,73 @@
+# Template for tests/system_tests/config_llm_local.yaml — the system tests'
+# model endpoints.
+#
+#     cp config_llm_local.example.yaml config_llm_local.yaml
+#     # then fill in real hosts and keys
+#
+# The real file is gitignored: it holds live credentials and must never be
+# committed. This template is the only copy in the repo, so keep it free of
+# real keys and in sync with the schema in llm_config.py.
+#
+# Each entry is one API endpoint with its own credentials and the models it
+# serves. Two shapes matter, and both are shown below:
+#
+#   * one endpoint, many models — an OpenRouter/LiteLLM-style gateway where a
+#     single key fronts a whole catalogue (see `gateway`).
+#   * many endpoints, one model — the same model behind independent keys, i.e.
+#     failover peers (see `primary` / `primary-backup`). IntelliRouter needs
+#     these to have something to fail over to.
+#
+# Order matters: the FIRST entry's FIRST model is the default, and is what the
+# single-model E2Es (swarmflow and friends) run on. Only `endpoints[0]` is
+# strictly needed — drop the rest if you only run those.
+#
+# To run one of the others without reordering anything, name it as
+# `<endpoint>/<model>` — the only spelling that can distinguish a model served
+# by several endpoints (e.g. `primary/deepseek-chat` vs
+# `primary-backup/deepseek-chat`):
+#
+#     OPENJIUWEN_E2E_MODEL=gateway/z-ai/glm-5.1 python ..._e2e.py
+#     OPENJIUWEN_E2E_MODEL=gateway            python ..._e2e.py  # its 1st model
+#
+# `name` is therefore an identifier you will type: keep it short and stable.
+#
+# `api_base` is written the way openjiuwen wants it: it is handed straight to
+# the OpenAI SDK as `base_url`, which appends `/chat/completions`. So an
+# OpenAI-compatible gateway MUST carry the `/v1` suffix here. IntelliRouter
+# needs the bare root instead and strips `/v1` itself
+# (`ModelEndpoint.router_api_base`) — do not pre-strip it below, or every
+# openjiuwen client 404s.
+#
+# `provider` is an openjiuwen ProviderType value in CamelCase (OpenAI /
+# DeepSeek / Anthropic / SiliconFlow / DashScope / ...). IntelliRouter spells
+# providers lowercase; `ModelEndpoint.router_provider` bridges the two.
+#
+# Point OPENJIUWEN_E2E_LLM_CONFIG at another file to override the location.
+
+endpoints:
+  # --- Default: what single-model E2Es run on. ---
+  - name: primary
+    provider: DeepSeek
+    api_base: "https://api.deepseek.com"
+    api_key: "sk-replace-me"
+    models:
+      - deepseek-chat
+
+  # --- Optional: same model, independent key — a failover peer for `primary`.
+  # Only IntelliRouter benefits from this; delete it if you do not run that E2E.
+  - name: primary-backup
+    provider: DeepSeek
+    api_base: "https://api.deepseek.com"
+    api_key: "sk-replace-me-too"
+    models:
+      - deepseek-chat
+
+  # --- Optional: one key fronting a catalogue (OpenRouter-style). ---
+  # Note the /v1 suffix, required for OpenAI-compatible gateways.
+  - name: gateway
+    provider: OpenAI
+    api_base: "https://openrouter.ai/api/v1"
+    api_key: "sk-replace-me-as-well"
+    models:
+      - z-ai/glm-5.1
+      - moonshotai/kimi-k2.6

@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from .admission import AgentAdmission
 from .backends.base import AgentBackend
+from .budget import BudgetLedger
 from .cap import resolve_agents_per_run_cap
 from .journal import Journal
 from .progress import ProgressSink, noop_progress_sink
@@ -41,7 +42,10 @@ class Runtime:
     retries: int = 2  # extra attempts after the first on backend/validation error
     strict: bool = False
     spawn_limit: int = 1000
-    budget_total: int | None = None
+    budget: BudgetLedger = field(default_factory=BudgetLedger)
+    """The run's token ledger, shared by reference with the backend (which
+    reports real usage into it). Default: an unbounded ledger. The engine only
+    reads it — at the ``agent()`` / ``send()`` budget gates and via ``budget.*``."""
     cap_override: int | None = None  # force the concurrency cap (tests)
     abort_event: asyncio.Event | None = field(default=None, repr=False)
     """External cooperative pause signal. When set, the ``agent()`` /
@@ -52,7 +56,6 @@ class Runtime:
     # Mutable run state (created/advanced inside the running loop).
     agent_gate: AgentAdmission | None = field(default=None, repr=False)
     spawn_count: int = 0
-    tokens_spent: int = 0
     current_phase: str | None = None
     warned_concurrent_scope: bool = False  # one-shot guard for the raw-gather warning
     warned_concurrent_session: bool = False  # one-shot guard for overlapping session sends

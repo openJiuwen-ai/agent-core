@@ -52,6 +52,7 @@ class _FakeWorkerBackend(TeamWorkerBackend):
         member_name: str,
         has_schema: bool,
         model: Any,
+        budget_rail: Any = None,
     ) -> str:
         if has_schema and tools:
             tools[0].captured = {"answer": f"done::{member_name}"}
@@ -100,7 +101,7 @@ def test_schema_path_prefers_natural_text_over_json(tmp_path):
     """When schema capture succeeds and invoke also returns narration, prefer narration."""
 
     class _NarratingWorker(TeamWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
             if has_schema and tools:
                 tools[0].captured = {"answer": f"done::{member_name}"}
                 tools[0].called = True
@@ -125,7 +126,7 @@ def test_missing_submit_makes_agent_return_none(tmp_path):
     """
 
     class _SilentWorker(TeamWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
             return ""  # never fills structured_output
 
     script = _write(tmp_path, _SCRIPT)
@@ -155,7 +156,7 @@ async def run(args):
     seen: list = []
 
     class _RecordingBackend(TeamWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
             seen.append(model)
             return f"ran::{model}"
 
@@ -377,6 +378,9 @@ def test_worktree_isolation_sets_worker_workspace_and_removes_clean_worktree(tmp
         async def run_once(self, content, **kw):
             return "ok"
 
+        def add_rail(self, rail):
+            return None
+
         async def dispose(self):
             return None
 
@@ -449,6 +453,9 @@ async def run(args):
     class _FakeHarness:
         async def run_once(self, content, **kw):
             return '{"status": "done"}'
+
+        def add_rail(self, rail):
+            return None
 
         async def dispose(self):
             return None
@@ -530,7 +537,7 @@ def test_agent_emits_failed_when_worker_backend_raises(tmp_path):
     from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
 
     class _FailingWorkerBackend(_FakeWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
             raise BackendError(
                 "worker 'wf-w-0' failed: [181001] model call failed, reason: ReadError"
             )

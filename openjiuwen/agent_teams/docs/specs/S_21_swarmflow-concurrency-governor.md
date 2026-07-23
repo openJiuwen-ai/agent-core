@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/concurrency.py`、`workflow/engine/admission.py`、`workflow/engine/cap.py`、`workflow/engine/runtime.py`、`workflow/engine/primitives.py`、`workflow/engine/runner.py`、`workflow/tool_swarmflow.py`、`workflow/runner.py`、`workflow/backends/team_worker_backend.py`、`harness/async_tools.py`、`harness/native_harness.py`、`schema/blueprint.py`、`agent/agent_configurator.py`、`rails/team_context.py`、`rails/team_tool_rail.py`、`tools/tool_factory.py`、`agent/coordination/handlers/workflow.py`、`i18n.py` |
-| 最近一次修订日期 | 2026-07-01 |
+| 最近一次修订日期 | 2026-07-16 |
 | 关联 feature | `F_47_swarmflow-concurrency-governor.md`、`F_48_swarmflow-inline-script-execution.md` |
 
 ## 范围 / 边界
@@ -23,7 +23,7 @@
 
 - 跨 Team / 跨进程全局限制。
 - workflow 脚本内 cap 配置（engine 铁律：脚本不感知）。
-- Token 预算（`Runtime.budget_total`，独立机制）。
+- Token 预算（`Runtime.budget` / `BudgetLedger`，独立机制，见 `S_18` 与 `F_66`）。
 - journal 路径选择（仍 `(team, session, workflow_name)`，`run_id` 不参与路径）。
 
 ## 三层限制（不变量）
