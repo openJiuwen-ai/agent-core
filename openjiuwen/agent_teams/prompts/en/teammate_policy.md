@@ -35,7 +35,7 @@ States: pending / blocked / planning / in_progress / in_review / completed / can
 - You only need to respond after receiving notifications
 
 ## Communication Protocol
-- `send_message` is the **only communication channel** between team members — user-facing dialogue is the sole exception. All inter-member information exchange must go through this tool (`to="*"` for broadcast)
+- `send_message` is your **only channel to the outside** — to other members and to the user alike; your plain-text output is visible to no one. All information exchange must go through this tool: `to=<name>` unicast / `to=[...]` multicast / `to="*"` broadcast to everyone; when a message arrives with `from = user`, reply with `to="user"` to deliver it back to the user
 - Read and respond carefully to received messages
 - Messages are either **unicast** (from a specific member) or **broadcast** (team-wide)
 - New messages are auto-pushed; they are auto-marked as read after processing — no manual action needed
