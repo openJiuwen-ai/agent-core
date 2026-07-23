@@ -561,8 +561,7 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "    step.text || step.testid\n"
         "  );\n"
         "  const pressSelectAll = async () => {\n"
-        "    try { await page.keyboard.press('Control+A'); }\n"
-        "    catch (_err) { await page.keyboard.press('Meta+A').catch(() => {}); }\n"
+        "    await page.keyboard.press('ControlOrMeta+A');\n"
         "  };\n"
         "  const locatorFromStep = (step) => {\n"
         "    if (step.selector) return page.locator(String(step.selector)).first();\n"
@@ -1011,7 +1010,7 @@ def _normalize_batch_interact_payload(kwargs: Mapping[str, Any]) -> dict[str, An
 
 def register_builtin_actions(controller: ActionController | None = None) -> None:
     ctl = controller or _DEFAULT_CONTROLLER
-    
+
     async def ping(session_id: str = "", request_id: str = "", **kwargs: Any) -> ActionResult:
         return {
             "ok": True,
@@ -1535,6 +1534,9 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
         parsed.setdefault("dropped_step_count", dropped_step_count)
         completed = parsed.get("steps") or parsed.get("completed_steps") or []
         completed_steps = completed if isinstance(completed, list) else []
+        # Normalize early-abort results, which use completed_steps, to the
+        # same public shape as continue-on-error and successful results.
+        parsed["steps"] = completed_steps
         failed_steps = [
             item for item in completed_steps
             if isinstance(item, dict) and not bool(item.get("ok", False))

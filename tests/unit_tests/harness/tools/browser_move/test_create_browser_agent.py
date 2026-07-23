@@ -181,7 +181,7 @@ def test_default_wiring_main_agent_has_browser_runtime_rail() -> None:
     assert isinstance(browser_rails[0].mcp_usage_limiter, BrowserMcpUsageLimiter)
 
 
-def test_default_wiring_does_not_inject_context_processors() -> None:
+def test_default_wiring_injects_context_processor_for_large_browser_results() -> None:
     calls, fake = _capture_create_deep_agent()
     with _patch_all(fake)[0]:
         create_browser_agent(_fake_model(), settings=_fake_settings())
@@ -194,8 +194,7 @@ def test_default_wiring_does_not_inject_context_processors() -> None:
     assert len(processors) == 1
     key, config = processors[0]
     assert key == "ToolResultWindowProcessor"
-    # Pin the intended contract literally (not against the source constant) so a
-    # regression like the plain "browser_snapshot" name is actually caught.
+
     assert config.tool_names == [
         "browser_probe_interactives",
         "browser_probe_cards",

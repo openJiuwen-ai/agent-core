@@ -92,3 +92,53 @@ def test_controller_normalizes_partial_batch_result_to_failure() -> None:
     assert result["partial"] is True
     assert result["steps_ok"] == 1
     assert result["steps_failed"] == 1
+
+
+def test_controller_normalizes_early_abort_completed_steps() -> None:
+    async def fake_code_executor(_js_code: str) -> dict[str, Any]:
+        completed_steps = [
+            {"index": 0, "op": "fill", "ok": True},
+            {
+                "index": 1,
+                "op": "click",
+                "ok": False,
+                "error": "locator.click timed out",
+            },
+        ]
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "ok": False,
+                            "error": "locator.click timed out",
+                            "failed_step": completed_steps[1],
+                            "completed_steps": completed_steps,
+                            "elapsed_ms": 5012,
+                        }
+                    ),
+                }
+            ]
+        }
+
+    controller.register_example_actions()
+    controller.bind_code_executor(fake_code_executor)
+
+    result = _run(
+        controller.run_action(
+            "browser_batch_interact",
+            steps=[
+                {"op": "fill", "selector": "#name", "value": "Alex"},
+                {"op": "click", "selector": "#missing"},
+            ],
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["steps"] == result["completed_steps"]
+    assert result["all_steps_ok"] is False
+    assert result["had_step_errors"] is True
+    assert result["partial"] is True
+    assert result["steps_ok"] == 1
+    assert result["steps_failed"] == 1

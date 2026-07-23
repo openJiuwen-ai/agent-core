@@ -8,6 +8,7 @@ import dataclasses
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.context_engine import ToolResultWindowProcessorConfig
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard
 from openjiuwen.core.single_agent.rail.base import AgentRail
@@ -15,17 +16,18 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
+from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 from openjiuwen.harness.schema.config import SubAgentConfig
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
+    DEFAULT_BROWSER_CAPABILITIES,
+    resolve_browser_capabilities,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     BrowserInstanceConfig,
     RuntimeSettings,
     build_browser_guardrails,
     build_playwright_mcp_config,
     build_runtime_settings,
-)
-from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
-    DEFAULT_BROWSER_CAPABILITIES,
-    resolve_browser_capabilities,
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
     BrowserAgentRuntime,
@@ -273,7 +275,7 @@ def create_browser_agent(
     """Create the browser subagent with task-scoped capability context.
 
     ``browser_capabilities`` is resolved against the trusted capability
-    catalog here. The resolved allowlist does not yet alter registered tools.
+    catalog and forwarded to the runtime as its Playwright tool allowlist.
     """
     if browser_capabilities is not None and (
         not isinstance(browser_capabilities, list)
@@ -338,7 +340,7 @@ def create_browser_agent(
         "browser_probe_form_fields",
         "browser_probe_dropdown",
         "browser_probe_calendar",
-        "browser_snapshot"
+        "browser_snapshot",
     ]
     if not any(isinstance(rail, ContextProcessorRail) for rail in (rails or [])):
         injected_rails.append(
