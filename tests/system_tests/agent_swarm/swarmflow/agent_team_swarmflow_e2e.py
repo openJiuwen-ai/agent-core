@@ -19,7 +19,7 @@ human turns were prompted and answered, and the run completed (not failed),
 exiting non-zero on any failure.
 
 Run directly (needs a real model endpoint, see config_llm_local.yaml):
-    python tests/system_tests/agent_swarm/agent_team_swarmflow_e2e.py
+    python tests/system_tests/agent_swarm/swarmflow/agent_team_swarmflow_e2e.py
 """
 
 from __future__ import annotations
@@ -31,32 +31,32 @@ import time
 import uuid
 from pathlib import Path
 
-import yaml
 
-# Ensure _e2e_utils is importable regardless of working directory.
+# This suite lives in its own directory; the modules it shares with the other
+# agent_swarm E2Es stay where they are, so reach them by walking up:
+# ``_e2e_utils`` in agent_swarm/, ``llm_config`` in system_tests/.
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_HERE))  # sibling swarmflow E2Es (imported as a harness)
+sys.path.insert(0, str(_HERE.parent))  # _e2e_utils
+sys.path.insert(0, str(_HERE.parent.parent))  # llm_config
 
 from openjiuwen.agent_teams import paths
 from openjiuwen.agent_teams.interaction.payload import HumanAgentMessage
 from openjiuwen.agent_teams.paths import configure_openjiuwen_home
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
-from openjiuwen.core.common.logging.log_config import (
-    configure_log,
-    configure_log_config,
-)
+from openjiuwen.core.common.logging.log_config import configure_log_config
 from openjiuwen.core.common.logging.loguru.constant import DEFAULT_INNER_LOG_CONFIG
 from openjiuwen.core.runner.runner import Runner
 
-from _e2e_utils import load_team_config
+from _e2e_utils import configure_logging_into, load_team_config
+from llm_config import load_llm_config
 from tests.test_logger import logger as test_logger
 
 # ---------------------------------------------------------------------------
 # Paths / config
 # ---------------------------------------------------------------------------
-_LOG_CONFIG_PATH = _HERE / "logging.yaml"
+_LOG_CONFIG_PATH = _HERE.parent / "logging.yaml"
 _TEAM_CONFIG_PATH = _HERE / "config_swarmflow.yaml"
-_LLM_CONFIG_PATH = _HERE.parent / "config_llm_local.yaml"
 _SCRIPT_PATH = _HERE / "resources" / "party_planner.py"
 # We run from a dedicated scratch dir (gitignored) so the team's runtime
 # scaffolding (identity / memory / skills / logs written to cwd) never pollutes
@@ -65,9 +65,6 @@ _SCRIPT_PATH = _HERE / "resources" / "party_planner.py"
 # nested workflow resolves its sibling via __file__, so it is cwd-independent.
 _WORKDIR = _HERE / ".e2e_workdir"
 _SCRIPT_REL = "../resources/party_planner.py"
-
-# Only the qwen flash model for now (first entry of config_llm_local.yaml).
-_MODEL_NAME = "qwen3.6-flash"
 
 # Fail fast if the leader never launches the workflow within this window after
 # the runtime is ready (instead of waiting out the whole-run ceiling).
@@ -86,8 +83,11 @@ _NARRATION_MAX_S = 90.0
 # disk by the time the workflow completes, so it survives either way.
 _TEARDOWN = os.getenv("SWARMFLOW_E2E_TEARDOWN", "1").strip().lower() not in ("0", "false", "no")
 
+# Pin every sink under the scratch dir, so the whole run's log — framework and
+# test alike — lands in one place regardless of what gets logged before the
+# chdir below. See ``configure_logging_into``.
 if _LOG_CONFIG_PATH.is_file():
-    configure_log(str(_LOG_CONFIG_PATH))
+    configure_logging_into(_LOG_CONFIG_PATH, _WORKDIR / "logs")
 else:
     configure_log_config(DEFAULT_INNER_LOG_CONFIG)
 
@@ -106,15 +106,21 @@ def _wire_model_env() -> None:
 
     ``config_swarmflow.yaml`` references these via ``${VAR}`` placeholders, so
     they must exist before the spec is validated.
+
+    Endpoint and model are resolved together from one ref, so they cannot
+    disagree — hard-coding a model name here drifts the moment the config
+    points somewhere else, and the request then fails with a model the
+    endpoint has never heard of. Defaults to the config's first model;
+    override without editing YAML::
+
+        OPENJIUWEN_E2E_MODEL=gateway/GLM-5.1 python ..._e2e.py
     """
-    with open(_LLM_CONFIG_PATH, "r", encoding="utf-8") as f:
-        llm_cfg = yaml.safe_load(f)
-    api_base = llm_cfg["api_base"]
-    api_key = llm_cfg["api_key"]
-    os.environ.setdefault("API_BASE", api_base)
-    os.environ.setdefault("LEADER_API_KEY", api_key)
-    os.environ.setdefault("TEAMMATE_API_KEY", api_key)
-    os.environ.setdefault("MODEL_NAME", _MODEL_NAME)
+    model = load_llm_config().resolve()
+    test_logger.info("[swarmflow] model: %s (%s)", model.ref, model.api_base)
+    os.environ.setdefault("API_BASE", model.api_base)
+    os.environ.setdefault("LEADER_API_KEY", model.api_key)
+    os.environ.setdefault("TEAMMATE_API_KEY", model.api_key)
+    os.environ.setdefault("MODEL_NAME", model.model)
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +158,9 @@ class _SwarmflowProbe:
         # agent_completed counts keyed by the agent's label — lets a caller prove
         # e.g. how many concurrent sub-workflows actually ran.
         self.agent_completed: dict[str, int] = {}
+        # Text of every ``log()`` the script emitted — how a script reports its
+        # own view of the run (e.g. the token budget it saw) back to a verifier.
+        self.logs: list[str] = []
 
     async def drain(self, monitor: "object") -> None:
         """Consume ``monitor.workflow_events()`` until the run terminates."""
@@ -171,6 +180,11 @@ class _SwarmflowProbe:
                 label = payload.get("label")
                 if label:
                     self.agent_completed[label] = self.agent_completed.get(label, 0) + 1
+            elif kind == "log":
+                text = payload.get("text")
+                if text:
+                    self.logs.append(text)
+                    test_logger.info("[swarmflow] log: %s", text)
             elif kind == "human_prompt":
                 await self._answer_human(payload)
             elif kind == "human_replied":

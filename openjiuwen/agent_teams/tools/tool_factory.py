@@ -110,6 +110,7 @@ def create_team_tools(
     swarmflow_worker_base_spec: Any = None,
     swarmflow_human_base_spec: Any = None,
     concurrency_governor: Any = None,
+    swarmflow_budget: Any = None,
     team_permissions_enabled: bool = False,
 ) -> list[Tool]:
     """Create role-appropriate tool instances filtered by permission sets.
@@ -149,6 +150,8 @@ def create_team_tools(
         swarmflow_model_resolver: Resolves an ``agent(model=...)`` name hint to a
             worker ``Model``. Non-None only for a leader whose spec has
             ``enable_swarmflow``; when None the ``swarmflow`` tool is gated out.
+        swarmflow_budget: The leader's shared ``BudgetLedger`` capping the tokens
+            its swarmflow runs may burn. Non-None only for a swarmflow leader.
     """
     from openjiuwen.agent_teams.tools.locales import make_translator
     from openjiuwen.agent_teams.workflow.tool_swarmflow import SwarmflowTool
@@ -199,6 +202,7 @@ def create_team_tools(
             worker_base_spec=swarmflow_worker_base_spec,
             human_base_spec=swarmflow_human_base_spec,
             concurrency_governor=concurrency_governor,
+            budget=swarmflow_budget,
             t=t,
             language=lang,
         ),

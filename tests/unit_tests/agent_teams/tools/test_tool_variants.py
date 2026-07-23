@@ -458,6 +458,36 @@ async def test_every_toolset_assembles(db, lang, dispatch_mode, role):
         assert "{{" not in tool.card.description
 
 
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize("dispatch_mode", ["autonomous", "scheduled"])
+@pytest.mark.parametrize("role", ["leader", "teammate", "human_agent"])
+async def test_every_tool_declares_an_object_schema(db, dispatch_mode, role):
+    """Every tool's ``input_params`` is a JSON Schema object.
+
+    ``ToolCard.input_params`` defaults to ``{}``, which has no ``type`` — a
+    strict OpenAI-compatible endpoint rejects the *entire* request over one
+    such tool ("schema must be a JSON Schema of 'type: object', got 'type:
+    null'"), so a single argument-less tool that forgets its schema takes the
+    whole toolset down. A tool that takes no arguments still declares
+    ``{"type": "object", "properties": {}}``.
+    """
+    is_leader = role == "leader"
+    member = LEADER_NAME if is_leader else DEV_1
+    tools = create_team_tools(
+        role=role,
+        agent_team=_backend(db, member, is_leader),
+        dispatch_mode=dispatch_mode,
+        swarmflow_model_resolver=lambda name: None,
+    )
+    typeless = [
+        tool.card.name
+        for tool in tools
+        if not (isinstance(tool.card.input_params, dict) and tool.card.input_params.get("type") == "object")
+    ]
+    assert not typeless, f"tools with no object schema (strict endpoints 400 on these): {typeless}"
+
+
 # ---------------------------------------------------------------------------
 # Verify gate (F_59): reviewer column + verify_task tool
 # ---------------------------------------------------------------------------
