@@ -31,9 +31,12 @@ from openjiuwen.agent_teams.observability import (
 )
 from openjiuwen.agent_teams.observability.monitor_handler import OtelTeamMonitorHandler
 from openjiuwen.agent_teams.observability.semconv import (
+    AT_AGENT_ID,
     AT_MEMBER_NAME,
     AT_PLAN_APPROVED,
     AT_TASK_STATUS,
+    GEN_AI_REQUEST_MESSAGE_COUNT,
+    GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX,
     LANGFUSE_OBSERVATION_INPUT,
     LANGFUSE_OBSERVATION_OUTPUT,
 )
@@ -1585,3 +1588,186 @@ async def test_team_span_uses_agent_team_name(
     team_spans = _spans_by_name(in_memory_exporter, f"team.{real_team_name}")
     assert team_spans, f"team span 'team.{real_team_name}' should be in exporter"
     assert _attr(team_spans[0], "agentteam.team.name") == real_team_name
+
+
+@pytest.mark.asyncio
+async def test_cross_iteration_prompt_delta_uses_team_span_count(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Iteration 2's first LLM call emits only the delta over iteration 1.
+
+    Root cause this guards: ``gen_ai.request.message_count`` was stored on the
+    iteration span, which closes per-iteration — so iteration 2 read 0 and
+    re-emitted the full prompt. The fix stores the per-member prev count on the
+    team span (keyed by agent_id) so it survives across iterations.
+    """
+    from openjiuwen.agent_teams.observability.span_context import (
+        get_team_span,
+        remove_team_span,
+    )
+    from openjiuwen.agent_teams.observability.setup import finalize_team_trace
+    from openjiuwen.core.single_agent.rail.base import (
+        AgentCallbackContext,
+        TaskIterationInputs,
+    )
+
+    _create_team_span("test_team")
+    fw = Runner.callback_framework
+    session = MagicMock()
+    session.get_session_id.return_value = "test_session"
+    mock_agent = _create_mock_agent()
+    rail = ObservabilityRail()
+
+    # --- Iteration 1: system + 3 user messages ---
+    inputs1 = TaskIterationInputs(iteration=1, query="iter1", loop_event=None)
+    ctx1 = AgentCallbackContext(agent=mock_agent, inputs=inputs1)
+    await rail.before_task_iteration(ctx1)
+    msgs1 = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "m1"},
+        {"role": "user", "content": "m2"},
+        {"role": "user", "content": "m3"},
+    ]
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_INPUT,
+        messages=msgs1,
+        model="fake-llm-1",
+    )
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_OUTPUT,
+        messages=msgs1,
+        result=_FakeAssistantMessage(content="ok"),
+    )
+    await rail.after_task_iteration(ctx1)
+
+    # Team span must now carry the per-member prev count for this agent.
+    team_span = get_team_span()
+    agent_id = _attr(_get_iter_span(in_memory_exporter, 1), AT_AGENT_ID)
+    assert agent_id, "iteration 1 span should carry agentteam.agent.id"
+    prev_count_key = f"{GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX}{agent_id}"
+    assert _attr(team_span, prev_count_key) == len(msgs1), (
+        "team span should record iteration 1's message count per-member"
+    )
+
+    # --- Iteration 2: same agent, 2 new messages appended ---
+    inputs2 = TaskIterationInputs(iteration=2, query="iter2", loop_event=None)
+    ctx2 = AgentCallbackContext(agent=mock_agent, inputs=inputs2)
+    await rail.before_task_iteration(ctx2)
+    msgs2 = msgs1 + [
+        {"role": "user", "content": "m4"},
+        {"role": "user", "content": "m5"},
+    ]
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_INPUT,
+        messages=msgs2,
+        model="fake-llm-1",
+    )
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_OUTPUT,
+        messages=msgs2,
+        result=_FakeAssistantMessage(content="ok2"),
+    )
+    await rail.after_task_iteration(ctx2)
+
+    finalize_team_trace("test_team")
+
+    # Iteration 2's llm.call span must only carry the system message + the 2
+    # NEW user messages (m4, m5) as prompt attributes — not the full history.
+    llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
+    assert len(llm_spans) >= 2
+    iter2_llm = llm_spans[-1]
+    attrs = dict(iter2_llm.attributes or {})
+    # system always emitted; m1/m2/m3 must NOT be re-emitted in iteration 2.
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.0.role") == "system"
+    assert "langfuse.gen_ai.prompt.1.content" not in attrs, (
+        "iteration 2 should skip iteration 1's user message m1 (delta only)"
+    )
+    assert "langfuse.gen_ai.prompt.2.content" not in attrs
+    assert "langfuse.gen_ai.prompt.3.content" not in attrs
+    # m4/m5 ARE emitted (indices 4 and 5 in the full list).
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.4.role") == "user"
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.5.role") == "user"
+
+    remove_team_span("test_team")
+
+
+def _get_iter_span(exporter: InMemorySpanExporter, iteration: int) -> Any:
+    """Return the agent task_iteration span for the given iteration number."""
+    needle = f"task_iteration.{iteration}"
+    for s in exporter.get_finished_spans():
+        if s.name.startswith("agent.") and needle in s.name:
+            return s
+    raise AssertionError(f"no agent iteration {iteration} span found")
+
+
+@pytest.mark.asyncio
+async def test_max_attributes_cap_keeps_top_level_prompt_attrs(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A huge prompt must not evict the top-level gen_ai.* request attrs.
+
+    OTel BoundedAttributes evicts FIFO (oldest first). The top-level
+    gen_ai.system / operation.name / provider.name / request.model are written
+    before the prompt loop, so without the tail-cap they'd be evicted once the
+    prompt attributes fill the 200-attribute budget.
+    """
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
+    from openjiuwen.core.single_agent.rail.base import (
+        AgentCallbackContext,
+        TaskIterationInputs,
+    )
+
+    _create_team_span("test_team")
+    fw = Runner.callback_framework
+    session = MagicMock()
+    session.get_session_id.return_value = "test_session"
+    mock_agent = _create_mock_agent()
+    rail = ObservabilityRail()
+    inputs = TaskIterationInputs(iteration=1, query="big", loop_event=None)
+    ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
+    await rail.before_task_iteration(ctx)
+
+    # 1 system + 300 user messages → far exceeds the 200-attr cap.
+    big_messages = [{"role": "system", "content": "sys"}]
+    big_messages += [{"role": "user", "content": f"msg-{i}"} for i in range(300)]
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_INPUT,
+        messages=big_messages,
+        model="fake-llm-1",
+    )
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_OUTPUT,
+        messages=big_messages,
+        result=_FakeAssistantMessage(content="ok"),
+    )
+    await rail.after_task_iteration(ctx)
+    from openjiuwen.agent_teams.observability.setup import finalize_team_trace
+
+    finalize_team_trace("test_team")
+
+    llm_span = _spans_by_name(in_memory_exporter, "llm.call")[-1]
+    # Top-level request attrs must survive (not FIFO-evicted by the prompt flood).
+    assert _attr(llm_span, "gen_ai.system") == "openjiuwen-test", (
+        "gen_ai.system must survive the prompt attribute flood"
+    )
+    assert _attr(llm_span, "gen_ai.operation.name") == "chat"
+    assert _attr(llm_span, "gen_ai.provider.name") is not None
+    assert _attr(llm_span, "gen_ai.request.model") == "fake-llm-1"
+    # The per-span message_count is still recorded.
+    assert _attr(llm_span, GEN_AI_REQUEST_MESSAGE_COUNT) == len(big_messages)
+
+    # Only the trailing N user messages are emitted (the head is dropped by
+    # the tail-cap, NOT by evicting the top-level attrs).
+    attrs = dict(llm_span.attributes or {})
+    user_prompt_idxs = sorted(
+        int(k.split(".")[3])
+        for k in attrs
+        if k.startswith("langfuse.gen_ai.prompt.") and k.endswith(".role") and attrs[k] == "user"
+    )
+    # Cap = (200 - 30) // 2 = 85 writable messages; 300 user messages → 85.
+    assert len(user_prompt_idxs) == 85, f"expected 85 trailing user prompts, got {len(user_prompt_idxs)}"
+    # The kept ones are the LAST 85 (indices 216..300), not the first.
+    assert user_prompt_idxs[0] == 216, f"expected first kept user prompt at index 216, got {user_prompt_idxs[0]}"
+    assert user_prompt_idxs[-1] == 300
+
+    remove_team_span("test_team")

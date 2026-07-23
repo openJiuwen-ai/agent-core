@@ -31,6 +31,7 @@ from openjiuwen.agent_teams.observability.redaction import (
     redact_prompt,
 )
 from openjiuwen.agent_teams.observability.semconv import (
+    AT_AGENT_ID,
     AT_MEMBER_NAME,
     AT_SESSION_ID,
 
@@ -42,6 +43,7 @@ from openjiuwen.agent_teams.observability.semconv import (
     LANGFUSE_GEN_AI_PROMPT,
     GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MESSAGE_COUNT,
+    GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX,
     GEN_AI_REQUEST_MODEL,
     GEN_AI_REQUEST_TEMPERATURE,
     GEN_AI_REQUEST_TOP_P,
@@ -603,10 +605,9 @@ class OtelCallbackHandler:
         span.set_attribute(GEN_AI_REQUEST_MESSAGE_COUNT, msg_count)
 
         # ── Delta tracking ──────────────────────────────────────────
-        # Use the agent-span attribute gen_ai.request.message_count from the
-        # *previous* LLM call to decide whether this is a subsequent call.
-        # The same decision drives both per-message prompt attributes AND the
-        # langfuse.observation.input JSON.
+        # The previous LLM call's message_count decides whether this is a
+        # subsequent call. It drives both per-message prompt attributes and
+        # the langfuse.observation.input JSON.
         #
         #   - First call (prev_count == 0):  emit ALL messages as attributes.
         #   - Context compression (current < prev): emit ALL messages.
@@ -614,10 +615,25 @@ class OtelCallbackHandler:
         #
         # System messages are ALWAYS emitted regardless of delta — they form
         # the stable instruction baseline that every span needs.
+        #
+        # Cross-iteration: the count is stored on the *team* span (not the
+        # iteration span) keyed by agent_id, because each iteration opens and
+        # closes its own agent span — a count stored there is lost before the
+        # next iteration's first LLM call, which would then re-emit the full
+        # prompt. Each teammate (incl. leader) keeps its own chain
+        # (gen_ai.request.prev_message_count.<agent_id>); OTel span
+        # set_attribute is internally locked so no manual locking is needed.
         agent_span = get_current_agent_span()
-        prev_count_raw: int = 0
+        team_span = get_team_span()
+        agent_id = ""
         if agent_span is not None:
-            prev_attr = agent_span.attributes.get(GEN_AI_REQUEST_MESSAGE_COUNT)
+            raw_id = agent_span.attributes.get(AT_AGENT_ID)
+            if raw_id is not None:
+                agent_id = str(raw_id)
+
+        prev_count_raw: int = 0
+        if team_span is not None and agent_id:
+            prev_attr = team_span.attributes.get(f"{GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX}{agent_id}")
             if prev_attr is not None:
                 try:
                     prev_count_raw = int(str(prev_attr))
@@ -625,15 +641,45 @@ class OtelCallbackHandler:
                     pass
 
         is_first_call = prev_count_raw == 0 or msg_count < prev_count_raw
-        attr_start_idx = 0 if is_first_call else prev_count_raw
+        delta_start = 0 if is_first_call else prev_count_raw
 
-        # ── Per-message prompt attributes (delta) ────────────────────
+        # Update the per-member count on the team span for the next LLM call
+        # of this member (across iterations). Also keep the per-span display
+        # count on the current iteration span.
+        if team_span is not None and team_span.is_recording() and agent_id:
+            team_span.set_attribute(f"{GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX}{agent_id}", msg_count)
+        if agent_span is not None:
+            agent_span.set_attribute(GEN_AI_REQUEST_MESSAGE_COUNT, msg_count)
+
+        # ── Per-message prompt attributes (delta + tail cap) ─────────
+        # OTel BoundedAttributes evicts FIFO (oldest first). The top-level
+        # gen_ai.system / operation.name / provider.name / request.model are
+        # written before this loop, so if the prompt attributes fill the
+        # span's max_attributes budget they would be evicted first. Reserve
+        # a fixed non-prompt budget and write only the trailing N messages.
         emit_standard_prompt = self._config.backend != "langfuse"
+        attrs_per_msg = 4 if emit_standard_prompt else 2
+        non_prompt_budget = 30  # top system + request params + team context +
+        # member name + output-stage completion/usage/finish_reason (≈22, 30
+        # leaves headroom); covers the 1 system message too.
+        writable_msg_count = max((self._config.max_attributes - non_prompt_budget) // attrs_per_msg, 0)
+
+        # Non-system delta message indices (delta_start .. end). System is
+        # always emitted separately, so it does not consume the writable budget
+        # for non-system messages.
+        delta_idxs = [i for i in range(delta_start, msg_count) if _message_role(messages[i]) != "system"]
+        if len(delta_idxs) > writable_msg_count:
+            # Keep only the trailing N so the oldest prompt slots — not the
+            # top-level attrs — are the ones dropped by FIFO.
+            delta_idxs = delta_idxs[-writable_msg_count:] if writable_msg_count > 0 else []
+        emit_set = set(delta_idxs)
+
         for i, m in enumerate(messages):
             role = _message_role(m)
             is_system = role == "system"
-            # System message → always emit.  Non-system → only emit delta.
-            if not is_system and i < attr_start_idx:
+            # System message → always emit.  Non-system → only emit delta,
+            # and only if it survived the tail cap.
+            if not is_system and i not in emit_set:
                 continue
             raw_content = _coerce_message_content(_message_content(m))
             redacted = redact_prompt(raw_content, self._config)
@@ -650,10 +696,6 @@ class OtelCallbackHandler:
             delta_msgs = [m for m in messages if _message_role(m) != "system"]
         else:
             delta_msgs = messages[prev_count_raw:]
-
-        # Update the count on the agent span for the next LLM call.
-        if agent_span is not None:
-            agent_span.set_attribute(GEN_AI_REQUEST_MESSAGE_COUNT, msg_count)
 
         input_json = json.dumps(
             [{"role": _message_role(m),

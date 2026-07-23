@@ -31,6 +31,14 @@ GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"
 GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
 GEN_AI_REQUEST_MESSAGE_COUNT = "gen_ai.request.message_count"
 
+# Per-member prev-message-count stored on the team span to make prompt
+# delta tracking survive across iterations (each iteration opens/closes its
+# own agent span, so a count stored there is lost). Keyed by agent_id
+# (``{team}_{member}``), i.e. ``gen_ai.request.prev_message_count.<agent_id>``.
+# Distinct prefix from the standard ``gen_ai.request.message_count`` to avoid
+# collision with the per-span display count.
+GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX = "gen_ai.request.prev_message_count."
+
 GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
 GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
 GEN_AI_USAGE_TOTAL_TOKENS = "gen_ai.usage.total_tokens"

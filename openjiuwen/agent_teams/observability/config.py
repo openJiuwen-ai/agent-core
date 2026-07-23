@@ -25,9 +25,15 @@ class ObservabilityConfig(BaseModel):
         redact_completions: When True, hash/truncate completion contents.
         attribute_value_max_length: Hard cap on string attribute length.
             Default 40960 (langfuse recommendation).
-        max_attributes: Maximum number of attributes per span. Default 4096.
-            Passed to OTel SDK SpanLimits to prevent BoundedAttributes FIFO
-            eviction that causes prompt/completion attribute loss.
+        max_attributes: Maximum number of attributes per span. Default 200.
+            Passed to OTel SDK SpanLimits. OTel's BoundedAttributes uses FIFO
+            eviction (oldest first), so attributes written before the prompt
+            loop (gen_ai.system / operation.name / provider.name / request.model)
+            would be evicted once the prompt attributes fill the budget.
+            200 is the span-wide cap including a ~30-attribute reservation for
+            non-prompt attrs (top system + request params + team context +
+            output-stage completion/usage/finish_reason); only the trailing
+            N prompt messages are written so the top attrs survive.
         backend: Backend type for attribute deduplication. Default "langfuse".
             When "langfuse", standard gen_ai.prompt/completion attributes are
             not written (only langfuse.* versions), avoiding duplicate attributes.
@@ -52,7 +58,7 @@ class ObservabilityConfig(BaseModel):
     redact_prompts: bool = False
     redact_completions: bool = False
     attribute_value_max_length: int = 40960
-    max_attributes: int = 4096
+    max_attributes: int = 200
     backend: Literal["langfuse", "otlp"] = "langfuse"
     export_timeout_ms: int = 5000
     # Langfuse authentication (for OTLP export via Langfuse OTLP endpoint)
