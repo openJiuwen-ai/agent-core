@@ -25,6 +25,7 @@ from openjiuwen.harness.rails import (
     SubagentRail,
     SysOperationRail,
     TaskPlanningRail,
+    ToolCallResilienceRail,
 )
 from openjiuwen.harness.schema.agent_mode import AgentMode
 from openjiuwen.harness.schema.config import (
@@ -186,6 +187,7 @@ def resolve_deep_agent_parts(
     model_selection: Optional[Dict[Model, str]] = None,
     parallel_tool_calls: bool = True,
     enable_llm_retry_rail: bool = True,
+    enable_tool_resilience_rail: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgentParts:
     """Assemble DeepAgent config + rails + tools without creating an instance.
@@ -341,6 +343,7 @@ def resolve_deep_agent_parts(
     default_rails = [
         (SecurityRail, True, lambda: SecurityRail()),
         (LLMRetryRail, enable_llm_retry_rail, lambda: LLMRetryRail()),
+        (ToolCallResilienceRail, enable_tool_resilience_rail, lambda: ToolCallResilienceRail()),
         (TaskPlanningRail, enable_task_planning, _make_task_planning_rail),
         (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
         (SubagentRail, bool(effective_subagents),
@@ -423,6 +426,7 @@ def create_deep_agent(
     model_selection: Optional[Dict[Model, str]] = None,
     parallel_tool_calls: bool = True,
     enable_llm_retry_rail: bool = True,
+    enable_tool_resilience_rail: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -469,6 +473,9 @@ def create_deep_agent(
             If False, allow access to any path including system root.
         default_mode: Initial agent mode (``AgentMode.NORMAL`` or ``AgentMode.PLAN``).
         enable_llm_retry_rail: Enable default LLMRetryRail for stream frame timeout and repeated-output retries.
+        enable_tool_resilience_rail: Enable default ToolCallResilienceRail for retryable tool-call
+            failures (transport/timeout). Bounded per-invoke retry budget; business/argument errors
+            are not retried. Set False to disable.
         model_selection: Optional model selection config for TaskPlanningRail.
             Dict mapping Model instance to description string. When provided along with
             enable_task_planning, TaskPlanningRail will be configured with model selection,
@@ -507,6 +514,7 @@ def create_deep_agent(
         model_selection=model_selection,
         parallel_tool_calls=parallel_tool_calls,
         enable_llm_retry_rail=enable_llm_retry_rail,
+        enable_tool_resilience_rail=enable_tool_resilience_rail,
         **config_kwargs,
     )
     agent = DeepAgent(parts.config.card)

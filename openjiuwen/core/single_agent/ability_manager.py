@@ -9,6 +9,8 @@ import json
 import os
 from dataclasses import dataclass
 from typing import List, Any, Union, Optional, Tuple, Dict, Iterable
+
+import anyio
 from pydantic import BaseModel
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -66,6 +68,37 @@ class AbilityExecutionError(AgentError):
             **kwargs,
         )
         self.tool_message = tool_message
+
+
+# 单次 tool.invoke 的默认调用级超时上限(秒)。作为"工具自身无超时"时的
+# 兜底,防止卡死的 tool.invoke 永久阻塞整轮 task_loop。工具可在
+# ``ToolCard.properties["resilience"]["timeout_s"]`` 声明覆盖;声明 ``None``
+# 表示豁免外层超时(完全交给工具内部超时管控)。
+DEFAULT_TOOL_CALL_TIMEOUT: float = float(os.getenv("DEFAULT_TOOL_CALL_TIMEOUT", 300.0))
+
+#: Lazy-resolved cache of the non-idempotent tool-name set. These tools are
+#: exempt from the outer ``anyio.fail_after`` by *name* (Layer 0 in
+#: ``_resolve_call_timeout``): if the outer timeout fired on a non-idempotent
+#: tool, ToolCallResilienceRail would see a retryable "timed out" marker and
+#: re-run the side effect. Resolved lazily because the canonical set lives in
+#: ``harness/rails/tool_inventory.py`` (a core→harness import); deferring it
+#: to first use keeps the harness subtree out of core's import-time path.
+_NON_IDEMPOTENT_EXEMPT_NAMES: Optional[frozenset[str]] = None
+
+
+def _load_non_idempotent_exempt_names() -> "frozenset[str]":
+    """Resolve (and cache) the non-idempotent tool-name exempt set.
+
+    Imported lazily on first call to avoid pulling the harness layer into
+    core's import-time graph; subsequent calls return the cached frozenset.
+    """
+    global _NON_IDEMPOTENT_EXEMPT_NAMES
+    if _NON_IDEMPOTENT_EXEMPT_NAMES is None:
+        from openjiuwen.harness.rails.tool_inventory import (
+            NON_IDEMPOTENT_TOOL_NAMES,
+        )
+        _NON_IDEMPOTENT_EXEMPT_NAMES = frozenset(NON_IDEMPOTENT_TOOL_NAMES)
+    return _NON_IDEMPOTENT_EXEMPT_NAMES
 
 
 class AbilityManager:
@@ -369,6 +402,56 @@ class AbilityManager:
                 tool_call_id=tool_call.id,
             ),
         )
+
+    @staticmethod
+    def _resolve_call_timeout(
+            tool_card: Optional[ToolCard],
+            *,
+            tool_name: Optional[str] = None,
+    ) -> Optional[float]:
+        """Resolve the per-call timeout for ``tool.invoke``.
+
+        Exemption / override order:
+
+        0. Tool name in the non-idempotent exempt set → ``None``. Never let
+           the outer ``fail_after`` fire on a side-effecting tool: a timeout
+           here would surface as a retryable "timed out" marker and
+           ToolCallResilienceRail would re-run the side effect. Tools in the
+           set are either pure I/O (fast, no hang risk) or carry their own
+           internal timeout (e.g. bash), so exempting the outer deadline is
+           safe. The set is sourced from ``tool_inventory.NON_IDEMPOTENT_TOOL_NAMES``.
+        1. ``ToolCard.properties["resilience"]["timeout_s"]`` declared:
+           ``None`` or non-positive → ``None`` (exempt, internal timeout governs);
+           a positive number → that many seconds.
+        2. absent / no ``resilience`` block → ``DEFAULT_TOOL_CALL_TIMEOUT``.
+
+        ``tool_name`` lets the fallback execution path (no registered card)
+        still benefit from the name-based exemption; callers that have the
+        card may omit it and the card's ``name`` is used.
+
+        Returning ``None`` means the caller passes it to
+        ``anyio.fail_after(None)``, which is a no-op deadline so exempt
+        tools behave exactly as before.
+        """
+        name = tool_name or (tool_card.name if tool_card else None)
+        if name and name in _load_non_idempotent_exempt_names():
+            return None
+        properties = getattr(tool_card, "properties", None) if tool_card else None
+        if not isinstance(properties, dict):
+            return DEFAULT_TOOL_CALL_TIMEOUT
+        resilience = properties.get("resilience")
+        if not isinstance(resilience, dict):
+            return DEFAULT_TOOL_CALL_TIMEOUT
+        declared = resilience.get("timeout_s", "unset")
+        if declared == "unset":
+            return DEFAULT_TOOL_CALL_TIMEOUT
+        if declared is None:
+            return None
+        try:
+            value = float(declared)
+        except (TypeError, ValueError):
+            return DEFAULT_TOOL_CALL_TIMEOUT
+        return value if value > 0 else None
 
     @staticmethod
     def _get_stream_writer_manager(session: Session) -> Any:
@@ -1115,8 +1198,17 @@ class AbilityManager:
                     tool_call,
                     f"Tool instance not found in resource_mgr: {tool_id}",
                 )
+            call_timeout = self._resolve_call_timeout(tool_card)
             try:
-                result = await tool.invoke(tool_args, session=session)
+                with anyio.fail_after(call_timeout):
+                    result = await tool.invoke(tool_args, session=session)
+            except TimeoutError as e:
+                error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
+                logger.warning(error_msg)
+                raise self._build_execution_error(
+                    tool_call,
+                    error_msg,
+                ) from e
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
                 logger.error(error_msg)
@@ -1200,8 +1292,17 @@ class AbilityManager:
                     tool_call,
                     f"Ability not found in resource_mgr: {tool_name}",
                 )
+            call_timeout = self._resolve_call_timeout(None, tool_name=tool_name)
             try:
-                result = await tool.invoke(tool_args, session=session)
+                with anyio.fail_after(call_timeout):
+                    result = await tool.invoke(tool_args, session=session)
+            except TimeoutError as e:
+                error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
+                logger.warning(error_msg)
+                raise self._build_execution_error(
+                    tool_call,
+                    error_msg,
+                ) from e
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
                 logger.error(error_msg)
