@@ -1594,12 +1594,12 @@ async def test_team_span_uses_agent_team_name(
 async def test_cross_iteration_prompt_delta_uses_team_span_count(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
-    """Iteration 2's first LLM call emits only the delta over iteration 1.
+    """Iteration 2's LLM call emits the full prompt (not delta).
 
-    Root cause this guards: ``gen_ai.request.message_count`` was stored on the
-    iteration span, which closes per-iteration — so iteration 2 read 0 and
-    re-emitted the full prompt. The fix stores the per-member prev count on the
-    team span (keyed by agent_id) so it survives across iterations.
+    The per-member prev message_count is stored on the team span (keyed by
+    agent_id) so it survives across iterations.  ``langfuse.observation.input``
+    still uses delta (only new messages), but per-message ``gen_ai.prompt.{i}.*``
+    attributes use the full prompt so Langfuse always shows the complete context.
     """
     from openjiuwen.agent_teams.observability.span_context import (
         get_team_span,
@@ -1671,22 +1671,34 @@ async def test_cross_iteration_prompt_delta_uses_team_span_count(
 
     finalize_team_trace("test_team")
 
-    # Iteration 2's llm.call span must only carry the system message + the 2
-    # NEW user messages (m4, m5) as prompt attributes — not the full history.
+    # Iteration 2's llm.call span carries the FULL prompt (system + all user
+    # messages m1-m5) as attributes — not delta.
     llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
     assert len(llm_spans) >= 2
     iter2_llm = llm_spans[-1]
     attrs = dict(iter2_llm.attributes or {})
-    # system always emitted; m1/m2/m3 must NOT be re-emitted in iteration 2.
+    # system always emitted.
     assert _attr(iter2_llm, "langfuse.gen_ai.prompt.0.role") == "system"
-    assert "langfuse.gen_ai.prompt.1.content" not in attrs, (
-        "iteration 2 should skip iteration 1's user message m1 (delta only)"
+    # m1/m2/m3 ARE re-emitted in iteration 2 (full prompt, not delta).
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.1.role") == "user", (
+        "iteration 2 should include iteration 1's m1 (full prompt)"
     )
-    assert "langfuse.gen_ai.prompt.2.content" not in attrs
-    assert "langfuse.gen_ai.prompt.3.content" not in attrs
-    # m4/m5 ARE emitted (indices 4 and 5 in the full list).
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.1.content") == "m1"
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.2.content") == "m2"
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.3.content") == "m3"
+    # m4/m5 are also emitted (indices 4 and 5 in the full list).
     assert _attr(iter2_llm, "langfuse.gen_ai.prompt.4.role") == "user"
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.4.content") == "m4"
     assert _attr(iter2_llm, "langfuse.gen_ai.prompt.5.role") == "user"
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.5.content") == "m5"
+    # observation.input still uses delta — iteration 2 only has new messages.
+    input_json = _attr(iter2_llm, "langfuse.observation.input", "")
+    assert "m4" in input_json and "m5" in input_json, (
+        "observation.input should contain new messages (delta)"
+    )
+    assert "m1" not in input_json and "m2" not in input_json, (
+        "observation.input should NOT re-emit iteration 1 messages"
+    )
 
     remove_team_span("test_team")
 
