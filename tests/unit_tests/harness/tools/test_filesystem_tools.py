@@ -9,10 +9,11 @@ import shutil
 import tempfile
 import unittest
 from types import MethodType
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import pytest_asyncio
+from PIL import Image
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
@@ -119,6 +120,51 @@ async def test_read_file_image_can_disable_multimodal_payload(sys_op, temp_dir):
     assert "base64," not in read_res.data["content"]
     assert read_res.data["multimodal"] == []
     assert "native image multimodal input is disabled" in read_res.data["content"]
+
+
+def test_estimate_base64_tokens_matches_actual_encoding():
+    for length in (0, 1, 2, 3, 4, 5, 100, 1000, 123457):
+        data = b"a" * length
+        actual_tokens = max(1, int(len(base64.b64encode(data)) * 0.125))
+        assert ReadFileTool._estimate_base64_tokens(length) == actual_tokens
+
+
+def test_compress_image_does_not_mutate_source():
+    img = Image.new("RGB", (500, 500), color="red")
+    original_size = img.size
+
+    result = ReadFileTool._compress_image(img, size=(100, 100), quality=50)
+
+    assert result is not None
+    assert img.size == original_size, "compression tiers must not mutate the shared source image"
+
+
+@pytest.mark.asyncio
+async def test_read_file_image_compresses_large_image_with_single_decode_and_encode(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "large_noise.png")
+
+    # Random noise compresses poorly, guaranteeing the payload busts the
+    # token budget and forces the aggressive-compression fallback tiers.
+    width = height = 1800
+    noise = Image.frombytes("RGB", (width, height), os.urandom(width * height * 3))
+    noise.save(file_path, format="PNG")
+    raw_size = os.path.getsize(file_path)
+
+    with patch("PIL.Image.open", wraps=Image.open) as open_spy, \
+         patch("openjiuwen.harness.tools.filesystem.base64.b64encode", wraps=base64.b64encode) as encode_spy:
+        read_res = await read_tool.invoke({"file_path": file_path})
+
+    assert read_res.success is True
+    assert open_spy.call_count == 1, "image bytes must be decoded exactly once"
+    assert encode_spy.call_count == 1, "the final payload must be base64-encoded exactly once"
+
+    data_url = read_res.data["multimodal"][0]["data_url"]
+    assert data_url.startswith("data:image/")
+    encoded_payload = data_url.split(",", 1)[1]
+    decoded = base64.b64decode(encoded_payload)
+    assert len(decoded) < raw_size
+    assert ReadFileTool._estimate_base64_tokens(len(decoded)) <= ReadFileTool.MAX_TOKENS
 
 
 @pytest.mark.asyncio
