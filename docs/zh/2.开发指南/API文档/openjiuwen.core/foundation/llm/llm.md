@@ -255,6 +255,21 @@ class openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client.Sili
 
 ---
 
+## class openjiuwen.core.foundation.llm.model_clients.openai_account_model_client.OpenAIAccountModelClient
+
+```
+class openjiuwen.core.foundation.llm.model_clients.openai_account_model_client.OpenAIAccountModelClient(model_config: ModelRequestConfig, model_client_config: ModelClientConfig)
+```
+
+继承 `BaseModelClient`，对接 OpenAI 账户后端（`chatgpt.com/backend-api/codex`）。该 provider 不要求在 `ModelClientConfig` 中配置 `api_key`，而是在请求时通过 `OpenAIAccountAuthManager` 从本地 OAuth 凭据存储中解析访问令牌，并在令牌过期时自动刷新；实现 `invoke`、`stream`，支持 tool_calls、output_parser。
+
+**参数**：
+
+* **model_config**(ModelRequestConfig)：模型请求参数。
+* **model_client_config**(ModelClientConfig)：客户端配置，`client_provider` 需为 `"OpenAIAccount"`，`api_key` 可省略。
+
+---
+
 ## class openjiuwen.core.foundation.llm.model_clients.dashscope_model_client.DashScopeModelClient
 
 ```
@@ -566,6 +581,7 @@ Chinese, English, German, Italian, Portuguese, Spanish, Japanese, Korean, French
 定义了支持的模型服务商类型。
 
 * **OpenAI**：表示 OpenAI 服务商。
+* **OpenAIAccount**：表示使用 OpenAI 账户 OAuth 凭据接入的服务商，无需 `api_key`。
 * **SiliconFlow**：表示 SiliconFlow 服务商。
 
 ---
@@ -575,9 +591,9 @@ Chinese, English, German, Italian, Portuguese, Spanish, Japanese, Korean, French
 客户端配置数据类。
 
 * **client_id**(str)：客户端唯一标识，用于在 Runner 中注册。默认值：由 `uuid.uuid4()` 自动生成。
-* **client_provider**(Union[ProviderType, str])：服务商标识。枚举值：`OpenAI`、`SiliconFlow`。
-* **api_key**(str)：API 密钥。
-* **api_base**(str)：API 基础 URL。
+* **client_provider**(Union[ProviderType, str])：服务商标识。枚举值：`OpenAI`、`OpenAIAccount`、`SiliconFlow`。
+* **api_key**(str)：API 密钥。当 `client_provider` 为 `OpenAIAccount` 时可省略（默认值：`""`），其余内置 provider 均为必填。
+* **api_base**(str)：API 基础 URL。对所有内置 provider（含 `OpenAIAccount`）均为必填，不会自动填充默认值。
 * **timeout**(float)：请求超时，单位：秒。取值范围大于 0。默认值：`60.0`。
 * **max_retries**(int)：最大重试次数。默认值：`3`。
 * **verify_ssl**(bool)：是否验证 SSL 证书。默认值：`True`。
@@ -685,6 +701,7 @@ Chinese, English, German, Italian, Portuguese, Spanish, Japanese, Korean, French
 * **name**(str)：工具名称。
 * **arguments**(str)：工具参数（JSON 字符串）。
 * **index**(int，可选)：工具调用索引，用于区分多次工具调用。默认值：`None`。
+* **response_item_id**(str，可选)：部分协议中用于区分响应条目 ID 与工具调用 ID 的厂商响应条目 ID。默认值：`None`。
 
 ---
 
