@@ -202,8 +202,17 @@ class ObservabilityRail(DeepAgentRail):
             member_name = self._resolve_member_name(agent)
             team_name = getattr(agent, "team_name", "")
 
-            # Standalone agents (not in a team) have no team span to parent under.
-            if not team_name:
+            team_span = get_team_span()
+            if team_span is None:
+                team_logger.warning("RAIL.before_task_iteration: team_span is None! team_name={}", team_name)
+                return
+            if not team_span.is_recording():
+                team_logger.warning(
+                    "RAIL.before_task_iteration: team_span ENDED! name={} trace_id={:032x} "
+                    "span_id={:016x} member={} iteration={}",
+                    team_span.name, team_span.context.trace_id, team_span.context.span_id,
+                    member_name, iteration,
+                )
                 return
 
             # Get session_id from ContextVar (no agent attribute for this)
@@ -218,19 +227,6 @@ class ObservabilityRail(DeepAgentRail):
                 "RAIL.before_task_iteration: member={} iteration={} ctx_id={}",
                 member_name, iteration, id(ctx),
             )
-
-            team_span = get_team_span()
-            if team_span is None:
-                team_logger.warning("RAIL.before_task_iteration: team_span is None! team_name={}", team_name)
-                return
-            if not team_span.is_recording():
-                team_logger.warning(
-                    "RAIL.before_task_iteration: team_span ENDED! name={} trace_id={:032x} "
-                    "span_id={:016x} member={} iteration={}",
-                    team_span.name, team_span.context.trace_id, team_span.context.span_id,
-                    member_name, iteration,
-                )
-                return
 
             if AgentSpanScope.current(ctx) is not None:
                 old = AgentSpanScope.current(ctx).span
