@@ -208,9 +208,11 @@ class BaseModelClient(ABC):
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                               error_msg="model client config verify_ssl must be a boolean type.")
 
-        if self.model_client_config.verify_ssl is True and self.model_client_config.ssl_cert is None:
-            raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
-                              error_msg="model client config ssl_cert is required when verify_ssl is True.")
+        # NOTE: ssl_cert is no longer mandatory when verify_ssl=True. With the
+        # updated SslUtils.create_strict_ssl_context, omitting ssl_cert makes
+        # the client fall back to the system default trust store (public CAs
+        # like api.openai.com work out of the box); a user-provided ssl_cert is
+        # loaded additively on top of the default store for self-signed endpoints.
 
     @staticmethod
     def _convert_messages_to_dict(messages: Union[str, List[BaseMessage], List[dict]]) -> List[dict]:
