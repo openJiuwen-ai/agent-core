@@ -44,6 +44,22 @@ _MASK_COLORS = [
 
 
 class KeypointProposer:
+    @staticmethod
+    def _select_device(device: Optional[str], torch_module: Any) -> str:
+        """Pick a torch device: explicit override, else CUDA, else MPS, else CPU.
+
+        Takes the already-imported ``torch`` module as a parameter so this
+        selection logic can be unit-tested with a fake module, without
+        requiring torch to be installed to import this file.
+        """
+        if device is not None:
+            return device
+        if torch_module.cuda.is_available():
+            return "cuda"
+        if torch_module.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+
     def __init__(
         self,
         *,
@@ -68,7 +84,7 @@ class KeypointProposer:
             ) from e
 
         self._torch = torch
-        self.device = device or ("cuda" if torch.cuda.is_available() else "mps")
+        self.device = self._select_device(device, torch)
         self.k = k_per_mask
         self.bandwidth_m = meanshift_bandwidth_m
         self.target_long = target_long_side

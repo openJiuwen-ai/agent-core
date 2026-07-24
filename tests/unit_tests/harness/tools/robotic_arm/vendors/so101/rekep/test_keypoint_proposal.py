@@ -46,3 +46,61 @@ def test_segmentation_overlay_no_masks_returns_original() -> None:
     overlay = KeypointProposer._segmentation_overlay(rgb, [])
 
     assert np.array_equal(overlay, rgb)
+
+
+class _FakeCudaModule:
+    def __init__(self, available: bool) -> None:
+        self._available = available
+
+    def is_available(self) -> bool:
+        return self._available
+
+
+class _FakeMpsBackend:
+    def __init__(self, available: bool) -> None:
+        self._available = available
+
+    def is_available(self) -> bool:
+        return self._available
+
+
+class _FakeBackendsModule:
+    def __init__(self, mps_available: bool) -> None:
+        self.mps = _FakeMpsBackend(mps_available)
+
+
+class _FakeTorchModule:
+    """Duck-typed stand-in for the ``torch`` module, so device selection can be
+    tested without torch (an optional, heavy robotic-arm-so101-rekep dependency)
+    installed."""
+
+    def __init__(self, *, cuda_available: bool, mps_available: bool) -> None:
+        self.cuda = _FakeCudaModule(cuda_available)
+        self.backends = _FakeBackendsModule(mps_available)
+
+
+def test_select_device_prefers_explicit_override() -> None:
+    torch_module = _FakeTorchModule(cuda_available=True, mps_available=True)
+
+    assert KeypointProposer._select_device("cpu", torch_module) == "cpu"
+
+
+def test_select_device_prefers_cuda_when_available() -> None:
+    torch_module = _FakeTorchModule(cuda_available=True, mps_available=True)
+
+    assert KeypointProposer._select_device(None, torch_module) == "cuda"
+
+
+def test_select_device_falls_back_to_mps_when_cuda_unavailable() -> None:
+    torch_module = _FakeTorchModule(cuda_available=False, mps_available=True)
+
+    assert KeypointProposer._select_device(None, torch_module) == "mps"
+
+
+def test_select_device_falls_back_to_cpu_when_neither_available() -> None:
+    # This is the case a Windows/Linux CPU-only machine hits: previously this
+    # returned "mps" unconditionally whenever CUDA was unavailable, which is an
+    # Apple-only backend and crashes on non-Mac hardware.
+    torch_module = _FakeTorchModule(cuda_available=False, mps_available=False)
+
+    assert KeypointProposer._select_device(None, torch_module) == "cpu"
