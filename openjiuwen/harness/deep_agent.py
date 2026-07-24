@@ -28,6 +28,9 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.user_config import UserConfig
+from openjiuwen.harness.multi_rollout.executor import (
+    MultiRolloutExecutor,
+)
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.controller.config import ControllerConfig
@@ -2374,6 +2377,19 @@ class DeepAgent(BaseAgent):
             )
 
         invoke_inputs = self._normalize_inputs(inputs)
+
+        # Multi-rollout: when enabled, run N isolated parallel attempts
+        # and return the best result instead of the normal single path.
+        if (
+            self._deep_config is not None
+            and self._deep_config.multi_rollout is not None
+            and self._deep_config.multi_rollout.enabled
+        ):
+            executor = MultiRolloutExecutor(
+                self, self._deep_config.multi_rollout
+            )
+            return await executor.invoke(invoke_inputs, session)
+
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
 
         self._invoke_active = True

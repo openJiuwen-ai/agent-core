@@ -61,6 +61,7 @@
     - [Security Guardrail](2.Development%20Guide/Advanced%20Usage/Security%20Guardrail.md)
     - [MCP Tool](2.Development%20Guide/Advanced%20Usage/MCP%20Tool.md)
     - [Store Plugin Development](2.Development%20Guide/Advanced%20Usage/Store%20Plugin%20Development.md)
+    - [Multi-Rollout Parallel Task Execution](2.Development%20Guide/Advanced%20Usage/Multi-Rollout%20Parallel%20Task%20Execution.md)
     - [IntelliRouter](2.Development%20Guide/Advanced%20Usage/IntelliRouter.md)
   - [API Docs](2.Development%20Guide/API%20Docs/README.md)
     - [openjiuwen.harness](2.Development%20Guide/API%20Docs/openjiuwen.harness.README.md)
