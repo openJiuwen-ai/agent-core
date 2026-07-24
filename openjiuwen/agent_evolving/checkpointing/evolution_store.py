@@ -17,6 +17,9 @@ from openjiuwen.agent_evolving.checkpointing.changelog import (
     merge_changelog_for_release,
     utc_today_iso,
 )
+from openjiuwen.agent_evolving.checkpointing.skill_summary import (
+    generate_skill_experiences_summary,
+)
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionPatch,
     EvolutionRecord,
@@ -287,6 +290,8 @@ class EvolutionStore:
         name: str,
         evo_log: EvolutionLog,
         skill_dir: Optional[Path] = None,
+        *,
+        refresh_summary: bool = True,
     ) -> None:
         target_dir = skill_dir or self._resolve_skill_dir(name, create=True)
         if target_dir is None:
@@ -294,7 +299,35 @@ class EvolutionStore:
 
         target_dir.mkdir(parents=True, exist_ok=True)
         evo_path = target_dir / _EVOLUTION_FILENAME
+        if refresh_summary:
+            evo_log.refresh_summary()
         await self._write_file_text(evo_path, json.dumps(evo_log.to_dict(), ensure_ascii=False, indent=2))
+
+    async def refresh_skill_summary(
+        self,
+        name: str,
+        *,
+        llm: Any = None,
+        model: Optional[str] = None,
+        language: str = "cn",
+    ) -> Optional[str]:
+        """Regenerate top-level evolutions.json summary (LLM, with heuristic fallback)."""
+        evo_log = await self._load_full_evolution_log(name)
+        summary = await generate_skill_experiences_summary(
+            skill_id=name,
+            entries=evo_log.entries,
+            llm=llm,
+            model=model,
+            language=language,
+        )
+        evo_log.summary = summary
+        await self._save_evolution_log(name, evo_log, refresh_summary=False)
+        logger.info(
+            "[EvolutionStore] refreshed skill summary for '%s' (chars=%d)",
+            name,
+            len(summary or ""),
+        )
+        return summary
 
     async def get_pending_records(
         self,
@@ -536,7 +569,7 @@ class EvolutionStore:
         return cls._normalize_summary_text(first_line) or record.id
 
     @staticmethod
-    def _normalize_summary_text(text: str, max_chars: int = 96) -> str:
+    def _normalize_summary_text(text: str, max_chars: int = 100) -> str:
         value = text.strip()
         value = re.sub(r"^#{1,6}\s*", "", value)
         value = value.replace("|", " ")

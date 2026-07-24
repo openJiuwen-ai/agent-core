@@ -55,12 +55,7 @@ def make_signal(excerpt: str = "tool timeout") -> EvolutionSignal:
 
 def _mock_analyzer_json(candidates: list) -> str:
     return json.dumps({
-        "root_causes": [{
-            "failure_type": "skill_instruction_gap",
-            "confidence": 0.9,
-            "evidence": ["test signal"],
-            "should_evolve": True,
-        }],
+        "root_cause": "技能缺少超时重试指引",
         "candidates": candidates,
     }, ensure_ascii=False)
 
@@ -283,6 +278,48 @@ class TestSkillExperienceOptimizerGenerate:
         assert records[0].summary == "When tool calls time out, retry with a shorter prompt."
         assert records[0].change.summary == "When tool calls time out, retry with a shorter prompt."
         assert records[0].change.keywords == ["timeout", "retry", "prompt"]
+        assert records[0].root_cause == "技能缺少超时重试指引"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_two_stage_truncates_summary_to_100_chars():
+        llm = MagicMock()
+        long_summary = "A" * 160
+        candidates = [
+            {
+                "action": "append",
+                "target": "body",
+                "section": "Troubleshooting",
+                "summary": long_summary,
+                "keywords": ["timeout"],
+                "content": "A",
+            },
+        ]
+        patches = [
+            {
+                "action": "append",
+                "target": "body",
+                "section": "Troubleshooting",
+                "summary": long_summary,
+                "keywords": ["timeout"],
+                "content": "A",
+                "merge_target": None,
+            },
+        ]
+        llm.invoke = AsyncMock(side_effect=_two_stage_llm_side_effect(candidates, patches))
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="en", two_stage=True)
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal()],
+            skill_content="# skill",
+            messages=[{"role": "user", "content": "hello"}],
+            existing_desc_records=[],
+            existing_body_records=[],
+        )
+        records = await optimizer.generate_records(ctx)
+        assert len(records) == 1
+        assert len(records[0].summary or "") == 100
+        assert records[0].to_dict()["root_cause"] == "技能缺少超时重试指引"
 
     @staticmethod
     def test_two_stage_prompts_require_summary_and_keywords():
@@ -296,8 +333,12 @@ class TestSkillExperienceOptimizerGenerate:
             formatter = SKILL_EXPERIENCE_FORMATTER_PROMPT[lang]
             assert '"summary"' in analyzer
             assert '"keywords"' in analyzer
+            assert '"root_cause"' in analyzer
+            assert "100" in analyzer
             assert '"summary"' in formatter
             assert '"keywords"' in formatter
+            assert '"root_cause"' in formatter
+            assert "100" in formatter
 
     @staticmethod
     def test_update_llm_updates_runtime_references():
@@ -544,7 +585,7 @@ class TestFixJsonText:
     def test_parse_analyzer_response_with_https_in_content():
         raw = '''```json
 {
-  "root_causes": [{"failure_type": "skill_instruction_gap", "confidence": 0.85, "evidence": ["x"], "should_evolve": true}],
+  "root_cause": "技能缺少超时重试指引",
   "candidates": [{
     "action": "append",
     "target": "body",

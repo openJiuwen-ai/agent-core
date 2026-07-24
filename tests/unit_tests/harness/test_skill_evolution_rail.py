@@ -50,6 +50,7 @@ def _make_rail(tmp_path, *, auto_scan: bool = True, auto_save: bool = True) -> S
         auto_save=auto_save,
     )
     rail._evolution_store = Mock()
+    rail._evolution_store.refresh_skill_summary = AsyncMock(return_value=None)
     rail._evolver = Mock()
     return rail
 
@@ -121,6 +122,50 @@ def test_extract_file_path():
     ]
     for args, expected in cases:
         assert rail._extract_file_path(args) == expected
+
+
+def test_prepare_record_for_evolutions_json_caps_summary_and_sets_root_cause():
+    record = _make_record("skill-a")
+    record.summary = "字" * 150
+    record.change.summary = record.summary
+    record.root_cause = None
+
+    SkillEvolutionRail._prepare_record_for_evolutions_json(record)
+
+    assert record.summary is not None
+    assert len(record.summary) == 100
+    assert record.change.summary == record.summary
+    assert record.root_cause is None
+    payload = record.to_dict()
+    assert "root_cause" in payload
+    assert "summary" in payload
+    assert len(payload["summary"]) == 100
+
+
+def test_prepare_record_for_evolutions_json_keeps_root_cause():
+    record = _make_record("skill-a")
+    record.summary = "短摘要"
+    record.root_cause = "技能缺少超时重试指引"
+
+    SkillEvolutionRail._prepare_record_for_evolutions_json(record)
+
+    assert record.summary == "短摘要"
+    assert record.root_cause == "技能缺少超时重试指引"
+    assert record.to_dict()["root_cause"] == "技能缺少超时重试指引"
+
+
+def test_prepare_record_for_evolutions_json_falls_back_summary_from_content():
+    record = _make_record("skill-a", content="## 超时重试\n- 先重试\n- 再切换备用")
+    record.summary = None
+    record.change.summary = None
+    record.root_cause = None
+
+    SkillEvolutionRail._prepare_record_for_evolutions_json(record)
+
+    assert record.summary == "## 超时重试"
+    assert record.change.summary == "## 超时重试"
+    assert record.root_cause is None
+    assert record.to_dict()["summary"] == "## 超时重试"
 
 
 def test_properties_and_clear_processed_signals(tmp_path):
@@ -892,6 +937,12 @@ async def test_run_evolution_auto_save_appends_records(tmp_path, monkeypatch):
     )
     rail._evolution_store.append_record.assert_any_await(
         "skill-a", records[1], update_skill_md=False
+    )
+    rail._evolution_store.refresh_skill_summary.assert_awaited_once_with(
+        "skill-a",
+        llm=rail._optimizer_llm,
+        model=rail._optimizer_model,
+        language=rail._language,
     )
     rail._emit_generated_records.assert_not_awaited()
 
