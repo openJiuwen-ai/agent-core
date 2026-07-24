@@ -204,7 +204,8 @@ class ObservabilityRail(DeepAgentRail):
 
             team_span = get_team_span()
             if team_span is None:
-                team_logger.warning("RAIL.before_task_iteration: team_span is None! team_name={}", team_name)
+                if team_name:
+                    team_logger.warning("RAIL.before_task_iteration: team_span is None! team_name={}", team_name)
                 return
             if not team_span.is_recording():
                 team_logger.warning(

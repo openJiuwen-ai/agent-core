@@ -191,7 +191,7 @@ class OtelCallbackHandler:
                     team_span.context.span_id,
                 )
 
-        team_logger.warning("otel: no valid parent span for LLM/tool — skipping span creation")
+        team_logger.debug("otel: no valid parent span for LLM/tool — skipping span creation")
         return None
 
     # ------------------------------------------------------------------
