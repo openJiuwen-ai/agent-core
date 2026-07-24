@@ -36,6 +36,7 @@ def _get_exception_class_registry() -> Dict[str, Type]:
         "ContextError": _errors.ContextError,
         "RunnerError": _errors.RunnerError,
         "CryptError": _errors.CryptError,
+        "StoreError": _errors.StoreError,
     }
 
 
@@ -47,6 +48,22 @@ KEYWORD_RULES = [
     (("CALL", "INVOKE_LLM", "MODEL", "REMOTE"), "FrameworkError"),
 
     (("TIMEOUT", "EXECUTE", "EXECUTION", "RUNTIME", "PROCESS", "STREAM", "RESPONSE"), "ExecutionError"),
+
+    # Lowest priority so earlier keyword rules win for store/checkpointer names
+    # that also mention INVALID / CONFIG / INIT / EXECUTION etc. Intentionally
+    # reclassifies persistence-layer codes that previously fell through to the
+    # range fallback into StoreError, which owns store/checkpointer failures.
+    # As of this rule, 6 existing codes are remapped:
+    #   - STORE_VECTOR_COLLECTION_NOT_FOUND (186002) : FrameworkError -> StoreError
+    #   - STORE_GRAPH_FACTORY_NOT_INSTANTIABLE (186008): FrameworkError -> StoreError
+    #     (these two flip fatal True -> False)
+    #   - CHECKPOINTER_INTERRUPT_AGENT_ERROR (111122) : WorkflowError -> StoreError
+    #   - RETRIEVAL_RETRIEVER_VECTOR_STORE_NOT_FOUND (155206): ContextError -> StoreError
+    #   - RETRIEVAL_VECTOR_STORE_PATH_NOT_FOUND (155400): ContextError -> StoreError
+    #   - RETRIEVAL_KB_VECTOR_STORE_NOT_FOUND (155503) : ContextError -> StoreError
+    # The last four stay within the recoverable ExecutionError family (relabel
+    # only). Add a MANUAL_OVERRIDE if a specific code must keep its previous class.
+    (("STORE", "CHECKPOINTER"), "StoreError"),
 ]
 
 RANGE_RULES = [
@@ -75,6 +92,7 @@ _MANUAL_OVERRIDES_RAW = {
     "AGENT_RL_REWARD_NOT_FOUND": "ValidationError",
     "COMMON_ENCRYPTION_ERROR": "CryptError",
     "COMMON_DECRYPTION_ERROR": "CryptError",
+    "PREGEL_GRAPH_SUPER_STEP_EXECUTION_ERROR": "GraphError",
 }
 
 # Build the actual mapping only for StatusCode members that exist in the current enum.
