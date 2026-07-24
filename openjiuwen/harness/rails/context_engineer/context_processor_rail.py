@@ -9,8 +9,11 @@ from typing import Any, Dict, List, Tuple, Union
 
 from pydantic import BaseModel
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import (
+    LOOP_COMPACT_BAILOUT_STATE_KEY,
     CurrentRoundCompressorConfig,
     DialogueCompressorConfig,
     FullCompactProcessorConfig,
@@ -19,6 +22,7 @@ from openjiuwen.core.context_engine import (
     ReasoningToolLoopCompactProcessorConfig,
     ToolResultBudgetProcessorConfig,
 )
+from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     SessionMemoryConfig,
     SessionMemoryManager,
@@ -35,6 +39,10 @@ from openjiuwen.harness.schema.state import (
     _SESSION_STATE_KEY,
     DeepAgentState,
 )
+
+
+_LOOP_BAILOUT_MARKER = "reasoning/tool loop unresolved after repeated compaction"
+_LOOP_COMPACT_PROCESSOR_KEY = "ReasoningToolLoopCompactProcessor"
 
 
 class ContextProcessorRail(DeepAgentRail):
@@ -282,9 +290,11 @@ class ContextProcessorRail(DeepAgentRail):
         self._reload_enabled = False
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        self._reset_loop_bailout_counter(ctx)
         await self.fix_incomplete_tool_context(ctx)
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        self._maybe_bailout_reasoning_tool_loop(ctx)
         self._refresh_task_state_runtime(ctx)
         await self._maybe_inject_offload_section()
 
@@ -313,6 +323,72 @@ class ContextProcessorRail(DeepAgentRail):
         await self._session_memory_mgr.maybe_schedule_update(
             ctx,
             workspace=self.workspace,
+        )
+
+    def _resolve_loop_bailout_threshold(self) -> int:
+        """Return the configured loop-compaction bail-out threshold (0 = off)."""
+        for key, cfg in self._all_processors:
+            if key != _LOOP_COMPACT_PROCESSOR_KEY:
+                continue
+            threshold = getattr(cfg, "bailout_threshold", 0)
+            try:
+                return max(0, int(threshold))
+            except (TypeError, ValueError):
+                return 0
+        return 0
+
+    @staticmethod
+    def _reset_loop_bailout_counter(ctx: AgentCallbackContext) -> None:
+        """Clear the shared loop-compaction counter at the start of an invoke."""
+        session = ctx.session
+        if session is None:
+            return
+        session.update_state({LOOP_COMPACT_BAILOUT_STATE_KEY: 0})
+
+    def _maybe_bailout_reasoning_tool_loop(self, ctx: AgentCallbackContext) -> None:
+        """Raise before the model call when the loop persists after compaction.
+
+        The ``ReasoningToolLoopCompactProcessor`` increments a shared counter on
+        the session every time it folds a consecutive identical reasoning/tool
+        loop. Once that counter reaches ``bailout_threshold`` (i.e. the model
+        keeps looping even after being compacted/warned that many times), abort
+        the run so the caller can perceive the failure instead of looping forever.
+
+        Raising ``AbortError`` (with a ``build_error`` cause) is required because
+        plain exceptions raised inside a rail callback are swallowed by the
+        callback framework; ``AbortError`` re-raises its cause across the
+        ``trigger`` boundary so the underlying ``build_error`` propagates.
+        """
+        threshold = self._resolve_loop_bailout_threshold()
+        if threshold <= 0:
+            return
+        session = ctx.session
+        if session is None:
+            return
+        try:
+            count = int(session.get_state(LOOP_COMPACT_BAILOUT_STATE_KEY) or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count < threshold:
+            return
+        # Clear first so a caller-level retry / next invoke starts clean.
+        session.update_state({LOOP_COMPACT_BAILOUT_STATE_KEY: 0})
+        logger.warning(
+            "[ContextProcessorRail] %s: compaction_count=%d >= threshold=%d; aborting run",
+            _LOOP_BAILOUT_MARKER,
+            count,
+            threshold,
+        )
+        raise AbortError(
+            _LOOP_BAILOUT_MARKER,
+            cause=build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg=(
+                    f"{_LOOP_BAILOUT_MARKER}: the model repeated identical "
+                    f"reasoning and tool calls through {count} compaction(s) "
+                    f"(threshold={threshold})"
+                ),
+            ),
         )
 
     @staticmethod

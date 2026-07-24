@@ -59,6 +59,12 @@ _LOOP_WARNING_TEMPLATES = {
     "en": _LOOP_WARNING_TEMPLATE_EN,
 }
 
+# Session-state key holding the number of times this processor has folded a
+# consecutive identical reasoning/tool loop within the current agent invoke.
+# A rail reads this counter to decide whether to bail out (raise) when the
+# model keeps looping even after repeated compaction.
+LOOP_COMPACT_BAILOUT_STATE_KEY = "reasoning_tool_loop_compact_count"
+
 
 class ReasoningToolLoopCompactProcessorConfig(BaseModel):
     """Detect and compact consecutive identical reasoning + tool-call rounds."""
@@ -88,6 +94,17 @@ class ReasoningToolLoopCompactProcessorConfig(BaseModel):
     language: str = Field(
         default="cn",
         description="Loop warning language ('cn' or 'en').",
+    )
+    bailout_threshold: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "Raise a bail-out error once this many loop compactions have been "
+            "triggered within a single agent invoke (i.e. the model keeps "
+            "looping even after being compacted/warned this many times). "
+            "Set to 0 to disable the bail-out. The actual raise is performed "
+            "by a rail that reads the shared counter."
+        ),
     )
 
 
@@ -143,6 +160,7 @@ class ReasoningToolLoopCompactProcessor(ContextProcessor):
             return None, messages_to_add
 
         context.set_messages(compacted)
+        self._record_bailout_signal(context)
         logger.info(
             "[ReasoningToolLoopCompact] compacted consecutive identical "
             "reasoning/tool rounds on ADD path: before=%d after=%d",
@@ -159,6 +177,28 @@ class ReasoningToolLoopCompactProcessor(ContextProcessor):
 
     def save_state(self) -> Dict[str, Any]:
         return {}
+
+    def _record_bailout_signal(self, context: ModelContext) -> None:
+        """Increment the shared loop-compaction counter on the session.
+
+        The counter is read by a rail (e.g. ``ContextProcessorRail``) to decide
+        whether to bail out when the model keeps looping even after repeated
+        compaction. No-op when the bail-out is disabled or no session is bound.
+        """
+        if self.config.bailout_threshold <= 0:
+            return
+        get_session_ref = getattr(context, "get_session_ref", None)
+        session = get_session_ref() if callable(get_session_ref) else None
+        if session is None:
+            return
+        try:
+            current = int(session.get_state(LOOP_COMPACT_BAILOUT_STATE_KEY) or 0)
+            session.update_state({LOOP_COMPACT_BAILOUT_STATE_KEY: current + 1})
+        except Exception as exc:  # best-effort signal; never break compaction
+            logger.warning(
+                "[ReasoningToolLoopCompact] failed to record bail-out signal: %s",
+                exc,
+            )
 
     def _compact_messages(self, messages: List[BaseMessage]) -> Optional[List[BaseMessage]]:
         compact_range = self._find_compact_range(messages)
@@ -367,6 +407,7 @@ def _normalize_language(language: str | None) -> str:
 
 
 __all__ = [
+    "LOOP_COMPACT_BAILOUT_STATE_KEY",
     "ReasoningToolLoopCompactProcessor",
     "ReasoningToolLoopCompactProcessorConfig",
 ]

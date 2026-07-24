@@ -9,9 +9,30 @@ import pytest
 
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.compressor.reasoning_tool_loop_compact_processor import (
+    LOOP_COMPACT_BAILOUT_STATE_KEY,
     ReasoningToolLoopCompactProcessorConfig,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
+
+
+class _FakeSession:
+    """Minimal session double exposing the get_state/update_state contract.
+
+    Mirrors ``openjiuwen.core.session.agent.Session``: ``get_state(key)``
+    returns the stored value (or the whole dict when key is None) and
+    ``update_state(dict)`` merges into a single global state dict.
+    """
+
+    def __init__(self) -> None:
+        self._state: dict = {}
+
+    def get_state(self, key=None):
+        if key is None:
+            return dict(self._state)
+        return self._state.get(key)
+
+    def update_state(self, data: dict) -> None:
+        self._state.update(data)
 
 
 def _extract_json_block(content: str, heading: str) -> list:
@@ -248,6 +269,65 @@ class TestReasoningToolLoopCompactProcessor:
             "content": "Successfully created task(s) round-3",
         }]
         assert "Successfully created task(s) round-1" not in summaries[0].content
+
+    @pytest.mark.asyncio
+    async def test_records_bailout_signal_on_each_compaction(self):
+        """Each successful fold increments the shared counter on the session."""
+        config = ReasoningToolLoopCompactProcessorConfig(
+            consecutive_threshold=3,
+            bailout_threshold=2,
+        )
+        ctx = await _create_context(config)
+        session = _FakeSession()
+        ctx.set_session_ref(session)
+
+        await ctx.add_messages(UserMessage(content="请生成研究想法"))
+
+        # First loop of 3 identical rounds -> one fold -> counter == 1.
+        for index in range(1, 4):
+            await ctx.add_messages(_todo_round(index))
+        assert len(_loop_summary_messages(ctx.get_messages())) == 1
+        assert session.get_state(LOOP_COMPACT_BAILOUT_STATE_KEY) == 1
+
+        # Model keeps looping: 3 more identical rounds -> second fold -> counter == 2.
+        for index in range(4, 7):
+            await ctx.add_messages(_todo_round(index))
+        assert session.get_state(LOOP_COMPACT_BAILOUT_STATE_KEY) == 2
+
+    @pytest.mark.asyncio
+    async def test_bailout_disabled_does_not_record_signal(self):
+        """bailout_threshold=0 folds as usual but never touches the counter."""
+        config = ReasoningToolLoopCompactProcessorConfig(
+            consecutive_threshold=3,
+            bailout_threshold=0,
+        )
+        ctx = await _create_context(config)
+        session = _FakeSession()
+        ctx.set_session_ref(session)
+
+        await ctx.add_messages(UserMessage(content="请生成研究想法"))
+        for index in range(1, 4):
+            await ctx.add_messages(_todo_round(index))
+
+        # Compaction still happened, but no bail-out signal was recorded.
+        assert len(_loop_summary_messages(ctx.get_messages())) == 1
+        assert session.get_state(LOOP_COMPACT_BAILOUT_STATE_KEY) is None
+
+    @pytest.mark.asyncio
+    async def test_compaction_without_session_does_not_crash(self):
+        """Folding must be a no-op on the counter when no session is bound."""
+        config = ReasoningToolLoopCompactProcessorConfig(
+            consecutive_threshold=3,
+            bailout_threshold=2,
+        )
+        ctx = await _create_context(config)  # session is None
+
+        await ctx.add_messages(UserMessage(content="请生成研究想法"))
+        for index in range(1, 4):
+            await ctx.add_messages(_todo_round(index))
+
+        # No exception raised; compaction still worked.
+        assert len(_loop_summary_messages(ctx.get_messages())) == 1
 
     @pytest.mark.asyncio
     async def test_disabled_config_skips_compaction(self):
