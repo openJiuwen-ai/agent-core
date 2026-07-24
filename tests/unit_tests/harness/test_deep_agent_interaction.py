@@ -12,6 +12,7 @@ from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.interaction import (
+    ActiveInteractionRound,
     InputDispatchMode,
     RoundWorkItem,
     SendInputRequest,
@@ -131,3 +132,53 @@ async def test_run_one_round_uses_single_round_path_for_interrupt_resume(
     build_next_work.assert_not_called()
     write_result.assert_awaited_once_with(result, session)
     assert outcome.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_active_round_does_not_block_on_slow_cancel_task() -> None:
+    """abort first; cancel_task wait is bounded so overwrite is not stuck."""
+    import asyncio
+
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    agent._interaction_session = MagicMock()
+    agent.abort = AsyncMock()
+
+    async def _slow_cancel_task(_task_id: str):
+        await asyncio.sleep(10)
+
+    scheduler = MagicMock()
+    scheduler.cancel_task = _slow_cancel_task
+    controller = MagicMock()
+    controller.task_scheduler = scheduler
+    agent._loop_controller = controller
+
+    work = RoundWorkItem(
+        kind="goal",
+        request_id="req-cancel",
+        inputs={"query": "overwrite me"},
+        context={"goal_id": "g1", "revision": 1},
+    )
+    agent._active_interaction_round = ActiveInteractionRound(
+        work=work,
+        task_id="task-slow",
+    )
+
+    async def _noop_round():
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise
+
+    agent._interaction_round_task = asyncio.create_task(_noop_round())
+
+    started = asyncio.get_running_loop().time()
+    await agent._cancel_active_round(
+        reason="goal_overwrite",
+        wait_timeout=0.05,
+    )
+    elapsed = asyncio.get_running_loop().time() - started
+
+    agent.abort.assert_awaited_once()
+    assert elapsed < 1.0
+    assert agent._interaction_round_task.cancelled() or agent._interaction_round_task.done()

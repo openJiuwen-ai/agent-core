@@ -3039,7 +3039,21 @@ class DeepAgent(BaseAgent):
         expected_run_kind: Optional[str] = None,
         expected_goal_id: Optional[str] = None,
         expected_revision: Optional[int] = None,
+        wait_timeout: float = 1.5,
     ) -> None:
+        """Cancel the in-flight interaction round.
+
+        Order mirrors NativeHarness hard-cancel intent, with a bounded wait so
+        goal overwrite/clear are not blocked for minutes on an unresponsive
+        streaming LLM ``await``:
+
+        1. ``abort()`` first — arm coordinator abort / cancel stream_process.
+        2. Cancel ``_interaction_round_task`` so the supervisor is not stuck in
+           ``wait_round_completion``.
+        3. ``cancel_task`` with a short timeout (shielded); if the exec task is
+           still draining LLM I/O, continue without waiting and let cancel
+           finish in the background.
+        """
         active = self._active_interaction_round
         if active is None:
             return
@@ -3051,16 +3065,51 @@ class DeepAgent(BaseAgent):
             return
 
         logger.info("[DeepAgent] cancelling %s round: %s", active.run_kind, reason)
+        task_id = active.task_id
         controller = self.loop_controller
         scheduler = getattr(controller, "task_scheduler", None) if controller else None
-        if active.task_id and scheduler is not None:
-            with suppress(Exception):
-                await scheduler.cancel_task(active.task_id)
+
+        # 1) Signal abort before waiting on scheduler cancel.
         with suppress(Exception):
             await self.abort(self._interaction_session)
-        task = self._interaction_round_task
-        if task is not None and task is not asyncio.current_task() and not task.done():
-            task.cancel()
+
+        # 2) Unblock supervisor / wait_round_completion promptly.
+        round_task = self._interaction_round_task
+        if (
+            round_task is not None
+            and round_task is not asyncio.current_task()
+            and not round_task.done()
+        ):
+            round_task.cancel()
+
+        # 3) Bound the wait for the scheduler exec task (often stuck in LLM I/O).
+        if task_id and scheduler is not None:
+            cancel_wait = asyncio.create_task(
+                scheduler.cancel_task(task_id),
+                name=f"deepagent-cancel-task-{task_id[:12]}",
+            )
+            try:
+                await asyncio.wait_for(asyncio.shield(cancel_wait), timeout=wait_timeout)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[DeepAgent] cancel_task timed out after %.1fs "
+                    "(reason=%s task_id=%s); continuing without waiting for LLM",
+                    wait_timeout,
+                    reason,
+                    task_id,
+                )
+            except Exception:
+                logger.debug(
+                    "[DeepAgent] cancel_task raised during round cancel "
+                    "(reason=%s task_id=%s)",
+                    reason,
+                    task_id,
+                    exc_info=True,
+                )
+                if not cancel_wait.done():
+                    cancel_wait.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await cancel_wait
 
     def _notify_work(self) -> None:
         self._interaction_wakeup.set()

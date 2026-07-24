@@ -11,6 +11,8 @@ from openjiuwen.harness.prompts.tools.base import ToolMetadataProvider
 # submit_goal_report description
 # ---------------------------------------------------------------------------
 SUBMIT_GOAL_REPORT_DESCRIPTION_CN = (
+    "仅当本次用户消息中包含 <goal_task> 标签（即处于 Goal 执行轮）时才调用本工具；"
+    "普通对话轮（无 <goal_task>）绝不要调用本工具。"
     "本工具用于提交当前 goal 尝试的结构化结果。"
     "这是本次 goal 尝试的最终工具动作；工具调用成功后不要再调用其他工具，"
     "已有进展但目标仍可继续推进时使用 continue；"
@@ -20,6 +22,9 @@ SUBMIT_GOAL_REPORT_DESCRIPTION_CN = (
 )
 
 SUBMIT_GOAL_REPORT_DESCRIPTION_EN = (
+    "Only call this tool when the current user message contains a <goal_task> tag "
+    "(i.e. this is a Goal execution round); never call it on a normal turn "
+    "without <goal_task>. "
     "Submit a structured result for the current goal attempt. "
     "This is the final tool action for the current goal attempt; after the tool "
     "call succeeds, do not call any other tools. "

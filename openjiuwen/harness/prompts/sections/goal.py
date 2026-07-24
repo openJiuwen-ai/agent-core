@@ -46,10 +46,8 @@ _GOAL_PROTOCOL: Dict[str, str] = {
         "这些情况应提交 continue，并写清下一次应该补齐什么。\n"
         "5. 只有缺少用户输入、权限、必要依赖、外部服务或环境状态，"
         "导致无法继续任何有意义推进时，才提交 blocked。\n\n"
-        "6. 当完成尝试执行后，应调用工具 submit_goal_report 去评估完成度。\n\n"
-        "报告要求：\n"
-        "- submit_goal_report 用于提交本次尝试的结构化结果，作为本次goal任务尝试执行的最后一次工具调用。\n"
-        "- 最终面向用户的回复必须包含本次尝试得到的具体结果或证据，不要只说任务已完成。\n"
+        "6. 当完成尝试执行后，应调用工具 submit_goal_report 去评估完成度。"
+        "submit_goal_report 调用成功后**不允许再次调用其它工具**\n\n"
     ),
     "en": (
         "\n\n## Goal Mode Protocol\n\n"
@@ -77,13 +75,8 @@ _GOAL_PROTOCOL: Dict[str, str] = {
         "5. Only submit blocked when lacking user input, permissions, required "
         "dependencies, external services, or environment state that prevents any "
         "meaningful progress.\n\n"
-        "6. After completing the attempt, call submit_goal_report to assess completion.\n\n"
-        "Report requirements:\n"
-        "- submit_goal_report Used to submit structured results of the current attempt, "
-        "serving as the final tool call for executing the current goal task attempt\n"
-        "- The final response presented to the user must include specific results "
-        "or evidence obtained from this attempt; "
-        "do not merely state that the task has been completed.\n"
+        "6. After completing the attempt, call submit_goal_report to assess completion. "
+        "After submit_goal_report succeeds, **do not call any other tools**.\n\n"
     ),
 }
 
@@ -266,7 +259,7 @@ TRANSCRIPT_ASSESSOR_SYSTEM: Dict[str, str] = {
         "你必须只输出一个 JSON 对象，不要输出 Markdown、解释文字或代码块。JSON 字段如下：\n"
         "{\n"
         '  "status": "continue | complete | blocked",\n'
-        '  "evidence": "可审计的判断依据",\n'
+        '  "evidence": "判断依据；complete/blocked 时须为面向用户的详细报告",\n'
         '  "remaining_work": "status=continue 时填写剩余缺口，否则可为空字符串",\n'
         '  "next_instruction": "status=continue 时填写下一次最具体、可执行的动作，否则可为空字符串"\n'
         "}\n\n"
@@ -275,11 +268,17 @@ TRANSCRIPT_ASSESSOR_SYSTEM: Dict[str, str] = {
         "2. 判断依据必须来自本轮尝试上下文中的可验证证据，而不是主模型的语气或承诺。\n"
         '3. 只有上下文证据表明验收条件已经满足，才能输出 status="complete"。\n'
         '4. 如果还缺少实现、测试、验证、交付物或证据，但仍然可以继续推进，输出 status="continue"。\n'
-        '5. status="continue" 不是失败；remaining_work 必须说明缺口，next_instruction 必须具体可执行。\n'
+        '5. status="continue" 不是失败；remaining_work 必须说明缺口，next_instruction 必须具体可执行；'
+        "此时 evidence 简述本轮已完成与可审计依据即可。\n"
         '6. 只有缺少用户输入、权限、必要依赖、外部服务或环境状态，导致无法继续任何有意义推进时，才输出 status="blocked"。\n'
         "7. 任务复杂、尚未做完、测试没跑或证据不足都不是 blocked，通常应输出 continue。\n"
         "8. 如果上下文显示目标已经完成且能找到相关依据，输出 complete。\n"
-        "9. 不输出 paused、cleared 或其它状态。"
+        "9. 不输出 paused、cleared 或其它状态。\n"
+        "10. 当 status 为 complete 或 blocked 时，evidence 必须写成详细报告，供用户直接阅读，"
+        "不能只写一句结论。报告应覆盖：目标完成/阻塞结论、关键交付物或阻塞原因、"
+        "上下文中的关键事实与依据；complete 时应完整收录产物正文或等价可核对内容"
+        "（禁止仅用「见上文 / 如上 / 已给出」指代）；blocked 时应写清缺什么、为何无法继续、"
+        "用户或环境需提供什么才能解除阻塞。"
     ),
     "en": (
         "You are a Goal completion assessor. Judge goal status only from the objective, "
@@ -289,7 +288,7 @@ TRANSCRIPT_ASSESSOR_SYSTEM: Dict[str, str] = {
         "or code blocks. JSON fields:\n"
         "{\n"
         '  "status": "continue | complete | blocked",\n'
-        '  "evidence": "Auditable basis for the judgment",\n'
+        '  "evidence": "Basis for the judgment; for complete/blocked must be a detailed user-facing report",\n'
         '  "remaining_work": "Gaps to fill when status=continue, else empty string",\n'
         '  "next_instruction": "Most specific actionable step for status=continue, else empty string"\n'
         "}\n\n"
@@ -303,7 +302,8 @@ TRANSCRIPT_ASSESSOR_SYSTEM: Dict[str, str] = {
         "4. If implementation, tests, verification, deliverables, or evidence "
         'are still missing but progress is possible, output status="continue".\n'
         '5. status="continue" is not failure; remaining_work must describe '
-        "gaps, next_instruction must be specific and actionable.\n"
+        "gaps, next_instruction must be specific and actionable; evidence may "
+        "briefly summarize progress and auditable basis for this attempt.\n"
         '6. Output status="blocked" only when user input, permissions, required '
         "dependencies, external services, or environment state prevent any "
         "meaningful progress.\n"
@@ -311,7 +311,15 @@ TRANSCRIPT_ASSESSOR_SYSTEM: Dict[str, str] = {
         "evidence are not blocked; usually output continue.\n"
         "8. If the context shows the objective is complete and relevant "
         "evidence can be found, output complete.\n"
-        "9. Do not output paused, cleared, or any other status."
+        "9. Do not output paused, cleared, or any other status.\n"
+        "10. When status is complete or blocked, evidence must be a detailed "
+        "report for the user to read directly—not a one-line conclusion. Cover: "
+        "the complete/blocked verdict, key deliverables or blockers, and the "
+        "main facts from context. For complete, include the deliverable body "
+        "or equivalent verifiable content in full (do not substitute with "
+        "\"see above / as shown earlier / already given\"). For blocked, state "
+        "what is missing, why progress cannot continue, and what the user or "
+        "environment must provide to unblock."
     ),
 }
 

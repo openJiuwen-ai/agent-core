@@ -437,6 +437,50 @@ class TaskCompletionRail(DeepAgentRail):
             )
             return
 
+        # Permission / HITL pause: react_agent.invoke returns result_type=interrupt
+        # and the task loop still fires AFTER_TASK_ITERATION (for cleanup rails).
+        # That is not a finished goal attempt — skip transcript assessor and
+        # apply_assessment so we do not burn an LLM call or mutate GoalRecord
+        # while the frontend is still answering the interrupt.
+        result = getattr(getattr(ctx, "inputs", None), "result", None)
+        if isinstance(result, dict) and result.get("result_type") == "interrupt":
+            logger.info(
+                "[GoalLifecycle] skip assessment on interrupt "
+                "(HITL/permission pause; attempt not finished)"
+            )
+            return
+
+        # Only when invoke *raised* out of the task loop (frontend already sees
+        # failure). TaskLoopEventExecutor then sets this iteration's
+        # ``ctx.exception`` and fires AFTER_TASK_ITERATION. Do not confuse with
+        # ``on_model_exception``: that uses a different AgentCallbackContext
+        # inside the model-call @rail wrapper; retries clear it and never
+        # surface here unless the exception is re-raised past invoke.
+        from openjiuwen.harness.goal.schema import GoalAssessment, GoalAssessmentStatus
+
+        round_error = self._extract_goal_round_error(ctx)
+        if round_error is not None:
+            logger.warning(
+                "[GoalLifecycle] Goal attempt failed; blocking goal: %s",
+                round_error[:300],
+            )
+            await manager.apply_assessment(
+                goal_id=str(self._current_goal_id),
+                revision=int(self._current_revision),
+                assessment=GoalAssessment(
+                    status=GoalAssessmentStatus.BLOCKED,
+                    evidence=f"round_execution_error: {round_error}",
+                    remaining_work=(
+                        "Resolve the execution error before resuming the goal."
+                    ),
+                    next_instruction=(
+                        "Fix the underlying failure (for example model or API "
+                        "configuration), then resume the goal."
+                    ),
+                ),
+            )
+            return
+
         agent_report = (
             self._goal_report_sink.consume()
             if self._goal_report_sink is not None
@@ -460,6 +504,22 @@ class TaskCompletionRail(DeepAgentRail):
             revision=int(self._current_revision),
             assessment=assessment,
         )
+
+    @staticmethod
+    def _extract_goal_round_error(ctx: AgentCallbackContext) -> Optional[str]:
+        """Return a message only when this task-iteration ctx has a thrown error.
+
+        ``ctx`` here is the *outer* TaskLoopEventExecutor context, created fresh
+        each iteration. It is not the model-call context used by
+        ``ON_MODEL_EXCEPTION``. Model retries that succeed never set
+        ``exception`` on this object; only the executor's ``except`` after
+        ``react_agent.invoke`` re-raises does.
+        """
+        exc = getattr(ctx, "exception", None)
+        if exc is None:
+            return None
+        text = str(exc).strip()
+        return text or type(exc).__name__
 
     async def _maybe_invoke_transcript_assessor(
         self,
