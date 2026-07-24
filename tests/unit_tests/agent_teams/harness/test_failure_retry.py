@@ -1,12 +1,12 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""One-shot failure retry for rounds that die abnormally.
+"""Failure handling for structured task failures and runtime crashes.
 
 A round's inbound query is marked read at deliver time, so a round that
-crashes (or is killed by a completion timeout) would silently lose its
+crashes before reporting an outcome would silently lose its
 message — no poll ever re-delivers it. ``_on_round_done`` therefore retries
-the query once on a fresh round, and gives up loudly on a second abnormal
-death so a deterministic failure cannot loop forever.
+the query once on a fresh round. Structured task failures instead rely on
+their queued retry follow-up and never trigger that independent replay.
 """
 from __future__ import annotations
 
@@ -27,13 +27,14 @@ from tests.unit_tests.agent_teams.harness.fixtures import (
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_crashed_round_retries_query_once_and_succeeds() -> None:
-    """A round that crashes is retried once with the same query; the retry runs to completion."""
+async def test_task_failure_runs_queued_retry_follow_up() -> None:
+    """A structured task failure runs its retry follow-up instead of replaying the query."""
     await Runner.start()
     try:
         harness = NativeHarness(make_spec())
         fake = await start_harness(harness, answer_output="recovered")
         fake.raise_exc_once = RuntimeError("inner round blew up")
+        harness.loop_controller.enqueue_follow_up("retry the failed round")
 
         collected: list = []
         consumer = asyncio.create_task(drain_outputs(harness, collected))
@@ -45,7 +46,7 @@ async def test_crashed_round_retries_query_once_and_succeeds() -> None:
             await consumer
 
         queries = [inv["query"] for inv in fake.invocations]
-        assert queries == ["please do the thing", "please do the thing"]
+        assert queries == ["please do the thing", "retry the failed round"]
         assert answer_outputs(collected) == ["recovered"]
     finally:
         await Runner.stop()
@@ -53,8 +54,8 @@ async def test_crashed_round_retries_query_once_and_succeeds() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_round_crashing_twice_gives_up_without_looping() -> None:
-    """A second abnormal death gives up (IDLE) instead of retrying forever."""
+async def test_task_failure_without_follow_up_goes_idle_without_replay() -> None:
+    """A structured task failure without a retry follow-up is not replayed."""
     await Runner.start()
     try:
         harness = NativeHarness(make_spec())
@@ -66,13 +67,13 @@ async def test_round_crashing_twice_gives_up_without_looping() -> None:
         try:
             await harness.send("doomed query")
             assert await wait_for_state(harness, HarnessState.IDLE)
-            # Give any (buggy) further retry a chance to surface before counting.
+            # Give any unintended replay a chance to surface before counting.
             await asyncio.sleep(0.1)
         finally:
             await harness.stop()
             await consumer
 
-        assert len(fake.invocations) == 2
+        assert len(fake.invocations) == 1
         assert answer_outputs(collected) == []
         assert harness.state is HarnessState.TERMINATED
     finally:
@@ -81,8 +82,8 @@ async def test_round_crashing_twice_gives_up_without_looping() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_failed_round_emits_failed_event_not_finished() -> None:
-    """An abnormally-dying round surfaces as harness.round kind=failed to subscribers."""
+async def test_task_failure_emits_failed_event_not_finished() -> None:
+    """A structured task failure surfaces as harness.round kind=failed."""
     await Runner.start()
     try:
         harness = NativeHarness(make_spec())
@@ -107,7 +108,7 @@ async def test_failed_round_emits_failed_event_not_finished() -> None:
             await consumer
 
         kinds = [kind for kind, _ in round_events]
-        assert kinds.count("failed") == 2, kinds
+        assert kinds.count("failed") == 1, kinds
         assert "finished" not in kinds
     finally:
         await Runner.stop()

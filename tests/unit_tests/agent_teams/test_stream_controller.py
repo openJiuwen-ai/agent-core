@@ -344,6 +344,13 @@ async def test_handle_retry_swallows_and_redrives_retryable_failure() -> None:
     """A retryable task_failed within the budget swallows the round and re-drives."""
     runtime = _FakeRuntime()
     sc = _make_controller(runtime)
+    sc.stream_queue = asyncio.Queue()
+    observed: list[Any] = []
+
+    async def _observe(chunk: Any) -> None:
+        observed.append(chunk)
+
+    sc.add_chunk_observer(_observe)
 
     consumed = await sc._handle_retry(_task_failed_chunk("[181001] transient blip"))
 
@@ -351,6 +358,17 @@ async def test_handle_retry_swallows_and_redrives_retryable_failure() -> None:
     assert sc._swallow_failed_round is True
     assert sc._retry_attempt == 1
     assert runtime.sent == [(_RETRY_QUERY, False)]
+    retry_chunk = sc.stream_queue.get_nowait()
+    assert isinstance(retry_chunk, TeamOutputSchema)
+    assert retry_chunk.type == "llm_output"
+    assert retry_chunk.payload == {
+        "content": "\n\n[Retry 1/10] [181001] transient blip\n\n",
+        "retrying": True,
+        "attempt": 1,
+        "max_attempts": 10,
+        "error_code": 181001,
+    }
+    assert observed == [retry_chunk]
 
 
 @pytest.mark.asyncio

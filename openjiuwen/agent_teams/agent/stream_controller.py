@@ -228,6 +228,36 @@ class StreamController:
         except Exception:
             team_logger.exception("[{}] output forwarder crashed", member_name or "?")
 
+    async def _emit_retry_output(self, code: int | None, text: str) -> None:
+        """Expose a retryable failure as visible streamed model output."""
+        retry_chunk = self._tag_chunk(
+            OutputSchema(
+                type="llm_output",
+                index=0,
+                payload={
+                    "content": (
+                        f"\n\n[Retry {self._retry_attempt}/{_MAX_RETRY_ATTEMPTS}] "
+                        f"{text}\n\n"
+                    ),
+                    "retrying": True,
+                    "attempt": self._retry_attempt,
+                    "max_attempts": _MAX_RETRY_ATTEMPTS,
+                    "error_code": code,
+                },
+            )
+        )
+        if self.stream_queue is not None:
+            await self.stream_queue.put(retry_chunk)
+        for observer in list(self._chunk_observers):
+            try:
+                await observer(retry_chunk)
+            except Exception:
+                team_logger.exception(
+                    "[{}] retry observer raised; detaching",
+                    self._member_name() or "?",
+                )
+                self.remove_chunk_observer(observer)
+
     async def _handle_retry(self, chunk: Any) -> bool:
         """Detect a task_failed chunk and drive transient retry.
 
@@ -252,6 +282,7 @@ class StreamController:
                 text,
             )
             self._swallow_failed_round = True
+            await self._emit_retry_output(code, text)
             await harness.send(_RETRY_QUERY)
             return True
         team_logger.error(
