@@ -33,7 +33,6 @@ from openjiuwen.harness.tools.todo import (
     TodoItem,
     TodoStatus,
     TodoTool,
-    create_todos_tool,
 )
 from openjiuwen.harness.tools.todo_resume import (
     TODO_RESUME_SNAPSHOT_PENDING_KEY,
@@ -288,6 +287,7 @@ class TaskPlanningRail(DeepAgentRail):
             tool_name = ctx.inputs.tool_name or ""
         if tool_name in _TODO_TOOL_NAMES:
             await self._maybe_schedule_advance_reminder(ctx)
+            await self._sync_plan_from_todos(ctx)
 
         session_id = ctx.session.get_session_id()
         if session_id in self._pending_advance_reminder:
@@ -440,6 +440,7 @@ class TaskPlanningRail(DeepAgentRail):
         if not todos:
             return
 
+        # Sync todo.json FROM TaskPlan (but don't regress terminal states)
         status_by_task_id = {
             task.id: self._to_todo_status(task.status)
             for task in plan.tasks
@@ -450,6 +451,9 @@ class TaskPlanningRail(DeepAgentRail):
         for todo in todos:
             desired = status_by_task_id.get(todo.id)
             if desired is None:
+                continue
+            # 不回退已终态的任务：completed/cancelled 不应被覆盖为 in_progress/pending
+            if todo.status in (TodoStatus.COMPLETED, TodoStatus.CANCELLED):
                 continue
             if todo.status != desired:
                 todo.status = desired
@@ -464,6 +468,68 @@ class TaskPlanningRail(DeepAgentRail):
             "TaskPlanningRail: synced %d todos from TaskPlan",
             len(todos),
         )
+
+    async def _sync_plan_from_todos(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Sync TaskPlan FROM todo.json (terminal states only).
+
+        Ensures TaskPlan reflects LLM's todo_modify updates immediately,
+        preventing the outer loop from re-processing completed tasks.
+        """
+        if ctx.session is None:
+            return
+
+        state = ctx.agent.load_state(ctx.session)  # type: ignore[attr-defined]
+        plan = state.task_plan
+        if plan is None or len(plan.tasks) == 0:
+            return
+
+        tool = self._find_todo_tool()
+        if tool is None:
+            return
+
+        session_id = ctx.session.get_session_id()
+        file_path = tool.file_path_for_session(session_id)
+
+        try:
+            todos = await tool.load_todos(file_path)
+        except Exception as exc:
+            logger.warning("TaskPlanningRail: failed to load todos from %s, error: %s", file_path, exc)
+            return
+
+        if not todos:
+            return
+
+        todo_status_by_id = {todo.id: todo.status for todo in todos}
+        plan_changed = False
+        for task in plan.tasks:
+            todo_status = todo_status_by_id.get(task.id)
+            if todo_status is None:
+                continue
+            if todo_status not in (TodoStatus.COMPLETED, TodoStatus.CANCELLED):
+                continue
+            desired = self._from_todo_status(todo_status)
+            if task.status != desired:
+                task.status = desired
+                plan_changed = True
+
+        if plan_changed:
+            ctx.agent.save_state(ctx.session, state)
+            logger.info(
+                "TaskPlanningRail: synced tasks from todos to TaskPlan",
+            )
+
+    @staticmethod
+    def _from_todo_status(todo_status: TodoStatus) -> TaskStatus:
+        """Map Todo status to TaskPlan status."""
+        if todo_status == TodoStatus.PENDING:
+            return TaskStatus.PENDING
+        if todo_status == TodoStatus.IN_PROGRESS:
+            return TaskStatus.IN_PROGRESS
+        if todo_status == TodoStatus.CANCELLED:
+            return TaskStatus.FAILED
+        return TaskStatus.COMPLETED
 
     @staticmethod
     def _to_todo_status(status: TaskStatus) -> TodoStatus:
