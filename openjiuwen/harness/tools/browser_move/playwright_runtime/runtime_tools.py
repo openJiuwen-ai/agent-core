@@ -387,6 +387,7 @@ _BATCH_INTERACT_DESC = (
     "text fields when that official tool is enough."
 )
 
+
 def _coerce_bool(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
@@ -961,6 +962,7 @@ class BrowserFillFormSemanticTool(Tool):
         del inputs, kwargs
         if False:
             yield None
+
 
 class BrowserProbeDropdownTool(Tool):
     """Compact visible-dropdown probe."""

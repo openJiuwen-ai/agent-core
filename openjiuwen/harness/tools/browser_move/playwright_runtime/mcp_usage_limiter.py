@@ -568,6 +568,7 @@ class BrowserMcpUsageLimiter:
         except (TypeError, ValueError):
             return 2
 
+    @staticmethod
     def _limit_for(self, tool_name: str, args: dict[str, Any]) -> int:
         defaults = {
             "browser_snapshot": 1,
@@ -788,13 +789,17 @@ class BrowserMcpUsageLimiter:
             previous = self.last_observation_fingerprints.get(observation_key, "")
             self.last_observation_fingerprints[observation_key] = observation_fingerprint
             fingerprint = f"observation:{observation_key}:{observation_fingerprint}"
-            if (
+
+            observation_changed = bool(
                 previous
                 and observation_fingerprint
                 and observation_fingerprint != previous
-                and fingerprint not in self.recent_progress_fingerprints
-                and self.observation_progress_count < self.observation_progress_limit
-            ):
+            )
+            observation_is_new = fingerprint not in self.recent_progress_fingerprints
+            has_observation_budget = (
+                self.observation_progress_count < self.observation_progress_limit
+            )
+            if observation_changed and observation_is_new and has_observation_budget:
                 self._mark_progress(fingerprint, observation=True)
                 return
 
@@ -849,12 +854,17 @@ class BrowserMcpUsageLimiter:
         if tool_name not in self._limited_tools:
             return self._predictive_task_progress_blocked_reason(tool_name, args)
 
-        if (
+        has_semantic_failure_context = bool(
             self.last_failure_semantic_context
             and self.last_semantic_failure_target_family
-            and tool_name in self._raw_mutating_tools
-            and _targets_overlap(target_fingerprints, self.last_semantic_failure_targets)
-        ):
+        )
+        is_raw_mutating_tool = tool_name in self._raw_mutating_tools
+        overlaps_failed_target = _targets_overlap(
+            target_fingerprints,
+            self.last_semantic_failure_targets,
+        )
+
+        if has_semantic_failure_context and is_raw_mutating_tool and overlaps_failed_target:
             return (
                 "mcp_usage_limited: raw_fallback_after_semantic_widget_failure. "
                 "The last dropdown/calendar/form interaction failed, so the first raw fallback is blocked. "

@@ -768,15 +768,29 @@ class BrowserSubagentStatusLogger:
 
     def _timeline_error(self, ctx: Any, message: str, *args: Any) -> None:
         self._timeline(browser_agent_timeline_error, ctx, message, *args)
-
+    
     def _timeline(self, sink: Callable[..., None], ctx: Any, message: str, *args: Any) -> None:
         metadata = self._metadata(ctx)
         prefix = self._timeline_prefix(metadata)
+
         try:
             rendered = message % args if args else message
+        except (TypeError, ValueError) as exc:
+            browser_agent_warning(
+                "Failed to render browser timeline message: message=%r args=%r error=%s",
+                message,
+                args,
+                exc,
+            )
+            rendered = f"{message} args={args!r}"
+
+        try:
             sink("%s%s", prefix, rendered)
-        except Exception:
-            return
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            browser_agent_warning(
+                "Failed to write browser timeline message: error=%s",
+                exc,
+            )
 
     @staticmethod
     def _timeline_prefix(metadata: Mapping[str, Any]) -> str:
