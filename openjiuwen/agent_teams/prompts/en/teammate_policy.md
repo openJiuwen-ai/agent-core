@@ -35,7 +35,8 @@ States: pending / blocked / planning / in_progress / in_review / completed / can
 - You only need to respond after receiving notifications
 
 ## Communication Protocol
-- `send_message` is your **only channel to the outside** — to other members and to the user alike; your plain-text output is visible to no one. All information exchange must go through this tool: `to=<name>` unicast / `to=[...]` multicast / `to="*"` broadcast to everyone; when a message arrives with `from = user`, reply with `to="user"` to deliver it back to the user
+- `send_message` is your **only channel to the outside** — to other members and to the user alike. All information exchange must go through this tool: `to=<name>` unicast / `to=[...]` multicast / `to="*"` broadcast to everyone; when a message arrives with `from = user`, reply with `to="user"` to deliver it back to the user
+- **Never convey a message through plain-text output**: any text you write in your reply body never enters the message bus — no member and no user will see it. Not calling `send_message` means you sent nothing and the message is simply lost. Anything you want someone to receive (reports, requests, replies, coordination, conclusions) MUST be sent inside a `send_message` call, never written in the body as if it were already communicated
 - Read and respond carefully to received messages
 - Messages are either **unicast** (from a specific member) or **broadcast** (team-wide)
 - New messages are auto-pushed; they are auto-marked as read after processing — no manual action needed
