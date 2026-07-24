@@ -135,6 +135,30 @@ class TestEvolutionStoreLogCRUD:
         assert [item.id for item in evo_log.entries] == ["ev_new"]
         assert evo_log.entries[0].change.content == "new"
 
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_refresh_skill_summary_writes_llm_result(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a")
+        store = EvolutionStore(str(root))
+        await store.append_record(
+            "skill-a",
+            make_record("ev_1", content="## 超时重试\n- retry", summary="超时先重试"),
+        )
+
+        llm = MagicMock()
+        llm.invoke = AsyncMock(return_value=SimpleNamespace(content="本技能聚焦超时重试与备用切换。"))
+        summary = await store.refresh_skill_summary(
+            "skill-a",
+            llm=llm,
+            model="dummy",
+            language="cn",
+        )
+        assert summary == "本技能聚焦超时重试与备用切换。"
+        evo_log = await store.load_full_evolution_log("skill-a")
+        assert evo_log.summary == "本技能聚焦超时重试与备用切换。"
+        llm.invoke.assert_awaited_once()
+
 
 class TestEvolutionStoreVersionBump:
     @staticmethod

@@ -16,6 +16,41 @@ from openjiuwen.agent_evolving.signal.base import EvolutionSignal, EvolutionTarg
 VALID_SECTIONS = {"Instructions", "Examples", "Troubleshooting", "Scripts"}
 
 
+def _coerce_root_cause(data: dict) -> Optional[str]:
+    """Load root_cause string; migrate legacy root_causes list if needed."""
+    raw = data.get("root_cause")
+    if isinstance(raw, str):
+        text = " ".join(raw.split())
+        return text or None
+    if raw is not None and not isinstance(raw, list):
+        text = str(raw).strip()
+        return text or None
+
+    legacy = data.get("root_causes")
+    if not isinstance(legacy, list):
+        return None
+    parts: List[str] = []
+    for item in legacy:
+        if isinstance(item, str):
+            part = item.strip()
+        elif isinstance(item, dict):
+            failure_type = str(item.get("failure_type") or "").strip()
+            evidence = item.get("evidence")
+            if isinstance(evidence, list):
+                ev = "；".join(str(e).strip() for e in evidence if str(e).strip())
+            elif evidence is None:
+                ev = ""
+            else:
+                ev = str(evidence).strip()
+            part = "：".join(p for p in (failure_type, ev) if p)
+        else:
+            continue
+        if part:
+            parts.append(part)
+    text = "；".join(parts)
+    return text or None
+
+
 @dataclass
 class UsageStats:
     """Usage tracking for an evolution experience."""
@@ -123,6 +158,7 @@ class EvolutionRecordSpec:
     score: float = 0.6
     skill_version: Optional[str] = None
     summary: Optional[str] = None
+    root_cause: Optional[str] = None
 
 
 @dataclass
@@ -141,6 +177,8 @@ class EvolutionRecord:
     summary: Optional[str] = None
     # suggest-mode review lifecycle: "suggest" | "auto" | "accepted" | None
     review_status: Optional[str] = None
+    # Why this experience was triggered (single sentence for evolutions.json).
+    root_cause: Optional[str] = None
 
     @classmethod
     def make(cls, spec: EvolutionRecordSpec) -> "EvolutionRecord":
@@ -154,6 +192,7 @@ class EvolutionRecord:
             usage_stats=UsageStats(),
             skill_version=spec.skill_version,
             summary=spec.summary,
+            root_cause=spec.root_cause,
         )
 
     def to_dict(self) -> dict:
@@ -165,13 +204,14 @@ class EvolutionRecord:
             "change": self.change.to_dict(),
             "applied": self.applied,
             "score": self.score,
+            # Always persist for evolutions.json consumers.
+            "summary": self.summary,
+            "root_cause": self.root_cause,
         }
         if self.usage_stats is not None:
             payload["usage_stats"] = self.usage_stats.to_dict()
         if self.skill_version is not None:
             payload["skill_version"] = self.skill_version
-        if self.summary:
-            payload["summary"] = self.summary
         if self.review_status:
             payload["review_status"] = self.review_status
         return payload
@@ -192,6 +232,7 @@ class EvolutionRecord:
             skill_version=data.get("skill_version"),
             summary=data.get("summary"),
             review_status=data.get("review_status"),
+            root_cause=_coerce_root_cause(data),
         )
 
     @property
@@ -209,27 +250,61 @@ class EvolutionLog:
         default_factory=lambda: datetime.now(tz=timezone.utc).isoformat()
     )
     entries: List[EvolutionRecord] = field(default_factory=list)
+    # One-line overview of all experiences for this skill (≤100 chars).
+    summary: Optional[str] = None
 
     @property
     def pending_entries(self) -> List[EvolutionRecord]:
         return [entry for entry in self.entries if entry.is_pending]
+
+    def refresh_summary(self, max_chars: int = 100) -> None:
+        """Rebuild skill-level summary from all active experience summaries."""
+        parts: List[str] = []
+        for entry in self.entries:
+            if entry.change.skip_reason:
+                continue
+            text = (
+                (entry.summary or "").strip()
+                or (entry.change.summary or "").strip()
+            )
+            if not text and entry.change.content:
+                text = entry.change.content.splitlines()[0].strip()
+            if text:
+                parts.append(" ".join(text.split()))
+        if not parts:
+            self.summary = None
+            return
+        joined = "；".join(parts)
+        joined = " ".join(joined.split())
+        if max_chars > 0 and len(joined) > max_chars:
+            joined = joined[:max_chars].rstrip()
+        self.summary = joined or None
 
     def to_dict(self) -> dict:
         return {
             "skill_id": self.skill_id,
             "version": self.version,
             "updated_at": self.updated_at,
+            "summary": self.summary,
             "entries": [entry.to_dict() for entry in self.entries],
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "EvolutionLog":
-        return cls(
+        raw_summary = data.get("summary")
+        summary = None
+        if isinstance(raw_summary, str):
+            summary = " ".join(raw_summary.split()) or None
+        log = cls(
             skill_id=data.get("skill_id", ""),
             version=data.get("version", "1.0.0"),
             updated_at=data.get("updated_at", ""),
             entries=[EvolutionRecord.from_dict(item) for item in data.get("entries", [])],
+            summary=summary,
         )
+        if log.summary is None and log.entries:
+            log.refresh_summary()
+        return log
 
     @classmethod
     def empty(cls, skill_id: str) -> "EvolutionLog":

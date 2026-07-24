@@ -15,6 +15,11 @@ from openjiuwen.agent_evolving.checkpointing.types import (
 from openjiuwen.agent_evolving.signal.base import EvolutionTarget
 from openjiuwen.core.common.logging import logger
 
+# Persist experience summaries in evolutions.json within this limit.
+SUMMARY_MAX_CHARS = 100
+# Keep root_cause concise for evolutions.json consumers.
+ROOT_CAUSE_MAX_CHARS = 200
+
 
 @dataclass
 class ParsedExperienceDraft:
@@ -23,6 +28,7 @@ class ParsedExperienceDraft:
     patch: EvolutionPatch
     summary: Optional[str] = None
     keywords: Optional[list[str]] = None
+    root_cause: Optional[str] = None
 
 
 def normalize_keywords(raw: Any) -> Optional[list[str]]:
@@ -33,14 +39,69 @@ def normalize_keywords(raw: Any) -> Optional[list[str]]:
     return keywords or None
 
 
-def normalize_summary(raw: Any) -> Optional[str]:
-    """Normalize optional one-line experience summaries from LLM JSON."""
+def normalize_summary(
+    raw: Any,
+    *,
+    max_chars: int = SUMMARY_MAX_CHARS,
+) -> Optional[str]:
+    """Normalize optional one-line experience summaries from LLM JSON.
+
+    Summaries are capped at ``max_chars`` (default 100) for evolutions.json.
+    """
     if not isinstance(raw, str):
         return None
     summary = " ".join(raw.split())
     if not summary or summary.lower() == "null":
         return None
-    return summary
+    if max_chars > 0 and len(summary) > max_chars:
+        summary = summary[:max_chars].rstrip()
+    return summary or None
+
+
+def normalize_root_cause(
+    raw: Any,
+    *,
+    max_chars: int = ROOT_CAUSE_MAX_CHARS,
+) -> Optional[str]:
+    """Normalize trigger reason to a single string for evolutions.json.
+
+    Accepts a plain string, or legacy list forms (strings / attribution dicts)
+    and flattens them into one sentence.
+    """
+    if raw is None:
+        return None
+
+    if isinstance(raw, str):
+        text = " ".join(raw.split())
+    elif isinstance(raw, list):
+        parts: list[str] = []
+        for item in raw:
+            if isinstance(item, str):
+                part = item.strip()
+            elif isinstance(item, dict):
+                failure_type = str(item.get("failure_type") or "").strip()
+                evidence = item.get("evidence")
+                if isinstance(evidence, list):
+                    ev = "；".join(str(e).strip() for e in evidence if str(e).strip())
+                elif evidence is None:
+                    ev = ""
+                else:
+                    ev = str(evidence).strip()
+                part = "：".join(p for p in (failure_type, ev) if p)
+            else:
+                continue
+            if part:
+                parts.append(part)
+        text = "；".join(parts)
+    else:
+        text = str(raw).strip()
+
+    if not text or text.lower() == "null":
+        return None
+    text = " ".join(text.split())
+    if max_chars > 0 and len(text) > max_chars:
+        text = text[:max_chars].rstrip()
+    return text or None
 
 
 def parse_experience_draft(data: dict) -> Optional[ParsedExperienceDraft]:
@@ -83,6 +144,9 @@ def parse_experience_draft(data: dict) -> Optional[ParsedExperienceDraft]:
 
     keywords = normalize_keywords(data.get("keywords"))
     summary = normalize_summary(data.get("summary"))
+    root_cause = normalize_root_cause(
+        data.get("root_cause", data.get("root_causes"))
+    )
     patch = EvolutionPatch(
         section=section,
         action="append",
@@ -99,6 +163,7 @@ def parse_experience_draft(data: dict) -> Optional[ParsedExperienceDraft]:
         patch=patch,
         summary=summary,
         keywords=keywords,
+        root_cause=root_cause,
     )
 
 
@@ -123,9 +188,12 @@ def parse_experience_drafts_with_error(
 
 
 __all__ = [
+    "SUMMARY_MAX_CHARS",
+    "ROOT_CAUSE_MAX_CHARS",
     "ParsedExperienceDraft",
     "normalize_keywords",
     "normalize_summary",
+    "normalize_root_cause",
     "parse_experience_draft",
     "parse_experience_drafts_with_error",
 ]

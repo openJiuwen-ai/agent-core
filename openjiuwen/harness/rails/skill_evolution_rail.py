@@ -33,6 +33,10 @@ from openjiuwen.agent_evolving.optimizer.skill_call import (
     ExperienceScorer,
     build_tool_call_chain,
 )
+from openjiuwen.agent_evolving.optimizer.skill_call.experience_draft_parser import (
+    normalize_root_cause,
+    normalize_summary,
+)
 from openjiuwen.agent_evolving.signal import (
     SignalDetector,
     EvolutionSignal,
@@ -830,6 +834,12 @@ class SkillEvolutionRail(EvolutionRail):
                             record,
                             update_skill_md=False,
                         )
+                    await self._evolution_store.refresh_skill_summary(
+                        skill_name,
+                        llm=self._optimizer_llm,
+                        model=self._optimizer_model,
+                        language=self._language,
+                    )
                     self._record_skill_evolution(skill_name, records, skill_signals)
                     logger.info(
                         "[SkillEvolutionRail] persisted %d record(s) for skill=%s action=%s",
@@ -895,6 +905,31 @@ class SkillEvolutionRail(EvolutionRail):
         )
         return summary
 
+    @staticmethod
+    def _prepare_record_for_evolutions_json(record: EvolutionRecord) -> None:
+        """Normalize fields persisted to evolutions.json.
+
+        - ``summary`` / ``change.summary``: one-line, ≤100 chars (required for
+          every experience; falls back to script_purpose / first content line)
+        - ``root_cause``: single string explaining why this experience triggered
+        """
+        summary = normalize_summary(
+            getattr(record, "summary", None)
+            or getattr(record.change, "summary", None)
+        )
+        if not summary:
+            if (
+                record.change.target == EvolutionTarget.SCRIPT
+                and record.change.script_purpose
+            ):
+                summary = normalize_summary(record.change.script_purpose)
+            elif record.change.content:
+                first_line = record.change.content.splitlines()[0]
+                summary = normalize_summary(first_line)
+        record.summary = summary
+        record.change.summary = summary
+        record.root_cause = normalize_root_cause(getattr(record, "root_cause", None))
+
     def _record_skill_evolution(
         self,
         skill_name: str,
@@ -918,6 +953,8 @@ class SkillEvolutionRail(EvolutionRail):
             record_items.append({
                 "section": record.change.section,
                 "target": target.value if hasattr(target, "value") else str(target),
+                "summary": record.summary or "",
+                "root_cause": record.root_cause or "",
                 "content_preview": content[:_UI_SUMMARY_RECORD_PREVIEW_CHARS],
             })
         signal_items = [
@@ -1443,7 +1480,7 @@ class SkillEvolutionRail(EvolutionRail):
             ),
         )
         try:
-            return await self._evolver.generate_records(context)
+            records = await self._evolver.generate_records(context)
         except Exception as exc:
             logger.warning(
                 "[SkillEvolutionRail] generate failed (skill=%s): %s",
@@ -1451,6 +1488,9 @@ class SkillEvolutionRail(EvolutionRail):
                 exc,
             )
             return []
+        for record in records:
+            self._prepare_record_for_evolutions_json(record)
+        return records
 
     @classmethod
     def _parse_tool_args_dict(cls, tool_args: Any) -> dict:

@@ -106,12 +106,7 @@ def _build_conversation_with_script() -> list[dict]:
 
 def _mock_analyzer_json(candidates: list) -> str:
     return json.dumps({
-        "root_causes": [{
-            "failure_type": "skill_instruction_gap",
-            "confidence": 0.9,
-            "evidence": ["conversation signals"],
-            "should_evolve": True,
-        }],
+        "root_cause": "对话中出现权限不足信号",
         "candidates": candidates,
     }, ensure_ascii=False)
 
