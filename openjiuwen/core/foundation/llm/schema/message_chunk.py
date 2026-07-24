@@ -172,6 +172,7 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
                     arguments=tc.arguments,
                     index=tc.index,
                     response_item_id=tc.response_item_id,
+                    extra_content=tc.extra_content,
                 ))
 
         if other.tool_calls:
@@ -188,6 +189,7 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
                             arguments=(last.arguments or "") + (incoming.arguments or ""),
                             index=last.index,
                             response_item_id=last.response_item_id or incoming.response_item_id,
+                            extra_content=incoming.extra_content or last.extra_content,
                         )
                         continue
                 # otherwise, push as a new tool_call
@@ -198,6 +200,7 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
                     arguments=incoming.arguments,
                     index=len(merged_tool_calls),
                     response_item_id=incoming.response_item_id,
+                    extra_content=incoming.extra_content,
                 ))
 
         merged_finish_reason = other.finish_reason if other.finish_reason != "null" else self.finish_reason
