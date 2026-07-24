@@ -24,7 +24,10 @@ from typing import (
     Optional,
 )
 
-from openjiuwen.core.common.logging.browser_context import is_browser_agent_log_context
+from openjiuwen.core.common.logging.browser_context import (
+    is_browser_agent_log_context,
+    should_log_browser_agent_context_message,
+)
 from openjiuwen.core.common.logging.base_impl import (
     format_log_filename,
     resolve_log_type_label,
@@ -420,8 +423,9 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
         formatted_msg = self._auto_format_message(msg, args)
         processed_msg = self._process_log_message(log_level, formatted_msg, event_type, event, **kwargs)
         if is_browser_agent_log_context():
-            browser_logger = logging.getLogger("openjiuwen.browser_agent")
-            getattr(browser_logger, level)(processed_msg, stacklevel=stacklevel)
+            if should_log_browser_agent_context_message(processed_msg):
+                browser_logger = logging.getLogger("openjiuwen.browser_agent")
+                getattr(browser_logger, level)(processed_msg, stacklevel=stacklevel)
             mirror_common = os.getenv(
                 "OPENJIUWEN_BROWSER_AGENT_LOG_MIRROR_COMMON",
                 "0",

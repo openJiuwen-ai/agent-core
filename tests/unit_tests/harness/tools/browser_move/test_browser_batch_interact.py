@@ -84,6 +84,19 @@ def test_batch_interact_script_contains_realistic_playwright_locators() -> None:
     assert "setTimeout" not in js
 
 
+def test_batch_interact_script_uses_cross_platform_select_all_shortcut() -> None:
+    js = _build_batch_interact_script(
+        {
+            "steps": [{"op": "fill", "selector": "#name", "value": "Alex"}],
+        }
+    )
+
+    assert "page.keyboard.press('ControlOrMeta+A')" in js
+    assert "process.platform" not in js
+    assert "page.keyboard.press('Control+A')" not in js
+    assert "page.keyboard.press('Meta+A')" not in js
+
+
 def test_drag_script_uses_playwright_wait_for_timeout_instead_of_global_settimeout() -> None:
     js = _build_drag_script({
         "coord_source_x": 1,

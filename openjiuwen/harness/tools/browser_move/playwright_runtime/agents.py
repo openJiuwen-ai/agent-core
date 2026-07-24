@@ -20,6 +20,11 @@ from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.tools.browser_move.playwright_runtime.mcp_usage_limiter import (
+    BrowserMcpUsageLimiter as _BrowserMcpUsageLimiter,
+    normalized_browser_tool_name as _normalized_browser_tool_name,
+    tool_calls_list as _tool_calls_list,
+)
 
 ToolResultObserver = Callable[[str, Any], Awaitable[None]]
 
@@ -194,9 +199,21 @@ def build_browser_worker_system_prompt(
         "After a successful card probe, call browser_run_code/browser_run_code_unsafe only for a clearly missing "
         "required field or a specific selector-based action; do not repeat broad evaluation "
         "just to re-read the same cards. Prefer selector_hint values from compact probes when they are relevant. "
+        "Before filling passenger/contact/checkout forms with guessed selectors, "
+        "call browser_probe_form_fields to get verified selector_hint values. "
+        "After probing fields, prefer browser_fill_form_semantic for ordinary visible text fields, or "
+        "browser_batch_interact with verified selector_hint values for multi-step form sequences. "
+        "Use browser_probe_dropdown and browser_select_dropdown_option for dropdowns, comboboxes, "
+        "Select2/custom multi-select widgets, airport/city selectors, country/title fields, and passenger "
+        "selectors. Pass field_label when a custom widget has no stable input selector. For native multi-selects, "
+        "use option_texts for an atomic set or preserve_existing=true when adding options sequentially. "
+        "After opening or typing into a dropdown, do not keep clicking stale refs; probe or select by option text. "
+        "Use browser_probe_calendar and browser_select_calendar_date for calendars and date pickers. "
+        "Always target exact ISO dates by year, month, and day; do not click a bare day number such as '15' "
+        "unless the month/year are verified. "
         "browser_batch_interact is a standalone runtime helper like browser_probe_interactives and "
         "browser_probe_cards, not a browser_custom_action wrapper. Use it directly. "
-        "For multi-field forms with several known controls, search flows with autocomplete, dropdown/date-picker " 
+        "For multi-field forms with several known controls, search flows with autocomplete, dropdown/date-picker "
         "flows, filter panels, or any short sequence where two or more next click/type/wait/extract steps are "
         "already known, call browser_batch_interact before falling back to repeated "
         "browser_click/browser_type/browser_wait_for turns. "
@@ -207,6 +224,13 @@ def build_browser_worker_system_prompt(
         "date open+choose, or search submit+result wait into separate ReAct turns unless browser_batch_interact "
         "failed or the next target is genuinely unknown. "
         "Keep using browser_fill_form for ordinary visible text fields when that official tool is enough. "
+        "If browser_batch_interact fails because selectors are missing, call browser_probe_form_fields "
+        "before another batch attempt. Do not use snapshot [ref=...] targets for passenger/contact form filling. "
+        "Raw Playwright MCP primitives are constrained by a usage policy: avoid repeated browser_snapshot, "
+        "browser_click, browser_type, browser_wait_for, browser_evaluate, browser_run_code, and "
+        "browser_take_screenshot loops. "
+        "If a low-level primitive is blocked, switch to the matching semantic helper rather than retrying. "
+        "Never retry the same stale [ref=...] target after it fails. "
         "Use browser_snapshot only when the compact probes are insufficient, when accessibility structure is needed, "
         "or when you need exact element references required by a Playwright MCP action. "
         "Use browser_run_code_unsafe or browser_run_code only when you already know the exact selector/computation, "
@@ -277,12 +301,27 @@ def ensure_execute_signature_compat(
         return
 
     original_execute = execute_fn
+    usage_limiter = _BrowserMcpUsageLimiter()
+    logger.info(
+        "[BROWSER_MCP_LIMIT] installed enabled=%s raw_streak_limit=%s",
+        usage_limiter.enabled,
+        usage_limiter.raw_streak_limit,
+    )
     supports_ctx = "ctx" in params
     supports_tag = "tag" in params
     supports_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())
     tool_timeout_s = _resolve_tool_timeout_s()
+    runtime_marker_emitted = False
 
     async def execute_with_timeout(*args, **kwargs):
+        nonlocal runtime_marker_emitted
+        if not runtime_marker_emitted:
+            runtime_marker_emitted = True
+            logger.info(
+                "[BROWSER_MCP_LIMIT] runtime_active enabled=%s raw_streak_limit=%s",
+                usage_limiter.enabled,
+                usage_limiter.raw_streak_limit,
+            )
         ctx, tool_call, session, tag, extra_kwargs = _normalize_execute_call(args, kwargs)
         tool_names = _format_tool_names(tool_call)
         _drop_none_tool_arguments(tool_call)
@@ -297,6 +336,21 @@ def ensure_execute_signature_compat(
             call_kwargs["tag"] = tag
         if supports_kwargs:
             call_kwargs.update(extra_kwargs)
+        blocked_reason = usage_limiter.blocked_reason(tool_call)
+        if blocked_reason:
+            normalized_names = ",".join(
+                _normalized_browser_tool_name(getattr(call, "name", "")) for call in _tool_calls_list(tool_call)
+            )
+            logger.warning(
+                "[BROWSER_MCP_LIMIT] blocked tool=%s normalized=%s reason=%s",
+                tool_names,
+                normalized_names,
+                blocked_reason,
+            )
+            results = usage_limiter.blocked_tool_results(tool_call, blocked_reason)
+            if tool_result_observer is not None:
+                await _notify_tool_results(tool_call, results, tool_result_observer)
+            return results
         try:
             with anyio.fail_after(tool_timeout_s):
                 results = await original_execute(**call_kwargs)
@@ -307,6 +361,7 @@ def ensure_execute_signature_compat(
             raise RuntimeError(
                 f"tool_execution_timeout: tools={tool_names}, timeout_s={tool_timeout_s:.1f}"
             ) from exc
+        usage_limiter.record_result(tool_call, results)
         if tool_result_observer is not None:
             await _notify_tool_results(tool_call, results, tool_result_observer)
         return results

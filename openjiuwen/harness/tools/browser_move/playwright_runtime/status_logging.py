@@ -14,6 +14,10 @@ from typing import Any, Callable, Mapping, Optional
 from urllib.parse import urlsplit, urlunsplit
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
     browser_agent_log_info,
+    browser_agent_log_warning,
+    browser_agent_timeline_error,
+    browser_agent_timeline_info,
+    browser_agent_timeline_warning,
 )
 
 _STATUS_KEY = "_browser_subagent_status_logging"
@@ -177,6 +181,7 @@ class BrowserSubagentStatusLogger:
                 "model_calls": 0,
                 "tool_calls": 0,
                 "tool_starts": {},
+                "tool_args": {},
                 "tool_counts": Counter(),
                 "total_model_elapsed_ms": 0,
                 "total_tool_elapsed_ms": 0,
@@ -192,13 +197,21 @@ class BrowserSubagentStatusLogger:
         inputs = getattr(ctx, "inputs", None)
         query = _mapping_get(inputs, "query", "")
         conversation_id = _mapping_get(inputs, "conversation_id", "")
+        query_summary = self._summarize_query(query)
         self._emit(
             "task_start",
             ctx,
             {
                 "conversation_id": _safe_str(conversation_id, 160),
-                "query_summary": self._summarize_query(query),
+                "query_summary": query_summary,
             },
+        )
+        self._timeline_info(
+            ctx,
+            "TASK_START task_hash=%s query_len=%s domains=%s",
+            query_summary.get("task_hash") or "-",
+            query_summary.get("length", 0),
+            ",".join(query_summary.get("url_domains") or []) or "-",
         )
 
     def after_invoke(self, ctx: Any) -> None:
@@ -211,6 +224,7 @@ class BrowserSubagentStatusLogger:
             tool_counts_payload = dict(sorted(tool_counts.items()))
         else:
             tool_counts_payload = dict(tool_counts)
+        result_summary = self.summarize_result("browser_task", result)
         self._emit(
             "task_end",
             ctx,
@@ -227,8 +241,21 @@ class BrowserSubagentStatusLogger:
                 "total_model_elapsed_ms": state.get("total_model_elapsed_ms", 0),
                 "total_tool_elapsed_ms": state.get("total_tool_elapsed_ms", 0),
                 "recent_tools": list(state.get("history") or [])[-_TOOL_HISTORY_LIMIT:],
-                "result_summary": self.summarize_result("browser_task", result),
+                "result_summary": result_summary,
             },
+        )
+        self._timeline_info(
+            ctx,
+            "TASK_END status=%s elapsed_ms=%s model_calls=%s tool_calls=%s "
+            "batch_calls=%s batch_steps=%s/%s fallback_count=%s",
+            self._timeline_status_from_result(result),
+            elapsed_ms,
+            state.get("model_calls", 0),
+            state.get("tool_calls", 0),
+            state.get("batch_calls", 0),
+            state.get("batch_steps_ok", 0),
+            state.get("batch_steps_total", 0),
+            state.get("fallback_count", 0),
         )
 
     def before_model_call(self, ctx: Any) -> None:
@@ -255,14 +282,26 @@ class BrowserSubagentStatusLogger:
         elapsed_ms = self._elapsed_ms(state.get("model_started_at"))
         if elapsed_ms is not None:
             state["total_model_elapsed_ms"] = int(state.get("total_model_elapsed_ms", 0)) + elapsed_ms
+        response_summary = self._summarize_model_response(response)
         self._emit(
             "model_end",
             ctx,
             {
                 "iteration": state.get("model_calls", 0),
                 "elapsed_ms": elapsed_ms,
-                "response_summary": self._summarize_model_response(response),
+                "response_summary": response_summary,
             },
+        )
+        self._timeline_info(
+            ctx,
+            "i=%s MODEL ms=%s content_len=%s reasoning_len=%s "
+            "tool_calls=%s tools=%s",
+            state.get("model_calls", 0),
+            elapsed_ms,
+            response_summary.get("content_length", 0),
+            response_summary.get("reasoning_length", 0),
+            response_summary.get("tool_call_count", 0),
+            self._format_tool_list(response_summary.get("tool_names") or []),
         )
 
     def on_model_exception(self, ctx: Any) -> None:
@@ -271,15 +310,25 @@ class BrowserSubagentStatusLogger:
         if elapsed_ms is not None:
             state["total_model_elapsed_ms"] = int(state.get("total_model_elapsed_ms", 0)) + elapsed_ms
         exc = getattr(ctx, "exception", None)
+        error_type = type(exc).__name__ if exc is not None else ""
+        error = _safe_str(exc, 300) if exc is not None else ""
         self._emit(
             "model_exception",
             ctx,
             {
                 "iteration": state.get("model_calls", 0),
                 "elapsed_ms": elapsed_ms,
-                "error_type": type(exc).__name__ if exc is not None else "",
-                "error": _safe_str(exc, 300) if exc is not None else "",
+                "error_type": error_type,
+                "error": error,
             },
+        )
+        self._timeline_error(
+            ctx,
+            "i=%s MODEL_EXCEPTION ms=%s error_type=%s error=%s",
+            state.get("model_calls", 0),
+            elapsed_ms,
+            error_type or "-",
+            error or "-",
         )
 
     def before_tool_call(self, ctx: Any) -> None:
@@ -306,8 +355,19 @@ class BrowserSubagentStatusLogger:
                     "previous_batch": previous_batch,
                 },
             )
+            self._timeline_warning(
+                ctx,
+                "i=%s FALLBACK from=browser_batch_interact to=%s reason=%s",
+                state.get("model_calls", 0),
+                self._short_tool_name(tool_name),
+                _safe_str(previous_batch.get("error") or "batch_failed", 160)
+                if isinstance(previous_batch, Mapping)
+                else "batch_failed",
+            )
             state["last_failed_batch"] = None
 
+        args_summary = self.summarize_args(str(tool_name), tool_args)
+        state.setdefault("tool_args", {})[tool_key] = args_summary
         self._emit(
             "tool_start",
             ctx,
@@ -315,7 +375,7 @@ class BrowserSubagentStatusLogger:
                 "iteration": state.get("model_calls", 0),
                 "tool_index": state.get("tool_calls", 0),
                 "tool_name": _safe_str(tool_name, 180),
-                "args_summary": self.summarize_args(str(tool_name), tool_args),
+                "args_summary": args_summary,
             },
         )
 
@@ -327,6 +387,7 @@ class BrowserSubagentStatusLogger:
         tool_name = str(tool_name or "")
         tool_key = self._tool_key(inputs)
         started_at = state.setdefault("tool_starts", {}).pop(tool_key, None)
+        args_summary = state.setdefault("tool_args", {}).pop(tool_key, {})
         elapsed_ms = self._elapsed_ms(started_at)
         if elapsed_ms is not None:
             state["total_tool_elapsed_ms"] = int(state.get("total_tool_elapsed_ms", 0)) + elapsed_ms
@@ -345,6 +406,15 @@ class BrowserSubagentStatusLogger:
                 "result_summary": result_summary,
             },
         )
+        self._timeline_tool_end(
+            ctx,
+            tool_name=tool_name,
+            elapsed_ms=elapsed_ms,
+            args_summary=args_summary,
+            result_summary=result_summary,
+        )
+        self._timeline_observation(ctx, tool_name, result_summary)
+        self._detect_repetitive_tools(ctx, state, tool_name)
 
     def on_tool_exception(self, ctx: Any) -> None:
         state = self._state(ctx)
@@ -353,10 +423,13 @@ class BrowserSubagentStatusLogger:
         tool_name = _mapping_get(inputs, "tool_name", "") or self._tool_name_from_call(tool_call)
         tool_key = self._tool_key(inputs)
         started_at = state.setdefault("tool_starts", {}).pop(tool_key, None)
+        state.setdefault("tool_args", {}).pop(tool_key, None)
         elapsed_ms = self._elapsed_ms(started_at)
         if elapsed_ms is not None:
             state["total_tool_elapsed_ms"] = int(state.get("total_tool_elapsed_ms", 0)) + elapsed_ms
         exc = getattr(ctx, "exception", None)
+        error_type = type(exc).__name__ if exc is not None else ""
+        error = _safe_str(exc, 300) if exc is not None else ""
         self._emit(
             "tool_exception",
             ctx,
@@ -364,9 +437,18 @@ class BrowserSubagentStatusLogger:
                 "iteration": state.get("model_calls", 0),
                 "tool_name": _safe_str(tool_name, 180),
                 "elapsed_ms": elapsed_ms,
-                "error_type": type(exc).__name__ if exc is not None else "",
-                "error": _safe_str(exc, 300) if exc is not None else "",
+                "error_type": error_type,
+                "error": error,
             },
+        )
+        self._timeline_error(
+            ctx,
+            "i=%s TOOL_EXCEPTION tool=%s ms=%s error_type=%s error=%s",
+            state.get("model_calls", 0),
+            self._short_tool_name(tool_name),
+            elapsed_ms,
+            error_type or "-",
+            error or "-",
         )
 
     def summarize_args(self, tool_name: str, tool_args: Any) -> dict[str, Any]:
@@ -614,6 +696,7 @@ class BrowserSubagentStatusLogger:
                 "model_calls": 0,
                 "tool_calls": 0,
                 "tool_starts": {},
+                "tool_args": {},
                 "tool_counts": Counter(),
                 "total_model_elapsed_ms": 0,
                 "total_tool_elapsed_ms": 0,
@@ -677,6 +760,222 @@ class BrowserSubagentStatusLogger:
         if not metadata.get("run_key"):
             metadata["run_key"] = self._run_key(ctx)
         return {str(key): _safe_str(value, 180) for key, value in metadata.items() if value not in (None, "")}
+
+    def _timeline_info(self, ctx: Any, message: str, *args: Any) -> None:
+        self._timeline(browser_agent_timeline_info, ctx, message, *args)
+
+    def _timeline_warning(self, ctx: Any, message: str, *args: Any) -> None:
+        self._timeline(browser_agent_timeline_warning, ctx, message, *args)
+
+    def _timeline_error(self, ctx: Any, message: str, *args: Any) -> None:
+        self._timeline(browser_agent_timeline_error, ctx, message, *args)
+    
+    def _timeline(self, sink: Callable[..., None], ctx: Any, message: str, *args: Any) -> None:
+        metadata = self._metadata(ctx)
+        prefix = self._timeline_prefix(metadata)
+
+        try:
+            rendered = message % args if args else message
+        except (TypeError, ValueError) as exc:
+            browser_agent_log_warning(
+                "Failed to render browser timeline message: message=%r args=%r error=%s",
+                message,
+                args,
+                exc,
+            )
+            rendered = f"{message} args={args!r}"
+
+        try:
+            sink("%s%s", prefix, rendered)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            browser_agent_log_warning(
+                "Failed to write browser timeline message: error=%s",
+                exc,
+            )
+
+    @staticmethod
+    def _timeline_prefix(metadata: Mapping[str, Any]) -> str:
+        run_key = BrowserSubagentStatusLogger._short_id(metadata.get("run_key"))
+        session_id = BrowserSubagentStatusLogger._short_id(metadata.get("session_id"))
+        request_id = BrowserSubagentStatusLogger._short_id(metadata.get("request_id"))
+        parts = []
+        if run_key:
+            parts.append(f"run={run_key}")
+        if session_id and session_id != run_key:
+            parts.append(f"sid={session_id}")
+        if request_id:
+            parts.append(f"req={request_id}")
+        return " ".join(parts) + (" " if parts else "")
+
+    @staticmethod
+    def _short_id(value: Any, limit: int = 10) -> str:
+        text = _safe_str(value, 80)
+        if not text:
+            return ""
+        if len(text) <= limit:
+            return text
+        return text[-limit:]
+
+    @staticmethod
+    def _short_tool_name(tool_name: Any) -> str:
+        name = _safe_str(tool_name, 180)
+        for prefix in (
+            "mcp_playwright-official_",
+            "mcp_playwright_official_",
+            "mcp_playwright-",
+            "mcp_playwright_",
+        ):
+            if name.startswith(prefix):
+                return name[len(prefix):]
+        return name
+
+    @staticmethod
+    def _format_tool_list(tool_names: Any) -> str:
+        if not isinstance(tool_names, list) or not tool_names:
+            return "-"
+        compact = [BrowserSubagentStatusLogger._short_tool_name(name) for name in tool_names[:4]]
+        suffix = ",..." if len(tool_names) > 4 else ""
+        return ",".join(compact) + suffix
+
+    @staticmethod
+    def _timeline_status_from_result(result: Any) -> str:
+        if isinstance(result, Mapping):
+            result_type = _safe_str(result.get("result_type"), 40).lower()
+            if result_type:
+                return result_type
+            if result.get("failure_summary"):
+                return "error"
+            if result.get("error"):
+                return "error"
+        return "unknown"
+
+    def _timeline_tool_end(
+        self,
+        ctx: Any,
+        *,
+        tool_name: str,
+        elapsed_ms: Optional[int],
+        args_summary: Any,
+        result_summary: Mapping[str, Any],
+    ) -> None:
+        status = self._tool_status(result_summary)
+        arg_fragment = self._timeline_args_fragment(args_summary)
+        result_fragment = self._timeline_result_fragment(result_summary)
+        state = self._state(ctx)
+        self._timeline_info(
+            ctx,
+            "i=%s TOOL %s %s ms=%s%s%s",
+            state.get("model_calls", 0),
+            self._short_tool_name(tool_name),
+            status,
+            elapsed_ms,
+            f" {arg_fragment}" if arg_fragment else "",
+            f" {result_fragment}" if result_fragment else "",
+        )
+
+    @staticmethod
+    def _tool_status(result_summary: Mapping[str, Any]) -> str:
+        if result_summary.get("had_step_errors"):
+            return "partial" if result_summary.get("ok") else "failed"
+        if result_summary.get("ok") is False or result_summary.get("success") is False:
+            return "failed"
+        if result_summary.get("error"):
+            return "failed"
+        return "ok"
+
+    @staticmethod
+    def _timeline_args_fragment(args_summary: Any) -> str:
+        if not isinstance(args_summary, Mapping):
+            return ""
+        kind = args_summary.get("kind")
+        if kind == "navigation":
+            url = args_summary.get("url")
+            return f"url={url}" if url else ""
+        if kind == "browser_batch_interact":
+            return (
+                f"steps={args_summary.get('step_count', 0)} "
+                f"ops={args_summary.get('op_counts') or {}}"
+            )
+        safe_values = args_summary.get("safe_values")
+        if isinstance(safe_values, Mapping):
+            fragments = []
+            for key in (
+                "selector",
+                "role",
+                "label",
+                "placeholder",
+                "checked",
+                "timeout",
+                "timeout_ms",
+            ):
+                if key in safe_values:
+                    fragments.append(f"{key}={_safe_str(safe_values.get(key), 80)}")
+            return " ".join(fragments[:3])
+        return ""
+
+    @staticmethod
+    def _timeline_result_fragment(result_summary: Mapping[str, Any]) -> str:
+        if result_summary.get("steps_total") is not None:
+            return (
+                f"steps_ok={result_summary.get('steps_ok', 0)}/"
+                f"{result_summary.get('steps_total', 0)}"
+            )
+        if result_summary.get("element_count") is not None:
+            return f"elements={result_summary.get('element_count')}"
+        if result_summary.get("card_count") is not None:
+            return f"cards={result_summary.get('card_count')}"
+        page = result_summary.get("page")
+        if isinstance(page, Mapping):
+            title = _safe_str(page.get("title"), 80)
+            return f"page_title={title}" if title else ""
+        if result_summary.get("error"):
+            return f"error={_safe_str(result_summary.get('error'), 120)}"
+        return ""
+
+    def _timeline_observation(
+        self,
+        ctx: Any,
+        tool_name: str,
+        result_summary: Mapping[str, Any],
+    ) -> None:
+        page = result_summary.get("page")
+        if isinstance(page, Mapping):
+            url = page.get("url")
+            title = page.get("title")
+            if url or title:
+                self._timeline_info(
+                    ctx,
+                    "OBSERVE page title=%s url=%s",
+                    _safe_str(title, 120) or "-",
+                    _safe_str(url, 180) or "-",
+                )
+        if result_summary.get("error"):
+            self._timeline_warning(
+                ctx,
+                "OBSERVE tool_error tool=%s error=%s",
+                self._short_tool_name(tool_name),
+                _safe_str(result_summary.get("error"), 180),
+            )
+
+    def _detect_repetitive_tools(self, ctx: Any, state: dict[str, Any], tool_name: str) -> None:
+        recent = state.setdefault("timeline_recent_tools", [])
+        recent.append(self._short_tool_name(tool_name))
+        del recent[:-8]
+        if len(recent) < 6:
+            return
+        repeated_count = max(recent.count(name) for name in set(recent))
+        if repeated_count < 5:
+            return
+        signature = ",".join(recent)
+        if state.get("timeline_last_loop_signature") == signature:
+            return
+        state["timeline_last_loop_signature"] = signature
+        self._timeline_warning(
+            ctx,
+            "LOOP_DETECTED repeated_tool_count=%s recent_tools=%s",
+            repeated_count,
+            signature,
+        )
 
     def _emit(self, phase: str, ctx: Any, payload: Mapping[str, Any]) -> None:
         record: dict[str, Any] = {

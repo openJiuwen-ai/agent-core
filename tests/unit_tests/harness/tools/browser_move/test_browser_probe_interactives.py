@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 # coding: utf-8
-# pylint: disable=protected-access
 
 from __future__ import annotations
 
@@ -11,6 +10,9 @@ from unittest.mock import AsyncMock
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import BrowserRunGuardrails
+from openjiuwen.harness.tools.browser_move.playwright_runtime.page_structure_index import (
+    build_page_index_install_js,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.probes import (
     build_interactive_probe_js,
 )
@@ -50,36 +52,41 @@ def _make_runtime() -> BrowserAgentRuntime:
     )
 
 
-def test_build_interactive_probe_js_contains_high_value_selectors() -> None:
-    js = build_interactive_probe_js(max_items=25, viewport_only=True)
+def test_build_interactive_probe_js_uses_shared_page_index() -> None:
+    install_js = build_page_index_install_js()
+    query_js = build_interactive_probe_js(max_items=25, viewport_only=True)
 
-    assert "button" in js
-    assert "a[href]" in js
-    assert "input" in js
-    assert "[aria-label]" in js
-    assert "[data-testid]" in js
-    assert "max_items" in js
-    assert "viewport_only" in js
+    assert "STATE_KEY = '__openjiuwenPageStructureIndexV3'" in install_js
+    assert "document.createTreeWalker" in install_js
+    assert "index.interactiveIds" in install_js
+    assert "cache_hit" in install_js
+    assert "nodes_indexed" in install_js
+    assert "page_index_runtime_missing" in query_js
+    assert "document.createTreeWalker" not in query_js
+    assert '"max_items":25' in query_js
+    assert '"viewport_only":true' in query_js
 
 
-def test_build_interactive_probe_js_expands_search_and_input_queries() -> None:
-    js = build_interactive_probe_js(max_items=25, viewport_only=True, query="search")
+def test_build_interactive_probe_js_queries_indexed_semantics_and_group_context() -> None:
+    install_js = build_page_index_install_js()
+    query_js = build_interactive_probe_js(max_items=25, viewport_only=True, query="search")
 
-    assert "queryAliases" in js
-    assert "queryMatches" in js
-    assert "action_likelihood" in js
-    assert "className" in js
-    assert "input_type" in js
-    assert "搜索" in js
-    assert "关键词" in js
-    assert "role=\"searchbox\"" in js
-    assert "[placeholder]" in js
+    assert "queryAliases" in install_js
+    assert "queryInteractives" in install_js
+    assert "action_likelihood" in install_js
+    assert "findContainingGroup" in install_js
+    assert "group_context" in install_js
+    assert "INTERACTIVE_ROLES" in install_js
+    assert "node.interactive" in install_js
+    assert "搜索" in install_js
+    assert "关键词" in install_js
+    assert '"query":"search"' in query_js
 
 
 def test_build_interactive_probe_js_clamps_max_items() -> None:
     js = build_interactive_probe_js(max_items=999, viewport_only=True)
 
-    assert '"max_items": 100' in js
+    assert '"max_items":100' in js
 
 
 def test_browser_probe_interactives_tool_invokes_runtime_api() -> None:
@@ -115,9 +122,38 @@ def test_browser_probe_interactives_tool_invokes_runtime_api() -> None:
         max_items=100,
         viewport_only=False,
         query="cart",
+        scope_group_id="",
+        scope_item_index=None,
     )
     assert result.success is True
     assert result.data["elements"][0]["text"] == "Add to cart"
+
+
+def test_browser_probe_interactives_tool_passes_group_scope() -> None:
+    runtime = _make_runtime()
+    runtime.probe_interactives = AsyncMock(
+        return_value={"ok": True, "elements": [], "error": None}
+    )
+    tool = BrowserProbeInteractivesTool(runtime, language="en")
+
+    result = _run(
+        tool.invoke(
+            {
+                "query": "Soumission",
+                "scope_group_id": "group_books",
+                "scope_item_index": 2,
+            }
+        )
+    )
+
+    runtime.probe_interactives.assert_called_once_with(
+        max_items=50,
+        viewport_only=True,
+        query="Soumission",
+        scope_group_id="group_books",
+        scope_item_index=2,
+    )
+    assert result.success is True
 
 
 def test_browser_probe_interactives_tool_reports_runtime_error() -> None:
@@ -142,6 +178,7 @@ def test_browser_probe_interactives_tool_reports_runtime_error() -> None:
 def test_runtime_probe_interactives_uses_code_executor_and_parses_json() -> None:
     runtime = _make_runtime()
     runtime.ensure_runtime_ready = AsyncMock()
+    runtime._page_index_runtime_installed = True
     runtime._code_executor = AsyncMock(
         return_value={
             "ok": True,
@@ -212,6 +249,7 @@ def test_runtime_unwrap_mcp_text_result() -> None:
 
     assert runtime._unwrap_mcp_text_result(raw) == '{"ok": true, "elements": []}'
 
+
 def test_runtime_call_playwright_run_code_unsafe_uses_runner_mcp_tool(monkeypatch) -> None:
     runtime = _make_runtime()
 
@@ -258,3 +296,61 @@ def test_runtime_call_playwright_run_code_unsafe_uses_runner_mcp_tool(monkeypatc
         "code": "async (page) => ({ok: true})"
     }
     assert result["content"][0]["text"] == '{"ok": true, "elements": []}'
+
+
+def test_runtime_probe_installs_page_index_once_before_first_query() -> None:
+    runtime = _make_runtime()
+    runtime.ensure_runtime_ready = AsyncMock()
+    runtime._code_executor = AsyncMock(
+        side_effect=[
+            {
+                "ok": True,
+                "already_installed": False,
+                "schema_version": 3,
+            },
+            {
+                "ok": True,
+                "elements": [],
+                "page_index": {"cache_hit": False},
+            },
+        ]
+    )
+
+    result = _run(runtime.probe_interactives())
+
+    assert result["ok"] is True
+    assert runtime._page_index_runtime_installed is True
+    assert runtime._code_executor.await_count == 2
+    install_code = runtime._code_executor.await_args_list[0].args[0]
+    query_code = runtime._code_executor.await_args_list[1].args[0]
+    assert "window[RUNTIME_KEY]" in install_code
+    assert "document.createTreeWalker" in install_code
+    assert "page_index_runtime_missing" in query_code
+    assert "document.createTreeWalker" not in query_code
+
+
+def test_runtime_probe_reinstalls_page_index_after_navigation_reset() -> None:
+    runtime = _make_runtime()
+    runtime.ensure_runtime_ready = AsyncMock()
+    runtime._page_index_runtime_installed = True
+    runtime._code_executor = AsyncMock(
+        side_effect=[
+            {"ok": False, "error": "page_index_runtime_missing"},
+            {
+                "ok": True,
+                "already_installed": False,
+                "schema_version": 3,
+            },
+            {
+                "ok": True,
+                "elements": [{"id": "interactive_1", "role": "button"}],
+            },
+        ]
+    )
+
+    result = _run(runtime.probe_interactives())
+
+    assert result["ok"] is True
+    assert result["elements"][0]["role"] == "button"
+    assert runtime._code_executor.await_count == 3
+    assert runtime._page_index_runtime_installed is True

@@ -23,10 +23,10 @@ from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
 try:
     from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
-        browser_agent_log_info,
+        browser_agent_log_debug,
     )
 except Exception:  # pragma: no cover - browser runtime is optional here
-    browser_agent_log_info = None
+    browser_agent_log_debug = None
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm.schema.config import (
@@ -1275,8 +1275,8 @@ class ReActAgent(BaseAgent):
             log_args = self._summarize_tool_args_for_log(tool_call.name, tool_call.arguments)
             tool_name = str(tool_call.name or "")
             is_browser_tool = self._is_browser_tool_name(tool_name)
-            if is_browser_tool and browser_agent_log_info is not None:
-                browser_agent_log_info("Executing tool: %s with args: %s", tool_name, log_args)
+            if is_browser_tool and browser_agent_log_debug is not None:
+                browser_agent_log_debug("Executing tool: %s with args: %s", tool_name, log_args)
             else:
                 logger.info("Executing tool: %s with args: %s", tool_name, log_args)
 

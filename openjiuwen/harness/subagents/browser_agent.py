@@ -8,6 +8,7 @@ import dataclasses
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.context_engine import ToolResultWindowProcessorConfig
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard
 from openjiuwen.core.single_agent.rail.base import AgentRail
@@ -15,17 +16,18 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
+from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 from openjiuwen.harness.schema.config import SubAgentConfig
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
+    DEFAULT_BROWSER_CAPABILITIES,
+    resolve_browser_capabilities,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     BrowserInstanceConfig,
     RuntimeSettings,
     build_browser_guardrails,
     build_playwright_mcp_config,
     build_runtime_settings,
-)
-from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
-    DEFAULT_BROWSER_CAPABILITIES,
-    resolve_browser_capabilities,
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
     BrowserAgentRuntime,
@@ -71,6 +73,20 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "browser_probe_interactives only if you also need page-level navigation, filters, forms, or "
     "controls outside the cards. "
     "Prefer selector_hint values from compact probes when they are relevant. "
+    "Before filling passenger/contact/checkout forms with guessed selectors, "
+    "call browser_probe_form_fields to get verified selector_hint values. "
+    "For dropdowns, comboboxes, Select2/custom multi-select menus, airport/city selectors, "
+    "passenger selectors, and country/title fields, use browser_probe_dropdown and "
+    "browser_select_dropdown_option; pass field_label when no stable selector exists. "
+    "instead of repeated browser_click/browser_type/browser_snapshot turns. "
+    "For date pickers and booking calendars, use browser_probe_calendar and browser_select_calendar_date; "
+    "select exact ISO dates by year-month-day, not bare day numbers. "
+    "Use browser_batch_interact for known multi-field flows and condition-based waits, but if a batch "
+    "fails because selectors are missing, call browser_probe_form_fields before another batch attempt. "
+    "Raw Playwright MCP primitives such as browser_snapshot, browser_click, browser_type, "
+    "browser_wait_for, browser_evaluate, browser_run_code, and browser_take_screenshot are limited; "
+    "after repeated failures or stale refs, "
+    "switch to semantic helpers. "
     "Use browser_snapshot only when compact probes are insufficient, when accessibility structure "
     "is needed, or when exact element references are required by a Playwright MCP action. "
     "Use browser_run_code_unsafe or browser_run_code only when you already know the exact "
@@ -100,6 +116,14 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_CN = (
     "对于商品、列表或条目数据任务，优先使用 browser_probe_cards；只有在还需要卡片外的页面级导航、"
     "筛选器、表单或控件时，再调用 browser_probe_interactives。"
     "相关时优先使用紧凑探测返回的 selector_hint。"
+    "处理下拉框、组合框、自动补全、机场/城市选择、乘客选择、国家或称谓字段时，"
+    "优先使用 browser_probe_dropdown 和 browser_select_dropdown_option，"
+    "不要反复使用 browser_click/browser_type/browser_snapshot。"
+    "处理日期选择器和预订日历时，优先使用 browser_probe_calendar 和 browser_select_calendar_date；"
+    "按年月日精确选择 ISO 日期，不要只点击单独的日期数字。"
+    "已知的多字段流程优先使用 browser_batch_interact 和条件等待。"
+    "browser_snapshot、browser_click、browser_type、browser_wait_for、browser_take_screenshot 等"
+    "底层 Playwright MCP 原语会受到限制；遇到重复失败或旧 ref 时应切换到语义工具。"
     "仅在紧凑探测不足、需要无障碍结构，或 Playwright MCP 操作需要精确元素引用时使用 browser_snapshot。"
     "仅在已经知道精确 selector/计算逻辑，或紧凑探测和 browser_snapshot 都不足时，"
     "使用 browser_run_code_unsafe 或 browser_run_code。"
@@ -251,7 +275,7 @@ def create_browser_agent(
     """Create the browser subagent with task-scoped capability context.
 
     ``browser_capabilities`` is resolved against the trusted capability
-    catalog here. The resolved allowlist does not yet alter registered tools.
+    catalog and forwarded to the runtime as its Playwright tool allowlist.
     """
     if browser_capabilities is not None and (
         not isinstance(browser_capabilities, list)
@@ -306,6 +330,33 @@ def create_browser_agent(
     injected_tools = build_browser_runtime_tools(browser_backend, language=resolved_language)
     injected_rails: List[AgentRail] = [BrowserRuntimeRail(browser_backend)]
 
+    # Window the large browser probe/snapshot results unless the caller already
+    # manages context processors via their own ContextProcessorRail.
+    # Browser probe/snapshot tools emit large results; keep only the most recent
+    # few in context and persist older ones via ToolResultWindowProcessor.
+    browser_windowed_tool_names = [
+        "browser_probe_interactives",
+        "browser_probe_cards",
+        "browser_probe_form_fields",
+        "browser_probe_dropdown",
+        "browser_probe_calendar",
+        "browser_snapshot",
+    ]
+    if not any(isinstance(rail, ContextProcessorRail) for rail in (rails or [])):
+        injected_rails.append(
+            ContextProcessorRail(
+                processors=[
+                    (
+                        "ToolResultWindowProcessor",
+                        ToolResultWindowProcessorConfig(
+                            tool_names=browser_windowed_tool_names,
+                            keep_last_k=1,
+                        ),
+                    )
+                ],
+                preset=False,
+            )
+        )
     final_tools = list(tools or []) + injected_tools
     final_mcps = list(mcps or [])
     final_rails = list(rails or []) + injected_rails
