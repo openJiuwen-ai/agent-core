@@ -68,12 +68,14 @@ ROLE_SKILL_DIRS: dict[str, Path] = {
 
 ROLE_PROMPTS: dict[str, str] = {
     "detection": (
-        "你是可靠性语义检测器。必须经 skill_tool 加载指定 SKILL，"
-        "最终回复只输出 SKILL 规定的 JSON 对象，禁止其他文字，禁止调用 skill_complete。"
+        "你是可靠性语义检测器。SKILL 正文已由宿主内联提供，禁止调用 skill_tool "
+        "或任何工具；最终回复只输出 SKILL 规定的 JSON 对象，禁止其他文字，"
+        "禁止调用 skill_complete。"
     ),
     "recovery": (
-        "你是可靠性恢复侧成员。必须经 skill_tool 加载指定 SKILL，"
-        "最终回复只输出 SKILL 规定的 JSON 对象，禁止其他文字，禁止调用 skill_complete。"
+        "你是可靠性恢复侧成员。SKILL 正文已由宿主内联提供，禁止调用 skill_tool "
+        "或任何工具；最终回复只输出 SKILL 规定的 JSON 对象，禁止其他文字，"
+        "禁止调用 skill_complete。"
     ),
 }
 
@@ -122,11 +124,29 @@ def _skills_path(role: str, skill_name: str) -> Path:
 
 
 def load_skill_body(role: str, skill_name: str) -> str:
-    """Load SKILL.md body for tests and lightweight invoke paths."""
+    """Load SKILL.md via sync pathlib (bypass SysOperation ``fs.read_file``)."""
     skill_path = _skills_path(role, skill_name)
     if not skill_path.is_file():
         return ""
     return skill_path.read_text(encoding="utf-8")
+
+
+def build_inline_skill_query(*, role: str, skill_name: str, task_block: str) -> str:
+    """Build member query with SKILL.md inlined so nested agents need no skill_tool.
+
+    Mid-stream ``SysOperation.fs.read_file`` (via skill_tool / SkillUseRail) was
+    observed to stall under parent LLM streaming; pathlib here stays off that path.
+    """
+    body = load_skill_body(role, skill_name).strip()
+    if not body:
+        body = f"(SKILL `{skill_name}` 未能从本地包路径加载)"
+    return (
+        f"## Skill `{skill_name}`（已内联，禁止调用 skill_tool / skill_complete / 任何工具）\n"
+        f"{body}\n\n"
+        f"## 任务\n"
+        f"{task_block}\n\n"
+        f"按上述 Skill 要求，最终回复只输出 JSON 对象。"
+    )
 
 
 __all__ = [
@@ -140,6 +160,7 @@ __all__ = [
     "SKILL_TIMEOUT_SECONDS",
     "AgentAdapter",
     "NoOpAgentAdapter",
+    "build_inline_skill_query",
     "fault_domain_for_kind",
     "load_skill_body",
     "skill_for",

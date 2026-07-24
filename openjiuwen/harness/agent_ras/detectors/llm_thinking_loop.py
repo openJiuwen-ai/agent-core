@@ -23,9 +23,9 @@ baseline), but this detector does not consume it — only visible assistant
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import re
 import time
-from collections import Counter
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any, Optional
@@ -64,13 +64,16 @@ MIN_CLAUSE_LEN = 5
 SUFFIX_CYCLE_MIN_PATTERN_LEN = 10
 SUFFIX_CYCLE_MAX_PATTERN_LEN = 150
 SUFFIX_CYCLE_TAIL_WINDOW = 600
-SIMILAR_CLAUSE_ENUM_TOP_RATIO = 0.7
-SIMILAR_CLAUSE_ENUM_STRICT_RATIO = 0.85
 
 _CODE_FENCE_RE = re.compile(r"```[\w]*\n.*?```", re.DOTALL)
 _CLAUSE_SPLIT_RE = re.compile(r"[。！？\n]+")
-_DIGIT_SKELETON_RE = re.compile(r"\d+")
-_LEXICAL_TOKEN_RE = re.compile(r"[a-zA-Z]+|[\u4e00-\u9fff]")
+# Delete separators (underscore, punctuation, whitespace) — do NOT replace with
+# spaces — so xxx_0 → xxx0 and stays one identifier token after findall.
+_NON_LEXICAL_CHAR_RE = re.compile(r"[^a-zA-Z0-9\u4e00-\u9fff]+")
+# Keep digits glued to letters (p2, v1, xxx0); bare counts (2650字) stay out.
+_LEXICAL_TOKEN_RE = re.compile(
+    r"[a-zA-Z]+[0-9]*|[0-9]+[a-zA-Z]+|[\u4e00-\u9fff]+"
+)
 _NORMALIZE_PREFIX_RE = re.compile(r"(^|\n)\s*(\d+[.)]\s*|step\s+[\dA-Z]+:\s*)")
 
 
@@ -107,7 +110,8 @@ def _extract_lexical_key(clause: str) -> str:
     if not clause:
         return ""
     lowered = clause.lower()
-    tokens = _LEXICAL_TOKEN_RE.findall(lowered)
+    compact = _NON_LEXICAL_CHAR_RE.sub("", lowered)
+    tokens = _LEXICAL_TOKEN_RE.findall(compact)
     return " ".join(tokens)
 
 
@@ -127,33 +131,6 @@ def _split_clauses(text: str) -> list[str]:
             continue
         clauses.append(stripped)
     return clauses
-
-
-def _digit_skeleton(clause: str) -> str:
-    return _DIGIT_SKELETON_RE.sub("#", clause)
-
-
-def _is_enumeration_exempt(clauses: list[str]) -> bool:
-    if len(clauses) < 3:
-        return False
-    skels = [_digit_skeleton(c) for c in clauses]
-    cnt = Counter(skels)
-    dominant_skel, dominant_count = cnt.most_common(1)[0]
-    top_ratio = dominant_count / len(clauses)
-    if top_ratio < SIMILAR_CLAUSE_ENUM_TOP_RATIO or "#" not in dominant_skel:
-        return False
-    nums: list[int] = []
-    for clause in clauses:
-        if _digit_skeleton(clause) != dominant_skel:
-            continue
-        found = _DIGIT_SKELETON_RE.findall(clause)
-        if found:
-            nums.append(int(found[0]))
-    if len(nums) >= 3 and len(set(nums)) == len(nums):
-        sorted_nums = sorted(nums)
-        if sorted_nums[-1] - sorted_nums[0] == len(sorted_nums) - 1:
-            return True
-    return top_ratio >= SIMILAR_CLAUSE_ENUM_STRICT_RATIO
 
 
 def _clause_similarity(a: str, b: str) -> float:
@@ -232,6 +209,41 @@ def _strategy_suffix_cycle(
     return None
 
 
+def _largest_similar_cluster(
+    clauses: list[str],
+    sim_threshold: float,
+) -> list[int]:
+    """Return indices of the largest connected component under pairwise similarity."""
+    n = len(clauses)
+    if n < 2:
+        return []
+    adj: list[set[int]] = [set() for _ in range(n)]
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _clause_similarity(clauses[i], clauses[j]) >= sim_threshold:
+                adj[i].add(j)
+                adj[j].add(i)
+
+    seen: set[int] = set()
+    best: list[int] = []
+    for start in range(n):
+        if start in seen or not adj[start]:
+            continue
+        stack = [start]
+        seen.add(start)
+        comp: list[int] = []
+        while stack:
+            u = stack.pop()
+            comp.append(u)
+            for v in adj[u]:
+                if v not in seen:
+                    seen.add(v)
+                    stack.append(v)
+        if len(comp) > len(best):
+            best = comp
+    return best
+
+
 def _strategy_similar_clauses(
     text: str,
     threshold: int,
@@ -240,27 +252,20 @@ def _strategy_similar_clauses(
     clauses = _split_clauses(text)
     if len(clauses) < threshold:
         return None
-    if _is_enumeration_exempt(clauses):
-        return None
 
-    similar_indices: set[int] = set()
-    clause_count = len(clauses)
-    for i in range(clause_count):
-        for j in range(i + 1, clause_count):
-            if _clause_similarity(clauses[i], clauses[j]) >= sim_threshold:
-                similar_indices.add(i)
-                similar_indices.add(j)
-
-    if len(similar_indices) < threshold:
+    # Count the largest similarity connected component (not the union of all
+    # pairwise hits), so unrelated small pairs cannot accumulate to threshold.
+    cluster = _largest_similar_cluster(clauses, sim_threshold)
+    if len(cluster) < threshold:
         return None
 
     positions = _clause_positions_in_text(text, clauses)
-    start_pos = min(positions[i] for i in similar_indices)
+    start_pos = min(positions[i] for i in cluster)
     return DetectionResult(
         detected=True,
         start_pos=start_pos,
         mode="similar_clauses",
-        count=len(similar_indices),
+        count=len(cluster),
         threshold=threshold,
     )
 
@@ -658,6 +663,8 @@ class LlmThinkingLoopDetector:
         trigger_buffer_len = len(ch.buffer)
         excerpt_copy = excerpt
         generation = self._generation
+        # Empty Context cuts parent write_stream ContextVars (_current_session,
+        # tool_batch, cwd) so nested detection does not inherit host state.
         task = asyncio.create_task(
             self._run_semantic_eval(
                 _SemanticEvalJob(
@@ -668,7 +675,8 @@ class LlmThinkingLoopDetector:
                     member=member,
                     generation=generation,
                 )
-            )
+            ),
+            context=contextvars.Context(),
         )
         self._eval_tasks.add(task)
         task.add_done_callback(self._eval_tasks.discard)

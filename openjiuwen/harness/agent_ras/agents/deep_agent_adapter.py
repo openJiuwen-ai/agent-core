@@ -5,17 +5,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
+from openjiuwen.core.sys_operation.cwd import init_cwd
 from openjiuwen.harness.agent_ras.agents.base import (
     FAULT_DOMAIN_LLM_THINKING_LOOP,
     MEMBER_MAX_ITERATIONS,
     ROLE_PROMPTS,
+    build_inline_skill_query,
     skill_for,
     skills_dir_for_role,
 )
@@ -27,8 +29,26 @@ from openjiuwen.harness.agent_ras.detectors.skill_verdicts import (
     verdict_to_dict,
 )
 
-InvokeFn = Callable[[str, str, str], Awaitable[str]]
 logger = logging.getLogger(__name__)
+
+InvokeFn = Callable[[str, str, str], Awaitable[str]]
+
+
+def _ras_conversation_id(role: str) -> str:
+    """Unique session key per semantic invoke (avoid ReAct ``default_session``)."""
+    return f"ras-{role}-{uuid.uuid4().hex}"
+
+
+def _rebind_member_cwd(role: str) -> str:
+    """Rebind ContextVar CWD to the member skill root for the current Task.
+
+    L3 runs via ``asyncio.create_task`` and inherits the parent agent's CWD.
+    Member ``_ensure_initialized`` only calls ``init_cwd`` once, so later
+    evals would keep the host workspace unless we rebind here.
+    """
+    skills_root = str(skills_dir_for_role(role).resolve())
+    init_cwd(skills_root, workspace=skills_root)
+    return skills_root
 
 
 @dataclass
@@ -85,7 +105,7 @@ def _extract_invoke_payload(result: Any) -> str | dict[str, Any]:
 
 
 class DeepAgentAdapter:
-    """Default AgentAdapter using lazy DeepAgent members + SkillUseRail."""
+    """Default AgentAdapter using lazy DeepAgent members with inlined SKILL bodies."""
 
     def __init__(
         self,
@@ -100,16 +120,17 @@ class DeepAgentAdapter:
 
     @staticmethod
     def register_skills(role: str) -> Path:
-        """Return the skill root directory for ``role`` (SkillUseRail scans it)."""
+        """Return the skill root directory for ``role``."""
         return skills_dir_for_role(role)
 
     async def get_or_create_member(self, role: str) -> Any | None:
-        """Lazy-create a short-lived DeepAgent with SkillUseRail for ``role``.
+        """Lazy-create a short-lived DeepAgent judge for ``role``.
 
-        Workspace aligns to ``ROLE_SKILL_DIRS[role]`` so SKILL paths stay inside the
-        jiuwenclaw sandbox. ``auto_create_workspace=False`` matches auto_harness
-        stage agents and prevents DirectoryBuilder from polluting the package
-        skills tree.
+        No ``SkillUseRail`` / ``skill_tool``: SKILL.md is inlined via pathlib on
+        each invoke (see ``build_inline_skill_query``) to avoid mid-stream
+        ``SysOperation.fs.read_file`` stalls. Workspace still points at the
+        package skill root for sandbox alignment; ``agent_ras=False`` prevents
+        nesting another AgentRASRail on judges.
         """
         if self._invoke_fn is not None:
             return None
@@ -126,14 +147,6 @@ class DeepAgentAdapter:
             logger.warning("Agent RAS skill directory missing: %s", skills_root)
             return None
         skills_dir = str(skills_root)
-        skill_name = self._cfg.skill_for_role(role)
-        rail = SkillUseRail(
-            skills_dir=skills_dir,
-            skill_mode=SkillUseRail.SKILL_MODE_ALL,
-            enabled_skills=[skill_name],
-            include_tools=True,
-            include_skill_body_tools=True,
-        )
         agent = create_deep_agent(
             model=self._model,
             card=AgentCard(
@@ -141,11 +154,12 @@ class DeepAgentAdapter:
                 description=f"Reliability {role} semantic member",
             ),
             system_prompt=ROLE_PROMPTS.get(role, ROLE_PROMPTS["detection"]),
-            rails=[rail],
+            rails=[],
             workspace=Workspace(root_path=skills_dir),
             enable_task_loop=False,
             max_iterations=self._cfg.max_iterations,
             auto_create_workspace=False,
+            agent_ras=False,
         )
         self._members[role] = agent
         return agent
@@ -167,8 +181,8 @@ class DeepAgentAdapter:
         *,
         skill_name: str,
         user_content: str,
-        timeout: float,
     ) -> str | dict[str, Any]:
+        """Invoke one reliability member with SKILL body inlined into the query."""
         if self._invoke_fn is not None:
             raw = await self._invoke_fn(role, skill_name, user_content)
             if isinstance(raw, dict) and "output" in raw:
@@ -177,12 +191,18 @@ class DeepAgentAdapter:
         agent = await self.get_or_create_member(role)
         if agent is None:
             return "{}"
-        user_msg = (
-            f"{user_content}\n"
-            f"请加载 Skill `{skill_name}`，按 SKILL 要求最终只输出 JSON，"
-            f"不要调用 skill_complete。"
+        _rebind_member_cwd(role)
+        conversation_id = _ras_conversation_id(role)
+        query = build_inline_skill_query(
+            role=role,
+            skill_name=skill_name,
+            task_block=user_content,
         )
-        result = await agent.invoke({"query": user_msg})
+        # Unique conversation_id avoids ReAct falling back to "default_session",
+        # which can collide with the parent stream / other nested invokes.
+        result = await agent.invoke(
+            {"query": query, "conversation_id": conversation_id}
+        )
         return _extract_invoke_payload(result)
 
     async def invoke_skill(
@@ -194,15 +214,9 @@ class DeepAgentAdapter:
         timeout: float,
     ) -> dict:
         if role == "recovery":
-            user_msg = (
-                f"恢复材料:\n{payload}\n"
-                f"请加载 Skill `{skill_name}` 并输出 JSON。"
-            )
+            user_msg = f"恢复材料:\n{payload}"
         else:
-            user_msg = (
-                f"待判定 excerpt:\n{payload}\n"
-                f"请加载 Skill `{skill_name}` 并输出 JSON。"
-            )
+            user_msg = f"待判定 excerpt:\n{payload}"
         if timeout <= 0:
             logger.warning(
                 "Agent RAS semantic %s skill=%s fail_open=True reason=non_positive_timeout",
@@ -216,7 +230,6 @@ class DeepAgentAdapter:
                     role,
                     skill_name=skill_name,
                     user_content=user_msg,
-                    timeout=timeout,
                 ),
                 timeout=timeout,
             )

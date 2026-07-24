@@ -902,6 +902,8 @@ class ReActAgent(BaseAgent):
                 **extra_kwargs,
         )
         stream_aborted = False
+        # Drop abort latched during tool/spawn windows (no in-flight stream then).
+        ctx.consume_abort_stream()
         try:
             async for chunk in stream_iter:
                 if ctx.has_abort_stream_request:

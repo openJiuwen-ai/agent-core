@@ -137,6 +137,9 @@ class StreamObserver:
         ctx = self._ctx
         if ctx is None or data is None:
             return
+        # Child/forwarded frames set stream_source_id; do not feed parent RAS.
+        if _stream_source_id(data):
+            return
         chunk_type, chunk_text = _extract_chunk(data)
         if chunk_type not in _LLM_STREAM_TYPES:
             return
@@ -148,6 +151,22 @@ class StreamObserver:
                 chunk_type,
                 exc_info=True,
             )
+
+
+def _payload_dict(data: Any) -> dict[str, Any] | None:
+    if isinstance(data, dict):
+        payload = data.get("payload")
+    else:
+        payload = getattr(data, "payload", None)
+    return payload if isinstance(payload, dict) else None
+
+
+def _stream_source_id(data: Any) -> str:
+    """Return non-empty stream_source_id from payload, else empty string."""
+    payload = _payload_dict(data)
+    if not payload:
+        return ""
+    return str(payload.get("stream_source_id") or "").strip()
 
 
 def _extract_chunk(data: Any) -> tuple[str, str]:
