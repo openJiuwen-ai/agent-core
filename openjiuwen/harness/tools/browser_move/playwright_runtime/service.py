@@ -313,6 +313,7 @@ class BrowserService:
                 candidates.append(named)
 
         _expected_extra_args = parse_command_args(os.getenv("BROWSER_MANAGED_ARGS") or "")
+        expected_binary = self._normalize_browser_binary(self._configured_browser_binary())
         for profile in candidates:
             endpoint = str(profile.cdp_url or "").strip()
             if not endpoint or not self._is_cdp_endpoint_ready(endpoint):
@@ -320,6 +321,8 @@ class BrowserService:
             # Don't reuse a live Chrome whose launch args differ from the current
             # BROWSER_MANAGED_ARGS — e.g. a headed Chrome when headless is now on.
             if profile.extra_args != _expected_extra_args:
+                continue
+            if self._normalize_browser_binary(profile.browser_binary) != expected_binary:
                 continue
             try:
                 self._profile_store.upsert_profile(profile, select=True)
@@ -343,6 +346,17 @@ class BrowserService:
         params = getattr(self.mcp_cfg, "params", {}) or {}
         env_map = dict(params.get("env", {}) or {})
         return str(env_map.get("PLAYWRIGHT_MCP_CDP_ENDPOINT") or "").strip()
+
+    def _configured_browser_binary(self) -> str:
+        instance_binary = self._instance.browser_binary if self._instance else ""
+        return str(instance_binary or os.getenv("BROWSER_MANAGED_BINARY") or "").strip()
+
+    @staticmethod
+    def _normalize_browser_binary(value: str) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        return os.path.normcase(os.path.normpath(str(Path(raw).expanduser())))
 
     def _resolve_managed_port(self) -> int:
         """Resolve the managed Chrome debug port.
@@ -382,9 +396,7 @@ class BrowserService:
             user_data_dir = _default_chrome_user_data_dir()
         else:
             user_data_dir = str(self._mcp_cwd / ".browser-profiles" / self._profile_name)
-        browser_binary = (
-            (instance.browser_binary if instance else "") or (os.getenv("BROWSER_MANAGED_BINARY") or "")
-        ).strip()
+        browser_binary = self._configured_browser_binary()
         extra_args = parse_command_args(os.getenv("BROWSER_MANAGED_ARGS") or "")
         cdp_url = f"http://{host}:{port}"
         return BrowserProfile(
@@ -438,9 +450,8 @@ class BrowserService:
             or profile.extra_args != _expected_extra_args
         ):
             profile = self._build_managed_profile()
-        configured_binary = (os.getenv("BROWSER_MANAGED_BINARY") or "").strip()
-        if configured_binary:
-            profile.browser_binary = configured_binary
+        configured_binary = self._configured_browser_binary()
+        profile.browser_binary = configured_binary
         self._profile_store.upsert_profile(profile, select=True)
         self._active_profile = profile
 
@@ -779,6 +790,20 @@ class BrowserService:
         self._registered_cdp_endpoint = ""
         self._browser_agent = None
         await self._stop_managed_driver()
+
+    async def reset(self) -> None:
+        """Stop owned browser resources and restart lazily on the next task."""
+        heartbeat = self._heartbeat_task
+        self._heartbeat_task = None
+        if heartbeat is not None and not heartbeat.done():
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+        await self._reset_browser_runtime()
+        self._connection_healthy = False
+        self._last_heartbeat_ok = None
 
     async def _restart_browser_runtime(self) -> None:
         await self._reset_browser_runtime()

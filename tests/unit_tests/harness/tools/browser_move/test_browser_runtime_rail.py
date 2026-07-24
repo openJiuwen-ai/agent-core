@@ -15,6 +15,7 @@ from openjiuwen.core.single_agent.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
     resolve_browser_capabilities,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime import runtime as runtime_module
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserAgentRuntime, BrowserRuntimeRail
 from openjiuwen.harness.tools.browser_move.playwright_runtime.service import MAX_ITERATION_MESSAGE
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -63,6 +64,23 @@ def test_rail_holds_runtime_reference() -> None:
     runtime = MagicMock(spec=BrowserAgentRuntime)
     rail = BrowserRuntimeRail(runtime)
     assert rail._runtime is runtime
+
+
+def test_reset_active_browser_runtimes_resets_all_live_instances() -> None:
+    class _Runtime:
+        def __init__(self) -> None:
+            self.reset = AsyncMock()
+
+    first = _Runtime()
+    second = _Runtime()
+    runtime_module._ACTIVE_BROWSER_RUNTIMES.clear()
+    runtime_module._ACTIVE_BROWSER_RUNTIMES.add(first)
+    runtime_module._ACTIVE_BROWSER_RUNTIMES.add(second)
+
+    assert _run(runtime_module.reset_active_browser_runtimes()) == 2
+    first.reset.assert_awaited_once()
+    second.reset.assert_awaited_once()
+    runtime_module._ACTIVE_BROWSER_RUNTIMES.clear()
 
 
 def test_before_invoke_calls_ensure_runtime_ready() -> None:
