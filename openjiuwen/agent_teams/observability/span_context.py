@@ -165,7 +165,7 @@ class ActiveSpanTracker(SpanProcessor):
             exact = [s for s in candidates
                      if s.parent is not None and s.parent.span_id == parent_id]
             if exact:
-                result = max(exact, key=lambda s: getattr(getattr(s, "_otel_llm_state", None), "start_ns", 0))
+                result = max(exact, key=lambda s: getattr(getattr(s, "otel_llm_state", None), "start_ns", 0))
                 if pop and result is not None:
                     with self._lock:
                         ts = self._spans_by_trace.get(trace_id)
@@ -175,7 +175,7 @@ class ActiveSpanTracker(SpanProcessor):
 
         # Fallback: most recently opened in this trace (cross-task callback,
         # or pre-iteration call with no agent span in context).
-        result = max(candidates, key=lambda s: getattr(getattr(s, "_otel_llm_state", None), "start_ns", 0))
+        result = max(candidates, key=lambda s: getattr(getattr(s, "otel_llm_state", None), "start_ns", 0))
         if pop and result is not None:
             with self._lock:
                 ts = self._spans_by_trace.get(trace_id)
@@ -199,7 +199,7 @@ class ActiveSpanTracker(SpanProcessor):
     def flush_spans_for_trace(self, trace_id: int, exclude_team_span: bool = True) -> int:
         """Close all active spans for a specific trace (multi-team isolation).
 
-        Spans that carry ``_otel_llm_state`` are leaked LLM spans whose normal
+        Spans that carry ``otel_llm_state`` are leaked LLM spans whose normal
         close callback never fired — logged at error level.  Other spans
         (tool / task / event) reaching this path are also unexpected and
         logged as errors.
@@ -221,7 +221,7 @@ class ActiveSpanTracker(SpanProcessor):
 
                 # Spans with _llm_state are leaked LLM spans — log, don't
                 # stamp (silent fixups mask real bugs).
-                state = getattr(span, "_otel_llm_state", None)
+                state = getattr(span, "otel_llm_state", None)
                 if state is not None:
                     _log_orphan_llm_span(span, state)
                 else:
@@ -267,7 +267,7 @@ class ActiveSpanTracker(SpanProcessor):
                     if exclude_team_span and hasattr(span, 'name') and span.name.startswith("team."):
                         continue
 
-                    state = getattr(span, "_otel_llm_state", None)
+                    state = getattr(span, "otel_llm_state", None)
                     if state is not None:
                         _log_orphan_llm_span(span, state)
                     else:
@@ -406,7 +406,7 @@ def set_current_agent_span(span: Span | None) -> None:
 def _log_orphan_llm_span(span: Span, state: LlmSpanState) -> None:
     """Log and close an orphan LLM span that reached the flush path.
 
-    A span with ``_otel_llm_state`` reaching ``flush_spans_for_trace`` or
+    A span with ``otel_llm_state`` reaching ``flush_spans_for_trace`` or
     ``flush_all_spans`` means it was opened normally but its close
     callback (on_llm_output / on_llm_invoke_output) never fired AND
     cascade-close missed it.  This is a real bug — log at error level

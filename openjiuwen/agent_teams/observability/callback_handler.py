@@ -213,7 +213,7 @@ class OtelCallbackHandler:
     async def on_llm_stream_output(self, *args: Any, **kwargs: Any) -> Any:
         try:
             span = get_current_llm_span()
-            state = getattr(span, "_otel_llm_state", None) if span else None
+            state = getattr(span, "otel_llm_state", None) if span else None
 
             if state is None or not state.span.is_recording():
                 return kwargs.get("result")
@@ -250,7 +250,7 @@ class OtelCallbackHandler:
         state = None
         try:
             span = pop_current_llm_span()
-            state = getattr(span, "_otel_llm_state", None) if span else None
+            state = getattr(span, "otel_llm_state", None) if span else None
             if state is None:
                 team_logger.debug("otel: on_llm_output — no open LLM span to close")
                 return
@@ -305,14 +305,14 @@ class OtelCallbackHandler:
         try:
             # Peek first to check if it's streaming (leave to on_llm_output)
             span_peek = get_current_llm_span()
-            state_peek = getattr(span_peek, "_otel_llm_state", None) if span_peek else None
+            state_peek = getattr(span_peek, "otel_llm_state", None) if span_peek else None
             if state_peek is None:
                 return kwargs.get("result")
             if state_peek.is_streaming:
                 return kwargs.get("result")
             # Non-streaming: pop and close
             span = pop_current_llm_span()
-            state = getattr(span, "_otel_llm_state", None) if span else None
+            state = getattr(span, "otel_llm_state", None) if span else None
             if state is None:
                 return kwargs.get("result")
             response = kwargs.get("result")
@@ -335,7 +335,7 @@ class OtelCallbackHandler:
         state = None
         try:
             span = pop_current_llm_span()
-            state = getattr(span, "_otel_llm_state", None) if span else None
+            state = getattr(span, "otel_llm_state", None) if span else None
 
             if state is None:
                 return
@@ -686,7 +686,7 @@ class OtelCallbackHandler:
         self._stamp_parent_member_name(span)
 
         _llm_st = LlmSpanState(span=span, start_ns=time.monotonic_ns(), is_streaming=is_streaming)
-        span._otel_llm_state = _llm_st  # attach state to span object (context-immune)
+        span.otel_llm_state = _llm_st  # attach state to span object (context-immune)
 
 
         team_logger.debug(
