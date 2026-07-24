@@ -3,6 +3,8 @@
 from pathlib import Path
 import tempfile
 import shutil
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -146,6 +148,37 @@ async def test_skill_tool_invalid_reference_file(sys_op, temp_dir):
     skill_res = await skill_tool.invoke({"skill_name": "test_skill_1", "relative_file_path": "reference/unknown_file.md"})
     assert skill_res.success is False
     assert skill_res.error is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "relative_file_path",
+    [
+        "../outside.md",
+        "reference/../../outside.md",
+        r"reference\..\..\outside.md",
+        "/absolute/outside.md",
+        r"C:\absolute\outside.md",
+    ],
+)
+async def test_skill_tool_rejects_unsafe_reference_paths(temp_dir, relative_file_path):
+    skills_root = Path(temp_dir) / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    skill = _write_skill(skills_root, "test_skill_1", "description", "body")
+    read_file = AsyncMock()
+    operation = SimpleNamespace(fs=lambda: SimpleNamespace(read_file=read_file))
+    skill_tool = SkillTool(operation, lambda: [skill])
+
+    skill_res = await skill_tool.invoke(
+        {
+            "skill_name": "test_skill_1",
+            "relative_file_path": relative_file_path,
+        }
+    )
+
+    assert skill_res.success is False
+    assert "Invalid relative_file_path" in skill_res.error
+    read_file.assert_not_awaited()
 
 
 @pytest.mark.asyncio
