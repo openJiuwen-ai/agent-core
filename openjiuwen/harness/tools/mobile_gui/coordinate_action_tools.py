@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import time
+import asyncio
 from dataclasses import dataclass
 from typing import Any, List
 
@@ -328,7 +328,7 @@ async def type_text_action(text: str, ctx: AgentCallbackContext) -> str:
             return error
 
         text = "" if text is None else str(text)
-        time.sleep(0.5)
+        await asyncio.sleep(0.5)
 
         try:
             focused = device(focused=True)
