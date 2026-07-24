@@ -960,7 +960,7 @@ class OtelCallbackHandler:
         try:
             agent_span = get_current_agent_span()
             if agent_span is None:
-                team_logger.warning(
+                team_logger.debug(
                     "callback_handler: _stamp_parent_member_name — "
                     "no agent span in context; span={} will not carry agentteam.member.name",
                     span.name,
