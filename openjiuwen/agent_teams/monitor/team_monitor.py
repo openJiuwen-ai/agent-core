@@ -192,6 +192,21 @@ class TeamMonitor:
             tasks = await self._db.task.get_team_tasks(self._team_name, status=status)
         return [TaskInfo.from_internal(t) for t in tasks]
 
+    async def get_task(self, task_id: str) -> TaskInfo | None:
+        """Query a single task by ID.
+
+        Args:
+            task_id: Task identifier.
+
+        Returns:
+            TaskInfo or None if not found.
+        """
+        with self._bound_session():
+            task = await self._db.task.get_task(task_id)
+        if task is None:
+            return None
+        return TaskInfo.from_internal(task)
+
     async def get_messages(
         self,
         *,
