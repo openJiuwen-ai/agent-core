@@ -16,12 +16,16 @@ __all__ = [
     "REPO_ROOT",
     "build_browser_runtime_mcp_config",
     "register_browser_runtime_mcp_server",
+    "reset_active_browser_runtimes",
     "restart_local_browser_runtime_server",
     "stop_local_browser_runtime_server",
 ]
 
 
 def __getattr__(name: str) -> Any:
+    if name == "reset_active_browser_runtimes":
+        module = import_module("openjiuwen.harness.tools.browser_move.playwright_runtime.runtime")
+        return getattr(module, name)
     if name in {
         "build_browser_runtime_mcp_config",
         "register_browser_runtime_mcp_server",
