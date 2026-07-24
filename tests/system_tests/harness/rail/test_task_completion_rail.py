@@ -241,7 +241,7 @@ class TestTaskCompletionRailSystem(unittest.IsolatedAsyncioTestCase):
         mock_llm.set_responses([create_text_response("ok")] * 20)
         model = _build_mock_model(mock_llm)
 
-        rail = TaskCompletionRail(timeout_seconds=0.6)
+        rail = TaskCompletionRail(timeout_seconds=1.2)
         capture = _IterationCapture()
 
         agent = create_deep_agent(
@@ -254,12 +254,12 @@ class TestTaskCompletionRailSystem(unittest.IsolatedAsyncioTestCase):
         agent.add_rail(capture)
 
         # react_agent is available after configure() (before invoke).
-        # Patch its invoke to be slow (~0.4 s per call).
+        # Patch its invoke to be slow (~0.3 s per call).
         assert agent.react_agent is not None
         original_invoke = agent.react_agent.invoke
 
         async def _slow_invoke(*args: Any, **kwargs: Any) -> Any:
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.3)
             return await original_invoke(*args, **kwargs)
 
         agent.react_agent.invoke = _slow_invoke  # type: ignore[method-assign]
@@ -272,8 +272,15 @@ class TestTaskCompletionRailSystem(unittest.IsolatedAsyncioTestCase):
 
         await agent.invoke({"query": "loop forever"}, session=session)
 
-        # With 0.6 s timeout and ~0.4 s per round, at most 2 rounds.
-        self.assertLessEqual(capture.count, 3)
+        # With a 1.2 s timeout and ~0.3 s per round, ~4 rounds are expected.
+        # Bounds are intentionally loose (vs. the ~4 rounds expected) to absorb
+        # scheduling/setup overhead on a loaded CI box: the first round previously
+        # had only ~0.2 s of slack over its own sleep, which was enough for a busy
+        # runner to blow the budget before even one round completed
+        # (capture.count == 0). The upper bound just needs to stay well under the
+        # 10 seeded tasks, to prove the loop stopped because of the timeout and
+        # not because it ran out of tasks.
+        self.assertLessEqual(capture.count, 8)
         self.assertGreaterEqual(capture.count, 1)
 
     # -- UC-2: CompletionPromise with mock LLM ---------------------------
