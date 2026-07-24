@@ -92,13 +92,13 @@ _RUNTIME_HEALTH_PARAMS: Dict[str, Any] = {
 }
 
 _PROBE_INTERACTIVES_DESC = (
-    "Return a compact list of visible, high-value interactive elements on the current page. "
+    "Query the runtime's shared, versioned page index for visible high-value interactive elements. "
     "Use this for page-level controls such as buttons, links, inputs, forms, navigation, login, "
     "pagination, menus, and visible actions. The optional query filter is alias-aware for common "
-    "search/input terms, including placeholders, aria labels, input type/name/id/class, and Chinese "
-    "search text such as 搜索/关键词. Prefer max_items around 20-30 unless a larger inventory "
-    "is needed. For product/search/listing card data, prefer browser_probe_cards first. "
-    "The result includes role/action_likelihood/text/aria-label/testid/bbox/selector_hint for likely controls."
+    "search/input terms, including Chinese text such as 搜索/关键词. Repeated-item controls include "
+    "their containing group and item context. Pass scope_group_id and scope_item_index from a card "
+    "result to retrieve controls for one repeated item without another DOM scan. Prefer max_items "
+    "around 20-30. For listing data, use browser_probe_cards first."
 )
 _PROBE_INTERACTIVES_PARAMS: Dict[str, Any] = {
     "type": "object",
@@ -113,22 +113,28 @@ _PROBE_INTERACTIVES_PARAMS: Dict[str, Any] = {
         },
         "query": {
             "type": "string",
-            "description": "Optional text filter, e.g. 'cart', 'search', 'next', or 'login'.",
+            "description": "Optional text filter, including text from a containing repeated item.",
+        },
+        "scope_group_id": {
+            "type": "string",
+            "description": "Optional group_id returned by browser_probe_cards.",
+        },
+        "scope_item_index": {
+            "type": "integer",
+            "description": "Optional zero-based item index within scope_group_id.",
         },
     },
     "required": [],
 }
 
 _PROBE_CARDS_DESC = (
-    "Return compact repeated card/listing structures from the current page. "
-    "Use this first on product pages, marketplace pages, search-result pages, catalog pages, "
-    "article-list pages, table/list-row result pages, or any page with repeated visible cards/listings. "
-    "The result includes candidate card title, author/source, summary/snippet, price, rating, "
-    "review count, availability, primary link, visible buttons, bbox, selector_hint, "
-    "recurring structure signatures, and cache diagnostics. If this returns the fields needed "
-    "for the task, including article/search-result title/link/author/source/summary fields, "
-    "use the compact card result directly instead of taking screenshots/snapshots or running "
-    "broad DOM evaluation. Only evaluate again when a required field is missing."
+    "Query the shared page index for repeated card, row, article, product, or result-item groups. "
+    "The probe detects duplicate sibling structures first, ranks groups, parses at most three "
+    "representatives, compiles relative field paths, and applies that schema to the remaining items. "
+    "Use it first on product, marketplace, search-result, catalog, article-list, table, and list pages. "
+    "The default compact result includes the selected group, essential card fields, interaction hints, "
+    "and page-index diagnostics. Use diagnostics_level='standard' for attempted groups or 'debug' for "
+    "recurring signatures and cache selectors. Prefer the compact result over snapshots or DOM dumps."
 )
 _PROBE_CARDS_PARAMS: Dict[str, Any] = {
     "type": "object",
@@ -148,6 +154,11 @@ _PROBE_CARDS_PARAMS: Dict[str, Any] = {
         "query": {
             "type": "string",
             "description": "Optional text filter, e.g. 'mouse', 'book', 'laptop', or 'cart'.",
+        },
+        "diagnostics_level": {
+            "type": "string",
+            "enum": ["compact", "standard", "debug"],
+            "description": "Diagnostic detail level. Default compact.",
         },
     },
     "required": [],
@@ -765,12 +776,24 @@ class BrowserProbeInteractivesTool(Tool):
             viewport_only = bool(viewport_only_raw)
 
         query = str(inputs.get("query") or "").strip()
+        scope_group_id = str(inputs.get("scope_group_id") or "").strip()
+        scope_item_index_raw = inputs.get("scope_item_index")
+        try:
+            scope_item_index = (
+                max(0, int(scope_item_index_raw))
+                if scope_item_index_raw is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            scope_item_index = None
 
         try:
             data = await self._runtime.probe_interactives(
                 max_items=max_items,
                 viewport_only=viewport_only,
                 query=query,
+                scope_group_id=scope_group_id,
+                scope_item_index=scope_item_index,
             )
             return ToolOutput(
                 success=bool(data.get("ok", True)),
@@ -826,6 +849,11 @@ class BrowserProbeCardsTool(Tool):
             include_buttons = bool(include_buttons_raw)
 
         query = str(inputs.get("query") or "").strip()
+        diagnostics_level = str(
+            inputs.get("diagnostics_level") or "compact"
+        ).strip().lower()
+        if diagnostics_level not in {"compact", "standard", "debug"}:
+            diagnostics_level = "compact"
 
         try:
             data = await self._runtime.probe_cards(
@@ -833,6 +861,7 @@ class BrowserProbeCardsTool(Tool):
                 viewport_only=viewport_only,
                 include_buttons=include_buttons,
                 query=query,
+                diagnostics_level=diagnostics_level,
             )
             return ToolOutput(
                 success=bool(data.get("ok", True)),

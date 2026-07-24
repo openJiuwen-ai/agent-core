@@ -34,6 +34,12 @@ from .browser_logging import (
 from .browser_tools import ensure_browser_runtime_client_patch
 from .config import BrowserInstanceConfig, BrowserRunGuardrails
 from .mcp_usage_limiter import BrowserMcpUsageLimiter
+from .page_structure_index import (
+    PAGE_INDEX_RUNTIME_MISSING_ERROR,
+    build_page_index_configuration,
+    build_page_index_configure_js,
+    build_page_index_install_js,
+)
 from .probes import build_card_probe_js, build_interactive_probe_js
 from .semantic_widgets import (
     build_calendar_probe_js,
@@ -131,6 +137,8 @@ class BrowserAgentRuntime:
         self._browser_list_actions_tool = None
         self._controller: BaseController = ActionController()
         self._code_executor = None
+        self._page_index_runtime_installed = False
+        self._page_index_config_revision = ""
         self._browser_probe_interactives_tool = None
         self._browser_probe_cards_tool = None
         self._browser_batch_interact_tool = None
@@ -832,12 +840,130 @@ class BrowserAgentRuntime:
             **(params or {}),
         )
 
+    async def _install_page_index_runtime(
+        self,
+        initial_configuration: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if self._code_executor is None:
+            return {"ok": False, "error": "browser_code_executor_not_ready"}
+
+        try:
+            raw = await self._code_executor(
+                build_page_index_install_js(initial_configuration)
+            )
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            self._page_index_runtime_installed = False
+            self._page_index_config_revision = ""
+            return {
+                "ok": False,
+                "error": f"browser_page_index_install failed: {exc}",
+            }
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            self._page_index_runtime_installed = False
+            self._page_index_config_revision = ""
+            return {
+                "ok": False,
+                "error": "Could not parse browser page-index install result JSON",
+                "raw_preview": str(raw)[:400],
+            }
+
+        if not parsed.get("ok", False):
+            self._page_index_runtime_installed = False
+            self._page_index_config_revision = ""
+            return parsed
+
+        self._page_index_runtime_installed = True
+        self._page_index_config_revision = str(
+            parsed.get("configuration_revision") or ""
+        )
+        return parsed
+
+    async def _ensure_page_index_configuration(
+        self,
+        configuration: Dict[str, Any],
+    ) -> None:
+        revision = str(configuration.get("revision") or "")
+        if revision and revision == self._page_index_config_revision:
+            return
+        if self._code_executor is None:
+            raise RuntimeError("browser_code_executor_not_ready")
+
+        raw = await self._code_executor(
+            build_page_index_configure_js(configuration)
+        )
+        unwrapped = self._unwrap_mcp_text_result(raw)
+        parsed = extract_json_object(unwrapped)
+        if not parsed:
+            raise RuntimeError("Could not parse browser page-index configuration result JSON")
+        if parsed.get("error") == PAGE_INDEX_RUNTIME_MISSING_ERROR:
+            self._page_index_runtime_installed = False
+            self._page_index_config_revision = ""
+            install_result = await self._install_page_index_runtime(configuration)
+            if not install_result.get("ok", False):
+                raise RuntimeError(
+                    str(install_result.get("error") or "page_index_reinstall_failed")
+                )
+            return
+        if not parsed.get("ok", False):
+            raise RuntimeError(
+                str(parsed.get("error") or "page_index_configuration_failed")
+            )
+        self._page_index_config_revision = str(
+            parsed.get("configuration_revision") or revision
+        )
+
+    async def _execute_page_index_probe(
+        self,
+        js_code: str,
+        *,
+        configuration: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        if self._code_executor is None:
+            raise RuntimeError("browser_code_executor_not_ready")
+
+        if not self._page_index_runtime_installed:
+            install_result = await self._install_page_index_runtime(configuration)
+            if not install_result.get("ok", False):
+                raise RuntimeError(
+                    str(install_result.get("error") or "page_index_install_failed")
+                )
+        elif configuration is not None:
+            await self._ensure_page_index_configuration(configuration)
+
+        raw = await self._code_executor(js_code)
+        unwrapped = self._unwrap_mcp_text_result(raw)
+        parsed = extract_json_object(unwrapped)
+        if not parsed:
+            return raw
+
+        error = str(parsed.get("error") or "")
+        if error == "page_index_configuration_mismatch" and configuration is not None:
+            self._page_index_config_revision = ""
+            await self._ensure_page_index_configuration(configuration)
+            return await self._code_executor(js_code)
+        if error != PAGE_INDEX_RUNTIME_MISSING_ERROR:
+            return raw
+
+        self._page_index_runtime_installed = False
+        self._page_index_config_revision = ""
+        install_result = await self._install_page_index_runtime(configuration)
+        if not install_result.get("ok", False):
+            raise RuntimeError(
+                str(install_result.get("error") or "page_index_reinstall_failed")
+            )
+        return await self._code_executor(js_code)
+
     async def probe_interactives(
         self,
         *,
         max_items: int = 50,
         viewport_only: bool = True,
         query: str = "",
+        scope_group_id: str = "",
+        scope_item_index: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Return compact visible/high-value interactive elements from the current page."""
         await self.ensure_runtime_ready()
@@ -853,10 +979,12 @@ class BrowserAgentRuntime:
             max_items=max_items,
             viewport_only=viewport_only,
             query=query,
+            scope_group_id=scope_group_id,
+            scope_item_index=scope_item_index,
         )
 
         try:
-            raw = await self._code_executor(js_code)
+            raw = await self._execute_page_index_probe(js_code)
             raw = self._unwrap_mcp_text_result(raw)
         except Exception as exc:
             return {
@@ -886,6 +1014,7 @@ class BrowserAgentRuntime:
         viewport_only: bool = True,
         include_buttons: bool = True,
         query: str = "",
+        diagnostics_level: str = "compact",
     ) -> Dict[str, Any]:
         """Return compact repeated card/listing structures from the current page."""
         await self.ensure_runtime_ready()
@@ -900,18 +1029,25 @@ class BrowserAgentRuntime:
         site_profiles = builtin_site_profiles()
         selector_cache = get_selector_cache()
         selector_cache_records = selector_cache.export_for_probe()
+        configuration = build_page_index_configuration(
+            site_profiles=site_profiles,
+            selector_cache_records=selector_cache_records,
+        )
 
         js_code = build_card_probe_js(
             max_cards=max_cards,
             viewport_only=viewport_only,
             include_buttons=include_buttons,
             query=query,
-            site_profiles=site_profiles,
-            selector_cache_records=selector_cache_records,
+            diagnostics_level=diagnostics_level,
+            configuration_revision=str(configuration.get("revision") or ""),
         )
 
         try:
-            raw = await self._code_executor(js_code)
+            raw = await self._execute_page_index_probe(
+                js_code,
+                configuration=configuration,
+            )
             raw = self._unwrap_mcp_text_result(raw)
         except Exception as exc:
             return {
@@ -933,24 +1069,30 @@ class BrowserAgentRuntime:
         parsed.setdefault("error", None)
         parsed.setdefault("cards", [])
 
+        cache_cards = parsed.get("_cache_cards")
+        cache_result = dict(parsed)
+        if isinstance(cache_cards, list) and cache_cards:
+            cache_result["cards"] = cache_cards
+
         if parsed.get("ok"):
             try:
-                selector_cache.record_card_probe_cache_rejection(parsed)
+                selector_cache.record_card_probe_cache_rejection(cache_result)
             except Exception:
                 logger.debug(
                     "Failed to record rejected card-probe selector cache attempt",
                     exc_info=True,
                 )
 
-        if parsed.get("ok") and parsed.get("cards"):
+        if parsed.get("ok") and cache_result.get("cards"):
             try:
-                selector_cache.record_card_probe_result(parsed)
+                selector_cache.record_card_probe_result(cache_result)
             except Exception:
                 logger.debug(
                     "Failed to record card probe result in selector cache",
                     exc_info=True,
                 )
 
+        parsed.pop("_cache_cards", None)
         return parsed
 
     async def list_actions(self) -> Dict[str, Any]:

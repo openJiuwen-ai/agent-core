@@ -254,6 +254,8 @@ def test_probe_interactives_tool_uses_runtime_api() -> None:
         max_items=20,
         viewport_only=True,
         query="next",
+        scope_group_id="",
+        scope_item_index=None,
     )
     assert result.success is True
     assert result.data["elements"][0]["text"] == "Next"
@@ -294,6 +296,7 @@ def test_probe_cards_tool_uses_runtime_api() -> None:
         viewport_only=True,
         include_buttons=True,
         query="book",
+        diagnostics_level="compact",
     )
     assert result.success is True
     assert result.data["cards"][0]["title"] == "Book"
