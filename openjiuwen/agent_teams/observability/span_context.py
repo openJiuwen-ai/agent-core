@@ -103,7 +103,7 @@ class ActiveSpanTracker(SpanProcessor):
             if parent is None or parent.span_id != parent_span_id:
                 continue
             try:
-                team_logger.error(
+                team_logger.warning(
                     "ORPHAN LLM span in cascade-close: span_id={:016x} "
                     "parent_span_id={:016x} — close callback did not fire",
                     span.context.span_id, parent_span_id,
@@ -416,7 +416,7 @@ def _log_orphan_llm_span(span: Span, state: LlmSpanState) -> None:
     "stream_finalized" output attribute, because that would mask the fact
     that the span was leaked.
     """
-    team_logger.error(
+    team_logger.warning(
         "ORPHAN LLM span at flush: span_id={:016x} streaming={} "
         "recording={} first_chunk_ns={} — span was opened but never "
         "properly closed; its normal close callback did not fire",
