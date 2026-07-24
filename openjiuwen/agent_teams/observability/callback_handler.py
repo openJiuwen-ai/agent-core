@@ -174,7 +174,7 @@ class OtelCallbackHandler:
         team_span = get_team_span()
         if team_span is not None:
             if team_span.is_recording():
-                team_logger.info(
+                team_logger.debug(
                     "otel: _get_parent_context - fallback to team span name={} "
                     "trace_id={:032x} span_id={:016x}",
                     team_span.name,
@@ -191,7 +191,7 @@ class OtelCallbackHandler:
                     team_span.context.span_id,
                 )
 
-        team_logger.error("otel: no valid parent span for LLM/tool — skipping span creation")
+        team_logger.warning("otel: no valid parent span for LLM/tool — skipping span creation")
         return None
 
     # ------------------------------------------------------------------
@@ -407,7 +407,7 @@ class OtelCallbackHandler:
                 return result
 
             if not span.is_recording():
-                team_logger.error(
+                team_logger.warning(
                     "WRITE_ON_ENDED_SPAN: where=on_tool_call_finished name={} span_id={:016x}",
                     getattr(span, "name", "<no-name>"),
                     getattr(getattr(span, "context", None), "span_id", 0),
@@ -442,7 +442,7 @@ class OtelCallbackHandler:
                 return
 
             if not span.is_recording():
-                team_logger.error(
+                team_logger.warning(
                     "WRITE_ON_ENDED_SPAN: where=on_tool_call_error name={} span_id={:016x}",
                     getattr(span, "name", "<no-name>"),
                     getattr(getattr(span, "context", None), "span_id", 0),
@@ -689,7 +689,7 @@ class OtelCallbackHandler:
         span._otel_llm_state = _llm_st  # attach state to span object (context-immune)
 
 
-        team_logger.info(
+        team_logger.debug(
             "otel: _open_llm_span name=llm.call trace_id={:032x} span_id={:016x} "
             "parent_span_id={:016x} streaming={}",
             span.context.trace_id, span.context.span_id,
@@ -698,7 +698,7 @@ class OtelCallbackHandler:
 
     def _close_llm_span(self, state: LlmSpanState, response: Any) -> None:
         if not state.span.is_recording():
-            team_logger.error(
+            team_logger.warning(
                 "WRITE_ON_ENDED_SPAN: where=_close_llm_span name={} span_id={:016x}",
                 getattr(state.span, "name", "<no-name>"),
                 getattr(getattr(state.span, "context", None), "span_id", 0),

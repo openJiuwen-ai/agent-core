@@ -217,10 +217,10 @@ class ObservabilityRail(DeepAgentRail):
 
             team_span = get_team_span()
             if team_span is None:
-                team_logger.error("RAIL.before_task_iteration: team_span is None! team_name={}", team_name)
+                team_logger.warning("RAIL.before_task_iteration: team_span is None! team_name={}", team_name)
                 return
             if not team_span.is_recording():
-                team_logger.error(
+                team_logger.warning(
                     "RAIL.before_task_iteration: team_span ENDED! name={} trace_id={:032x} "
                     "span_id={:016x} member={} iteration={}",
                     team_span.name, team_span.context.trace_id, team_span.context.span_id,
@@ -278,7 +278,7 @@ class ObservabilityRail(DeepAgentRail):
             agent_ctx = set_span_in_context(span, otel_context.get_current())
             otel_context.attach(agent_ctx)
 
-            team_logger.info(
+            team_logger.debug(
                 "otel rail: agent span opened: agent.{}.task_iteration.{} "
                 "span_id={:016x} trace_id={:032x} parent_span_id={:016x}",
                 member_label, iteration,
@@ -305,7 +305,7 @@ class ObservabilityRail(DeepAgentRail):
             if scope is None:
                 return
 
-            team_logger.info(
+            team_logger.debug(
                 "RAIL.after_task_iteration: ctx_id={} name={} span_id={:016x}",
                 id(ctx), scope.span.name, scope.span.context.span_id,
             )
@@ -339,7 +339,7 @@ class ObservabilityRail(DeepAgentRail):
                         redacted = redact_completion(output_str, config) if config else output_str
                         team_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
 
-            team_logger.info(
+            team_logger.debug(
                 "otel rail: agent span closed, member={}, has_output={}",
                 member_name, output is not None,
             )
@@ -462,7 +462,7 @@ class ObservabilityRail(DeepAgentRail):
                 config=config,
             ).attach(ctx)
 
-            team_logger.info(
+            team_logger.debug(
                 "otel rail: invoke span opened (single-round fallback): agent.{} "
                 "span_id={:016x} trace_id={:032x} nested={}",
                 member_name, span.context.span_id, span.context.trace_id,
@@ -485,7 +485,7 @@ class ObservabilityRail(DeepAgentRail):
 
             scope.close(output=output, exception=ctx.exception)
 
-            team_logger.info(
+            team_logger.debug(
                 "otel rail: invoke span closed: name={} span_id={:016x}",
                 scope.span.name, scope.span.context.span_id,
             )

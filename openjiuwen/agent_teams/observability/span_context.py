@@ -43,7 +43,7 @@ class ActiveSpanTracker(SpanProcessor):
                 for s in s_set:
                     if hasattr(s, 'name') and s.name.startswith("team."):
                         team_spans += 1
-            team_logger.info(
+            team_logger.debug(
                 "ActiveSpanTracker state: traces={} total_spans={} team_spans={} "
                 "start_calls={} end_calls={}",
                 len(self._spans_by_trace), total_spans, team_spans,
@@ -225,7 +225,7 @@ class ActiveSpanTracker(SpanProcessor):
                 if state is not None:
                     _log_orphan_llm_span(span, state)
                 else:
-                    team_logger.error(
+                    team_logger.warning(
                         "ORPHAN non-LLM span at flush: name={} span_id={:016x} "
                         "— span was never properly closed",
                         span.name if hasattr(span, 'name') else '<no-name>',
@@ -271,7 +271,7 @@ class ActiveSpanTracker(SpanProcessor):
                     if state is not None:
                         _log_orphan_llm_span(span, state)
                     else:
-                        team_logger.error(
+                        team_logger.warning(
                             "ORPHAN non-LLM span at flush: name={} span_id={:016x} "
                             "— span was never properly closed",
                             span.name if hasattr(span, 'name') else '<no-name>',
@@ -356,7 +356,7 @@ def get_or_create_team_span(team_name: str, tracer) -> Span | None:
 
     span = _team_span_ctx.get()
     if span is not None:
-        team_logger.info(
+        team_logger.debug(
             "otel: get_or_create_team_span REUSE existing span={} is_recording={} "
             "trace_id={:032x} span_id={:016x}",
             span.name, span.is_recording(),
@@ -438,7 +438,7 @@ def cascade_close_children() -> None:
     for bucket in _tool_span_map.get().values():
         for ts in bucket:
             if ts.is_recording():
-                team_logger.error(
+                team_logger.warning(
                     "ORPHAN tool span in cascade-close: name={} span_id={:016x} — "
                     "on_tool_call_finished/on_tool_call_error did not fire",
                     ts.name if hasattr(ts, 'name') else '<no-name>',
@@ -563,7 +563,7 @@ def finalize_trace(team_name: str) -> None:
 
     # Step 1: Close the team span (clears ContextVar for the next team).
     if team_span is not None and team_span.is_recording():
-        team_logger.info(
+        team_logger.debug(
             "otel: finalize_trace - closing team span team={} name={} "
             "is_recording={} trace_id={:032x} span_id={:016x}",
             team_name, team_span.name, team_span.is_recording(),
@@ -588,7 +588,7 @@ def finalize_trace(team_name: str) -> None:
     # Step 2: Flush remaining child spans for THIS trace only.
     flush_child_spans(trace_id=trace_id_for_flush)
 
-    team_logger.info("otel: finalize_trace completed for team={}", team_name)
+    team_logger.debug("otel: finalize_trace completed for team={}", team_name)
 
 
 def reset_all() -> None:
