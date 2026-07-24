@@ -278,6 +278,7 @@ def _persist_tiered_approval_override_suggestions(
     permissions: PermissionsSection,
     suggestions: list[PermissionSuggestion],
 ) -> bool:
+    """写入 command 类 approval_overrides；path 类忽略（路径只写 file_guard）。"""
     if not suggestions:
         return False
     overrides = permissions.get("approval_overrides")
@@ -287,6 +288,13 @@ def _persist_tiered_approval_override_suggestions(
 
     persisted_any = False
     for suggestion in suggestions:
+        if str(suggestion.match_type or "").strip().lower() == "path":
+            logger.info(
+                "[PermissionEngine] permission.persist.skip reason=path_suggestion_use_file_guard "
+                "pattern=%s",
+                suggestion.pattern,
+            )
+            continue
         for tool_name in suggestion.tools:
             if _ensure_single_allow_override(
                     overrides,
@@ -412,31 +420,148 @@ def write_permissions_section_to_agent_config_yaml(
         return False
 
 
+def _axes_for_file_guard_action(action: str) -> tuple[str, str, str]:
+    """HITL「总是允许」按当时 path action 落盘，避免 read 场景写开放 write。"""
+    act = (action or "read").strip().lower()
+    if act == "write":
+        return "allow", "allow", "ask"
+    if act == "exec":
+        return "allow", "ask", "allow"
+    return "allow", "ask", "ask"
+
+
+def _escalate_axis_toward_allow(old: Any, new: str) -> str:
+    """合并同 path 规则：仅在 new=allow 时抬升，不降级已有 allow/deny。"""
+    if new == "allow":
+        return "allow"
+    if old in ("allow", "ask", "deny"):
+        return str(old)
+    return new
+
+
+def merge_file_guard_path_rule(
+    permissions: PermissionsSection | dict[str, Any],
+    path: str,
+    *,
+    read: str = "allow",
+    write: str = "allow",
+    exec_: str = "ask",
+    match: str = "prefix",
+) -> tuple[PermissionsSection, bool]:
+    """在 ``permissions`` 副本上合并一条 ``file_guard.paths`` 规则；返回 ``(merged, wrote_any)``。
+
+    用于 ``/add-dir`` / HITL「总是允许」路径类决策。``exec_`` 默认 ``ask``（目录信任 ≠ 默认可执行）。
+    同 path 已存在时按轴向 allow 抬升合并，避免后一次 read-only 覆盖掉已有 write allow。
+    """
+    path_norm = path.replace("\\", "/").rstrip("/")
+    if not path_norm:
+        return cast(PermissionsSection, deepcopy(permissions)), False
+
+    perms = cast(PermissionsSection, deepcopy(permissions))
+    fg = perms.get("file_guard")
+    if not isinstance(fg, dict):
+        fg = {}
+        perms["file_guard"] = fg  # type: ignore[typeddict-unknown-key]
+    fg["enabled"] = True
+    paths = fg.get("paths")
+    if not isinstance(paths, list):
+        paths = []
+        fg["paths"] = paths
+
+    for i, existing in enumerate(paths):
+        if not isinstance(existing, dict):
+            continue
+        existing_path = str(existing.get("path") or "").replace("\\", "/").rstrip("/")
+        if existing_path != path_norm:
+            continue
+        merged_read = _escalate_axis_toward_allow(existing.get("read"), read)
+        merged_write = _escalate_axis_toward_allow(existing.get("write"), write)
+        merged_exec = _escalate_axis_toward_allow(existing.get("exec"), exec_)
+        merged_match = existing.get("match", "prefix") or match
+        unchanged = (
+            existing.get("read") == merged_read
+            and existing.get("write") == merged_write
+            and existing.get("exec") == merged_exec
+            and existing.get("match", "prefix") == merged_match
+        )
+        if unchanged:
+            return cast(PermissionsSection, perms), False
+        paths[i] = {
+            **existing,
+            "path": path_norm,
+            "read": merged_read,
+            "write": merged_write,
+            "exec": merged_exec,
+            "match": merged_match,
+        }
+        logger.info(
+            "[PermissionEngine] permission.merge.file_guard path=%s read=%s write=%s exec=%s",
+            path_norm, merged_read, merged_write, merged_exec,
+        )
+        return cast(PermissionsSection, perms), True
+
+    entry = {
+        "path": path_norm,
+        "read": read,
+        "write": write,
+        "exec": exec_,
+        "match": match,
+    }
+    paths.append(entry)
+    logger.info(
+        "[PermissionEngine] permission.merge.file_guard path=%s read=%s write=%s exec=%s",
+        path_norm, read, write, exec_,
+    )
+    return cast(PermissionsSection, perms), True
+
+
+def merge_file_guard_access_allows(
+    permissions: PermissionsSection | dict[str, Any],
+    accesses: list[tuple[str, str]],
+) -> tuple[PermissionsSection, bool]:
+    """按 ``(path, action)`` 写入 ``file_guard.paths``（HITL「总是允许」主路径）。
+
+    - 使用触达路径本身，**不上卷父目录**（``ls dir`` → 信任 ``dir``，不是 ``dir`` 的父级）
+    - 轴权限按 action：``read`` → 仅 read allow；``write`` → read+write allow；``exec`` → read+exec allow
+    """
+    if not accesses:
+        return cast(PermissionsSection, deepcopy(permissions)), False
+    perms = cast(PermissionsSection, deepcopy(permissions))
+    wrote = False
+    for path_str, action in accesses:
+        if not isinstance(path_str, str) or not path_str.strip():
+            continue
+        path_norm = path_str.replace("\\", "/").rstrip("/")
+        if not path_norm:
+            continue
+        read, write, exec_ = _axes_for_file_guard_action(action)
+        perms, did = merge_file_guard_path_rule(
+            perms, path_norm, read=read, write=write, exec_=exec_,
+        )
+        wrote = wrote or did
+    return cast(PermissionsSection, perms), wrote
+
+
 def merge_external_directory_allow_into_permissions(
     permissions: PermissionsSection | dict[str, Any],
     paths: list[str],
+    *,
+    actions: list[str] | None = None,
 ) -> tuple[PermissionsSection, bool]:
-    """在 ``permissions`` 副本上合并外部目录白名单；返回 ``(merged, wrote_any)``。"""
+    """Deprecated：请改用 :func:`merge_file_guard_access_allows`。
+
+    写入触达路径本身（不上卷父目录）；缺省按 **read** 轴 allow（write/exec 保持 ask），
+    避免 ``ls`` 类读操作过度授权 write。可通过 ``actions`` 与 ``paths`` 对齐传入动作。
+    """
     if not paths:
         return cast(PermissionsSection, deepcopy(permissions)), False
-    perms = cast(PermissionsSection, deepcopy(permissions))
-    ext_cfg = perms.get("external_directory")
-    if not isinstance(ext_cfg, dict):
-        ext_cfg = {"*": "ask"}
-        perms["external_directory"] = ext_cfg
-    wrote = False
-    for path_str in paths:
-        path_norm = path_str.replace("\\", "/").rstrip("/")
-        parent = str(Path(path_norm).parent).replace("\\", "/")
-        key = parent if parent and parent != "." else path_norm
-        if key not in ext_cfg or ext_cfg[key] != "allow":
-            ext_cfg[key] = "allow"
-            wrote = True
-            logger.info(
-                "[PermissionEngine] permission.merge.external path=%s action=allow",
-                key,
-            )
-    return cast(PermissionsSection, perms), wrote
+    access_list: list[tuple[str, str]] = []
+    for i, path_str in enumerate(paths):
+        act = "read"
+        if actions is not None and i < len(actions) and actions[i]:
+            act = str(actions[i])
+        access_list.append((path_str, act))
+    return merge_file_guard_access_allows(permissions, access_list)
 
 
 def merge_permission_allow_rule_into_permissions(
@@ -473,8 +598,11 @@ def merge_permission_allow_rule_into_permissions(
         tool_args,
         shell_ast_result=shell_ast_result,
     )
-    if not _persist_tiered_approval_override_suggestions(perms, suggestions):
-        if tool_name not in _SHELL_APPROVAL_TOOLS and tool_name not in _PATH_APPROVAL_TOOLS:
+    # path 类 suggestion 不写 approval_overrides（路径细则由 rail 侧 file_guard 落盘）；
+    # 若 A 当前为 ask（如 tools.write_file: ask），则抬升整工具 tools.<name>: allow。
+    non_path = [s for s in suggestions if str(s.match_type or "").lower() != "path"]
+    if not _persist_tiered_approval_override_suggestions(perms, non_path):
+        if tool_name not in _SHELL_APPROVAL_TOOLS:
             if _persist_tiered_tool_allow(perms, tool_name):
                 logger.info(
                     "[PermissionEngine] permission.merge.ok tool=%s target=tools",
@@ -501,11 +629,11 @@ def persist_cli_trusted_directory(
 ) -> dict[str, Any]:
     """CLI ``command.add_dir``：全局信任目录子树。
 
-    写入 ``permissions.external_directory``（以目录路径为前缀键），并追加
-    ``approval_overrides``（路径类工具一条、shell 类工具一条），以便同时消除外部路径维度的 ASK
-    与参数级 ASK。
+    写入 ``permissions.file_guard.paths``（``read/write: allow``，``exec: ask``），
+    并追加 shell 类 ``approval_overrides``（命令维，消除 A 层路径文本 ASK）。
+    **不再**写入 path 类 approval_overrides，也**不再**写入 ``external_directory`` 具名键。
 
-    不更新内存中的引擎；新建 YAML 时可传 ``bootstrap_permissions``。``remember`` 由调用方忽略；本函数始终落盘。
+    不更新内存中的引擎；新建 YAML 时可传 ``bootstrap_permissions``。
     """
     if not isinstance(raw_path, str) or not raw_path.strip():
         return {"ok": False, "error": "path is empty"}
@@ -521,7 +649,6 @@ def persist_cli_trusted_directory(
 
     try:
         from openjiuwen.harness.security.tiered_policy import (
-            _PATH_TOOLS,
             _SHELL_TOOLS,
         )
 
@@ -545,23 +672,27 @@ def persist_cli_trusted_directory(
             permissions = {}
             data["permissions"] = permissions
 
-        ext_cfg = permissions.get("external_directory")
-        if not isinstance(ext_cfg, dict):
-            ext_cfg = {"*": "ask"}
-            permissions["external_directory"] = ext_cfg
-        ext_cfg[dir_norm] = "allow"
+        merged, _wrote = merge_file_guard_path_rule(
+            cast(PermissionsSection, permissions),
+            dir_norm,
+            read="allow",
+            write="allow",
+            exec_="ask",
+        )
+        # 写回同一 dict 树（merge 返回副本）
+        data["permissions"] = merged
+        permissions = merged
+
         logger.info(
-            "[PermissionEngine] permission.persist.cli_add_dir.external.write path=%s action=allow",
+            "[PermissionEngine] permission.persist.cli_add_dir.file_guard path=%s "
+            "read=allow write=allow exec=ask",
             dir_norm,
         )
 
-        path_pattern = "re:^" + re.escape(dir_norm) + r"(?:$|/)"
         posix = dir_norm
-        # 仅用正斜杠路径；反斜杠写入 YAML 双引号后易被解析成 \U 等非法正则转义，匹配改由 tiered 对 command 做 \→/ 归一化
         shell_pattern = "re:" + rf".*{re.escape(posix)}.*"
 
         suffix = hashlib.sha256(dir_norm.encode("utf-8")).hexdigest()[:16]
-        path_override_id = f"cli_trusted_path_{suffix}"
         shell_override_id = f"cli_trusted_shell_{suffix}"
 
         overrides = permissions.get("approval_overrides")
@@ -574,20 +705,6 @@ def persist_cli_trusted_directory(
                 if isinstance(r, dict) and r.get("id") == oid:
                     return True
             return False
-
-        path_tools = sorted(_PATH_TOOLS)
-        if not _has_id(path_override_id):
-            overrides.append({
-                "id": path_override_id,
-                "tools": path_tools,
-                "match_type": "path",
-                "pattern": path_pattern,
-                "action": "allow",
-            })
-            logger.info(
-                "[PermissionEngine] permission.persist.cli_add_dir.override.write target=path id=%s",
-                path_override_id,
-            )
 
         shell_tools = sorted(_SHELL_TOOLS)
         if not _has_id(shell_override_id):
@@ -607,8 +724,8 @@ def persist_cli_trusted_directory(
         return {
             "ok": True,
             "normalized": dir_norm,
-            "path_pattern": path_pattern,
             "shell_pattern": shell_pattern,
+            "file_guard": True,
             "tiered_overrides": True,
         }
     except Exception as e:  # noqa: BLE001
