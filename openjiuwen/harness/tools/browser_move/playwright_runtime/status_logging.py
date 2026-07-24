@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping, Optional
 from urllib.parse import urlsplit, urlunsplit
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
     browser_agent_log_info,
+    browser_agent_log_warning,
     browser_agent_timeline_error,
     browser_agent_timeline_info,
     browser_agent_timeline_warning,
@@ -776,7 +777,7 @@ class BrowserSubagentStatusLogger:
         try:
             rendered = message % args if args else message
         except (TypeError, ValueError) as exc:
-            browser_agent_warning(
+            browser_agent_log_warning(
                 "Failed to render browser timeline message: message=%r args=%r error=%s",
                 message,
                 args,
@@ -787,7 +788,7 @@ class BrowserSubagentStatusLogger:
         try:
             sink("%s%s", prefix, rendered)
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            browser_agent_warning(
+            browser_agent_log_warning(
                 "Failed to write browser timeline message: error=%s",
                 exc,
             )
