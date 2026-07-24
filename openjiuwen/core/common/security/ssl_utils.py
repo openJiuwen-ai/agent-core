@@ -32,7 +32,15 @@ class SslUtils:
 
     @staticmethod
     def get_ssl_config(verify_switch_env: str, ssl_cert_env: str, trigger_value: list, url_is_https: bool = True):
-        """get ssl config"""
+        """get ssl config.
+
+        Returns ``(ssl_verify, ssl_cert)``. ``ssl_cert`` may be ``None``, which
+        means "verify SSL using the system default trust store" (public-CA
+        endpoints work out of the box). When the user sets the cert env var,
+        that CA is loaded additively on top of the system store for
+        self-signed/internal endpoints. Set the verify-switch env var to a
+        trigger value to disable verification entirely.
+        """
         if not url_is_https:
             return False, False
 
@@ -41,18 +49,20 @@ class SslUtils:
 
         if is_ssl_verify_off:
             return False, False
-
-        if ssl_cert is None:
-            raise build_error(
-                StatusCode.COMMON_SSL_CERT_INVALID,
-                error_msg=f"when {verify_switch_env}=true, must provide ssl cert {ssl_cert_env}"
-            )
         return True, ssl_cert
 
     @staticmethod
     def create_strict_ssl_context(ssl_cert: str = None) -> ssl.SSLContext:
-        """create strict ssl context"""
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        """create strict ssl context.
+
+        Always loads the system default trust store (so public-CA endpoints
+        like api.openai.com work out of the box without a custom cert). If
+        ``ssl_cert`` is provided, the user CA is loaded *on top* of the default
+        trust store (additive, not replacing) — this also covers self-signed
+        internal endpoints. When a user cert is given, ``SAFE_CERT_DIR`` must
+        be set and the cert path must stay within it (path confinement).
+        """
+        ctx = ssl.create_default_context()
 
         ctx.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 | ssl.OP_NO_SSLv2 | ssl.OP_NO_SSLv3
         ctx.options |= ssl.OP_NO_RENEGOTIATION
