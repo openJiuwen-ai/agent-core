@@ -126,7 +126,7 @@ def test_prepare_rebuild_context_uses_subject_envelope():
 
 def test_complete_rebuild_clears_when_archive_path_present():
     store = Mock()
-    store.bump_version_for_rebuild = AsyncMock(return_value="1.0.1")
+    store.bump_version_for_rebuild = AsyncMock(return_value="v1.0.1")
     store.load_evolution_log = AsyncMock(return_value=Mock(entries=[]))
     store.append_changelog_for_rebuild = AsyncMock(return_value=True)
     store.clear_evolutions = AsyncMock()
@@ -141,13 +141,13 @@ def test_complete_rebuild_clears_when_archive_path_present():
     assert cleared is True
     store.bump_version_for_rebuild.assert_awaited_once_with("skill-a", entries=[])
     store.append_changelog_for_rebuild.assert_awaited_once()
-    store.clear_evolutions.assert_awaited_once_with("skill-a", retain_version="1.0.1")
+    store.clear_evolutions.assert_awaited_once_with("skill-a", retain_version="v1.0.1")
 
 
 def test_complete_rebuild_proceeds_when_archive_path_missing():
     """Archive skip (already exists) must not permanently block bump/clear."""
     store = Mock()
-    store.bump_version_for_rebuild = AsyncMock(return_value="1.0.1")
+    store.bump_version_for_rebuild = AsyncMock(return_value="v1.0.1")
     store.load_evolution_log = AsyncMock(return_value=Mock(entries=[]))
     store.append_changelog_for_rebuild = AsyncMock(return_value=True)
     store.clear_evolutions = AsyncMock()
@@ -159,7 +159,7 @@ def test_complete_rebuild_proceeds_when_archive_path_missing():
 
     assert cleared is True
     store.bump_version_for_rebuild.assert_awaited_once_with("skill-a", entries=[])
-    store.clear_evolutions.assert_awaited_once_with("skill-a", retain_version="1.0.1")
+    store.clear_evolutions.assert_awaited_once_with("skill-a", retain_version="v1.0.1")
 
 
 def test_complete_rebuild_skips_when_archive_error():
@@ -191,7 +191,7 @@ async def test_complete_rebuild_bumps_patch_from_all_entries(tmp_path: Path):
     skill_dir = root / "skill-a"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
-        "---\nname: skill-a\ndescription: d\nversion: 1.0.0\n---\n\n# Skill\n",
+        "---\nname: skill-a\ndescription: d\nversion: v1.0.0\n---\n\n# Skill\n",
         encoding="utf-8",
     )
     store = EvolutionStore(str(root))
@@ -219,11 +219,11 @@ async def test_complete_rebuild_bumps_patch_from_all_entries(tmp_path: Path):
     assert cleared is True
     evo_log = await store.load_full_evolution_log("skill-a")
     assert evo_log.entries == []
-    assert evo_log.version == "1.0.1"
+    assert evo_log.version == "v1.0.1"
     skill_md = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
-    assert "version: 1.0.1" in skill_md
+    assert "version: v1.0.1" in skill_md
     changelog = (skill_dir / "changelog.md").read_text(encoding="utf-8")
-    assert "## [1.0.1]" in changelog
+    assert "## [v1.0.1]" in changelog
     assert "Unreleased" not in changelog
     assert "关联经验" in changelog
 
@@ -276,8 +276,8 @@ async def test_complete_rebuild_bumps_minor_when_any_instruction(tmp_path: Path)
 
     assert cleared is True
     evo_log = await store.load_full_evolution_log("skill-a")
-    assert evo_log.version == "1.1.0"
-    assert "version: 1.1.0" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert evo_log.version == "v1.1.0"
+    assert "version: v1.1.0" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -310,7 +310,7 @@ async def test_complete_rebuild_uses_llm_classification(tmp_path: Path):
     skill_dir = root / "skill-a"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
-        "---\nname: skill-a\ndescription: d\nversion: 1.0.0\n---\n\n# Skill\n",
+        "---\nname: skill-a\ndescription: d\nversion: v1.0.0\n---\n\n# Skill\n",
         encoding="utf-8",
     )
     store = EvolutionStore(str(root))
@@ -364,7 +364,7 @@ async def test_complete_rebuild_changelog_idempotent_same_version(tmp_path: Path
     skill_dir = root / "skill-a"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
-        "---\nversion: 1.0.0\n---\n\n# Skill\n",
+        "---\nversion: v1.0.0\n---\n\n# Skill\n",
         encoding="utf-8",
     )
     store = EvolutionStore(str(root))
@@ -388,12 +388,12 @@ async def test_complete_rebuild_changelog_idempotent_same_version(tmp_path: Path
         {"skill_name": "skill-a", "archive_path": "evolutions.v1.0.0.json"},
     )
     first = (skill_dir / "changelog.md").read_text(encoding="utf-8")
-    assert first.count("## [1.0.1]") == 1
+    assert first.count("## [v1.0.1]") == 1
 
     # Force rewrite attempt for same version with empty entries (no bump path).
     wrote = await store.append_changelog_for_rebuild(
         "skill-a",
-        "1.0.1",
+        "v1.0.1",
         [],
     )
     assert wrote is False
@@ -461,7 +461,7 @@ async def test_complete_rebuild_whitelist_bumps_from_selected_then_clears_all(tm
     skill_dir = root / "skill-a"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
-        "---\nversion: 1.0.0\n---\n\n# Skill\n",
+        "---\nversion: v1.0.0\n---\n\n# Skill\n",
         encoding="utf-8",
     )
     store = EvolutionStore(str(root))
@@ -505,8 +505,8 @@ async def test_complete_rebuild_whitelist_bumps_from_selected_then_clears_all(tm
     assert cleared is True
     evo_log = await store.load_full_evolution_log("skill-a")
     assert evo_log.entries == []
-    assert evo_log.version == "1.0.1"
-    assert "version: 1.0.1" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert evo_log.version == "v1.0.1"
+    assert "version: v1.0.1" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -516,7 +516,7 @@ async def test_complete_rebuild_without_whitelist_uses_low_score_and_skip_reason
     skill_dir = root / "skill-a"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
-        "---\nversion: 1.0.0\n---\n\n# Skill\n",
+        "---\nversion: v1.0.0\n---\n\n# Skill\n",
         encoding="utf-8",
     )
     store = EvolutionStore(str(root))
@@ -577,10 +577,10 @@ async def test_complete_rebuild_without_whitelist_uses_low_score_and_skip_reason
     evo_log = await store.load_full_evolution_log("skill-a")
     assert evo_log.entries == []
     # Full log includes Instructions (MINOR); prepare-style filters would yield PATCH only.
-    assert evo_log.version == "1.1.0"
-    assert "version: 1.1.0" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert evo_log.version == "v1.1.0"
+    assert "version: v1.1.0" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
     changelog = (skill_dir / "changelog.md").read_text(encoding="utf-8")
-    assert "## [1.1.0]" in changelog
+    assert "## [v1.1.0]" in changelog
 
 
 def test_normalize_record_ids_treats_bare_string_as_single_id():

@@ -930,7 +930,7 @@ class EvolutionStore:
         skill_md_content = f"""---
 name: {name}
 description: {description}
-version: 1.0.0
+version: v1.0.0
 ---
 
 # {name}
@@ -1060,7 +1060,7 @@ version: 1.0.0
                 return frontmatter_version
         if evo_log.version:
             return evo_log.version
-        return "1.0.0"
+        return "v1.0.0"
 
     async def bump_version_for_rebuild(
         self,
@@ -1307,7 +1307,7 @@ version: 1.0.0
             evo_log = await self._load_full_evolution_log(name)
             version = await self._resolve_current_version(skill_dir, evo_log)
         else:
-            version = "1.0.0"
+            version = "v1.0.0"
         empty_log = EvolutionLog.empty(skill_id=name)
         empty_log.version = version
         await self._save_evolution_log(name, empty_log, skill_dir=skill_dir)

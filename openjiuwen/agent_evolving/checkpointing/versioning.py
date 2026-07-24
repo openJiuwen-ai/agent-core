@@ -15,7 +15,7 @@ from typing import Any, Final, Iterable, Optional, Tuple
 _DEFAULT_MAJOR: Final[int] = 1
 _DEFAULT_MINOR: Final[int] = 0
 _DEFAULT_PATCH: Final[int] = 0
-_DEFAULT_VERSION: Final[str] = "1.0.0"
+_DEFAULT_VERSION: Final[str] = "v1.0.0"
 
 _SEMVER_RE = re.compile(
     r"^\s*v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)\s*$",
@@ -94,7 +94,7 @@ def parse_semver(version: str) -> Tuple[int, int, int]:
 
 def format_semver(major: int, minor: int, patch: int) -> str:
     """Format a semver triple as ``MAJOR.MINOR.PATCH``."""
-    return f"{major}.{minor}.{patch}"
+    return f"v{major}.{minor}.{patch}"
 
 
 def bump_semver(current: str, level: VersionBump) -> str:

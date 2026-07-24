@@ -168,7 +168,7 @@ class TestEvolutionStoreVersionBump:
         prepare_skill(
             root,
             "skill-a",
-            "---\nname: skill-a\ndescription: weather\nversion: 1.0.0\n---\n\n# Skill\n",
+            "---\nname: skill-a\ndescription: weather\nversion: v1.0.0\n---\n\n# Skill\n",
         )
         store = EvolutionStore(str(root))
 
@@ -180,10 +180,10 @@ class TestEvolutionStoreVersionBump:
         await store.append_record("skill-a", record)
 
         evo_log = await store.load_full_evolution_log("skill-a")
-        assert evo_log.version == "1.0.0"
+        assert evo_log.version == "v1.0.0"
         assert evo_log.entries[0].skill_version is None
         skill_md = await store.read_skill_content("skill-a")
-        assert EvolutionStore._extract_version_from_skill_md(skill_md) == "1.0.0"
+        assert EvolutionStore._extract_version_from_skill_md(skill_md) == "v1.0.0"
 
     @staticmethod
     @pytest.mark.asyncio
@@ -192,7 +192,7 @@ class TestEvolutionStoreVersionBump:
         prepare_skill(
             root,
             "skill-a",
-            "---\nname: skill-a\ndescription: weather\nversion: 1.0.0\n---\n\n# Skill\n",
+            "---\nname: skill-a\ndescription: weather\nversion: v1.0.0\n---\n\n# Skill\n",
         )
         store = EvolutionStore(str(root))
         await store.append_record(
@@ -201,11 +201,11 @@ class TestEvolutionStoreVersionBump:
         )
 
         new_version = await store.bump_version_for_rebuild("skill-a")
-        assert new_version == "1.0.1"
+        assert new_version == "v1.0.1"
         evo_log = await store.load_full_evolution_log("skill-a")
-        assert evo_log.version == "1.0.1"
+        assert evo_log.version == "v1.0.1"
         skill_md = await store.read_skill_content("skill-a")
-        assert EvolutionStore._extract_version_from_skill_md(skill_md) == "1.0.1"
+        assert EvolutionStore._extract_version_from_skill_md(skill_md) == "v1.0.1"
 
     @staticmethod
     @pytest.mark.asyncio
@@ -227,9 +227,9 @@ class TestEvolutionStoreVersionBump:
         )
 
         new_version = await store.bump_version_for_rebuild("skill-a")
-        assert new_version == "1.1.0"
+        assert new_version == "v1.1.0"
         skill_md = await store.read_skill_content("skill-a")
-        assert EvolutionStore._extract_version_from_skill_md(skill_md) == "1.1.0"
+        assert EvolutionStore._extract_version_from_skill_md(skill_md) == "v1.1.0"
         assert "description: weather" in skill_md
 
     @staticmethod
@@ -253,7 +253,7 @@ class TestEvolutionStoreVersionBump:
         prepare_skill(
             root,
             "skill-a",
-            "---\nname: skill-a\ndescription: weather\nversion: 1.0.0\n---\n\n# Skill\n",
+            "---\nname: skill-a\ndescription: weather\nversion: v1.0.0\n---\n\n# Skill\n",
         )
         store = EvolutionStore(str(root))
         patch = make_record("ev_patch", source="execution_failure", section="Troubleshooting")
@@ -262,9 +262,9 @@ class TestEvolutionStoreVersionBump:
         await store.append_record("skill-a", minor)
 
         new_version = await store.bump_version_for_rebuild("skill-a", entries=[patch])
-        assert new_version == "1.0.1"
+        assert new_version == "v1.0.1"
         skill_md = await store.read_skill_content("skill-a")
-        assert EvolutionStore._extract_version_from_skill_md(skill_md) == "1.0.1"
+        assert EvolutionStore._extract_version_from_skill_md(skill_md) == "v1.0.1"
 
     @staticmethod
     @pytest.mark.asyncio
@@ -273,7 +273,7 @@ class TestEvolutionStoreVersionBump:
         prepare_skill(
             root,
             "skill-a",
-            "---\nversion: 1.0.0\n---\n\n# Skill\n",
+            "---\nversion: v1.0.0\n---\n\n# Skill\n",
         )
         store = EvolutionStore(str(root))
         await store.append_record(
@@ -282,7 +282,7 @@ class TestEvolutionStoreVersionBump:
         )
         assert await store.bump_version_for_rebuild("skill-a", entries=[]) is None
         skill_md = await store.read_skill_content("skill-a")
-        assert EvolutionStore._extract_version_from_skill_md(skill_md) == "1.0.0"
+        assert EvolutionStore._extract_version_from_skill_md(skill_md) == "v1.0.0"
 
     @staticmethod
     @pytest.mark.asyncio
@@ -291,15 +291,15 @@ class TestEvolutionStoreVersionBump:
         prepare_skill(
             root,
             "skill-a",
-            "---\nversion: 1.2.3\n---\n\n# Skill\n",
+            "---\nversion: v1.2.3\n---\n\n# Skill\n",
         )
         store = EvolutionStore(str(root))
         await store.append_record("skill-a", make_record("ev_1"))
-        await store.clear_evolutions("skill-a", retain_version="1.3.0")
+        await store.clear_evolutions("skill-a", retain_version="v1.3.0")
 
         evo_log = await store.load_full_evolution_log("skill-a")
         assert evo_log.entries == []
-        assert evo_log.version == "1.3.0"
+        assert evo_log.version == "v1.3.0"
 
     @staticmethod
     @pytest.mark.asyncio
@@ -312,9 +312,9 @@ class TestEvolutionStoreVersionBump:
         assert skill_dir is not None
 
         skill_md = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
-        assert "version: 1.0.0" in skill_md
+        assert "version: v1.0.0" in skill_md
         evo_log = await store.load_full_evolution_log("new-skill")
-        assert evo_log.version == "1.0.0"
+        assert evo_log.version == "v1.0.0"
         changelog = (skill_dir / "changelog.md").read_text(encoding="utf-8")
         assert changelog.startswith("# Changelog")
         assert "Unreleased" not in changelog
@@ -379,7 +379,7 @@ class TestEvolutionStoreArchive:
         archive.mkdir(parents=True)
         archived_log = {
             "skill_id": "skill-a",
-            "version": "1.0.0",
+            "version": "v1.0.0",
             "updated_at": "2026-01-01T00:00:00+00:00",
             "entries": [],
         }
@@ -445,7 +445,7 @@ class TestEvolutionStoreArchive:
         skill_dir = prepare_skill(
             root,
             "skill-a",
-            "---\nname: skill-a\ndescription: d\nversion: 1.0.0\n---\n\n# Original\n",
+            "---\nname: skill-a\ndescription: d\nversion: v1.0.0\n---\n\n# Original\n",
         )
         archive = skill_dir / "archive"
         archive.mkdir(parents=True)

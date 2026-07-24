@@ -245,7 +245,7 @@ class EvolutionLog:
     """Persisted container of evolution entries for one skill."""
 
     skill_id: str
-    version: str = "1.0.0"
+    version: str = "v1.0.0"
     updated_at: str = field(
         default_factory=lambda: datetime.now(tz=timezone.utc).isoformat()
     )
