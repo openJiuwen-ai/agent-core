@@ -202,6 +202,10 @@ class ObservabilityRail(DeepAgentRail):
             member_name = self._resolve_member_name(agent)
             team_name = getattr(agent, "team_name", "")
 
+            # Standalone agents (not in a team) have no team span to parent under.
+            if not team_name:
+                return
+
             # Get session_id from ContextVar (no agent attribute for this)
             session_id = ""
             try:
@@ -210,7 +214,7 @@ class ObservabilityRail(DeepAgentRail):
             except Exception as exc:
                 team_logger.warning("rail: failed to get session_id: {}", exc)
 
-            team_logger.info(
+            team_logger.debug(
                 "RAIL.before_task_iteration: member={} iteration={} ctx_id={}",
                 member_name, iteration, id(ctx),
             )
@@ -382,6 +386,9 @@ class ObservabilityRail(DeepAgentRail):
 
             member_name = self._resolve_member_name(agent) or "unknown"
             team_name = getattr(agent, "team_name", "")
+
+            if not team_name:
+                return
 
             team_span = get_team_span()
             if team_span is None:
