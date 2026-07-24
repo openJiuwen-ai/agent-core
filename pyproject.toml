@@ -100,23 +100,6 @@ mobile-gui = [
     "uiautomator2>=3.2.0",
     "pillow>=10.0.0",
 ]
-robotic-arm-so101 = [
-    # Install: pip install 'openjiuwen[robotic-arm-so101]'
-    "ikpy>=3.4",
-    "pyrealsense2>=2.55",
-    "scipy>=1.11",
-]
-robotic-arm-so101-rekep = [
-    # Install: pip install 'openjiuwen[robotic-arm-so101-rekep]'
-    # Also needs MobileSAM (weights + package aren't on a normal pip index;
-    # see openjiuwen/harness/tools/robotic_arm/vendors/so101/rekep/keypoint_proposal.py).
-    "openjiuwen[robotic-arm-so101]",
-    "torch>=2.1",
-    "transformers>=4.40",
-    "scikit-learn>=1.3",
-    "openai>=1.0",
-    "opencv-python>=4.8",
-]
 
 online-rl = [
     "fastapi>=0.100",
@@ -133,8 +116,21 @@ all-vector = ["openjiuwen[pgvector,chromadb,gaussvector]"]
 
 cli = ["click>=8.0", "rich>=13.0", "prompt-toolkit>=3.0"]
 
+# IntelliRouter
+# Pinned to commit 09b2035 on ``feature/intelliRouter`` — the branch HEAD at the
+# time of this pin. Older commits (e.g. 6f0378a) shipped a ``pyproject.toml``
+# missing the ``[tool.hatch.build.targets.wheel]`` section, so hatchling could
+# not locate the package directory and ``uv sync --all-extras`` failed.
+#
+# To pick up newer branch work, bump the commit below and run
+# ``uv lock --upgrade-package intelli-router``.
+intelli-router = ["intelli-router @ git+https://gitcode.com/openJiuwen/agent-protocol.git@09b2035ce98a6dc78b3c7ad1011cc2d38ea4fc78#subdirectory=intelli_router"]
+
 default = []
 # Includes A2A SDK so the A2A remote/server plugins work when using `openjiuwen[all]`.
+# Note: ``intelli-router`` is intentionally NOT in ``all`` — its git dependency
+# can fail to build when the upstream repo's packaging metadata is broken. Install
+# it explicitly with ``pip install openjiuwen[intelli-router]`` only when needed.
 all = ["openjiuwen[all-mq,all-storage,all-vector,all-a2a]"]
 
 [dependency-groups]
@@ -168,9 +164,6 @@ docs = [
 ]
 
 dev = [{ include-group = "test" }, { include-group = "lint" }, { include-group = "docs" }]
-
-# IntelliRouter
-intelli-router = ["intelli-router @ git+https://gitcode.com/openJiuwen/agent-protocol.git@feature/intelliRouter#subdirectory=intelli_router"]
 
 [project.entry-points."openjiuwen.remote_clients"]
 A2A = "openjiuwen.extensions.a2a.a2a_remote_client:A2ARemoteClient"
