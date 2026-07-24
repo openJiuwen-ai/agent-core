@@ -569,7 +569,7 @@ class BrowserMcpUsageLimiter:
             return 2
 
     @staticmethod
-    def _limit_for(self, tool_name: str, args: dict[str, Any]) -> int:
+    def _limit_for(tool_name: str, args: dict[str, Any]) -> int:
         defaults = {
             "browser_snapshot": 1,
             "browser_click": 2,
