@@ -63,6 +63,7 @@
     - [MCP工具](2.开发指南/高阶用法/MCP工具.md)
     - [插件开发-存储后端](2.开发指南/高阶用法/插件开发-存储后端.md)
     - [IntelliRouter智能路由](2.开发指南/高阶用法/IntelliRouter智能路由.md)
+    - [Best-of-N 多尝试修复](2.开发指南/高阶用法/Best-of-N%20多尝试修复.md)
   - [API文档](2.开发指南/API文档/README.md)
     - [openjiuwen.harness](2.开发指南/API文档/openjiuwen.harness.README.md)
       - [deep_agent](2.开发指南/API文档/openjiuwen.harness/deep_agent.md)
