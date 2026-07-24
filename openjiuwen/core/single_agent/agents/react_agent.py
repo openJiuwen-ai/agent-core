@@ -183,6 +183,47 @@ def log_llm_response(log: Any, ai_message: Any) -> None:
                 )
 
 
+def _format_messages_as_prompt(messages: Optional[List[Any]], max_len: Optional[int] = None) -> str:
+    """Serialize LLM messages into a concise prompt string for history / debugging."""
+    if not messages:
+        return ""
+    parts: List[str] = []
+    total_len = 0
+    for msg in messages:
+        if isinstance(msg, dict):
+            role = str(msg.get("role", "unknown"))
+            content = str(msg.get("content", ""))
+            tool_calls = msg.get("tool_calls")
+            tool_call_id = msg.get("tool_call_id", "")
+        else:
+            role = str(getattr(msg, "role", "unknown"))
+            content = str(getattr(msg, "content", ""))
+            tool_calls = getattr(msg, "tool_calls", None)
+            tool_call_id = getattr(msg, "tool_call_id", "")
+        # Skip image content for brevity
+        if content and "data:image" in content:
+            content = "[image]"
+        line_parts: List[str] = []
+        if tool_call_id:
+            line_parts.append(f"tool_call_id={tool_call_id}")
+        if tool_calls:
+            tc_summary = [_summarize_tool_call(tc) for tc in tool_calls]
+            line_parts.append(f"tool_calls=[{', '.join(tc_summary)}]")
+        if content:
+            line_parts.append(content)
+        line = f"[{role}]: {' | '.join(line_parts)}"
+        if max_len is not None and total_len + len(line) + 1 > max_len:
+            remaining = max_len - total_len
+            if remaining > 20:
+                parts.append(line[:remaining] + "...")
+            else:
+                parts.append("...")
+            break
+        parts.append(line)
+        total_len += len(line) + 1
+    return "\n".join(parts)
+
+
 class ReActAgentConfig(BaseModel):
     """ReActAgent Configuration Class
 
@@ -877,6 +918,10 @@ class ReActAgent(BaseAgent):
                 else:
                     raise
             ctx.inputs.response = ai_message
+            if ai_message.usage_metadata:
+                ai_message.usage_metadata.prompt = _format_messages_as_prompt(
+                    ctx.inputs.messages
+                )
             return ai_message
 
         # Streaming path: accumulate chunks via __add__, write to session in real-time
@@ -954,6 +999,11 @@ class ReActAgent(BaseAgent):
             )
         ctx.inputs.response = ai_message
         if ai_message.usage_metadata:
+            # Serialize the messages sent to LLM into the prompt field so
+            # downstream tools can inspect what was sent.
+            ai_message.usage_metadata.prompt = _format_messages_as_prompt(
+                ctx.inputs.messages
+            )
 
             perf_metrics = {}
             call_latency = (time.monotonic() - call_start_time) * 1000
