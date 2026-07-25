@@ -1900,9 +1900,18 @@ class ReActAgent(BaseAgent):
         except asyncio.CancelledError:
             # 外部取消（非工具级 CancelledError）。
             # Fix 1 确保工具级 CancelledError 在 asyncio.gather 中被捕获并转为
-            # ToolMessage，不会传播到这里。此处只清理当前轮次的消息（工具调用请求 +
-            # 部分结果），保留历史对话上下文（with_history=False）。
-            await self.clear_context_messages(session_id=session.get_session_id())
+            # ToolMessage，不会传播到这里。
+            # 只丢弃本轮残缺的 tool_call / 部分 ToolMessage，保留 UserMessage 与
+            # 已完成的 tool 对，以及历史对话（with_history=False）。
+            # 若整轮 clear 会把用户问题一并抹掉，下一轮同 session 就丢上下文。
+            try:
+                await asyncio.shield(self._cleanup_context_on_cancel(session))
+            except Exception:
+                logger.warning(
+                    "Failed to cleanup context on cancel for session %s",
+                    session.get_session_id(),
+                    exc_info=True,
+                )
             raise  # Re-raise to propagate cancellation signal
         finally:
             if need_cleanup:
@@ -2083,6 +2092,73 @@ class ReActAgent(BaseAgent):
 
         await context.clear_messages(with_history=False)
         return True
+
+    async def _cleanup_context_on_cancel(self, session: Session) -> None:
+        """Keep the cancelled turn's user query; drop incomplete tool debris.
+
+        Unlike ``clear_context_messages``, this preserves the current-turn
+        ``UserMessage`` (and any fully completed tool pairs) so the next turn
+        in the same session still sees what the user asked before cancelling.
+        """
+        session_id = session.get_session_id()
+        context = self.context_engine.get_context(session_id=session_id)
+        if context is None:
+            return
+
+        current = context.get_messages(with_history=False)
+        if not current:
+            return
+
+        kept = self._sanitize_cancelled_turn_messages(current)
+        context.set_messages(kept, with_history=False)
+
+    @staticmethod
+    def _sanitize_cancelled_turn_messages(messages: List[Any]) -> List[Any]:
+        """Return a LLM-safe prefix of the cancelled turn's messages.
+
+        Keeps user text and completed assistant/tool pairs. Drops incomplete
+        tool_call blocks. Ensures the turn does not end on a bare UserMessage
+        by appending a short cancelled marker when needed.
+        """
+        kept: List[Any] = []
+        i = 0
+        n = len(messages)
+        while i < n:
+            msg = messages[i]
+            if isinstance(msg, AssistantMessage) and msg.tool_calls:
+                tool_ids = [
+                    getattr(tc, "id", None) for tc in msg.tool_calls if getattr(tc, "id", None)
+                ]
+                needed = set(tool_ids)
+                found: Dict[str, ToolMessage] = {}
+                j = i + 1
+                while j < n and isinstance(messages[j], ToolMessage):
+                    tool_msg = messages[j]
+                    found[tool_msg.tool_call_id] = tool_msg
+                    j += 1
+                if needed and needed <= set(found.keys()):
+                    kept.append(msg)
+                    for tool_id in tool_ids:
+                        kept.append(found[tool_id])
+                    i = j
+                else:
+                    # Incomplete tool block: drop assistant + partial tools.
+                    i = j
+                continue
+
+            if isinstance(msg, ToolMessage):
+                # Orphan tool result without a matching assistant tool_calls.
+                i += 1
+                continue
+
+            kept.append(msg)
+            i += 1
+
+        if kept and isinstance(kept[-1], UserMessage):
+            kept.append(
+                AssistantMessage(content="[Request cancelled by user]")
+            )
+        return kept
 
 
 __all__ = [
