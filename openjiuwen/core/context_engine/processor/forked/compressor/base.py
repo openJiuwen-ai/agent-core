@@ -6,23 +6,23 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.processor.forked.base import ContextEvent, ContextProcessor
-from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
-    build_compressor_reinjected_state_message,
-    count_messages_tokens,
-    resolve_context_max,
-    resolve_ratio_token_threshold,
-)
 from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
     CompressionError,
     CompressionErrorKind,
     CompressionExecutor,
     CompressionRequest,
     CompressionResult,
+)
+from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
+    build_compressor_reinjected_state_message,
+    count_messages_tokens,
+    resolve_context_max,
+    resolve_ratio_token_threshold,
 )
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
@@ -34,7 +34,6 @@ from openjiuwen.core.foundation.llm import (
     UserMessage,
 )
 from openjiuwen.core.foundation.tool import ToolInfo
-
 
 _CONTEXT_OVERFLOW_RETRY_BUDGET_RATIOS = (0.85, 0.65, 0.5)
 _TRANSIENT_COMPRESSION_ERROR_KINDS = {
@@ -68,6 +67,15 @@ class PrefixCompactProcessorConfig(BaseModel):
     # effect analysis. Disabled by default; zero overhead when off.
     enable_compression_dump: bool = Field(default=False)
     compression_dump_dir: str | None = Field(default=None)
+    enable_recall: bool = Field(default=False)
+    recall_chunk_size_tokens: int = Field(default=3000, gt=0)
+    recall_chunk_overlap_tokens: int = Field(default=300, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_recall_chunk_tokens(self) -> "PrefixCompactProcessorConfig":
+        if self.recall_chunk_overlap_tokens >= self.recall_chunk_size_tokens:
+            raise ValueError("recall_chunk_overlap_tokens must be smaller than recall_chunk_size_tokens")
+        return self
 
 
 def adjust_keep_recent_for_tool_boundaries(messages: list[BaseMessage], keep_recent: int) -> int:
@@ -125,9 +133,7 @@ class PrefixCompactProcessor(ContextProcessor):
     memory_block_close: str = "</memory_block>"
     default_prompt: str = ""
     processor_label: str = "PrefixCompactProcessor"
-    memory_block_meaning: str = (
-        "This is compressed context from earlier messages. It is not a new user request."
-    )
+    memory_block_meaning: str = "This is compressed context from earlier messages. It is not a new user request."
     memory_block_conflict_policy: str = (
         "Newer raw messages and the latest explicit user intent override this compressed context."
     )
@@ -212,18 +218,23 @@ class PrefixCompactProcessor(ContextProcessor):
         if not summary:
             return None, context_window
 
-        memory_message = UserMessage(content=self._wrap_memory_block(summary))
-        new_messages = [*span.preserved_prefix, memory_message, *span.protected_tail]
-        reinjected_message = build_compressor_reinjected_state_message(
-            source_messages=original_messages,
-            messages_to_keep=new_messages,
+        archive = await self._archive_compressed_messages(
             context=context,
-            config=self.config,
-            builder_names=self.reinject_builder_names,
+            original_messages=original_messages,
+            span=span,
         )
-        if reinjected_message is not None:
-            new_messages = [*span.preserved_prefix, memory_message, reinjected_message, *span.protected_tail]
+        memory_message = UserMessage(
+            content=self._wrap_memory_block(summary, memory_id=archive.memory_id if archive is not None else None)
+        )
+        new_messages = self._build_compacted_messages(
+            context=context,
+            original_messages=original_messages,
+            span=span,
+            memory_message=memory_message,
+        )
         if not self._has_compression_benefit(context, original_messages, new_messages):
+            if archive is not None:
+                self._delete_compression_archive(archive)
             return None, context_window
 
         context_window.context_messages = new_messages
@@ -355,9 +366,7 @@ class PrefixCompactProcessor(ContextProcessor):
         context_max = self._resolve_context_max(context, {})
         budget_tokens = max(int(context_max * budget_ratio), 1)
         fixed_tokens = self._count_messages_tokens(
-            list(context_window.system_messages or [])
-            + list(span.preserved_prefix)
-            + [UserMessage(content=prompt)],
+            list(context_window.system_messages or []) + list(span.preserved_prefix) + [UserMessage(content=prompt)],
             context,
         )
         fixed_tokens += self._count_tools_tokens(list(context_window.tools or []), context)
@@ -493,7 +502,76 @@ class PrefixCompactProcessor(ContextProcessor):
             "Do not invent details. Preserve only information supported by the conversation."
         )
 
-    def _wrap_memory_block(self, summary: str) -> str:
+    def _build_compacted_messages(
+        self,
+        *,
+        context: ModelContext,
+        original_messages: list[BaseMessage],
+        span: PrefixCompactSpan,
+        memory_message: UserMessage,
+    ) -> list[BaseMessage]:
+        new_messages = [*span.preserved_prefix, memory_message, *span.protected_tail]
+        reinjected_message = build_compressor_reinjected_state_message(
+            source_messages=original_messages,
+            messages_to_keep=new_messages,
+            context=context,
+            config=self.config,
+            builder_names=self.reinject_builder_names,
+        )
+        if reinjected_message is not None:
+            return [*span.preserved_prefix, memory_message, reinjected_message, *span.protected_tail]
+        return new_messages
+
+    async def _archive_compressed_messages(
+        self,
+        *,
+        context: ModelContext,
+        original_messages: list[BaseMessage],
+        span: PrefixCompactSpan,
+    ) -> Any | None:
+        if not getattr(self.config, "enable_recall", False):
+            return None
+        from openjiuwen.core.context_engine.processor.forked.compressor.recall import (
+            archive_compression_messages,
+        )
+
+        try:
+            return await asyncio.to_thread(
+                archive_compression_messages,
+                context=context,
+                processor_type=self.processor_type(),
+                original_messages=original_messages,
+                messages_to_compress=list(span.messages_to_compress),
+                preceding_messages=list(span.preserved_prefix),
+                chunk_size_tokens=int(getattr(self.config, "recall_chunk_size_tokens", 3000)),
+                chunk_overlap_tokens=int(getattr(self.config, "recall_chunk_overlap_tokens", 300)),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] compression recall archive failed; continuing without a recall marker: %s",
+                self.processor_type(),
+                exc,
+                exc_info=True,
+            )
+            return None
+
+    def _delete_compression_archive(self, archive: Any) -> None:
+        from openjiuwen.core.context_engine.processor.forked.compressor.recall import (
+            delete_compression_archive,
+        )
+
+        try:
+            delete_compression_archive(archive)
+        except Exception as exc:
+            logger.warning(
+                "[%s] compression recall archive rollback failed: %s",
+                self.processor_type(),
+                exc,
+                exc_info=True,
+            )
+
+    def _wrap_memory_block(self, summary: str, *, memory_id: str | None = None) -> str:
+        recall_marker = f"\n[[COMPRESSION_RECALL: id={memory_id}]]" if memory_id else ""
         return (
             f"{self.memory_block_open}\n"
             "<meaning>\n"
@@ -504,7 +582,7 @@ class PrefixCompactProcessor(ContextProcessor):
             "</conflict_policy>\n"
             "<summary>\n"
             f"{summary}\n"
-            "</summary>\n"
+            f"</summary>{recall_marker}\n"
             f"{self.memory_block_close}"
         )
 
