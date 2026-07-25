@@ -14,10 +14,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import (
     LOOP_COMPACT_BAILOUT_STATE_KEY,
-    CurrentRoundCompressorConfig,
-    DialogueCompressorConfig,
     FullCompactProcessorConfig,
-    MessageSummaryOffloaderConfig,
     MicroCompactProcessorConfig,
     ReasoningToolLoopCompactProcessorConfig,
     ToolResultBudgetProcessorConfig,
@@ -27,8 +24,12 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
     SessionMemoryConfig,
     SessionMemoryManager,
 )
-from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
+from openjiuwen.core.context_engine.processor.forked import (  # pylint: disable=no-name-in-module
+    CurrentRoundCompressorConfig,
+    DialogueCompressorConfig,
+    MessageSummaryOffloaderConfig,
     RoundLevelCompressorConfig,
+    activate,
 )
 from openjiuwen.core.foundation.llm import ModelRequestConfig
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -191,11 +192,7 @@ class ContextProcessorRail(DeepAgentRail):
                 (
                     "MessageSummaryOffloader",
                     MessageSummaryOffloaderConfig(
-                        large_message_threshold=15000,
-                        offload_message_type=["tool"],
                         protected_tool_names=["read_file"],
-                        model=model_cfg,
-                        model_client=model_client_config,
                     ),
                 ),
                 (
@@ -205,10 +202,7 @@ class ContextProcessorRail(DeepAgentRail):
                 (
                     "DialogueCompressor",
                     DialogueCompressorConfig(
-                        tokens_threshold=100000,
-                        messages_to_keep=10,
-                        keep_last_round=False,
-                        compression_target_tokens=1800,
+                        enable_recall=True,
                         model=model_cfg,
                         model_client=model_client_config,
                     ),
@@ -216,8 +210,8 @@ class ContextProcessorRail(DeepAgentRail):
                 (
                     "CurrentRoundCompressor",
                     CurrentRoundCompressorConfig(
-                        tokens_threshold=100000,
-                        messages_to_keep=3,
+                        keep_recent_messages=3,
+                        enable_recall=True,
                         model=model_cfg,
                         model_client=model_client_config,
                     ),
@@ -226,8 +220,8 @@ class ContextProcessorRail(DeepAgentRail):
                     "RoundLevelCompressor",
                     RoundLevelCompressorConfig(
                         trigger_context_ratio=0.9,
-                        target_total_tokens=160000,
                         keep_recent_messages=6,
+                        enable_recall=True,
                         model=model_cfg,
                         model_client=model_client_config,
                     ),
@@ -237,6 +231,7 @@ class ContextProcessorRail(DeepAgentRail):
 
     def init(self, agent) -> None:
         """Inject / merge processors into agent.react_agent._config.context_processors."""
+        activate()
         config = getattr(getattr(agent, "react_agent", None), "_config", None)
         if config is None:
             return
