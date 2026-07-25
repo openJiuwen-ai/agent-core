@@ -560,7 +560,9 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "    step.selector || step.role || step.label || step.placeholder ||\n"
         "    step.text || step.testid\n"
         "  );\n"
-        "  const selectAllKey = 'ControlOrMeta+A';\n"
+        "  const pressSelectAll = async () => {\n"
+        "    await page.keyboard.press('ControlOrMeta+A');\n"
+        "  };\n"
         "  const locatorFromStep = (step) => {\n"
         "    if (step.selector) return page.locator(String(step.selector)).first();\n"
         "    if (step.role) {\n"
@@ -643,7 +645,7 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "        if (op === 'type' || step.mode === 'type') {\n"
         "          await target.click({ timeout });\n"
         "          try {\n"
-        "            await page.keyboard.press(selectAllKey);\n"
+        "            await pressSelectAll();\n"
         "          } catch (_err) {}\n"
         "          try {\n"
         "            await page.keyboard.press('Backspace');\n"
@@ -660,7 +662,7 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "        const value = String(step.value ?? step.query ?? step.text_value ?? '');\n"
         "        await target.click({ timeout });\n"
         "        try {\n"
-        "          await page.keyboard.press(selectAllKey);\n"
+        "          await pressSelectAll();\n"
         "        } catch (_err) {}\n"
         "        try {\n"
         "          await page.keyboard.press('Backspace');\n"
@@ -791,9 +793,17 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "    item.elapsed_ms = Date.now() - stepStartedAt;\n"
         "    results.push(item);\n"
         "  }\n"
+        "  const failedSteps = results.filter((item) => !item.ok);\n"
+        "  const successfulSteps = results.filter((item) => item.ok);\n"
+        "  const allStepsOk = failedSteps.length === 0;\n"
         "  return {\n"
-        "    ok: true,\n"
-        "    error: null,\n"
+        "    ok: allStepsOk,\n"
+        "    error: allStepsOk ? null : 'one_or_more_steps_failed',\n"
+        "    partial: failedSteps.length > 0 && successfulSteps.length > 0,\n"
+        "    all_steps_ok: allStepsOk,\n"
+        "    had_step_errors: failedSteps.length > 0,\n"
+        "    steps_ok: successfulSteps.length,\n"
+        "    steps_failed: failedSteps.length,\n"
         "    steps: results,\n"
         "    elapsed_ms: Date.now() - startedAt,\n"
         "    url: page.url(),\n"
@@ -1000,7 +1010,7 @@ def _normalize_batch_interact_payload(kwargs: Mapping[str, Any]) -> dict[str, An
 
 def register_builtin_actions(controller: ActionController | None = None) -> None:
     ctl = controller or _DEFAULT_CONTROLLER
-    
+
     async def ping(session_id: str = "", request_id: str = "", **kwargs: Any) -> ActionResult:
         return {
             "ok": True,
@@ -1523,6 +1533,26 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
         parsed.setdefault("truncated", truncated)
         parsed.setdefault("dropped_step_count", dropped_step_count)
         completed = parsed.get("steps") or parsed.get("completed_steps") or []
+        completed_steps = completed if isinstance(completed, list) else []
+        # Normalize early-abort results, which use completed_steps, to the
+        # same public shape as continue-on-error and successful results.
+        parsed["steps"] = completed_steps
+        failed_steps = [
+            item for item in completed_steps
+            if isinstance(item, dict) and not bool(item.get("ok", False))
+        ]
+        successful_steps = [
+            item for item in completed_steps
+            if isinstance(item, dict) and bool(item.get("ok", False))
+        ]
+        if failed_steps:
+            parsed["ok"] = False
+            parsed["error"] = parsed.get("error") or "one_or_more_steps_failed"
+        parsed["all_steps_ok"] = bool(parsed.get("ok", False)) and not failed_steps
+        parsed["had_step_errors"] = bool(failed_steps) or not bool(parsed.get("ok", False))
+        parsed["partial"] = bool(failed_steps and successful_steps)
+        parsed["steps_ok"] = len(successful_steps)
+        parsed["steps_failed"] = len(failed_steps)
 
         browser_agent_log_info(
             "[BROWSER_BATCH] end ok=%s session_id=%s request_id=%s elapsed_ms=%s "
@@ -1535,7 +1565,6 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
             parsed.get("error") or "-",
         )
 
-        completed_steps = completed if isinstance(completed, list) else []
         for item in completed_steps:
             if isinstance(item, dict):
                 browser_agent_log_info(

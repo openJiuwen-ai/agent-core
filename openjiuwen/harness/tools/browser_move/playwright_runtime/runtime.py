@@ -15,6 +15,7 @@ from openjiuwen.core.common.logging.browser_context import (
     reset_browser_agent_log_context,
     set_browser_agent_log_context,
 )
+from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
@@ -32,7 +33,22 @@ from .browser_logging import (
 )
 from .browser_tools import ensure_browser_runtime_client_patch
 from .config import BrowserInstanceConfig, BrowserRunGuardrails
+from .mcp_usage_limiter import BrowserMcpUsageLimiter
+from .page_structure_index import (
+    PAGE_INDEX_RUNTIME_MISSING_ERROR,
+    build_page_index_configuration,
+    build_page_index_configure_js,
+    build_page_index_install_js,
+)
 from .probes import build_card_probe_js, build_interactive_probe_js
+from .semantic_widgets import (
+    build_calendar_probe_js,
+    build_calendar_select_js,
+    build_dropdown_probe_js,
+    build_dropdown_select_js,
+    build_form_fields_probe_js,
+    build_semantic_form_fill_js,
+)
 from .service import MAX_ITERATION_MESSAGE, BrowserService, BrowserTaskProgressState
 from .site_profiles import builtin_site_profiles, get_selector_cache
 from .status_logging import BrowserSubagentStatusLogger, is_browser_subagent_status_log_enabled
@@ -42,6 +58,7 @@ _BROWSER_PROGRESS_STATE_KEY = "__browser_subagent_progress_state__"
 _BROWSER_PROGRESS_TASK_KEY = "__browser_subagent_last_task__"
 _BROWSER_PROGRESS_SECTION_NAME = "browser_progress_continuation"
 _BROWSER_PROGRESS_FORMAT_SECTION_NAME = "browser_progress_format"
+_BROWSER_PROGRESS_GUARD_SECTION_NAME = "browser_progress_guard"
 _BROWSER_LOG_CONTEXT_TOKEN_KEY = "__browser_agent_log_context_token__"
 _BROWSER_PROGRESS_TAG_RE = re.compile(
     r"<browser_progress>\s*(\{.*?\})\s*</browser_progress>",
@@ -62,6 +79,31 @@ _BROWSER_PROGRESS_FORMAT_GUIDANCE = {
         "包含以下紧凑字段：status、completed_steps、remaining_steps、next_step、"
         "completion_evidence、missing_requirements。"
     ),
+}
+
+_BROWSER_PROGRESS_GUARD_GUIDANCE = {
+    "en": {
+        "strategy": (
+            "Browser progress guard: recent browser calls did not produce meaningful progress. "
+            "Do not repeat the blocked tool family. Choose a materially different strategy, use a target-specific "
+            "semantic helper, navigate to a genuinely new workflow stage, or report the exact blocker."
+        ),
+        "exhausted": (
+            "Browser progress budget exhausted. Do not call another browser tool. Return a concise partial-progress "
+            "report containing the current page or stage, completed steps, blocking condition, and recommended "
+            "next step."
+        ),
+    },
+    "cn": {
+        "strategy": (
+            "浏览器进度守卫：最近的浏览器调用没有产生有意义的进展。不要重复被阻止的工具类别。"
+            "请选择实质不同的策略、使用针对目标的语义工具、进入真正新的流程阶段，或报告明确阻塞原因。"
+        ),
+        "exhausted": (
+            "浏览器进度预算已耗尽。不要再调用浏览器工具。请返回简洁的部分进度报告，包含当前页面或阶段、"
+            "已完成步骤、阻塞条件和建议的下一步。"
+        ),
+    },
 }
 
 
@@ -95,9 +137,17 @@ class BrowserAgentRuntime:
         self._browser_list_actions_tool = None
         self._controller: BaseController = ActionController()
         self._code_executor = None
+        self._page_index_runtime_installed = False
+        self._page_index_config_revision = ""
         self._browser_probe_interactives_tool = None
         self._browser_probe_cards_tool = None
         self._browser_batch_interact_tool = None
+        self._browser_probe_form_fields_tool = None
+        self._browser_fill_form_semantic_tool = None
+        self._browser_probe_dropdown_tool = None
+        self._browser_select_dropdown_option_tool = None
+        self._browser_probe_calendar_tool = None
+        self._browser_select_calendar_date_tool = None
 
     @property
     def service(self) -> BrowserService:
@@ -122,6 +172,30 @@ class BrowserAgentRuntime:
     @property
     def browser_batch_interact_tool(self) -> Any:
         return self._browser_batch_interact_tool
+
+    @property
+    def browser_probe_form_fields_tool(self) -> Any:
+        return self._browser_probe_form_fields_tool
+
+    @property
+    def browser_fill_form_semantic_tool(self) -> Any:
+        return self._browser_fill_form_semantic_tool
+
+    @property
+    def browser_probe_dropdown_tool(self) -> Any:
+        return self._browser_probe_dropdown_tool
+
+    @property
+    def browser_select_dropdown_option_tool(self) -> Any:
+        return self._browser_select_dropdown_option_tool
+
+    @property
+    def browser_probe_calendar_tool(self) -> Any:
+        return self._browser_probe_calendar_tool
+
+    @property
+    def browser_select_calendar_date_tool(self) -> Any:
+        return self._browser_select_calendar_date_tool
 
     @property
     def controller(self) -> BaseController:
@@ -361,12 +435,24 @@ class BrowserAgentRuntime:
             BrowserBatchInteractTool,
             BrowserCustomActionTool,
             BrowserListActionsTool,
+            BrowserProbeCalendarTool,
             BrowserProbeCardsTool,
+            BrowserProbeDropdownTool,
+            BrowserFillFormSemanticTool,
+            BrowserProbeFormFieldsTool,
             BrowserProbeInteractivesTool,
+            BrowserSelectCalendarDateTool,
+            BrowserSelectDropdownOptionTool,
         )
 
         self._browser_probe_interactives_tool = BrowserProbeInteractivesTool(self, language="en")
         self._browser_probe_cards_tool = BrowserProbeCardsTool(self, language="en")
+        self._browser_probe_form_fields_tool = BrowserProbeFormFieldsTool(self, language="en")
+        self._browser_fill_form_semantic_tool = BrowserFillFormSemanticTool(self, language="en")
+        self._browser_probe_dropdown_tool = BrowserProbeDropdownTool(self, language="en")
+        self._browser_select_dropdown_option_tool = BrowserSelectDropdownOptionTool(self, language="en")
+        self._browser_probe_calendar_tool = BrowserProbeCalendarTool(self, language="en")
+        self._browser_select_calendar_date_tool = BrowserSelectCalendarDateTool(self, language="en")
         self._browser_batch_interact_tool = BrowserBatchInteractTool(self, language="en")
         self._browser_custom_action_tool = BrowserCustomActionTool(self, language="en")
         self._browser_list_actions_tool = BrowserListActionsTool(self, language="en")
@@ -377,6 +463,30 @@ class BrowserAgentRuntime:
         self._register_runtime_tool(
             self._browser_probe_cards_tool,
             tool_name="browser_probe_cards",
+        )
+        self._register_runtime_tool(
+            self._browser_probe_form_fields_tool,
+            tool_name="browser_probe_form_fields",
+        )
+        self._register_runtime_tool(
+            self._browser_fill_form_semantic_tool,
+            tool_name="browser_fill_form_semantic",
+        )
+        self._register_runtime_tool(
+            self._browser_probe_dropdown_tool,
+            tool_name="browser_probe_dropdown",
+        )
+        self._register_runtime_tool(
+            self._browser_select_dropdown_option_tool,
+            tool_name="browser_select_dropdown_option",
+        )
+        self._register_runtime_tool(
+            self._browser_probe_calendar_tool,
+            tool_name="browser_probe_calendar",
+        )
+        self._register_runtime_tool(
+            self._browser_select_calendar_date_tool,
+            tool_name="browser_select_calendar_date",
         )
         self._register_runtime_tool(
             self._browser_batch_interact_tool,
@@ -398,6 +508,12 @@ class BrowserAgentRuntime:
             # same first-class affordances as the probe tools before MCP primitives.
             self._service.browser_agent.ability_manager.add(self._browser_probe_interactives_tool.card)
             self._service.browser_agent.ability_manager.add(self._browser_probe_cards_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_probe_form_fields_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_fill_form_semantic_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_probe_dropdown_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_select_dropdown_option_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_probe_calendar_tool.card)
+            self._service.browser_agent.ability_manager.add(self._browser_select_calendar_date_tool.card)
             self._service.browser_agent.ability_manager.add(self._browser_batch_interact_tool.card)
             self._service.browser_agent.ability_manager.add(self._browser_custom_action_tool.card)
             self._service.browser_agent.ability_manager.add(self._browser_list_actions_tool.card)
@@ -444,6 +560,267 @@ class BrowserAgentRuntime:
         )
 
 
+
+    async def probe_form_fields(
+        self,
+        *,
+        max_fields: int = 80,
+        viewport_only: bool = True,
+        query: str = "",
+        include_options: bool = True,
+    ) -> Dict[str, Any]:
+        """Return compact visible form-field metadata before batch filling."""
+        await self.ensure_runtime_ready()
+
+        if self._code_executor is None:
+            return {"ok": False, "error": "browser_code_executor_not_ready", "fields": []}
+
+        js_code = build_form_fields_probe_js(
+            max_fields=max_fields,
+            viewport_only=viewport_only,
+            query=query,
+            include_options=include_options,
+        )
+
+        try:
+            raw = await self._code_executor(js_code)
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            return {"ok": False, "error": f"browser_probe_form_fields failed: {exc}", "fields": []}
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "Could not parse browser_probe_form_fields result JSON",
+                "raw_preview": str(raw)[:400],
+                "fields": [],
+            }
+
+        parsed.setdefault("ok", True)
+        parsed.setdefault("error", None)
+        parsed.setdefault("fields", [])
+        return parsed
+
+
+    async def fill_form_semantic(
+        self,
+        *,
+        fields: Dict[str, Any],
+        max_fields: int = 120,
+        viewport_only: bool = True,
+        clear_existing: bool = True,
+    ) -> Dict[str, Any]:
+        """Fill visible form fields by semantic field names rather than raw refs."""
+        await self.ensure_runtime_ready()
+
+        if self._code_executor is None:
+            return {"ok": False, "error": "browser_code_executor_not_ready", "filled": [], "failed": []}
+
+        js_code = build_semantic_form_fill_js(
+            fields=fields,
+            max_fields=max_fields,
+            viewport_only=viewport_only,
+            clear_existing=clear_existing,
+        )
+
+        try:
+            raw = await self._code_executor(js_code)
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            return {"ok": False, "error": f"browser_fill_form_semantic failed: {exc}", "filled": [], "failed": []}
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "Could not parse browser_fill_form_semantic result JSON",
+                "raw_preview": str(raw)[:400],
+                "filled": [],
+                "failed": [],
+            }
+
+        parsed.setdefault("ok", True)
+        parsed.setdefault("error", None)
+        parsed.setdefault("filled", [])
+        parsed.setdefault("failed", [])
+        return parsed
+
+    async def probe_dropdown(
+        self,
+        *,
+        max_options: int = 30,
+        viewport_only: bool = True,
+        query: str = "",
+    ) -> Dict[str, Any]:
+        """Return compact visible dropdown/autocomplete options."""
+        await self.ensure_runtime_ready()
+
+        if self._code_executor is None:
+            return {"ok": False, "error": "browser_code_executor_not_ready", "options": []}
+
+        js_code = build_dropdown_probe_js(
+            max_options=max_options,
+            viewport_only=viewport_only,
+            query=query,
+        )
+
+        try:
+            raw = await self._code_executor(js_code)
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            return {"ok": False, "error": f"browser_probe_dropdown failed: {exc}", "options": []}
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "Could not parse browser_probe_dropdown result JSON",
+                "raw_preview": str(raw)[:400],
+                "options": [],
+            }
+
+        parsed.setdefault("ok", True)
+        parsed.setdefault("error", None)
+        parsed.setdefault("options", [])
+        return parsed
+
+    async def select_dropdown_option(
+        self,
+        *,
+        field_selector: str = "",
+        field_label: str = "",
+        query: str = "",
+        option_text: str = "",
+        option_texts: list[str] | None = None,
+        exact: bool = False,
+        preserve_existing: bool = True,
+        selection_mode: str = "add",
+        timeout_ms: int = 5000,
+        wait_after_type_ms: int = 250,
+    ) -> Dict[str, Any]:
+        """Type into a dropdown/autocomplete field and choose the requested option."""
+        await self.ensure_runtime_ready()
+
+        if self._code_executor is None:
+            return {"ok": False, "error": "browser_code_executor_not_ready"}
+
+        js_code = build_dropdown_select_js(
+            field_selector=field_selector,
+            field_label=field_label,
+            query=query,
+            option_text=option_text,
+            option_texts=option_texts,
+            exact=exact,
+            preserve_existing=preserve_existing,
+            selection_mode=selection_mode,
+            timeout_ms=timeout_ms,
+            wait_after_type_ms=wait_after_type_ms,
+        )
+
+        try:
+            raw = await self._code_executor(js_code)
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            return {"ok": False, "error": f"browser_select_dropdown_option failed: {exc}"}
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "Could not parse browser_select_dropdown_option result JSON",
+                "raw_preview": str(raw)[:400],
+            }
+
+        parsed.setdefault("ok", True)
+        parsed.setdefault("error", None)
+        return parsed
+
+    async def probe_calendar(
+        self,
+        *,
+        max_days: int = 120,
+        viewport_only: bool = True,
+        query: str = "",
+    ) -> Dict[str, Any]:
+        """Return compact visible calendar/date-picker days."""
+        await self.ensure_runtime_ready()
+
+        if self._code_executor is None:
+            return {"ok": False, "error": "browser_code_executor_not_ready", "days": []}
+
+        js_code = build_calendar_probe_js(
+            max_days=max_days,
+            viewport_only=viewport_only,
+            query=query,
+        )
+
+        try:
+            raw = await self._code_executor(js_code)
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            return {"ok": False, "error": f"browser_probe_calendar failed: {exc}", "days": []}
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "Could not parse browser_probe_calendar result JSON",
+                "raw_preview": str(raw)[:400],
+                "days": [],
+            }
+
+        parsed.setdefault("ok", True)
+        parsed.setdefault("error", None)
+        parsed.setdefault("days", [])
+        return parsed
+
+    async def select_calendar_date(
+        self,
+        *,
+        date: str,
+        field_selector: str = "",
+        next_selector: str = "",
+        prev_selector: str = "",
+        max_month_clicks: int = 18,
+        timeout_ms: int = 5000,
+        try_direct_input: bool = True,
+    ) -> Dict[str, Any]:
+        """Select an exact date from a date input or open calendar widget."""
+        await self.ensure_runtime_ready()
+
+        if self._code_executor is None:
+            return {"ok": False, "error": "browser_code_executor_not_ready"}
+
+        js_code = build_calendar_select_js(
+            date=date,
+            field_selector=field_selector,
+            next_selector=next_selector,
+            prev_selector=prev_selector,
+            max_month_clicks=max_month_clicks,
+            timeout_ms=timeout_ms,
+            try_direct_input=try_direct_input,
+        )
+
+        try:
+            raw = await self._code_executor(js_code)
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            return {"ok": False, "error": f"browser_select_calendar_date failed: {exc}"}
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "Could not parse browser_select_calendar_date result JSON",
+                "raw_preview": str(raw)[:400],
+            }
+
+        parsed.setdefault("ok", True)
+        parsed.setdefault("error", None)
+        return parsed
+
+
     async def run_custom_action(
         self,
         *,
@@ -463,12 +840,130 @@ class BrowserAgentRuntime:
             **(params or {}),
         )
 
+    async def _install_page_index_runtime(
+        self,
+        initial_configuration: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if self._code_executor is None:
+            return {"ok": False, "error": "browser_code_executor_not_ready"}
+
+        try:
+            raw = await self._code_executor(
+                build_page_index_install_js(initial_configuration)
+            )
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            self._page_index_runtime_installed = False
+            self._page_index_config_revision = ""
+            return {
+                "ok": False,
+                "error": f"browser_page_index_install failed: {exc}",
+            }
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            self._page_index_runtime_installed = False
+            self._page_index_config_revision = ""
+            return {
+                "ok": False,
+                "error": "Could not parse browser page-index install result JSON",
+                "raw_preview": str(raw)[:400],
+            }
+
+        if not parsed.get("ok", False):
+            self._page_index_runtime_installed = False
+            self._page_index_config_revision = ""
+            return parsed
+
+        self._page_index_runtime_installed = True
+        self._page_index_config_revision = str(
+            parsed.get("configuration_revision") or ""
+        )
+        return parsed
+
+    async def _ensure_page_index_configuration(
+        self,
+        configuration: Dict[str, Any],
+    ) -> None:
+        revision = str(configuration.get("revision") or "")
+        if revision and revision == self._page_index_config_revision:
+            return
+        if self._code_executor is None:
+            raise RuntimeError("browser_code_executor_not_ready")
+
+        raw = await self._code_executor(
+            build_page_index_configure_js(configuration)
+        )
+        unwrapped = self._unwrap_mcp_text_result(raw)
+        parsed = extract_json_object(unwrapped)
+        if not parsed:
+            raise RuntimeError("Could not parse browser page-index configuration result JSON")
+        if parsed.get("error") == PAGE_INDEX_RUNTIME_MISSING_ERROR:
+            self._page_index_runtime_installed = False
+            self._page_index_config_revision = ""
+            install_result = await self._install_page_index_runtime(configuration)
+            if not install_result.get("ok", False):
+                raise RuntimeError(
+                    str(install_result.get("error") or "page_index_reinstall_failed")
+                )
+            return
+        if not parsed.get("ok", False):
+            raise RuntimeError(
+                str(parsed.get("error") or "page_index_configuration_failed")
+            )
+        self._page_index_config_revision = str(
+            parsed.get("configuration_revision") or revision
+        )
+
+    async def _execute_page_index_probe(
+        self,
+        js_code: str,
+        *,
+        configuration: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        if self._code_executor is None:
+            raise RuntimeError("browser_code_executor_not_ready")
+
+        if not self._page_index_runtime_installed:
+            install_result = await self._install_page_index_runtime(configuration)
+            if not install_result.get("ok", False):
+                raise RuntimeError(
+                    str(install_result.get("error") or "page_index_install_failed")
+                )
+        elif configuration is not None:
+            await self._ensure_page_index_configuration(configuration)
+
+        raw = await self._code_executor(js_code)
+        unwrapped = self._unwrap_mcp_text_result(raw)
+        parsed = extract_json_object(unwrapped)
+        if not parsed:
+            return raw
+
+        error = str(parsed.get("error") or "")
+        if error == "page_index_configuration_mismatch" and configuration is not None:
+            self._page_index_config_revision = ""
+            await self._ensure_page_index_configuration(configuration)
+            return await self._code_executor(js_code)
+        if error != PAGE_INDEX_RUNTIME_MISSING_ERROR:
+            return raw
+
+        self._page_index_runtime_installed = False
+        self._page_index_config_revision = ""
+        install_result = await self._install_page_index_runtime(configuration)
+        if not install_result.get("ok", False):
+            raise RuntimeError(
+                str(install_result.get("error") or "page_index_reinstall_failed")
+            )
+        return await self._code_executor(js_code)
+
     async def probe_interactives(
         self,
         *,
         max_items: int = 50,
         viewport_only: bool = True,
         query: str = "",
+        scope_group_id: str = "",
+        scope_item_index: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Return compact visible/high-value interactive elements from the current page."""
         await self.ensure_runtime_ready()
@@ -484,10 +979,12 @@ class BrowserAgentRuntime:
             max_items=max_items,
             viewport_only=viewport_only,
             query=query,
+            scope_group_id=scope_group_id,
+            scope_item_index=scope_item_index,
         )
 
         try:
-            raw = await self._code_executor(js_code)
+            raw = await self._execute_page_index_probe(js_code)
             raw = self._unwrap_mcp_text_result(raw)
         except Exception as exc:
             return {
@@ -517,6 +1014,7 @@ class BrowserAgentRuntime:
         viewport_only: bool = True,
         include_buttons: bool = True,
         query: str = "",
+        diagnostics_level: str = "compact",
     ) -> Dict[str, Any]:
         """Return compact repeated card/listing structures from the current page."""
         await self.ensure_runtime_ready()
@@ -531,18 +1029,25 @@ class BrowserAgentRuntime:
         site_profiles = builtin_site_profiles()
         selector_cache = get_selector_cache()
         selector_cache_records = selector_cache.export_for_probe()
+        configuration = build_page_index_configuration(
+            site_profiles=site_profiles,
+            selector_cache_records=selector_cache_records,
+        )
 
         js_code = build_card_probe_js(
             max_cards=max_cards,
             viewport_only=viewport_only,
             include_buttons=include_buttons,
             query=query,
-            site_profiles=site_profiles,
-            selector_cache_records=selector_cache_records,
+            diagnostics_level=diagnostics_level,
+            configuration_revision=str(configuration.get("revision") or ""),
         )
 
         try:
-            raw = await self._code_executor(js_code)
+            raw = await self._execute_page_index_probe(
+                js_code,
+                configuration=configuration,
+            )
             raw = self._unwrap_mcp_text_result(raw)
         except Exception as exc:
             return {
@@ -564,24 +1069,30 @@ class BrowserAgentRuntime:
         parsed.setdefault("error", None)
         parsed.setdefault("cards", [])
 
+        cache_cards = parsed.get("_cache_cards")
+        cache_result = dict(parsed)
+        if isinstance(cache_cards, list) and cache_cards:
+            cache_result["cards"] = cache_cards
+
         if parsed.get("ok"):
             try:
-                selector_cache.record_card_probe_cache_rejection(parsed)
+                selector_cache.record_card_probe_cache_rejection(cache_result)
             except Exception:
                 logger.debug(
                     "Failed to record rejected card-probe selector cache attempt",
                     exc_info=True,
                 )
 
-        if parsed.get("ok") and parsed.get("cards"):
+        if parsed.get("ok") and cache_result.get("cards"):
             try:
-                selector_cache.record_card_probe_result(parsed)
+                selector_cache.record_card_probe_result(cache_result)
             except Exception:
                 logger.debug(
                     "Failed to record card probe result in selector cache",
                     exc_info=True,
                 )
 
+        parsed.pop("_cache_cards", None)
         return parsed
 
     async def list_actions(self) -> Dict[str, Any]:
@@ -611,6 +1122,7 @@ class BrowserRuntimeRail(AgentRail):
     def __init__(self, runtime: BrowserAgentRuntime) -> None:
         super().__init__()
         self._runtime = runtime
+        self._mcp_usage_limiter = BrowserMcpUsageLimiter()
         self._status_logger = (
             BrowserSubagentStatusLogger()
             if is_browser_subagent_status_log_enabled()
@@ -621,6 +1133,17 @@ class BrowserRuntimeRail(AgentRail):
             self._status_logger is not None,
             type(self._status_logger).__name__ if self._status_logger is not None else None,
         )
+        browser_agent_log_info(
+            "[BROWSER_MCP_LIMIT] attached "
+            "boundary=browser_runtime_rail.before_tool_call enabled=%s raw_streak_limit=%s",
+            self._mcp_usage_limiter.enabled,
+            self._mcp_usage_limiter.raw_streak_limit,
+        )
+
+    @property
+    def mcp_usage_limiter(self) -> BrowserMcpUsageLimiter:
+        """Return the limiter used by the live DeepAgent browser dispatch rail."""
+        return self._mcp_usage_limiter
 
     def _emit_status(self, method_name: str, ctx: AgentCallbackContext) -> None:
         if self._status_logger is None:
@@ -642,6 +1165,13 @@ class BrowserRuntimeRail(AgentRail):
             )
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        self._mcp_usage_limiter.reset()
+        browser_agent_log_info(
+            "[BROWSER_MCP_LIMIT] runtime_active "
+            "boundary=browser_runtime_rail.before_tool_call enabled=%s raw_streak_limit=%s",
+            self._mcp_usage_limiter.enabled,
+            self._mcp_usage_limiter.raw_streak_limit,
+        )
         if isinstance(getattr(ctx, "extra", None), dict):
             ctx.extra[_BROWSER_LOG_CONTEXT_TOKEN_KEY] = set_browser_agent_log_context(True)
         self._emit_status("before_invoke", ctx)
@@ -662,6 +1192,29 @@ class BrowserRuntimeRail(AgentRail):
         builder = getattr(ctx.agent, "system_prompt_builder", None)
         if session is None or builder is None:
             return
+
+        builder.remove_section(_BROWSER_PROGRESS_GUARD_SECTION_NAME)
+        guard_language = getattr(builder, "language", "cn")
+        guard_messages = _BROWSER_PROGRESS_GUARD_GUIDANCE.get(
+            guard_language,
+            _BROWSER_PROGRESS_GUARD_GUIDANCE["en"],
+        )
+        if self._mcp_usage_limiter.progress_budget_exhausted:
+            builder.add_section(
+                PromptSection(
+                    name=_BROWSER_PROGRESS_GUARD_SECTION_NAME,
+                    content=guard_messages["exhausted"],
+                    priority=99,
+                )
+            )
+        elif self._mcp_usage_limiter.strategy_change_required:
+            builder.add_section(
+                PromptSection(
+                    name=_BROWSER_PROGRESS_GUARD_SECTION_NAME,
+                    content=guard_messages["strategy"],
+                    priority=96,
+                )
+            )
 
         builder.add_section(
             PromptSection(
@@ -744,19 +1297,72 @@ class BrowserRuntimeRail(AgentRail):
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         self._emit_status("before_tool_call", ctx)
+        if ctx.extra.get("_skip_tool"):
+            return
+        inputs = getattr(ctx, "inputs", None)
+        tool_name = str(getattr(inputs, "tool_name", "") or "").strip()
+        tool_args = getattr(inputs, "tool_args", None)
+        blocked_reason = self._mcp_usage_limiter.blocked_reason(tool_name, tool_args)
+        if not blocked_reason:
+            return
+
+        payload = self._mcp_usage_limiter.blocked_payload(
+            tool_name,
+            blocked_reason,
+            tool_args,
+        )
+        tool_call = getattr(inputs, "tool_call", None)
+        tool_call_id = getattr(tool_call, "id", "") if tool_call is not None else ""
+        ctx.extra["_skip_tool"] = True
+        inputs.tool_result = payload
+        inputs.tool_msg = ToolMessage(
+            content=json.dumps(payload, ensure_ascii=False),
+            tool_call_id=tool_call_id,
+        )
+        browser_agent_log_warning(
+            "[BROWSER_MCP_LIMIT] blocked "
+            "boundary=browser_runtime_rail.before_tool_call tool=%s reason=%s target_family=%s",
+            tool_name,
+            payload.get("reason"),
+            payload.get("target_family") or "",
+        )
 
     async def on_tool_exception(self, ctx: AgentCallbackContext) -> None:
         self._emit_status("on_tool_exception", ctx)
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         self._emit_status("after_tool_call", ctx)
+        inputs = getattr(ctx, "inputs", None)
+        tool_name = str(getattr(inputs, "tool_name", "") or "").strip()
+        tool_args = getattr(inputs, "tool_args", None)
+        raw_tool_result = getattr(inputs, "tool_result", None)
+        limiter_event = self._mcp_usage_limiter.record_result(
+            tool_name,
+            raw_tool_result,
+            tool_args,
+        )
+        if limiter_event == "semantic_failure_recorded":
+            browser_agent_log_info(
+                "[BROWSER_MCP_LIMIT] semantic_failure_recorded "
+                "boundary=browser_runtime_rail.after_tool_call tool=%s target_family=%s",
+                tool_name,
+                self._mcp_usage_limiter.last_semantic_failure_target_family,
+            )
+        if self._mcp_usage_limiter.last_progress_event:
+            browser_agent_log_warning(
+                "[BROWSER_PROGRESS_GUARD] event=%s no_progress_turns=%s "
+                "soft_limit=%s hard_limit=%s blocked_families=%s",
+                self._mcp_usage_limiter.last_progress_event,
+                self._mcp_usage_limiter.no_progress_turns,
+                self._mcp_usage_limiter.progress_soft_limit,
+                self._mcp_usage_limiter.progress_hard_limit,
+                sorted(self._mcp_usage_limiter.strategy_blocked_families),
+            )
+
         session = getattr(ctx, "session", None)
-        if session is None:
+        if session is None or not self._is_browser_progress_tool(tool_name):
             return
-        tool_name = str(getattr(getattr(ctx, "inputs", None), "tool_name", "") or "").strip()
-        if not self._is_browser_progress_tool(tool_name):
-            return
-        tool_result = self._normalize_tool_result(getattr(getattr(ctx, "inputs", None), "tool_result", None))
+        tool_result = self._normalize_tool_result(raw_tool_result)
         session_id = session.get_session_id()
         self._runtime.service.record_tool_progress(
             session_id=session_id,
