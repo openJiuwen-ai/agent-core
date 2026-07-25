@@ -41,12 +41,11 @@ from openjiuwen.harness.rails.skill_evolution_rail import (
 )
 
 
-def _make_rail(tmp_path, *, auto_scan: bool = True, auto_save: bool = True) -> SkillEvolutionRail:
+def _make_rail(tmp_path, *, auto_save: bool = True) -> SkillEvolutionRail:
     rail = SkillEvolutionRail(
         skills_dir=str(tmp_path / "skills"),
         llm=Mock(),
         model="dummy-model",
-        auto_scan=auto_scan,
         auto_save=auto_save,
     )
     rail._evolution_store = Mock()
@@ -169,13 +168,11 @@ def test_prepare_record_for_evolutions_json_falls_back_summary_from_content():
 
 
 def test_properties_and_clear_processed_signals(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, auto_save=True)
     rail.processed_signal_keys.add(("a", "b"))
-    rail.auto_scan = False
     rail.auto_save = False
     rail.clear_processed_signals()
 
-    assert rail.auto_scan is False
     assert rail.auto_save is False
     assert rail.processed_signal_keys == set()
 
@@ -623,7 +620,7 @@ async def test_after_tool_call_remembers_skill_on_session(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_evolution_passes_session_skills_to_detect_user_intent(tmp_path, monkeypatch):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, auto_save=True)
     session = SimpleNamespace(_skill_evolution_used_skills={"weather", "travel-planner"})
     captured: dict[str, Any] = {}
 
@@ -779,7 +776,7 @@ async def test_after_tool_call_skips_invalid_cases(tmp_path):
 @pytest.mark.asyncio
 async def test_after_invoke_schedules_evolution_without_blocking(tmp_path):
     """after_invoke must return before background evolution finishes."""
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, auto_save=True)
     started = asyncio.Event()
     release = asyncio.Event()
     finished = asyncio.Event()
@@ -816,31 +813,6 @@ async def test_after_invoke_schedules_evolution_without_blocking(tmp_path):
     await rail.wait_for_pending_evolution(timeout=1.0)
     assert finished.is_set()
     assert not rail.has_pending_evolution
-
-
-@pytest.mark.asyncio
-async def test_after_invoke_skips_background_when_auto_scan_disabled(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=False)
-    rail.run_evolution = AsyncMock()  # type: ignore[method-assign]
-
-    invoke_inputs = InvokeInputs(query="hello", conversation_id="conv-skip")
-    before_ctx = AgentCallbackContext(
-        agent=None,
-        inputs=invoke_inputs,
-        session=None,
-        event=AgentCallbackEvent.BEFORE_INVOKE,
-    )
-    await rail.before_invoke(before_ctx)
-    after_ctx = AgentCallbackContext(
-        agent=None,
-        inputs=invoke_inputs,
-        session=None,
-        event=AgentCallbackEvent.AFTER_INVOKE,
-    )
-    await rail.after_invoke(after_ctx)
-
-    assert not rail.has_pending_evolution
-    rail.run_evolution.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -907,16 +879,8 @@ async def test_uninit_schedules_drain_for_cancelled_tasks(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_run_evolution_returns_immediately_when_auto_scan_disabled(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=False)
-    rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "x"}])
-    await rail.run_evolution(None, AgentCallbackContext(agent=None, inputs=None, session=None))
-    rail._collect_parsed_messages.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_run_evolution_auto_save_appends_records(tmp_path, monkeypatch):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, auto_save=True)
     signals = [_make_signal("skill-a")]
     records = [_make_record("skill-a"), _make_record("skill-a")]
 
@@ -952,7 +916,7 @@ async def test_run_evolution_auto_save_false_still_persists_evolutions_json(
     tmp_path, monkeypatch
 ):
     """auto_save=False resolves to suggest, but still writes evolutions.json only."""
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=False)
+    rail = _make_rail(tmp_path, auto_save=False)
     signals = [_make_signal("skill-a")]
     records = [_make_record("skill-a")]
     parsed_messages = [{"role": "user", "content": "hello"}]
@@ -982,7 +946,7 @@ async def test_run_evolution_auto_save_false_still_persists_evolutions_json(
 
 @pytest.mark.asyncio
 async def test_run_evolution_skips_skill_when_self_evolution_off(tmp_path, monkeypatch):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, auto_save=True)
     signals = [_make_signal("weather")]
     rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hello"}])
     rail._evolution_store.list_skill_names = Mock(return_value=["weather"])
@@ -1007,7 +971,7 @@ async def test_run_evolution_skips_skill_when_self_evolution_off(tmp_path, monke
 @pytest.mark.asyncio
 async def test_run_evolution_suggest_mode_persists_evolutions_json(tmp_path, monkeypatch):
     """suggest/auto both write evolutions.json with update_skill_md=False."""
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, auto_save=True)
     signals = [_make_signal("weather")]
     records = [_make_record("weather")]
     parsed_messages = [{"role": "user", "content": "hello"}]
@@ -1043,7 +1007,7 @@ async def test_run_evolution_action_auto_persists_even_if_auto_save_false(
     tmp_path, monkeypatch
 ):
     """Per-skill selfEvolution=auto outranks rail auto_save=False; still no SKILL.md write."""
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=False)
+    rail = _make_rail(tmp_path, auto_save=False)
     signals = [_make_signal("weather")]
     records = [_make_record("weather")]
     parsed_messages = [{"role": "user", "content": "hello"}]
@@ -1076,7 +1040,7 @@ async def test_run_evolution_action_auto_persists_even_if_auto_save_false(
 
 @pytest.mark.asyncio
 async def test_run_evolution_filters_empty_skill_name_and_swallow_exceptions(tmp_path, monkeypatch):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, auto_save=True)
     rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hello"}])
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
     rail._evolution_store.skill_exists = Mock(return_value=True)
@@ -1088,7 +1052,7 @@ async def test_run_evolution_filters_empty_skill_name_and_swallow_exceptions(tmp
     rail._generate_experience_for_skill.assert_awaited_once()
     assert rail._generate_experience_for_skill.await_args.args[0] == "skill-a"
 
-    rail2 = _make_rail(tmp_path, auto_scan=True)
+    rail2 = _make_rail(tmp_path)
     rail2._collect_parsed_messages = AsyncMock(side_effect=RuntimeError("boom"))
     await rail2.run_evolution(None, AgentCallbackContext(agent=None, inputs=None, session=None))
 
@@ -1100,7 +1064,7 @@ async def test_run_evolution_filters_empty_skill_name_and_swallow_exceptions(tmp
 
 @pytest.mark.asyncio
 async def test_run_evolution_deduplicates_with_processed_keys(tmp_path, monkeypatch):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, auto_save=True)
     rail._evolution_store.skill_exists = Mock(return_value=True)
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
     rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "x"}])
@@ -1122,7 +1086,7 @@ async def test_run_evolution_deduplicates_with_processed_keys(tmp_path, monkeypa
 
 @pytest.mark.asyncio
 async def test_run_evolution_clears_processed_keys_when_exceed_limit(tmp_path, monkeypatch):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, auto_save=True)
     rail._evolution_store.skill_exists = Mock(return_value=True)
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
     rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "x"}])
@@ -1140,7 +1104,7 @@ async def test_run_evolution_clears_processed_keys_when_exceed_limit(tmp_path, m
 async def test_run_evolution_binds_evolver_llm_to_detector(tmp_path, monkeypatch):
     """run_evolution must bind evolver llm/model/language then call
     ``detect_trajectory_signals`` with hard signal types only."""
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, auto_save=True)
     rail._evolution_store.skill_exists = Mock(return_value=True)
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
     rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "x"}])
@@ -1532,7 +1496,7 @@ def test_infer_primary_skill_ignores_unknown_skills(tmp_path):
 @pytest.mark.asyncio
 async def test_run_evolution_zero_signals_skips_experience_generation(tmp_path, monkeypatch):
     """Zero rule-based signals currently skip conversation_review fallback."""
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, auto_save=True)
 
     rail._collect_parsed_messages = AsyncMock(
         return_value=[
@@ -1561,7 +1525,7 @@ async def test_run_evolution_zero_signals_skips_experience_generation(tmp_path, 
 
 @pytest.mark.asyncio
 async def test_run_evolution_zero_signals_no_primary_skill_returns(tmp_path, monkeypatch):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, auto_save=True)
 
     rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
@@ -1578,7 +1542,7 @@ async def test_run_evolution_zero_signals_no_primary_skill_returns(tmp_path, mon
 
 @pytest.mark.asyncio
 async def test_run_evolution_unattributed_signals_get_fallback_skill(tmp_path, monkeypatch):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, auto_save=True)
 
     attributed = _make_signal("skill-a", excerpt="attributed")
     unattributed = _make_signal(None, excerpt="unattributed")
@@ -1601,7 +1565,7 @@ async def test_run_evolution_unattributed_signals_get_fallback_skill(tmp_path, m
 @pytest.mark.asyncio
 async def test_run_evolution_all_unattributed_signals_cancel_review(tmp_path, monkeypatch):
     """When every signal lacks skill_name, cancel regular skill evolution (no primary infer)."""
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, auto_save=True)
     unattributed = _make_signal(None, excerpt="correction")
 
     rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
@@ -1625,7 +1589,7 @@ async def test_run_evolution_all_unattributed_signals_cancel_review(tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_run_evolution_multiple_attributed_skills_no_fallback(tmp_path, monkeypatch):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, auto_save=True)
 
     sig_a = _make_signal("skill-a", excerpt="a")
     sig_b = _make_signal("skill-b", excerpt="b")
@@ -2093,7 +2057,6 @@ def test_session_helpers_with_none_session(tmp_path):
 async def test_run_evolution_path_b_not_reached_when_no_attributed_signals(tmp_path, monkeypatch):
     """When no attributed signals, cancel review and do not evaluate Path B."""
     rail = _make_rail(tmp_path)
-    rail._auto_scan = True
     rail._new_skill_detection = True
 
     parsed_messages = [
@@ -2144,7 +2107,6 @@ async def test_run_evolution_path_b_not_reached_when_no_attributed_signals(tmp_p
 async def test_run_evolution_path_b_not_reached_when_path_a_handled(tmp_path, monkeypatch):
     """Path B should NOT run when Path A already handled at least one skill."""
     rail = _make_rail(tmp_path)
-    rail._auto_scan = True
     rail._new_skill_detection = True
     rail._auto_save = True
 
@@ -2639,7 +2601,7 @@ async def test_track_presented_records_skips_when_no_body_records(tmp_path):
 @pytest.mark.asyncio
 async def test_after_tool_call_no_track_when_no_body_text(tmp_path):
     """after_tool_call must not call _track_presented_records when body injection is empty."""
-    rail = _make_rail(tmp_path, auto_scan=True)
+    rail = _make_rail(tmp_path)
 
     # Simulate reading a SKILL.md with no body experiences
     tool_inputs = ToolCallInputs(

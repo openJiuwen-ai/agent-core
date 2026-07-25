@@ -277,7 +277,6 @@ class SkillEvolutionRail(EvolutionRail):
         *,
         llm: Any,
         model: str,
-        auto_scan: bool = True,
         auto_save: bool = True,
         language: str = "cn",
         trajectory_store: Optional[TrajectoryStore] = None,
@@ -292,7 +291,6 @@ class SkillEvolutionRail(EvolutionRail):
             skills_dir: Directory or list of directories containing skill definitions
             llm: LLM client for experience generation
             model: Model name for experience generation
-            auto_scan: Whether to auto-detect evolution signals
             auto_save: Whether to auto-save generated experiences
             language: Language for experience generation ("cn" or "en")
             trajectory_store: Optional trajectory store (inherited from EvolutionRail)
@@ -313,7 +311,6 @@ class SkillEvolutionRail(EvolutionRail):
         self._evolution_store = EvolutionStore(skills_dir)
         self._evolver = SkillExperienceOptimizer(llm, model, language)
         self._scorer = ExperienceScorer(llm, model, language)
-        self._auto_scan = auto_scan
         self._processed_signal_keys: set[tuple[str, ...]] = set()
         self._auto_save = auto_save
         self._pending_approval_events: list[OutputSchema] = []
@@ -376,15 +373,6 @@ class SkillEvolutionRail(EvolutionRail):
     @auto_save.setter
     def auto_save(self, value: bool) -> None:
         self._auto_save = value
-
-    @property
-    def auto_scan(self) -> bool:
-        """Whether auto-scan is enabled."""
-        return self._auto_scan
-
-    @auto_scan.setter
-    def auto_scan(self, value: bool) -> None:
-        self._auto_scan = value
 
     def _resolve_skills_dirs_for_self_evolution(self) -> Optional[List[Any]]:
         """Return EvolutionStore base dirs for capabilities.json lookup, if available."""
@@ -551,9 +539,6 @@ class SkillEvolutionRail(EvolutionRail):
         Claim this invoke's presented-record queue immediately so a later
         overlapping invoke cannot steal or mix evaluation ownership.
         """
-        if not self._auto_scan:
-            logger.info("[SkillEvolutionRail] auto_scan disabled, skip background evolution")
-            return
         session = getattr(ctx, "session", None)
         presented_snapshot = list(self._get_session_presented_records(session))
         self._set_session_presented_records(session, [])
@@ -689,11 +674,8 @@ class SkillEvolutionRail(EvolutionRail):
         presented_snapshot: Optional[List[tuple[str, Any, str]]] = None,
     ) -> None:
         """Core evolution body; caller must hold ``_evolution_lock``."""
-        logger.info("[SkillEvolutionRail] run_evolution called, auto_scan=%s", self._auto_scan)
+        logger.info("[SkillEvolutionRail] run_evolution called")
         self._run_summary = None
-        if not self._auto_scan:
-            logger.info("[SkillEvolutionRail] auto_scan disabled, skipping")
-            return
 
         # Snapshot claimed at schedule time. If we never hand it to evaluation
         # (early exit / hard failure), restore it so a later round can retry.
