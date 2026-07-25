@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any, Dict, Iterable, Optional
+from weakref import WeakSet
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.logging.browser_context import (
@@ -43,6 +45,7 @@ _BROWSER_PROGRESS_TASK_KEY = "__browser_subagent_last_task__"
 _BROWSER_PROGRESS_SECTION_NAME = "browser_progress_continuation"
 _BROWSER_PROGRESS_FORMAT_SECTION_NAME = "browser_progress_format"
 _BROWSER_LOG_CONTEXT_TOKEN_KEY = "__browser_agent_log_context_token__"
+_ACTIVE_BROWSER_RUNTIMES: WeakSet[Any] = WeakSet()
 _BROWSER_PROGRESS_TAG_RE = re.compile(
     r"<browser_progress>\s*(\{.*?\})\s*</browser_progress>",
     re.DOTALL | re.IGNORECASE,
@@ -98,6 +101,7 @@ class BrowserAgentRuntime:
         self._browser_probe_interactives_tool = None
         self._browser_probe_cards_tool = None
         self._browser_batch_interact_tool = None
+        _ACTIVE_BROWSER_RUNTIMES.add(self)
 
     @property
     def service(self) -> BrowserService:
@@ -603,6 +607,33 @@ class BrowserAgentRuntime:
 
     async def shutdown(self) -> None:
         await self._service.shutdown()
+
+    async def reset(self) -> None:
+        """Release the current browser and restart lazily on the next task."""
+        await self._service.reset()
+
+
+async def reset_active_browser_runtimes() -> int:
+    """Reset every live browser runtime owned by this process."""
+    runtimes = list(_ACTIVE_BROWSER_RUNTIMES)
+    if not runtimes:
+        return 0
+
+    results = await asyncio.gather(
+        *(runtime.reset() for runtime in runtimes),
+        return_exceptions=True,
+    )
+    reset_count = 0
+    for runtime, result in zip(runtimes, results):
+        if isinstance(result, BaseException):
+            logger.warning(
+                "Failed to reset active browser runtime %s: %s",
+                id(runtime),
+                result,
+            )
+            continue
+        reset_count += 1
+    return reset_count
 
 
 class BrowserRuntimeRail(AgentRail):
