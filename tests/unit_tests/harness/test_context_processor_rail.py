@@ -7,7 +7,10 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 import pytest
 
-from openjiuwen.core.context_engine import LOOP_COMPACT_BAILOUT_STATE_KEY
+from openjiuwen.core.context_engine import (
+    LOOP_COMPACT_BAILOUT_STATE_KEY,
+    TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY,
+)
 from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
     DialogueCompressorConfig,
 )
@@ -1295,18 +1298,17 @@ async def test_before_model_call_injects_offload_section(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_before_model_call_bailout_raises_when_threshold_reached(tmp_path: Path):
-    """before_model_call should abort when the loop counter reaches the threshold."""
+    """before_model_call should abort when the reasoning-loop counter reaches threshold."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
     agent = _make_agent(sys_operation, workspace)
 
-    # Preset includes ReasoningToolLoopCompactProcessor with bailout_threshold=2.
     rail = ContextProcessorRail(preset=True)
     await agent.register_rail(rail)
     await agent.ensure_initialized()
 
     mock_session = Mock()
-    mock_session.get_state.return_value = 3  # counter == threshold
+    mock_session.get_state.return_value = 3  # reaches bailout_threshold=3
 
     ctx = AgentCallbackContext(
         agent=agent,
@@ -1317,13 +1319,43 @@ async def test_before_model_call_bailout_raises_when_threshold_reached(tmp_path:
     with pytest.raises(AbortError):
         await rail.before_model_call(ctx)
 
-    # Counter is cleared before raising so a retry / next invoke starts clean.
     mock_session.update_state.assert_any_call({LOOP_COMPACT_BAILOUT_STATE_KEY: 0})
 
 
 @pytest.mark.asyncio
+async def test_before_model_call_tool_args_bailout_raises_when_threshold_reached(tmp_path: Path):
+    """Tool-args loop bail-out trips independently via tool_args_bailout_threshold."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    rail = ContextProcessorRail(
+        preset=True,
+        processors=[
+            ("ReasoningToolLoopCompactProcessor", {"bailout_threshold": 0}),
+        ],
+    )
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    mock_session = Mock()
+    mock_session.get_state.return_value = 2  # tool_args_bailout_threshold default
+
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ModelCallInputs(messages=[]),
+        session=mock_session,
+    )
+
+    with pytest.raises(AbortError):
+        await rail.before_model_call(ctx)
+
+    mock_session.update_state.assert_any_call({TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY: 0})
+
+
+@pytest.mark.asyncio
 async def test_before_model_call_no_bailout_below_threshold(tmp_path: Path):
-    """before_model_call should not abort while the counter is below threshold."""
+    """before_model_call should not abort while counters are below thresholds."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
     agent = _make_agent(sys_operation, workspace)
@@ -1333,7 +1365,7 @@ async def test_before_model_call_no_bailout_below_threshold(tmp_path: Path):
     await agent.ensure_initialized()
 
     mock_session = Mock()
-    mock_session.get_state.return_value = 1  # below threshold (2)
+    mock_session.get_state.return_value = 1  # below both thresholds (3 and 2)
 
     ctx = AgentCallbackContext(
         agent=agent,
@@ -1341,33 +1373,39 @@ async def test_before_model_call_no_bailout_below_threshold(tmp_path: Path):
         session=mock_session,
     )
 
-    # Should not raise.
     await rail.before_model_call(ctx)
 
-    # No reset of the counter happened (we only reset when we bail out).
     reset_calls = [
         call for call in mock_session.update_state.call_args_list
-        if call.args and call.args[0] == {LOOP_COMPACT_BAILOUT_STATE_KEY: 0}
+        if call.args and (
+            call.args[0] == {LOOP_COMPACT_BAILOUT_STATE_KEY: 0}
+            or call.args[0] == {TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY: 0}
+        )
     ]
     assert reset_calls == []
 
 
 @pytest.mark.asyncio
 async def test_before_model_call_no_bailout_when_threshold_zero(tmp_path: Path):
-    """bailout_threshold=0 disables the bail-out even if the counter is high."""
+    """Disabling both bail-out thresholds skips abort even if counters are high."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
     agent = _make_agent(sys_operation, workspace)
 
     rail = ContextProcessorRail(
         preset=True,
-        processors=[("ReasoningToolLoopCompactProcessor", {"bailout_threshold": 0})],
+        processors=[
+            (
+                "ReasoningToolLoopCompactProcessor",
+                {"bailout_threshold": 0, "tool_args_bailout_threshold": 0},
+            ),
+        ],
     )
     await agent.register_rail(rail)
     await agent.ensure_initialized()
 
     mock_session = Mock()
-    mock_session.get_state.return_value = 999  # would trip any positive threshold
+    mock_session.get_state.return_value = 999
 
     ctx = AgentCallbackContext(
         agent=agent,
@@ -1375,13 +1413,12 @@ async def test_before_model_call_no_bailout_when_threshold_zero(tmp_path: Path):
         session=mock_session,
     )
 
-    # Should not raise because the bail-out is disabled.
     await rail.before_model_call(ctx)
 
 
 @pytest.mark.asyncio
 async def test_before_invoke_resets_bailout_counter(tmp_path: Path):
-    """before_invoke should reset the loop counter to 0 at the start of an invoke."""
+    """before_invoke should reset both loop counters to 0 at the start of an invoke."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
     agent = _make_agent(sys_operation, workspace)
@@ -1399,5 +1436,8 @@ async def test_before_invoke_resets_bailout_counter(tmp_path: Path):
 
     await rail.before_invoke(ctx)
 
-    mock_session.update_state.assert_any_call({LOOP_COMPACT_BAILOUT_STATE_KEY: 0})
+    mock_session.update_state.assert_any_call({
+        LOOP_COMPACT_BAILOUT_STATE_KEY: 0,
+        TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY: 0,
+    })
 
