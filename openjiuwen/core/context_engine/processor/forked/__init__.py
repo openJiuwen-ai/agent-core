@@ -13,6 +13,11 @@ _EXPORT_MODULES = {
     "MessageSummaryOffloaderConfig": ".offloader.message_offloader",
     "RoundLevelCompressor": ".compressor.round_level_compressor",
     "RoundLevelCompressorConfig": ".compressor.round_level_compressor",
+    "SessionMemoryAgent": ".compressor.session_memory_agent",
+    "SessionMemoryAgentConfig": ".compressor.session_memory_agent",
+    "SessionMemoryAbilityManager": ".compressor.session_memory_agent",
+    "SessionMemoryCompressor": ".compressor.session_memory_compressor",
+    "SessionMemoryCompressorConfig": ".compressor.session_memory_compressor",
 }
 
 __all__ = list(_EXPORT_MODULES)
@@ -25,6 +30,7 @@ def activate() -> None:
         "DialogueCompressor",
         "CurrentRoundCompressor",
         "RoundLevelCompressor",
+        "SessionMemoryCompressor",
     ):
         module = import_module(_EXPORT_MODULES[class_name], __name__)
         processor_class = getattr(module, class_name)

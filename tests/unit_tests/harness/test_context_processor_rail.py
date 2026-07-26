@@ -625,11 +625,14 @@ def test_build_preset_processors_with_session_memory(tmp_path: Path):
     presets = rail._build_preset_processors()
 
     keys = [k for k, _ in presets]
-    assert "ToolResultBudgetProcessor" in keys
-    assert "MicroCompactProcessor" in keys
-    assert "FullCompactProcessor" in keys
-    assert "MessageSummaryOffloader" not in keys
-    assert "DialogueCompressor" not in keys
+    assert "MessageSummaryOffloader" in keys
+    assert "SessionMemoryCompressor" in keys
+    assert "DialogueCompressor" in keys
+    assert "CurrentRoundCompressor" in keys
+    assert "RoundLevelCompressor" in keys
+    assert "ToolResultBudgetProcessor" not in keys
+    assert "MicroCompactProcessor" not in keys
+    assert "FullCompactProcessor" not in keys
 
 
 def test_build_preset_processors_with_session_memory_dict(tmp_path: Path):
@@ -638,8 +641,9 @@ def test_build_preset_processors_with_session_memory_dict(tmp_path: Path):
     presets = rail._build_preset_processors()
 
     keys = [k for k, _ in presets]
-    assert "ToolResultBudgetProcessor" in keys
-    assert "FullCompactProcessor" in keys
+    assert "MessageSummaryOffloader" in keys
+    assert "SessionMemoryCompressor" in keys
+    assert "DialogueCompressor" in keys
 
 
 # =============================================================================

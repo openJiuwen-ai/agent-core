@@ -15,14 +15,26 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import (
     LOOP_COMPACT_BAILOUT_STATE_KEY,
     TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY,
-    FullCompactProcessorConfig,
-    MicroCompactProcessorConfig,
     ReasoningToolLoopCompactProcessorConfig,
-    ToolResultBudgetProcessorConfig,
 )
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     SessionMemoryConfig,
     SessionMemoryManager,
+)
+from openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor import (
+    CurrentRoundCompressorConfig as ForkedCurrentRoundCompressorConfig,
+)
+from openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor import (
+    DialogueCompressorConfig as ForkedDialogueCompressorConfig,
+)
+from openjiuwen.core.context_engine.processor.forked.compressor.round_level_compressor import (
+    RoundLevelCompressorConfig as ForkedRoundLevelCompressorConfig,
+)
+from openjiuwen.core.context_engine.processor.forked.compressor.session_memory_compressor import (
+    SessionMemoryCompressorConfig,
+)
+from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader import (
+    MessageSummaryOffloaderConfig as ForkedMessageSummaryOffloaderConfig,
 )
 from openjiuwen.core.foundation.llm import ModelRequestConfig
 from openjiuwen.core.runner.callback.errors import AbortError
@@ -175,19 +187,29 @@ class ContextProcessorRail(DeepAgentRail):
         else:
             model_cfg = None
         if self._session_memory_enabled:
+            from openjiuwen.core.context_engine.processor import forked
+
+            forked.activate()
             presets: List[Tuple[str, BaseModel]] = [
                 (
-                    "ToolResultBudgetProcessor",
-                    ToolResultBudgetProcessorConfig(),
-                ),
-                ("MicroCompactProcessor", MicroCompactProcessorConfig()),
-                (
-                    "ReasoningToolLoopCompactProcessor",
-                    ReasoningToolLoopCompactProcessorConfig(),
+                    "MessageSummaryOffloader",
+                    ForkedMessageSummaryOffloaderConfig(),
                 ),
                 (
-                    "FullCompactProcessor",
-                    FullCompactProcessorConfig(model=model_config, model_client=model_client_config),
+                    "SessionMemoryCompressor",
+                    SessionMemoryCompressorConfig(enabled=True),
+                ),
+                (
+                    "DialogueCompressor",
+                    ForkedDialogueCompressorConfig(model=model_cfg, model_client=model_client_config),
+                ),
+                (
+                    "CurrentRoundCompressor",
+                    ForkedCurrentRoundCompressorConfig(model=model_cfg, model_client=model_client_config),
+                ),
+                (
+                    "RoundLevelCompressor",
+                    ForkedRoundLevelCompressorConfig(model=model_cfg, model_client=model_client_config),
                 ),
             ]
         else:
