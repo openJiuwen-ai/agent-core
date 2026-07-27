@@ -36,7 +36,7 @@ def tokenize(text: str) -> list[str]:
 
     for sequence in _CJK_SEQUENCE_RE.findall(lowered):
         expanded.extend(sequence)
-        expanded.extend(sequence[index : index + 2] for index in range(len(sequence) - 1))
+        expanded.extend("".join(pair) for pair in zip(sequence, sequence[1:]))
     return expanded
 
 

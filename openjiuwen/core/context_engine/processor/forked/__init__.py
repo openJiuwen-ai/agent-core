@@ -33,6 +33,8 @@ _ORIGINAL_PROCESSORS = {}
 
 def activate() -> None:
     """Register the refactored processors under the official processor names."""
+    # Designated internal facade for the processor registry.
+    # pylint: disable=protected-access
     global _ACTIVATED  # pylint: disable=global-statement
     for class_name in _ACTIVATED_PROCESSORS:
         if class_name not in _ORIGINAL_PROCESSORS:
@@ -50,6 +52,8 @@ def activate() -> None:
 
 def deactivate() -> None:
     """Restore the processor registry entries captured before the first activation."""
+    # Designated internal facade for the processor registry.
+    # pylint: disable=protected-access
     global _ACTIVATED  # pylint: disable=global-statement
     for class_name, original in _ORIGINAL_PROCESSORS.items():
         if original is None:

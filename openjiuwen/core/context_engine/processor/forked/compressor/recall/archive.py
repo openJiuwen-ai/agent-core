@@ -241,8 +241,9 @@ def _split_text(
         chunks: list[str] = []
         start = 0
         while start < len(token_ids):
-            chunks.append(encoding.decode(token_ids[start : start + chunk_size_tokens]))
-            if start + chunk_size_tokens >= len(token_ids):
+            end = start + chunk_size_tokens
+            chunks.append(encoding.decode(token_ids[start:end]))
+            if end >= len(token_ids):
                 break
             start += step
         return chunks
@@ -255,8 +256,9 @@ def _split_text(
         chunks = []
         start = 0
         while start < len(text):
-            chunks.append(text[start : start + char_size])
-            if start + char_size >= len(text):
+            end = start + char_size
+            chunks.append(text[start:end])
+            if end >= len(text):
                 break
             start += step
         return chunks

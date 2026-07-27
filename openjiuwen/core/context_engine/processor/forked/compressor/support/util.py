@@ -353,7 +353,8 @@ def truncate_state_text(text: str, max_chars: int) -> str:
     if max_chars <= 0 or len(text) <= max_chars:
         return text
     head = text[: max_chars // 2]
-    tail = text[-max(max_chars - len(head), 0) :]
+    tail_start = -max(max_chars - len(head), 0)
+    tail = text[tail_start:]
     return f"{head}\n...[STATE_REINJECTION_TRUNCATED]...\n{tail}"
 
 
@@ -365,7 +366,8 @@ def find_last_completed_api_round_end_idx(
     """Return absolute end index for the last complete API round in the selected range."""
     if end_idx < start_idx:
         return end_idx
-    candidate_messages = messages[start_idx : end_idx + 1]
+    end = end_idx + 1
+    candidate_messages = messages[start_idx:end]
     completed_rounds = group_completed_api_round_ranges(candidate_messages)
     if not completed_rounds:
         return start_idx - 1
