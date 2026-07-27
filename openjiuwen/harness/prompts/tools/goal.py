@@ -161,7 +161,6 @@ class GetCurrentGoalMetadataProvider(ToolMetadataProvider):
         }
 
 
-
 __all__ = [
     "GetCurrentGoalMetadataProvider",
     "SubmitGoalReportMetadataProvider",

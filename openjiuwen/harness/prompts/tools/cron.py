@@ -928,7 +928,6 @@ class CronListJobsMetadataProvider(ToolMetadataProvider):
         return get_cron_list_jobs_input_params(language)
 
 
-
 class CronGetJobMetadataProvider(ToolMetadataProvider):
     """Metadata provider for legacy cron_get_job tool."""
 
@@ -940,7 +939,6 @@ class CronGetJobMetadataProvider(ToolMetadataProvider):
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_cron_get_job_input_params(language)
-
 
 
 class CronCreateJobMetadataProvider(ToolMetadataProvider):
@@ -1006,4 +1004,3 @@ class CronPreviewJobMetadataProvider(ToolMetadataProvider):
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_cron_preview_job_input_params(language)
-

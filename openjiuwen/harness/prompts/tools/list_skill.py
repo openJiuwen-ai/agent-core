@@ -45,4 +45,3 @@ class ListSkillMetadataProvider(ToolMetadataProvider):
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_list_skill_input_params(language)
-

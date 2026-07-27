@@ -123,7 +123,6 @@ class ImageOCRMetadataProvider(ToolMetadataProvider):
         return get_image_ocr_input_params(language)
 
 
-
 class VisualQuestionAnsweringMetadataProvider(ToolMetadataProvider):
     """Metadata provider for visual_question_answering."""
 
@@ -138,4 +137,3 @@ class VisualQuestionAnsweringMetadataProvider(ToolMetadataProvider):
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_visual_question_answering_input_params(language)
-

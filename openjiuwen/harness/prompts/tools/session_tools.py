@@ -39,7 +39,6 @@ class SessionsListMetadataProvider(ToolMetadataProvider):
         return get_sessions_list_input_params(language)
 
 
-
 # ---------------------------------------------------------------------------
 # sessions_spawn tool
 # ---------------------------------------------------------------------------

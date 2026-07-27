@@ -106,7 +106,6 @@ class FreeSearchMetadataProvider(ToolMetadataProvider):
         return _schema_free_search(language)
 
 
-
 class PaidSearchMetadataProvider(ToolMetadataProvider):
     def get_name(self) -> str:
         return "paid_search"
@@ -129,7 +128,6 @@ class PaidSearchMetadataProvider(ToolMetadataProvider):
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return _schema_paid_search(language)
-
 
 
 class FetchWebpageMetadataProvider(ToolMetadataProvider):
@@ -162,4 +160,3 @@ class FetchWebpageMetadataProvider(ToolMetadataProvider):
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return _schema_fetch_webpage(language)
-

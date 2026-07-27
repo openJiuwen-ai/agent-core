@@ -324,7 +324,6 @@ class ReadFileMetadataProvider(ToolMetadataProvider):
         return get_read_file_input_params(language)
 
 
-
 class _LegacyReadFileMetadataProvider(ToolMetadataProvider):
     """Legacy read-file metadata provider kept private for compatibility helpers."""
 
@@ -353,7 +352,6 @@ class WriteFileMetadataProvider(ToolMetadataProvider):
         return get_write_file_input_params(language)
 
 
-
 class EditFileMetadataProvider(ToolMetadataProvider):
     """EditFile 工具的元数据 provider。"""
 
@@ -365,7 +363,6 @@ class EditFileMetadataProvider(ToolMetadataProvider):
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_edit_file_input_params(language)
-
 
 
 class _LegacyEditFileMetadataProvider(ToolMetadataProvider):
@@ -394,7 +391,6 @@ class GlobMetadataProvider(ToolMetadataProvider):
         return get_glob_input_params(language)
 
 
-
 class ListDirMetadataProvider(ToolMetadataProvider):
     """ListDir 工具的元数据 provider。"""
 
@@ -410,7 +406,6 @@ class ListDirMetadataProvider(ToolMetadataProvider):
         return get_list_dir_input_params(language)
 
 
-
 class GrepMetadataProvider(ToolMetadataProvider):
     """Grep 工具的元数据 provider。"""
 
@@ -422,4 +417,3 @@ class GrepMetadataProvider(ToolMetadataProvider):
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_grep_input_params(language)
-
