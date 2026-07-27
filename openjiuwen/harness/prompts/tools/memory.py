@@ -178,6 +178,9 @@ class MemorySearchMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_memory_search_input_params(language)
 
+    def is_idempotent(self) -> bool:
+        return True
+
 
 class MemoryGetMetadataProvider(ToolMetadataProvider):
     """MemoryGet ToolMetaProvider。"""
@@ -193,6 +196,9 @@ class MemoryGetMetadataProvider(ToolMetadataProvider):
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_memory_get_input_params(language)
+
+    def is_idempotent(self) -> bool:
+        return True
 
 
 class WriteMemoryMetadataProvider(ToolMetadataProvider):
@@ -241,6 +247,9 @@ class ReadMemoryMetadataProvider(ToolMetadataProvider):
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_read_memory_input_params(language)
+
+    def is_idempotent(self) -> bool:
+        return True
 
 
 __all__ = [

@@ -101,6 +101,9 @@ class SwitchModeMetadataProvider(ToolMetadataProvider):
             return SWITCH_MODE_INPUT_PARAMS_EN
         return SWITCH_MODE_INPUT_PARAMS_CN
 
+    def is_idempotent(self) -> bool:
+        return True
+
 
 # ---------------------------------------------------------------------------
 # enter_plan_mode
@@ -148,6 +151,9 @@ class EnterPlanModeMetadataProvider(ToolMetadataProvider):
         if language == "en":
             return ENTER_PLAN_MODE_INPUT_PARAMS_EN
         return ENTER_PLAN_MODE_INPUT_PARAMS_CN
+
+    def is_idempotent(self) -> bool:
+        return True
 
     def validate(self) -> None:
         """No-parameter tools skip the standard bilingual schema check."""
@@ -198,6 +204,9 @@ class ExitPlanModeMetadataProvider(ToolMetadataProvider):
         if language == "en":
             return EXIT_PLAN_MODE_INPUT_PARAMS_EN
         return EXIT_PLAN_MODE_INPUT_PARAMS_CN
+
+    def is_idempotent(self) -> bool:
+        return True
 
     def validate(self) -> None:
         """No-parameter tools skip the standard bilingual schema check."""

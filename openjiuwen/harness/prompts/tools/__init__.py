@@ -200,6 +200,7 @@ class ToolCardBuildOptions:
 
     format_args: Optional[Dict[str, str]] = None
     parallel_safe: bool = True
+    idempotent: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------
@@ -251,12 +252,20 @@ def build_tool_card(
 
     final_tool_id = f"{tool_id}_{agent_id}" if agent_id else f"{tool_id}_{uuid.uuid4().hex}"
 
+    # Secure-by-default: idempotent falls back to the provider's declaration.
+    # Only when options explicitly pass idempotent do we allow an override.
+    provider = _REGISTRY.get(name)
+    idempotent = provider.is_idempotent() if provider else False
+    if options is not None and build_options.idempotent is not None:
+        idempotent = build_options.idempotent
+
     return ToolCard(
         id=final_tool_id,
         name=name,
         description=description,
         input_params=get_tool_input_params(name, language),
         parallel_safe=build_options.parallel_safe,
+        idempotent=idempotent,
     )
 
 

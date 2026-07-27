@@ -37,6 +37,15 @@ class ToolMetadataProvider(ABC):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         """返回指定语言的 JSON Schema 参数定义。"""
 
+    def is_idempotent(self) -> bool:
+        """Return whether the tool is idempotent (safe to retry).
+
+        Override to True for read-only / query tools.
+        Defaults to False for secure-by-default: new tools must explicitly
+        opt-in to idempotency.
+        """
+        return False
+
     def validate(self) -> None:
         """校验双语元数据完整性，失败抛 ValueError。"""
         validate_provider(self)

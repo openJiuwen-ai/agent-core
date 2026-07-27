@@ -24,6 +24,8 @@ from typing import (
     cast,
 )
 
+import anyio
+
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
@@ -3089,8 +3091,9 @@ class DeepAgent(BaseAgent):
                 name=f"deepagent-cancel-task-{task_id[:12]}",
             )
             try:
-                await asyncio.wait_for(asyncio.shield(cancel_wait), timeout=wait_timeout)
-            except asyncio.TimeoutError:
+                with anyio.fail_after(wait_timeout, shield=True):
+                    await cancel_wait
+            except TimeoutError:
                 logger.warning(
                     "[DeepAgent] cancel_task timed out after %.1fs "
                     "(reason=%s task_id=%s); continuing without waiting for LLM",

@@ -534,6 +534,9 @@ class TodoListMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_todo_list_input_params(language)
 
+    def is_idempotent(self) -> bool:
+        return True
+
 
 class TodoModifyMetadataProvider(ToolMetadataProvider):
     """TodoModify 工具的元数据 provider。"""
@@ -561,3 +564,6 @@ class TodoGetMetadataProvider(ToolMetadataProvider):
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_todo_get_input_params(language)
+
+    def is_idempotent(self) -> bool:
+        return True

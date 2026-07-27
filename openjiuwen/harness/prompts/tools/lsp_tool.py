@@ -147,3 +147,6 @@ class LspToolMetadataProvider(ToolMetadataProvider):
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_lsp_input_params(language)
+
+    def is_idempotent(self) -> bool:
+        return True

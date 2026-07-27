@@ -37,6 +37,16 @@ class ToolCard(BaseCard):
             "agent-qualified id at registration."
         ),
     )
+    idempotent: bool = Field(
+        default=False,
+        description=(
+            "Whether repeated invocations with the same inputs have no additional "
+            "side effects. Non-idempotent tools (write, shell, spawn) are exempt "
+            "from outer call-level timeouts and are never retried by resilience rails. "
+            "Defaults to False for secure-by-default: new tools must explicitly opt-in "
+            "to idempotency."
+        ),
+    )
 
     def tool_info(self):
         return ToolInfo(name=self.name, description=self.description, parameters=self.input_params)

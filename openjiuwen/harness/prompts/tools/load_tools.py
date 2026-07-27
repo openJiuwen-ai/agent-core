@@ -53,3 +53,6 @@ class LoadToolsMetadataProvider(ToolMetadataProvider):
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_load_tools_input_params(language)
+
+    def is_idempotent(self) -> bool:
+        return True

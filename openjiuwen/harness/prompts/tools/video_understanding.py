@@ -102,3 +102,6 @@ class VideoUnderstandingMetadataProvider(ToolMetadataProvider):
         self, language: str = "cn",
     ) -> Dict[str, Any]:
         return get_video_understanding_input_params(language)
+
+    def is_idempotent(self) -> bool:
+        return True

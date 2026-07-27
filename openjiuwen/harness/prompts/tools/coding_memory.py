@@ -101,6 +101,9 @@ class CodingMemoryReadMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_coding_memory_read_input_params(language)
 
+    def is_idempotent(self) -> bool:
+        return True
+
 
 class CodingMemoryWriteMetadataProvider(ToolMetadataProvider):
     def get_name(self) -> str:
