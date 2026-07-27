@@ -47,19 +47,35 @@ class ModelClientConfig(BaseModel):
     )
     api_key: str = Field(default="", description="API key")
     api_base: str = Field(default="", description="API base URL")
-    timeout: float = Field(default=60.0, gt=0, description="Request timeout in seconds (must be greater than 0)")
+    timeout: float = Field(
+        default=360.0,
+        gt=0,
+        description="HTTP request timeout in seconds (must be greater than 0). Kept >= "
+                    "stream_first_chunk_timeout so the transport layer never times out before "
+                    "the application-level stream timeout."
+    )
     stream_first_chunk_timeout: Optional[float] = Field(
         default=300.0,
         gt=0,
         description="Maximum seconds to wait for the first parsed streaming chunk; None disables it"
     )
     stream_idle_timeout: Optional[float] = Field(
-        default=120.0,
+        default=60.0,
         gt=0,
         description="Maximum seconds to wait between parsed streaming chunks; None disables it"
     )
 
-    max_retries: int = Field(default=3, description="Maximum number of retries")
+    max_retries: int = Field(
+        default=1,
+        description="Maximum number of thin SDK-level retries for transient HTTP failures "
+                    "(connection drops, 429, 5xx). Whole-call retries are handled by LLMRetryRail."
+    )
+    use_shared_llm_http_client: bool = Field(
+        default=True,
+        description="Reuse a process-wide, long-lived HTTP client (with its own keep-alive connection pool) "
+                    "instead of building/closing a client per request. Emergency kill-switch: set to False "
+                    "to fall back to per-request clients."
+    )
     verify_ssl: bool = Field(default=True, description="Whether to verify SSL certificates")
     ssl_cert: Optional[str] = Field(default=None, description="Path to SSL certificate file")
     custom_headers: Optional[dict[str, Any]] = Field(

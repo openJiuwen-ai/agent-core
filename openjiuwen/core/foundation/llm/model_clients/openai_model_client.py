@@ -1,13 +1,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import TYPE_CHECKING, List, Optional, AsyncIterator, Union, Any, Mapping
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, AsyncIterator, Tuple, Union, Any, Mapping
 
 import httpx
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import llm_logger, LogEventType
+from openjiuwen.core.common.logging import llm_logger, logger, LogEventType
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
@@ -41,11 +41,48 @@ class OpenAIModelClient(BaseModelClient):
     __client_name__ = [ProviderType.OpenAI.value]
     _PROTECTED_HEADERS = PROTECTED_HEADERS
 
+    # Process-wide cache of long-lived ``AsyncOpenAI`` clients, bucketed by
+    # tenant/connection config so different api_key/api_base never share a
+    # client. Each cached client keeps its own httpx keep-alive connection pool
+    # alive, so cache hits reuse established connections (no per-request
+    # build/close). Shared across subclasses (OpenRouter/DashScope/DeepSeek) on
+    # purpose: one cache per process.
+    _client_cache: Dict[Tuple, "openai.AsyncOpenAI"] = {}
+
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
         self._base_headers = build_base_headers(
             custom_headers=model_client_config.custom_headers,
         )
+
+    def _use_shared_client(self) -> bool:
+        """Whether to reuse the process-wide cached client (default True).
+
+        Emergency kill-switch: set ``use_shared_llm_http_client=False`` to fall
+        back to per-request clients.
+        """
+        return bool(getattr(self.model_client_config, "use_shared_llm_http_client", True))
+
+    @classmethod
+    def connection_key(cls, model_client_config: ModelClientConfig) -> Tuple:
+        """Connection identity used to bucket/reuse cached clients.
+
+        Includes ``api_key``/``api_base`` so different tenants never share a
+        client. ``api_base`` already determines the proxy, so proxy is not part
+        of the key. Exposed as a classmethod so callers (e.g. config hot-reload
+        reconciliation) can compute the same key to select connections to close
+        via :meth:`aclose_connections`.
+        """
+        cfg = model_client_config
+        return (
+            cfg.api_key,
+            cfg.api_base,
+            cfg.verify_ssl,
+            cfg.ssl_cert,
+        )
+
+    def _client_cache_key(self) -> Tuple:
+        return self.connection_key(self.model_client_config)
 
     def _get_client_name(self) -> str:
         """Get client name."""
@@ -108,20 +145,60 @@ class OpenAIModelClient(BaseModelClient):
         return params
 
     def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
-        """
-        Create an OpenAI Async client with configured SSL/proxy/http client settings.
-        
+        """Acquire an ``AsyncOpenAI`` client for a request.
+
+        Default (shared) path returns a long-lived, cached client whose httpx
+        keep-alive pool reuses established connections. The caller MUST NOT close
+        it on the hot path.
+
+        Emergency fallback path (``use_shared_llm_http_client=False``) builds a
+        fresh per-request client that the caller owns and must close.
+
         Args:
-            timeout: Optional timeout override for this specific request
+            timeout: Optional per-request timeout. Only baked into the client in
+                the fallback path; in the shared path it is applied per request
+                via ``create(..., timeout=...)`` so the cached client is never
+                rebuilt just to change the timeout.
         """
+        if not self._use_shared_client():
+            return self._build_async_openai_client(timeout=timeout)
+
+        # Shared path: build once per tenant/connection identity and reuse.
+        # Building is fully synchronous (no ``await``), so under a single-threaded
+        # asyncio event loop the get/build/set below is atomic and needs no lock.
+        key = self._client_cache_key()
+        client = self._client_cache.get(key)
+        if client is None:
+            client = self._build_async_openai_client()
+            self._client_cache[key] = client
+            llm_logger.info(
+                "Created shared long-lived AsyncOpenAI client.",
+                event_type=LogEventType.LLM_CALL_START,
+                timeout=self.model_client_config.timeout,
+                max_retries=self.model_client_config.max_retries,
+            )
+        return client
+
+    def _build_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
+        """Build a fresh ``AsyncOpenAI`` client with its own httpx connection pool."""
         from openai import AsyncOpenAI
 
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
 
+        # httpx defaults keepalive_expiry to 5s, which drops idle keep-alive
+        # connections between calls spaced >5s apart, forcing a rebuild. Bump to
+        # 60s to keep connections warm across typical inter-request gaps while
+        # staying at/under common upstream/LB idle timeouts (avoids reusing a
+        # server-closed "dead" connection).
         http_client = httpx.AsyncClient(
             proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
-            verify=verify
+            verify=verify,
+            limits=httpx.Limits(
+                max_connections=100,
+                max_keepalive_connections=20,
+                keepalive_expiry=60.0,
+            ),
         )
 
         # Use method-level timeout if provided, otherwise use config timeout
@@ -140,6 +217,52 @@ class OpenAIModelClient(BaseModelClient):
             timeout=final_timeout,
             max_retries=self.model_client_config.max_retries
         )
+
+    @classmethod
+    async def aclose(cls) -> None:
+        """Close all cached clients and their underlying connection pools.
+
+        Intended for agent/process teardown only. NEVER call this on the request
+        hot path: it tears down the shared client that other in-flight calls
+        rely on.
+        """
+        clients = list(cls._client_cache.values())
+        cls._client_cache.clear()
+
+        for client in clients:
+            try:
+                await client.close()
+            except Exception as e:  # pragma: no cover - defensive cleanup
+                logger.warning(f"Error closing cached AsyncOpenAI client: {e}")
+
+    @classmethod
+    async def aclose_connections(cls, configs: Iterable[ModelClientConfig]) -> None:
+        """Close and drop cached clients for exactly the given connection identities.
+
+        Only the connections whose identity matches one of ``configs`` are
+        closed; everything else is left untouched. Intended for delta-based
+        eviction on config hot-reload (close just the credentials that were
+        removed/changed), so unrelated cached clients (used by other components
+        sharing this process-wide cache) are never disturbed.
+
+        Closing is immediate even if a call is in flight: a model the user
+        removed should stop consuming tokens at once. An in-flight request on a
+        closed client surfaces as a normal model-call failure (not retried by
+        LLMRetryRail, which only retries repetition/stream-timeout markers).
+        """
+        keys = {cls.connection_key(cfg) for cfg in configs}
+        closed = 0
+        for key in keys:
+            client = cls._client_cache.pop(key, None)
+            if client is None:
+                continue
+            try:
+                await client.close()
+                closed += 1
+            except Exception as e:  # pragma: no cover - defensive cleanup
+                logger.warning(f"Error closing AsyncOpenAI client: {e}")
+        if closed:
+            logger.info(f"Closed {closed} AsyncOpenAI client(s) for removed/updated model config")
 
     async def invoke(
             self,
@@ -221,6 +344,11 @@ class OpenAIModelClient(BaseModelClient):
 
             async_client = self._create_async_openai_client(timeout=timeout)
 
+            # Per-request timeout override; cached shared client is never rebuilt
+            # just to change the timeout.
+            if timeout is not None:
+                params["timeout"] = timeout
+
             # Call API
             response = await async_client.chat.completions.create(**params)
             llm_logger.info(
@@ -286,7 +414,10 @@ class OpenAIModelClient(BaseModelClient):
                 error_msg=f"openAI API async invoke error: {str(e)}"
             ) from e
         finally:
-            if async_client is not None:
+            # Only close clients we own (fallback path). Shared/pooled clients
+            # are long-lived; closing them on the hot path would tear down the
+            # shared transport.
+            if async_client is not None and not self._use_shared_client():
                 await async_client.close()
 
     async def stream(
@@ -377,6 +508,11 @@ class OpenAIModelClient(BaseModelClient):
 
             async_client = self._create_async_openai_client(timeout=timeout)
 
+            # Per-request timeout override; cached shared client is never rebuilt
+            # just to change the timeout.
+            if timeout is not None:
+                params["timeout"] = timeout
+
             # Call API with streaming
             response_stream = await async_client.chat.completions.create(**params)
 
@@ -449,7 +585,10 @@ class OpenAIModelClient(BaseModelClient):
                 error_msg=f"openAI API async stream error: {error_detail}"
             ) from e
         finally:
-            if async_client is not None:
+            # Only close clients we own (fallback path). Shared/pooled clients
+            # are long-lived; closing them on the hot path would tear down the
+            # shared transport.
+            if async_client is not None and not self._use_shared_client():
                 await async_client.close()
 
     async def generate_image(
