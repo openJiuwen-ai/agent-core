@@ -191,7 +191,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     **扩展就是加 key**；语义变了的同名参数用新的 desc_key 命名空间
     （`send_message_scheduled.to`）。**绝不让 resolver 学会 variant**。
 19. **`create_task` 的 `assignee` 与任务图同一事务落库**（F_57 / F_59 / F_62）。scheduled
-    形态的 `assignee` **必填**（成员不自主认领，无主任务永远不会执行），随 `TaskGraphSpec` →
+    形态的 `assignee` **必填**（scheduled 成员不自主认领，未指定 assignee 的 scheduled 任务不会被调度），随 `TaskGraphSpec` →
     `NewTaskSpec` 进同一次 `mutate_dependency_graph`。**每个任务一律 seed `PENDING`**
     （携带 assignee）：无依赖 → 停在 `PENDING(assignee)`（"已指派未开始"），带依赖 →
     refresh pass 翻成 `BLOCKED(assignee)`。指派与开工是两个事件，故创建期**不再** seed

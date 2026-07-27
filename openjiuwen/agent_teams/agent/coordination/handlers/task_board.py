@@ -410,10 +410,10 @@ class TaskBoardHandler(BaseCoordinationHandler):
 
         Leader: reviews the full task board (every incomplete task) to
         decide whether to re-plan, assign, or conclude.
-        Teammate: sees only claimable tasks (pending + unassigned) to
-        pick one. Tasks already claimed / in-flight by others are not
-        surfaced — a teammate is woken to take on new claimable work,
-        not to survey what everyone else is doing.
+        Teammate: sees claimable tasks (pending + unassigned) plus tasks
+        explicitly assigned to itself. Tasks claimed / in-flight by others are
+        not surfaced — a teammate is woken to take on work it can act on, not
+        to survey what everyone else is doing.
 
         Args:
             member_name: The calling member's own name.
@@ -444,10 +444,15 @@ class TaskBoardHandler(BaseCoordinationHandler):
             lines = [t("dispatcher.leader_task_board")]
             board_tasks = incomplete
         else:
-            # Teammate: surface only claimable work (pending + unassigned).
-            # No claimable task means nothing to pick up — stay idle
-            # rather than dump others' in-flight tasks into the round.
-            board_tasks = [task for task in incomplete if task.status == "pending" and not task.assignee]
+            # Teammate: surface claimable work (pending + unassigned) and
+            # explicitly assigned self work. Assigned pending tasks may have
+            # been created before this member started; feeding them here makes
+            # the startup poll actionable without exposing other members' work.
+            board_tasks = [
+                task
+                for task in incomplete
+                if (task.status == "pending" and not task.assignee) or task.assignee == member_name
+            ]
             if not board_tasks:
                 return
             lines = [t("dispatcher.teammate_task_list")]

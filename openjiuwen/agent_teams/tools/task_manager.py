@@ -155,6 +155,22 @@ class TeamTaskManager:
         if team_plan_id is not None:
             self.team_plan_id = _safe_token(team_plan_id, "team_plan")
 
+    async def _validate_task_owner(self, member_name: str) -> TaskOpResult:
+        """Validate that a task owner exists and is not the team leader."""
+        owner = str(member_name or "").strip()
+        if not owner:
+            return TaskOpResult.success()
+        leader_member_name = await self._resolve_leader_member_name()
+        if leader_member_name and owner == leader_member_name:
+            return TaskOpResult.fail(
+                f"Member {owner} is the team leader and cannot be assigned team tasks; "
+                "assign the task to a non-leader member"
+            )
+        member = await self.db.member.get_member(owner, self.team_name)
+        if not member:
+            return TaskOpResult.fail(f"Member {owner} not found in team {self.team_name}")
+        return TaskOpResult.success()
+
     async def add_graph(self, specs: list[TaskGraphSpec]) -> TaskGraphResult:
         """Create a batch of tasks and their dependency edges atomically.
 
@@ -189,6 +205,10 @@ class TeamTaskManager:
         new_tasks: list[NewTaskSpec] = []
         edges: list[tuple[str, str]] = []
         for spec in specs:
+            if spec.assignee:
+                owner_result = await self._validate_task_owner(spec.assignee)
+                if not owner_result.ok:
+                    return TaskGraphResult.fail(owner_result.reason)
             task_id = spec.task_id or str(uuid.uuid4())
             # Always seed PENDING. A scheduled pre-assigned task rests at
             # PENDING(assignee) until the scheduler starts it; the refresh
@@ -419,9 +439,9 @@ class TeamTaskManager:
         if not task:
             return TaskOpResult.fail(f"Task {task_id} not found")
 
-        # Validate the assignee is a real team member. The DB column has no
-        # FK to team_member, so a typo here would silently leave the task
-        # bound to a name nobody serves; surface it at this layer instead.
+        owner_result = await self._validate_task_owner(assignee)
+        if not owner_result.ok:
+            return owner_result
         member = await self.db.member.get_member(assignee, self.team_name)
         if not member:
             return TaskOpResult.fail(f"Member {assignee} not found in team {self.team_name}")
@@ -440,7 +460,8 @@ class TeamTaskManager:
 
         if task.assignee and task.assignee != assignee:
             return TaskOpResult.fail(
-                f"Task {task_id} is already claimed by {task.assignee}; reset the task before reassigning to {assignee}"
+                f"Task {task_id} is already claimed by {task.assignee}; "
+                f"reset the task before reassigning to {assignee}"
             )
 
         success = await self.db.task.claim_task(task_id, assignee, to_status=entry_status)
@@ -521,6 +542,19 @@ class TeamTaskManager:
         if task.assignee == member_name and task.status == TaskStatus.IN_PROGRESS.value:
             team_logger.debug(f"Task {task_id} already claimed by {member_name}; no-op")
             return TaskOpResult.success()
+        if task.assignee == member_name and task.status == TaskStatus.PENDING.value:
+            started = await self.db.task.start_task(task_id, member_name, to_status=TaskStatus.IN_PROGRESS)
+            if not started:
+                return TaskOpResult.fail(f"Task {task_id} could not be started for {member_name}")
+            await self._publish_task_event(
+                TaskClaimedEvent(
+                    team_name=self.team_name,
+                    task_id=task_id,
+                    member_name=member_name,
+                ),
+                error_label=f"Task claimed event for assigned task {task_id}",
+            )
+            return TaskOpResult.success()
 
         # Claim conflict must be reported before the state-transition check —
         # otherwise a task held by someone else surfaces as the misleading
@@ -580,6 +614,12 @@ class TeamTaskManager:
         member = await self.db.member.get_member(self.member_name, self.team_name)
         if not member:
             return TaskOpResult.fail(f"Member {self.member_name} not found in team {self.team_name}")
+        task = await self.db.task.get_task(task_id)
+        if task is not None and task.assignee != self.member_name:
+            return TaskOpResult.fail(
+                f"Task {task_id} is assigned to {task.assignee or '<unassigned>'}, "
+                f"{self.member_name} cannot complete it"
+            )
 
         # Verify gate: when the task carries reviewers, "done" means "ready for
         # review" — route IN_PROGRESS -> IN_REVIEW instead of completing. The
@@ -1478,6 +1518,10 @@ class TeamTaskManager:
         member_name = task.assignee
         if not member_name:
             return TaskOpResult.fail(f"Task {task_id} has no assignee; cannot start an unassigned task")
+        # Defensive guard for stale/manual rows; normal create/assign paths validate owners earlier.
+        owner_result = await self._validate_task_owner(member_name)
+        if not owner_result.ok:
+            return owner_result
 
         # Entry gate mirrors ``assign``: plan-mode owners land in the plan
         # gate and must get approval before executing.
@@ -1543,9 +1587,9 @@ class TeamTaskManager:
         if not task:
             return TaskOpResult.fail(f"Task {task_id} not found")
 
-        member = await self.db.member.get_member(new_assignee, self.team_name)
-        if not member:
-            return TaskOpResult.fail(f"Member {new_assignee} not found in team {self.team_name}")
+        owner_result = await self._validate_task_owner(new_assignee)
+        if not owner_result.ok:
+            return owner_result
 
         old_assignee = task.assignee
         if not old_assignee:
