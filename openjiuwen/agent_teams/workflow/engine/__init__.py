@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from .backends import SKIP, AgentBackend, AgentResult, MockBackend
 from .budget import BudgetLedger
-from .errors import BudgetExhausted, LintError, MetaError, SchemaError, WorkflowError, EngineError
+from .errors import BudgetExhausted, EngineError, LintError, MetaError, SchemaError
 from .journal import Journal
 from .loader import LoadedWorkflow, load_workflow_source
 from .primitives import (

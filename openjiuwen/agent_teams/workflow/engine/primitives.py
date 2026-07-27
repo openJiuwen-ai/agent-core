@@ -42,7 +42,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence, TypeVar, overload
 
-from .errors import BudgetExhausted, WorkflowAborted, WorkflowError, EngineError
+from .errors import BudgetExhausted, EngineError, WorkflowAborted
 from .journal import call_signature, key_str
 from .progress import ProgressKind, WorkflowProgressEvent
 from .schema import coerce, resolve_schema
