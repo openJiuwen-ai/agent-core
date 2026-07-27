@@ -693,15 +693,19 @@ def rail(
                 finally:
                     # 跳过 after 回调当：
                     # 1. 函数被 asyncio.CancelledError 中断时；
-                    # 2. 即将进入重试时（避免中间状态被误当作最终结果）。
+                    # 2. tool call 即将进入重试时（避免 on_tool_exception 写入的
+                    #    中间态 tool_result 被 after 回调当作最终结果消费）。
+                    # model call 重试时不跳过 —— after_model_call 契约要求每次
+                    # model 调用后（含失败+即将重试）都触发，CancellationRail
+                    # 等回调依赖此做取消检测。
                     # CancelledError 是 BaseException 不是 Exception（Python 3.9+），
                     # 会跳过上面的 except 块直接进入 finally。
-                    # 此时触发 after_tool_call 会发出虚假的空结果事件。
                     is_cancelled = isinstance(
                         sys.exc_info()[1] if sys.exc_info()[1] is not None else None,
                         asyncio.CancelledError,
                     )
-                    if after and not is_cancelled and not will_retry:
+                    skip_after = will_retry and after is AgentCallbackEvent.AFTER_TOOL_CALL
+                    if after and not is_cancelled and not skip_after:
                         try:
                             await ctx.fire(after)
                         except Exception as callback_exc:

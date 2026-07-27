@@ -1191,6 +1191,7 @@ class AbilityManager:
             except asyncio.CancelledError:
                 # Do not swallow cancellation; let outer scopes (e.g. DeepAgent
                 # round cancellation) propagate correctly through anyio CancelScope.
+                logger.warning("[AbilityManager] Task cancellation caught, re-raising CancelledError")
                 raise
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
@@ -1294,6 +1295,7 @@ class AbilityManager:
                 ) from e
             except asyncio.CancelledError:
                 # Do not swallow cancellation; let outer scopes propagate correctly.
+                logger.warning("[AbilityManager] Task cancellation caught, re-raising CancelledError")
                 raise
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
