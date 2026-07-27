@@ -105,8 +105,6 @@ class FreeSearchMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return _schema_free_search(language)
 
-    def is_idempotent(self) -> bool:
-        return True
 
 
 class PaidSearchMetadataProvider(ToolMetadataProvider):
@@ -132,8 +130,6 @@ class PaidSearchMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return _schema_paid_search(language)
 
-    def is_idempotent(self) -> bool:
-        return True
 
 
 class FetchWebpageMetadataProvider(ToolMetadataProvider):
@@ -167,5 +163,3 @@ class FetchWebpageMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return _schema_fetch_webpage(language)
 
-    def is_idempotent(self) -> bool:
-        return True

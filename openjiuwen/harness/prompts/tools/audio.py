@@ -137,8 +137,6 @@ class AudioTranscriptionMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_audio_transcription_input_params(language)
 
-    def is_idempotent(self) -> bool:
-        return True
 
 
 class AudioQuestionAnsweringMetadataProvider(ToolMetadataProvider):
@@ -156,8 +154,6 @@ class AudioQuestionAnsweringMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_audio_question_answering_input_params(language)
 
-    def is_idempotent(self) -> bool:
-        return True
 
 
 class AudioMetadataMetadataProvider(ToolMetadataProvider):
@@ -175,5 +171,3 @@ class AudioMetadataMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_audio_metadata_input_params(language)
 
-    def is_idempotent(self) -> bool:
-        return True

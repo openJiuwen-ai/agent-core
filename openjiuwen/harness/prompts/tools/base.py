@@ -40,9 +40,11 @@ class ToolMetadataProvider(ABC):
     def is_idempotent(self) -> bool:
         """Return whether the tool is idempotent (safe to retry).
 
-        Override to True for read-only / query tools.
-        Defaults to False for secure-by-default: new tools must explicitly
-        opt-in to idempotency.
+        Defaults to False — secure-by-default: every tool is treated as
+        side-effecting and is neither retried by ``ToolCallResilienceRail``
+        nor exempted from the outer call-level timeout. Opt in to idempotency
+        via ``ToolCardBuildOptions(idempotent=True)`` at build time, not by
+        overriding this hook.
         """
         return False
 

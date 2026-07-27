@@ -48,8 +48,6 @@ class ListMcpResourcesMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_list_mcp_resources_input_params(language)
 
-    def is_idempotent(self) -> bool:
-        return True
 
 
 # ---------------------------------------------------------------------------
@@ -101,5 +99,3 @@ class ReadMcpResourceMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_read_mcp_resource_input_params(language)
 
-    def is_idempotent(self) -> bool:
-        return True

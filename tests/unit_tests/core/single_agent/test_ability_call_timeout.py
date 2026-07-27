@@ -33,6 +33,7 @@ def _tool_card(
         *,
         timeout_s: Any = "unset",
         stateless: bool = False,
+        idempotent: bool = True,
 ) -> ToolCard:
     """Build a ToolCard carrying a ``resilience.timeout_s`` property.
 
@@ -48,7 +49,7 @@ def _tool_card(
         description=f"{name} desc",
         stateless=stateless,
         properties=properties,
-        idempotent=True,  # test helpers are idempotent by design
+        idempotent=idempotent,
     )
 
 
@@ -176,55 +177,58 @@ def test_resolve_call_timeout_garbage_value_falls_back_to_default() -> None:
     assert AbilityManager._resolve_call_timeout(card) == am_mod.DEFAULT_TOOL_CALL_TIMEOUT
 
 
-def test_resolve_call_timeout_exempts_non_idempotent_by_name() -> None:
-    """Layer 0: a non-idempotent tool is exempt by *name* regardless of any
-    declared timeout_s, so the outer fail_after never fires on a side-
-    effecting tool (its timeout would feed the rail a retryable marker and
-    re-run the side effect). Returns None → anyio.fail_after(None) is a no-op.
+def test_resolve_call_timeout_honors_declared_timeout_s() -> None:
+    """``ToolCard.idempotent`` is not consulted by ``_resolve_call_timeout``;
+    the timeout is governed solely by the ``resilience.timeout_s`` property
+    and the default. A non-idempotent tool with a declared timeout_s must
+    honor that value (no name-based exemption).
 
-    Uses the real ``WriteFileTool`` / ``BashTool`` cards so the exemption
-    gates on the tools' actual ``card.name``, not a stale string.
+    Uses the real ``WriteFileTool`` / ``BashTool`` cards so the test gates
+    on the tools' actual ``card.name``.
     """
-    # Real WriteFileTool card, overlaid with a declared timeout_s the name
-    # exemption must override.
+    # Real WriteFileTool card, overlaid with a declared 10s → honored.
     card = _real_tool_card("write_file", timeout_s=10.0)
-    assert AbilityManager._resolve_call_timeout(card) is None
+    assert AbilityManager._resolve_call_timeout(card) == 10.0
 
-    # Real BashTool card with no resilience block at all.
-    assert AbilityManager._resolve_call_timeout(_real_tool_card("bash")) is None
-
-
-def test_resolve_call_timeout_exempts_non_idempotent_on_fallback_path() -> None:
-    """The fallback execution path passes ``tool.card`` (not ``None``), so
-    non-idempotent tools are exempt there too via Layer 0 — no hard-coded
-    name set needed. ``tool_name`` is no longer consulted.
-
-    Uses the real EditFileTool / PowerShellTool / ReadFileTool cards.
-    """
-    # Non-idempotent: edit_file / powershell → exempt (idempotent is False).
-    assert AbilityManager._resolve_call_timeout(_real_tool_card("edit_file")) is None
-    assert AbilityManager._resolve_call_timeout(_real_tool_card("powershell")) is None
-    # Idempotent: read_file → default timeout (no resilience block).
+    # Real BashTool card with no resilience block → default timeout.
     assert (
-        AbilityManager._resolve_call_timeout(_real_tool_card("read_file"))
+        AbilityManager._resolve_call_timeout(_real_tool_card("bash"))
+        == am_mod.DEFAULT_TOOL_CALL_TIMEOUT
+    )
+
+
+def test_resolve_call_timeout_ignores_idempotent_field() -> None:
+    """``idempotent`` True/False does not change the resolved timeout — only
+    the ``resilience`` property and the default matter.
+    """
+    # Same card, only idempotent differs → same timeout.
+    idem_card = _tool_card("t", idempotent=True, timeout_s=42.0)
+    non_idem_card = _tool_card("t", idempotent=False, timeout_s=42.0)
+    assert AbilityManager._resolve_call_timeout(idem_card) == 42.0
+    assert AbilityManager._resolve_call_timeout(non_idem_card) == 42.0
+
+    # No resilience block → default, regardless of idempotent.
+    assert (
+        AbilityManager._resolve_call_timeout(_tool_card("a", idempotent=True))
+        == am_mod.DEFAULT_TOOL_CALL_TIMEOUT
+    )
+    assert (
+        AbilityManager._resolve_call_timeout(_tool_card("b", idempotent=False))
         == am_mod.DEFAULT_TOOL_CALL_TIMEOUT
     )
 
 
 def test_resolve_call_timeout_idempotent_tool_still_uses_property() -> None:
     """Layer 0 must not over-reach: an idempotent tool's declared timeout_s
-    is still honored (regression guard against the name check swallowing
-    tools that legitimately want a timeout).
-
-    Uses the real FreeSearchTool / GlobTool cards.
+    is still honored (regression guard against the idempotent check
+    swallowing tools that legitimately want a timeout).
     """
-    # Real FreeSearchTool card, overlaid with a declared 42s timeout that must
-    # be honored (free_search is not in the non-idempotent set).
-    card = _real_tool_card("free_search", timeout_s=42.0)
+    # Idempotent + declared 42s → honored (Layer 0 does not exempt).
+    card = _tool_card("search_like", idempotent=True, timeout_s=42.0)
     assert AbilityManager._resolve_call_timeout(card) == 42.0
-    # Real GlobTool card with no resilience block → default.
+    # Idempotent + no resilience block → default.
     assert (
-        AbilityManager._resolve_call_timeout(_real_tool_card("glob"))
+        AbilityManager._resolve_call_timeout(_tool_card("glob_like", idempotent=True))
         == am_mod.DEFAULT_TOOL_CALL_TIMEOUT
     )
 

@@ -125,9 +125,10 @@ class ToolCallResilienceRail(DeepAgentRail):
                 data=None,
                 error=error_text,
             )
-        # Layer 0 — non-idempotent tools never retry. Prefer the explicit
-        # ToolCard.idempotent field (new canonical source), then fall back
-        # to the legacy name-based set for compatibility.
+        # Layer 0 — non-idempotent tools never retry. Whether a tool is
+        # exempt is owned by this rail (via ToolCard.idempotent on the
+        # registered card), decoupled from the call-level timeout in
+        # AbilityManager._resolve_call_timeout.
         is_non_idempotent = self._is_non_idempotent(ctx, tool_name)
         if is_non_idempotent:
             logger.info(

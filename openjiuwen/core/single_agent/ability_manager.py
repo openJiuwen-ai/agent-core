@@ -392,25 +392,22 @@ class AbilityManager:
     ) -> Optional[float]:
         """Resolve the per-call timeout for ``tool.invoke``.
 
-        Exemption / override order:
+        Override order:
 
-        0. ``ToolCard.idempotent is False`` → ``None``. Never let the outer
-           ``fail_after`` fire on a side-effecting tool: a timeout here would
-           surface as a retryable "timed out" marker and ToolCallResilienceRail
-           would re-run the side effect.
         1. ``ToolCard.properties["resilience"]["timeout_s"]`` declared:
            ``None`` or non-positive → ``None`` (exempt, internal timeout governs);
            a positive number → that many seconds.
         2. absent / no ``resilience`` block → ``DEFAULT_TOOL_CALL_TIMEOUT``.
 
-        Returning ``None`` means the caller passes it to
-        ``anyio.fail_after(None)``, which is a no-op deadline so exempt
-        tools behave exactly as before.
-        """
-        # Layer 0 — explicit ToolCard.idempotent.
-        if tool_card is not None and tool_card.idempotent is False:
-            return None
+        ``ToolCard.idempotent`` is no longer consulted here. Whether a tool
+        is retried on failure is owned by ``ToolCallResilienceRail``; the
+        call-level timeout applies uniformly. An exempt (``None``) result
+        is still bounded by ``MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT`` at the call
+        site to prevent indefinite hangs.
 
+        Returning ``None`` means the caller passes it to
+        ``anyio.fail_after(None)``, which is a no-op deadline.
+        """
         properties = getattr(tool_card, "properties", None) if tool_card else None
         if not isinstance(properties, dict):
             return DEFAULT_TOOL_CALL_TIMEOUT

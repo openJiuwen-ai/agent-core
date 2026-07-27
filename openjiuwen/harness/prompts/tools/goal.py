@@ -160,8 +160,6 @@ class GetCurrentGoalMetadataProvider(ToolMetadataProvider):
             "required": [],
         }
 
-    def is_idempotent(self) -> bool:
-        return True
 
 
 __all__ = [

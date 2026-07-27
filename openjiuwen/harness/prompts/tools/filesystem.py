@@ -323,8 +323,6 @@ class ReadFileMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_read_file_input_params(language)
 
-    def is_idempotent(self) -> bool:
-        return True
 
 
 class _LegacyReadFileMetadataProvider(ToolMetadataProvider):
@@ -354,8 +352,6 @@ class WriteFileMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_write_file_input_params(language)
 
-    def is_idempotent(self) -> bool:
-        return False
 
 
 class EditFileMetadataProvider(ToolMetadataProvider):
@@ -370,8 +366,6 @@ class EditFileMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_edit_file_input_params(language)
 
-    def is_idempotent(self) -> bool:
-        return False
 
 
 class _LegacyEditFileMetadataProvider(ToolMetadataProvider):
@@ -399,8 +393,6 @@ class GlobMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_glob_input_params(language)
 
-    def is_idempotent(self) -> bool:
-        return True
 
 
 class ListDirMetadataProvider(ToolMetadataProvider):
@@ -417,8 +409,6 @@ class ListDirMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_list_dir_input_params(language)
 
-    def is_idempotent(self) -> bool:
-        return True
 
 
 class GrepMetadataProvider(ToolMetadataProvider):
@@ -433,5 +423,3 @@ class GrepMetadataProvider(ToolMetadataProvider):
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_grep_input_params(language)
 
-    def is_idempotent(self) -> bool:
-        return True
