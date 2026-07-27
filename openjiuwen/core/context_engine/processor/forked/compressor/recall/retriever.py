@@ -24,7 +24,7 @@ class CompressionRecallError(ValueError):
     """Raised when a recall archive cannot be safely read."""
 
 
-def recall_compressed_context(
+def recall_compressed_context(  # pylint: disable=too-many-locals
     *,
     workspace_dir: str,
     session_id: str,
@@ -137,7 +137,7 @@ def _collect_chunk_candidates(
             chunk_path = _resolve_relative_file(archive_path, relative_path)
             try:
                 markdown = chunk_path.read_text(encoding="utf-8")
-            except OSError as exc:
+            except (OSError, UnicodeDecodeError) as exc:
                 raise CompressionRecallError("compression recall chunk could not be read") from exc
             chunk_documents.append(normalize_markdown(markdown))
             chunk_records.append({"path": str(chunk_path), "content": markdown})
@@ -225,7 +225,7 @@ def _resolve_inside(path: Path, root: Path, *, kind: str) -> Path:
 def _read_json_object(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise CompressionRecallError("compression recall manifest is invalid") from exc
     if not isinstance(value, dict):
         raise CompressionRecallError("compression recall manifest is invalid")
@@ -243,7 +243,7 @@ def _read_json_lines(path: Path) -> list[dict[str, Any]]:
                 if not isinstance(value, dict):
                     raise CompressionRecallError("compression recall turn index is invalid")
                 records.append(value)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise CompressionRecallError("compression recall turn index is invalid") from exc
     return records
 

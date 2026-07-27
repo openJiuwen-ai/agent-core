@@ -19,6 +19,7 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.compress
     CompressionResult,
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
+    INTERNAL_USER_PREFIXES,
     build_compressor_reinjected_state_message,
     count_messages_tokens,
     resolve_context_max,
@@ -117,15 +118,7 @@ def _is_real_user_message(message: BaseMessage) -> bool:
     if not isinstance(content, str):
         return True
     stripped = content.lstrip()
-    internal_prefixes = (
-        "<system-reminder>",
-        "<memory_block_current>",
-        "<memory_block_dialogue>",
-        "<memory_block_round>",
-        "<recovered_context>",
-        "[STATE_REINJECTION]",
-    )
-    return not stripped.startswith(internal_prefixes)
+    return not stripped.startswith(INTERNAL_USER_PREFIXES)
 
 
 class PrefixCompactProcessor(ContextProcessor):

@@ -548,7 +548,9 @@ class ContextProcessorRail(DeepAgentRail):
         self._system_prompt_builder.add_section(build_reload_section(lang))
 
     def _register_compression_recall_tool(self, agent) -> None:
-        if not hasattr(agent, "ability_manager"):
+        ability_manager = getattr(agent, "ability_manager", None)
+        add_ability = getattr(ability_manager, "add_ability", None)
+        if not callable(add_ability):
             return
         from openjiuwen.harness.tools.compression_recall import CompressionRecallTool
 
@@ -556,7 +558,7 @@ class ContextProcessorRail(DeepAgentRail):
         agent_id = getattr(getattr(agent, "card", None), "id", None) or "default"
         language = getattr(self._system_prompt_builder, "language", "cn") or "cn"
         tool = CompressionRecallTool(workspace_dir, language=language, agent_id=agent_id)
-        result = agent.ability_manager.add_ability(tool.card, tool)
+        result = add_ability(tool.card, tool)
         if result.added:
             self._owned_tool_names.add(tool.card.name)
 

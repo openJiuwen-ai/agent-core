@@ -40,7 +40,9 @@ def tokenize(text: str) -> list[str]:
     return expanded
 
 
-def rank_bm25(query: str, documents: list[str], *, k1: float = 1.5, b: float = 0.75) -> list[float]:
+def rank_bm25(  # pylint: disable=too-many-locals
+    query: str, documents: list[str], *, k1: float = 1.5, b: float = 0.75
+) -> list[float]:
     """Return one positive-IDF BM25 score for each document."""
     if not documents:
         return []

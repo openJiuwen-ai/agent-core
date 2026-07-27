@@ -14,20 +14,15 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
+    INTERNAL_USER_PREFIXES,
+)
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMessage, UserMessage
 
 ARCHIVE_SCHEMA_VERSION = 1
 DEFAULT_CHUNK_SIZE_TOKENS = 3_000
 DEFAULT_CHUNK_OVERLAP_TOKENS = 300
 RECALL_DIR_NAME = "compression_recall"
-_INTERNAL_USER_PREFIXES = (
-    "<system-reminder>",
-    "<memory_block_current>",
-    "<memory_block_dialogue>",
-    "<memory_block_round>",
-    "<recovered_context>",
-    "[STATE_REINJECTION]",
-)
 
 
 @dataclass(frozen=True)
@@ -46,7 +41,7 @@ class _Turn:
     messages: list[BaseMessage]
 
 
-def archive_compression_messages(
+def archive_compression_messages(  # pylint: disable=too-many-locals
     *,
     context: ModelContext,
     processor_type: str,
@@ -330,7 +325,7 @@ def _is_real_user_message(message: BaseMessage) -> bool:
     if not isinstance(message, UserMessage):
         return False
     content = _content_to_text(message.content).lstrip()
-    return not content.startswith(_INTERNAL_USER_PREFIXES)
+    return not content.startswith(INTERNAL_USER_PREFIXES)
 
 
 def _content_to_text(content: Any) -> str:

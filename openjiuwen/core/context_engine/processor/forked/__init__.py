@@ -28,12 +28,15 @@ _ACTIVATED_PROCESSORS = (
     "RoundLevelCompressor",
 )
 _ACTIVATED = False
+_ORIGINAL_PROCESSORS = {}
 
 
 def activate() -> None:
     """Register the refactored processors under the official processor names."""
     global _ACTIVATED  # pylint: disable=global-statement
     for class_name in _ACTIVATED_PROCESSORS:
+        if class_name not in _ORIGINAL_PROCESSORS:
+            _ORIGINAL_PROCESSORS[class_name] = ContextEngine._PROCESSOR_MAP.get(class_name)
         module = import_module(_EXPORT_MODULES[class_name], __name__)
         processor_class = getattr(module, class_name)
         ContextEngine.register_processor()(processor_class)
@@ -43,6 +46,17 @@ def activate() -> None:
             "forked context processors activated, overriding processor registry: %s",
             ", ".join(_ACTIVATED_PROCESSORS),
         )
+
+
+def deactivate() -> None:
+    """Restore the processor registry entries captured before the first activation."""
+    global _ACTIVATED  # pylint: disable=global-statement
+    for class_name, original in _ORIGINAL_PROCESSORS.items():
+        if original is None:
+            ContextEngine._PROCESSOR_MAP.pop(class_name, None)
+        else:
+            ContextEngine._PROCESSOR_MAP[class_name] = original
+    _ACTIVATED = False
 
 
 def __getattr__(name: str):

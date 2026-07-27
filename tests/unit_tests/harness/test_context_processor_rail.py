@@ -1335,6 +1335,7 @@ async def test_before_model_call_injects_offload_section(tmp_path: Path):
 # ContextProcessorRail - reasoning/tool loop bail-out Tests
 # =============================================================================
 
+
 @pytest.mark.asyncio
 async def test_before_model_call_bailout_raises_when_threshold_reached(tmp_path: Path):
     """before_model_call should abort when the loop counter reaches the threshold."""
@@ -1388,7 +1389,8 @@ async def test_before_model_call_no_bailout_below_threshold(tmp_path: Path):
 
     # No reset of the counter happened (we only reset when we bail out).
     reset_calls = [
-        call for call in mock_session.update_state.call_args_list
+        call
+        for call in mock_session.update_state.call_args_list
         if call.args and call.args[0] == {LOOP_COMPACT_BAILOUT_STATE_KEY: 0}
     ]
     assert reset_calls == []
@@ -1442,4 +1444,3 @@ async def test_before_invoke_resets_bailout_counter(tmp_path: Path):
     await rail.before_invoke(ctx)
 
     mock_session.update_state.assert_any_call({LOOP_COMPACT_BAILOUT_STATE_KEY: 0})
-
