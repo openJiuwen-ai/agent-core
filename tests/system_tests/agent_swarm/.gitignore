@@ -3,4 +3,7 @@ workspace/
 docs/
 main.py
 openjiuwen_home/
-.e2e_workdir/
+# Scratch dirs the E2Es chdir into (swarmflow/ has its own set; these patterns
+# carry no leading slash, so they match at any depth). The glob covers the
+# pause/resume run's separate workdir too.
+.e2e_workdir*/

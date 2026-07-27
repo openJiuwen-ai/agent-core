@@ -25,10 +25,20 @@ class TeamDao:
         team_name: str,
         display_name: str,
         leader_member_name: str,
+        *,
         desc: Optional[str] = None,
         prompt: Optional[str] = None,
+        dispatch_mode: str = "autonomous",
+        enable_task_verification: bool = False,
     ) -> bool:
-        """Create a new team."""
+        """Create a new team.
+
+        The optional columns are keyword-only: ``desc`` / ``prompt`` sit next to
+        each other and ``dispatch_mode`` / ``enable_task_verification`` carry the
+        effective per-instance capability choices made at ``build_team`` time
+        (F_62, persisted so cold recovery restores them) — naming them at the
+        call site is what keeps them from being swapped.
+        """
         async with self._sessions.write() as session:
             try:
                 ts = get_current_time()
@@ -38,6 +48,8 @@ class TeamDao:
                     leader_member_name=leader_member_name,
                     desc=desc,
                     prompt=prompt,
+                    dispatch_mode=dispatch_mode,
+                    enable_task_verification=enable_task_verification,
                     created=ts,
                     updated_at=ts,
                 )

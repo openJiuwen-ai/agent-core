@@ -28,8 +28,8 @@ TrajectoryUploader = importlib.import_module(
 ).TrajectoryUploader
 trajectory_module = importlib.import_module("openjiuwen.agent_evolving.trajectory")
 LLMCallDetail = trajectory_module.LLMCallDetail
-LegacyTrajectory = trajectory_module.LegacyTrajectory
 TrajectoryStep = trajectory_module.TrajectoryStep
+trajectory_from_steps = trajectory_module.trajectory_from_steps
 
 
 class _FakeRedisPipeline:
@@ -251,7 +251,7 @@ async def test_online_gateway_proxy_and_rail_upload_e2e(tmp_path: Path):
                 tenant_id="st-user",
                 uploader=uploader,
             )
-            trajectory = LegacyTrajectory(
+            trajectory = trajectory_from_steps(
                 execution_id="traj-st",
                 session_id="session-st",
                 steps=[

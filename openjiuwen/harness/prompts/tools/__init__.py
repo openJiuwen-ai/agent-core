@@ -11,6 +11,7 @@ All built-in tools register via ``ToolMetadataProvider`` implementations.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.foundation.tool.base import ToolCard
@@ -122,6 +123,10 @@ from openjiuwen.harness.prompts.tools.enter_worktree import (
 from openjiuwen.harness.prompts.tools.exit_worktree import (
     ExitWorktreeMetadataProvider,
 )
+from openjiuwen.harness.prompts.tools.goal import (
+    GetCurrentGoalMetadataProvider,
+    SubmitGoalReportMetadataProvider,
+)
 
 # ---------------------------------------------------------------------------
 # Provider registry
@@ -182,9 +187,19 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     CodingMemoryEditMetadataProvider(),
     EnterWorktreeMetadataProvider(),
     ExitWorktreeMetadataProvider(),
+    SubmitGoalReportMetadataProvider(),
+    GetCurrentGoalMetadataProvider(),
 ]
 
 _REGISTRY: Dict[str, ToolMetadataProvider] = {p.get_name(): p for p in _PROVIDERS}
+
+
+@dataclass(frozen=True)
+class ToolCardBuildOptions:
+    """Options for building a tool card."""
+
+    format_args: Optional[Dict[str, str]] = None
+    parallel_safe: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -210,8 +225,8 @@ def build_tool_card(
     name: str,
     tool_id: str,
     language: str = "cn",
-    format_args: Optional[Dict[str, str]] = None,
     agent_id: Optional[str] = None,
+    options: Optional[ToolCardBuildOptions] = None,
 ) -> ToolCard:
     """统一建卡函数。工具类不再自己拼 ToolCard。
 
@@ -219,19 +234,20 @@ def build_tool_card(
         name: 工具名称。
         tool_id: 工具 ID 前缀。
         language: 语言（'cn' 或 'en'）。
-        format_args: 可选的格式化参数字典，用于填充描述中的占位符。
         agent_id: 可选的 agent ID，用于生成唯一的工具 ID。
             如果提供，最终的 tool_id 为 f"{tool_id}_{agent_id}"；
             如果不提供，使用 uuid 生成唯一后缀。
+        options: 可选的建卡选项。
 
     Returns:
         配置好的 ToolCard 实例。
     """
     description = get_tool_description(name, language)
+    build_options = options or ToolCardBuildOptions()
 
     # 如果提供了格式化参数，填充描述中的占位符
-    if format_args:
-        description = description.format(**format_args)
+    if build_options.format_args:
+        description = description.format(**build_options.format_args)
 
     final_tool_id = f"{tool_id}_{agent_id}" if agent_id else f"{tool_id}_{uuid.uuid4().hex}"
 
@@ -240,6 +256,7 @@ def build_tool_card(
         name=name,
         description=description,
         input_params=get_tool_input_params(name, language),
+        parallel_safe=build_options.parallel_safe,
     )
 
 

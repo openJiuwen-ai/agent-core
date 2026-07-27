@@ -5,7 +5,7 @@
 Responsibilities:
 1. Register ``enter_plan_mode`` / ``exit_plan_mode`` tools on init.
 2. ``before_model_call``:
-   - Inject MODE_INSTRUCTIONS system prompt section.
+   - Inject MODE_INSTRUCTIONS through the system prompt or a prompt attachment.
    - Remove Todo/Session sections added by higher-priority rails.
    - Filter Todo/Session tools from the visible tool list.
 3. ``before_tool_call`` (three-segment):
@@ -107,6 +107,10 @@ class AgentModeRail(DeepAgentRail):
             section (KV-cache-friendly) instead of the dynamic
             ``build_plan_mode_section()`` output. When None, existing dynamic
             behavior is used. Defaults to None.
+        plan_mode_attachment_note: Optional static plan mode note injected as
+            a session-scoped prompt attachment instead of changing the system
+            prompt. Mutually exclusive with ``plan_mode_system_note``.
+            Defaults to None.
         enter_plan_instructions: Optional instructions appended to
             ``enter_plan_mode`` tool_result. Aligns with Claude Code behavior
             where plan instructions live in conversation, not system prompt.
@@ -125,10 +129,13 @@ class AgentModeRail(DeepAgentRail):
         *,
         allow_switch_mode: bool = True,
         plan_mode_system_note: str | None = None,
+        plan_mode_attachment_note: str | None = None,
         enter_plan_instructions: str | None = None,
         exit_plan_notification: str | None = None,
     ) -> None:
         super().__init__()
+        if plan_mode_system_note is not None and plan_mode_attachment_note is not None:
+            raise ValueError("plan_mode_system_note and plan_mode_attachment_note are mutually exclusive")
         names = (
             allowed_tools
             if allowed_tools is not None
@@ -139,6 +146,7 @@ class AgentModeRail(DeepAgentRail):
         self._allowed_tools: frozenset[str] = frozenset(names)
         self._allow_switch_mode: bool = allow_switch_mode
         self._plan_mode_system_note: str | None = plan_mode_system_note
+        self._plan_mode_attachment_note: str | None = plan_mode_attachment_note
         self._enter_plan_instructions: str | None = enter_plan_instructions
         self._exit_plan_notification: str | None = exit_plan_notification
         self._owns_task_tool: bool = False
@@ -268,9 +276,12 @@ class AgentModeRail(DeepAgentRail):
         * **Static** (``_plan_mode_system_note is not None``): injects a
           fixed-content section whose content never changes across turns,
           keeping the KV cache stable.  Uses whitelist-based tool filtering.
-        * **Dynamic** (``_plan_mode_system_note is None``, default): calls
-          ``build_plan_mode_section()`` with current plan-file state.
-          Uses blacklist-based tool filtering.
+        * **Attachment** (``_plan_mode_attachment_note is not None``): injects
+          fixed content as a session-scoped prompt attachment while keeping
+          the system prompt stable. Uses whitelist-based tool filtering.
+        * **Dynamic** (both static notes are ``None``, default): calls
+          ``build_plan_mode_section()`` with current plan-file state and
+          injects it as a prompt attachment. Uses blacklist-based filtering.
 
         In normal mode, defensively removes AgentModeRail-owned ``task_tool``
         from the visible tool list — this covers the edge case where
@@ -327,6 +338,12 @@ class AgentModeRail(DeepAgentRail):
                 content={"en": self._plan_mode_system_note},
                 priority=85,
             )
+        elif self._plan_mode_attachment_note is not None:
+            section = PromptSection(
+                name=SectionName.MODE_INSTRUCTIONS,
+                content={"en": self._plan_mode_attachment_note},
+                priority=85,
+            )
         else:
             # Dynamic path: build from current plan-file state
             plan_file_path = agent.get_plan_file_path(session)
@@ -341,25 +358,33 @@ class AgentModeRail(DeepAgentRail):
             )
 
         # 1. Inject MODE_INSTRUCTIONS.
-        # Keep upstream's static note path in system prompt for KV-cache stability;
-        # only dynamic plan-file state is moved into prompt attachment.
+        # Keep the legacy static system-note behavior for compatibility. Both
+        # the new static attachment note and dynamic plan-file state live in
+        # the tail attachment block so they do not invalidate the system prefix.
         if self._plan_mode_system_note is not None:
             self.system_prompt_builder.add_section(section)
         else:
             self.system_prompt_builder.remove_section(SectionName.MODE_INSTRUCTIONS)
 
-        if self._plan_mode_system_note is None and self.attachment_manager is not None:
-            writer = self.attachment_manager.bind_context(ctx)
-            try:
-                await writer.add_from_prompt_section(
-                    prompt_section=section,
-                    kind=PromptAttachmentKind.RUNTIME,
-                    source="agent_core.agent_mode_rail",
-                    language=self.system_prompt_builder.language,
-                    content_kind="text/markdown",
-                )
-            except ValueError as exc:
-                logger.warning("[AgentModeRail] skip prompt attachment section=%s: %s", section.name, exc)
+        if self._plan_mode_system_note is None:
+            if self.attachment_manager is not None:
+                writer = self.attachment_manager.bind_context(ctx)
+                try:
+                    await writer.add_from_prompt_section(
+                        prompt_section=section,
+                        kind=PromptAttachmentKind.RUNTIME,
+                        source="agent_core.agent_mode_rail",
+                        language=self.system_prompt_builder.language,
+                        content_kind="text/markdown",
+                    )
+                except ValueError as exc:
+                    logger.warning("[AgentModeRail] skip prompt attachment section=%s: %s", section.name, exc)
+                    if self._plan_mode_attachment_note is not None:
+                        self.system_prompt_builder.add_section(section)
+            elif self._plan_mode_attachment_note is not None:
+                # A real DeepAgent always provides an attachment manager, but
+                # retain the safety instruction for minimal/custom agents.
+                self.system_prompt_builder.add_section(section)
 
         # 2. Remove Todo/Session sections added by higher-priority rails
         self.system_prompt_builder.remove_section(SectionName.TODO)
@@ -367,7 +392,7 @@ class AgentModeRail(DeepAgentRail):
 
         # 3. Filter hidden tools from the visible tool list
         if isinstance(ctx.inputs.tools, list):
-            if self._plan_mode_system_note is not None:
+            if self._plan_mode_system_note is not None or self._plan_mode_attachment_note is not None:
                 # Static path: whitelist-based filtering (more secure —
                 # the model never sees tools it cannot use)
                 filtered = []

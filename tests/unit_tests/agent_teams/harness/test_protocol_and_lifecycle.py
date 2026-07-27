@@ -229,17 +229,19 @@ async def test_after_task_iteration_fires_when_round_fails() -> None:
             await harness.send("will fail")
             # Wait on the cleanup hook rather than a specific harness state —
             # failure-mode state transitions are out of scope for this test.
+            # A structured task failure is not replayed by NativeHarness. This
+            # test queues no retry follow-up, so only one round runs.
             deadline = asyncio.get_running_loop().time() + 3.0
-            while not fired and asyncio.get_running_loop().time() < deadline:
+            while len(fired) < 1 and asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(0.01)
         finally:
             await harness.stop()
             await consumer
 
-        # Fired exactly once, carrying the error-shaped result the except
-        # branch installs (not a leftover success result).
+        # Fired once for the failed round with the error-shaped result installed
+        # by the executor's exception branch, not a leftover success result.
         assert len(fired) == 1
-        assert fired[0] == {"result_type": "error", "error": "boom"}
+        assert fired == [{"result_type": "error", "error": "boom"}]
     finally:
         await Runner.stop()
 

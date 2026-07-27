@@ -16,7 +16,7 @@ STRINGS: dict[str, str] = {
     "build_team.display_name": "团队的显示名（如「后端平台小队」），仅用于展示，不是标识符",
     "build_team.team_desc": "团队目标、交付范围和全局协作指令。所有成员可见此描述，写清协作目标和约束",
     "build_team.leader_display_name": "Leader 的显示名（纯展示，不作为标识符）",
-    "build_team.leader_desc": "Leader 的人设描述（专业背景、领域专长），影响成员的信任和沟通方式",
+    "build_team.leader_desc": "Leader 的角色描述（专业背景、领域专长），影响成员的信任和沟通方式",
     "build_team.enable_hitt": (
         "本次实例是否启用 HITT（Human in the Team）模式。可选 true / false / 不传。"
         "不传：继承 TeamAgentSpec.enable_hitt（spec 层能力天花板）。"
@@ -24,6 +24,11 @@ STRINGS: dict[str, str] = {
         "false：本次显式禁用，spawn 任何 human_agent 的请求都会被拒绝，"
         "predefined_members 中声明的 HUMAN_AGENT 成员也会被跳过。"
         "用户表达「我要加入团队」时设为 true；明确不需要人类协作时设为 false"
+    ),
+    "build_team.enable_task_verification": (
+        "本团队实例是否要求任务校验。可选 true / false / 不传（继承 TeamAgentSpec 配置）。"
+        "开启后你在创建任务时应按自己的判断为任务指派 0~N 个 reviewer（关键交付必配、"
+        "琐碎任务可不配）；带 reviewer 的任务完成后进入验收，通过才算完成"
     ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/cn/clean_team.md
@@ -73,7 +78,7 @@ STRINGS: dict[str, str] = {
         "会注入所有其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
     ),
     "spawn_human_agent.desc": (
-        "[公开] 人类成员的角色画像与职责范围，用于展示与持久化人设，"
+        "[公开] 人类成员的角色画像与职责范围，用于展示与持久化描述，"
         "并注入其他成员的 system prompt、由 list_members 返回。"
         "真人通过 HumanAgentInbox 驱动该成员；模型与启动提示由框架内置模板托管，无需在此提供"
     ),
@@ -90,14 +95,17 @@ STRINGS: dict[str, str] = {
         "会注入所有其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
     ),
     "spawn_bridge_agent.desc": (
-        "[公开] 桥接成员的角色画像。**必填**：同时作为本地团队 persona 与远程 agent 的连接 briefing"
-        "（通过 adapter.connect 下发，远程据此扮演角色）。"
-        "会注入其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
+        "[公开] 桥接成员的对外花名册描述，仅供其他成员在 list_members / 团队 roster 中识别该成员。"
+        "可选；会注入其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
+    ),
+    "spawn_bridge_agent.prompt": (
+        "[私有] 远程 agent 据此扮演角色的系统提示词（该成员自己的私有工作设定），"
+        "**必填**：通过 adapter.connect 下发给远程，远程据此充当本成员。仅本成员自己可见，不进他人花名册"
     ),
     "spawn_bridge_agent.mailbox_inject_mode": (
         "控制团队消息被自动转发给远程 agent 时的形态："
         "'passthrough'（默认）= 仅加最简发送者前缀直传；"
-        "'rephrase' = 包装完整发送者上下文（角色、人设、相关任务）"
+        "'rephrase' = 包装完整发送者上下文（角色、描述、相关任务）"
     ),
     "spawn_bridge_agent.protocol": (
         "协议标识（如 'a2a' / 'acp' / 'claudecode'）。"
@@ -124,8 +132,12 @@ STRINGS: dict[str, str] = {
         "会注入所有其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
     ),
     "spawn_external_cli.desc": (
-        "[公开] 该 CLI 成员的 persona / 角色画像。**必填**。"
-        "会注入其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
+        "[公开] 该 CLI 成员的对外花名册描述，仅供其他成员在 list_members / 团队 roster 中识别。"
+        "可选；会注入其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
+    ),
+    "spawn_external_cli.prompt": (
+        "[私有] 该 CLI 成员的私有系统提示词，CLI 据此扮演本成员角色。**必填**。"
+        "仅本成员自己可见，不进他人花名册"
     ),
     "spawn_external_cli.cli_agent": (
         "要拉起的第三方 CLI agent 类型标识，如 'claude'（claudecode）或 'codex'。"
@@ -161,13 +173,34 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "自定义任务 ID，便于依赖引用（不提供则自动生成）",
     "create_task.task.title": "任务标题，简明描述任务目标",
     "create_task.task.content": "任务详细内容，包含目标和验收标准",
-    "create_task.task.depends_on": "前置依赖的任务 ID 列表",
-    "create_task.task.depended_by": "需要等待本任务完成的现有任务 ID 列表（反向依赖）",
+    # Only the scheduled create_task variant exposes this property; the
+    # description lives under the shared create_task.* key namespace so both
+    # variants read the same strings for the properties they have in common.
+    "create_task.task.assignee": (
+        "承担该任务的成员名称（必填）；该成员必须已存在。成员不自主认领，无主任务永远不会执行——"
+        "无依赖的任务由调度框架自动开工，有依赖的任务在依赖完成后自动转交承担者"
+    ),
+    "create_task.task.depends_on": "前置依赖的任务 ID 列表；可引用本次调用中一起创建的任务或已有任务",
+    "create_task.task.depended_by": "需要等待本任务完成的已有任务 ID 列表（反向依赖）；不得引用本次调用创建的任务——批内依赖一律用对方的 depends_on 表示",
+    "create_task.task.reviewer": (
+        "该任务的验证者 member_name 列表（可选，可多个）；这些成员必须已存在且不能是 assignee 本人。"
+        "配了验证者的任务在 assignee 完成后进入 in_review 等验证，验证通过才 completed"
+    ),
+    "create_task.task.max_review_rounds": (
+        "该任务验证返工的轮数上限（可选，整数 ≥1，需同时配 reviewer）；不传用团队默认值。"
+        "验证不通过会打回重做开新一轮，超过上限后不再自动打回，而是升级给你处置"
+    ),
     # ===== view_task ===========================================================
     # view_task._desc lives in descs/cn/view_task.md
-    "view_task.action": "查看模式：'list'（默认，所有任务摘要）、'get'（单个任务详情，需传 task_id）、'claimable'（可认领的 pending 任务）",
+    "view_task.action": (
+        "查看模式：'list'（默认，所有任务摘要）、'get'（单个任务详情，需传 task_id）、"
+        "'claimable'（可认领的 pending 任务）、'in_review'（指派给你验证、正在 in_review 的任务）"
+    ),
     "view_task.task_id": "任务 ID — action=get 时必填，其他模式忽略",
-    "view_task.status": "仅 action=list 时使用的状态过滤：pending/claimed/plan_approved/completed/cancelled/blocked，不传则返回全部",
+    "view_task.status": (
+        "仅 action=list 时使用的状态过滤："
+        "pending/blocked/planning/in_progress/in_review/completed/cancelled，不传则返回全部"
+    ),
     # ===== update_task =========================================================
     # update_task._desc lives in descs/cn/update_task.md
     "update_task.task_id": "要更新的任务 ID，传 '*' 取消所有任务",
@@ -175,12 +208,26 @@ STRINGS: dict[str, str] = {
     "update_task.title": "新任务标题",
     "update_task.content": "新任务内容",
     "update_task.assignee": "指派任务的目标 member_name（仅当任务当前无 assignee 时生效）。系统会向被指派成员发送通知",
+    "update_task.reviewer": (
+        "设置该任务的验证者 member_name 列表（传空列表清除验证）；验证者必须已存在且不能是 assignee。"
+        "配了验证者后，assignee 完成任务会进入 in_review 等验证"
+    ),
+    "update_task.max_review_rounds": (
+        "设置该任务验证返工的轮数上限（整数 ≥1，任务需已配或同时配 reviewer）。"
+        "超过上限后验证失败不再自动打回，而是升级给你处置"
+    ),
     "update_task.add_blocked_by": "要添加为新依赖的任务 ID 列表（本任务将被阻塞直到这些任务完成）",
     "update_task.error_human_agent_locked_cancel": (
-        "任务 {task_id} 已由人类成员认领，该任务不允许被取消；如需变更，请通过 send_message 与对应的人类成员协商"
+        "任务 {task_id} 由仍在团队中的人类成员认领，不允许取消；请通过 send_message 与其协商。"
+        "若其确实无法继续，可先用 shutdown_member 让其退出团队，退出后该任务即可取消或改派"
     ),
     "update_task.error_human_agent_locked_reassign": (
-        "任务 {task_id} 已由人类成员认领，不能改派给 {new_assignee}；人类成员锁定的任务必须由对应人类本人完成"
+        "任务 {task_id} 由仍在团队中的人类成员认领，不能改派给 {new_assignee}；该任务须由这位人类本人完成。"
+        "若其确实无法继续，可先用 shutdown_member 让其退出团队，退出后该任务即可改派"
+    ),
+    "update_task.error_human_agent_locked_edit": (
+        "任务 {task_id} 由仍在团队中的人类成员认领，不允许修改其标题/内容；请通过 send_message 与其协商。"
+        "若其确实无法继续，可先用 shutdown_member 让其退出团队，退出后该任务即可取消或改派"
     ),
     # ===== claim_task =========================================================
     # claim_task._desc lives in descs/cn/claim_task.md
@@ -190,6 +237,11 @@ STRINGS: dict[str, str] = {
     # member_complete_task._desc lives in descs/cn/member_complete_task.md
     "member_complete_task.task_id": "要标记完成的任务 ID（必须是 leader 已经指派给你的任务）",
     "member_complete_task.note": "可选的完成说明，便于团队了解你的执行结果或后续注意事项",
+    # ===== verify_task ========================================================
+    # verify_task._desc lives in descs/cn/verify_task.md
+    "verify_task.task_id": "要验证的任务 ID（必须是指派给你验证、当前处于 in_review 的任务）",
+    "verify_task.decision": "验证结论：'pass'（通过，任务转 completed）或 'fail'（打回，任务转回 in_progress 让 author 返工）",
+    "verify_task.feedback": "验证反馈（打回时会定向发给 author 指导返工，通过时可选）",
     # ===== send_message ========================================================
     # send_message._desc lives in descs/cn/send_message.md
     "send_message.to": (
@@ -201,6 +253,21 @@ STRINGS: dict[str, str] = {
     ),
     "send_message.content": "消息内容，应包含明确的行动指引或信息",
     "send_message.summary": "5-10 词摘要，用于消息预览和日志",
+    "send_message.error_content_too_long": (
+        "'content' 过长（{actual} 字符，上限 {limit}）：这个体量的内容是产物，不是消息。"
+        "先用 write_file 把正文写到团队共享工作空间 .team/ 下的文件，再重发本消息，"
+        "content 里只写文件路径加一两句摘要。不要为了绕过本限制而把正文拆成多条消息。"
+    ),
+    # ===== send_message_scheduled (scheduled-mode member variant) ==============
+    # send_message_scheduled._desc lives in descs/cn/send_message_scheduled.md
+    # ``content`` / ``summary`` are reused verbatim from the send_message keys
+    # above — only the recipient semantics differ, so only ``to`` is redefined.
+    "send_message_scheduled.to": (
+        '收件人：只能是 "leader"（角色名，系统自动投递给真正的 Leader；'
+        '用于汇报进展、完成结果、阻塞、改派请求）'
+        '或 "user"（仅当收到的消息来源是 user 时用于回复）。'
+        "本模式下不能发给其他成员，也不支持多播和广播"
+    ),
     # NOTE: worktree tools (enter_worktree / exit_worktree) live in
     # ``openjiuwen.harness.tools.worktree`` and resolve their description
     # / param schema via ``harness.prompts.tools`` providers — no entries

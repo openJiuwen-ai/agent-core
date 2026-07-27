@@ -32,12 +32,17 @@ from openjiuwen.agent_teams.constants import (
 )
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.memory import TeamMemoryConfig
-from openjiuwen.agent_teams.models.pool import ModelPoolEntry, ModelRouterConfig
+from openjiuwen.agent_teams.models.pool import (
+    IntelliRouterConfig,
+    ModelPoolEntry,
+    ModelRouterConfig,
+)
 from openjiuwen.agent_teams.reliability.config import ReliabilityConfig
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
     BridgeMemberSpec,
     ExternalCliAgentSpec,
+    MemberSpecBase,
     TeamLifecycle,
     TeamMemberSpec,
     TeamRole,
@@ -79,15 +84,17 @@ def _ensure_builtin_infra_registered() -> None:
 
         _TRANSPORT_REGISTRY["inprocess"] = MessagerTransportConfig
         _TRANSPORT_REGISTRY["pyzmq"] = MessagerTransportConfig
+        _TRANSPORT_REGISTRY["hybrid"] = MessagerTransportConfig
 
     if not _STORAGE_REGISTRY:
         from openjiuwen.agent_teams.tools.database import DatabaseConfig
-        from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 
         _STORAGE_REGISTRY["sqlite"] = DatabaseConfig
         _STORAGE_REGISTRY["postgresql"] = DatabaseConfig
         _STORAGE_REGISTRY["mysql"] = DatabaseConfig
-        _STORAGE_REGISTRY["memory"] = MemoryDatabaseConfig
+        # "memory" is an alias for a :memory: SQLite db (DatabaseConfig
+        # normalises db_type="memory" -> sqlite + connection_string=":memory:").
+        _STORAGE_REGISTRY["memory"] = DatabaseConfig
 
 
 class TransportSpec(BaseModel):
@@ -149,26 +156,22 @@ PredefinedMemberSpec = Annotated[
 # ---------------------------------------------------------------------------
 
 
-class LeaderSpec(BaseModel):
-    """Leader identity specification."""
+class LeaderSpec(MemberSpecBase):
+    """Leader identity specification.
 
-    model_config = {"protected_namespaces": ()}
+    Shares the ``desc`` (public) / ``prompt`` (private) split with every other
+    member via :class:`MemberSpecBase`. The leader's ``prompt`` — its private
+    system prompt — is fixed at build time and, unlike a teammate, is never
+    regenerated after ``build_team``, keeping the leader's system-prompt prefix
+    KV-cache stable.
+
+    Overrides ``model_name``'s docstring only to note the ``build()``-time
+    (rather than ``build_team``-time) allocation; the field itself is inherited.
+    """
 
     member_name: str = "team_leader"
     display_name: str = "Team Leader"
-    persona: str = Field(default_factory=lambda: t("blueprint.default_persona"))
-    model_name: Optional[str] = None
-    """Optional pool model_name to allocate from when ``TeamSpec.model_pool``
-    is configured with ``by_model_name`` or ``router`` strategy.
-
-    Forwarded to ``ModelAllocator.allocate`` at ``build()`` time so the
-    leader draws an endpoint from the named group (``by_model_name``) or
-    the named router entry (``router``). Ignored by the ``round_robin``
-    strategy (which always allocates regardless of name). ``None``
-    (default) means the leader uses its per-agent model — except under
-    ``router``, where it falls back to the router's first declared
-    model_name.
-    """
+    desc: str = Field(default_factory=lambda: t("blueprint.default_desc"))
 
 
 class TinyAgentSpec(BaseModel):
@@ -244,8 +247,8 @@ class TeamAgentSpec(BaseModel):
     at ``build()`` time so allocators reachable from runtime context
     see the same pool.
 
-    Mutually exclusive with ``model_router``: configure one or the other,
-    never both.
+    Mutually exclusive with ``model_router`` and ``model_intelli_router``:
+    configure at most one of the three.
     """
     model_router: Optional[ModelRouterConfig] = None
     """Optional single-endpoint router configuration.
@@ -258,18 +261,42 @@ class TeamAgentSpec(BaseModel):
     machinery (``resolve_member_model``, ``inherit_pool_ids``,
     ``update_model_pool``) keeps working against the flat pool view.
 
-    Mutually exclusive with ``model_pool``. The first declared model
-    name acts as the team's default — ``RouterAllocator.allocate()``
-    with no hint returns it, so the leader can run without an explicit
-    ``leader.model_name``.
+    Mutually exclusive with ``model_pool`` and ``model_intelli_router``.
+    The first declared model name acts as the team's default —
+    ``RouterAllocator.allocate()`` with no hint returns it, so the
+    leader can run without an explicit ``leader.model_name``.
     """
-    model_pool_strategy: Literal["round_robin", "by_model_name", "router"] = "round_robin"
+    model_intelli_router: Optional[IntelliRouterConfig] = None
+    """Optional client-side reliable-router configuration.
+
+    Use this when reliability should come from the *client* rather than
+    from spreading members across endpoints: ``IntelliRouterModelClient``
+    wraps ``intelli_router.ReliableRouter``, which retries and fails over
+    across the declared deployments on every request, honouring per-
+    deployment tpm / rpm budgets and (optionally) health checks.
+
+    At ``build()`` time the config expands into ``TeamSpec.model_pool``
+    (one entry per logical model name, each carrying the full deployment
+    list) and ``model_pool_strategy`` is set to ``"intelli_router"``, so
+    all downstream machinery (``resolve_member_model``,
+    ``inherit_pool_ids``, ``update_model_pool``) keeps working against
+    the flat pool view.
+
+    Mutually exclusive with ``model_pool`` and ``model_router``. The
+    first resolved model name — ``"*"`` (unified routing) unless
+    ``model_names`` overrides the order — is the team default, so a
+    leader without an explicit ``leader.model_name`` gets the broadest
+    failover.
+    """
+    model_pool_strategy: Literal["round_robin", "by_model_name", "router", "intelli_router"] = "round_robin"
     """Allocation strategy applied to ``model_pool``.
 
     Mirrors ``TeamSpec.model_pool_strategy`` and propagates to it at
     ``build()`` time. See ``TeamSpec.model_pool_strategy`` for the
-    semantics of each option. When ``model_router`` is set, ``build()``
-    forces this to ``"router"`` regardless of the configured value.
+    semantics of each option. When ``model_router`` or
+    ``model_intelli_router`` is set, ``build()`` forces this to
+    ``"router"`` / ``"intelli_router"`` respectively, regardless of the
+    configured value.
     """
     team_mode: Literal["default", "predefined", "hybrid"] | None = None
     """Team operating mode.
@@ -281,6 +308,76 @@ class TeamAgentSpec(BaseModel):
     "predefined" to lock the roster and drop the leader's
     ``spawn_member`` tool.
     """
+    dispatch_mode: Literal["autonomous", "scheduled"] = "autonomous"
+    """How a task reaches the member that executes it. Static configuration.
+
+    Orthogonal to ``team_mode`` (which governs whether the roster can
+    grow). ``"autonomous"`` (default) puts tasks on a shared board:
+    members claim what matches their expertise, and the leader launches
+    them with a ``send_message`` broadcast. ``"scheduled"`` has the
+    leader assign every task to a named member up front; the scheduling
+    runtime (``agent/scheduling``, F_62) starts each task and performs
+    every handoff — start, review dispatch, rework, verified — as
+    leader-identity mailbox messages, and members lose ``claim_task``
+    in favour of ``member_complete_task``. Prompts and tool shapes are
+    assembled per mode at build time; the mode never changes at runtime.
+    """
+    enable_task_verification: bool = False
+    """Team-level "verification expected" switch for the verify gate.
+
+    Purely prompt-driven: when True the leader's task-creation guidance
+    asks it to assign 0..N reviewers per task by its own judgement (no
+    hard validation — a task the leader deems trivial may still carry no
+    reviewer). The reviewer machinery itself (column, guards, voting) is
+    always available regardless of this flag. Overridable per team
+    instance at ``build_team`` time. See F_62.
+    """
+    verify_vote_threshold: float = 2 / 3
+    """Pass quorum for multi-reviewer verification under scheduled dispatch.
+
+    A task in review completes when ``pass_votes >= ceil(threshold * n)``
+    over ``n = len(reviewer)``, and is sent back for rework as soon as
+    that quorum becomes unreachable. Consumed only by the leader-side
+    scheduler (single judge), so it is not mirrored onto ``TeamSpec``.
+    Range ``0 < threshold <= 1``. See F_62.
+    """
+    default_max_review_rounds: int = 3
+    """Default per-task review-round ceiling (scheduled dispatch).
+
+    Used when a task does not set ``max_review_rounds`` at creation.
+    When a review round beyond this ceiling still fails, the scheduler
+    stops the automatic rework loop and escalates to the leader instead.
+    See F_62.
+    """
+    review_stall_timeout: int = 1800
+    """Seconds before a stalled review round escalates to the leader.
+
+    A round that produced no verdict (including no votes at all) within
+    this window is surfaced to the leader with the current vote status —
+    covering reviewers that never vote, which the round ceiling alone
+    cannot catch. Consumed only by the leader-side scheduler. See F_62.
+    """
+    stale_claim_idle_timeout: int = 600
+    """Autonomous dispatch: seconds a member may sit idle holding active work.
+
+    A member that stays runtime-IDLE this long while still owning a
+    ``PLANNING`` / ``IN_PROGRESS`` task gets a nudge fed back into its own
+    loop to keep pushing; if consecutive windows keep finding it idle the
+    stall is escalated to the leader, who can reassign or intervene.
+    Measured off the member's process-local idle clock
+    (``TeamAgentState.idle_since``), never DB ``updated_at`` — see F_65.
+    Ignored under scheduled dispatch. See F_65.
+    """
+    stale_pending_idle_timeout: int = 600
+    """Autonomous dispatch: seconds the leader may sit idle on unclaimed work.
+
+    Once the leader has been runtime-IDLE this long while unassigned
+    ``PENDING`` tasks exist *and* at least one non-leader member is READY,
+    it self-prompts to assign them — the free-member precondition keeps the
+    prompt away from a team whose members are simply all busy. Measured off
+    the leader's process-local idle clock, never DB ``updated_at``.
+    Ignored under scheduled dispatch. See F_65.
+    """
     transport: Optional[TransportSpec] = None
     """Pluggable transport layer specification.
 
@@ -291,6 +388,8 @@ class TeamAgentSpec(BaseModel):
     caller to configure a cross-process backend (e.g. ``"pyzmq"``) when
     teammates are involved.
     """
+    external_transport: Optional[TransportSpec] = None
+    """Optional transport used by external CLI MCP clients."""
     storage: Optional[StorageSpec] = None
     worktree: Optional[WorktreeConfig] = None
     """Optional worktree isolation config for team members."""
@@ -378,6 +477,22 @@ class TeamAgentSpec(BaseModel):
     swarmflow_concurrency: ConcurrencyLimits = Field(default_factory=ConcurrencyLimits)
     """Three-layer Swarmflow concurrency caps (L1/L2/L3). Used when ``enable_swarmflow``."""
 
+    swarmflow_budget: Optional[int] = None
+    """Token ceiling for this leader's Swarmflow runs; ``None`` (default) is unbounded.
+
+    A hard ceiling, not a hint: workers report the token usage their model
+    client returns, and once the ceiling is reached the in-flight ones are cut
+    short at their next model call and no further ``agent()`` starts. Scripts
+    read it as ``budget.total`` and poll ``budget.remaining()`` to wind down on
+    their own before the cut.
+
+    It is deliberately *not* a ``swarmflow()`` tool argument: a spend limit is
+    the operator's call, not something the leader should pick per invocation.
+    Counted per leader across all its runs (matching ``budget``'s documented
+    "shared across the main loop and all workflows" semantics), so concurrent
+    runs draw down one pool rather than getting a ceiling each.
+    """
+
     enable_permissions: bool = False
     """Team-specific permission control."""
 
@@ -448,17 +563,25 @@ class TeamAgentSpec(BaseModel):
 
     @model_validator(mode="after")
     def _validate_pool_router_exclusive(self) -> "TeamAgentSpec":
-        """Reject configs that set both ``model_pool`` and ``model_router``.
+        """Reject configs that set more than one model-pool source.
 
-        The two fields describe overlapping concerns — a flat list of
-        endpoints versus a router-shaped declaration that expands into
-        the same kind of list. Allowing both leaves the strategy and
-        the materialized pool ambiguous, so we surface the conflict
+        ``model_pool`` / ``model_router`` / ``model_intelli_router``
+        describe overlapping concerns — a flat list of endpoints versus
+        two router-shaped declarations that each expand into the same
+        kind of list. Allowing more than one leaves both the strategy
+        and the materialized pool ambiguous, so we surface the conflict
         early instead of silently picking one.
         """
-        if self.model_router is not None and self.model_pool:
+        candidates = (
+            ("model_pool", bool(self.model_pool)),
+            ("model_router", self.model_router is not None),
+            ("model_intelli_router", self.model_intelli_router is not None),
+        )
+        configured = [name for name, value in candidates if value]
+        if len(configured) > 1:
             raise ValueError(
-                "model_pool and model_router are mutually exclusive; configure one or the other",
+                f"model_pool, model_router and model_intelli_router are mutually exclusive; "
+                f"configure exactly one (got: {configured})",
             )
         return self
 
@@ -480,6 +603,44 @@ class TeamAgentSpec(BaseModel):
             raise ValueError(
                 f"external_cli_agents has duplicate cli_agent name(s) {sorted(duplicates)}; "
                 f"declare each CLI kind at most once",
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_review_settings(self) -> "TeamAgentSpec":
+        """Range-check the verify-gate knobs (F_62).
+
+        The scheduler consumes these without further guarding, so an
+        out-of-range value must fail at spec time, not mid-run.
+        """
+        if not 0 < self.verify_vote_threshold <= 1:
+            raise ValueError(
+                f"verify_vote_threshold must be in (0, 1], got {self.verify_vote_threshold}",
+            )
+        if self.default_max_review_rounds < 1:
+            raise ValueError(
+                f"default_max_review_rounds must be >= 1, got {self.default_max_review_rounds}",
+            )
+        if self.review_stall_timeout <= 0:
+            raise ValueError(
+                f"review_stall_timeout must be > 0 seconds, got {self.review_stall_timeout}",
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_stall_settings(self) -> "TeamAgentSpec":
+        """Range-check the autonomous stall-nudge thresholds (F_65).
+
+        The stale-task sweep consumes these as-is, so a non-positive window
+        must fail at spec time rather than turn every poll into a nudge.
+        """
+        if self.stale_claim_idle_timeout <= 0:
+            raise ValueError(
+                f"stale_claim_idle_timeout must be > 0 seconds, got {self.stale_claim_idle_timeout}",
+            )
+        if self.stale_pending_idle_timeout <= 0:
+            raise ValueError(
+                f"stale_pending_idle_timeout must be > 0 seconds, got {self.stale_pending_idle_timeout}",
             )
         return self
 
@@ -535,30 +696,41 @@ class TeamAgentSpec(BaseModel):
         self._validate_bridge_consistency()
         if self.enable_swarmflow:
             validate_swarmflow_concurrency(self.swarmflow_concurrency)
+            self._validate_swarmflow_budget()
 
         resolved_language = resolve_language(self.language)
         for role_spec in self.agents.values():
             if role_spec.language is None:
                 role_spec.language = resolved_language
 
-        # ``model_router`` is a convenience input that expands into the
-        # flat ``model_pool`` view at build time. Doing the expansion here
-        # keeps every downstream component (resolver, pool refresh, DB
-        # ref lookup) on a single code path — they only ever see entries.
+        # ``model_router`` / ``model_intelli_router`` are convenience
+        # inputs that expand into the flat ``model_pool`` view at build
+        # time. Doing the expansion here keeps every downstream component
+        # (resolver, pool refresh, DB ref lookup) on a single code path —
+        # they only ever see entries.
+        team_strategy: Literal["round_robin", "by_model_name", "router", "intelli_router"]
         if self.model_router is not None:
             team_pool = self.model_router.to_pool_entries()
-            team_strategy: Literal["round_robin", "by_model_name", "router"] = "router"
+            team_strategy = "router"
+        elif self.model_intelli_router is not None:
+            team_pool = self.model_intelli_router.to_pool_entries()
+            team_strategy = "intelli_router"
         else:
             team_pool = list(self.model_pool)
             team_strategy = self.model_pool_strategy
 
+        external_messager_config = self.external_transport.build() if self.external_transport else None
         team_spec = TeamSpec(
             team_name=self.team_name,
             display_name=self.team_name,
             leader_member_name=self.leader.member_name,
             language=resolved_language,
+            dispatch_mode=self.dispatch_mode,
+            teammate_mode=str(self.teammate_mode),
             model_pool=team_pool,
             model_pool_strategy=team_strategy,
+            external_messager_config=external_messager_config,
+            workspace=self.workspace.model_dump() if self.workspace is not None else None,
         )
 
         messager_config = self.transport.build() if self.transport else None
@@ -590,7 +762,8 @@ class TeamAgentSpec(BaseModel):
         context = TeamRuntimeContext(
             role=TeamRole.LEADER,
             member_name=self.leader.member_name,
-            persona=self.leader.persona,
+            desc=self.leader.desc,
+            prompt=self.leader.prompt,
             team_spec=team_spec,
             messager_config=messager_config,
             db_config=db_config,
@@ -641,9 +814,10 @@ class TeamAgentSpec(BaseModel):
 
         available_names = sorted({entry.model_name for entry in team_spec.model_pool})
         strategy = team_spec.model_pool_strategy
+        name_routed = strategy in ("router", "intelli_router")
         leader_name = self.leader.model_name
         if leader_name and leader_name not in available_names:
-            scope = "router" if strategy == "router" else "pool"
+            scope = "router" if name_routed else "pool"
             cause = (
                 f"leader.model_name='{leader_name}' is not present in the {scope} (available names: {available_names})"
             )
@@ -652,7 +826,7 @@ class TeamAgentSpec(BaseModel):
         else:
             cause = "the allocator did not produce a model for the leader"
 
-        if strategy == "router":
+        if name_routed:
             tail = (
                 f"(1) leave leader.model_name unset to fall back on the router's first declared name, "
                 f"(2) set leader.model_name to one of {available_names}, "
@@ -666,6 +840,24 @@ class TeamAgentSpec(BaseModel):
             )
         reason = f"{cause}; resolve by either: {tail}"
         raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID, reason=reason)
+
+    def _validate_swarmflow_budget(self) -> None:
+        """Reject a non-positive ``swarmflow_budget`` (a run with no headroom).
+
+        Zero or negative would exhaust the ceiling before the first ``agent()``,
+        making every run fail identically — a config mistake worth catching at
+        build time rather than at the first gate.
+        """
+        if self.swarmflow_budget is None or self.swarmflow_budget >= 1:
+            return
+
+        from openjiuwen.core.common.exception.codes import StatusCode
+        from openjiuwen.core.common.exception.errors import raise_error
+
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason=f"swarmflow_budget must be >= 1 when set (got {self.swarmflow_budget})",
+        )
 
     def _validate_reserved_names(self) -> None:
         """Reject user-declared members that collide with reserved names.

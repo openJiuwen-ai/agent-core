@@ -5,7 +5,7 @@
 
 Layout:
 - ``team_policy_rail``: ``TeamPolicyRail`` — injects team-specific
-  PromptSections (role, workflow, lifecycle, persona, info, members)
+  PromptSections (role, workflow, lifecycle, private-prompt, info, members)
   into the agent's shared system prompt builder.
 - ``team_tool_rail``: ``TeamToolRail`` — registers role-appropriate
   team coordination tools onto the agent's ability manager.

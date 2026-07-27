@@ -15,7 +15,7 @@ from openjiuwen.agent_evolving.signal import (
     make_team_trajectory_signal,
     make_team_user_intent_signal,
 )
-from openjiuwen.agent_evolving.trajectory.types import ToolCallDetail, LegacyTrajectory, TrajectoryStep
+from openjiuwen.agent_evolving.trajectory.types import ToolCallDetail, TrajectoryStep, trajectory_from_steps
 
 
 def test_team_signal_type_values_are_stable() -> None:
@@ -76,7 +76,7 @@ def test_team_user_intent_signal_helper() -> None:
 
 
 def test_build_team_trajectory_summary_includes_tool_calls() -> None:
-    trajectory = LegacyTrajectory(
+    trajectory = trajectory_from_steps(
         execution_id="exec-1",
         steps=[
             TrajectoryStep(
@@ -87,7 +87,7 @@ def test_build_team_trajectory_summary_includes_tool_calls() -> None:
                     call_result="sent",
                 ),
             )
-        ]
+        ],
     )
 
     summary = build_team_trajectory_summary(trajectory)

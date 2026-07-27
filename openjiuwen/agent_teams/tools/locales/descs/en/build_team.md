@@ -1,7 +1,7 @@
 Assemble a team and register yourself as Leader. Call as soon as you have a goal — don't hesitate.
 
 ## Call Order
-build_team → create_task → spawn_teammate → send_message(to="*").
+build_team → spawn_teammate → create_task → put the members to work (how depends on the team's dispatch mode). Members exist before tasks, so work lands on named people.
 No other team tool may be called before build_team.
 
 ## HITT (Human in the Team)
@@ -23,7 +23,7 @@ Once HITT is on, the following rules apply to every `role=human_agent` member:
 
 ## Task Design Principles
 - Describe goals, not steps: content should contain goals, acceptance criteria, and constraints — not specific operations
-- Single owner: each task may only be claimed by one teammate who owns delivery
+- Single owner: each task is carried by exactly one teammate who owns delivery
 - Coarse-grained: one task = one independently deliverable outcome
 - Member autonomy: members create their own plans; Leader reviews via approve_plan
 

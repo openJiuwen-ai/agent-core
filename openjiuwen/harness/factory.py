@@ -23,9 +23,9 @@ from openjiuwen.harness.rails import (
     SecurityRail,
     SkillUseRail,
     SubagentRail,
+    SysOperationRail,
     TaskPlanningRail,
 )
-from openjiuwen.harness.rails import SysOperationRail
 from openjiuwen.harness.schema.agent_mode import AgentMode
 from openjiuwen.harness.schema.config import (
     AudioModelConfig,

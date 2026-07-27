@@ -28,7 +28,6 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
     TeamMember,
 )
-from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberMode,
@@ -272,7 +271,7 @@ class TestApprovePlan:
 
         assert result is True
         approved_task = await agent_team.task_manager.get(task.task_id)
-        assert approved_task.status == TaskStatus.PLAN_APPROVED.value
+        assert approved_task.status == TaskStatus.IN_PROGRESS.value
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -320,7 +319,7 @@ class TestApprovePlan:
             assert result is True
             mock_send.assert_not_called()
             rejected_task = await agent_team.task_manager.get(task.task_id)
-            assert rejected_task.status == TaskStatus.CLAIMED.value
+            assert rejected_task.status == TaskStatus.PLANNING.value
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -355,7 +354,7 @@ class TestApprovePlan:
             assert result is True
             mock_send.assert_not_called()
             approved_task = await agent_team.task_manager.get(task.task_id)
-            assert approved_task.status == TaskStatus.PLAN_APPROVED.value
+            assert approved_task.status == TaskStatus.IN_PROGRESS.value
 
 
 class TestApproveTool:
@@ -549,8 +548,8 @@ class TestCancelMember:
         # Verify tasks are claimed
         task1_claimed = await db.task.get_task(task1.task_id)
         task2_claimed = await db.task.get_task(task2.task_id)
-        assert task1_claimed.status == TaskStatus.CLAIMED.value
-        assert task2_claimed.status == TaskStatus.CLAIMED.value
+        assert task1_claimed.status == TaskStatus.IN_PROGRESS.value
+        assert task2_claimed.status == TaskStatus.IN_PROGRESS.value
         assert task1_claimed.assignee == "member1"
         assert task2_claimed.assignee == "member1"
 
@@ -924,7 +923,7 @@ class TestCancelAllTasks:
         """Test cancelling tasks with mixed statuses"""
         # Create tasks with different statuses
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
         await db.task.claim_task("task2", "member1")
         await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "cancelled")
         await db.task.create_task("task4", "test_team", "Task 4", "Content 4", "completed")
@@ -971,7 +970,7 @@ class TestCancelAllTasks:
 
 
 class TestTeamRuntimeContextDbConfig:
-    """Test TeamRuntimeContext accepts both DatabaseConfig and MemoryDatabaseConfig."""
+    """Test TeamRuntimeContext accepts DatabaseConfig."""
 
     @pytest.mark.level0
     def test_runtime_context_with_database_config(self):
@@ -987,18 +986,6 @@ class TestTeamRuntimeContextDbConfig:
             db_config=db_config,
         )
         assert context.db_config.db_type == "sqlite"
-
-    @pytest.mark.level0
-    def test_runtime_context_with_memory_database_config(self):
-        """Test TeamRuntimeContext accepts MemoryDatabaseConfig."""
-        db_config = MemoryDatabaseConfig()
-        context = TeamRuntimeContext(
-            role=TeamRole.LEADER,
-            member_name="leader1",
-            team_spec=TeamSpec(team_name="test_team", display_name="Test Team"),
-            db_config=db_config,
-        )
-        assert context.db_config.db_type == "memory"
 
     @pytest.mark.level0
     def test_runtime_context_default_database_config(self):
@@ -1470,3 +1457,35 @@ async def test_try_transition_member_status_atomic_cas(db):
         "dev-1", team_id, MemberStatus.UNSTARTED, MemberStatus.STARTING,
     )
     assert ok2 is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_team_persists_leader_prompt(db, message_bus):
+    """build_team writes the leader's private prompt onto the leader DB row.
+
+    The leader's private prompt (LeaderSpec.prompt, supplied via ctx.prompt to
+    the TeamBackend ``leader_prompt`` arg) must land on the leader member row —
+    cold-recovery rebuilds the leader context from the DB, so a prompt that only
+    lived in the runtime rail would be lost on recovery. The public leader_desc
+    goes to desc; the private prompt goes to prompt.
+    """
+    backend = TeamBackend(
+        team_name="lp_team",
+        member_name="lead",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        leader_prompt="private working agreement",
+    )
+    await backend.build_team(
+        display_name="LP Team",
+        desc="team goal",
+        leader_display_name="Lead",
+        leader_desc="public role blurb",
+    )
+
+    row = await db.member.get_member("lead", "lp_team")
+    assert row is not None
+    assert row.prompt == "private working agreement"
+    assert row.desc == "public role blurb"

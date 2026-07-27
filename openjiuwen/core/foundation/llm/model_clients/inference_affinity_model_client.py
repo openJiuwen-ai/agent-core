@@ -163,7 +163,10 @@ class InferenceAffinityModelClient(BaseModelClient):
                 tools=params.get("tools"),
                 temperature=params.get("temperature"),
                 top_p=params.get("top_p"),
-                max_tokens=params.get("max_tokens"))
+                max_tokens=params.get("max_tokens"),
+                frequency_penalty=params.get("frequency_penalty"),
+                presence_penalty=params.get("presence_penalty"),
+                stop=params.get("stop"))
 
             response_data = await self._make_async_request(params, timeout=timeout)
 
@@ -290,6 +293,9 @@ class InferenceAffinityModelClient(BaseModelClient):
                 temperature=params.get("temperature"),
                 top_p=params.get("top_p"),
                 max_tokens=params.get("max_tokens"),
+                frequency_penalty=params.get("frequency_penalty"),
+                presence_penalty=params.get("presence_penalty"),
+                stop=params.get("stop"),
                 is_stream=True)
 
             if output_parser:

@@ -9,7 +9,12 @@ import logging
 import time
 from typing import Any, Optional
 
-from openjiuwen.agent_evolving.trajectory import Trajectory
+from openjiuwen.agent_evolving.trajectory import (
+    Trajectory,
+    set_trajectory_resource_attributes,
+    trajectory_execution_id,
+    trajectory_meta,
+)
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails import EvolutionRail
 
@@ -134,15 +139,17 @@ class RLOnlineRail(EvolutionRail):
         *,
         snapshot: Optional[dict[str, Any]] = None,
     ) -> None:
-        trajectory.meta.setdefault("tenant_id", self._tenant_id)
-        trajectory.meta.setdefault("status", "ok")
-        trajectory.meta["ended_at"] = time.time()
+        metadata = trajectory_meta(trajectory)
+        attributes = {"ended_at": time.time()}
+        attributes["tenant_id"] = metadata.get("tenant_id", self._tenant_id)
+        attributes["status"] = metadata.get("status", "ok")
+        set_trajectory_resource_attributes(trajectory, attributes)
         batch = self._converter.convert(
             trajectory,
             tenant_id=self._tenant_id,
             session_done=self._session_done_on_invoke_end,
         )
         if not batch.samples:
-            logger.debug("[RLOnlineRail] no LLM samples to upload trajectory=%s", trajectory.execution_id)
+            logger.debug("[RLOnlineRail] no LLM samples to upload trajectory=%s", trajectory_execution_id(trajectory))
             return
         await self._uploader.enqueue(batch)

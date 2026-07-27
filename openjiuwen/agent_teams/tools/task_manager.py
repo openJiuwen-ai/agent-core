@@ -8,6 +8,7 @@ This module provides task management functionality for agent teams.
 
 import json
 import shutil
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -29,8 +30,15 @@ from openjiuwen.agent_teams.schema.events import (
     TaskListDrainedEvent,
     TaskPlanRequestEvent,
     TaskPlanResponseEvent,
+    TaskReleasedEvent,
+    TaskReviewVoteEvent,
+    TaskRevisionRequestedEvent,
+    TaskRevokedEvent,
+    TaskStartedEvent,
+    TaskSubmittedForReviewEvent,
     TaskUnblockedEvent,
     TaskUpdatedEvent,
+    TaskVerifiedEvent,
     TeamTopic,
 )
 from openjiuwen.agent_teams.schema.status import (
@@ -43,13 +51,14 @@ from openjiuwen.agent_teams.schema.task import (
     NewTaskSpec,
     TaskCreateResult,
     TaskDetail,
+    TaskGraphResult,
+    TaskGraphSpec,
     TaskListResult,
     TaskOpResult,
     TaskSummary,
 )
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database import (
-    TASK_TERMINAL_STATUSES,
     TeamDatabase,
     TeamTaskBase,
     TeamTaskDependencyBase,
@@ -107,6 +116,7 @@ class TeamTaskManager:
         plans_dir: str | Path | None = None,
         team_plan_id: str | None = None,
         leader_member_name: str | None = None,
+        dispatch_mode: str = "autonomous",
     ):
         """Initialize task manager.
 
@@ -120,6 +130,9 @@ class TeamTaskManager:
             leader_member_name: Leader member name used for member plan
                 review notifications. Falls back to the team row when
                 omitted.
+            dispatch_mode: The team's dispatch mode ("autonomous" /
+                "scheduled"), static from ``TeamAgentSpec.dispatch_mode``
+                (F_62). ``verify_task`` selects its verdict policy by it.
         """
         self.db = db
         self.team_name = team_name
@@ -128,6 +141,7 @@ class TeamTaskManager:
         self.plans_dir = Path(plans_dir) if plans_dir else team_home(team_name) / "team-workspace" / "plans"
         self.team_plan_id = _safe_token(team_plan_id or get_session_id() or team_name, "team_plan")
         self.leader_member_name = str(leader_member_name or "").strip()
+        self._dispatch_mode = dispatch_mode
 
     def configure_plan_storage(
         self,
@@ -141,50 +155,86 @@ class TeamTaskManager:
         if team_plan_id is not None:
             self.team_plan_id = _safe_token(team_plan_id, "team_plan")
 
-    async def add_batch(self, tasks: List[dict]) -> List[TaskCreateResult]:
-        """Add multiple tasks to the team in batch.
+    async def add_graph(self, specs: list[TaskGraphSpec]) -> TaskGraphResult:
+        """Create a batch of tasks and their dependency edges atomically.
 
-        Creates multiple tasks in a single operation for efficiency. Each
-        task in the list is a dictionary with keys ``title``, ``content``,
-        optional ``task_id`` and ``dependencies``. Invalid specs (missing
-        title/content) are skipped silently.
+        The whole batch flows through a single ``mutate_dependency_graph``
+        call, so ``depends_on`` edges may reference tasks created later in
+        the same batch (forward references) and the batch either fully
+        lands or fully rolls back with the real failure reason.
+
+        ``depended_by`` edges wire *existing* tasks to depend on a new
+        task (insert into an existing chain). The tool boundary rejects
+        in-batch ``depended_by`` targets — see ``TaskGraphSpec``.
+
+        ``spec.assignee`` pre-assigns a task (scheduled dispatch) inside the
+        same transaction. Every task is seeded ``PENDING`` regardless of
+        assignee — a scheduled task rests at ``PENDING`` *with an assignee*
+        ("assigned, not yet started") until the scheduler calls
+        ``start_task`` to move it to ``IN_PROGRESS``. Assignment and execution
+        are separate events, so seeding an execution state here would conflate
+        them. A task with unresolved ``depends_on`` is flipped to ``BLOCKED``
+        by the refresh pass and carries its assignee through. ``depended_by``
+        gates the tasks pointing at this one, not this task, so it is not
+        consulted here.
 
         Args:
-            tasks: List of task dictionaries.
+            specs: Task specs to create; missing ``task_id`` values are
+                auto-generated.
 
         Returns:
-            List of ``TaskCreateResult`` — one per successfully created
-            task. Failed specs (missing fields, creation errors) are
-            omitted so callers can still treat the return value as a
-            list of created tasks. Because ``TaskCreateResult`` delegates
-            attribute lookups to the wrapped task, existing call sites
-            that iterate and read ``.task_id`` / ``.title`` work
-            unchanged.
+            ``TaskGraphResult`` — created tasks with post-refresh statuses
+            on success, the graph-mutation failure reason otherwise.
         """
-        created_tasks: List[TaskCreateResult] = []
-        for task_spec in tasks:
-            title = task_spec.get("title")
-            content = task_spec.get("content")
-            task_id = task_spec.get("task_id")
-            dependencies = task_spec.get("dependencies")
-
-            if not title or not content:
-                team_logger.warning(f"Skipping invalid task: {task_spec}")
-                continue
-
-            result = await self.add(
-                title=title,
-                content=content,
-                task_id=task_id,
-                dependencies=dependencies,
+        new_tasks: list[NewTaskSpec] = []
+        edges: list[tuple[str, str]] = []
+        for spec in specs:
+            task_id = spec.task_id or str(uuid.uuid4())
+            # Always seed PENDING. A scheduled pre-assigned task rests at
+            # PENDING(assignee) until the scheduler starts it; the refresh
+            # pass flips it to BLOCKED if it has unresolved dependencies.
+            new_tasks.append(
+                NewTaskSpec(
+                    task_id=task_id,
+                    title=spec.title,
+                    content=spec.content,
+                    initial_status=TaskStatus.PENDING.value,
+                    assignee=spec.assignee,
+                    reviewer=json.dumps(list(spec.reviewer)) if spec.reviewer else None,
+                    max_review_rounds=spec.max_review_rounds,
+                )
             )
-            if result.ok:
-                created_tasks.append(result)
-            else:
-                team_logger.warning(f"Batch add skipped task {task_id or title!r}: {result.reason}")
+            edges.extend((task_id, dep_id) for dep_id in spec.depends_on)
+            edges.extend((dependent_id, task_id) for dependent_id in spec.depended_by)
 
-        team_logger.info(f"Batch added {len(created_tasks)} tasks")
-        return created_tasks
+        mutation = await self.db.task.mutate_dependency_graph(
+            team_name=self.team_name,
+            new_tasks=new_tasks,
+            add_edges=edges,
+        )
+        if not mutation.ok:
+            return TaskGraphResult.fail(mutation.reason)
+
+        # The refresh pass may have flipped PENDING -> BLOCKED for tasks
+        # with unresolved dependencies; reflect that in the returned tasks
+        # and the task-created events.
+        status_by_id = {t.task_id: t.status for t in mutation.refreshed_tasks}
+        created: list[TeamTaskBase] = []
+        for node in new_tasks:
+            status = status_by_id.get(node.task_id, node.initial_status)
+            await self._publish_task_created(node.task_id, status)
+            created.append(
+                TeamTaskBase(
+                    task_id=node.task_id,
+                    team_name=self.team_name,
+                    title=node.title,
+                    content=node.content,
+                    status=status,
+                    assignee=node.assignee,
+                )
+            )
+        team_logger.debug(f"Added {len(created)} task(s) with {len(edges)} dependency edge(s)")
+        return TaskGraphResult.success(created)
 
     async def add(
         self,
@@ -193,10 +243,10 @@ class TeamTaskManager:
         task_id: Optional[str] = None,
         dependencies: Optional[List[str]] = None,
     ) -> TaskCreateResult:
-        """Add a task to the team.
+        """Add a single task to the team.
 
-        Creates a task in the team_task table and optionally adds
-        task dependencies to the team_task_dependency table.
+        Thin wrapper over ``add_graph`` for single-task callers (external
+        operator client, internal seeding).
 
         Args:
             title: Task title.
@@ -210,52 +260,22 @@ class TeamTaskManager:
             / ``result.title`` transparently delegates to it); on
             failure ``result.reason`` holds the specific cause.
         """
-        if task_id is None:
-            task_id = str(uuid.uuid4())
+        result = await self.add_graph(
+            [
+                TaskGraphSpec(
+                    title=title,
+                    content=content,
+                    task_id=task_id,
+                    depends_on=tuple(dependencies or ()),
+                )
+            ]
+        )
+        if not result.ok:
+            return TaskCreateResult.fail(f"Failed to create task {task_id or title!r}: {result.reason}")
+        return TaskCreateResult.success(result.tasks[0])
 
-        # Initial seed: PENDING for an isolated task; the graph mutation
-        # path's refresh pass will flip it to BLOCKED if any dependency
-        # is still unresolved at insert time.
-        status = TaskStatus.PENDING.value
-
-        if dependencies:
-            # Edges + node go through the unified mutation primitive so
-            # cycle detection and BLOCKED/PENDING refresh fire as one
-            # atomic step.
-            mutation = await self.db.task.mutate_dependency_graph(
-                team_name=self.team_name,
-                new_tasks=[
-                    NewTaskSpec(
-                        task_id=task_id,
-                        title=title,
-                        content=content,
-                        initial_status=status,
-                    )
-                ],
-                add_edges=[(task_id, dep_id) for dep_id in dependencies],
-            )
-            if not mutation.ok:
-                return TaskCreateResult.fail(f"Failed to create task {task_id}: {mutation.reason}")
-            # Refresh pass may have flipped PENDING -> BLOCKED; reflect
-            # that in the response so the caller and downstream event
-            # carry the right status.
-            for refreshed in mutation.refreshed_tasks:
-                if refreshed.task_id == task_id:
-                    status = refreshed.status
-                    break
-            team_logger.debug(f"Added task {task_id} with dependencies: {dependencies}")
-        else:
-            success = await self.db.task.create_task(
-                task_id=task_id,
-                team_name=self.team_name,
-                title=title,
-                content=content,
-                status=status,
-            )
-            if not success:
-                return TaskCreateResult.fail(f"Failed to create task {task_id} (likely a task_id collision)")
-
-        # Publish task created event
+    async def _publish_task_created(self, task_id: str, status: str) -> None:
+        """Publish a task-created event; log-and-continue on failure."""
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
@@ -270,185 +290,6 @@ class TeamTaskManager:
             team_logger.debug(f"Task created event published: {task_id}")
         except Exception as e:
             team_logger.error(f"Failed to publish task created event for {task_id}: {e}")
-
-        return TaskCreateResult.success(
-            TeamTaskBase(
-                task_id=task_id,
-                team_name=self.team_name,
-                title=title,
-                content=content,
-                status=status,
-                assignee=None,
-            )
-        )
-
-    async def add_with_priority(
-        self,
-        title: str,
-        content: str,
-        task_id: Optional[str] = None,
-        dependencies: Optional[List[str]] = None,
-        dependent_task_ids: Optional[List[str]] = None,
-    ) -> TaskCreateResult:
-        """Add a task with bidirectional dependency support (prioritized task)
-
-        This method allows creating a task that can:
-        1. Depend on existing tasks (dependencies parameter)
-        2. Have existing tasks depend on it (dependent_task_ids parameter)
-        3. Both of the above (inserting the task between other tasks in the dependency chain)
-
-        When existing tasks are made to depend on the new task (dependent_task_ids),
-        their status is automatically updated from 'pending' to 'blocked' if applicable.
-
-        This operation is atomic and prevents circular dependencies.
-
-        Args:
-            title: Task title
-            content: Task content
-            task_id: Optional custom task ID (auto-generated if not provided)
-            dependencies: List of existing task IDs that the new task depends on
-            dependent_task_ids: List of existing task IDs that should depend on the new task
-
-        Returns:
-            ``TaskCreateResult`` describing the outcome. On failure
-            ``result.reason`` typically points at a circular dependency
-            or a conflicting task_id.
-        """
-        if task_id is None:
-            task_id = str(uuid.uuid4())
-
-        # Determine initial status based on dependencies
-        # If the task has dependencies, it starts as BLOCKED
-        if dependencies and len(dependencies) > 0:
-            status = TaskStatus.BLOCKED.value
-        else:
-            status = TaskStatus.PENDING.value
-
-        # Use database method for atomic operation with cycle detection
-        success = await self.db.task.add_task_with_bidirectional_dependencies(
-            task_id=task_id,
-            team_name=self.team_name,
-            title=title,
-            content=content,
-            status=status,
-            dependencies=dependencies,
-            dependent_task_ids=dependent_task_ids,
-        )
-
-        if not success:
-            return TaskCreateResult.fail(
-                f"Failed to create prioritized task {task_id} "
-                f"(circular dependency, missing dependent task, or task_id collision)"
-            )
-
-        # Publish task created event
-        try:
-            await self.messager.publish(
-                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
-                message=EventMessage.from_event(
-                    TaskCreatedEvent(
-                        team_name=self.team_name,
-                        task_id=task_id,
-                        status=status,
-                    )
-                ),
-            )
-            team_logger.debug(f"Task created event published: {task_id}")
-        except Exception as e:
-            team_logger.error(f"Failed to publish task created event for {task_id}: {e}")
-
-        return TaskCreateResult.success(
-            TeamTaskBase(
-                task_id=task_id,
-                team_name=self.team_name,
-                title=title,
-                content=content,
-                status=status,
-                assignee=None,
-            )
-        )
-
-    async def add_as_top_priority(
-        self,
-        title: str,
-        content: str,
-        task_id: Optional[str] = None,
-    ) -> TaskCreateResult:
-        """Add a task as top priority (blocks all existing pending/blockable tasks)
-
-        This method creates a new task and makes all existing tasks that can be blocked
-        (pending or claimed status) depend on it. This ensures the new task is executed
-        before those tasks.
-
-        This is useful for inserting urgent tasks that must be processed before
-        any other pending work.
-
-        This operation is atomic and prevents circular dependencies.
-
-        Args:
-            title: Task title.
-            content: Task content.
-            task_id: Optional custom task ID (auto-generated if not provided).
-
-        Returns:
-            ``TaskCreateResult`` describing the outcome.
-        """
-        if task_id is None:
-            task_id = str(uuid.uuid4())
-
-        # Get all tasks that can be blocked (pending or claimed status)
-        # These tasks will be made to depend on the new top priority task
-        pending_tasks = await self.list_tasks(status=TaskStatus.PENDING.value)
-
-        dependent_task_ids = [task.task_id for task in pending_tasks]
-
-        # Top priority task has no dependencies, so it starts as PENDING.
-        status = TaskStatus.PENDING.value
-
-        # Use database method for atomic operation with cycle detection
-        success = await self.db.task.add_task_with_bidirectional_dependencies(
-            task_id=task_id,
-            team_name=self.team_name,
-            title=title,
-            content=content,
-            status=status,
-            dependencies=None,
-            dependent_task_ids=dependent_task_ids if dependent_task_ids else None,
-        )
-
-        if not success:
-            return TaskCreateResult.fail(
-                f"Failed to create top priority task {task_id} (circular dependency or task_id collision)"
-            )
-
-        team_logger.info(f"Added top priority task {task_id}, blocking {len(dependent_task_ids)} existing tasks")
-
-        # Publish task created event
-        try:
-            await self.messager.publish(
-                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
-                message=EventMessage.from_event(
-                    TaskCreatedEvent(
-                        team_name=self.team_name,
-                        task_id=task_id,
-                        status=status,
-                    )
-                ),
-            )
-            team_logger.debug(f"Task created event published: {task_id}")
-        except Exception as e:
-            team_logger.error(f"Failed to publish task created event for {task_id}: {e}")
-
-        return TaskCreateResult.success(
-            TeamTaskBase(
-                task_id=task_id,
-                team_name=self.team_name,
-                title=title,
-                content=content,
-                status=status,
-                assignee=None,
-            )
-        )
 
     async def list_tasks_with_deps(self, status: Optional[str] = None) -> TaskListResult:
         """List tasks with blocked_by info (summary view, no content).
@@ -462,21 +303,27 @@ class TeamTaskManager:
         Returns:
             TaskListResult containing task summaries with dependency info.
         """
+        # Two queries, independent of task count: all tasks + all dependency
+        # edges for the team, grouped in memory. Replaces the previous N+1
+        # (one get_dependencies per task) that turned a large board into
+        # hundreds of per-task queries / connection checkouts.
         tasks = await self.list_tasks(status=status)
-        summaries = []
-        for task in tasks:
-            deps = await self.get_dependencies(task.task_id)
-            unresolved = [d.depends_on_task_id for d in deps if not d.resolved]
-            summaries.append(
-                TaskSummary(
-                    task_id=task.task_id,
-                    title=task.title,
-                    status=task.status,
-                    assignee=task.assignee,
-                    blocked_by=unresolved,
-                    updated_at=task.updated_at,
-                )
+        all_deps = await self.db.task.get_team_dependencies(self.team_name)
+        unresolved_by_task: dict[str, list[str]] = defaultdict(list)
+        for dep in all_deps:
+            if not dep.resolved:
+                unresolved_by_task[dep.task_id].append(dep.depends_on_task_id)
+        summaries = [
+            TaskSummary(
+                task_id=task.task_id,
+                title=task.title,
+                status=task.status,
+                assignee=task.assignee,
+                blocked_by=unresolved_by_task.get(task.task_id, []),
+                updated_at=task.updated_at,
             )
+            for task in tasks
+        ]
         return TaskListResult(tasks=summaries, count=len(summaries))
 
     async def get_task_detail(self, task_id: str) -> Optional[TaskDetail]:
@@ -498,8 +345,7 @@ class TeamTaskManager:
         deps = await self.get_dependencies(task_id)
         blocked_by = [d.depends_on_task_id for d in deps if not d.resolved]
 
-        downstream = await self.db.task.get_tasks_depending_on(task_id)
-        blocks = [t.task_id for t in downstream]
+        blocks = await self.db.task.get_dependent_task_ids(task_id)
 
         return TaskDetail(
             task_id=task.task_id,
@@ -507,10 +353,34 @@ class TeamTaskManager:
             content=task.content,
             status=task.status,
             assignee=task.assignee,
+            reviewer=task.reviewers(),
+            review_round=task.review_round,
+            max_review_rounds=task.max_review_rounds,
             blocked_by=blocked_by,
             blocks=blocks,
             updated_at=task.updated_at,
         )
+
+    async def list_review_tasks(self, reviewer_name: str) -> TaskListResult:
+        """List IN_REVIEW tasks awaiting ``reviewer_name`` (verify-gate view).
+
+        Backs ``view_task(action=in_review)``: the tasks a reviewer is on the
+        hook to verify. Summary shape mirrors the list view; dependency info is
+        omitted (a task under review is past its prerequisites).
+        """
+        tasks = await self.get_review_tasks(reviewer_name)
+        summaries = [
+            TaskSummary(
+                task_id=task.task_id,
+                title=task.title,
+                status=task.status,
+                assignee=task.assignee,
+                blocked_by=[],
+                updated_at=task.updated_at,
+            )
+            for task in tasks
+        ]
+        return TaskListResult(tasks=summaries, count=len(summaries))
 
     async def get(self, task_id: str) -> Optional[TeamTaskBase]:
         """Get a task by ID
@@ -524,15 +394,17 @@ class TeamTaskManager:
         return await self.db.task.get_task(task_id)
 
     async def assign(self, task_id: str, assignee: str) -> TaskOpResult:
-        """Assign a task to a member and mark it as claimed (Leader only).
+        """Assign a task to a member (Leader only).
 
-        Atomically sets the assignee and transitions the task to ``CLAIMED``
-        so leader-driven assignment is symmetric with a member self-claim.
-        Idempotent when the task is already claimed by ``assignee``. Fails
-        when the task is currently held by a different member; the caller
-        must reset the task first (see ``reset``) for true reassignment.
-        Sends a notification message to the assigned member's mailbox on
-        success.
+        Atomically sets the assignee and enters the member's entry gate,
+        symmetric with a member self-serve: a ``BUILD_MODE`` assignee starts
+        executing (``IN_PROGRESS``), a ``PLAN_MODE`` assignee enters the plan
+        gate (``PLANNING``) and must submit a plan for approval before
+        executing. Idempotent when the task is already held by ``assignee`` in
+        that gate. Fails when the task is currently held by a different member;
+        the caller must reset the task first (see ``reset``) for true
+        reassignment. Sends a notification message to the assigned member's
+        mailbox on success.
 
         Args:
             task_id: Task identifier.
@@ -554,8 +426,15 @@ class TeamTaskManager:
         if not member:
             return TaskOpResult.fail(f"Member {assignee} not found in team {self.team_name}")
 
-        # Idempotent re-assign: same member, status already claimed -> no-op success.
-        if task.assignee == assignee and task.status == TaskStatus.CLAIMED.value:
+        # Entry gate mirrors a member self-serve: plan-mode assignees land in
+        # the plan gate (PLANNING) and must get approval; build-mode assignees
+        # start executing (IN_PROGRESS).
+        entry_status = (
+            TaskStatus.PLANNING if member.mode == MemberMode.PLAN_MODE.value else TaskStatus.IN_PROGRESS
+        )
+
+        # Idempotent re-assign: same member, already at its entry gate -> no-op.
+        if task.assignee == assignee and task.status == entry_status.value:
             team_logger.debug(f"Task {task_id} already assigned to {assignee}; no-op")
             return TaskOpResult.success()
 
@@ -564,7 +443,7 @@ class TeamTaskManager:
                 f"Task {task_id} is already claimed by {task.assignee}; reset the task before reassigning to {assignee}"
             )
 
-        success = await self.db.task.claim_task(task_id, assignee)
+        success = await self.db.task.claim_task(task_id, assignee, to_status=entry_status)
         if not success:
             return TaskOpResult.fail(
                 f"Database rejected assign for task {task_id} (invalid state transition from {task.status})"
@@ -635,17 +514,17 @@ class TeamTaskManager:
         if member.mode == MemberMode.PLAN_MODE.value:
             return TaskOpResult.fail(
                 "PLAN_MODE members must call submit_plan first; "
-                "leader approval moves the task from claimed to plan_approved"
+                "leader approval moves the task from planning to in_progress"
             )
 
         # Idempotent re-claim: if the caller already owns this task, succeed silently.
-        if task.assignee == member_name and task.status == TaskStatus.CLAIMED.value:
+        if task.assignee == member_name and task.status == TaskStatus.IN_PROGRESS.value:
             team_logger.debug(f"Task {task_id} already claimed by {member_name}; no-op")
             return TaskOpResult.success()
 
         # Claim conflict must be reported before the state-transition check —
-        # otherwise a CLAIMED task held by someone else surfaces as the
-        # misleading "invalid claimed → claimed transition" error.
+        # otherwise a task held by someone else surfaces as the misleading
+        # "invalid in_progress → in_progress transition" error.
         if task.assignee:
             return TaskOpResult.fail(
                 f"Task {task_id} is already claimed by {task.assignee}, {member_name} cannot claim it"
@@ -654,7 +533,7 @@ class TeamTaskManager:
         # Validate state transition (blocks e.g. COMPLETED/CANCELLED/BLOCKED claims).
         if not is_valid_transition(
             TaskStatus(task.status),
-            TaskStatus.CLAIMED,
+            TaskStatus.IN_PROGRESS,
             TASK_TRANSITIONS,
         ):
             return TaskOpResult.fail(
@@ -697,23 +576,23 @@ class TeamTaskManager:
         Returns:
             ``TaskOpResult`` describing the outcome.
         """
-        # Get member to check mode
+        # Get member to check mode (drives the plan-index write below).
         member = await self.db.member.get_member(self.member_name, self.team_name)
         if not member:
             return TaskOpResult.fail(f"Member {self.member_name} not found in team {self.team_name}")
 
-        # Check if member is in PLAN_MODE
-        if member.mode == MemberMode.PLAN_MODE.value:
-            task = await self.db.task.get_task(task_id)
-            if not task:
-                return TaskOpResult.fail(f"Task {task_id} not found")
+        # Verify gate: when the task carries reviewers, "done" means "ready for
+        # review" — route IN_PROGRESS -> IN_REVIEW instead of completing. The
+        # member's mental model is unchanged ("I finished"); whether it enters
+        # review is driven by the task's reviewer list, not the member.
+        gated = await self.db.task.get_task(task_id)
+        if gated is not None and gated.reviewers():
+            return await self._submit_for_review(gated)
 
-            # PLAN_MODE members can only complete PLAN_APPROVED tasks.
-            if task.status != TaskStatus.PLAN_APPROVED.value:
-                return TaskOpResult.fail(
-                    f"PLAN_MODE member cannot complete task {task_id} in status "
-                    f"'{task.status}'; only plan_approved tasks can be completed"
-                )
+        # No plan-mode-specific gate is needed: the transition table forbids
+        # PLANNING -> COMPLETED, so a plan-mode member cannot complete a task
+        # that has not been approved (PLANNING -> IN_PROGRESS). Completion is
+        # uniformly valid only from IN_PROGRESS.
 
         # Complete task atomically - this handles state validation, dependency resolution,
         # and unblocking dependent tasks in a single transaction to prevent race conditions
@@ -723,7 +602,8 @@ class TeamTaskManager:
             if current is None:
                 return TaskOpResult.fail(f"Task {task_id} not found")
             return TaskOpResult.fail(
-                f"Task {task_id} cannot be completed from status '{current.status}' (must be claimed or plan_approved)"
+                f"Task {task_id} cannot be completed from status '{current.status}' "
+                f"(must be in_progress)"
             )
 
         # Extract completed task info and unblocked tasks
@@ -758,6 +638,238 @@ class TeamTaskManager:
         await self._publish_unblocked_events(unblocked_tasks)
         await self._maybe_publish_task_list_drained()
         return TaskOpResult.success()
+
+    async def _submit_for_review(self, task) -> TaskOpResult:
+        """Route a completed-by-author task into the verify gate (IN_REVIEW).
+
+        Called from ``complete`` when the task carries reviewers. Plain
+        IN_PROGRESS -> IN_REVIEW flip (no dependency resolution — the task is
+        not done yet); the author stays assigned. Publishes
+        ``TASK_SUBMITTED_FOR_REVIEW`` carrying the reviewer list for the
+        framework to dispatch/notify.
+        """
+        submitted = await self.db.task.submit_for_review(task.task_id)
+        if not submitted:
+            return TaskOpResult.fail(
+                f"Task {task.task_id} cannot be submitted for review from status "
+                f"'{task.status}' (must be in_progress)"
+            )
+        team_logger.info("Task %s submitted for review", task.task_id)
+        await self._publish_task_event(
+            TaskSubmittedForReviewEvent(
+                team_name=self.team_name,
+                task_id=task.task_id,
+                member_name=task.assignee,
+                reviewer=task.reviewers(),
+            ),
+            error_label=f"Task submitted-for-review event for {task.task_id}",
+        )
+        return TaskOpResult.success()
+
+    async def verify_task(self, task_id: str, decision: str, feedback: str = "") -> TaskOpResult:
+        """Reviewer verdict on a task in the verify gate (reviewer only).
+
+        The verdict policy depends on the team's effective dispatch mode:
+
+        * **autonomous** — first verdict wins: ``pass`` completes the task
+          (IN_REVIEW -> COMPLETED, unblocks dependents), ``fail`` sends it back
+          to the author (IN_REVIEW -> IN_PROGRESS, rework loop) — there is no
+          judge component to tally votes.
+        * **scheduled** (F_62) — the call only records a vote fact (append-only
+          row) and publishes ``TASK_REVIEW_VOTE``; the task stays ``IN_REVIEW``
+          and the leader-side scheduler tallies votes and settles the verdict
+          via ``settle_review``. A repeated call by the same reviewer replaces
+          their previous vote (latest row wins).
+
+        Guards are identical in both modes: the task is ``IN_REVIEW`` and the
+        caller is one of its reviewers (not the author).
+
+        Args:
+            task_id: Task under review.
+            decision: ``pass`` or ``fail``.
+            feedback: Reviewer guidance (carried to the author on ``fail``).
+
+        Returns:
+            ``TaskOpResult`` carrying the failure reason on error; under
+            scheduled dispatch ``data`` snapshots the vote tally.
+        """
+        normalized = decision.strip().lower()
+        if normalized not in ("pass", "fail"):
+            return TaskOpResult.fail(f"verify_task decision must be 'pass' or 'fail', got '{decision}'")
+
+        task = await self.get(task_id)
+        if not task:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+        if task.status != TaskStatus.IN_REVIEW.value:
+            return TaskOpResult.fail(
+                f"Task {task_id} is not under review (status '{task.status}'); nothing to verify"
+            )
+        reviewers = task.reviewers()
+        if self.member_name not in reviewers:
+            return TaskOpResult.fail(
+                f"{self.member_name} is not a reviewer of task {task_id}; cannot verify it"
+            )
+        if self.member_name == task.assignee:
+            return TaskOpResult.fail(f"{self.member_name} cannot verify their own task {task_id}")
+
+        if self._dispatch_mode == "scheduled":
+            return await self._record_review_vote(task, normalized, feedback)
+
+        if normalized == "pass":
+            return await self._verify_pass(task)
+        return await self._verify_fail(task, feedback)
+
+    async def _record_review_vote(self, task, decision: str, feedback: str) -> TaskOpResult:
+        """Persist one reviewer vote and publish the tally (scheduled dispatch).
+
+        Vote facts are append-only rows keyed by the task's current
+        ``review_round``; the tally counts each reviewer's latest row, so
+        concurrent reviewers never contend and a re-vote is a plain insert.
+        No transition happens here — the scheduler settles once the tally
+        decides (see ``settle_review``).
+        """
+        await self.db.task.insert_review_vote(
+            team_name=self.team_name,
+            task_id=task.task_id,
+            review_round=task.review_round,
+            reviewer=self.member_name,
+            decision=decision,
+            feedback=feedback or None,
+        )
+        tally = await self.get_review_tally(task)
+        await self._publish_task_event(
+            TaskReviewVoteEvent(
+                team_name=self.team_name,
+                task_id=task.task_id,
+                member_name=task.assignee,
+                reviewer=self.member_name,
+                decision=decision,
+                review_round=task.review_round,
+                pass_count=tally["pass_count"],
+                fail_count=tally["fail_count"],
+                reviewer_count=tally["reviewer_count"],
+            ),
+            error_label=f"Task review vote event for {task.task_id}",
+        )
+        return TaskOpResult.success(data=tally)
+
+    async def get_review_tally(self, task) -> dict[str, Any]:
+        """Snapshot the current-round vote tally of one IN_REVIEW task.
+
+        Latest vote per reviewer wins; votes from members no longer on the
+        task's reviewer list are ignored. Feedback strings of the effective
+        ``fail`` votes are collected for the rework message. Shared by the
+        vote-recording path (event snapshot) and the scheduler's judge pass.
+        """
+        votes = await self.db.task.get_review_votes(task.task_id, task.review_round)
+        reviewers = task.reviewers()
+        latest_decision: dict[str, str] = {}
+        latest_feedback: dict[str, str] = {}
+        for vote in votes:
+            if vote.reviewer not in reviewers:
+                continue
+            latest_decision[vote.reviewer] = vote.decision
+            latest_feedback[vote.reviewer] = vote.feedback or ""
+        fail_feedback = {
+            reviewer: latest_feedback[reviewer]
+            for reviewer, verdict in latest_decision.items()
+            if verdict == "fail" and latest_feedback[reviewer]
+        }
+        pass_count = sum(1 for verdict in latest_decision.values() if verdict == "pass")
+        return {
+            "task_id": task.task_id,
+            "review_round": task.review_round,
+            "pass_count": pass_count,
+            "fail_count": len(latest_decision) - pass_count,
+            "reviewer_count": len(reviewers),
+            "voted": sorted(latest_decision),
+            "fail_feedback": fail_feedback,
+        }
+
+    async def settle_review(self, task_id: str, decision: str, feedback: str = "") -> TaskOpResult:
+        """Framework-side settlement of a tallied review round (F_62).
+
+        Called by the leader-side scheduler once the vote tally decides:
+        ``pass`` completes the task (IN_REVIEW -> COMPLETED, unblocks
+        dependents, publishes ``TASK_VERIFIED``), ``fail`` sends it back for
+        rework (IN_REVIEW -> IN_PROGRESS, publishes
+        ``TASK_REVISION_REQUESTED`` with the aggregated feedback). Unlike
+        ``verify_task`` there is no reviewer-membership guard — the caller is
+        the scheduling runtime, not a member. The DAO status CAS keeps a
+        duplicate settlement from applying twice.
+        """
+        normalized = decision.strip().lower()
+        if normalized not in ("pass", "fail"):
+            return TaskOpResult.fail(f"settle_review decision must be 'pass' or 'fail', got '{decision}'")
+
+        task = await self.get(task_id)
+        if not task:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+        if task.status != TaskStatus.IN_REVIEW.value:
+            return TaskOpResult.fail(
+                f"Task {task_id} is not under review (status '{task.status}'); nothing to settle"
+            )
+
+        if normalized == "pass":
+            return await self._verify_pass(task)
+        return await self._verify_fail(task, feedback)
+
+    async def _verify_pass(self, task) -> TaskOpResult:
+        """Pass verdict: IN_REVIEW -> COMPLETED, unblocking dependents.
+
+        Reuses ``complete_task`` (which resolves dependencies + cascades) —
+        ``IN_REVIEW -> COMPLETED`` is a valid terminal transition, and the
+        source was already guarded as IN_REVIEW by ``verify_task``.
+        """
+        result = await self.db.task.complete_task(task.task_id)
+        if not result:
+            return TaskOpResult.fail(f"Task {task.task_id} could not be completed from review")
+        completed_task = result.get("task")
+        unblocked_tasks = result.get("unblocked_tasks", [])
+        team_logger.info("Task %s verified (passed) and completed", task.task_id)
+        await self._publish_task_event(
+            TaskVerifiedEvent(
+                team_name=self.team_name,
+                task_id=task.task_id,
+                member_name=completed_task.assignee,
+            ),
+            error_label=f"Task verified event for {task.task_id}",
+        )
+        await self._publish_unblocked_events(unblocked_tasks)
+        await self._maybe_publish_task_list_drained()
+        return TaskOpResult.success()
+
+    async def _verify_fail(self, task, feedback: str) -> TaskOpResult:
+        """Fail verdict: IN_REVIEW -> IN_PROGRESS, rework loop to the author."""
+        revised = await self.db.task.revise_task(task.task_id)
+        if not revised:
+            return TaskOpResult.fail(f"Task {task.task_id} could not be sent back for revision")
+        team_logger.info("Task %s verification failed; sent back to %s for revision", task.task_id, task.assignee)
+        await self._publish_task_event(
+            TaskRevisionRequestedEvent(
+                team_name=self.team_name,
+                task_id=task.task_id,
+                member_name=task.assignee,
+                feedback=feedback,
+            ),
+            error_label=f"Task revision-requested event for {task.task_id}",
+        )
+        return TaskOpResult.success()
+
+    async def get_review_tasks(self, reviewer_name: str) -> List[TeamTaskBase]:
+        """Return IN_REVIEW tasks whose reviewer list contains ``reviewer_name``.
+
+        Fetches the status-indexed IN_REVIEW rows and filters the reviewer
+        membership in memory — v1 verification is team-scale, so a normalized
+        reviewer join table is premature (see F_59). The author of a task is
+        never returned to itself as a review target.
+        """
+        in_review = await self.list_tasks(status=TaskStatus.IN_REVIEW.value)
+        return [
+            task
+            for task in in_review
+            if reviewer_name in task.reviewers() and task.assignee != reviewer_name
+        ]
 
     def _task_plan_dir(self, task_id: str) -> Path:
         return self.plans_dir / self.team_plan_id / "tasks" / _safe_token(task_id, "task")
@@ -910,7 +1022,7 @@ class TeamTaskManager:
         plan_id: str | None = None,
         tool_call_id: str = "",
     ) -> dict[str, Any]:
-        """Snapshot a member execution plan file and reserve the task as CLAIMED."""
+        """Snapshot a member execution plan file and reserve the task as PLANNING."""
         member_name = self.member_name
         member = await self.db.member.get_member(member_name, self.team_name)
         if not member:
@@ -927,7 +1039,15 @@ class TeamTaskManager:
                 "task_id": task_id,
                 "message": f"Task {task_id} is assigned to {task.assignee}, not {member_name}",
             }
-        if task.status not in (TaskStatus.PENDING.value, TaskStatus.CLAIMED.value):
+        # PENDING (first submission, reserved into PLANNING below), PLANNING
+        # (re-submit after a reject, stays PLANNING), and IN_PROGRESS (scheduled
+        # owner submits a plan against an already-started task without
+        # re-claiming) are the states a member plan can be recorded from.
+        if task.status not in (
+            TaskStatus.PENDING.value,
+            TaskStatus.PLANNING.value,
+            TaskStatus.IN_PROGRESS.value,
+        ):
             return {
                 "success": False,
                 "task_id": task_id,
@@ -954,15 +1074,24 @@ class TeamTaskManager:
             }
 
         if task.status == TaskStatus.PENDING.value:
-            claimed = await self.db.task.claim_task(task_id, member_name)
+            # A PENDING task with no owner is reserved into the plan gate
+            # (PENDING -> PLANNING) by the first submission. Scheduled tasks
+            # never reach here as PENDING with a free assignee.
+            claimed = await self.db.task.claim_task(task_id, member_name, to_status=TaskStatus.PLANNING)
             if not claimed:
                 return {"success": False, "task_id": task_id, "message": "Failed to reserve task for planning"}
+            active_status = TaskStatus.PLANNING.value
         elif task.assignee != member_name:
             return {
                 "success": False,
                 "task_id": task_id,
                 "message": f"Task {task_id} is assigned to {task.assignee}, not {member_name}",
             }
+        else:
+            # Already owned by this member: PLANNING (re-plan after reject) or
+            # IN_PROGRESS (scheduled). Planning records against it without a
+            # status change.
+            active_status = task.status
 
         member_plan_path = self._task_plan_path(task_id, plan_id)
         member_plan_path.parent.mkdir(parents=True, exist_ok=True)
@@ -974,7 +1103,7 @@ class TeamTaskManager:
             "team_plan_id": self.team_plan_id,
             "latest_plan_id": plan_id,
             "member_name": member_name,
-            "status": TaskStatus.CLAIMED.value,
+            "status": active_status,
             "member_plan_md": str(member_plan_path),
             "source_plan_path": str(submitted_plan_path),
             "tool_call_id": tool_call_id,
@@ -988,7 +1117,7 @@ class TeamTaskManager:
                 team_name=self.team_name,
                 task_id=task_id,
                 member_name=member_name,
-                status=TaskStatus.CLAIMED.value,
+                status=active_status,
                 plan_id=plan_id,
                 member_plan_md=str(member_plan_path),
                 tool_call_id=tool_call_id,
@@ -1009,7 +1138,7 @@ class TeamTaskManager:
             "success": True,
             "task_id": task_id,
             "plan_id": plan_id,
-            "status": TaskStatus.CLAIMED.value,
+            "status": active_status,
             "member_plan_md": str(member_plan_path),
             "leader_message_id": leader_message_id,
             "message": "Member plan submitted. Wait for leader approval before execution.",
@@ -1033,8 +1162,10 @@ class TeamTaskManager:
         unblocked_tasks = result.get("unblocked_tasks") or []
         team_logger.info(f"Task {task_id} cancelled")
 
+        # Carry the (former) assignee so its dispatcher steers it off the
+        # cancelled task via on_task_cancelled, instead of a member-wide cancel.
         await self._publish_task_event(
-            TaskCancelledEvent(team_name=self.team_name, task_id=task_id),
+            TaskCancelledEvent(team_name=self.team_name, task_id=task_id, member_name=task.assignee),
             error_label=f"Task cancelled event for {task_id}",
         )
         await self._publish_unblocked_events(unblocked_tasks)
@@ -1071,7 +1202,11 @@ class TeamTaskManager:
 
         for task in cancelled_tasks:
             await self._publish_task_event(
-                TaskCancelledEvent(team_name=self.team_name, task_id=task.task_id),
+                TaskCancelledEvent(
+                    team_name=self.team_name,
+                    task_id=task.task_id,
+                    member_name=task.assignee,
+                ),
                 error_label=f"Task cancelled event for {task.task_id}",
             )
         await self._publish_unblocked_events(unblocked_tasks)
@@ -1101,20 +1236,20 @@ class TeamTaskManager:
         team_logger.info(f"Unblocked {len(unblocked_tasks)} tasks")
 
     async def _maybe_publish_task_list_drained(self) -> None:
-        """Publish TASK_LIST_DRAINED if every task in the list is now terminal.
+        """Publish TASK_LIST_DRAINED if every task on the board is now terminal.
 
-        Re-reads the full task list; no-op when the list is empty (an empty
-        board is not "drained"). Idempotency across repeated terminal
-        transitions is the consumer's concern — the manager just reports the
-        fact each time it observes it.
+        Uses one aggregate COUNT query (total + non-terminal) instead of
+        loading the whole task list and iterating — this fires on every
+        terminal transition, so a full scan here is pure waste. No-op when the
+        board is empty (an empty board is not "drained"). Idempotency across
+        repeated terminal transitions is the consumer's concern — the manager
+        just reports the fact each time it observes it.
         """
-        tasks = await self.list_tasks()
-        if not tasks:
-            return
-        if any(tk.status not in TASK_TERMINAL_STATUSES for tk in tasks):
+        total, non_terminal = await self.db.task.count_tasks_terminality(self.team_name)
+        if total == 0 or non_terminal > 0:
             return
         await self._publish_task_event(
-            TaskListDrainedEvent(team_name=self.team_name, task_count=len(tasks)),
+            TaskListDrainedEvent(team_name=self.team_name, task_count=total),
             error_label=f"Task list drained event for team {self.team_name}",
         )
 
@@ -1197,15 +1332,21 @@ class TeamTaskManager:
         if not success:
             return TaskOpResult.fail(
                 f"Task {task_id} cannot be edited while in status '{task.status}'; "
-                f"content updates are only allowed on pending / blocked tasks"
+                f"content updates are allowed on pending / blocked / planning / in-progress tasks "
+                f"(in-review tasks are locked)"
             )
 
         team_logger.info(f"Task {task_id} updated")
 
+        # A claimed task stays claimed on edit; carry the assignee so its
+        # dispatcher tells it to re-read the revised content (on_task_updated)
+        # instead of the old reset-to-pending + cancel_member.
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
-                message=EventMessage.from_event(TaskUpdatedEvent(team_name=self.team_name, task_id=task_id)),
+                message=EventMessage.from_event(
+                    TaskUpdatedEvent(team_name=self.team_name, task_id=task_id, member_name=task.assignee)
+                ),
             )
             team_logger.debug(f"Task updated event published: {task_id}")
         except Exception as e:
@@ -1213,10 +1354,58 @@ class TeamTaskManager:
 
         return TaskOpResult.success()
 
+    async def set_reviewer(self, task_id: str, reviewer_names: list[str]) -> TaskOpResult:
+        """Set a task's verify-gate reviewers (Leader only).
+
+        Persists the reviewer member-name list (empty clears the gate). Caller
+        (the tool boundary) validates that reviewers are real members and none
+        is the task's author. Independent of status — reviewers may be attached
+        before or during execution; the list is consulted at completion time.
+
+        Args:
+            task_id: Task to (re)assign reviewers on.
+            reviewer_names: Reviewer member names; empty list clears reviewers.
+
+        Returns:
+            ``TaskOpResult`` describing the outcome.
+        """
+        task = await self.get(task_id)
+        if not task:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+
+        reviewer_json = json.dumps(list(reviewer_names)) if reviewer_names else None
+        ok = await self.db.task.set_reviewer(task_id, reviewer_json)
+        if not ok:
+            return TaskOpResult.fail(f"Task {task_id} reviewer could not be set")
+        team_logger.info("Task %s reviewers set to %s", task_id, reviewer_names or "[]")
+        return TaskOpResult.success()
+
+    async def set_max_review_rounds(self, task_id: str, max_review_rounds: int) -> TaskOpResult:
+        """Set a task's review-round ceiling (Leader only, F_62).
+
+        Caller (the tool boundary) validates the value and that the task
+        carries reviewers. Consulted by the scheduler's judge pass — a failing
+        round at or beyond the ceiling escalates to the leader instead of
+        looping rework.
+        """
+        task = await self.get(task_id)
+        if not task:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+
+        ok = await self.db.task.set_max_review_rounds(task_id, max_review_rounds)
+        if not ok:
+            return TaskOpResult.fail(f"Task {task_id} max_review_rounds could not be set")
+        team_logger.info("Task %s max_review_rounds set to %s", task_id, max_review_rounds)
+        return TaskOpResult.success()
+
     async def reset(self, task_id: str) -> TaskOpResult:
         """Reset a claimed task back to PENDING and clear assignee.
 
-        Useful for re-assigning a task to another member.
+        Useful for re-assigning a task to another member, or for
+        releasing a leaving member's claims back into the claimable pool.
+        Publishes ``TASK_RELEASED`` on success so idle teammates learn
+        the task is claimable again (same downstream nudge as
+        ``TASK_UNBLOCKED``).
 
         Args:
             task_id: Task identifier.
@@ -1231,9 +1420,151 @@ class TeamTaskManager:
         result = await self.db.task.reset_task(task_id)
         if not result:
             return TaskOpResult.fail(
-                f"Task {task_id} cannot be reset from status '{existing.status}'; only claimed tasks can be reset"
+                f"Task {task_id} cannot be reset from status '{existing.status}'; "
+                f"only planning / in-progress / in-review tasks can be reset"
             )
         team_logger.info(f"Task {task_id} reset successfully")
+        await self._publish_task_event(
+            TaskReleasedEvent(team_name=self.team_name, task_id=task_id),
+            error_label=f"Task released event for {task_id}",
+        )
+        return TaskOpResult.success()
+
+    async def get_other_active_task_id(self, member_name: str, exclude_task_id: str) -> str | None:
+        """Return the task_id of a member's active task other than
+        ``exclude_task_id``, or None.
+
+        Backs the one-active-task-per-member invariant enforced at the tool
+        boundary: a claim / leader assignment / scheduler start is rejected
+        when this returns a task id. "Active" spans the three owned non-terminal
+        conditions — ``PLANNING`` / ``IN_PROGRESS`` / ``IN_REVIEW``. ``exclude_task_id``
+        keeps an idempotent re-claim / re-assign / re-start of the same task
+        from being flagged as a conflict. Probes a single ``task_id`` column
+        (``LIMIT 1``) at the DB layer rather than reading the member's full
+        active set.
+
+        Args:
+            member_name: Member whose active tasks to inspect.
+            exclude_task_id: Task id to ignore (the one being acted on).
+
+        Returns:
+            The task_id of one other active task, or ``None`` when the member
+            holds none besides ``exclude_task_id``.
+        """
+        return await self.db.task.get_other_active_task_id(self.team_name, member_name, exclude_task_id)
+
+    async def start_task(self, task_id: str) -> TaskOpResult:
+        """Move a scheduled task from PENDING(assignee) into execution.
+
+        Called by the scheduler when it dispatches an already-assigned task to
+        its owner and execution begins — assignment (at create time) and
+        execution-start are separate events in scheduled dispatch. The entry
+        gate mirrors ``assign``: a ``BUILD_MODE`` owner starts executing
+        (``IN_PROGRESS``), a ``PLAN_MODE`` owner enters the plan gate
+        (``PLANNING``, F_59 scheduled·plan edge). Enforces the one-active-task
+        invariant before the CAS: the owner must not already hold another
+        active (PLANNING / IN_PROGRESS / IN_REVIEW) task.
+
+        Args:
+            task_id: The assigned task to start. Its ``assignee`` names the
+                owner; there is no separate member argument.
+
+        Returns:
+            ``TaskOpResult`` carrying the failure reason on error.
+        """
+        task = await self.get(task_id)
+        if not task:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+        member_name = task.assignee
+        if not member_name:
+            return TaskOpResult.fail(f"Task {task_id} has no assignee; cannot start an unassigned task")
+
+        # Entry gate mirrors ``assign``: plan-mode owners land in the plan
+        # gate and must get approval before executing.
+        member = await self.db.member.get_member(member_name, self.team_name)
+        entry_status = (
+            TaskStatus.PLANNING
+            if member is not None and member.mode == MemberMode.PLAN_MODE.value
+            else TaskStatus.IN_PROGRESS
+        )
+
+        # Idempotent re-start: already at its entry gate for its owner -> no-op.
+        if task.status == entry_status.value:
+            team_logger.debug("Task %s already started by %s; no-op", task_id, member_name)
+            return TaskOpResult.success()
+
+        # One active task per member (PLANNING / IN_PROGRESS / IN_REVIEW).
+        busy_task_id = await self.get_other_active_task_id(member_name, task_id)
+        if busy_task_id:
+            return TaskOpResult.fail(
+                f"Member {member_name} already has an active task {busy_task_id}; "
+                f"finish it before starting {task_id}"
+            )
+
+        started = await self.db.task.start_task(task_id, member_name, to_status=entry_status)
+        if not started:
+            return TaskOpResult.fail(
+                f"Task {task_id} cannot be started from status '{task.status}' "
+                f"(only a pending task assigned to {member_name} can start)"
+            )
+
+        await self._publish_task_event(
+            TaskStartedEvent(
+                team_name=self.team_name,
+                task_id=task_id,
+                member_name=member_name,
+            ),
+            error_label=f"Task started event for {task_id}",
+        )
+        return TaskOpResult.success()
+
+    async def reassign(self, task_id: str, new_assignee: str) -> TaskOpResult:
+        """Hand an in-progress task from its current owner to another member.
+
+        Atomic assignee swap — the task stays IN_PROGRESS throughout and never
+        bounces through PENDING, so no spurious ``TASK_RELEASED`` wakes idle
+        teammates and there is no claimable-pool window to race into. Fires
+        exactly two targeted events: ``TASK_REVOKED`` tells the former owner
+        to steer off the now-foreign task, ``TASK_CLAIMED`` tells the new
+        owner to pick it up. The former owner's other claims and in-flight
+        round stay intact — this touches only the one task.
+
+        The new member is validated *before* the swap so a bad target never
+        disturbs the task.
+
+        Args:
+            task_id: Task to reassign (must be IN_PROGRESS).
+            new_assignee: Member to hand the task to.
+
+        Returns:
+            ``TaskOpResult`` describing the outcome.
+        """
+        task = await self.get(task_id)
+        if not task:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+
+        member = await self.db.member.get_member(new_assignee, self.team_name)
+        if not member:
+            return TaskOpResult.fail(f"Member {new_assignee} not found in team {self.team_name}")
+
+        old_assignee = task.assignee
+        if not old_assignee:
+            return TaskOpResult.fail(f"Task {task_id} has no current assignee to reassign from")
+
+        swapped = await self.db.task.reassign_task(task_id, old_assignee, new_assignee)
+        if not swapped:
+            return TaskOpResult.fail(
+                f"Task {task_id} could not be reassigned; it is no longer claimed by {old_assignee}"
+            )
+
+        await self._publish_task_event(
+            TaskRevokedEvent(team_name=self.team_name, task_id=task_id, member_name=old_assignee),
+            error_label=f"Task revoked event for {task_id} (from {old_assignee})",
+        )
+        await self._publish_task_event(
+            TaskClaimedEvent(team_name=self.team_name, task_id=task_id, member_name=new_assignee),
+            error_label=f"Task claimed event for {task_id} (to {new_assignee})",
+        )
         return TaskOpResult.success()
 
     async def approve_plan(
@@ -1245,10 +1576,10 @@ class TeamTaskManager:
     ) -> TaskOpResult:
         """Approve or reject a member plan submission for PLAN_MODE members.
 
-        Plan mode reuses the existing task state machine:
-        PENDING -> CLAIMED when a member submits a plan, then
-        CLAIMED -> PLAN_APPROVED when the leader approves it. A rejection
-        keeps the task in CLAIMED so the member can revise and resubmit a
+        Plan mode drives the plan gate:
+        PENDING -> PLANNING when a member submits a plan, then
+        PLANNING -> IN_PROGRESS when the leader approves it. A rejection
+        keeps the task in PLANNING so the member can revise and resubmit a
         new plan id.
 
         Args:
@@ -1272,10 +1603,11 @@ class TeamTaskManager:
         existing = await self.db.task.get_task(task_id)
         if not existing:
             return TaskOpResult.fail(f"Task {task_id} not found")
-        if existing.status != TaskStatus.CLAIMED.value:
+        # PLANNING is the plan-gate state a plan is decided from.
+        if existing.status != TaskStatus.PLANNING.value:
             return TaskOpResult.fail(
                 f"Task {task_id} cannot be plan-approved from status "
-                f"'{existing.status}'; only claimed tasks can be approved or rejected"
+                f"'{existing.status}'; only a task in planning can be approved or rejected"
             )
         if not existing.assignee:
             return TaskOpResult.fail(f"Task {task_id} has no assignee")
@@ -1303,7 +1635,9 @@ class TeamTaskManager:
 
         tool_call_id = str(plan_index.get("tool_call_id") or "")
 
-        next_status = TaskStatus.PLAN_APPROVED.value if approved else TaskStatus.CLAIMED.value
+        # Rejection keeps the task in PLANNING so the member can revise and
+        # resubmit; approval advances the plan gate to IN_PROGRESS.
+        next_status = TaskStatus.IN_PROGRESS.value if approved else existing.status
         plan_path.parent.mkdir(parents=True, exist_ok=True)
         approval = {
             "task_id": task_id,
@@ -1330,14 +1664,14 @@ class TeamTaskManager:
                     task_id=task_id,
                     member_name=existing.assignee,
                     approved=False,
-                    status=TaskStatus.CLAIMED.value,
+                    status=existing.status,
                     plan_id=plan_id,
                     feedback=feedback,
                     tool_call_id=tool_call_id,
                 ),
                 error_label=f"Task plan response event for {task_id}",
             )
-            team_logger.info(f"Task {task_id} plan rejected; task remains claimed")
+            team_logger.info("Task %s plan rejected; task remains %s", task_id, existing.status)
             return TaskOpResult.success()
 
         task = await self.db.task.approve_plan_task(task_id)
@@ -1353,7 +1687,7 @@ class TeamTaskManager:
                 task_id=task_id,
                 member_name=task.assignee,
                 approved=True,
-                status=TaskStatus.PLAN_APPROVED.value,
+                status=TaskStatus.IN_PROGRESS.value,
                 plan_id=plan_id,
                 feedback=feedback,
                 tool_call_id=tool_call_id,

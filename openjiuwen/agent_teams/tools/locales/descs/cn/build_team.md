@@ -1,7 +1,7 @@
 组建团队并注册自己为 Leader。拿到目标后就调用，不要犹豫。
 
 ## 调用顺序
-build_team → create_task → spawn_teammate → send_message(to="*")。
+build_team → spawn_teammate → create_task → 让成员开工（方式取决于团队的调度模式）。成员先于任务存在，任务才能落到具体的人头上。
 build_team 之前不能调用任何其他团队工具。
 
 ## HITT（Human in the Team）
@@ -23,9 +23,9 @@ HITT 启用后适用于全部 role=human_agent 的成员：
 
 ## 任务设计原则
 - 描述目标，不描述步骤：content 写目标、验收标准、技术约束，不写具体操作
-- 单人认领：每个任务只允许一个 teammate 认领并负责交付
+- 单一负责人：每个任务只允许一个 teammate 承担并负责交付
 - 粗粒度拆分：一个任务对应一个可独立交付的成果
-- 成员自主规划：成员领取任务后自行制定计划，Leader 通过 approve_plan 审批（仅当成员执行模式为 plan_mode 时生效）
+- 成员自主规划：成员承接任务后自行制定计划，Leader 通过 approve_plan 审批（仅当成员执行模式为 plan_mode 时生效）
 
 ## 消息自动投递
 发送消息后不需要轮询回复或查看任务进度，系统会在新消息到达或任务状态变化时主动通知你。没有待处理事项时停下来等待通知。

@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
+from openjiuwen.agent_evolving.checkpointing.skill_package import pack_skill_directory
 from openjiuwen.agent_evolving.checkpointing.store_records import MergeRecordsRequest, StoreRecordsHelper
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionLog,
@@ -75,6 +76,21 @@ def write_invalid_evolution_log(
 
 def assert_no_files(path: Path, pattern: str = "*") -> None:
     assert not path.exists() or not any(path.glob(pattern))
+
+
+def make_skill_package(tmp_path: Path) -> bytes:
+    source_dir = prepare_skill(tmp_path / "package-source", "source-skill")
+    return pack_skill_directory(source_dir)
+
+
+def make_named_member_package(member_name: str) -> bytes:
+    payload = b"# Skill\n"
+    member = tarfile.TarInfo(name=member_name)
+    member.size = len(payload)
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        archive.addfile(member, io.BytesIO(payload))
+    return buffer.getvalue()
 
 
 class TestEvolutionStoreBasics:
@@ -923,6 +939,90 @@ class TestPackSkillForSharing:
         assert "evolution-index-end" not in packed_skill_md
         assert "Experience Index" not in packed_skill_md
         assert "# Skill A" in packed_skill_md
+
+
+class TestInstallSkillPackage:
+    @staticmethod
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "unsafe_name",
+        [
+            "../outside",
+            "nested/name",
+            r"nested\name",
+            ".",
+            "..",
+            "skill.name",
+            "skill name",
+        ],
+    )
+    async def test_rejects_unsafe_explicit_name(tmp_path: Path, unsafe_name: str):
+        root = tmp_path / "skills"
+        store = EvolutionStore(str(root))
+
+        installed = await store.install_skill_package(
+            make_skill_package(tmp_path),
+            skill_name=unsafe_name,
+        )
+
+        assert installed is None
+        assert_no_files(root)
+        assert not (tmp_path / "outside").exists()
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_rejects_absolute_explicit_name(tmp_path: Path):
+        root = tmp_path / "skills"
+        outside = tmp_path / "absolute-target"
+        store = EvolutionStore(str(root))
+
+        installed = await store.install_skill_package(
+            make_skill_package(tmp_path),
+            skill_name=str(outside),
+        )
+
+        assert installed is None
+        assert_no_files(root)
+        assert not outside.exists()
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_rejects_unsafe_inferred_name(tmp_path: Path):
+        root = tmp_path / "skills"
+        store = EvolutionStore(str(root))
+
+        installed = await store.install_skill_package(make_named_member_package("./SKILL.md"))
+
+        assert installed is None
+        assert_no_files(root)
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_rejects_symlinked_destination_outside_root(tmp_path: Path):
+        root = tmp_path / "skills"
+        outside = tmp_path / "outside"
+        root.mkdir()
+        outside.mkdir()
+        try:
+            (root / "linked-skill").symlink_to(outside, target_is_directory=True)
+        except (NotImplementedError, OSError):
+            pytest.skip("directory symlinks are unavailable")
+        store = EvolutionStore(str(root))
+
+        installed = await store.install_skill_package(
+            make_skill_package(tmp_path),
+            skill_name="linked-skill",
+        )
+
+        assert installed is None
+        assert_no_files(outside)
+
+    @staticmethod
+    def test_create_resolution_rejects_path_outside_root(tmp_path: Path):
+        root = tmp_path / "skills"
+        store = EvolutionStore(str(root))
+
+        assert store.resolve_skill_dir("../outside", create=True) is None
 
 
 class TestEvolutionStoreArchiveAndCreate:

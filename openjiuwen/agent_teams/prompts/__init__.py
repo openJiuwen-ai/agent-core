@@ -8,28 +8,21 @@ TeamAgent. Consumers (rails, configurators, tests) import from here
 instead of reaching into individual files.
 
 Layout:
-- ``loader``: ``load_template`` / ``load_shared_template`` for markdown.
-- ``policy``: legacy monolithic ``build_system_prompt`` + ``role_policy``.
+- ``loader``: ``load_template`` for markdown.
 - ``sections``: per-section ``PromptSection`` builders consumed by the rail.
 - ``section_cache``: mtime-keyed cache primitive for dynamic sections.
-- ``system_prompt.md`` / ``cn/`` / ``en/``: markdown templates.
+- ``cn/`` / ``en/``: markdown templates.
 """
 
 from __future__ import annotations
 
-from openjiuwen.agent_teams.prompts.loader import (
-    load_shared_template,
-    load_template,
-)
-from openjiuwen.agent_teams.prompts.policy import (
-    build_system_prompt,
-    role_policy,
-)
+from openjiuwen.agent_teams.prompts.loader import load_template
 from openjiuwen.agent_teams.prompts.section_cache import MtimeSectionCache
 from openjiuwen.agent_teams.prompts.sections import (
     TeamSectionName,
     build_team_attachment_notice_section,
     build_team_bridge_section,
+    build_team_dispatch_section,
     build_team_extra_section,
     build_team_hitt_section,
     build_team_inbound_tags_section,
@@ -37,7 +30,7 @@ from openjiuwen.agent_teams.prompts.sections import (
     build_team_lifecycle_section,
     build_team_member_system_prompt,
     build_team_members_section,
-    build_team_persona_section,
+    build_team_private_prompt_section,
     build_team_role_section,
     build_team_static_sections,
     build_team_workflow_section,
@@ -69,9 +62,9 @@ __all__ = [
     "TEAM_PLAN_MODE_PROMPT_EN",
     "TeamSectionName",
     "apply_team_plan_agent_prompt",
-    "build_system_prompt",
     "build_team_attachment_notice_section",
     "build_team_bridge_section",
+    "build_team_dispatch_section",
     "build_team_plan_agent_card",
     "build_team_extra_section",
     "build_team_hitt_section",
@@ -80,7 +73,7 @@ __all__ = [
     "build_team_lifecycle_section",
     "build_team_member_system_prompt",
     "build_team_members_section",
-    "build_team_persona_section",
+    "build_team_private_prompt_section",
     "build_team_plan_mode_prompt",
     "build_team_plan_mode_prompt_template",
     "build_team_plan_mode_section",
@@ -88,7 +81,5 @@ __all__ = [
     "build_team_static_sections",
     "build_team_workflow_section",
     "get_team_plan_mode_prompt",
-    "load_shared_template",
     "load_template",
-    "role_policy",
 ]

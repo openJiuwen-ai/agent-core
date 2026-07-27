@@ -43,7 +43,7 @@ Unlike regular Skills, Team Skills:
 
 ### Principle
 
-`TeamSkillCreateRail` detects `spawn_member` call count in `AFTER_TASK_ITERATION` callback. When threshold is reached, it injects a follow_up prompt guiding the Agent to confirm via `ask_user` and invoke `team-skill-creator` skill.
+`TeamSkillCreateRail` waits until the team task is completed, then checks whether the run spawned enough team members and did not already use an existing Team/Swarm Skill. When these gates pass, it injects a short follow_up to wake up the next round and injects system prompt text that guides the Agent to decide whether the collaboration pattern is reusable. If so, the Agent asks for confirmation in normal reply text. It must not use popup-style interaction tools for this confirmation.
 
 ### Configuration Example
 
@@ -70,11 +70,13 @@ agent = create_deep_agent(
 ### Creation Flow
 
 1. Agent executes collaboration flow (calls `build_team`, `spawn_member`, `create_task`)
-2. Rail detects `spawn_member` call count reaches threshold
-3. Rail injects prompt via `TaskLoopController.enqueue_follow_up()`
-4. Agent calls `ask_user` tool to confirm with user
-5. User selects "Create", Agent invokes `team-skill-creator` skill
-6. Skill generates Team Skill files based on trajectory
+2. Team completion callback marks the run as eligible for creation review
+3. Rail detects `spawn_member` call count reaches threshold and no existing Team/Swarm Skill was used
+4. Rail injects a short follow_up via `TaskLoopController.enqueue_follow_up()` and injects a system self-check prompt before the next model call
+5. Agent asks in normal reply text whether to create a Team/Swarm Skill when it finds reusable value
+6. User confirms or provides custom instructions
+7. Agent invokes `swarmskill-creator` or a compatible team skill creator skill
+8. Skill generates Team/Swarm Skill files based on the current team context
 
 ---
 
@@ -127,7 +129,7 @@ To aggregate multiple members, every rail or agent that should contribute eviden
 
 #### 1. Trajectory Issue Analysis
 
-Rail analyzes team execution trajectory, detecting:
+Rail analyzes team execution context records, detecting:
 
 - **Role coordination issues**: Collaboration breaks, data not passed
 - **Constraint violations**: Timeout, output format issues

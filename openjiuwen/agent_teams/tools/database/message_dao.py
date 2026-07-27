@@ -3,9 +3,10 @@
 
 """Message and message-read-status data access object."""
 
+import json
 from typing import List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,6 +49,7 @@ class MessageDao:
         broadcast: bool = False,
         is_read: bool = False,
         protocol: str = "plain",
+        meta: Optional[dict] = None,
     ) -> bool:
         """Create a new team message.
 
@@ -59,6 +61,10 @@ class MessageDao:
                 whose per-member read state lives in MessageReadStatus.
             protocol: Message format — ``"plain"`` for normal text,
                 ``"json"`` for structured payloads (e.g. approval results).
+            meta: Framework-only delivery payload, JSON-serialized into the
+                ``meta`` column. A templated message carries the template key
+                plus its refs/params here and stores an empty ``content`` —
+                the delivery path expands it. See ``message_template.py``.
         """
         message_model = _get_message_model()
 
@@ -74,6 +80,7 @@ class MessageDao:
                         timestamp=get_current_time(),
                         broadcast=broadcast,
                         protocol=protocol,
+                        meta=json.dumps(meta, ensure_ascii=False) if meta else None,
                         is_read=None if broadcast else is_read,
                     )
                     session.add(message)
@@ -85,6 +92,76 @@ class MessageDao:
                 return False
 
         return await retry_on_locked(_op, on_locked_result=False, label=f"create_message {message_id}")
+
+    async def create_direct_messages(
+        self,
+        *,
+        team_name: str,
+        from_member_name: str,
+        content: str,
+        recipients: List[tuple[str, str]],
+        protocol: str = "plain",
+    ) -> int:
+        """Insert N point-to-point messages (same content) in ONE transaction.
+
+        Batch counterpart to ``create_message`` for multicast: one write-lock
+        acquisition + one COMMIT (one fsync) covers every recipient, instead
+        of N separate transactions each paying their own fsync — the dominant
+        multicast write-tail cost under the process-wide write lock. The whole
+        batch is atomic: an ``IntegrityError`` rolls back all rows and returns
+        0. ``is_read`` starts False (multicast never targets consumer-less
+        pseudo-members — the tool layer rejects ``user`` and ``*``).
+
+        Args:
+            team_name: Team the messages belong to.
+            from_member_name: Sender member id.
+            content: Shared message body.
+            recipients: ``(message_id, to_member_name)`` pairs, in delivery
+                order. Message ids are minted by the caller (mirrors
+                ``create_message``).
+            protocol: Message format (``"plain"`` / ``"json"``).
+
+        Returns:
+            Number of rows inserted; 0 when ``recipients`` is empty or the
+            batch failed (nothing committed).
+        """
+        if not recipients:
+            return 0
+        message_model = _get_message_model()
+        now = get_current_time()
+
+        async def _op() -> int:
+            try:
+                async with self._sessions.write() as session:
+                    for message_id, to_member_name in recipients:
+                        session.add(
+                            message_model(
+                                message_id=message_id,
+                                team_name=team_name,
+                                from_member_name=from_member_name,
+                                to_member_name=to_member_name,
+                                content=content,
+                                timestamp=now,
+                                broadcast=False,
+                                protocol=protocol,
+                                is_read=False,
+                            )
+                        )
+                    await session.commit()
+                team_logger.info("Created %d direct messages from %s", len(recipients), from_member_name)
+                return len(recipients)
+            except IntegrityError as e:
+                team_logger.error(
+                    "Failed to batch-create %d messages from %s: %s",
+                    len(recipients),
+                    from_member_name,
+                    e,
+                )
+                return 0
+
+        return await retry_on_locked(
+            _op, on_locked_result=0, label=f"create_direct_messages ({len(recipients)})"
+        )
 
     async def get_messages(
         self,
@@ -205,35 +282,35 @@ class MessageDao:
             if not include_broadcast:
                 return False
 
-            # Broadcast messages: per-member watermark comparison.
-            broadcast_result = await session.execute(
-                select(message_model).where(
+            # Broadcast messages: a broadcast B is unread by member M when M
+            # is not its sender and M has no read watermark covering B's
+            # timestamp. Push the whole "does any such (member, broadcast)
+            # pair exist?" check into one correlated EXISTS query instead of
+            # loading every broadcast + member + watermark row and doing an
+            # O(members x broadcasts) scan in Python. A NULL / absent
+            # watermark never satisfies ``read_at >= B.timestamp`` (SQL
+            # three-valued logic), so it correctly counts as uncovered.
+            covered_by_watermark = (
+                select(read_status_model.member_name)
+                .where(
+                    read_status_model.member_name == TeamMember.member_name,
+                    read_status_model.team_name == team_name,
+                    read_status_model.read_at >= message_model.timestamp,
+                )
+                .exists()
+            )
+            unread_broadcast = await session.execute(
+                select(message_model.message_id)
+                .join(TeamMember, TeamMember.team_name == message_model.team_name)
+                .where(
                     message_model.team_name == team_name,
                     message_model.broadcast.is_(True),
+                    TeamMember.member_name != message_model.from_member_name,
+                    ~covered_by_watermark,
                 )
+                .limit(1)
             )
-            broadcasts = broadcast_result.scalars().all()
-            if not broadcasts:
-                return False
-
-            member_result = await session.execute(
-                select(TeamMember.member_name).where(TeamMember.team_name == team_name)
-            )
-            members = member_result.scalars().all()
-
-            read_result = await session.execute(
-                select(read_status_model).where(read_status_model.team_name == team_name)
-            )
-            read_at_by_member = {row.member_name: row.read_at for row in read_result.scalars().all()}
-
-            for member_name in members:
-                watermark = read_at_by_member.get(member_name)
-                for msg in broadcasts:
-                    if msg.from_member_name == member_name:
-                        continue
-                    if watermark is None or msg.timestamp > watermark:
-                        return True
-            return False
+            return unread_broadcast.first() is not None
 
     async def _mark_read_in_session(
         self,
@@ -293,6 +370,13 @@ class MessageDao:
                     read_at=message.timestamp,
                 )
                 session.add(read_status)
+                # Flush the pending INSERT so a second broadcast id in the same
+                # batch transaction sees this watermark row on its SELECT. The
+                # session runs autoflush=False, so without this the next
+                # broadcast re-inserts the same (member_name, team_name) PK and
+                # the commit hits a UNIQUE violation. Flush holds no fsync — the
+                # single commit still batches the whole drain into one.
+                await session.flush()
             elif read_status.read_at is None or message.timestamp > read_status.read_at:
                 read_status.read_at = message.timestamp
         else:
@@ -317,11 +401,14 @@ class MessageDao:
     async def mark_messages_read(self, message_ids: List[str], member_name: str) -> int:
         """Mark several messages read for one member in a single transaction.
 
-        Batches what would otherwise be one transaction (one fsync) per
-        message into a single commit — the dominant write-throughput lever
-        on SQLite. Skips ids that are missing or fail validation; returns
-        the number actually marked. Idempotent and safe to retry on a
-        locked database (see ``_mark_read_in_session``).
+        Batches the whole mailbox drain into one commit (one fsync) — the
+        dominant write-throughput lever on SQLite. Direct messages are marked
+        with a single set-based ``UPDATE ... WHERE message_id IN (...)`` rather
+        than one SELECT+write per id, so draining a busy inbox costs a constant
+        few statements instead of ``O(n)`` round-trips. Broadcasts keep the
+        per-message watermark path (they are few — the manager layer collapses
+        them to the newest before the DAO). Skips ids that are missing or fail
+        validation; returns the number actually marked.
 
         Args:
             message_ids: Message ids to mark read, in delivery order.
@@ -333,14 +420,65 @@ class MessageDao:
         if not message_ids:
             return 0
 
+        message_model = _get_message_model()
+
         async def _op() -> int:
-            marked = 0
             async with self._sessions.write() as session:
-                for message_id in message_ids:
-                    if await self._mark_read_in_session(session, message_id, member_name):
+                # One SELECT for every target row — missing ids simply drop out.
+                result = await session.execute(
+                    select(message_model).where(message_model.message_id.in_(message_ids))
+                )
+                messages = result.scalars().all()
+                if not messages:
+                    return 0
+
+                direct = [m for m in messages if not m.broadcast]
+                broadcasts = [m for m in messages if m.broadcast]
+
+                marked = 0
+                # Direct messages: one set-based UPDATE for the whole batch.
+                direct_ids = await self._eligible_direct_ids(session, direct, member_name)
+                if direct_ids:
+                    await session.execute(
+                        update(message_model).where(message_model.message_id.in_(direct_ids)).values(is_read=True)
+                    )
+                    marked += len(direct_ids)
+
+                # Broadcasts: per-message watermark advance (few in practice).
+                for message in broadcasts:
+                    if await self._mark_read_in_session(session, message.message_id, member_name):
                         marked += 1
+
                 if marked:
                     await session.commit()
-            return marked
+                return marked
 
         return await retry_on_locked(_op, on_locked_result=0, label=f"mark_messages_read ({len(message_ids)})")
+
+    async def _eligible_direct_ids(
+        self,
+        session: AsyncSession,
+        direct_messages: List[TeamMessageBase],
+        member_name: str,
+    ) -> List[str]:
+        """Return the direct-message ids ``member_name`` is allowed to ack.
+
+        Mirrors the per-message validation of ``_mark_read_in_session`` but in
+        one roster query: the ``user`` pseudo-member may ack any direct message
+        without a roster row; every other member must exist in the message's
+        team. Messages whose team lacks the member are dropped (not marked),
+        matching the single-message path's "member not found -> skip".
+        """
+        if not direct_messages:
+            return []
+        if member_name == "user":
+            return [m.message_id for m in direct_messages]
+        teams = {m.team_name for m in direct_messages}
+        result = await session.execute(
+            select(TeamMember.team_name).where(
+                TeamMember.member_name == member_name,
+                TeamMember.team_name.in_(teams),
+            )
+        )
+        valid_teams = set(result.scalars().all())
+        return [m.message_id for m in direct_messages if m.team_name in valid_teams]

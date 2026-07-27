@@ -8,6 +8,12 @@ on-shutdown mailbox drain. Drain registers a fan-out callback on
 processes the lifecycle state change first, then this handler drains
 its own mailbox in ``use_steer`` mode so any final messages reach the
 agent before tear-down.
+
+Every path here that feeds the local harness goes through
+``_harness_input_blocked`` first, which is where a departing member's graceful
+teardown actually happens: a member with shutdown requested and no round in
+flight settles straight to SHUTDOWN instead of being woken for a final round,
+and a member that is already SHUTDOWN is never fed at all.
 """
 
 from __future__ import annotations
@@ -26,7 +32,9 @@ from openjiuwen.agent_teams.inbound_render import (
     INBOUND_TYPE_DIRECT,
     render_inbound,
 )
+from openjiuwen.agent_teams.message_template import ExpandedMessage, expand_message
 from openjiuwen.agent_teams.schema.events import EventMessage, MessageEvent, TeamEvent
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.timefmt import format_time_context
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
@@ -85,30 +93,87 @@ class MessageHandler(BaseCoordinationHandler):
             await self._process_unread_messages(member_name)
 
     async def on_member_shutdown_drain(self, event: EventMessage) -> None:
-        """Drain own mailbox when this teammate is the one shutting down.
+        """Drain own mailbox when this member is the one shutting down.
 
-        Teammate-only: the leader observes other members' shutdowns at
-        the lifecycle level, and a human agent has no autonomous round —
-        draining its mailbox would ``deliver_input`` and resurrect a
-        round just as the avatar is collapsing (its own teardown rides
-        ``MemberHandler`` → ``shutdown_self`` instead). Only the teammate
-        whose own ``member_name`` matches the event's payload drains.
-        Steer mode ensures the messages land even if the agent is in
-        the middle of a round.
+        Non-leader only, and only for the member the event names. Steer mode
+        ensures a final message lands even if the agent is mid-round.
+
+        Every role rides this same path, human agents included. The
+        harness-input gate in ``_process_unread_messages`` already refuses to
+        wake an idle harness for a departing member — it settles it straight to
+        SHUTDOWN instead — so draining can no longer resurrect a round on an
+        avatar that is collapsing. A member with a round in flight steers its
+        final messages into it and closes at round-end; an idle one settles.
+        That leaves nothing for a role branch to decide here.
         """
-        if self._blueprint.role != TeamRole.TEAMMATE:
+        if self._blueprint.role == TeamRole.LEADER:
             return
         member_name = self._blueprint.member_name
-        if not member_name or self._infra.message_manager is None:
+        if not member_name:
             return
         target_id = event.get_payload().member_name
         if target_id is None or target_id != member_name:
             return
+        # No ``message_manager`` guard here: the settle decision lives inside
+        # ``_process_unread_messages``' gate, and a member's teardown must not
+        # hinge on whether the mailbox subsystem happens to be wired.
         await self._process_unread_messages(member_name, use_steer=True)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _harness_input_blocked(self, member_name: str) -> bool:
+        """Whether this member's harness must not be fed — settling it if idle.
+
+        Every path in this handler that feeds the local harness passes through
+        here first. Three outcomes, keyed on the member's persisted status:
+
+        * ``SHUTDOWN`` — the member is gone. Never feed a dead harness; drop the
+          delivery.
+        * ``SHUTDOWN_REQUESTED`` with no round in flight — the member is on its
+          way out with nothing running to ride. Waking the harness for one last
+          round, only to hand it a "you are being shut down" notice, burns an
+          LLM round to say goodbye. Settle straight to SHUTDOWN instead.
+        * ``SHUTDOWN_REQUESTED`` with a round in flight — let the delivery
+          through. It steers into the running round, whose end closes the stream
+          (the teardown teammates have always ridden).
+
+        The status must come from the DB, not from the ``MEMBER_SHUTDOWN``
+        event: ``shutdown_member`` writes SHUTDOWN_REQUESTED, *then* sends the
+        shutdown notice, *then* publishes the event. The notice therefore lands
+        as an ordinary MESSAGE first, and a gate keyed on the event would let it
+        wake an idle harness before the event ever arrives.
+
+        The real human behind a human-agent avatar is unaffected either way: the
+        leader pushes team messages to the controller's inbound callback
+        (``_notify_human_agent_inbound``) independently of this avatar's harness,
+        so skipping the harness never costs the person a message.
+
+        The leader is exempt — it is never a ``shutdown_member`` target and has
+        to survive ``clean_team`` to serve the next interaction.
+        """
+        if self._blueprint.role == TeamRole.LEADER:
+            return False
+        backend = self._infra.team_backend
+        if backend is None:
+            return False
+
+        status = await backend.get_member_status(member_name)
+        if status == MemberStatus.SHUTDOWN.value:
+            team_logger.debug("[{}] harness input dropped: member is already SHUTDOWN", member_name)
+            return True
+        if status != MemberStatus.SHUTDOWN_REQUESTED.value:
+            return False
+        if self._round.has_in_flight_round():
+            return False
+
+        team_logger.info(
+            "[{}] shutdown requested with no round in flight; settling to SHUTDOWN without a final round",
+            member_name,
+        )
+        await self._lifecycle.shutdown_self()
+        return True
 
     async def _process_unread_messages(self, member_name: str, *, use_steer: bool = True) -> None:
         """Read unread messages, feed to agent one by one, loop until no new messages.
@@ -123,6 +188,11 @@ class MessageHandler(BaseCoordinationHandler):
             member_name: Current member ID.
             use_steer: When True, use steer instead of follow_up for running agent.
         """
+        if await self._harness_input_blocked(member_name):
+            return
+        if self._infra.message_manager is None:
+            return
+
         seen_ids: set[str] = set()
         backend = self._infra.team_backend
         is_human_agent = backend is not None and await backend.is_human_agent(member_name)
@@ -137,27 +207,16 @@ class MessageHandler(BaseCoordinationHandler):
                 break
 
             team_logger.info("[{}] processing {} unread messages (steer={})", member_name, len(new_messages), use_steer)
-            # Collect delivered ids and batch their read-state write into a
-            # single transaction after the loop — one commit (one fsync)
+            # Collect delivered messages and batch their read-state write into
+            # a single transaction after the loop — one commit (one fsync)
             # instead of one per message. The finally guarantees already
             # delivered messages are marked even if delivery raises or an
             # interrupt cuts the drain short; undelivered ones stay unread
-            # for the next poll.
-            #
-            # Broadcast read state is a per-member watermark (one row per
-            # ``(member, team)`` keyed by the newest read broadcast timestamp),
-            # so marking the newest broadcast in the batch advances the
-            # watermark past every older broadcast too. Collecting more than
-            # one broadcast id would make ``mark_messages_read`` insert
-            # duplicate ``(member, team)`` rows in the same transaction and
-            # the commit would raise ``UNIQUE constraint failed``, rolling
-            # back the whole batch and stalling the watermark — the mailbox
-            # reprocessing loop. ``_read_all_unread`` returns newest-first,
-            # so the first broadcast delivered is the watermark anchor; older
-            # broadcasts are still delivered to the agent but skipped on the
-            # read-state write.
-            delivered_ids: list[str] = []
-            broadcast_marked = False
+            # for the next poll. The read-state details (direct is_read rows
+            # vs the single broadcast watermark) live in
+            # ``TeamMessageManager.mark_messages_read`` — the handler just
+            # hands over the raw delivered objects.
+            delivered: list[Any] = []
             interrupted = False
             try:
                 for msg in new_messages:
@@ -182,30 +241,58 @@ class MessageHandler(BaseCoordinationHandler):
                         )
                         interrupted = True
                         break
+                    expanded = await self._expand(msg)
                     if is_bridge:
-                        text = await self._bridge_deliverable_for(member_name, msg)
+                        text = await self._bridge_deliverable_for(member_name, msg, expanded=expanded)
                     else:
-                        text = self._format_message(msg, is_human_agent=is_human_agent, now_ms=get_current_time())
+                        text = self._format_message(
+                            msg,
+                            expanded=expanded,
+                            is_human_agent=is_human_agent,
+                            now_ms=get_current_time(),
+                        )
                     team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
                     await self._round.deliver_input(text, use_steer=use_steer)
-                    # Direct messages flip their own ``is_read`` row, so every
-                    # delivered direct id goes to the batch. Broadcasts share
-                    # one watermark row — collect only the newest (first seen,
-                    # since the unread list is newest-first) and let the
-                    # watermark cover the rest.
-                    if msg.broadcast:
-                        if broadcast_marked:
-                            continue
-                        broadcast_marked = True
-                    delivered_ids.append(msg.message_id)
+                    delivered.append(msg)
             finally:
-                if delivered_ids:
-                    await self._infra.message_manager.mark_messages_read(delivered_ids, member_name)
+                if delivered:
+                    await self._infra.message_manager.mark_messages_read(delivered, member_name)
             if interrupted:
                 return
 
-    async def _bridge_deliverable_for(self, member_name: str, msg: Any) -> str:
+    def _language(self) -> str:
+        """Team language for delivery-time template rendering."""
+        team_spec = self._blueprint.team_spec
+        if team_spec is not None and team_spec.language:
+            return team_spec.language
+        return "cn"
+
+    async def _expand(self, msg: Any) -> ExpandedMessage:
+        """Render a message row's delivery text (F_63 two-phase templating).
+
+        Ordinary messages pass through with their content. A framework
+        template message carries only ``meta``, and its document is rendered
+        here — against the task row as it stands *now*, so a handoff that sat
+        in an offline member's mailbox never delivers a stale task brief.
+        """
+        backend = self._infra.team_backend
+        db = backend.db if backend is not None else None
+
+        async def _get_task(task_id: str) -> Any:
+            return await db.task.get_task(task_id) if db is not None else None
+
+        async def _get_member(name: str) -> Any:
+            return await db.member.get_member(name, backend.team_name) if db is not None else None
+
+        return await expand_message(
+            msg,
+            task_getter=_get_task,
+            member_getter=_get_member,
+            language=self._language(),
+        )
+
+    async def _bridge_deliverable_for(self, member_name: str, msg: Any, *, expanded: ExpandedMessage) -> str:
         """Build the text delivered to a bridge avatar's DeepAgent.
 
         The bridge avatar is a full local teammate, but inbound team
@@ -221,6 +308,9 @@ class MessageHandler(BaseCoordinationHandler):
         Falls back to ``REMOTE_UNAVAILABLE_SENTINEL`` when no adapter
         is wired or when the adapter raises — the bridge then degrades
         to a normal teammate-style mailbox round.
+
+        The relayed body is the *expanded* text: a remote executor has no DB,
+        so it could not render a framework template itself (F_63).
         """
         from openjiuwen.agent_teams.agent.bridge_inbound_compose import compose_bridge_inbound
         from openjiuwen.agent_teams.agent.bridge_outbound_wrap import wrap_outbound_to_remote
@@ -236,19 +326,21 @@ class MessageHandler(BaseCoordinationHandler):
         # fall back to the plain teammate format. A bridge avatar is
         # never a human_agent, so the human-forwarding template stays off.
         if spec is None:
-            return self._format_message(msg, is_human_agent=False, now_ms=get_current_time())
+            return self._format_message(
+                msg,
+                expanded=expanded,
+                is_human_agent=False,
+                now_ms=get_current_time(),
+            )
 
-        language = "cn"
-        team_spec = self._blueprint.team_spec
-        if team_spec is not None and team_spec.language:
-            language = team_spec.language
+        language = self._language()
 
         outbound_text = wrap_outbound_to_remote(
             sender=msg.from_member_name,
             sender_display_name=await self._lookup_display_name(msg.from_member_name),
             sender_role=await self._lookup_role(msg.from_member_name),
-            sender_persona=await self._lookup_persona(msg.from_member_name),
-            body=msg.content,
+            sender_desc=await self._lookup_desc(msg.from_member_name),
+            body=expanded.body,
             broadcast=bool(getattr(msg, "broadcast", False)),
             task_hint=None,
             mode=spec.mailbox_inject_mode or BridgeMailboxInjectMode.PASSTHROUGH,
@@ -270,7 +362,7 @@ class MessageHandler(BaseCoordinationHandler):
 
         return compose_bridge_inbound(
             original_sender=msg.from_member_name,
-            original_body=msg.content,
+            original_body=expanded.body,
             remote_reply=remote_reply,
             language=language,
             time_info=format_time_context(msg.timestamp, get_current_time()),
@@ -286,7 +378,7 @@ class MessageHandler(BaseCoordinationHandler):
             return None
         return row.display_name if row is not None else None
 
-    async def _lookup_persona(self, member_name: str) -> Any:
+    async def _lookup_desc(self, member_name: str) -> Any:
         backend = self._infra.team_backend
         if backend is None or backend.db is None:
             return None
@@ -350,14 +442,23 @@ class MessageHandler(BaseCoordinationHandler):
         if row is None:
             return
 
-        body = row.content
+        # A human agent can be a scheduled team's assignee or reviewer, so the
+        # row may be a framework template whose content is empty — expand it
+        # here too, or the controller would be pushed a blank message (F_63).
+        body = (await self._expand(row)).body
         ts = row.timestamp
 
+        # Recipients are the humans still reachable — a fully SHUTDOWN member has
+        # left the team and its controller has no business still being fed the
+        # team's traffic. A member with shutdown merely *requested* stays in:
+        # ``shutdown_member`` flips the status before it sends the notice, so
+        # excluding it here would drop the one message that tells its controller
+        # it was removed.
         if is_broadcast:
-            recipients = [name for name in await backend.human_agent_names() if name != sender]
+            recipients = [name for name in await backend.reachable_human_agent_names() if name != sender]
         else:
             target = payload.to_member_name
-            if not await backend.is_human_agent(target):
+            if not await backend.is_reachable_human_agent(target):
                 return
             recipients = [target]
 
@@ -417,28 +518,33 @@ class MessageHandler(BaseCoordinationHandler):
         merged.sort(key=lambda m: m.timestamp, reverse=True)
         return merged
 
-    def _format_message(self, msg: Any, *, is_human_agent: bool, now_ms: int) -> str:
+    def _format_message(self, msg: Any, *, expanded: ExpandedMessage, is_human_agent: bool, now_ms: int) -> str:
         """Render one TeamMessage as ``<team-inbound>`` XML for agent input.
 
-        The sender's original content goes verbatim inside the
-        ``<team-inbound>`` element (sender / message_id / type / time as
-        attributes), and the framework-added hint goes in a separate
-        ``<team-note>`` — so the LLM sees a clean boundary between the
-        original message and what the runtime appended. ``message_id`` is
-        carried so the agent can call ``mark_message_read``; the send time
-        is rendered as ``<absolute local time> (<relative diff>)`` so the
-        agent can judge recency (mailbox delivery is often delayed).
+        The message body goes verbatim inside the ``<team-inbound>`` element
+        (sender / message_id / type / time as attributes), and the
+        framework-added hint goes in a separate ``<team-note>`` — so the LLM
+        sees a clean boundary between the message and what the runtime
+        appended. ``message_id`` is carried so the agent can call
+        ``mark_message_read``; the send time is rendered as ``<absolute local
+        time> (<relative diff>)`` so the agent can judge recency (mailbox
+        delivery is often delayed). The envelope is uniform across every team
+        message — a framework template message differs only in where its body
+        came from (rendered at delivery, see ``_expand``), not in its shape.
 
-        Rendering is role-aware. A teammate / leader gets a
-        ``reply-hint`` note. A human_agent avatar gets ``for="controller"``
-        plus a ``hitt-silence`` note: the message is framed as a
-        notification for the controlling human, and the load-bearing
-        "stay silent" constraint keeps the avatar from autonomously
-        calling ``send_message`` — its outbound actions are driven only by
-        Inbox instructions from its controller.
+        Rendering is role-aware. A teammate / leader gets a ``reply-hint``
+        note — except on a framework template message, which is answered with
+        a tool call (start work, cast a vote), never with a reply. A
+        human_agent avatar gets ``for="controller"`` plus a ``hitt-silence``
+        note: the message is framed as a notification for the controlling
+        human, and the load-bearing "stay silent" constraint keeps the avatar
+        from autonomously calling ``send_message`` — its outbound actions are
+        driven only by Inbox instructions from its controller.
 
         Args:
             msg: The team message row to render.
+            expanded: The delivery-time body plus whether it came from a
+                framework template.
             is_human_agent: Whether the recipient is a human-agent avatar.
             now_ms: Current millisecond UTC epoch, the relative-time anchor.
         """
@@ -446,7 +552,7 @@ class MessageHandler(BaseCoordinationHandler):
         time_info = format_time_context(msg.timestamp, now_ms)
         if is_human_agent:
             return render_inbound(
-                content=msg.content,
+                content=expanded.body,
                 sender=msg.from_member_name,
                 message_id=msg.message_id,
                 msg_type=msg_type,
@@ -455,14 +561,16 @@ class MessageHandler(BaseCoordinationHandler):
                 note_kind="hitt-silence",
                 note_text=t("hitt.silence_note"),
             )
+        note_kind = None if expanded.is_template else "reply-hint"
+        note_text = None if expanded.is_template else t("dispatcher.reply_hint", sender=msg.from_member_name)
         return render_inbound(
-            content=msg.content,
+            content=expanded.body,
             sender=msg.from_member_name,
             message_id=msg.message_id,
             msg_type=msg_type,
             time_info=time_info,
-            note_kind="reply-hint",
-            note_text=t("dispatcher.reply_hint", sender=msg.from_member_name),
+            note_kind=note_kind,
+            note_text=note_text,
         )
 
     @staticmethod
