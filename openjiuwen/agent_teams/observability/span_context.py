@@ -306,7 +306,7 @@ def set_active_span_tracker(tracker: ActiveSpanTracker | None) -> None:
 class LlmSpanState:
     """Per-call state attached to one open LLM span.
 
-    State is stored on the span object itself (``span._llm_state``),
+    State is stored on the span object itself (``span.otel_llm_state``),
     not in a ContextVar, so it survives asyncio context switches in
     streaming generators.
 

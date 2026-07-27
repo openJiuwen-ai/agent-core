@@ -1794,8 +1794,21 @@ async def test_max_attributes_cap_keeps_top_level_prompt_attrs(
 async def test_find_llm_span_disambiguates_concurrent_workers(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
-    """Two concurrent workers each with one LLM span — peek must return the right one for each."""
+    """Peek must return the right llm.call span per worker and per recency.
+
+    Covers two disambiguation paths in ``_find_llm_span``:
+
+    1. **Cross-worker**: two workers each with one LLM span — parent
+       matching picks the span whose parent is the current agent.
+    2. **Same-parent recency**: one worker with two concurrent LLM spans
+       — ``max(exact, key=start_ns)`` picks the most recently opened one.
+       This is the branch a single-span-per-worker fixture can never
+       trigger (``exact`` would have length 1 and the key would not be
+       compared), so it is what guards the ``otel_llm_state``/``start_ns``
+       contract against silent regressions.
+    """
     from openjiuwen.agent_teams.observability.span_context import (
+        LlmSpanState,
         get_active_span_tracker,
         remove_team_span,
         set_current_agent_span,
@@ -1803,7 +1816,6 @@ async def test_find_llm_span_disambiguates_concurrent_workers(
     from openjiuwen.agent_teams.observability.setup import get_tracer
     from opentelemetry.trace import SpanKind, set_span_in_context
     from opentelemetry import context as otel_context
-    import time
 
     team_span = _create_team_span("test_team")
     tracer = get_tracer("test")
@@ -1820,23 +1832,24 @@ async def test_find_llm_span_disambiguates_concurrent_workers(
         kind=SpanKind.INTERNAL,
     )
 
-    from openjiuwen.agent_teams.observability.span_context import LlmSpanState
-
     set_current_agent_span(agent_a)
     llm_a = tracer.start_span(
         "llm.call", context=set_span_in_context(agent_a, otel_context.get_current()),
         kind=SpanKind.CLIENT,
     )
-    llm_a._llm_state = LlmSpanState(span=llm_a, start_ns=time.monotonic_ns())
+    # Attach state under the production attribute name (``otel_llm_state``);
+    # ``_find_llm_span`` reads ``start_ns`` from it via getattr, so a name
+    # mismatch would silently fall back to 0 and make max() non-deterministic.
+    llm_a.otel_llm_state = LlmSpanState(span=llm_a, start_ns=1_000)
 
     set_current_agent_span(agent_b)
     llm_b = tracer.start_span(
         "llm.call", context=set_span_in_context(agent_b, otel_context.get_current()),
         kind=SpanKind.CLIENT,
     )
-    llm_b._llm_state = LlmSpanState(span=llm_b, start_ns=time.monotonic_ns())
+    llm_b.otel_llm_state = LlmSpanState(span=llm_b, start_ns=1_000)
 
-    # ContextVar is agent_b → _find_llm_span should return llm_b (parent match).
+    # Cross-worker: ContextVar is agent_b → peek returns llm_b (parent match).
     peek_b = tracker.peek_current_llm_span()
     assert peek_b is not None and peek_b.context.span_id == llm_b.context.span_id
 
@@ -1845,6 +1858,35 @@ async def test_find_llm_span_disambiguates_concurrent_workers(
     peek_a = tracker.peek_current_llm_span()
     assert peek_a is not None and peek_a.context.span_id == llm_a.context.span_id
 
+    # ── Same-parent recency: two LLM spans under one worker ──────────
+    # llm_older is opened first (smaller start_ns); llm_newer is opened
+    # second (larger start_ns). Both share agent_a as parent, so parent
+    # matching yields ``exact`` of length 2 and max() must compare
+    # ``start_ns`` — selecting llm_newer. This is the regression guard
+    # the original single-span-per-worker fixture could not exercise.
+    llm_older = tracer.start_span(
+        "llm.call", context=set_span_in_context(agent_a, otel_context.get_current()),
+        kind=SpanKind.CLIENT,
+    )
+    llm_older.otel_llm_state = LlmSpanState(span=llm_older, start_ns=2_000)
+
+    llm_newer = tracer.start_span(
+        "llm.call", context=set_span_in_context(agent_a, otel_context.get_current()),
+        kind=SpanKind.CLIENT,
+    )
+    llm_newer.otel_llm_state = LlmSpanState(span=llm_newer, start_ns=3_000)
+
+    set_current_agent_span(agent_a)
+    peek = tracker.peek_current_llm_span()
+    assert peek is not None and peek.context.span_id == llm_newer.context.span_id
+
+    # End the newer one; the older one becomes the most-recent survivor.
+    llm_newer.end()
+    set_current_agent_span(agent_a)
+    peek = tracker.peek_current_llm_span()
+    assert peek is not None and peek.context.span_id == llm_older.context.span_id
+
+    llm_older.end()
     llm_a.end()
     llm_b.end()
     agent_a.end()
