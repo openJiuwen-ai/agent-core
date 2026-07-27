@@ -6,11 +6,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 from sqlmodel import SQLModel
 
 from openjiuwen.agent_teams.context import get_session_id
@@ -39,6 +40,7 @@ from openjiuwen.agent_teams.organization.schema import (
     OrganizationSpec,
     OrgTask,
     OrgTaskCreator,
+    OrgTaskEventRecord,
     OrgTaskOutputContext,
     OrgTaskOutputSpec,
     OrgTaskRecord,
@@ -51,6 +53,9 @@ from openjiuwen.agent_teams.organization.schema import (
 )
 from openjiuwen.agent_teams.tools.database import TeamDatabase
 from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -169,6 +174,87 @@ class OrgTaskManager:
                 metadata=metadata,
             )
 
+    @classmethod
+    async def find_organization_ids_for_team(cls, db: "TeamDatabase", team_id: str) -> list[str]:
+        """Return persisted organizations that contain ``team_id``.
+
+        The process-local organization runtime is intentionally ephemeral.  A
+        cold-recovered team therefore needs a DB lookup to recover its
+        organization binding before its leader tool set is assembled.
+        """
+
+        await db.initialize()
+        if db.session_local is None:
+            raise RuntimeError("TeamDatabase is not initialized")
+        sessions = DbSessions(db.session_local)
+        async with sessions.read() as session:
+            stmt = select(OrgLeaderRecord.organization_id).where(OrgLeaderRecord.team_id == team_id)
+            return list((await session.execute(stmt)).scalars().all())
+
+    async def dissolve_organization(self) -> dict[str, int]:
+        """Delete every persisted row owned by this organization."""
+
+        await self.initialize()
+        async with self._write() as session:
+            task_ids = list(
+                (await session.execute(
+                    select(OrgTaskRecord.task_id).where(
+                        OrgTaskRecord.organization_id == self.organization_id
+                    )
+                )).scalars().all()
+            )
+
+            counts: dict[str, int] = {}
+
+            async def _delete(statement: Any, name: str) -> None:
+                result = await session.execute(statement)
+                counts[name] = max(result.rowcount or 0, 0)
+
+            if task_ids:
+                await _delete(
+                    delete(OrgTaskSourceRecord).where(
+                        or_(
+                            OrgTaskSourceRecord.summary_task_id.in_(task_ids),
+                            OrgTaskSourceRecord.source_task_id.in_(task_ids),
+                        )
+                    ),
+                    "task_sources",
+                )
+                await _delete(
+                    delete(OrgTaskReviewRecord).where(OrgTaskReviewRecord.task_id.in_(task_ids)),
+                    "task_reviews",
+                )
+            else:
+                counts["task_sources"] = 0
+                counts["task_reviews"] = 0
+
+            await _delete(
+                delete(OrgTaskEventRecord).where(
+                    OrgTaskEventRecord.organization_id == self.organization_id
+                ),
+                "task_events",
+            )
+            await _delete(
+                delete(OrgLeaderMessageRecord).where(
+                    OrgLeaderMessageRecord.organization_id == self.organization_id
+                ),
+                "leader_messages",
+            )
+            await _delete(
+                delete(OrgTaskRecord).where(OrgTaskRecord.organization_id == self.organization_id),
+                "tasks",
+            )
+            await _delete(
+                delete(OrgLeaderRecord).where(OrgLeaderRecord.organization_id == self.organization_id),
+                "leaders",
+            )
+            await _delete(
+                delete(OrgInfoRecord).where(OrgInfoRecord.organization_id == self.organization_id),
+                "organization",
+            )
+            await session.commit()
+            return counts
+
     async def register_leader(
         self,
         *,
@@ -225,6 +311,13 @@ class OrgTaskManager:
         delegated_to_leader_id: str | None = None,
     ) -> OrgTaskOpResult:
         await self.initialize()
+        capabilities = required_capabilities or []
+        if not capabilities or any(not isinstance(capability, str) or not capability.strip() for capability in capabilities):
+            return OrgTaskOpResult(
+                ok=False,
+                reason="required_capabilities must contain at least one non-empty capability",
+            )
+        capabilities = list(dict.fromkeys(capability.strip() for capability in capabilities))
         task_id = task_id or f"org-task-{uuid.uuid4().hex[:12]}"
         root_task_id = root_task_id or parent_task_id or task_id
         now = get_current_time()
@@ -248,7 +341,7 @@ class OrgTaskManager:
                 title=title,
                 description=description,
                 task_type=task_type,
-                required_capabilities_json=_json_dumps(required_capabilities or []),
+                required_capabilities_json=_json_dumps(capabilities),
                 assignment_type=assignment_type.value,
                 assigned_team_id=delegated_to_team_id,
                 assigned_leader_id=delegated_to_leader_id,
@@ -793,12 +886,32 @@ class OrgTaskManager:
         )
 
     async def _publish_event(self, event: BaseOrgEvent, *, team_inbox_id: str | None = None) -> None:
+        message = OrgEventMessage.from_event(event)
+        # Keep a compact durable activity trail for the web UI and for
+        # post-run inspection.  Transport delivery remains best effort.
+        try:
+            async with self._write() as session:
+                session.add(
+                    OrgTaskEventRecord(
+                        event_id=f"org-event-{uuid.uuid4().hex[:12]}",
+                        organization_id=self.organization_id,
+                        event_type=message.event_type,
+                        task_id=message.payload.get("task_id"),
+                        team_id=message.payload.get("team_id"),
+                        leader_id=message.payload.get("leader_id"),
+                        payload_json=_json_dumps(message.payload),
+                        created_at=get_current_time(),
+                    )
+                )
+                await session.commit()
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to persist organization activity event", exc_info=True)
+
         if self.messager is None:
             return
         session_id = self.session_id or get_session_id()
         if not session_id:
             return
-        message = OrgEventMessage.from_event(event)
         await self.messager.publish(OrgTopic.ORG.build(session_id, self.organization_id), message)
         if isinstance(
             event,

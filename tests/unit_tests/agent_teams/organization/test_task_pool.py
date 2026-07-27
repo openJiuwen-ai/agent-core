@@ -4,17 +4,27 @@ import asyncio
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 
-from openjiuwen.agent_teams.organization.events import OrgEvent, OrgEventMessage, OrgTaskCreatedEvent, OrgTopic
+from openjiuwen.agent_teams.organization.events import (
+    OrgEvent,
+    OrgEventMessage,
+    OrgTaskClaimedEvent,
+    OrgTaskCompletedEvent,
+    OrgTaskCreatedEvent,
+    OrgTopic,
+)
 from openjiuwen.agent_teams.organization.pool import clear_process_org_managers
 from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
 from openjiuwen.agent_teams.organization.schema import (
     OrgAssignmentType,
+    OrgTaskEventRecord,
     OrgTaskCreator,
     OrgTaskReviewStatus,
     OrgTaskStatus,
 )
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
+from openjiuwen.agent_teams.organization.tools import OrgCreateTaskTool
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
@@ -35,9 +45,24 @@ class FakeMessager:
 class FakeHarness:
     def __init__(self) -> None:
         self.tools = []
+        self.system_prompt_builder = FakePromptBuilder()
 
     def add_tool(self, tool) -> None:
         self.tools.append(tool)
+
+    def remove_tool(self, name) -> None:
+        self.tools = [tool for tool in self.tools if tool.card.name != name]
+
+
+class FakePromptBuilder:
+    def __init__(self) -> None:
+        self.sections = {}
+
+    def add_section(self, section) -> None:
+        self.sections[section.name] = section
+
+    def remove_section(self, name) -> None:
+        self.sections.pop(name, None)
 
 
 class FakeBackend:
@@ -109,6 +134,7 @@ async def test_claim_and_delegate_use_single_assignment(org_manager):
         task_id="task-1",
         title="Analyze logs",
         description="Find the root cause.",
+        required_capabilities=["analysis"],
         created_by=OrgTaskCreator(
             creator_type="client",
             creator_id="client-1",
@@ -139,12 +165,43 @@ async def test_claim_and_delegate_use_single_assignment(org_manager):
 
 
 @pytest.mark.asyncio
+async def test_org_tasks_require_non_empty_capabilities(org_manager):
+    manager, _ = org_manager
+    created = await manager.create_task(
+        task_id="empty-capabilities",
+        title="Invalid task",
+        description="This must be rejected.",
+        required_capabilities=["", "  "],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client-1",
+            organization_id="org-1",
+        ),
+    )
+    assert not created.ok
+    assert "required_capabilities" in created.reason
+    assert await manager.get_task("empty-capabilities") is None
+
+    tool = OrgCreateTaskTool(manager, team_id="team-a", leader_id="leader-a")
+    rejected = await tool.invoke(
+        {
+            "title": "Another invalid task",
+            "description": "This must also be rejected.",
+            "required_capabilities": [],
+        }
+    )
+    assert not rejected.success
+    assert "required_capabilities" in rejected.error
+
+
+@pytest.mark.asyncio
 async def test_completed_event_points_to_db_result(org_manager):
     manager, messager = org_manager
     await manager.create_task(
         task_id="task-2",
         title="Patch bug",
         description="Apply the fix.",
+        required_capabilities=["patching"],
         created_by=OrgTaskCreator(
             creator_type="client",
             creator_id="client-1",
@@ -194,12 +251,40 @@ async def test_leader_message_event_excludes_content_but_db_keeps_it(org_manager
 
 
 @pytest.mark.asyncio
+async def test_organization_events_are_persisted_for_activity_views(org_manager):
+    manager, _ = org_manager
+    await manager.create_task(
+        task_id="activity-task",
+        title="Persist activity",
+        description="Create an activity record.",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client-1",
+            organization_id="org-1",
+        ),
+    )
+    await manager.claim_task(task_id="activity-task", team_id="team-a", leader_id="leader-a")
+
+    assert manager.db.session_local is not None
+    async with manager.db.session_local() as session:
+        rows = (await session.execute(
+            select(OrgTaskEventRecord.event_type, OrgTaskEventRecord.task_id).where(
+                OrgTaskEventRecord.organization_id == "org-1"
+            )
+        )).all()
+    assert (OrgEvent.TASK_CREATED, "activity-task") in rows
+    assert (OrgEvent.TASK_CLAIMED, "activity-task") in rows
+
+
+@pytest.mark.asyncio
 async def test_child_task_completion_creates_pending_review(org_manager):
     manager, messager = org_manager
     await manager.create_task(
         task_id="parent-1",
         title="Build report",
         description="Create the final report.",
+        required_capabilities=["reporting"],
         created_by=OrgTaskCreator(
             creator_type="client",
             creator_id="client-1",
@@ -212,6 +297,7 @@ async def test_child_task_completion_creates_pending_review(org_manager):
         parent_task_id="parent-1",
         title="Analyze risk",
         description="Risk analysis slice.",
+        required_capabilities=["risk-analysis"],
         created_by=OrgTaskCreator(
             creator_type="team_leader",
             creator_id="leader-a",
@@ -271,6 +357,7 @@ async def test_summary_task_sources_read_completed_outputs(org_manager):
         task_id="source-1",
         title="Finance analysis",
         description="Analyze finance.",
+        required_capabilities=["finance"],
         created_by=OrgTaskCreator(
             creator_type="client",
             creator_id="client-1",
@@ -334,6 +421,8 @@ async def test_active_teams_can_create_and_join_organization(active_organization
     assert created.success
     assert created.data["owner_team_id"] == "team-a"
     assert agents["team-a"].team_backend.org_task_manager.organization_id == "org-active"
+    owner_prompt = agents["team-a"].harness.system_prompt_builder.sections["organization_owner_lifecycle"]
+    assert "org_dissolve_organization" in owner_prompt.content["en"]
     owner_tools = {tool.card.name: tool for tool in agents["team-a"].harness.tools}
     owner_tool_names = set(owner_tools)
     assert {"org_create_organization", "org_invite_team", "org_view_tasks"} <= owner_tool_names
@@ -371,6 +460,18 @@ async def test_joined_leader_is_woken_to_consider_open_org_task(active_organizat
         target_team_id="team-b",
         session_id=session_id,
     )
+    manager = agents["team-a"].team_backend.org_task_manager
+    await manager.create_task(
+        task_id="task-autoclaim",
+        title="Analysis task",
+        description="A task matching team-b's capabilities.",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id="org-autoclaim",
+        ),
+    )
 
     turns = []
 
@@ -397,3 +498,488 @@ async def test_joined_leader_is_woken_to_consider_open_org_task(active_organizat
     assert turns[0]["team_name"] == "team-b"
     assert turns[0]["session_id"] == session_id
     assert "task-autoclaim" in turns[0]["inputs"]["query"]
+
+
+@pytest.mark.asyncio
+async def test_claimed_task_wakes_claiming_team_to_execute(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    agents["team-b"].spec.metadata["capabilities"] = ["testing"]
+    await runtime.create_organization(
+        organization_id="org-claimed-task",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    await runtime.invite_team(
+        organization_id="org-claimed-task",
+        inviter_team_id="team-a",
+        target_team_id="team-b",
+        session_id=session_id,
+    )
+    manager = agents["team-a"].team_backend.org_task_manager
+    await manager.create_task(
+        task_id="claimed-test-task",
+        title="Run tests",
+        description="Execute the assigned test work.",
+        required_capabilities=["testing"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id="org-claimed-task",
+        ),
+    )
+    assert (await manager.claim_task(
+        task_id="claimed-test-task",
+        team_id="team-b",
+        leader_id="leader-team-b",
+    )).ok
+
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+    topic_id = OrgTopic.TASK.build(session_id, "org-claimed-task")
+    handler = next(handler for topic, handler in agents["team-b"].team_backend.messager.subscriptions if topic == topic_id)
+    await handler(
+        OrgEventMessage.from_event(
+            OrgTaskClaimedEvent(
+                organization_id="org-claimed-task",
+                team_id="team-b",
+                leader_id="leader-team-b",
+                task_id="claimed-test-task",
+                claimed_by_team_id="team-b",
+                claimed_by_leader_id="leader-team-b",
+            )
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert turns[0]["team_name"] == "team-b"
+    prompt = turns[0]["inputs"]["query"]
+    assert "claimed-test-task" in prompt
+    assert "org_update_task(action='start')" in prompt
+    assert "org_update_task(action='complete')" in prompt
+
+
+@pytest.mark.asyncio
+async def test_recreated_leader_regains_org_tools_and_subscription(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    await runtime.create_organization(
+        organization_id="org-rebind",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    await runtime.invite_team(
+        organization_id="org-rebind",
+        inviter_team_id="team-a",
+        target_team_id="team-b",
+        session_id=session_id,
+    )
+
+    original = agents["team-b"].team_backend
+    recreated_backend = FakeBackend(
+        team_name="team-b",
+        leader_id="leader-team-b",
+        db=original.db,
+        messager=FakeMessager(),
+    )
+    recreated_agent = FakeAgent(recreated_backend)
+    await runtime._team_runtime_manager.pool.add(
+        ActiveTeam(
+            team_name="team-b",
+            agent=recreated_agent,
+            current_session_id=session_id,
+            state=RuntimeState.PAUSED,
+        )
+    )
+
+    assert await runtime.ensure_team_binding(
+        team_id="team-b",
+        session_id=session_id,
+        agent=recreated_agent,
+    )
+    tool_names = {tool.card.name for tool in recreated_agent.harness.tools}
+    assert {"org_view_tasks", "org_claim_task", "org_update_task"} <= tool_names
+    assert recreated_backend.messager.subscriptions
+
+
+@pytest.mark.asyncio
+async def test_cold_recovered_leader_rebinds_from_persisted_membership(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    await runtime.create_organization(
+        organization_id="org-db-rebind",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    await runtime.invite_team(
+        organization_id="org-db-rebind",
+        inviter_team_id="team-a",
+        target_team_id="team-b",
+        session_id=session_id,
+    )
+    manager = agents["team-a"].team_backend.org_task_manager
+    await manager.create_task(
+        task_id="claimed-before-recovery",
+        title="Resume test task",
+        description="This task must resume after the Team is rebound.",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id="org-db-rebind",
+        ),
+    )
+    assert (await manager.claim_task(
+        task_id="claimed-before-recovery",
+        team_id="team-b",
+        leader_id="leader-team-b",
+    )).ok
+
+    # Model a process restart: the durable tables remain but the in-memory
+    # runtime's membership map is empty and the leader is newly reconstructed.
+    runtime._team_organizations.clear()
+    original = agents["team-b"].team_backend
+    recovered_backend = FakeBackend(
+        team_name="team-b",
+        leader_id="leader-team-b",
+        db=original.db,
+        messager=FakeMessager(),
+    )
+    recovered_agent = FakeAgent(recovered_backend)
+    await runtime._team_runtime_manager.pool.add(
+        ActiveTeam(
+            team_name="team-b",
+            agent=recovered_agent,
+            current_session_id=session_id,
+            state=RuntimeState.PAUSED,
+        )
+    )
+
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+
+    assert await runtime.ensure_team_binding(
+        team_id="team-b",
+        session_id=session_id,
+        agent=recovered_agent,
+    )
+    assert recovered_backend.org_task_manager.organization_id == "org-db-rebind"
+    assert {tool.card.name for tool in recovered_agent.harness.tools} >= {
+        "org_create_task",
+        "org_view_tasks",
+        "org_review_task",
+    }
+    await asyncio.sleep(0)
+    assert turns[0]["team_name"] == "team-b"
+    assert "claimed-before-recovery" in turns[0]["inputs"]["query"]
+
+
+@pytest.mark.asyncio
+async def test_recovered_leader_discovers_matching_open_task(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    agents["team-b"].spec.metadata["capabilities"] = ["testing", "unit-test"]
+    await runtime.create_organization(
+        organization_id="org-open-recovery",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    await runtime.invite_team(
+        organization_id="org-open-recovery",
+        inviter_team_id="team-a",
+        target_team_id="team-b",
+        session_id=session_id,
+    )
+    manager = agents["team-a"].team_backend.org_task_manager
+    await manager.create_task(
+        task_id="open-before-recovery",
+        title="Run tests",
+        description="This task must be claimed after the Team is rebound.",
+        required_capabilities=["testing", "unit-test"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id="org-open-recovery",
+        ),
+    )
+
+    runtime._team_organizations.clear()
+    original = agents["team-b"].team_backend
+    recovered_backend = FakeBackend(
+        team_name="team-b",
+        leader_id="leader-team-b",
+        db=original.db,
+        messager=FakeMessager(),
+    )
+    recovered_agent = FakeAgent(recovered_backend)
+    recovered_agent.spec.metadata["capabilities"] = ["testing", "unit-test"]
+    await runtime._team_runtime_manager.pool.add(
+        ActiveTeam(
+            team_name="team-b",
+            agent=recovered_agent,
+            current_session_id=session_id,
+            state=RuntimeState.PAUSED,
+        )
+    )
+
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+    assert await runtime.ensure_team_binding(
+        team_id="team-b",
+        session_id=session_id,
+        agent=recovered_agent,
+    )
+    await asyncio.sleep(0)
+
+    assert turns[0]["team_name"] == "team-b"
+    assert "open-before-recovery" in turns[0]["inputs"]["query"]
+    assert "MUST call org_claim_task" in turns[0]["inputs"]["query"]
+
+
+@pytest.mark.asyncio
+async def test_completed_child_wakes_its_creator_team(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    await runtime.create_organization(
+        organization_id="org-completed-child",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    await runtime.invite_team(
+        organization_id="org-completed-child",
+        inviter_team_id="team-a",
+        target_team_id="team-b",
+        session_id=session_id,
+    )
+    manager = agents["team-a"].team_backend.org_task_manager
+    await manager.create_task(
+        task_id="parent",
+        title="Parent",
+        description="Parent task",
+        required_capabilities=["coordination"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id="org-completed-child",
+        ),
+    )
+    await manager.claim_task(task_id="parent", team_id="team-a", leader_id="leader-team-a")
+    await manager.create_task(
+        task_id="child",
+        parent_task_id="parent",
+        title="Child",
+        description="Child task",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-team-a",
+            organization_id="org-completed-child",
+            team_id="team-a",
+        ),
+    )
+
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+    topic_id = OrgTopic.TASK.build(session_id, "org-completed-child")
+    handler = next(handler for topic, handler in agents["team-a"].team_backend.messager.subscriptions if topic == topic_id)
+    await handler(
+        OrgEventMessage.from_event(
+            OrgTaskCompletedEvent(
+                organization_id="org-completed-child",
+                team_id="team-b",
+                leader_id="leader-team-b",
+                task_id="child",
+            )
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert turns[0]["team_name"] == "team-a"
+    prompt = turns[0]["inputs"]["query"]
+    assert "child" in prompt
+    assert "at most one focused repair task" in prompt
+
+
+@pytest.mark.asyncio
+async def test_created_task_only_wakes_capability_matched_team(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    agents["team-b"].spec.metadata["capabilities"] = ["testing", "unit-test", "api-test"]
+    await runtime.create_organization(
+        organization_id="org-created-task-filter",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    await runtime.invite_team(
+        organization_id="org-created-task-filter",
+        inviter_team_id="team-a",
+        target_team_id="team-b",
+        session_id=session_id,
+    )
+    manager = agents["team-a"].team_backend.org_task_manager
+    await manager.create_task(
+        task_id="backend-only",
+        title="Backend",
+        description="Backend task",
+        required_capabilities=["backend", "api"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id="org-created-task-filter",
+        ),
+    )
+
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+    topic_id = OrgTopic.TASK.build(session_id, "org-created-task-filter")
+    handler = next(handler for topic, handler in agents["team-b"].team_backend.messager.subscriptions if topic == topic_id)
+    await handler(
+        OrgEventMessage.from_event(
+            OrgTaskCreatedEvent(
+                organization_id="org-created-task-filter",
+                team_id="team-a",
+                leader_id="leader-team-a",
+                task_id="backend-only",
+                root_task_id="backend-only",
+            )
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert turns == []
+
+
+@pytest.mark.asyncio
+async def test_completed_task_rewakes_team_for_matching_open_task(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    agents["team-b"].spec.metadata["capabilities"] = ["testing", "unit-test", "api-test"]
+    await runtime.create_organization(
+        organization_id="org-rewake-open-task",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    await runtime.invite_team(
+        organization_id="org-rewake-open-task",
+        inviter_team_id="team-a",
+        target_team_id="team-b",
+        session_id=session_id,
+    )
+    manager = agents["team-a"].team_backend.org_task_manager
+    await manager.create_task(
+        task_id="backend-complete",
+        title="Backend",
+        description="Backend task",
+        required_capabilities=["backend"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id="org-rewake-open-task",
+        ),
+    )
+    await manager.create_task(
+        task_id="test-open",
+        title="Tests",
+        description="Tests wait for the backend result.",
+        required_capabilities=["testing", "unit-test", "api-test"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id="org-rewake-open-task",
+        ),
+    )
+
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+    topic_id = OrgTopic.TASK.build(session_id, "org-rewake-open-task")
+    handler = next(handler for topic, handler in agents["team-b"].team_backend.messager.subscriptions if topic == topic_id)
+    await handler(
+        OrgEventMessage.from_event(
+            OrgTaskCompletedEvent(
+                organization_id="org-rewake-open-task",
+                team_id="team-a",
+                leader_id="leader-team-a",
+                task_id="backend-complete",
+            )
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert turns[0]["team_name"] == "team-b"
+    prompt = turns[0]["inputs"]["query"]
+    assert "test-open" in prompt
+    assert "MUST call org_claim_task" in prompt
+    assert "org_update_task(action='complete')" in prompt
+    assert "Do not wait for another team to fix" in prompt
+
+
+@pytest.mark.asyncio
+async def test_owner_can_dissolve_organization_and_recreate_it(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    await runtime.create_organization(
+        organization_id="org-dissolve",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    await runtime.invite_team(
+        organization_id="org-dissolve",
+        inviter_team_id="team-a",
+        target_team_id="team-b",
+        session_id=session_id,
+    )
+    manager = agents["team-a"].team_backend.org_task_manager
+    await manager.create_task(
+        task_id="dissolve-task",
+        title="Temporary task",
+        description="This row must be removed.",
+        required_capabilities=["cleanup"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id="org-dissolve",
+        ),
+    )
+
+    result = await runtime.dissolve_organization(
+        organization_id="org-dissolve",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+
+    assert result["deleted"]["organization"] == 1
+    assert result["deleted"]["tasks"] == 1
+    assert agents["team-a"].team_backend.org_task_manager is None
+    assert agents["team-b"].team_backend.org_task_manager is None
+    assert "organization_owner_lifecycle" not in agents["team-a"].harness.system_prompt_builder.sections
+    assert "org_view_tasks" not in {tool.card.name for tool in agents["team-a"].harness.tools}
+    assert await manager.get_organization() is None
+
+    recreated = await runtime.create_organization(
+        organization_id="org-dissolve",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    assert recreated.organization_id == "org-dissolve"

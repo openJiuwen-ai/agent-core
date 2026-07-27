@@ -38,4 +38,15 @@ def clear_process_org_managers() -> None:
     _MANAGERS.clear()
 
 
-__all__ = ["clear_process_org_managers", "get_process_org_manager"]
+def remove_process_org_manager(
+    *,
+    organization_id: str,
+    db: TeamDatabase,
+    session_id: str | None = None,
+) -> None:
+    """Forget one dissolved organization manager from the process registry."""
+
+    _MANAGERS.pop((id(db), organization_id, session_id), None)
+
+
+__all__ = ["clear_process_org_managers", "get_process_org_manager", "remove_process_org_manager"]

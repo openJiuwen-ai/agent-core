@@ -95,7 +95,13 @@ class OrgCreateOrganizationTool(_OrgControlTool):
             )
         except ValueError as exc:
             return ToolOutput(success=False, error=str(exc))
-        return ToolOutput(success=True, data=organization.model_dump())
+        data = organization.model_dump()
+        data["next_action"] = (
+            "Organization task-pool tools are now available to this leader. "
+            "Use org_create_task, org_view_tasks, org_view_child_tasks, and org_review_task; "
+            "do not replace member teams with local teammates."
+        )
+        return ToolOutput(success=True, data=data)
 
 
 class OrgInviteTeamTool(_OrgControlTool):
@@ -128,7 +134,100 @@ class OrgInviteTeamTool(_OrgControlTool):
             )
         except ValueError as exc:
             return ToolOutput(success=False, error=str(exc))
-        return ToolOutput(success=True, data=organization.model_dump())
+        data = organization.model_dump()
+        data["next_action"] = (
+            "Organization task-pool tools are now available to this leader. "
+            "Use org_create_task, org_view_tasks, org_view_child_tasks, and org_review_task; "
+            "do not replace member teams with local teammates."
+        )
+        return ToolOutput(success=True, data=data)
+
+
+class OrgDissolveOrganizationTool(_OrgControlTool):
+    """Dissolve an owner-controlled organization and erase its persisted state."""
+
+    def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
+        super().__init__(
+            name="org_dissolve_organization",
+            description="Dissolve an organization owned by this team, remove its members, and delete its task-pool data.",
+            runtime_manager=runtime_manager,
+            team_id=team_id,
+            session_id=session_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {"organization_id": {"type": "string"}},
+            "required": ["organization_id"],
+        }
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
+        try:
+            result = await self.runtime_manager.dissolve_organization(
+                organization_id=inputs.get("organization_id", ""),
+                owner_team_id=self.team_id,
+                session_id=self.session_id,
+            )
+        except ValueError as exc:
+            return ToolOutput(success=False, error=str(exc))
+        return ToolOutput(success=True, data=result)
+
+
+class OrgListAvailableTeamsTool(_OrgControlTool):
+    """List active teams in the current process/session for organization setup."""
+
+    def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
+        super().__init__(
+            name="org_list_available_teams",
+            description="List active same-session teams that can be invited into an organization.",
+            runtime_manager=runtime_manager,
+            team_id=team_id,
+            session_id=session_id,
+        )
+        self.card.input_params = {"type": "object", "properties": {}}
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
+        teams = await self.runtime_manager.list_available_teams(session_id=self.session_id)
+        return ToolOutput(success=True, data={"teams": teams})
+
+
+class OrgListConfiguredTeamsTool(_OrgControlTool):
+    """List dormant host-configured teams that may be activated and invited."""
+
+    def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
+        super().__init__(
+            name="org_list_configured_teams",
+            description="List configured same-process teams that can be activated and invited.",
+            runtime_manager=runtime_manager,
+            team_id=team_id,
+            session_id=session_id,
+        )
+        self.card.input_params = {"type": "object", "properties": {}}
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
+        teams = await self.runtime_manager.list_configured_teams(session_id=self.session_id)
+        return ToolOutput(success=True, data={"teams": teams})
+
+
+class OrgActivateAndInviteTeamTool(OrgInviteTeamTool):
+    """Activate a configured team when necessary, then invite it into the organization."""
+
+    def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
+        _OrgControlTool.__init__(
+            self,
+            name="org_activate_and_invite_team",
+            description="Activate a configured team if dormant, then invite it into the organization.",
+            runtime_manager=runtime_manager,
+            team_id=team_id,
+            session_id=session_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "organization_id": {"type": "string"},
+                "team_id": {"type": "string", "description": "Configured profile or active team to add."},
+            },
+            "required": ["organization_id", "team_id"],
+        }
 
 
 class OrgViewOrganizationTool(_OrgControlTool):
@@ -159,7 +258,11 @@ class OrgViewOrganizationTool(_OrgControlTool):
             return ToolOutput(success=False, error=str(exc))
         if organization is None:
             return ToolOutput(success=False, error="organization not found")
-        return ToolOutput(success=True, data=organization.model_dump())
+        data = organization.model_dump()
+        data["next_action"] = (
+            "The invited team's leader now has organization task-pool tools and can claim matching tasks."
+        )
+        return ToolOutput(success=True, data=data)
 
 
 class OrgViewTasksTool(_OrgLeaderTool):
@@ -241,13 +344,23 @@ class OrgCreateTaskTool(_OrgLeaderTool):
                 "delegated_to_team_id": {"type": "string"},
                 "delegated_to_leader_id": {"type": "string"},
             },
-            "required": ["title", "description"],
+            "required": ["title", "description", "required_capabilities"],
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
-        await self._ensure_registered()
         if not inputs.get("title") or not inputs.get("description"):
             return ToolOutput(success=False, error="'title' and 'description' are required")
+        capabilities = inputs.get("required_capabilities")
+        if (
+            not isinstance(capabilities, list)
+            or not capabilities
+            or any(not isinstance(capability, str) or not capability.strip() for capability in capabilities)
+        ):
+            return ToolOutput(
+                success=False,
+                error="'required_capabilities' must contain at least one non-empty capability",
+            )
+        await self._ensure_registered()
         result = await self.manager.create_task(
             task_id=inputs.get("task_id"),
             parent_task_id=inputs.get("parent_task_id"),
@@ -255,7 +368,7 @@ class OrgCreateTaskTool(_OrgLeaderTool):
             title=inputs["title"],
             description=inputs["description"],
             task_type=inputs.get("task_type"),
-            required_capabilities=inputs.get("required_capabilities") or [],
+            required_capabilities=capabilities,
             output_spec=OrgTaskOutputSpec.model_validate(inputs["output_spec"]) if inputs.get("output_spec") else None,
             metadata=inputs.get("metadata") or {},
             created_by=OrgTaskCreator(
@@ -653,6 +766,10 @@ def create_org_control_tools(
     return [
         OrgCreateOrganizationTool(runtime_manager, team_id, session_id),
         OrgInviteTeamTool(runtime_manager, team_id, session_id),
+        OrgDissolveOrganizationTool(runtime_manager, team_id, session_id),
+        OrgListAvailableTeamsTool(runtime_manager, team_id, session_id),
+        OrgListConfiguredTeamsTool(runtime_manager, team_id, session_id),
+        OrgActivateAndInviteTeamTool(runtime_manager, team_id, session_id),
         OrgViewOrganizationTool(runtime_manager, team_id, session_id),
     ]
 
@@ -676,7 +793,11 @@ ORG_LEADER_TOOL_NAMES = {
 __all__ = [
     "ORG_LEADER_TOOL_NAMES",
     "OrgCreateOrganizationTool",
+    "OrgDissolveOrganizationTool",
     "OrgInviteTeamTool",
+    "OrgListAvailableTeamsTool",
+    "OrgListConfiguredTeamsTool",
+    "OrgActivateAndInviteTeamTool",
     "OrgViewOrganizationTool",
     "OrgClaimTaskTool",
     "OrgCreateTaskTool",

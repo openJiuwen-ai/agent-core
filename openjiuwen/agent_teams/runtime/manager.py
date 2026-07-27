@@ -189,6 +189,16 @@ class TeamRuntimeManager:
                 activation.agent,
                 session_id=target_session_id,
             )
+            # A cold-recovered TeamBackend is rebuilt before the process-local
+            # organization registry exists. Rehydrate the durable membership
+            # before the leader starts, so the first post-restart LLM turn is
+            # given the organization task-pool tools rather than team-only
+            # fallbacks.
+            await self.organization_runtime_manager.ensure_team_binding(
+                team_id=team_name,
+                session_id=target_session_id,
+                agent=activation.agent,
+            )
         return activation
 
     async def finalize(

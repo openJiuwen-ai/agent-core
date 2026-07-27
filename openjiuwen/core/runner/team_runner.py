@@ -137,8 +137,26 @@ class _TeamRunnerMixin:
     ) -> bool:
         """Run a background organization turn through the normal Runner path."""
 
-        result = await self.run_agent_team(team_name, inputs, session=session_id)
-        return result is not None
+        spec = await self._resolve_team_agent_spec(team_name, session=session_id)
+        runtime_manager = self._get_team_runtime_manager()
+        activation = await runtime_manager.activate(spec, session_id, inputs)
+        try:
+            if _is_team_reject_kind(activation.action.kind):
+                return False
+            await runtime_manager.organization_runtime_manager.ensure_team_binding(
+                team_id=team_name,
+                session_id=activation.session.get_session_id(),
+                agent=activation.agent,
+            )
+            self._maybe_attach_observability(activation.agent)
+            result = await activation.agent.invoke(inputs, session=activation.session)
+            return result is not None
+        finally:
+            await runtime_manager.finalize(
+                team_name=spec.team_name,
+                session_id=activation.session.get_session_id(),
+            )
+            await activation.session.post_run()
 
     @staticmethod
     @contextmanager
