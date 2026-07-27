@@ -57,7 +57,7 @@ assert not any(key.startswith("Forked") for key in ContextEngine._PROCESSOR_MAP)
     assert result.returncode == 0, result.stderr
 
 
-def test_refactored_configs_accept_official_preset_fields():
+def test_refactored_configs_accept_official_preset_fields(refactored_context_processors):
     from openjiuwen.core.context_engine.processor.forked import (
         CurrentRoundCompressorConfig,
         DialogueCompressorConfig,
