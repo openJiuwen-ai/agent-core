@@ -1,7 +1,8 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, AsyncIterator, Tuple, Union, Any, Mapping
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 import httpx
 
@@ -36,10 +37,27 @@ if TYPE_CHECKING:
     import openai
 
 
+@dataclass(frozen=True)
+class ModelParamRule:
+    name: str
+    predicate: Callable[[str], bool]
+    extra_body_fields: Mapping[str, object]
+
+
+_DEFAULT_MODEL_PARAM_RULES: tuple[ModelParamRule, ...] = (
+    ModelParamRule(
+        name="minimax_reasoning_split",
+        predicate=lambda m: m.startswith("MiniMax-M"),
+        extra_body_fields={"reasoning_split": True},
+    ),
+)
+
+
 class OpenAIModelClient(BaseModelClient):
     """OpenAI API client supporting GPT models and OpenAI-compatible services."""
     __client_name__ = [ProviderType.OpenAI.value]
     _PROTECTED_HEADERS = PROTECTED_HEADERS
+    _MODEL_PARAM_RULES: tuple[ModelParamRule, ...] = _DEFAULT_MODEL_PARAM_RULES
 
     # Process-wide cache of long-lived ``AsyncOpenAI`` clients, bucketed by
     # tenant/connection config so different api_key/api_base never share a
@@ -80,6 +98,23 @@ class OpenAIModelClient(BaseModelClient):
             cfg.verify_ssl,
             cfg.ssl_cert,
         )
+
+    def _apply_model_specific_params(self, model: Optional[str], params: dict) -> None:
+        """Apply provider-specific ``extra_body`` fields based on model name.
+
+        Mutates ``params`` in place: for each matching ``ModelParamRule`` the
+        rule's ``extra_body_fields`` are merged into ``params['extra_body']``.
+        Existing caller-provided fields are preserved; later rules override
+        earlier ones on key collision.
+        """
+        if not model:
+            return
+        for rule in self._MODEL_PARAM_RULES:
+            if not rule.predicate(model) or not rule.extra_body_fields:
+                continue
+            extra_body = dict(params.get("extra_body") or {})
+            extra_body.update(rule.extra_body_fields)
+            params["extra_body"] = extra_body
 
     def _client_cache_key(self) -> Tuple:
         return self.connection_key(self.model_client_config)
@@ -324,6 +359,7 @@ class OpenAIModelClient(BaseModelClient):
             extra_body["return_token_ids"] = params.pop("return_token_ids")
             params["extra_body"] = extra_body
 
+        self._apply_model_specific_params(model, params)
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -487,6 +523,7 @@ class OpenAIModelClient(BaseModelClient):
             extra_body = dict(params.get("extra_body") or {})
             extra_body["return_token_ids"] = params.pop("return_token_ids")
             params["extra_body"] = extra_body
+        self._apply_model_specific_params(model, params)
 
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
@@ -696,7 +733,18 @@ class OpenAIModelClient(BaseModelClient):
 
     @staticmethod
     def _extract_reasoning_content(msg_or_delta: Any) -> Optional[str]:
-        return getattr(msg_or_delta, 'reasoning_content', None)
+        reasoning_details = getattr(msg_or_delta, "reasoning_details", None)
+        if isinstance(reasoning_details, list) and reasoning_details:
+            first = reasoning_details[0]
+            if isinstance(first, dict):
+                text = first.get("text")
+                if text:
+                    return text
+        for attr in ("reasoning_content", "reasoning"):
+            value = getattr(msg_or_delta, attr, None)
+            if isinstance(value, str) and value:
+                return value
+        return None
 
     async def _parse_response(
             self,
