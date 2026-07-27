@@ -256,6 +256,7 @@ class OpenAIModelClient(BaseModelClient):
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
                 response=assistant_message.content,
+                reasoning_content=assistant_message.reasoning_content,
                 usage=assistant_message.usage_metadata,
                 tool_calls=assistant_message.tool_calls)
 
