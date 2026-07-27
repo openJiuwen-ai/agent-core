@@ -1,9 +1,13 @@
 # coding: utf-8
 """Tests for the persistent Goal data model."""
+
 from __future__ import annotations
+
+from datetime import datetime, timezone, tzinfo
 
 import pytest
 
+import openjiuwen.harness.goal.schema as goal_schema
 from openjiuwen.harness.goal.schema import (
     GoalAssessment,
     GoalAssessmentStatus,
@@ -14,6 +18,28 @@ from openjiuwen.harness.goal.schema import (
     GoalStopStrategy,
     TokenUsage,
 )
+
+
+def _utc_timestamp(seconds: int) -> datetime:
+    return datetime.fromtimestamp(seconds, tz=timezone.utc)
+
+
+def _utc_iso(seconds: int) -> str:
+    return _utc_timestamp(seconds).isoformat()
+
+
+def _freeze_goal_clock(monkeypatch: pytest.MonkeyPatch, clock: dict[str, int]) -> None:
+    class FrozenDateTime:
+        @staticmethod
+        def now(tz: tzinfo | None = None) -> datetime:
+            current = _utc_timestamp(clock["now"])
+            return current if tz is None else current.astimezone(tz)
+
+        @staticmethod
+        def fromisoformat(value: str) -> datetime:
+            return datetime.fromisoformat(value)
+
+    monkeypatch.setattr(goal_schema, "datetime", FrozenDateTime)
 
 
 def test_token_usage_accumulates_and_round_trips() -> None:
@@ -68,16 +94,76 @@ def test_goal_record_round_trip_and_response_copy() -> None:
     assert record.objective == "Build a REST API"
 
 
+def test_goal_record_time_fields_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = {"now": 1000}
+    _freeze_goal_clock(monkeypatch, clock)
+    record = GoalRecord.create(session_id="session-1", objective="Build a REST API")
+    assert record.time_used_seconds == 0
+    assert record.active_started_at == _utc_iso(1000)
+    assert record.created_at == _utc_iso(1000)
+    assert record.updated_at == _utc_iso(1000)
+
+    clock["now"] = 1065
+    record.settle_active_time(keep_active=False)
+    record.status = GoalStatus.PAUSED
+
+    restored = GoalRecord.from_dict(record.to_dict())
+
+    assert restored.time_used_seconds == 65
+    assert restored.active_started_at is None
+    assert restored.created_at == _utc_iso(1000)
+    assert restored.updated_at == _utc_iso(1065)
+
+
 @pytest.mark.parametrize(
     "payload",
     [
         {"goal_id": "g", "session_id": "s", "objective": ""},
         {"goal_id": "g", "session_id": "s", "objective": "x", "status": "bad"},
+        {
+            "goal_id": "g",
+            "session_id": "s",
+            "objective": "x",
+            "status": "active",
+            "time_used_seconds": -1,
+        },
     ],
 )
 def test_goal_record_rejects_invalid_persistence_payload(payload: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         GoalRecord.from_dict(payload)
+
+
+def test_goal_record_tolerates_session_deleted_optional_timestamps() -> None:
+    """Session merge deletes keys whose value is None; paused goals must still load."""
+    paused = GoalRecord.from_dict(
+        {
+            "goal_id": "g1",
+            "session_id": "s1",
+            "objective": "write a report",
+            "status": "paused",
+            "time_used_seconds": 12,
+            "created_at": _utc_iso(1000),
+            "updated_at": _utc_iso(1012),
+        }
+    )
+    assert paused.status is GoalStatus.PAUSED
+    assert paused.active_started_at is None
+    assert paused.time_used_seconds == 12
+
+    active = GoalRecord.from_dict(
+        {
+            "goal_id": "g2",
+            "session_id": "s1",
+            "objective": "write a report",
+            "status": "active",
+            "time_used_seconds": 5,
+            "created_at": _utc_iso(1000),
+            "updated_at": _utc_iso(1005),
+        }
+    )
+    assert active.status is GoalStatus.ACTIVE
+    assert active.active_started_at == _utc_iso(1005)
 
 
 def test_goal_operation_error_keeps_an_isolated_goal_copy() -> None:
