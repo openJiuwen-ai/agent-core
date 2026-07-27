@@ -6,6 +6,7 @@ The repository may run without optional third-party SDKs such as
 ``dashscope`` in local CI environments. Provide a lightweight stub
 so deepagent module imports remain testable.
 """
+
 from __future__ import annotations
 
 import sys
@@ -101,3 +102,20 @@ def _mock_image_modality_probe(monkeypatch):
     monkeypatch.setattr("openjiuwen.harness.deep_agent.probe_image_support", probe)
     return probe
 
+
+@pytest.fixture(autouse=True)
+def _restore_processor_registry():
+    """Undo global processor-registry overrides after each test.
+
+    ``ContextProcessorRail`` activates the refactored ("forked") processors,
+    which overwrite ``ContextEngine._PROCESSOR_MAP`` process-wide. Snapshot
+    and restore the map so the override never leaks into other tests.
+    """
+    from openjiuwen.core.context_engine import ContextEngine
+
+    processor_map = dict(ContextEngine._PROCESSOR_MAP)
+    try:
+        yield
+    finally:
+        ContextEngine._PROCESSOR_MAP.clear()
+        ContextEngine._PROCESSOR_MAP.update(processor_map)
