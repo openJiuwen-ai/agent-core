@@ -4,7 +4,7 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-07-01 |
-| 范围 | `workflow/engine/loader.py`、`workflow/runner.py`、`workflow/tool_swarmflow.py`、`tools/locales/{cn,en}.py`、`tools/locales/descs/cn/swarmflow.md` |
+| 范围 | `workflow/engine/loader.py`、`workflow/runner.py`、`workflow/tool_swarmflow.py`、`i18n.py`（`swarmflow.launched` 加 `script_path`）、`tools/locales/{cn,en}.py`、`tools/locales/descs/{cn,en}/swarmflow.md` |
 | 测试基线 | `tests/unit_tests/agent_teams/workflow/` 108 passed |
 | Refs | #751 |
 
@@ -28,13 +28,15 @@
    `META.name` 算目录。真正的加载仍走 `load_workflow_source(path)`。
 
 2. **落盘位置 = journal 同源目录 `.../workflows/{META.name}/script.py`**（`runner.materialize_swarmflow_script`）。
-   选按 workflow name 的稳定目录、而非随机临时文件：路径随 name 确定 → pause/resume relaunch 用同一
-   `inputs` 重新落盘得到同路径（幂等）→ 同名脚本命中同一 journal（内容寻址缓存）。这与 `script_path`
-   的 resume / 缓存语义**逐字一致**。
+   选按 workflow name 的稳定目录、而非随机临时文件：路径随 name 确定 → 与 journal 同目录、同名脚本命中同一
+   journal（内容寻址缓存），与 `script_path` 的 resume / 缓存语义**逐字一致**；文件在 `invoke` 写一次后长期存在，
+   resume relaunch 直接从盘加载（不重复落盘）。
 
-3. **落盘时机在 `run_background`、不在 `invoke`。** `run_background` 已持有 `team_name` /
-   `session_id`（materialize 必需），且 resume 经 `_relaunch` 直接重入 `run_background`（绕过 `invoke`）——
-   把落盘放这里，resume 自动重新落盘，`invoke` 保持精简。
+3. **落盘时机在 `invoke`（同步启动轮内、admit 之后），不在 `run_background`。** 这样启动回执
+   （`swarmflow.launched`，`map_result` 同步返回）能带上**解析后的绝对 `script_path`**——leader 重跑 / 迭代
+   直接传该路径、不必重发整段源码（用户诉求）。解析后的路径回填进 enriched inputs，`run_background` 与 resume
+   relaunch 一律从盘加载、路径唯一。materialize 失败先 `release_workflow(ticket)` 再返回
+   `ToolOutput(success=False)`，不泄漏 L1 配额。
 
 4. **文件 I/O 用 `aiofiles`（异步）。** `materialize_swarmflow_script` 是 `async def`，用
    `aiofiles.os.makedirs` + `aiofiles.open(...).write(...)`，与 `engine/journal.py` 的异步写盘一致，

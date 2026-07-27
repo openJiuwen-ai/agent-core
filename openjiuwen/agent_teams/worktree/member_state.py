@@ -152,15 +152,18 @@ async def resolve_current_session_member_worktree(
     if teammate is None:
         return None
     worktree = get_member_worktree(teammate)
-    scope = owner_scope(team_name, member_name)
-
-    db_matches_scope = (
+    worktree_info = member_worktree_info.get(member_name)
+    has_db_worktree = (
         worktree is not None
         and worktree.isolation == "worktree"
         and bool(worktree.path)
-        and matches_scope(worktree, scope)
     )
-    worktree_info = member_worktree_info.get(member_name)
+    if worktree_info is None and not has_db_worktree:
+        return None
+
+    scope = owner_scope(team_name, member_name)
+
+    db_matches_scope = worktree is not None and has_db_worktree and matches_scope(worktree, scope)
     if worktree_info is not None and not info_matches_scope(worktree_info, scope):
         worktree_info = None
 

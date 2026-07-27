@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from openjiuwen.core.foundation.tool import Tool
@@ -79,15 +79,27 @@ def skill_markdown_has_media(skill_content: str) -> bool:
     )
 
 
+def _is_safe_relative_file_path(file_path: str) -> bool:
+    """Return whether a skill file path is relative and contains no traversal."""
+    posix_path = PurePosixPath(file_path.replace("\\", "/"))
+    windows_path = PureWindowsPath(file_path)
+    return (
+        not posix_path.is_absolute()
+        and not windows_path.drive
+        and not windows_path.root
+        and ".." not in posix_path.parts
+    )
+
+
 class SkillTool(Tool):
     """View the skill contents of a certain skill"""
     operation: SysOperation
-    get_skills: Callable[[], List[Skill]]
+    get_skills: Callable[..., List[Skill]]
 
     def __init__(
         self,
         operation: SysOperation,
-        get_skills: Callable[[], List[Skill]],
+        get_skills: Callable[..., List[Skill]],
         language: str = "cn",
         agent_id: Optional[str] = None,
         multimodal_skill_mode: str = "hint",
@@ -116,8 +128,17 @@ class SkillTool(Tool):
         skill_name = str(inputs.get("skill_name", "") or "").strip()
         relative_file_path = str(inputs.get("relative_file_path") or "SKILL.md").strip()
 
+        if not _is_safe_relative_file_path(relative_file_path):
+            return ToolOutput(
+                success=False,
+                error=(
+                    "Invalid relative_file_path: absolute paths and '..' traversal "
+                    "components are not allowed"
+                ),
+            )
+
         try:
-            skill = self._get_skill_by_name(skill_name)
+            skill = self._get_skill_by_name(skill_name, kwargs.get("session"))
             if not skill:
                 return ToolOutput(
                     success=False,
@@ -162,12 +183,16 @@ class SkillTool(Tool):
         if False:
             yield None
 
-    def _get_skill_by_name(self, skill_name: str) -> Optional[Skill]:
+    def _get_skill_by_name(self, skill_name: str, session: Any = None) -> Optional[Skill]:
         """Select skill object by name."""
         if not skill_name:
             return None
 
-        skills = self.get_skills() or []
+        try:
+            skills = self.get_skills(session=session) or []
+        except TypeError:
+            # Keep compatibility with callers that provide the original no-arg callback.
+            skills = self.get_skills() or []
         skill_map = {skill.name: skill for skill in skills}
         return skill_map.get(skill_name)
 

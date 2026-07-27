@@ -2,7 +2,7 @@ Mark a task that is assigned to the calling member as completed.
 
 ## When to use
 
-- After the leader assigns a task to you via `update_task(assignee=<your_member_name>)` (the task moves to status `claimed` with you as assignee), and you have finished the actual work, call this tool to move the status to `completed`.
+- After the leader assigns a task to you via `update_task(assignee=<your_member_name>)` (the task moves to status `in_progress` with you as assignee), and you have finished the actual work, call this tool to move the status to `completed`.
 - Only applicable when `task.assignee == you`. Other tasks will be rejected with a clear error.
 
 ## Input
@@ -20,4 +20,4 @@ Mark a task that is assigned to the calling member as completed.
 
 - `Task '<id>' not found`: the id does not exist.
 - `Task '<id>' is assigned to '<other>', not '<you>'; you can only complete tasks assigned to yourself`: the task is not yours.
-- Other (from `task_manager.complete`): the task is in a status that cannot transition to completed (e.g. already cancelled, never claimed).
+- Other (from `task_manager.complete`): the task is in a status that cannot transition to completed (e.g. already cancelled, not yet in_progress).

@@ -14,7 +14,15 @@ from openjiuwen.agent_evolving.trajectory.types import (
     UpdateKey,
     Updates,
     to_legacy_trajectory,
+    trajectory_case_id,
+    trajectory_cost,
+    trajectory_execution_id,
     trajectory_from_legacy,
+    trajectory_from_steps,
+    trajectory_meta,
+    trajectory_session_id,
+    trajectory_source,
+    trajectory_steps,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, UserMessage
 
@@ -61,7 +69,7 @@ def make_tool_step(
 
 
 def make_trajectory(case_id="case1", steps=None, **kwargs):
-    """Factory for creating LegacyTrajectory instances."""
+    """Factory for creating OTLP-first Trajectory instances."""
     defaults = dict(
         execution_id="exec1",
         case_id=case_id,
@@ -72,7 +80,7 @@ def make_trajectory(case_id="case1", steps=None, **kwargs):
     )
     defaults.update(kwargs)
     defaults.pop("otlp_trace", None)
-    return LegacyTrajectory(**defaults)
+    return trajectory_from_steps(**defaults)
 
 
 class TestLLMCallDetail:
@@ -223,27 +231,30 @@ class TestTrajectory:
 
     @staticmethod
     def test_minimal_creation():
-        """Create a legacy step view with minimal fields."""
+        """Create an OTLP trajectory with minimal fields."""
         step = make_step(kind="llm")
         traj = make_trajectory(case_id="case1", steps=[step])
-        assert traj.execution_id == "exec1"
-        assert traj.case_id == "case1"
-        assert traj.source == "offline"
-        assert len(traj.steps) == 1
+        assert trajectory_execution_id(traj) == "exec1"
+        assert trajectory_case_id(traj) == "case1"
+        assert trajectory_source(traj) == "offline"
+        assert len(trajectory_steps(traj)) == 1
 
     @staticmethod
     def test_creation_with_cost():
-        """Create a legacy step view with cost info."""
+        """Create an OTLP trajectory with cost info from LLM usage."""
         traj = make_trajectory(
             case_id="case1",
-            steps=[],
-            cost={"input_tokens": 100, "output_tokens": 50},
+            steps=[
+                make_llm_step(
+                    usage={"prompt_tokens": 100, "completion_tokens": 50},
+                )
+            ],
         )
-        assert traj.cost == {"input_tokens": 100, "output_tokens": 50}
+        assert trajectory_cost(traj) == {"input_tokens": 100, "output_tokens": 50}
 
     @staticmethod
     def test_online_trajectory():
-        """Create online legacy trajectory."""
+        """Create online OTLP trajectory."""
         traj = make_trajectory(
             execution_id="exec-online",
             source="online",
@@ -251,9 +262,9 @@ class TestTrajectory:
             case_id=None,
             steps=[],
         )
-        assert traj.source == "online"
-        assert traj.session_id == "session-123"
-        assert traj.case_id is None
+        assert trajectory_source(traj) == "online"
+        assert trajectory_session_id(traj) == "session-123"
+        assert trajectory_case_id(traj) is None
 
     @staticmethod
     def test_trajectory_does_not_inherit_legacy_view():
@@ -378,7 +389,7 @@ class TestTrajectory:
             messages=[{"role": "user", "content": "hello"}],
             response={"role": "assistant", "content": "hi"},
             usage={"prompt_tokens": 1, "completion_tokens": 2},
-            meta={"attributes": {"invoke_id": "llm-1"}},
+            meta={"label": "keep"},
         )
         traj = make_trajectory(
             steps=[step],
@@ -389,19 +400,19 @@ class TestTrajectory:
 
         legacy = to_legacy_trajectory(traj)
         legacy.steps[0].detail.messages[0]["content"] = "changed"
-        legacy.steps[0].meta["attributes"]["invoke_id"] = "changed"
+        legacy.steps[0].meta["label"] = "changed"
         legacy.cost["input_tokens"] = 99
         legacy.meta["labels"].append("changed")
 
-        assert traj.steps[0].detail.messages[0]["content"] == "hello"
-        assert traj.steps[0].meta["attributes"]["invoke_id"] == "llm-1"
-        assert traj.cost["input_tokens"] == 1
-        assert traj.meta["labels"] == ["online"]
+        assert trajectory_steps(traj)[0].detail.messages[0]["content"] == "hello"
+        assert trajectory_steps(traj)[0].meta["label"] == "keep"
+        assert trajectory_cost(traj) == {"input_tokens": 1, "output_tokens": 2}
+        assert trajectory_meta(traj)["labels"] == ["online"]
 
         wrapped = trajectory_from_legacy(legacy, otlp_trace=otlp_trace)
         wrapped_legacy = to_legacy_trajectory(wrapped)
         wrapped_legacy.steps[0].detail.messages[0]["content"] = "wrapped"
-        wrapped_legacy.steps[0].meta["attributes"]["invoke_id"] = "wrapped"
+        wrapped_legacy.steps[0].meta["label"] = "wrapped"
         wrapped_legacy.cost["output_tokens"] = 88
         wrapped_legacy.meta["labels"].append("wrapped")
         wrapped.otlp_trace["resourceSpans"][0]["resource"]["attributes"].append(
@@ -409,7 +420,7 @@ class TestTrajectory:
         )
 
         assert legacy.steps[0].detail.messages[0]["content"] == "changed"
-        assert legacy.steps[0].meta["attributes"]["invoke_id"] == "changed"
+        assert legacy.steps[0].meta["label"] == "changed"
         assert legacy.cost["output_tokens"] == 2
         assert legacy.meta["labels"] == ["online", "changed"]
         assert otlp_trace == {"resourceSpans": [{"resource": {"attributes": []}}]}
@@ -455,8 +466,8 @@ class TestTrajectory:
             "assistant",
             "assistant",
         ]
-        assert messages[2]["tool_calls"][0]["name"] == "read_file"
-        assert messages[2]["tool_calls"][0]["arguments"] == '{"file_path": "/skills/demo/SKILL.md"}'
+        assert messages[2]["tool_calls"][0]["function"]["name"] == "read_file"
+        assert messages[2]["tool_calls"][0]["function"]["arguments"] == '{"file_path": "/skills/demo/SKILL.md"}'
 
 
 class TestUpdateKey:

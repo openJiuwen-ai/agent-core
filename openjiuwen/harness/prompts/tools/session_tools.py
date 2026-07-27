@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Bilingual description and input params for session tools."""
+
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -47,8 +48,11 @@ while the task executes in the background without blocking the current conversat
 Available agent types and the tools they have access to:
 {available_agents}
 
-Important: When using sessions_spawn, 
+Important: When using sessions_spawn,
 you must specify the subagent_type and task_description parameters to select the agent type and describe the task.
+When subagent_type is "browser_agent", you must also specify browser_capabilities as a list of additional
+capability categories selected from the available Playwright capabilities above. Use an empty list for a
+core-only browser task. Do not provide browser_capabilities for other subagent types.
 Do not specify agents you do not have access to!!!
 
 ## When to use:
@@ -103,7 +107,9 @@ SESSIONS_SPAWN_DESCRIPTION_CN = """创建异步后台子代理任务，立即返
 可用代理类型及对应工具：
 {available_agents}
 
-重要：使用 sessions_spawn 时，必须指定 subagent_type, task_description 参数选择代理类型和描述任务。请勿指定你无权访问的其他代理！！！
+重要：使用 sessions_spawn 时，必须指定 subagent_type、task_description 参数来选择代理类型和描述任务。
+当 subagent_type 为 "browser_agent" 时，还必须指定 browser_capabilities，并从上方可用的 Playwright 能力中选择额外能力类别。
+仅使用核心浏览器能力时传入空列表；其他子代理类型不要提供 browser_capabilities。请勿指定你无权访问的其他代理！！！
 
 ## 使用场景:
 - 任务复杂、多步骤、可独立执行
@@ -162,6 +168,10 @@ SESSIONS_SPAWN_PARAMS: Dict[str, Dict[str, str]] = {
         "cn": "任务描述",
         "en": "Task description",
     },
+    "browser_capabilities": {
+        "cn": "浏览器子代理所需的额外能力类别列表；仅使用核心能力时传入空列表",
+        "en": "Additional capability categories required by browser_agent; use an empty list for core-only tasks",
+    },
 }
 
 
@@ -178,6 +188,11 @@ def get_sessions_spawn_input_params(language: str = "cn") -> Dict[str, Any]:
             "task_description": {
                 "type": "string",
                 "description": p["task_description"].get(language, p["task_description"]["cn"]),
+            },
+            "browser_capabilities": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": p["browser_capabilities"].get(language, p["browser_capabilities"]["cn"]),
             },
         },
         "required": ["subagent_type", "task_description"],

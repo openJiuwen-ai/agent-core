@@ -20,7 +20,7 @@ STRINGS: dict[str, str] = {
     ),
     "build_team.leader_display_name": "Human-readable display label for the leader member",
     "build_team.leader_desc": (
-        "Leader persona (professional background, domain expertise); "
+        "Leader description (professional background, domain expertise); "
         "influences how members trust and communicate with you"
     ),
     "build_team.enable_hitt": (
@@ -31,6 +31,13 @@ STRINGS: dict[str, str] = {
         "predefined HUMAN_AGENT members in the spec are skipped. "
         "Use true when the user wants to join the team; false when human collaboration is "
         "explicitly out of scope"
+    ),
+    "build_team.enable_task_verification": (
+        "Whether task verification is expected for this instance; accepts true / false / "
+        "omitted (inherit the TeamAgentSpec setting). When on, assign 0..N reviewers per task "
+        "by your own judgement when creating tasks (critical deliverables should carry "
+        "reviewers; trivial chores may skip them); a reviewed task only completes after "
+        "verification passes"
     ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/en/clean_team.md
@@ -95,7 +102,7 @@ STRINGS: dict[str, str] = {
     ),
     "spawn_human_agent.desc": (
         "[PUBLIC] Role profile and responsibilities of the human member, used "
-        "for display and persona persistence and injected into other members' "
+        "for display and description persistence and injected into other members' "
         "system prompts / returned by list_members. The real user drives this "
         "member via HumanAgentInbox; the model and startup prompt are managed "
         "by the framework template, so do not provide them here"
@@ -117,17 +124,22 @@ STRINGS: dict[str, str] = {
         "list_members — do not put private content here"
     ),
     "spawn_bridge_agent.desc": (
-        "[PUBLIC] Role profile of the bridge member. **Required**: it doubles "
-        "as the local teammate persona AND the connect briefing the remote "
-        "agent adopts (sent via adapter.connect). Injected into other members' "
-        "system prompts and returned by list_members — do not put private "
-        "content here"
+        "[PUBLIC] Public roster description of the bridge member — how peers "
+        "recognise it in list_members / the team roster. Optional. Injected "
+        "into other members' system prompts and returned by list_members — do "
+        "not put private content here"
+    ),
+    "spawn_bridge_agent.prompt": (
+        "[PRIVATE] The system prompt the remote agent adopts to act as this "
+        "member (this member's own private working setup). **Required**: sent "
+        "to the remote via adapter.connect. Visible only to this member, never "
+        "shown in peers' roster"
     ),
     "spawn_bridge_agent.mailbox_inject_mode": (
         "Controls how team-side mailbox messages are wrapped before being "
         "relayed to the remote agent. 'passthrough' (default) prefixes only "
         "the sender label; 'rephrase' wraps full sender context (role, "
-        "persona, optional task hint)"
+        "desc, optional task hint)"
     ),
     "spawn_bridge_agent.protocol": (
         "Protocol identifier (e.g. 'a2a' / 'acp' / 'claudecode'). Reserved for "
@@ -162,9 +174,15 @@ STRINGS: dict[str, str] = {
         "returned by list_members — do not put private content here"
     ),
     "spawn_external_cli.desc": (
-        "[PUBLIC] Persona / role profile of this CLI member. **Required**. "
-        "Injected into other members' system prompts and returned by "
+        "[PUBLIC] Public roster description of this CLI member — how peers "
+        "recognise it in list_members / the team roster. Optional. Injected "
+        "into other members' system prompts and returned by "
         "list_members — do not put private content here"
+    ),
+    "spawn_external_cli.prompt": (
+        "[PRIVATE] The private system prompt this CLI member adopts to act as "
+        "this member. **Required**. Visible only to this member, never shown "
+        "in peers' roster"
     ),
     "spawn_external_cli.cli_agent": (
         "Identifier of the third-party CLI agent kind to launch, e.g. 'claude' "
@@ -232,19 +250,47 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "Custom task ID for dependency reference (auto-generated if omitted)",
     "create_task.task.title": "Task title — concise description of the goal",
     "create_task.task.content": "Task details including goals and acceptance criteria",
-    "create_task.task.depends_on": "Prerequisite task IDs that must complete first",
-    "create_task.task.depended_by": "Existing task IDs that should wait for this task (reverse dependency)",
+    # Only the scheduled create_task variant exposes this property; the
+    # description lives under the shared create_task.* key namespace so both
+    # variants read the same strings for the properties they have in common.
+    "create_task.task.assignee": (
+        "Member name that carries this task (required); the member must already exist. "
+        "Members never claim, so an unowned task would never run — a dependency-free task "
+        "is started by the scheduling runtime, and a blocked one transfers automatically "
+        "once its dependencies complete"
+    ),
+    "create_task.task.depends_on": (
+        "Prerequisite task IDs; may reference tasks created in this same call "
+        "or existing tasks"
+    ),
+    "create_task.task.depended_by": (
+        "Existing task IDs that should wait for this task (reverse dependency); must not "
+        "reference tasks created in this same call — express in-batch edges with depends_on "
+        "on the dependent task"
+    ),
+    "create_task.task.reviewer": (
+        "Reviewer member names for this task (optional, may be several); they must already exist "
+        "and none may be the assignee. A task with reviewers enters in_review when the assignee "
+        "completes, and only reaches completed once a reviewer passes it"
+    ),
+    "create_task.task.max_review_rounds": (
+        "Review-round ceiling for this task's rework loop (optional, integer >= 1, requires "
+        "'reviewer'); omitted uses the team default. Each failed verification sends the task "
+        "back and opens a new round; beyond the ceiling the scheduler stops looping and "
+        "escalates to you instead"
+    ),
     # ===== view_task ===========================================================
     # view_task._desc lives in descs/en/view_task.md
     "view_task.action": (
         "View mode: 'list' (default, summary of all tasks), "
         "'get' (single task detail, requires task_id), "
-        "'claimable' (pending tasks ready to claim)"
+        "'claimable' (pending tasks ready to claim), "
+        "'in_review' (tasks assigned to you to verify, currently in_review)"
     ),
     "view_task.task_id": "Task ID — required when action=get, ignored otherwise",
     "view_task.status": (
         "Status filter for action=list only: "
-        "pending/claimed/plan_approved/completed/cancelled/blocked. "
+        "pending/blocked/planning/in_progress/in_review/completed/cancelled. "
         "Omit to list all."
     ),
     # ===== update_task =========================================================
@@ -256,18 +302,35 @@ STRINGS: dict[str, str] = {
     "update_task.assignee": (
         "member_name to assign this task to (only when currently unassigned). A notification is sent to the assignee"
     ),
+    "update_task.reviewer": (
+        "Set this task's reviewer member names (an empty list clears the verify gate); reviewers must "
+        "already exist and none may be the assignee. Once set, the assignee's completion enters in_review"
+    ),
+    "update_task.max_review_rounds": (
+        "Set this task's review-round ceiling (integer >= 1; the task must carry reviewers, or set "
+        "'reviewer' in the same call). Beyond the ceiling a failed verification escalates to you "
+        "instead of looping rework"
+    ),
     "update_task.add_blocked_by": (
         "Task IDs to add as new dependencies (this task will be blocked until those tasks complete)"
     ),
     "update_task.error_human_agent_locked_cancel": (
-        "Task {task_id} is claimed by a human member; this task cannot "
-        "be cancelled. Use send_message to coordinate with that human "
-        "member instead"
+        "Task {task_id} is claimed by a human member still on the team; it "
+        "cannot be cancelled. Use send_message to coordinate with that human. "
+        "If they truly cannot continue, shutdown_member removes them from the "
+        "team, after which the task can be cancelled or reassigned"
     ),
     "update_task.error_human_agent_locked_reassign": (
-        "Task {task_id} is claimed by a human member; it cannot be "
-        "reassigned to {new_assignee}. Tasks locked by a human member "
-        "must be completed by that human"
+        "Task {task_id} is claimed by a human member still on the team; it "
+        "cannot be reassigned to {new_assignee} and must be completed by that "
+        "human. If they truly cannot continue, shutdown_member removes them "
+        "from the team, after which the task can be reassigned"
+    ),
+    "update_task.error_human_agent_locked_edit": (
+        "Task {task_id} is claimed by a human member still on the team; its "
+        "title/content cannot be edited. Use send_message to coordinate with "
+        "that human. If they truly cannot continue, shutdown_member removes "
+        "them from the team, after which the task can be cancelled or reassigned"
     ),
     # ===== claim_task =========================================================
     # claim_task._desc lives in descs/en/claim_task.md
@@ -281,6 +344,14 @@ STRINGS: dict[str, str] = {
     "member_complete_task.note": (
         "Optional completion note describing your result or any follow-up the team should know about"
     ),
+    # ===== verify_task ========================================================
+    # verify_task._desc lives in descs/en/verify_task.md
+    "verify_task.task_id": "ID of the task to verify (must be a task assigned to you to review, currently in_review)",
+    "verify_task.decision": (
+        "Verdict: 'pass' (accept — task moves to completed) or 'fail' "
+        "(send back — task returns to in_progress for the author to rework)"
+    ),
+    "verify_task.feedback": "Review feedback (directed to the author on a fail to guide rework; optional on pass)",
     # ===== send_message ========================================================
     # send_message._desc lives in descs/en/send_message.md
     "send_message.to": (
@@ -295,6 +366,23 @@ STRINGS: dict[str, str] = {
     ),
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",
+    "send_message.error_content_too_long": (
+        "'content' is too long ({actual} chars, limit {limit}): a body this size is an "
+        "artifact, not a message. Write it to a file under the shared team workspace "
+        ".team/ with write_file, then resend this message carrying only the file path "
+        "plus a one- or two-sentence summary. Do not split the body across several "
+        "messages to get around this limit."
+    ),
+    # ===== send_message_scheduled (scheduled-mode member variant) ==============
+    # send_message_scheduled._desc lives in descs/en/send_message_scheduled.md
+    # ``content`` / ``summary`` are reused verbatim from the send_message keys
+    # above — only the recipient semantics differ, so only ``to`` is redefined.
+    "send_message_scheduled.to": (
+        'Recipient: only "leader" (a role name — the system delivers it to the real '
+        "Leader; use it for progress, completion, blockers, reassignment requests) "
+        'or "user" (only to reply when an incoming message came from the user). You '
+        "cannot message other members; multicast and broadcast are unavailable in this mode"
+    ),
     # NOTE: worktree tools (enter_worktree / exit_worktree) live in
     # ``openjiuwen.harness.tools.worktree`` and resolve their description
     # / param schema via ``harness.prompts.tools`` providers — no entries

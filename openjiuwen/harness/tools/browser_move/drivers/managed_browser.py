@@ -189,29 +189,22 @@ class ManagedBrowserDriver:
 
     def _resolve_binary(self) -> str:
         explicit = (self.profile.browser_binary or "").strip()
-        explicit_error = ""
         if explicit:
             if _is_chrome_identifier(explicit):
                 candidate = Path(explicit).expanduser()
-                if candidate.exists():
+                if candidate.is_file():
                     return str(candidate)
                 resolved = shutil.which(explicit)
                 if resolved:
                     return resolved
-                explicit_error = f"Configured Chrome binary not found: {explicit}"
-            else:
-                explicit_error = (
-                    "Managed mode supports Chrome only. "
-                    "Set BROWSER_MANAGED_BINARY to a Chrome executable."
-                )
+                raise RuntimeError(f"Configured Chrome binary not found: {explicit}")
+            raise RuntimeError(
+                "Managed mode supports Chrome only. "
+                "Set BROWSER_MANAGED_BINARY to a Chrome executable."
+            )
 
         candidates = _candidate_chrome_binaries()
         if not candidates:
-            if explicit_error:
-                raise RuntimeError(
-                    f"Chrome needs to be installed. {explicit_error} "
-                    "No fallback Chrome binary was found on this machine."
-                )
             raise RuntimeError(
                 "Chrome needs to be installed. No Chrome binary was found on this machine."
             )
@@ -233,6 +226,9 @@ class ManagedBrowserDriver:
             f"--user-data-dir={user_data_dir}",
             "--no-first-run",
             "--no-default-browser-check",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
             "about:blank",
         ]
         args.extend(self.profile.extra_args)
@@ -310,3 +306,17 @@ class ManagedBrowserDriver:
                 process.kill()
             except Exception:
                 pass
+
+    def clear(self):
+        # Reap a Chrome child that exited (e.g. user closed the window) but
+        # whose Popen handle still sits on the driver.
+        if self._process is None:
+            return
+        process = self._process
+        self._process = None
+        self._owns_process = False
+        if process is None:
+            return
+        from openjiuwen.core.common.logging import logger as _logger
+        _logger.info("ManagedBrowser: clear handle process")
+        process.poll()

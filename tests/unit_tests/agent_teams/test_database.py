@@ -4,6 +4,7 @@
 """Unit tests for TeamDatabase module"""
 
 import asyncio
+import json
 import warnings
 
 import pytest
@@ -20,13 +21,16 @@ from openjiuwen.agent_teams.paths import (
     reset_openjiuwen_home,
     team_session_worktrees_dir,
 )
+from openjiuwen.agent_teams.schema.task import NewTaskSpec
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.tools.database.engine import _ensure_team_member_options_column
-from openjiuwen.agent_teams.tools.memory_database import InMemoryTeamDatabase
+from openjiuwen.agent_teams.tools.database.engine import (
+    _ensure_dynamic_table_indexes,
+    _ensure_team_member_options_column,
+)
 from openjiuwen.agent_teams.tools.member_options import (
     build_member_options,
     get_member_options,
@@ -139,6 +143,180 @@ class TestTeamDatabaseInit:
             assert options.model_ref is not None
             assert options.model_ref.model_name == "gpt-4"
             assert options.model_ref.model_index == 1
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level0
+    def test_task_migration_adds_reviewer_and_folds_legacy_statuses(self):
+        """A pre-F_59 task table gains the reviewer column and legacy execution
+        statuses (claimed / started / plan_approved) fold into in_progress."""
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_task_legacy (
+                        task_id TEXT PRIMARY KEY,
+                        team_name TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        assignee TEXT,
+                        updated_at BIGINT
+                    )
+                    """
+                )
+                rows = [
+                    ("t_claimed", "claimed"),
+                    ("t_started", "started"),
+                    ("t_plan", "plan_approved"),
+                    ("t_pending", "pending"),
+                    ("t_done", "completed"),
+                ]
+                for task_id, status in rows:
+                    conn.exec_driver_sql(
+                        "INSERT INTO team_task_legacy (task_id, team_name, title, content, status) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (task_id, "team", "t", "c", status),
+                    )
+
+                _ensure_dynamic_table_indexes(conn)
+
+                columns = {col["name"] for col in inspect(conn).get_columns("team_task_legacy")}
+                statuses = {
+                    row["task_id"]: row["status"]
+                    for row in conn.exec_driver_sql(
+                        "SELECT task_id, status FROM team_task_legacy"
+                    ).mappings().all()
+                }
+
+            assert "reviewer" in columns
+            assert statuses["t_claimed"] == "in_progress"
+            assert statuses["t_started"] == "in_progress"
+            assert statuses["t_plan"] == "in_progress"
+            # Non-legacy statuses are untouched.
+            assert statuses["t_pending"] == "pending"
+            assert statuses["t_done"] == "completed"
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level1
+    def test_task_migration_adds_review_round_columns(self):
+        """A pre-F_62 task table gains review_round / max_review_rounds."""
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_task_prevote (
+                        task_id TEXT PRIMARY KEY,
+                        team_name TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        assignee TEXT,
+                        reviewer TEXT,
+                        updated_at BIGINT
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    "INSERT INTO team_task_prevote (task_id, team_name, title, content, status) "
+                    "VALUES ('t1', 'team', 't', 'c', 'pending')"
+                )
+
+                _ensure_dynamic_table_indexes(conn)
+
+                columns = {col["name"] for col in inspect(conn).get_columns("team_task_prevote")}
+                row = conn.exec_driver_sql(
+                    "SELECT review_round, max_review_rounds FROM team_task_prevote"
+                ).mappings().one()
+
+            assert "review_round" in columns
+            assert "max_review_rounds" in columns
+            assert row["review_round"] == 0
+            assert row["max_review_rounds"] is None
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level1
+    def test_team_info_migration_adds_capability_columns(self):
+        """A pre-F_62 team_info table gains dispatch_mode / enable_task_verification."""
+        from openjiuwen.agent_teams.tools.database.engine import _ensure_team_info_capability_columns
+
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_info (
+                        team_name TEXT PRIMARY KEY,
+                        display_name TEXT NOT NULL,
+                        leader_member_name TEXT NOT NULL,
+                        created BIGINT NOT NULL
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    "INSERT INTO team_info (team_name, display_name, leader_member_name, created) "
+                    "VALUES ('legacy', 'Legacy', 'leader', 1)"
+                )
+
+                _ensure_team_info_capability_columns(conn)
+
+                columns = {col["name"] for col in inspect(conn).get_columns("team_info")}
+                row = conn.exec_driver_sql(
+                    "SELECT dispatch_mode, enable_task_verification FROM team_info"
+                ).mappings().one()
+
+            assert "dispatch_mode" in columns
+            assert "enable_task_verification" in columns
+            assert row["dispatch_mode"] == "autonomous"
+            assert not row["enable_task_verification"]
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level1
+    def test_message_migration_adds_meta_column(self):
+        """A pre-F_63 message table gains the meta column; legacy rows read NULL.
+
+        NULL meta is exactly "an ordinary message" to the delivery path, so a
+        legacy row keeps rendering its own content — the pre-F_63 behavior.
+        """
+        from openjiuwen.agent_teams.tools.database.engine import _ensure_message_meta_column
+
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_message_premeta (
+                        message_id TEXT PRIMARY KEY,
+                        team_name TEXT NOT NULL,
+                        from_member_name TEXT NOT NULL,
+                        to_member_name TEXT,
+                        content TEXT NOT NULL,
+                        timestamp BIGINT NOT NULL,
+                        broadcast BOOLEAN NOT NULL,
+                        protocol TEXT NOT NULL DEFAULT 'plain',
+                        is_read BOOLEAN
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    "INSERT INTO team_message_premeta "
+                    "(message_id, team_name, from_member_name, content, timestamp, broadcast) "
+                    "VALUES ('m1', 'team', 'leader', 'hello', 1, 0)"
+                )
+
+                _ensure_message_meta_column(conn)
+
+                columns = {col["name"] for col in inspect(conn).get_columns("team_message_premeta")}
+                row = conn.exec_driver_sql("SELECT content, meta FROM team_message_premeta").mappings().one()
+
+            assert "meta" in columns
+            assert row["meta"] is None
+            assert row["content"] == "hello"
         finally:
             engine.dispose()
 
@@ -471,6 +649,28 @@ class TestMemberOperations:
 
     @pytest.mark.asyncio
     @pytest.mark.level0
+    async def test_member_exists(self, db):
+        """member_exists returns True only for a present member row."""
+        await db.team.create_team(
+            team_name="team_exists",
+            display_name="Team Exists",
+            leader_member_name="leader_e",
+        )
+        agent_card = AgentCard(name="ExistAgent").model_dump_json()
+        await db.member.create_member(
+            member_name="present",
+            team_name="team_exists",
+            display_name="Present",
+            agent_card=agent_card,
+            status="ready",
+        )
+
+        assert await db.member.member_exists("present", "team_exists") is True
+        assert await db.member.member_exists("absent", "team_exists") is False
+        assert await db.member.member_exists("present", "other_team") is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_update_member_status(self, db):
         """Test updating member status"""
         await db.team.create_team(
@@ -629,7 +829,7 @@ class TestTaskOperations:
             team_name="team11",
             title="Task 2",
             content="Content",
-            status="claimed"
+            status="in_progress"
         )
 
         success = await db.task.update_task_status("task2", "completed")
@@ -755,8 +955,9 @@ class TestTaskOperations:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_update_claimed_task_fails(self, db):
-        """Test that updating a claimed task fails"""
+    async def test_update_in_progress_task_succeeds_in_review_locked(self, db):
+        """An IN_PROGRESS task is editable (edit keeps it in progress; the
+        assignee is told to re-read). An IN_REVIEW task stays locked."""
         await db.team.create_team(
             team_name="team_claimed_update",
             display_name="Team Claimed Update",
@@ -767,17 +968,27 @@ class TestTaskOperations:
             team_name="team_claimed_update",
             title="Claimed Task",
             content="Original content",
-            status="claimed"
+            status="in_progress"
         )
 
-        # Try to update a claimed task - should fail
+        # Editing an in-progress task now succeeds.
         success = await db.task.update_task("task_claimed", title="New Title")
-        assert success is False
-
-        # Verify task was not changed
+        assert success is True
         task = await db.task.get_task("task_claimed")
-        assert task.title == "Claimed Task"
-        assert task.content == "Original content"
+        assert task.title == "New Title"
+
+        # An in-review task stays locked.
+        await db.task.create_task(
+            task_id="task_in_review",
+            team_name="team_claimed_update",
+            title="In Review Task",
+            content="Original content",
+            status="in_review"
+        )
+        locked = await db.task.update_task("task_in_review", title="Nope")
+        assert locked is False
+        unchanged = await db.task.get_task("task_in_review")
+        assert unchanged.title == "In Review Task"
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1098,16 +1309,14 @@ class TestTaskDependencyOperations:
         await db.task.create_task("task2", "team_bidir1", "Task 2", "Content 2", "pending")
 
         # Create a high priority task that task1 and task2 will depend on
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="priority_task",
-            team_name="team_bidir1",
-            title="Priority Task",
-            content="High priority content",
-            status="pending",
-            dependencies=None,
-            dependent_task_ids=["task1", "task2"]
+        result = await db.task.mutate_dependency_graph(
+            "team_bidir1",
+            new_tasks=[
+                NewTaskSpec(task_id="priority_task", title="Priority Task", content="High priority content", initial_status="pending")
+            ],
+            add_edges=[("task1", "priority_task"), ("task2", "priority_task")],
         )
-        assert success is True
+        assert result.ok is True
 
         # Verify: priority task was created
         priority_task = await db.task.get_task("priority_task")
@@ -1144,16 +1353,14 @@ class TestTaskDependencyOperations:
         await db.task.create_task("task2", "team_bidir2", "Task 2", "Content 2", "completed")
 
         # Create a new task that depends on task1 and task2
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="new_task",
-            team_name="team_bidir2",
-            title="New Task",
-            content="New task content",
-            status="blocked",
-            dependencies=["task1", "task2"],
-            dependent_task_ids=None
+        result = await db.task.mutate_dependency_graph(
+            "team_bidir2",
+            new_tasks=[
+                NewTaskSpec(task_id="new_task", title="New Task", content="New task content", initial_status="blocked")
+            ],
+            add_edges=[("new_task", "task1"), ("new_task", "task2")],
         )
-        assert success is True
+        assert result.ok is True
 
         # Verify: new task was created. Both dependencies are already
         # COMPLETED, so the edges are born resolved and the post-mutation
@@ -1188,16 +1395,14 @@ class TestTaskDependencyOperations:
         await db.task.mutate_dependency_graph("team_bidir3", add_edges=[("taskB", "taskA")])
 
         # Insert taskM such that: taskA -> taskM -> taskB
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="taskM",
-            team_name="team_bidir3",
-            title="Task M (Middle)",
-            content="Middle task content",
-            status="blocked",  # Depends on taskA
-            dependencies=["taskA"],
-            dependent_task_ids=["taskB"]
+        result = await db.task.mutate_dependency_graph(
+            "team_bidir3",
+            new_tasks=[
+                NewTaskSpec(task_id="taskM", title="Task M (Middle)", content="Middle task content", initial_status="blocked")
+            ],
+            add_edges=[("taskM", "taskA"), ("taskB", "taskM")],
         )
-        assert success is True
+        assert result.ok is True
 
         # Verify: taskM was created. taskA is COMPLETED so the edge
         # (taskM -> taskA) is born resolved; refresh flips taskM from
@@ -1242,17 +1447,15 @@ class TestTaskDependencyOperations:
         await db.task.mutate_dependency_graph("team_cycle", add_edges=[("taskA", "taskB")])
 
         # Try to add taskC that would create a cycle
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="taskC",
-            team_name="team_cycle",
-            title="Task C",
-            content="Content C",
-            status="blocked",
-            dependencies=["taskA"],
-            dependent_task_ids=["taskB"]
+        result = await db.task.mutate_dependency_graph(
+            "team_cycle",
+            new_tasks=[
+                NewTaskSpec(task_id="taskC", title="Task C", content="Content C", initial_status="blocked")
+            ],
+            add_edges=[("taskC", "taskA"), ("taskB", "taskC")],
         )
         # Should fail due to circular dependency
-        assert success is False
+        assert result.ok is False
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1264,16 +1467,14 @@ class TestTaskDependencyOperations:
             leader_member_name="leader5"
         )
 
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="task_no_deps",
-            team_name="team_no_deps",
-            title="No Deps Task",
-            content="Content",
-            status="pending",
-            dependencies=None,
-            dependent_task_ids=None
+        result = await db.task.mutate_dependency_graph(
+            "team_no_deps",
+            new_tasks=[
+                NewTaskSpec(task_id="task_no_deps", title="No Deps Task", content="Content", initial_status="pending")
+            ],
+            add_edges=[],
         )
-        assert success is True
+        assert result.ok is True
 
         task = await db.task.get_task("task_no_deps")
         assert task is not None
@@ -1298,16 +1499,14 @@ class TestTaskDependencyOperations:
 
         # Try to create a new task that the completed task would depend on
         # This should fail because completed is a terminal status
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="new_priority",
-            team_name="team_terminal1",
-            title="New Priority Task",
-            content="Content",
-            status="pending",
-            dependencies=None,
-            dependent_task_ids=["task_completed"]
+        result = await db.task.mutate_dependency_graph(
+            "team_terminal1",
+            new_tasks=[
+                NewTaskSpec(task_id="new_priority", title="New Priority Task", content="Content", initial_status="pending")
+            ],
+            add_edges=[("task_completed", "new_priority")],
         )
-        assert success is False
+        assert result.ok is False
 
         # Verify the new task was not created
         new_task = await db.task.get_task("new_priority")
@@ -1328,47 +1527,42 @@ class TestTaskDependencyOperations:
                              "Content", "cancelled")
 
         # Try to create a new task that the cancelled task would depend on
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="new_priority2",
-            team_name="team_terminal2",
-            title="New Priority Task 2",
-            content="Content",
-            status="pending",
-            dependencies=None,
-            dependent_task_ids=["task_cancelled"]
+        result = await db.task.mutate_dependency_graph(
+            "team_terminal2",
+            new_tasks=[
+                NewTaskSpec(task_id="new_priority2", title="New Priority Task 2", content="Content", initial_status="pending")
+            ],
+            add_edges=[("task_cancelled", "new_priority2")],
         )
-        assert success is False
+        assert result.ok is False
 
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_add_task_with_claimed_dependent_fails(self, db):
-        """Test that adding a dependency to a claimed task fails (claimed -> blocked is invalid)"""
+        """An in-progress task rejects a new prerequisite dependency."""
         await db.team.create_team(
             team_name="team_terminal3",
             display_name="Team Terminal3",
             leader_member_name="leader8"
         )
 
-        # Create a claimed task
+        # Create an in-progress task
         await db.task.create_task("task_claimed", "team_terminal3", "Task Claimed",
-                             "Content", "claimed")
+                             "Content", "in_progress")
 
-        # Create a new task that the claimed task would depend on
-        # This should succeed because CLAIMED -> BLOCKED is a valid state transition
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="new_priority3",
-            team_name="team_terminal3",
-            title="New Priority Task 3",
-            content="Content",
-            status="pending",
-            dependencies=None,
-            dependent_task_ids=["task_claimed"]
+        # Wiring a new prerequisite into an executing task is rejected.
+        result = await db.task.mutate_dependency_graph(
+            "team_terminal3",
+            new_tasks=[
+                NewTaskSpec(task_id="new_priority3", title="New Priority Task 3", content="Content", initial_status="pending")
+            ],
+            add_edges=[("task_claimed", "new_priority3")],
         )
-        assert success is False
+        assert result.ok is False
 
-        # Verify: claimed task status is not changed
+        # Verify: the in-progress task status is not changed
         claimed_task = await db.task.get_task("task_claimed")
-        assert (claimed_task.status == "claimed")
+        assert (claimed_task.status == "in_progress")
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1381,16 +1575,14 @@ class TestTaskDependencyOperations:
         )
 
         # Try to create a task that depends on a non-existent task
-        success = await db.task.add_task_with_bidirectional_dependencies(
-            task_id="new_task",
-            team_name="team_terminal4",
-            title="New Task",
-            content="Content",
-            status="pending",
-            dependencies=["nonexistent_task"],
-            dependent_task_ids=None
+        result = await db.task.mutate_dependency_graph(
+            "team_terminal4",
+            new_tasks=[
+                NewTaskSpec(task_id="new_task", title="New Task", content="Content", initial_status="pending")
+            ],
+            add_edges=[("new_task", "nonexistent_task")],
         )
-        assert success is False
+        assert result.ok is False
 
 
 class TestMessageOperations:
@@ -1423,6 +1615,44 @@ class TestMessageOperations:
         assert message.to_member_name == "member9"
         assert message.content == "Hello"
         assert message.broadcast == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_create_templated_message_round_trips_meta_and_stays_unread(self, db):
+        """A templated handoff stores meta, no body — and must still be delivered.
+
+        Its ``content`` is empty by design (the document is rendered from meta
+        at delivery, F_63), so the unread sweep that feeds a member's mailbox
+        must not treat the row as nothing to deliver.
+        """
+        await db.team.create_team(
+            team_name="team18b",
+            display_name="Team 18b",
+            leader_member_name="leader18b"
+        )
+
+        meta = {"template": "scheduler_task_start", "refs": {"task": "t-1"}}
+        success = await db.message.create_message(
+            message_id="msg-tpl",
+            team_name="team18b",
+            from_member_name="leader18b",
+            to_member_name="dev-1",
+            content="",
+            broadcast=False,
+            meta=meta,
+        )
+        assert success is True
+
+        message = await db.message.get_message("msg-tpl")
+        assert message.content == ""
+        assert json.loads(message.meta) == meta
+
+        unread = await db.message.get_messages(
+            team_name="team18b",
+            to_member_name="dev-1",
+            unread_only=True,
+        )
+        assert [m.message_id for m in unread] == ["msg-tpl"]
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1990,7 +2220,7 @@ class TestCancelAllTasks:
 
         # Create tasks with different statuses
         await db.task.create_task("task1", "team_mixed_cancel", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "team_mixed_cancel", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task2", "team_mixed_cancel", "Task 2", "Content 2", "in_progress")
         await db.task.create_task("task3", "team_mixed_cancel", "Task 3", "Content 3", "blocked")
         await db.task.create_task("task4", "team_mixed_cancel", "Task 4", "Content 4", "cancelled")
         await db.task.create_task("task5", "team_mixed_cancel", "Task 5", "Content 5", "completed")
@@ -2091,11 +2321,11 @@ class TestResetTask:
             content="Content",
             status="pending"
         )
-        # Claim task to set assignee (this sets status to claimed)
+        # Claim task to set assignee (this sets status to in_progress)
         await db.task.claim_task("task_reset", "member1")
 
         task_before = await db.task.get_task("task_reset")
-        assert task_before.status == "claimed"
+        assert task_before.status == "in_progress"
         assert task_before.assignee == "member1"
 
         # Reset task
@@ -2264,8 +2494,8 @@ class TestGetTasksByAssignee:
         await db.task.create_task("task2", "team_assignee_filter", "Task 2", "Content 2", "pending")
         await db.task.claim_task("task2", "member1")
 
-        # Get claimed tasks
-        claimed_tasks = await db.task.get_tasks_by_assignee("team_assignee_filter", "member1", "claimed")
+        # Get in-progress tasks
+        claimed_tasks = await db.task.get_tasks_by_assignee("team_assignee_filter", "member1", "in_progress")
         assert len(claimed_tasks) == 1
         assert claimed_tasks[0].task_id == "task2"
 
@@ -3222,9 +3452,9 @@ async def test_cancel_all_tasks_does_not_resurrect_terminal_tasks(db):
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_mutate_dependency_graph_rejects_terminal_target(db):
-    """Adding an edge whose source is already CLAIMED is rejected.
+    """Adding an edge whose source is already IN_PROGRESS is rejected.
 
-    The CLAIMED task is mid-execution; silently re-blocking it would
+    The IN_PROGRESS task is mid-execution; silently re-blocking it would
     surprise the assignee. Same protection applies to terminal statuses.
     """
     await db.team.create_team(team_name="team_reject_terminal", display_name="T", leader_member_name="leader")
@@ -3244,23 +3474,22 @@ async def test_mutate_dependency_graph_rejects_terminal_target(db):
         add_edges=[("claimed_task", "upstream")],
     )
     assert result.ok is False
-    assert "claimed" in result.reason
+    assert "in_progress" in result.reason
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_in_memory_has_unread_messages_honors_include_broadcast() -> None:
-    """In-memory has_unread_messages mirrors the SQL DAO and gates broadcasts."""
-    db = InMemoryTeamDatabase()
-    await db.initialize()
-    await db.create_member(
+async def test_has_unread_messages_honors_include_broadcast(db) -> None:
+    """has_unread_messages gates broadcasts behind the include_broadcast flag."""
+    await db.team.create_team(team_name="t1", display_name="T1", leader_member_name="leader")
+    await db.member.create_member(
         member_name="leader",
         team_name="t1",
         display_name="leader",
         agent_card=AgentCard().model_dump_json(),
         status="ready",
     )
-    await db.create_member(
+    await db.member.create_member(
         member_name="dev",
         team_name="t1",
         display_name="dev",
@@ -3269,25 +3498,167 @@ async def test_in_memory_has_unread_messages_honors_include_broadcast() -> None:
     )
 
     # No messages → nothing unread.
-    assert await db.has_unread_messages("t1") is False
+    assert await db.message.has_unread_messages("t1") is False
 
     # Unread broadcast: counted by default, excluded on request.
-    await db.create_message(
+    await db.message.create_message(
         message_id="b1",
         team_name="t1",
         from_member_name="leader",
         content="hi",
         broadcast=True,
     )
-    assert await db.has_unread_messages("t1") is True
-    assert await db.has_unread_messages("t1", include_broadcast=False) is False
+    assert await db.message.has_unread_messages("t1") is True
+    assert await db.message.has_unread_messages("t1", include_broadcast=False) is False
 
     # Unread direct message: counted under both settings.
-    await db.create_message(
+    await db.message.create_message(
         message_id="d1",
         team_name="t1",
         from_member_name="leader",
         content="ping",
         to_member_name="dev",
     )
-    assert await db.has_unread_messages("t1", include_broadcast=False) is True
+    assert await db.message.has_unread_messages("t1", include_broadcast=False) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_member_status_invalid_transition_returns_false(db):
+    """The guarded CAS update rejects an illegal member-status transition."""
+    await db.team.create_team(team_name="team_inv", display_name="T", leader_member_name="l")
+    await db.member.create_member(
+        member_name="m1",
+        team_name="team_inv",
+        display_name="M1",
+        agent_card=AgentCard(name="A").model_dump_json(),
+        status="ready",
+    )
+    # ready -> unstarted is not a legal MemberStatus transition.
+    assert await db.member.update_member_status("m1", "team_inv", "unstarted") is False
+    member = await db.member.get_member("m1", "team_inv")
+    assert member.status == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_member_execution_status_invalid_transition_returns_false(db):
+    """The guarded CAS update rejects an illegal execution-status transition."""
+    await db.team.create_team(team_name="team_inv2", display_name="T", leader_member_name="l")
+    await db.member.create_member(
+        member_name="m1",
+        team_name="team_inv2",
+        display_name="M1",
+        agent_card=AgentCard(name="A").model_dump_json(),
+        status="ready",
+        execution_status="idle",
+    )
+    # idle -> running skips the mandatory starting step; not a legal transition.
+    assert await db.member.update_member_execution_status("m1", "team_inv2", "running") is False
+    member = await db.member.get_member("m1", "team_inv2")
+    assert member.execution_status == "idle"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_message_table_uses_composite_indexes(db):
+    """A fresh session message table carries the A1/A2 composite index scheme."""
+    from sqlalchemy import text
+
+    async with db.read_session_local() as session:
+        rows = (
+            await session.execute(
+                text("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name LIKE 'team_message_%'")
+            )
+        ).scalars().all()
+    names = set(rows)
+    assert any(n.endswith("_inbox") for n in names), names
+    assert any(n.endswith("_bcast_ts") for n in names), names
+    # A1/A2 dropped these single-column indexes.
+    for suffix in ("_team_name", "_to_member_name", "_timestamp", "_broadcast", "_is_read"):
+        assert not any(n.endswith(suffix) for n in names), f"unexpected index *{suffix}: {names}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_dynamic_index_migration_rewrites_legacy_message_table(db):
+    """The index migration drops legacy single-column indexes for the composites."""
+    from openjiuwen.agent_teams.tools.database.engine import _ensure_dynamic_table_indexes
+
+    table = "team_message_legacy00"
+    legacy_cols = ("team_name", "to_member_name", "timestamp", "broadcast", "is_read")
+    async with db.engine.begin() as conn:
+        await conn.exec_driver_sql(
+            f"CREATE TABLE {table} (message_id TEXT PRIMARY KEY, team_name TEXT, "
+            f"to_member_name TEXT, timestamp INTEGER, broadcast INTEGER, is_read INTEGER)"
+        )
+        for col in legacy_cols:
+            await conn.exec_driver_sql(f"CREATE INDEX ix_{table}_{col} ON {table} ({col})")
+
+        await conn.run_sync(_ensure_dynamic_table_indexes)
+
+        names = set(
+            (
+                await conn.exec_driver_sql(
+                    f"SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='{table}'"
+                )
+            ).scalars().all()
+        )
+    assert f"ix_{table}_inbox" in names
+    assert f"ix_{table}_bcast_ts" in names
+    for col in legacy_cols:
+        assert f"ix_{table}_{col}" not in names
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_task_table_uses_assignee_status_composite_index(db):
+    """A fresh session task table carries the D4 index scheme."""
+    from sqlalchemy import text
+
+    async with db.read_session_local() as session:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type='index' "
+                    "AND tbl_name LIKE 'team_task_%' AND tbl_name NOT LIKE 'team_task_dependency_%'"
+                )
+            )
+        ).scalars().all()
+    names = set(rows)
+    assert any(n.endswith("_assignee_status") for n in names), names
+    assert any(n.endswith("_status") and not n.endswith("_assignee_status") for n in names), names
+    # Dropped: team_name (A1), standalone assignee (folded), dead updated_at.
+    for suffix in ("_team_name", "_updated_at"):
+        assert not any(n.endswith(suffix) for n in names), f"unexpected index *{suffix}: {names}"
+    assert not any(n.endswith("_assignee") and not n.endswith("_assignee_status") for n in names), names
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_dynamic_index_migration_rewrites_legacy_task_table(db):
+    """The index migration folds task assignee into a composite and drops updated_at."""
+    from openjiuwen.agent_teams.tools.database.engine import _ensure_dynamic_table_indexes
+
+    table = "team_task_legacy00"
+    async with db.engine.begin() as conn:
+        await conn.exec_driver_sql(
+            f"CREATE TABLE {table} (task_id TEXT PRIMARY KEY, team_name TEXT, "
+            f"status TEXT, assignee TEXT, updated_at INTEGER)"
+        )
+        for col in ("team_name", "status", "assignee", "updated_at"):
+            await conn.exec_driver_sql(f"CREATE INDEX ix_{table}_{col} ON {table} ({col})")
+
+        await conn.run_sync(_ensure_dynamic_table_indexes)
+
+        names = set(
+            (
+                await conn.exec_driver_sql(
+                    f"SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='{table}'"
+                )
+            ).scalars().all()
+        )
+    assert f"ix_{table}_assignee_status" in names
+    assert f"ix_{table}_status" in names
+    for col in ("team_name", "assignee", "updated_at"):
+        assert f"ix_{table}_{col}" not in names

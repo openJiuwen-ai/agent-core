@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import (
     Any,
+    ClassVar,
     Protocol,
     runtime_checkable,
 )
@@ -35,6 +36,8 @@ from openjiuwen.agent_teams.agent.coordination.handlers import (
     AgentLifecycleHandler,
     MemberHandler,
     MessageHandler,
+    ScheduledStaleTaskHandler,
+    ScheduledTaskBoardHandler,
     StaleTaskHandler,
     TaskBoardHandler,
     TeamCompletionHandler,
@@ -68,6 +71,15 @@ class AgentRoundController(Protocol):
 
     def is_agent_running(self) -> bool:
         """Return whether the agent is in an active round."""
+        ...
+
+    def idle_seconds(self) -> float | None:
+        """Return seconds since this member last settled into runtime IDLE.
+
+        ``None`` while the member is mid-round or has never settled. Measured
+        off a process-local monotonic clock re-based on resume, so a paused
+        team never inflates it.
+        """
         ...
 
     def has_in_flight_round(self) -> bool:
@@ -160,12 +172,27 @@ class EventDispatcher:
     access in tests.
     """
 
+    # Dispatch-mode handler variants (F_62). Selected here, at assembly —
+    # never inside a handler method. Literal tables in the F_57 spirit: the
+    # mode set is closed, an unknown mode is a loud KeyError, not a silent
+    # autonomous fallback.
+    _TASK_BOARD_CLASS: ClassVar[dict[str, type[TaskBoardHandler]]] = {
+        "autonomous": TaskBoardHandler,
+        "scheduled": ScheduledTaskBoardHandler,
+    }
+    _STALE_TASK_CLASS: ClassVar[dict[str, type[StaleTaskHandler]]] = {
+        "autonomous": StaleTaskHandler,
+        "scheduled": ScheduledStaleTaskHandler,
+    }
+
     def __init__(
         self,
         host: DispatcherHost,
         blueprint: TeamAgentBlueprint,
         infra: TeamInfra,
         poll_ctrl: PollController,
+        *,
+        dispatch_mode: str = "autonomous",
     ) -> None:
         # dispatch() only needs the round-readiness query; the lifecycle
         # surface is the handlers' concern, not ours. Alias under
@@ -173,50 +200,26 @@ class EventDispatcher:
         self._round: AgentRoundController = host
         self._blueprint = blueprint
         self._infra = infra
-        # Throttle dict shared by reference between MemberHandler
-        # (status-change path) and StaleTaskHandler (poll path) so the
-        # same task cannot be nudged twice within one stale window
-        # regardless of trigger source.
-        stale_claim_throttle: dict[str, float] = {}
+        self._dispatch_mode = dispatch_mode
 
         self.lifecycle = AgentLifecycleHandler(host, blueprint, infra, poll_ctrl)
-        self.member = MemberHandler(host, blueprint, infra, poll_ctrl, stale_claim_throttle)
+        self.member = MemberHandler(host, blueprint, infra, poll_ctrl)
         self.message = MessageHandler(host, blueprint, infra, poll_ctrl)
-        self.task_board = TaskBoardHandler(host, blueprint, infra, poll_ctrl)
-        self.stale_task = StaleTaskHandler(host, blueprint, infra, poll_ctrl, stale_claim_throttle)
+        # task_board / stale_task are the dispatch-mode-owned handler pair
+        # (F_62): the mode is static spec configuration, so the variant is
+        # chosen right here at construction, for every role alike.
+        self.task_board = self._TASK_BOARD_CLASS[dispatch_mode](host, blueprint, infra, poll_ctrl)
+        self.stale_task = self._STALE_TASK_CLASS[dispatch_mode](host, blueprint, infra, poll_ctrl)
         self.team_completion = TeamCompletionHandler(host, blueprint, infra, poll_ctrl)
         # Swarmflow spectator narration. Listens only for WORKFLOW_PROGRESS
         # (a dedicated event_key, no fan-out overlap), so its registration
         # position is not load-bearing.
         self.workflow = WorkflowHandler(host, blueprint, infra, poll_ctrl)
 
-        self._framework = AsyncCallbackFramework(
-            enable_metrics=False,
-            enable_logging=True,
-        )
-        # Register order matters for fan-out on shared event_keys.
-        # MEMBER_SHUTDOWN is the example: MemberHandler.on_member_event
-        # processes the lifecycle state, then
-        # MessageHandler.on_member_shutdown_drain flushes the mailbox.
-        # Same priority (default 0) → Python's stable sort keeps this
-        # registration order.
-        # team_completion is registered last so its POLL_TASK callback
-        # fans out after StaleTaskHandler's: a stale sweep may deliver
-        # input and make the leader non-idle, and the completion check
-        # must see that before deciding the team is done.
-        handlers = [
-            self.lifecycle,
-            self.member,
-            self.message,
-            self.task_board,
-            self.stale_task,
-            self.team_completion,
-            self.workflow,
-        ]
         # The reliability handler (leader-side remediation + team-level
         # ping-pong) mounts only when the team opts into the reliability
         # framework. It is appended after team_completion but does not listen
-        # on POLL_TASK, so the completion ordering above is unaffected; on
+        # on POLL_TASK, so the completion ordering below is unaffected; on
         # MESSAGE / BROADCAST it fans out after MessageHandler.
         self.reliability = None
         reliability_cfg = getattr(blueprint.spec, "reliability", None)
@@ -235,11 +238,41 @@ class EventDispatcher:
                 policy=build_remediation_policy(reliability_cfg),
                 pingpong=build_pingpong_detector(reliability_cfg),
             )
+
+        self._framework = AsyncCallbackFramework(
+            enable_metrics=False,
+            enable_logging=True,
+        )
+        # Register order matters for fan-out on shared event_keys.
+        # MEMBER_SHUTDOWN is the example: MemberHandler.on_member_event
+        # processes the lifecycle state, then
+        # MessageHandler.on_member_shutdown_drain flushes the mailbox.
+        # Same priority (default 0) → Python's stable sort keeps this
+        # registration order.
+        # team_completion is registered last so its POLL_TASK callback
+        # fans out after the stale_task handler's: a stale sweep may deliver
+        # input and make the leader non-idle, and the completion check
+        # must see that before deciding the team is done.
+        handlers = [
+            self.lifecycle,
+            self.member,
+            self.message,
+            self.task_board,
+            self.stale_task,
+            self.team_completion,
+            self.workflow,
+        ]
+        if self.reliability is not None:
             handlers.append(self.reliability)
 
         for handler in handlers:
             for event_key, callback in handler.get_callbacks().items():
                 self._framework.register_sync(event_key, callback)
+
+    @property
+    def dispatch_mode(self) -> str:
+        """The dispatch mode this handler set was assembled for."""
+        return self._dispatch_mode
 
     async def dispatch(self, event: CoordinationEvent) -> None:
         """Wake-up entry. Applies coarse rules, then triggers framework."""

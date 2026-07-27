@@ -16,6 +16,8 @@ import asyncio
 import json
 from typing import Any, Sequence
 
+import pytest
+
 from openjiuwen.agent_teams.rails.team_context import inject_team_handles
 from openjiuwen.agent_teams.schema.build_context import BuildContext
 from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
@@ -50,6 +52,7 @@ class _FakeWorkerBackend(TeamWorkerBackend):
         member_name: str,
         has_schema: bool,
         model: Any,
+        budget_rail: Any = None,
     ) -> str:
         if has_schema and tools:
             tools[0].captured = {"answer": f"done::{member_name}"}
@@ -90,6 +93,29 @@ def test_schema_path_returns_structured_and_free_path_returns_text(tmp_path):
     assert [a.label for a in do.agents] == ["compute", "free"]
     assert all(a.status == "completed" for a in do.agents)
     assert do.agents[0].prompt == "compute the answer"
+    # Schema path with empty invoke output falls back to JSON preview as outcome.
+    assert do.agents[0].outcome and '"answer"' in do.agents[0].outcome
+
+
+def test_schema_path_prefers_natural_text_over_json(tmp_path):
+    """When schema capture succeeds and invoke also returns narration, prefer narration."""
+
+    class _NarratingWorker(TeamWorkerBackend):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
+            if has_schema and tools:
+                tools[0].captured = {"answer": f"done::{member_name}"}
+                tools[0].called = True
+                return f"narration::{member_name}"
+            return f"freetext::{member_name}"
+
+    script = _write(tmp_path, _SCRIPT)
+    events: list = []
+    result = asyncio.run(
+        run_workflow(str(script), backend=_NarratingWorker(model=None), progress_sink=events.append)
+    )
+    assert result["a"]["answer"].startswith("done::")
+    do = next(p for p in build_workflow_run_from_events(events).phases if p.title == "Do")
+    assert do.agents[0].outcome.startswith("narration::")
 
 
 def test_missing_submit_makes_agent_return_none(tmp_path):
@@ -100,7 +126,7 @@ def test_missing_submit_makes_agent_return_none(tmp_path):
     """
 
     class _SilentWorker(TeamWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
             return ""  # never fills structured_output
 
     script = _write(tmp_path, _SCRIPT)
@@ -130,7 +156,7 @@ async def run(args):
     seen: list = []
 
     class _RecordingBackend(TeamWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
             seen.append(model)
             return f"ran::{model}"
 
@@ -352,6 +378,9 @@ def test_worktree_isolation_sets_worker_workspace_and_removes_clean_worktree(tmp
         async def run_once(self, content, **kw):
             return "ok"
 
+        def add_rail(self, rail):
+            return None
+
         async def dispose(self):
             return None
 
@@ -425,6 +454,9 @@ async def run(args):
         async def run_once(self, content, **kw):
             return '{"status": "done"}'
 
+        def add_rail(self, rail):
+            return None
+
         async def dispose(self):
             return None
 
@@ -482,3 +514,52 @@ def test_long_run_id_slug_is_not_truncated_in_member_names():
     name = backend._next_member_name({"label": "w"})
     assert name.startswith("wf-" + "a" * 48 + "-")
     assert len(name) > 50
+
+
+def test_execute_worker_surfaces_task_loop_model_error():
+    """Task-loop failures return {"error": ...}; worker must raise, not empty output."""
+    from openjiuwen.agent_teams.workflow.backends.team_worker_backend import (
+        _text_from_invoke_result,
+    )
+    from openjiuwen.agent_teams.workflow.engine.errors import BackendError
+
+    err = "[181001] model call failed, reason: openAI API async stream error: ReadError"
+    with pytest.raises(BackendError, match="ReadError"):
+        _text_from_invoke_result({"error": err}, member_name="wf-w-5")
+
+    assert _text_from_invoke_result({"output": ""}, member_name="wf-w-5") == ""
+    assert _text_from_invoke_result({"output": "ok"}, member_name="wf-w-5") == "ok"
+
+
+def test_agent_emits_failed_when_worker_backend_raises(tmp_path):
+    """BackendError from a model failure surfaces as agent_failed, not empty completed."""
+    from openjiuwen.agent_teams.workflow.engine.errors import BackendError
+    from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
+
+    class _FailingWorkerBackend(_FakeWorkerBackend):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
+            raise BackendError(
+                "worker 'wf-w-0' failed: [181001] model call failed, reason: ReadError"
+            )
+
+    script = _write(
+        tmp_path,
+        '''
+from swarmflow import agent, phase
+
+META = {"name": "wk", "description": "worker flow", "phases": [{"title": "Do"}]}
+
+async def run(args):
+    phase("Do")
+    return await agent("fail me", label="broken")
+''',
+    )
+    backend = _FailingWorkerBackend(model=None)
+    events: list = []
+    asyncio.run(run_workflow(str(script), backend=backend, progress_sink=events.append))
+
+    kinds = [ev.kind for ev in events]
+    assert ProgressKind.AGENT_FAILED in kinds
+    failed = next(ev for ev in events if ev.kind == ProgressKind.AGENT_FAILED)
+    assert "ReadError" in (failed.message or "")
+    assert ProgressKind.AGENT_COMPLETED not in kinds

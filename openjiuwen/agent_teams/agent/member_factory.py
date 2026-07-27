@@ -54,7 +54,7 @@ def create_member_handle(
         agent_card=agent_card,
         db=infra.team_backend.db,
         messager=infra.messager,
-        desc=blueprint.ctx.persona,
+        desc=blueprint.ctx.desc,
     )
 
 

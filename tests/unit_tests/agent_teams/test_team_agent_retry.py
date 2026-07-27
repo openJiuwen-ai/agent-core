@@ -151,8 +151,14 @@ async def test_retryable_failure_swallows_round_and_redrives(monkeypatch: pytest
 
     await sc._forward_outputs()
 
-    # Failure + trailing frames all swallowed; one retry re-drive sent.
-    assert await _drain_queue(sc.stream_queue) == []
+    # The raw failure + trailing frames are swallowed, but a visible retry
+    # delta is emitted before the retry re-drive is sent.
+    chunks = await _drain_queue(sc.stream_queue)
+    assert len(chunks) == 1
+    assert chunks[0].type == "llm_output"
+    assert chunks[0].payload["retrying"] is True
+    assert chunks[0].payload["attempt"] == 1
+    assert "model call failed, reason: timeout" in chunks[0].payload["content"]
     assert runtime.sent == [(stream_controller_module._RETRY_QUERY, False)]
     assert sc._retry_attempt == 1
     assert sc._swallow_failed_round is True
@@ -183,8 +189,10 @@ async def test_retry_round_forwards_after_started_resets_swallow(monkeypatch: py
     await sc._forward_outputs()  # the retry round's answer now forwards
 
     chunks = await _drain_queue(sc.stream_queue)
-    assert len(chunks) == 1
-    assert chunks[0].payload["output"] == "final"
+    assert len(chunks) == 2
+    assert chunks[0].type == "llm_output"
+    assert chunks[0].payload["retrying"] is True
+    assert chunks[1].payload["output"] == "final"
 
 
 @pytest.mark.asyncio

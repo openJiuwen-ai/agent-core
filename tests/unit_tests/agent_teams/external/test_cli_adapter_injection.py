@@ -20,15 +20,6 @@ def test_gemini_adapter_registered_and_builds_headless_turn():
 
 
 @pytest.mark.level0
-def test_claude_system_prompt_uses_append_flag():
-    adapter = build_adapter("claude")
-    assert adapter.injects_system_prompt_via_arg()
-    assert adapter.system_prompt_args("PERSONA") == ["--append-system-prompt", "PERSONA"]
-    # Empty system prompt yields no args.
-    assert adapter.system_prompt_args("") == []
-
-
-@pytest.mark.level0
 @pytest.mark.parametrize("name", ["gemini", "openclaw", "hermes", "generic"])
 def test_clis_without_system_prompt_flag_get_empty_args(name):
     adapter = build_adapter(name)
@@ -39,8 +30,8 @@ def test_clis_without_system_prompt_flag_get_empty_args(name):
 
 @pytest.mark.level0
 def test_codex_system_prompt_uses_developer_instructions():
-    # codex injects the system prompt via -c developer_instructions (no prepend).
-    adapter = build_adapter("codex")
+    # The one-shot compatibility backend still uses -c developer_instructions.
+    adapter = build_adapter("codex-exec")
     assert adapter.injects_system_prompt_via_arg()
     args = adapter.system_prompt_args("be terse")
     assert args[0] == "-c"
@@ -49,8 +40,8 @@ def test_codex_system_prompt_uses_developer_instructions():
 
 
 @pytest.mark.level0
-def test_codex_uses_json_output_and_turn_completed_sentinel():
-    adapter = build_adapter("codex")
+def test_codex_exec_uses_json_output_and_turn_completed_sentinel():
+    adapter = build_adapter("codex-exec")
     assert "--json" in adapter.build_command()
     assert adapter.is_turn_complete('{"type": "turn.completed"}')
     assert not adapter.is_turn_complete('{"type": "item.completed"}')
@@ -90,10 +81,9 @@ def test_hermes_registers_mcp_via_subcommand():
 
 
 @pytest.mark.level0
-@pytest.mark.parametrize("name", ["claude", "codex"])
+@pytest.mark.parametrize("name", ["codex-exec"])
 def test_launch_inject_clis_have_no_register_command(name):
-    # claude / codex inject MCP at launch (mcp_launch_args), so there is no
-    # out-of-band registration command.
+    # Codex injects MCP at launch, so there is no out-of-band registration command.
     adapter = build_adapter(name)
     assert adapter.mcp_register_command(server_name="t", server_command=("openjiuwen-team-mcp",)) is None
     assert adapter.mcp_launch_args(server_name="t", server_command=("openjiuwen-team-mcp",))
@@ -109,20 +99,8 @@ def test_openclaw_cannot_auto_inject_mcp():
 
 
 @pytest.mark.level0
-def test_claude_summarize_extracts_text_and_tool_skips_lifecycle():
-    adapter = build_adapter("claude")
-    assert adapter.structured_output
-    line = '{"type":"assistant","message":{"content":[{"type":"text","text":"hi there"},{"type":"tool_use","name":"read_inbox"}]}}'
-    assert adapter.summarize_output_line(line) == "hi there → read_inbox"
-    # result is a turn-boundary lifecycle event: nothing to surface.
-    assert adapter.summarize_output_line('{"type":"result","subtype":"success"}') is None
-    # non-JSON line on a structured-output CLI is ignored.
-    assert adapter.summarize_output_line("not json") is None
-
-
-@pytest.mark.level0
 def test_codex_summarize_extracts_item_text_skips_turn_completed():
-    adapter = build_adapter("codex")
+    adapter = build_adapter("codex-exec")
     assert adapter.summarize_output_line('{"type":"item.completed","item":{"text":"done the work"}}') == "done the work"
     assert adapter.summarize_output_line('{"type":"turn.completed"}') is None
 

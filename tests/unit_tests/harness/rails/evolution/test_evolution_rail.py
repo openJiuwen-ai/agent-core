@@ -14,14 +14,27 @@ from unittest.mock import patch
 from openjiuwen.agent_evolving.trajectory import (
     InMemoryTrajectoryStore,
     LLMCallDetail,
-    LegacyTrajectory,
     TRAJECTORY_TRACE_AGENT_HANDLER_NAME,
     TRAJECTORY_TRACE_WORKFLOW_HANDLER_NAME,
     Trajectory,
     TrajectoryBuilder,
     TrajectoryStep,
-    to_legacy_trajectory,
+    trajectory_execution_id,
+    trajectory_from_steps,
+    trajectory_session_id,
+    trajectory_source,
+    trajectory_steps,
 )
+from openjiuwen.agent_evolving.trajectory.semconv import (
+    OJ_AGENT_INVOKE_TYPE,
+    OJ_RL_COMPLETION_TOKEN_IDS,
+    OJ_RL_LOGPROBS,
+    OJ_RL_PROMPT_TOKEN_IDS,
+    OJ_RL_REWARD,
+    OJ_WORKFLOW_COMPONENT_TYPE,
+    TRAJECTORY_INVOKE_TYPE,
+)
+from openjiuwen.agent_evolving.trajectory.span_codec import to_otlp_value
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.session.tracer import TracerHandlerRegistry
@@ -215,18 +228,19 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         trajectories = self.store.query(session_id="conv_123")
         self.assertEqual(len(trajectories), 1)
 
-        traj = to_legacy_trajectory(trajectories[0])
-        self.assertEqual(traj.session_id, "conv_123")
-        self.assertEqual(traj.source, "online")
-        self.assertEqual(len(traj.steps), 2)
+        traj = trajectories[0]
+        self.assertEqual(trajectory_session_id(traj), "conv_123")
+        self.assertEqual(trajectory_source(traj), "online")
+        steps = trajectory_steps(traj)
+        self.assertEqual(len(steps), 2)
 
         # Check LLM step
-        llm_step = traj.steps[0]
+        llm_step = steps[0]
         self.assertEqual(llm_step.kind, "llm")
         self.assertIsNotNone(llm_step.detail)
 
         # Check tool step
-        tool_step = traj.steps[1]
+        tool_step = steps[1]
         self.assertEqual(tool_step.kind, "tool")
         self.assertIsNotNone(tool_step.detail)
 
@@ -327,7 +341,7 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
 
         trajectories = self.store.query(source="custom_online")
         self.assertEqual(len(trajectories), 1)
-        self.assertEqual(to_legacy_trajectory(trajectories[0]).source, "custom_online")
+        self.assertEqual(trajectory_source(trajectories[0]), "custom_online")
         self.assertEqual(self.store.query(source="online"), [])
 
     async def test_trace_trajectory_merges_builder_rl_fields(self):
@@ -394,12 +408,148 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
 
         trajectories = self.store.query(session_id="conv_trace_rl")
         self.assertEqual(len(trajectories), 1)
-        step = to_legacy_trajectory(trajectories[0]).steps[0]
+        step = trajectory_steps(trajectories[0])[0]
         self.assertEqual(step.reward, 0.7)
         self.assertEqual(step.prompt_token_ids, [1, 2, 3])
         self.assertEqual(step.completion_token_ids, [10, 11])
         self.assertEqual(step.logprobs, [-0.2, -0.3])
         self.assertEqual(step.meta["turn_id"], 0)
+
+    def test_otlp_span_step_kind_uses_shared_fallback_classification(self):
+        """Fallback-only OTLP spans should be classified the same as trajectory projection."""
+        cases = [
+            (
+                {"attributes": [{"key": TRAJECTORY_INVOKE_TYPE, "value": to_otlp_value("llm")}]},
+                "llm",
+            ),
+            (
+                {"attributes": [{"key": OJ_AGENT_INVOKE_TYPE, "value": to_otlp_value("plugin")}]},
+                "tool",
+            ),
+            (
+                {"attributes": [{"key": OJ_WORKFLOW_COMPONENT_TYPE, "value": to_otlp_value("Tool")}]},
+                "tool",
+            ),
+            (
+                {"name": "llm.call", "attributes": []},
+                "llm",
+            ),
+            (
+                {"name": "tool.read_file", "attributes": []},
+                "tool",
+            ),
+        ]
+
+        for span, expected in cases:
+            with self.subTest(span=span):
+                self.assertEqual(EvolutionRail._otlp_span_step_kind(span), expected)
+
+    def test_trace_trajectory_merges_builder_fields_for_fallback_classified_span(self):
+        """Builder RL fields should merge onto spans identified by invoke-type fallback attrs."""
+        rail = EvolutionRail(
+            trajectory_store=self.store,
+            evolution_trigger=EvolutionTriggerPoint.NONE,
+        )
+        rail._builder = TrajectoryBuilder(session_id="session-fallback", source="online")
+        rail._builder.record_step(
+            TrajectoryStep(
+                kind="llm",
+                detail=LLMCallDetail(
+                    model="fallback-model",
+                    messages=[{"role": "user", "content": "hello"}],
+                    response={"role": "assistant", "content": "hi"},
+                ),
+                reward=0.9,
+                prompt_token_ids=[1, 2],
+                completion_token_ids=[3, 4],
+                logprobs=[-0.1, -0.2],
+                meta={"turn_id": 1},
+            )
+        )
+        trajectory = Trajectory(
+            otlp_trace={
+                "resourceSpans": [
+                    {
+                        "resource": {"attributes": []},
+                        "scopeSpans": [
+                            {
+                                "spans": [
+                                    {
+                                        "traceId": "0" * 32,
+                                        "spanId": "1" * 16,
+                                        "name": "agent.model",
+                                        "attributes": [
+                                            {"key": TRAJECTORY_INVOKE_TYPE, "value": to_otlp_value("llm")},
+                                        ],
+                                        "status": {"code": "STATUS_CODE_OK"},
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        merged_step = trajectory_steps(rail._merge_builder_otlp_attributes(trajectory))[0]
+
+        self.assertEqual(merged_step.reward, 0.9)
+        self.assertEqual(merged_step.prompt_token_ids, [1, 2])
+        self.assertEqual(merged_step.completion_token_ids, [3, 4])
+        self.assertEqual(merged_step.logprobs, [-0.1, -0.2])
+        self.assertEqual(merged_step.meta["turn_id"], 1)
+
+    def test_trace_trajectory_keeps_existing_otlp_rl_fields_when_merging_builder_fields(self):
+        """Trace-provided RL fields should stay authoritative over builder fallback fields."""
+        rail = EvolutionRail(
+            trajectory_store=self.store,
+            evolution_trigger=EvolutionTriggerPoint.NONE,
+        )
+        rail._builder = TrajectoryBuilder(session_id="session-existing-rl", source="online")
+        rail._builder.record_step(
+            TrajectoryStep(
+                kind="llm",
+                reward=0.9,
+                prompt_token_ids=[1, 2],
+                completion_token_ids=[3, 4],
+                logprobs=[-0.1, -0.2],
+            )
+        )
+        trajectory = Trajectory(
+            otlp_trace={
+                "resourceSpans": [
+                    {
+                        "resource": {"attributes": []},
+                        "scopeSpans": [
+                            {
+                                "spans": [
+                                    {
+                                        "traceId": "0" * 32,
+                                        "spanId": "2" * 16,
+                                        "name": "agent.model",
+                                        "attributes": [
+                                            {"key": TRAJECTORY_INVOKE_TYPE, "value": to_otlp_value("llm")},
+                                            {"key": OJ_RL_REWARD, "value": to_otlp_value(0.4)},
+                                            {"key": OJ_RL_PROMPT_TOKEN_IDS, "value": to_otlp_value([10, 20])},
+                                            {"key": OJ_RL_COMPLETION_TOKEN_IDS, "value": to_otlp_value([30, 40])},
+                                            {"key": OJ_RL_LOGPROBS, "value": to_otlp_value([-0.4, -0.5])},
+                                        ],
+                                        "status": {"code": "STATUS_CODE_OK"},
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        merged_step = trajectory_steps(rail._merge_builder_otlp_attributes(trajectory))[0]
+
+        self.assertEqual(merged_step.reward, 0.4)
+        self.assertEqual(merged_step.prompt_token_ids, [10, 20])
+        self.assertEqual(merged_step.completion_token_ids, [30, 40])
+        self.assertEqual(merged_step.logprobs, [-0.4, -0.5])
 
     async def test_extension_points_called(self):
         """Test that extension points are called."""
@@ -522,7 +672,7 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
 
     async def test_async_snapshot_uses_typed_contract_legacy_shape(self):
         messages = [{"role": "user", "content": "hello"}]
-        trajectory = LegacyTrajectory(
+        trajectory = trajectory_from_steps(
             execution_id="exec-1",
             session_id="session-1",
             steps=[TrajectoryStep(kind="llm", detail=LLMCallDetail(model="m", messages=messages))],
@@ -537,10 +687,13 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         snapshot = await self.rail._snapshot_for_evolution(trajectory, ctx)
         typed_snapshot = EvolutionSnapshot.from_legacy_dict(snapshot)
 
-        self.assertIsInstance(typed_snapshot.trajectory, LegacyTrajectory)
-        self.assertIsNot(typed_snapshot.trajectory, trajectory)
-        self.assertEqual(typed_snapshot.trajectory.execution_id, trajectory.execution_id)
-        self.assertFalse(hasattr(typed_snapshot.trajectory, "otlp_trace"))
+        self.assertIsInstance(typed_snapshot.trajectory, Trajectory)
+        self.assertIs(typed_snapshot.trajectory, trajectory)
+        self.assertEqual(
+            trajectory_execution_id(typed_snapshot.trajectory),
+            trajectory_execution_id(trajectory),
+        )
+        self.assertTrue(hasattr(typed_snapshot.trajectory, "otlp_trace"))
         self.assertEqual(typed_snapshot.messages, messages)
         self.assertIsNone(typed_snapshot.skill_name)
 
@@ -650,9 +803,9 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         )
 
         trajectory = rail._build_trajectory()
-        legacy = to_legacy_trajectory(trajectory)
-        assert legacy.steps[1].detail.tool_call_id == "call_read_1"
-        assert legacy.steps[1].meta["parent_llm_call"] == "llm_0001"
+        steps = trajectory_steps(trajectory)
+        assert steps[1].detail.tool_call_id == "call_read_1"
+        assert steps[1].meta["parent_llm_call"] == "llm_0001"
 
     async def test_online_tool_step_uses_matching_tool_call_id_for_parent_ref(self):
         rail = EvolutionRail(async_evolution=False)
@@ -690,9 +843,9 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         )
 
         trajectory = rail._build_trajectory()
-        legacy = to_legacy_trajectory(trajectory)
-        assert legacy.steps[2].detail.tool_call_id == "call_read_1"
-        assert legacy.steps[2].meta["parent_llm_call"] == "llm_0001"
+        steps = trajectory_steps(trajectory)
+        assert steps[2].detail.tool_call_id == "call_read_1"
+        assert steps[2].meta["parent_llm_call"] == "llm_0001"
 
     async def test_after_evolution_triggered_hook_runs_after_trigger(self):
         """Subclasses can observe successful trigger scheduling after evolution starts."""
@@ -703,7 +856,7 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
                 call_log.append("evolution")
 
             async def _on_after_evolution_triggered(self, trajectory, ctx):
-                call_log.append(f"after:{trajectory.session_id}")
+                call_log.append(f"after:{trajectory_session_id(trajectory)}")
 
         rail = HookedEvolutionRail(trajectory_store=self.store, async_evolution=False)
 
@@ -874,7 +1027,7 @@ class TestEvolutionRailAccumulation(IsolatedAsyncioTestCase):
         rail._save_trajectory(trajectory)
         await rail.run_evolution(trajectory, ctx)
 
-        self.assertEqual(len(to_legacy_trajectory(trajectory).steps), 2)
+        self.assertEqual(len(trajectory_steps(trajectory)), 2)
         self.assertEqual(len(evolution_calls), 1)
         self.assertEqual(len(self.store.query()), 2)  # Round 1 + manual save
 
@@ -1008,7 +1161,7 @@ class TestTrajectoryRail(IsolatedAsyncioTestCase):
         # Verify trajectory was saved
         trajectories = self.store.query(session_id="conv_789")
         self.assertEqual(len(trajectories), 1)
-        self.assertEqual(to_legacy_trajectory(trajectories[0]).session_id, "conv_789")
+        self.assertEqual(trajectory_session_id(trajectories[0]), "conv_789")
 
     def test_priority(self):
         """Test that TrajectoryRail has expected priority."""
@@ -1090,8 +1243,8 @@ class TestEvolutionRailCustomEvolution(IsolatedAsyncioTestCase):
         # Verify evolution was called with trajectory
         self.assertEqual(len(self.evolution_calls), 1)
         traj = self.evolution_calls[0]
-        self.assertEqual(traj.session_id, "conv_custom")
-        self.assertEqual(len(traj.steps), 1)
+        self.assertEqual(trajectory_session_id(traj), "conv_custom")
+        self.assertEqual(len(trajectory_steps(traj)), 1)
 
 
 class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
@@ -1182,7 +1335,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
             context=MockMessageContext(messages=[{"role": "user", "content": "improve the workflow"}]),
         )
         result = await rail._snapshot_for_evolution(
-            LegacyTrajectory(
+            trajectory_from_steps(
                 execution_id="test",
                 steps=[],
                 session_id="test",
@@ -1192,7 +1345,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         )
         self.assertIsNotNone(result)
         self.assertIn("trajectory", result)
-        self.assertIsInstance(result["trajectory"], LegacyTrajectory)
+        self.assertIsInstance(result["trajectory"], Trajectory)
         self.assertEqual(result["messages"], [])
 
     async def test_safe_run_evolution_catches_exceptions(self):
@@ -1206,7 +1359,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         # Should not raise
         await rail._safe_run_evolution(
             {
-                "trajectory": LegacyTrajectory(
+                "trajectory": trajectory_from_steps(
                     execution_id="test",
                     steps=[],
                     session_id="test",
@@ -1233,7 +1386,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         rail = SlowRail(trajectory_store=self.store)
         await rail._safe_run_evolution(
             {
-                "trajectory": LegacyTrajectory(
+                "trajectory": trajectory_from_steps(
                     execution_id="test",
                     steps=[],
                     session_id="test",
@@ -1259,7 +1412,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         rail = FailingRail(trajectory_store=self.store)
         await rail._safe_run_evolution(
             {
-                "trajectory": LegacyTrajectory(
+                "trajectory": trajectory_from_steps(
                     execution_id="test",
                     steps=[],
                     session_id="test",
@@ -1284,7 +1437,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         rail = SuccessfulRail(trajectory_store=self.store)
         await rail._safe_run_evolution(
             {
-                "trajectory": LegacyTrajectory(
+                "trajectory": trajectory_from_steps(
                     execution_id="test",
                     steps=[],
                     session_id="test",
@@ -1300,14 +1453,14 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
 
         class FailingRail(EvolutionRail):
             async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
-                raise RuntimeError(f"failed-{trajectory.execution_id}")
+                raise RuntimeError(f"failed-{trajectory_execution_id(trajectory)}")
 
         rail = FailingRail(trajectory_store=self.store)
 
         for index in range(3):
             await rail._safe_run_evolution(
                 {
-                    "trajectory": LegacyTrajectory(
+                    "trajectory": trajectory_from_steps(
                         execution_id=str(index),
                         steps=[],
                         session_id="test",

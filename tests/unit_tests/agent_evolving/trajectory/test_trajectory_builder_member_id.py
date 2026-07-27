@@ -8,6 +8,7 @@ from openjiuwen.agent_evolving.trajectory.builder import TrajectoryBuilder
 from openjiuwen.agent_evolving.trajectory.types import (
     ToolCallDetail,
     TrajectoryStep,
+    trajectory_meta,
 )
 
 
@@ -28,7 +29,7 @@ class TestTrajectoryBuilderMemberId:
             )
         )
         traj = builder.build()
-        assert traj.meta.get("member_id") == "agent-001"
+        assert trajectory_meta(traj).get("member_id") == "agent-001"
 
     def test_build_without_member_id(self):
         """Builder without member_id produces empty meta dict."""
@@ -37,7 +38,7 @@ class TestTrajectoryBuilderMemberId:
             source="online",
         )
         traj = builder.build()
-        assert traj.meta == {}
+        assert trajectory_meta(traj) == {}
 
     def test_member_id_is_stored_on_builder(self):
         """member_id is accessible via builder.member_id."""

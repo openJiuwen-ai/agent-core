@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, Union
+from typing import Any, Dict, List, Optional, Protocol
 
 from openjiuwen.agent_evolving.trajectory.types import (
     LegacyTrajectory,
@@ -21,15 +21,19 @@ from openjiuwen.agent_evolving.trajectory.types import (
     ToolCallDetail,
     Trajectory,
     TrajectoryStep,
-    to_legacy_trajectory,
+    trajectory_case_id,
+    trajectory_execution_id,
     trajectory_from_legacy,
+    trajectory_meta,
+    trajectory_session_id,
+    trajectory_source,
 )
 
 _OJ_SESSION_ID = "openjiuwen.session_id"
 _OLD_OJ_SESSION_ID = "openjiuwen.session.id"
 _TRAJECTORY_ID = "openjiuwen.trajectory_id"
 _OLD_TRAJECTORY_ID = "openjiuwen.trajectory.id"
-TrajectoryRecord = Union[Trajectory, LegacyTrajectory]
+TrajectoryRecord = Trajectory
 
 
 class TrajectoryStore(Protocol):
@@ -97,7 +101,7 @@ class InMemoryTrajectoryStore:
         ver = version or "default"
         if ver not in self._data:
             self._data[ver] = {}
-        self._data[ver][to_legacy_trajectory(trajectory).execution_id] = trajectory
+        self._data[ver][trajectory_execution_id(trajectory)] = trajectory
 
     def load(
         self,
@@ -128,18 +132,17 @@ class InMemoryTrajectoryStore:
 
     @staticmethod
     def _filter_trajectory_value(trajectory: TrajectoryRecord, key: str) -> Any:
-        legacy = to_legacy_trajectory(trajectory)
         if key == "execution_id":
-            return legacy.execution_id
+            return trajectory_execution_id(trajectory)
         if key == "session_id":
-            return legacy.session_id
+            return trajectory_session_id(trajectory)
         if key == "case_id":
-            return legacy.case_id
+            return trajectory_case_id(trajectory)
         if key == "member_id":
-            return legacy.meta.get("member_id")
+            return trajectory_meta(trajectory).get("member_id")
         if key == "source":
-            return legacy.source
-        return getattr(legacy, key, None)
+            return trajectory_source(trajectory)
+        return trajectory_meta(trajectory).get(key)
 
 
 class FileTrajectoryStore:
@@ -233,8 +236,6 @@ class FileTrajectoryStore:
     @staticmethod
     def _trajectory_to_dict(trajectory: TrajectoryRecord) -> dict:
         """Convert Trajectory to dict."""
-        if isinstance(trajectory, LegacyTrajectory):
-            trajectory = trajectory_from_legacy(trajectory)
         if trajectory.otlp_trace and isinstance(trajectory.otlp_trace, dict):
             return FileTrajectoryStore._to_json_compatible(trajectory.otlp_trace)
         return FileTrajectoryStore._to_json_compatible(trajectory)
@@ -313,7 +314,7 @@ class FileTrajectoryStore:
     @staticmethod
     def _execution_id_from_record(data: dict) -> Optional[str]:
         if FileTrajectoryStore._is_otlp_trace_data(data):
-            return to_legacy_trajectory(Trajectory(otlp_trace=data)).execution_id
+            return trajectory_execution_id(Trajectory(otlp_trace=data))
         value = data.get("execution_id")
         return str(value) if value is not None else None
 
@@ -324,18 +325,18 @@ class FileTrajectoryStore:
                 meta = data.get("meta") or {}
                 return data.get("source") or meta.get("source")
             return data.get(key)
-        legacy = to_legacy_trajectory(Trajectory(otlp_trace=data))
+        trajectory = Trajectory(otlp_trace=data)
         if key == "execution_id":
-            return legacy.execution_id
+            return trajectory_execution_id(trajectory)
         if key == "session_id":
-            return legacy.session_id
+            return trajectory_session_id(trajectory)
         if key == "case_id":
-            return legacy.case_id
+            return trajectory_case_id(trajectory)
         if key == "member_id":
-            return legacy.meta.get("member_id")
+            return trajectory_meta(trajectory).get("member_id")
         if key == "source":
-            return legacy.source
-        return legacy.meta.get(key)
+            return trajectory_source(trajectory)
+        return trajectory_meta(trajectory).get(key)
 
     @staticmethod
     def _otlp_to_trajectory(data: dict) -> Optional[Trajectory]:

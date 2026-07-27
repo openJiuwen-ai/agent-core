@@ -412,6 +412,56 @@ class TestMarkMessageRead:
         assert broadcasts[0].broadcast is True
 
 
+# ==================== Test. mark_messages_read (batch) ====================
+
+
+class TestMarkMessagesReadBatch:
+    """Test the batch mark_messages_read that takes raw message objects."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_batch_collapses_multiple_broadcasts_to_watermark(self, team_messaging, db, message_bus):
+        """Several broadcasts in one batch collapse to the newest watermark.
+
+        Broadcast read state is a per-member watermark (one ``(member, team)``
+        row keyed by the newest read broadcast timestamp). The manager takes
+        raw message objects so it can keep every direct id but reduce the
+        broadcasts to just the newest before hitting the DAO. Passing more
+        than one broadcast id to the DAO in a single transaction re-inserts
+        the same primary key and the commit raises ``UNIQUE constraint
+        failed``; collapsing here keeps that invariant out of every caller.
+        """
+        await team_messaging.broadcast_message("all-1")
+        await team_messaging.broadcast_message("all-2")
+        await team_messaging.send_message("direct hi", "member2")
+
+        reader = TeamMessageManager(
+            team_name="test_team_123",
+            db=db,
+            messager=message_bus,
+            member_name="member2",
+        )
+        directs = await reader.get_messages(to_member_name="member2", unread_only=True)
+        broadcasts = await reader.get_broadcast_messages(member_name="member2", unread_only=True)
+        assert len(directs) == 1
+        assert len(broadcasts) == 2
+
+        # Both broadcasts + the direct in one call must not raise UNIQUE: the
+        # manager forwards one direct id + the single newest broadcast id.
+        marked = await reader.mark_messages_read([*directs, *broadcasts], "member2")
+        assert marked == 2
+
+        # The watermark now covers every broadcast, and the direct is read.
+        assert await reader.get_messages(to_member_name="member2", unread_only=True) == []
+        assert await reader.get_broadcast_messages(member_name="member2", unread_only=True) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_batch_empty_is_noop(self, team_messaging):
+        """An empty batch returns zero without touching the DAO."""
+        assert await team_messaging.mark_messages_read([], "member2") == 0
+
+
 # ==================== Test Integration Scenarios ====================
 
 class TestIntegrationScenarios:
@@ -614,3 +664,65 @@ async def test_has_unread_messages_direct_counts_when_broadcast_excluded(team_me
 
     assert await team_messaging.has_unread_messages() is True
     assert await team_messaging.has_unread_messages(include_broadcast=False) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_multicast_message_single_batch(db, team_messaging):
+    """multicast_message delivers to every recipient in one batched transaction.
+
+    All rows share the same timestamp (computed once for the batch), which is
+    the observable proxy for "one write / one fsync" instead of N sends.
+    """
+    agent_card = AgentCard(name="TestAgent").model_dump_json()
+    await db.member.create_member(
+        member_name="member3",
+        team_name="test_team_123",
+        display_name="Member Three",
+        agent_card=agent_card,
+        status="busy",
+    )
+
+    ids = await team_messaging.multicast_message(content="ping all", to_member_names=["member2", "member3"])
+    assert len(ids) == 2
+
+    msgs2 = await team_messaging.get_messages(to_member_name="member2")
+    msgs3 = await team_messaging.get_messages(to_member_name="member3")
+    assert len(msgs2) == 1
+    assert len(msgs3) == 1
+    assert msgs2[0].content == "ping all"
+    assert msgs3[0].content == "ping all"
+    assert msgs2[0].from_member_name == "member1"
+    assert msgs2[0].timestamp == msgs3[0].timestamp
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_multicast_message_empty_is_noop(team_messaging):
+    """An empty recipient list returns no ids and writes nothing."""
+    assert await team_messaging.multicast_message(content="x", to_member_names=[]) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_broadcast_partial_read(db, team_messaging):
+    """A broadcast read by one non-sender but not another is still unread.
+
+    Guards the correlated-EXISTS path: with member3 having no watermark, the
+    query must still find an uncovered (member, broadcast) pair.
+    """
+    agent_card = AgentCard(name="TestAgent").model_dump_json()
+    await db.member.create_member(
+        member_name="member3",
+        team_name="test_team_123",
+        display_name="Member Three",
+        agent_card=agent_card,
+        status="busy",
+    )
+    message_id = await team_messaging.broadcast_message(content="all hands")
+    await team_messaging.mark_message_read(message_id, "member2")
+
+    assert await team_messaging.has_unread_messages() is True
+
+    await team_messaging.mark_message_read(message_id, "member3")
+    assert await team_messaging.has_unread_messages() is False

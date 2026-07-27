@@ -51,6 +51,7 @@ class TeamHandleKey:
     SWARMFLOW_WORKER_BASE_SPEC = "team.swarmflow_worker_base_spec"
     SWARMFLOW_HUMAN_BASE_SPEC = "team.swarmflow_human_base_spec"
     SWARMFLOW_CONCURRENCY_GOVERNOR = "team.swarmflow_concurrency_governor"
+    SWARMFLOW_BUDGET = "team.swarmflow_budget"
     RELIABILITY_COMPONENTS = "team.reliability_components"
     PERMISSIONS_OVERRIDE = "team.permissions_override"
     WORKTREE_MANAGER = "team.worktree_manager"
@@ -68,6 +69,7 @@ def inject_team_handles(
     swarmflow_worker_base_spec: Optional["DeepAgentSpec"] = None,
     swarmflow_human_base_spec: Optional["DeepAgentSpec"] = None,
     swarmflow_concurrency_governor: Any = None,
+    swarmflow_budget: Any = None,
     reliability_components: Optional["ReliabilityComponents"] = None,
     permissions_override: Optional[dict[str, str]] = None,
     worktree_manager: Optional["WorktreeManager"] = None,
@@ -91,6 +93,9 @@ def inject_team_handles(
             teammate is configured). Non-None only for a swarmflow leader; carries
             teammate capabilities (model / tools / skills / workspace) WITHOUT the
             team rails, so each worker is a teammate-equivalent without team tools.
+        swarmflow_budget: The leader's shared ``BudgetLedger``, capping the tokens
+            all its swarmflow runs may burn. Non-None only for a swarmflow leader;
+            unbounded (``total=None``) unless ``swarmflow_budget`` is configured.
         reliability_components: The member's reused reliability core (detectors /
             remediator / local reporter), if reliability is enabled. Built once
             and wrapped by a fresh rail each cycle so its state outlives rebuilds.
@@ -109,6 +114,7 @@ def inject_team_handles(
     extras[TeamHandleKey.SWARMFLOW_WORKER_BASE_SPEC] = swarmflow_worker_base_spec
     extras[TeamHandleKey.SWARMFLOW_HUMAN_BASE_SPEC] = swarmflow_human_base_spec
     extras[TeamHandleKey.SWARMFLOW_CONCURRENCY_GOVERNOR] = swarmflow_concurrency_governor
+    extras[TeamHandleKey.SWARMFLOW_BUDGET] = swarmflow_budget
     extras[TeamHandleKey.RELIABILITY_COMPONENTS] = reliability_components
     extras[TeamHandleKey.PERMISSIONS_OVERRIDE] = permissions_override
     extras[TeamHandleKey.WORKTREE_MANAGER] = worktree_manager
@@ -165,6 +171,11 @@ def get_swarmflow_concurrency_governor(context: Any) -> Any:
     return _get(context, TeamHandleKey.SWARMFLOW_CONCURRENCY_GOVERNOR)
 
 
+def get_swarmflow_budget(context: Any) -> Any:
+    """Return the leader's shared swarmflow ``BudgetLedger``, or None."""
+    return _get(context, TeamHandleKey.SWARMFLOW_BUDGET)
+
+
 def get_reliability_components(context: Any) -> Optional["ReliabilityComponents"]:
     """Return the reused reliability components handle, or None.
 
@@ -202,6 +213,7 @@ __all__ = [
     "get_swarmflow_worker_base_spec",
     "get_swarmflow_human_base_spec",
     "get_swarmflow_concurrency_governor",
+    "get_swarmflow_budget",
     "get_reliability_components",
     "get_worktree_manager",
 ]

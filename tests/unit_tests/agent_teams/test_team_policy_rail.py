@@ -11,9 +11,11 @@ from openjiuwen.agent_teams.prompts import (
     build_team_extra_section,
     build_team_info_section,
     build_team_lifecycle_section,
+    build_team_member_system_prompt,
     build_team_members_section,
-    build_team_persona_section,
+    build_team_private_prompt_section,
     build_team_role_section,
+    build_team_static_sections,
     build_team_workflow_section,
 )
 from openjiuwen.agent_teams.rails import TeamPolicyRail
@@ -167,20 +169,20 @@ class TestTeamLifecycleSection:
         assert section is None
 
 
-class TestTeamPersonaSection:
+class TestTeamPrivatePromptSection:
     @pytest.mark.level0
-    def test_with_persona(self):
-        section = build_team_persona_section(persona="PM Expert", language="cn")
+    def test_with_private_prompt(self):
+        section = build_team_private_prompt_section(member_prompt="Ship small PRs", language="cn")
         assert section is not None
-        assert section.priority == 15
+        assert section.priority == 16
         content = section.render("cn")
-        assert "# 当前人设" in content
-        assert "PM Expert" in content
+        assert "# 私有工作约定" in content
+        assert "Ship small PRs" in content
 
     @pytest.mark.level1
-    def test_empty_persona_returns_none(self):
-        assert build_team_persona_section(persona="", language="cn") is None
-        assert build_team_persona_section(persona=None, language="cn") is None
+    def test_empty_private_prompt_returns_none(self):
+        assert build_team_private_prompt_section(member_prompt="", language="cn") is None
+        assert build_team_private_prompt_section(member_prompt=None, language="cn") is None
 
 
 class TestTeamExtraSection:
@@ -188,7 +190,7 @@ class TestTeamExtraSection:
     def test_with_base_prompt(self):
         section = build_team_extra_section(base_prompt="Be careful", language="cn")
         assert section is not None
-        assert section.priority == 16
+        assert section.priority == 17
         content = section.render("cn")
         assert "Be careful" in content
 
@@ -317,10 +319,11 @@ class _StubAgent:
 class _StubMember:
     """Lightweight stand-in for the SQLModel TeamMember row."""
 
-    def __init__(self, member_name: str, display_name: str, desc: str = "") -> None:
+    def __init__(self, member_name: str, display_name: str, desc: str = "", role: str = "teammate") -> None:
         self.member_name = member_name
         self.display_name = display_name
         self.desc = desc
+        self.role = role
 
 
 class _StubTeam:
@@ -347,11 +350,15 @@ class _FakeTeamBackend:
         members: list[_StubMember] | None = None,
         team_mtime: int = 1,
         members_mtime: int = 1,
+        human_agents: list[str] | None = None,
+        hitt_enabled: bool = False,
     ) -> None:
         self._team = team
         self._members: list[_StubMember] = list(members or [])
         self._team_mtime = team_mtime
         self._members_mtime = members_mtime
+        self._human_agents: list[str] = list(human_agents or [])
+        self._hitt_enabled = hitt_enabled
 
         self.team_mtime_calls = 0
         self.members_mtime_calls = 0
@@ -375,12 +382,12 @@ class _FakeTeamBackend:
         return list(self._members)
 
     def hitt_enabled(self) -> bool:
-        """TeamPolicyRail probes this; fake teams never enable HITT."""
-        return False
+        """TeamPolicyRail probes this at init to gate the static HITT contract."""
+        return self._hitt_enabled
 
     async def human_agent_names(self) -> frozenset[str]:
-        """TeamPolicyRail queries DB for the roster; fake teams are empty."""
-        return frozenset()
+        """TeamPolicyRail queries DB for the roster (empty unless injected)."""
+        return frozenset(self._human_agents)
 
     def bridge_agent_names(self) -> frozenset[str]:
         """TeamPolicyRail snapshots the bridge roster too; empty for fakes."""
@@ -399,7 +406,7 @@ class _FakeTeamBackend:
 
 class TestTeamPolicyRailStaticSections:
     """Static-only behaviour (team_backend is None) -- the rail still
-    registers role/workflow/lifecycle/persona/extra without touching DB."""
+    registers role/workflow/lifecycle/private-prompt/extra without touching DB."""
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -409,7 +416,7 @@ class TestTeamPolicyRailStaticSections:
 
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
-            persona="PM Expert",
+            member_prompt="PM Expert",
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
@@ -424,7 +431,7 @@ class TestTeamPolicyRailStaticSections:
             TeamSectionName.ROLE,
             TeamSectionName.WORKFLOW,
             TeamSectionName.LIFECYCLE,
-            TeamSectionName.PERSONA,
+            TeamSectionName.PRIVATE_PROMPT,
             TeamSectionName.EXTRA,
         ):
             assert name in sections
@@ -440,7 +447,7 @@ class TestTeamPolicyRailStaticSections:
 
         rail = TeamPolicyRail(
             role=TeamRole.TEAMMATE,
-            persona="Coder",
+            member_prompt="Coder",
             member_name="dev1",
             lifecycle="temporary",
             language="cn",
@@ -455,7 +462,7 @@ class TestTeamPolicyRailStaticSections:
         assert TeamSectionName.LIFECYCLE not in sections
         assert TeamSectionName.EXTRA not in sections
         assert TeamSectionName.ROLE in sections
-        assert TeamSectionName.PERSONA in sections
+        assert TeamSectionName.PRIVATE_PROMPT in sections
 
 
 async def _attachment_content(
@@ -474,12 +481,12 @@ async def _attachment_content(
 class TestTeamPolicyRailDynamicSections:
     """Dynamic behaviour driven by the injected ``_FakeTeamBackend``.
 
-    The three dynamic sections (team_info / team_members / team_hitt) no
-    longer live in the system prompt builder; the rail pushes them to the
-    DeepAgent's :class:`PromptAttachmentManager` so the system-prompt
-    prefix stays cache-stable. These tests assert the dynamic sections are
-    absent from the builder and present in the attachment manager, while
-    keeping the original cache hit / miss / mtime intents intact.
+    The two dynamic sections (team_info / team_members) do not live in the
+    system prompt builder; the rail pushes them to the DeepAgent's
+    :class:`PromptAttachmentManager` so the system-prompt prefix stays
+    cache-stable. These tests assert the dynamic sections are absent from the
+    builder and present in the attachment manager, while keeping the original
+    cache hit / miss / mtime intents intact.
     """
 
     @pytest.mark.asyncio
@@ -497,7 +504,7 @@ class TestTeamPolicyRailDynamicSections:
         agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_prompt="PM",
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
@@ -533,7 +540,7 @@ class TestTeamPolicyRailDynamicSections:
         agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_prompt="PM",
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
@@ -564,7 +571,7 @@ class TestTeamPolicyRailDynamicSections:
         agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_prompt="PM",
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
@@ -601,7 +608,7 @@ class TestTeamPolicyRailDynamicSections:
         agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_prompt="PM",
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
@@ -625,7 +632,7 @@ class TestTeamPolicyRailDynamicSections:
         agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_prompt="PM",
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
@@ -666,7 +673,7 @@ class TestTeamPolicyRailDynamicSections:
         agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_prompt="PM",
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
@@ -681,8 +688,8 @@ class TestTeamPolicyRailDynamicSections:
         idx_role = prompt.index("# 团队角色")
         idx_workflow = prompt.index("# 工作流程")
         idx_lifecycle = prompt.index("# 团队生命周期")
-        idx_persona = prompt.index("# 当前人设")
-        assert idx_role < idx_workflow < idx_lifecycle < idx_persona
+        idx_private_prompt = prompt.index("# 私有工作约定")
+        assert idx_role < idx_workflow < idx_lifecycle < idx_private_prompt
         # Dynamic sections do not leak into the system prompt anymore.
         assert "# 团队信息" not in prompt
         assert "# 成员关系" not in prompt
@@ -703,7 +710,7 @@ class TestTeamPolicyRailDynamicSections:
         agent = _StubAgent(builder, manager)
         rail = TeamPolicyRail(
             role=TeamRole.LEADER,
-            persona="PM",
+            member_prompt="PM",
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
@@ -723,6 +730,201 @@ class TestTeamPolicyRailDynamicSections:
             TeamSectionName.ROLE,
             TeamSectionName.WORKFLOW,
             TeamSectionName.LIFECYCLE,
-            TeamSectionName.PERSONA,
+            TeamSectionName.PRIVATE_PROMPT,
         ):
             assert not builder.has_section(name)
+
+
+class TestTeamPolicyRailHitt:
+    """HITT contract is a static builder section gated on ``hitt_enabled``; the
+    human roster is folded into the ``team_members`` attachment as a ``[human]``
+    tag (there is no separate ``team_hitt_roster``).
+
+    The tag is gated on the viewer: LEADER / HUMAN_AGENT always, TEAMMATE only
+    when ``expose_human_agents_to_teammates`` is set (F_18 privacy default).
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_contract_in_builder_and_human_tagged_in_members(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test"),
+            members=[
+                _StubMember("leader1", "Leader"),
+                _StubMember("alice", "Alice", role="human_agent"),
+            ],
+            hitt_enabled=True,
+        )
+        builder = SystemPromptBuilder(language="cn")
+        manager = PromptAttachmentManager()
+        agent = _StubAgent(builder, manager)
+        rail = TeamPolicyRail(
+            role=TeamRole.LEADER,
+            member_prompt="PM",
+            member_name="leader1",
+            lifecycle="temporary",
+            language="cn",
+            team_backend=backend,
+        )
+        rail.init(agent)
+        await rail.before_model_call(_StubContext())
+
+        # HITT contract (rules) rides the cache-stable builder prefix.
+        assert builder.has_section(TeamSectionName.HITT)
+        assert "禁止" in builder.get_section(TeamSectionName.HITT).render("cn")
+        # No separate hitt roster; the human is tagged [human] in team_members.
+        members = await _attachment_content(manager, TeamSectionName.MEMBERS)
+        assert members is not None
+        assert "member_name=alice" in members
+        assert "[human]" in members
+        logger.info("HITT contract in builder; human tagged in team_members")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_no_hitt_contract_when_disabled(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test"),
+            members=[_StubMember("dev1", "Dev")],
+            hitt_enabled=False,
+        )
+        builder = SystemPromptBuilder(language="cn")
+        manager = PromptAttachmentManager()
+        agent = _StubAgent(builder, manager)
+        rail = TeamPolicyRail(
+            role=TeamRole.LEADER,
+            member_name="leader1",
+            language="cn",
+            team_backend=backend,
+        )
+        rail.init(agent)
+        await rail.before_model_call(_StubContext())
+        assert not builder.has_section(TeamSectionName.HITT)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_teammate_default_hides_human_tag(self):
+        """Default teammate (expose=False) sees no ``[human]`` tag (F_18)."""
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test"),
+            members=[
+                _StubMember("dev1", "Dev"),
+                _StubMember("alice", "Alice", role="human_agent"),
+            ],
+            hitt_enabled=True,
+        )
+        builder = SystemPromptBuilder(language="cn")
+        manager = PromptAttachmentManager()
+        agent = _StubAgent(builder, manager)
+        rail = TeamPolicyRail(
+            role=TeamRole.TEAMMATE,
+            member_name="dev1",
+            language="cn",
+            team_backend=backend,
+        )
+        rail.init(agent)
+        await rail.before_model_call(_StubContext())
+        members = await _attachment_content(manager, TeamSectionName.MEMBERS)
+        assert members is not None
+        assert "member_name=alice" in members
+        assert "[human]" not in members
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_teammate_expose_shows_human_tag(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test"),
+            members=[
+                _StubMember("dev1", "Dev"),
+                _StubMember("alice", "Alice", role="human_agent"),
+            ],
+            hitt_enabled=True,
+        )
+        builder = SystemPromptBuilder(language="cn")
+        manager = PromptAttachmentManager()
+        agent = _StubAgent(builder, manager)
+        rail = TeamPolicyRail(
+            role=TeamRole.TEAMMATE,
+            member_name="dev1",
+            language="cn",
+            team_backend=backend,
+            expose_human_agents_to_teammates=True,
+        )
+        rail.init(agent)
+        await rail.before_model_call(_StubContext())
+        members = await _attachment_content(manager, TeamSectionName.MEMBERS)
+        assert members is not None
+        assert "[human]" in members
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_uninit_strips_hitt_contract_from_builder(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test"),
+            members=[_StubMember("leader1", "Leader")],
+            hitt_enabled=True,
+        )
+        builder = SystemPromptBuilder(language="cn")
+        manager = PromptAttachmentManager()
+        agent = _StubAgent(builder, manager)
+        rail = TeamPolicyRail(
+            role=TeamRole.LEADER,
+            member_name="leader1",
+            language="cn",
+            team_backend=backend,
+        )
+        rail.init(agent)
+        await rail.before_model_call(_StubContext())
+        assert builder.has_section(TeamSectionName.HITT)
+        rail.uninit(agent)
+        assert not builder.has_section(TeamSectionName.HITT)
+
+
+class TestTagNoticeInclusion:
+    """inbound_tags is universal; attachment_notice is in-process only (F_51).
+
+    Every team member reads inbound messages / events as <team-inbound> /
+    <team-event> XML, so the inbound-tag notice is always built. Only the
+    in-process DeepAgent (with a PromptAttachmentManager) sees prompt
+    attachments, so the attachment notice is gated behind
+    include_attachment_notice.
+    """
+
+    @pytest.mark.level1
+    def test_static_sections_default_omit_attachment_notice(self):
+        secs = build_team_static_sections(role=TeamRole.LEADER, member_name="l", language="cn")
+        names = {s.name for s in secs}
+        assert TeamSectionName.INBOUND_TAGS in names
+        assert TeamSectionName.ATTACHMENT_NOTICE not in names
+
+    @pytest.mark.level1
+    def test_static_sections_include_attachment_notice_when_flagged(self):
+        secs = build_team_static_sections(
+            role=TeamRole.LEADER,
+            member_name="l",
+            language="cn",
+            include_attachment_notice=True,
+        )
+        names = {s.name for s in secs}
+        assert TeamSectionName.INBOUND_TAGS in names
+        assert TeamSectionName.ATTACHMENT_NOTICE in names
+
+    @pytest.mark.level1
+    def test_external_cli_prompt_has_inbound_tags_and_attachment_notice(self):
+        # build_team_member_system_prompt is the external CLI path: it must carry
+        # both inbound-tag notice and attachment notice because external CLI
+        # receives rendered team context through runtime input.
+        prompt = build_team_member_system_prompt(role=TeamRole.LEADER, member_name="l", language="cn")
+        assert "team-inbound" in prompt
+        assert "prompt-attachment" in prompt
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_rail_static_sections_include_both_notices(self):
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = TeamPolicyRail(role=TeamRole.LEADER, member_name="l", language="cn")
+        rail.init(agent)
+        await rail.before_model_call(None)
+        names = builder.get_all_sections().keys()
+        assert TeamSectionName.INBOUND_TAGS in names
+        assert TeamSectionName.ATTACHMENT_NOTICE in names

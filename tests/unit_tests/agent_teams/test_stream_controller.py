@@ -13,6 +13,7 @@ mapping/forwarding contract is exercised without a real DeepAgent.
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable
 
@@ -343,6 +344,13 @@ async def test_handle_retry_swallows_and_redrives_retryable_failure() -> None:
     """A retryable task_failed within the budget swallows the round and re-drives."""
     runtime = _FakeRuntime()
     sc = _make_controller(runtime)
+    sc.stream_queue = asyncio.Queue()
+    observed: list[Any] = []
+
+    async def _observe(chunk: Any) -> None:
+        observed.append(chunk)
+
+    sc.add_chunk_observer(_observe)
 
     consumed = await sc._handle_retry(_task_failed_chunk("[181001] transient blip"))
 
@@ -350,6 +358,17 @@ async def test_handle_retry_swallows_and_redrives_retryable_failure() -> None:
     assert sc._swallow_failed_round is True
     assert sc._retry_attempt == 1
     assert runtime.sent == [(_RETRY_QUERY, False)]
+    retry_chunk = sc.stream_queue.get_nowait()
+    assert isinstance(retry_chunk, TeamOutputSchema)
+    assert retry_chunk.type == "llm_output"
+    assert retry_chunk.payload == {
+        "content": "\n\n[Retry 1/10] [181001] transient blip\n\n",
+        "retrying": True,
+        "attempt": 1,
+        "max_attempts": 10,
+        "error_code": 181001,
+    }
+    assert observed == [retry_chunk]
 
 
 @pytest.mark.asyncio
@@ -434,6 +453,38 @@ async def test_map_state_idle_sets_ready_and_settles() -> None:
 
     assert statuses == [MemberStatus.READY]
     assert polls == [None]  # idle-settled fired the completion poll
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_map_state_idle_stamps_the_idle_clock() -> None:
+    """Settling into IDLE starts the member's process-local idle clock.
+
+    The stall sweeps measure staleness from this stamp rather than from the
+    task row's ``updated_at``, so a paused team cannot fabricate a stall
+    (F_65).
+    """
+    state = TeamAgentState()
+    sc = _make_controller(_FakeRuntime(), state=state)
+    sc.stream_queue = asyncio.Queue()
+
+    before = time.monotonic()
+    await sc._map_state(HarnessState.IDLE)
+
+    assert state.idle_since is not None
+    assert state.idle_since >= before
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_map_state_running_clears_the_idle_clock() -> None:
+    """A member driving a round is progressing, so it carries no idle clock."""
+    state = TeamAgentState(idle_since=time.monotonic() - 100)
+    sc = _make_controller(_FakeRuntime(), state=state)
+
+    await sc._map_state(HarnessState.RUNNING)
+
+    assert state.idle_since is None
 
 
 # ----------------------------------------------------------------------

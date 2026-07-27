@@ -205,19 +205,21 @@ class TestGraphMemoryRegisterSearchStrategy:
             mem.register_search_strategy("x", search_entity=MagicMock())
 
 
-class TestGraphMemoryEnsureThreadLock:
-    """Tests for ensure_thread_lock"""
+class TestGraphMemoryEnsureUserLock:
+    """Tests for _ensure_user_lock"""
 
     @staticmethod
     @patch.object(GraphStoreFactory, "from_config")
-    def test_ensure_thread_lock_creates_per_user_lock(mock_from_config):
-        """ensure_thread_lock creates and stores lock for user_id"""
+    def test_ensure_user_lock_creates_per_user_lock(mock_from_config):
+        """_ensure_user_lock creates and stores asyncio.Lock for user_id"""
+        import asyncio
         mock_from_config.return_value = _make_mock_backend()
         mem = GraphMemory(db_config=_make_mock_config(), llm_client=_make_mock_llm_client())
-        mem.ensure_thread_lock("user-1")
-        assert "user-1" in mem.user_locks
-        mem.ensure_thread_lock("user-1")
-        assert len(mem.user_locks) == 1
+        mem._ensure_user_lock("user-1")
+        assert "user-1" in mem._user_locks
+        assert isinstance(mem._user_locks["user-1"], asyncio.Lock)
+        mem._ensure_user_lock("user-1")
+        assert len(mem._user_locks) == 1
 
 
 class TestAddMemory:

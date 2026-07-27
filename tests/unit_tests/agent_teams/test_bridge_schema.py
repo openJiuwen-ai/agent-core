@@ -52,7 +52,7 @@ def test_bridge_member_spec_defaults():
     spec = BridgeMemberSpec(
         member_name="codex",
         display_name="Codex Bridge",
-        persona="Senior python reviewer",
+        desc="Senior python reviewer",
     )
     assert spec.role_type == TeamRole.BRIDGE_AGENT
     assert spec.mailbox_inject_mode == BridgeMailboxInjectMode.PASSTHROUGH
@@ -68,7 +68,7 @@ def test_bridge_member_spec_role_type_locked():
         BridgeMemberSpec(
             member_name="codex",
             display_name="Codex",
-            persona="x",
+            desc="x",
             role_type=TeamRole.TEAMMATE,  # type: ignore[arg-type]
         )
 
@@ -82,7 +82,7 @@ def test_base_team_member_spec_rejects_bridge_role():
         TeamMemberSpec(
             member_name="codex",
             display_name="Codex",
-            persona="x",
+            desc="x",
             role_type=TeamRole.BRIDGE_AGENT,  # type: ignore[arg-type]
         )
 
@@ -92,7 +92,7 @@ def test_bridge_member_spec_custom_fields():
     spec = BridgeMemberSpec(
         member_name="claudecode",
         display_name="Claude Code Bridge",
-        persona="Pair-programmer",
+        desc="Pair-programmer",
         mailbox_inject_mode=BridgeMailboxInjectMode.REPHRASE,
         protocol="claudecode",
         adapter_config={"endpoint": "stdio://claude-code", "relay_timeout_s": 60},
@@ -125,7 +125,7 @@ def test_discriminator_dispatches_bridge_subclass():
             BridgeMemberSpec(
                 member_name="codex",
                 display_name="Codex",
-                persona="x",
+                desc="x",
                 protocol="codex",
             ),
         ],
@@ -143,7 +143,7 @@ def test_discriminator_keeps_base_for_teammate():
             TeamMemberSpec(
                 member_name="alice",
                 display_name="Alice",
-                persona="x",
+                desc="x",
                 role_type=TeamRole.TEAMMATE,
             ),
         ],
@@ -165,18 +165,18 @@ def test_discriminator_mixed_predefined():
             BridgeMemberSpec(
                 member_name="codex",
                 display_name="Codex",
-                persona="x",
+                desc="x",
             ),
             TeamMemberSpec(
                 member_name="alice",
                 display_name="Alice",
-                persona="y",
+                desc="y",
                 role_type=TeamRole.TEAMMATE,
             ),
             TeamMemberSpec(
                 member_name="bob_human",
                 display_name="Bob",
-                persona="z",
+                desc="z",
                 role_type=TeamRole.HUMAN_AGENT,
             ),
         ],
@@ -202,7 +202,7 @@ def test_discriminator_round_trip_via_dict():
                 {
                     "member_name": "codex",
                     "display_name": "Codex",
-                    "persona": "x",
+                    "desc": "x",
                     "role_type": "bridge_agent",
                     "mailbox_inject_mode": "rephrase",
                     "protocol": "codex",
@@ -211,7 +211,7 @@ def test_discriminator_round_trip_via_dict():
                 {
                     "member_name": "alice",
                     "display_name": "Alice",
-                    "persona": "y",
+                    "desc": "y",
                     "role_type": "teammate",
                 },
             ],
@@ -237,7 +237,7 @@ def test_legacy_dump_without_bridge_fields_still_loads():
             {
                 "member_name": "alice",
                 "display_name": "Alice",
-                "persona": "x",
+                "desc": "x",
                 "role_type": "teammate",
             },
         ],
@@ -264,7 +264,7 @@ def test_enable_bridge_true_with_predefined_passes():
     bridge = BridgeMemberSpec(
         member_name="codex",
         display_name="Codex",
-        persona="x",
+        desc="x",
     )
     spec = _minimal_spec(enable_bridge=True, predefined_members=[bridge])
     spec._validate_bridge_consistency()  # must not raise
@@ -283,7 +283,7 @@ def test_enable_bridge_false_with_predefined_raises():
     bridge = BridgeMemberSpec(
         member_name="codex",
         display_name="Codex",
-        persona="x",
+        desc="x",
     )
     spec = _minimal_spec(enable_bridge=False, predefined_members=[bridge])
     from openjiuwen.core.common.exception.errors import BaseError

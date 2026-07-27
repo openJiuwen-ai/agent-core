@@ -238,14 +238,12 @@ def _preview_extension_components(
     runtime_ext: RuntimeExtensionArtifact,
 ) -> LoadedComponents:
     """Parse config YAML to preview components without importing."""
-    from openjiuwen.harness.harness_config.loader import (
-        HarnessConfigLoader,
+    from openjiuwen.auto_harness.infra.runtime_manifest import (
+        load_runtime_manifest,
     )
 
-    resolved = HarnessConfigLoader.load(
-        runtime_ext.config_path
-    )
-    resources = resolved.config.resources
+    config = load_runtime_manifest(runtime_ext.config_path)
+    resources = config.resources
     rails: list[str] = []
     tools: list[str] = []
     skills: list[str] = []

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.agent_evolving.trajectory import LLMCallDetail, LegacyTrajectory, TrajectoryStep
+from openjiuwen.agent_evolving.trajectory import LLMCallDetail, TrajectoryStep, trajectory_from_steps
 
 
 class _FakeRedisPipeline:
@@ -267,7 +267,7 @@ async def test_gateway_trajectory_runtime_fills_single_user_default_on_record(tm
 def test_online_trajectory_converter_reads_prompt_and_response_token_ids_from_response():
     from openjiuwen.agent_evolving.agent_rl.online.rail.converter import OnlineTrajectoryConverter
 
-    trajectory = LegacyTrajectory(
+    trajectory = trajectory_from_steps(
         execution_id="traj-1",
         session_id="session-1",
         steps=[
@@ -279,15 +279,11 @@ def test_online_trajectory_converter_reads_prompt_and_response_token_ids_from_re
                     response={
                         "role": "assistant",
                         "content": "pong",
-                    },
-                    meta={
-                        "provider_response_json": {
-                            "prompt_token_ids": [1, 2, 3],
-                            "choices": [{
-                                "token_ids": [4, 5],
-                                "logprobs": [-0.1, -0.2],
-                            }],
-                        },
+                        "prompt_token_ids": [1, 2, 3],
+                        "choices": [{
+                            "token_ids": [4, 5],
+                            "logprobs": [-0.1, -0.2],
+                        }],
                     },
                 ),
             ),
@@ -308,7 +304,6 @@ async def test_online_trajectory_converter_preserves_trace_plain_meta():
     from openjiuwen.agent_evolving.trajectory import (
         TrajectoryTraceAgentHandler,
         TrajectoryTraceStateManager,
-        to_legacy_trajectory,
     )
     from openjiuwen.core.session.tracer.span import TraceAgentSpan
 
@@ -338,7 +333,7 @@ async def test_online_trajectory_converter_preserves_trace_plain_meta():
     )
 
     trajectory = state_manager.build_trajectory(trace_id, session_id="session-1", source="rl_online", finalize=True)
-    batch = OnlineTrajectoryConverter(tenant_id="tenant-1").convert(to_legacy_trajectory(trajectory))
+    batch = OnlineTrajectoryConverter(tenant_id="tenant-1").convert(trajectory)
 
     assert batch.trajectory_meta.status == "ok"
     assert batch.trajectory_meta.extra["tenant_id"] == "tenant-1"
@@ -350,7 +345,7 @@ def test_online_trajectory_converter_normalizes_streaming_logprobs_for_gateway()
     from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.rail_ingest import RailBatchIngestor
     from openjiuwen.agent_evolving.agent_rl.online.rail.converter import OnlineTrajectoryConverter
 
-    trajectory = LegacyTrajectory(
+    trajectory = trajectory_from_steps(
         execution_id="traj-stream",
         session_id="session-1",
         steps=[
@@ -387,7 +382,9 @@ def test_online_trajectory_converter_tolerates_message_model_dump_failure():
         def model_dump(self):
             raise TypeError("MockValSer")
 
-    trajectory = LegacyTrajectory(
+    # OTLP construction JSON-safes message objects; converter must still
+    # accept the resulting string fallback without raising.
+    trajectory = trajectory_from_steps(
         execution_id="traj-broken-message",
         session_id="session-1",
         steps=[
@@ -412,10 +409,9 @@ def test_online_trajectory_converter_tolerates_message_model_dump_failure():
     batch = OnlineTrajectoryConverter(tenant_id="user-1").convert(trajectory)
 
     assert len(batch.samples) == 1
-    assert batch.samples[0].messages[1] == {
-        "role": "assistant",
-        "content": "previous turn",
-    }
+    assert batch.samples[0].messages[0] == {"role": "user", "content": "hello"}
+    assert batch.samples[0].messages[1]["role"] == "unknown"
+    assert "BrokenMessage" in batch.samples[0].messages[1]["content"]
 
 
 @pytest.mark.asyncio

@@ -39,7 +39,6 @@ class TestModelContext:
         dialogue_round: int = None,
         max_context_message_num: Optional[int] = None,
         enable_reload: bool = False,
-        enable_kv_cache_release: bool = False,
         processors: Optional[List] = None,
         token_counter=None,
     ) -> ModelContext:
@@ -48,7 +47,6 @@ class TestModelContext:
             default_window_round_num=dialogue_round,
             max_context_message_num=max_context_message_num,
             enable_reload=enable_reload,
-            enable_kv_cache_release=enable_kv_cache_release,
         )
         context_engine = ContextEngine(config)
         session = None
@@ -721,20 +719,6 @@ class TestModelContext:
         assert len(window.system_messages) == 1
         assert window.system_messages[0].content == "custom sys"
 
-    # ---------- enable_kv_cache_release ----------
-    @pytest.mark.asyncio
-    async def test_enable_kv_cache_release_creates_manager(self):
-        context = await self.create_context(enable_kv_cache_release=True)
-        assert getattr(context, "_kv_cache_manager") is not None
-
-    @pytest.mark.asyncio
-    async def test_enable_kv_cache_release_calls_release_on_get_window(self):
-        context = await self.create_context(enable_kv_cache_release=True)
-        with patch.object(getattr(context, "_kv_cache_manager"), "release", new_callable=AsyncMock) as mock_release:
-            await context.get_context_window()
-            await context.get_context_window()
-            assert mock_release.call_count >= 1
-
     # ---------- token_counter ----------
     @pytest.mark.asyncio
     async def test_token_counter_returns_tokens(self):
@@ -838,9 +822,8 @@ class TestModelContext:
             }
         }
         context.load_state(state)
-        saved = context.save_state()["offload_messages"]
-        assert "h1" in saved
-        assert saved["h1"][0].content == "offloaded"
+        saved = context.save_state()
+        assert saved["offload_messages"]["h1"] == offload_msgs
 
     @pytest.mark.asyncio
     async def test_load_state_empty_state_clears_buffer(self):

@@ -54,7 +54,7 @@ async def test_spawn_external_cli_agent_registers_member(make_backend):
         member_name="cli-1",
         display_name="CLI One",
         cli_agent="claude",
-        persona="senior reviewer",
+        prompt="senior reviewer",
     )
     assert result.ok, result.reason
     assert backend.is_external_cli_agent("cli-1")
@@ -75,7 +75,7 @@ async def test_spawn_external_cli_agent_undeclared_fails(make_backend):
         member_name="cli-x",
         display_name="CLI X",
         cli_agent="claude",
-        persona="x",
+        prompt="x",
     )
     assert not result.ok
     assert "not declared" in (result.reason or "")
@@ -91,21 +91,22 @@ async def test_spawn_external_cli_agent_unknown_adapter_fails(make_backend):
         member_name="cli-2",
         display_name="CLI Two",
         cli_agent="not-a-real-cli",
-        persona="x",
+        prompt="x",
     )
     assert not result.ok
+    assert "claude" in (result.reason or "")
     assert not backend.is_external_cli_agent("cli-2")
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_spawn_external_cli_agent_requires_persona(make_backend):
+async def test_spawn_external_cli_agent_requires_prompt(make_backend):
     backend = make_backend(["claude"])
     result = await backend.spawn_external_cli_agent(
         member_name="cli-3",
         display_name="CLI Three",
         cli_agent="claude",
-        persona="",
+        prompt="",
     )
     assert not result.ok
     assert not backend.is_external_cli_agent("cli-3")

@@ -490,6 +490,28 @@ class _TeamRunnerMixin:
             session_id=session_id,
         )
 
+    async def dispatch_agent_team_kv_cache(
+        self,
+        *,
+        action: str,
+        team_name: str,
+        session_id: str,
+        reason: str = "",
+    ) -> bool:
+        """Dispatch Team offload/prefetch as a managed background signal.
+
+        ``reason`` is diagnostic lifecycle context and has no business effect.
+        """
+        from openjiuwen.agent_teams.kv_cache import kv_cache_team_actions
+
+        return await kv_cache_team_actions.dispatch_action(
+            self._get_team_runtime_manager(),
+            action=action,
+            team_name=team_name,
+            session_id=session_id,
+            reason=reason,
+        )
+
     async def get_agent_team_monitor(
         self,
         *,
@@ -532,7 +554,10 @@ class _TeamRunnerMixin:
         ``force=False`` requires the caller to ``stop_agent_team`` first
         and otherwise raises ``AGENT_TEAM_BUSY_INVALID``.
         """
-        return await self._get_team_runtime_manager().delete_team(
+        from openjiuwen.agent_teams.kv_cache import kv_cache_team_actions
+
+        return await kv_cache_team_actions.delete_team(
+            self._get_team_runtime_manager(),
             team_name=team_name,
             session_ids=session_ids,
             force=force,
@@ -560,8 +585,21 @@ class _TeamRunnerMixin:
         release_info = await TeamRuntimeManager.resolve_team_session_release_info(session_id)
         if release_info is None:
             return False
-        await self._get_team_runtime_manager().release_session(session_id, force=force)
+        from openjiuwen.agent_teams.kv_cache import kv_cache_team_actions
+
+        manager = self._get_team_runtime_manager()
+        prepared_teams = await kv_cache_team_actions.prepare_session_release(
+            manager,
+            team_names=release_info.team_names,
+            session_id=session_id,
+        )
+        await manager.release_session(session_id, force=force)
         await CheckpointerFactory.get_checkpointer().release(session_id)
+        await kv_cache_team_actions.complete_session_release(
+            manager,
+            team_names=prepared_teams,
+            session_id=session_id,
+        )
         return True
 
     # ------------------------------------------------------------------
@@ -1013,6 +1051,22 @@ class _TeamRunnerClassMixin:
     ) -> bool:
         """Stop the active TeamAgent runtime for ``(team_name, session_id)``."""
         return await _global_runner().stop_agent_team(team_name=team_name, session_id=session_id)
+
+    @classmethod
+    async def dispatch_agent_team_kv_cache(
+        cls,
+        *,
+        action: str,
+        team_name: str,
+        session_id: str,
+        reason: str = "",
+    ) -> bool:
+        return await _global_runner().dispatch_agent_team_kv_cache(
+            action=action,
+            team_name=team_name,
+            session_id=session_id,
+            reason=reason,
+        )
 
     @classmethod
     async def delete_agent_team(

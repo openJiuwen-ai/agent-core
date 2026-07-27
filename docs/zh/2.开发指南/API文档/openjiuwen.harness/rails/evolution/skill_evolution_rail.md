@@ -69,6 +69,9 @@ agent = create_deep_agent(
 ### 触发机制
 
 - 被动演进在 `DeepAgent.invoke()` 完成后运行。
+- `signal_trigger` 控制被动信号扫描；`auto_scan` 是兼容别名。二者默认关闭。
+- `review_trigger` 控制周期性自检 follow_up 注入；`fuzzy_review` 是兼容别名。二者默认关闭。
+- 迁移期如果同时传入新旧参数名，以新参数名的值为准。
 - `auto_scan=False` 会关闭被动信号扫描，也会跳过被动演进的 async snapshot。
 - 主动演进通过 `request_user_evolution()` 触发；返回的 prompt 会要求主 agent 先调用 `prepare_skill_evolution(user_confirmed=true)`，再用返回的 `evolution_review_ref` 委托 `evolution_reviewer`。prepare tool 会把当前 rail 已采集到的执行/对话轨迹作为默认 review materials，`user_intent` 只补充优化方向。
 - 普通 skill 演进会忽略 `kind: team-skill`；team skill 使用 `TeamSkillEvolutionRail` / `TeamSkillRail`。
@@ -80,8 +83,9 @@ class SkillEvolutionRail(
     llm: Model,
     model: str,
     review_runtime: EvolutionReviewRuntime,
-    auto_scan: bool = True,
-    auto_save: bool = True,
+    auto_scan: Optional[bool] = None,
+    signal_trigger: Optional[bool] = None,
+    auto_save: bool = False,
     subject_kind: str = "skill",
     language: str = "cn",
     trajectory_store: Optional[TrajectoryStore] = None,
@@ -90,6 +94,9 @@ class SkillEvolutionRail(
     generate_records_llm_policy: LLMInvokePolicy = ...,
     evaluate_llm_policy: LLMInvokePolicy = ...,
     simplify_llm_policy: LLMInvokePolicy = ...,
+    fuzzy_review: Optional[bool] = None,
+    review_trigger: Optional[bool] = None,
+    fuzzy_review_interval: int = 5,
     disabled_skills: Optional[Union[str, list[str]]] = None,
 )
 ```
@@ -100,8 +107,9 @@ class SkillEvolutionRail(
 * **llm** (Model): 信号、记录生成、评分和治理阶段使用的 LLM 客户端。
 * **model** (str): 模型名称。
 * **review_runtime** (EvolutionReviewRuntime): review 子智能体状态与中断审核绑定的共享运行时，active-review 依赖必须显式传入。
-* **auto_scan** (bool): invoke 后是否执行被动信号扫描，默认 `True`。
-* **auto_save** (bool): 是否自动审批并持久化生成的被动记录，默认 `True`；生产宿主通常应设置为 `False` 并消费审批事件。
+* **auto_scan** (bool, 可选): `signal_trigger` 的兼容别名；已设置 `signal_trigger` 时忽略该值。
+* **signal_trigger** (bool, 可选): invoke 后是否执行被动信号扫描，默认 `False`。
+* **auto_save** (bool): 是否自动审批并持久化生成的被动记录，默认 `False`。
 * **subject_kind** (str): 本 rail 的演进对象类型（`"skill"` 或 `"swarm-skill"`，会做统一归一化）。
 * **language** (str): prompt 语言，常见值为 `"cn"` 或 `"en"`。
 * **trajectory_store** (TrajectoryStore, 可选): 执行轨迹存储。
@@ -110,6 +118,9 @@ class SkillEvolutionRail(
 * **generate_records_llm_policy** (LLMInvokePolicy): 经验记录生成阶段的 LLM 重试/超时策略。
 * **evaluate_llm_policy** (LLMInvokePolicy): 经验评分阶段的 LLM 重试/超时策略。
 * **simplify_llm_policy** (LLMInvokePolicy): simplify 治理阶段的 LLM 重试/超时策略。
+* **fuzzy_review** (bool, 可选): `review_trigger` 的兼容别名；已设置 `review_trigger` 时忽略该值。
+* **review_trigger** (bool, 可选): 是否周期性注入简短演进自检 follow_up，默认 `False`。
+* **fuzzy_review_interval** (int): 两次自检检查之间的非 follow_up task iteration 数，必须大于等于 1。
 * **disabled_skills** (Optional[Union[str, list[str]]], 可选): 排除自优化范围的技能拒绝列表。支持单个技能名（字符串）或多个技能名（字符串列表）。
 
 ### 优先级

@@ -229,6 +229,20 @@ class AsyncCallbackFramework:
     def callback_filters(self):
         return self._callback_filters
 
+    def has_subscribers(self, event: str) -> bool:
+        """Return True if anything would observe *event* when triggered."""
+        if self._enable_history:
+            return True
+        if self._global_filters:
+            return True
+        if event in self._callbacks and self._callbacks[event]:
+            return True
+        if event in self._filters and self._filters[event]:
+            return True
+        if event in self._hooks and self._hooks[event]:
+            return True
+        return False
+
     # ========== Registration ==========
 
     def on(

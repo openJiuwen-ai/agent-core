@@ -68,13 +68,22 @@ def _attr(span: Any, key: str, default: Any = None) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_leader_single_iteration_trace_via_runner(in_memory_exporter: InMemorySpanExporter) -> None:
+async def test_leader_single_iteration_trace_via_runner(
+    in_memory_exporter: InMemorySpanExporter,
+    tmp_path,
+    monkeypatch,
+) -> None:
     """Leader runs one iteration with mock LLM returning a text answer.
 
     Goes through ``Runner.run_agent_team_streaming`` — only the LLM is
     mocked.  Team coordination, tool execution, and observability all run
     real code paths.
+
+    Runs from a temp dir: the spec configures no workspace root, so the real
+    build path scaffolds the agent workspace (AGENT.md / memory / skills /
+    ...) into the current directory, which for a test run is the repo root.
     """
+    monkeypatch.chdir(tmp_path)
     await Runner.start()
 
     team_name = f"obs_ut_{uuid.uuid4().hex[:6]}"
@@ -87,7 +96,7 @@ async def test_leader_single_iteration_trace_via_runner(in_memory_exporter: InMe
         "leader": {
             "member_name": "leader",
             "display_name": "TeamLeader",
-            "persona": "You are a helpful assistant. Answer briefly.",
+            "desc": "You are a helpful assistant. Answer briefly.",
         },
         "agents": {
             "leader": {

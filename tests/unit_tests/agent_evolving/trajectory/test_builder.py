@@ -7,6 +7,12 @@ from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
     ToolCallDetail,
     TrajectoryStep,
+    trajectory_case_id,
+    trajectory_cost,
+    trajectory_execution_id,
+    trajectory_session_id,
+    trajectory_source,
+    trajectory_steps,
 )
 
 
@@ -113,11 +119,11 @@ class TestTrajectoryBuilder:
 
         trajectory = builder.build()
 
-        assert trajectory.session_id == "session_123"
-        assert trajectory.source == "online"
-        assert trajectory.case_id == "case_456"
-        assert len(trajectory.steps) == 1
-        assert trajectory.execution_id is not None
+        assert trajectory_session_id(trajectory) == "session_123"
+        assert trajectory_source(trajectory) == "online"
+        assert trajectory_case_id(trajectory) == "case_456"
+        assert len(trajectory_steps(trajectory)) == 1
+        assert trajectory_execution_id(trajectory) is not None
 
     @staticmethod
     def test_build_with_empty_steps():
@@ -126,8 +132,8 @@ class TestTrajectoryBuilder:
 
         trajectory = builder.build()
 
-        assert trajectory.steps == []
-        assert trajectory.cost is None
+        assert trajectory_steps(trajectory) == []
+        assert trajectory_cost(trajectory) is None
 
     @staticmethod
     def test_cost_accumulation_from_llm_detail():
@@ -144,7 +150,7 @@ class TestTrajectoryBuilder:
 
         trajectory = builder.build()
 
-        assert trajectory.cost == {"input_tokens": 10, "output_tokens": 5}
+        assert trajectory_cost(trajectory) == {"input_tokens": 10, "output_tokens": 5}
 
     @staticmethod
     def test_cost_accumulation_multiple_llm_steps():
@@ -168,7 +174,7 @@ class TestTrajectoryBuilder:
 
         trajectory = builder.build()
 
-        assert trajectory.cost == {"input_tokens": 30, "output_tokens": 15}
+        assert trajectory_cost(trajectory) == {"input_tokens": 30, "output_tokens": 15}
 
     @staticmethod
     def test_cost_not_accumulated_for_tool_steps():
@@ -184,7 +190,7 @@ class TestTrajectoryBuilder:
 
         trajectory = builder.build()
 
-        assert trajectory.cost is None
+        assert trajectory_cost(trajectory) is None
 
     @staticmethod
     def test_cost_not_accumulated_without_usage():
@@ -201,7 +207,7 @@ class TestTrajectoryBuilder:
 
         trajectory = builder.build()
 
-        assert trajectory.cost is None
+        assert trajectory_cost(trajectory) is None
 
     @staticmethod
     def test_different_sources():
@@ -216,5 +222,5 @@ class TestTrajectoryBuilder:
         online_traj = online_builder.build()
         offline_traj = offline_builder.build()
 
-        assert online_traj.source == "online"
-        assert offline_traj.source == "offline"
+        assert trajectory_source(online_traj) == "online"
+        assert trajectory_source(offline_traj) == "offline"
