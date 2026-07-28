@@ -21,7 +21,28 @@ from openjiuwen.agent_teams.schema.team import TeamRole
 
 
 @pytest.mark.level0
-def test_static_sections_teammate_has_role_and_private_prompt():
+def test_static_sections_teammate_has_role_and_identity():
+    sections = build_team_static_sections(
+        role=TeamRole.TEAMMATE,
+        member_prompt="follow the backend conventions",
+        member_name="dev-1",
+        language="en",
+        include_member_specific=True,
+    )
+    names = {section.name for section in sections}
+    assert TeamSectionName.ROLE in names
+    # identity carries both the member_name and the private working agreement.
+    assert TeamSectionName.IDENTITY in names
+    # workflow / lifecycle are leader-only and absent for a teammate.
+    assert TeamSectionName.WORKFLOW not in names
+    assert TeamSectionName.LIFECYCLE not in names
+
+
+@pytest.mark.level0
+def test_static_sections_omit_member_specific_by_default():
+    # In-process members get the identity section (member_name + private
+    # working agreement) as a prompt attachment, so the shared system-prompt
+    # prefix stays identical across the team.
     sections = build_team_static_sections(
         role=TeamRole.TEAMMATE,
         member_prompt="follow the backend conventions",
@@ -29,11 +50,7 @@ def test_static_sections_teammate_has_role_and_private_prompt():
         language="en",
     )
     names = {section.name for section in sections}
-    assert TeamSectionName.ROLE in names
-    assert TeamSectionName.PRIVATE_PROMPT in names
-    # workflow / lifecycle are leader-only and absent for a teammate.
-    assert TeamSectionName.WORKFLOW not in names
-    assert TeamSectionName.LIFECYCLE not in names
+    assert TeamSectionName.IDENTITY not in names
 
 
 @pytest.mark.level0
@@ -44,13 +61,15 @@ def test_static_sections_leader_includes_workflow_and_lifecycle():
         member_name="leader",
         lifecycle="temporary",
         language="en",
+        include_member_specific=True,
     )
     names = {section.name for section in sections}
     assert TeamSectionName.ROLE in names
     assert TeamSectionName.WORKFLOW in names
     assert TeamSectionName.LIFECYCLE in names
-    # empty private prompt produces no private-prompt section.
-    assert TeamSectionName.PRIVATE_PROMPT not in names
+    # A leader has a member_name but no private prompt, so identity is present
+    # and carries the name alone.
+    assert TeamSectionName.IDENTITY in names
 
 
 @pytest.mark.level0

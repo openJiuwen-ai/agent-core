@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-07-06 |
-| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md` |
+| 最近一次修订日期 | 2026-07-28 |
+| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md` |
 
 ## 范围 / 边界
 
@@ -36,7 +36,9 @@
 
 4. **`TeamPolicyRail` 是团队 section 名的唯一发行方**：所有团队相关 section 名集中在 `TeamSectionName` 类常量里，priority 取值集中在该 rail 的注释表里。其他模块不得 hardcode `"team_*"` section 名。
 5. **section name 全局唯一**：`SystemPromptBuilder._sections` 是 `dict[str, PromptSection]`，同名 add 直接覆盖。团队 section 与 harness 内置 section（safety / capabilities / runtime / ...）必须不冲突。
-6. **section priority 单调约定**：进 builder 的团队 section 占 11–18（含 HITT 契约 / bridge 自契约 P:12、attachment/inbound 两个说明 section P:17/18）；harness 内置 section 排在 0–10、20–60、70–99，priority 升序拼接。进 attachment 的团队 section（`team_members` P:66 / `team_info` P:65）按同一 priority 值在 attachment 内部排序，与 builder 序正交。相同 priority 顺序由插入序决定。
+6. **section priority 单调约定**：进 builder 的团队 section 占 11–18（含 HITT 契约 / bridge 自契约 P:12、attachment/inbound 两个说明 section P:17/18）；harness 内置 section 排在 0–10、20–60、70–99，priority 升序拼接。进 attachment 的团队 section（`team_identity` P:10 / `team_info` P:65 / `team_members` P:66）按同一 priority 值在 attachment 内部排序，与 builder 序正交。相同 priority 顺序由插入序决定。
+
+6a. **系统提示词前缀里不放 per-member 内容**：进 builder 的团队 section 必须对同一 team、同一角色的所有成员逐字一致，否则每个成员各自占一份 prompt 前缀 KV cache，成员一多缓存命中率就塌。**当前的 per-member 内容全部收在一个 section 里**：`team_identity`（P:10）= 成员自己的 `member_name` + 私有工作约定（`## 私有工作约定` 子节）。两者都在 spawn 时固定、此后恒定、生命周期与投递去向完全一致，故合成一个 attachment type 而不是两个；走 attachment 纯粹是为了把它们挪出共享前缀（不是因为会变）。例外仅两处，都因角色本身单例而不构成放大：`hitt_human_agent` / `bridge_agent` 模板的 `{{self_line}}`。新增 section 前先问它是否 per-member——是就走 attachment，不要塞进 builder。
 7. **role-specific section 在不应出现的角色下返回 `None`**：`build_team_workflow_section` / `build_team_lifecycle_section` 在 `role != LEADER` 时返回 `None`；`build_team_hitt_section` 在 `hitt_enabled` 为 False（或角色无 HITT 版）时返回 `None`；`build_team_bridge_section` 在 `role != BRIDGE_AGENT` 时返回 `None`。**禁止用空字符串占位**——返回 `None` 等价于不挂 section。
    - **HITT 是单一静态契约（[[F_52]]）**：`build_team_hitt_section` 出 roster-agnostic 的规则段，进 system prompt builder（P:12，静态、KV 稳定），gate 用 `hitt_enabled`（capability flag，HITT 一开即 present，无需先 spawn 人类）。人类成员不再有独立名册段——他们在统一的 `team_members` 里标 `[human]`（撤销 [[F_50]] 的 `team_hitt_roster`）。
    - **Bridge 只有 avatar 自契约（[[F_52]]）**：bridge 成员在 peer 眼里就是普通 teammate（`team_members` 里不标记、无 peer 向说明段），只有 avatar 本人（`role == BRIDGE_AGENT`）拿 `bridge_agent` 自契约；已删 `bridge_leader` / `bridge_teammate` 模板。
@@ -58,9 +60,9 @@
 ### Rail 注入契约
 
 15. **Rail 通过 DeepAgent 的 rail registry 注入，不直接修改 `SystemPromptBuilder`**：`TeamPolicyRail` 在 `init(agent)` 里捕获 `agent.system_prompt_builder` 引用，于 `before_model_call` 写入 section；在 `uninit(agent)` 里按名移除。**禁止**绕过 rail 把 section 直接 `add_section` 到 *DeepAgent 的共享 builder* 上。**例外（外部 CLI 成员）**：非 DeepAgent 的外部 CLI 成员没有共享 builder，由 `sections.build_team_member_system_prompt(...)` 把同一批静态 section 装进一个**一次性 `SystemPromptBuilder`** 渲染成独立字符串(见不变量 18a / [[F_25_external-cli-hardening-and-gemini]])——这不违反本条，因为它不触碰任何 DeepAgent 的共享 builder，且**只装 team section、排除其它 rail**。
-    - 18a. **静态 section 的单一真相源是 `sections.build_team_static_sections(...)`**：`TeamPolicyRail._build_static_sections`（传 `include_attachment_notice=True`）与 `build_team_member_system_prompt`（外部 CLI，默认 False）都委托它构建 role / HITT 契约（gate `hitt_enabled`）/ bridge 自契约（仅 BRIDGE_AGENT）/ workflow / lifecycle / private-prompt / extra——**全部静态**，两条路径拿到一致的静态 section。成员**公开 `desc` 不进自己的 prompt**（只进他人花名册 `team_members` section）；成员**私有 `prompt` 只进自己的 prompt**（`team_private_prompt` static section）。dynamic 的 `team_info` / `team_members`（统一名册，人类标 `[human]`）**不在其中**——进程内成员由 rail 挂 attachment，外部 CLI 经 MCP 工具自取。inbound_tags 说明 section **无条件**构造（见 [[F_51]]）；attachment_notice 由 `include_attachment_notice` 门控（外部 CLI 走默认 False——它无 PromptAttachmentManager），两者都不再由 rail 额外 `append`。
+    - 18a. **静态 section 的单一真相源是 `sections.build_team_static_sections(...)`**：`TeamPolicyRail._build_static_sections` 与 `build_team_member_system_prompt`（外部 CLI）都委托它构建 role / HITT 契约（gate `hitt_enabled`）/ bridge 自契约（仅 BRIDGE_AGENT）/ workflow / dispatch / lifecycle / extra——**全部静态且成员间一致**，两条路径拿到一致的静态 section。成员**公开 `desc` 不进自己的 prompt**（只进他人花名册 `team_members` section）；成员**私有 `prompt` 只发给自己**（`team_identity` 的 `## 私有工作约定` 子节，进程内走 attachment）。dynamic 的 `team_info` / `team_members`（统一名册，人类标 `[human]`）**不在其中**——进程内成员由 rail 挂 attachment，外部 CLI 经 MCP 工具自取。inbound_tags 说明 section **无条件**构造（见 [[F_51]]）；两条路径都传 `include_attachment_notice=True`（外部 CLI 经 runtime input 收同一批渲染后的 attachment 块，见 [[F_51]]）。**唯一按路径分化的是 `include_member_specific`**：外部 CLI 传 True，把 per-member section（`team_identity`）内联进静态 prompt（独立进程的一次性快照，无共享前缀可保护、启动期也无 attachment 通道）；进程内成员走默认 False、由 rail 把它挂 attachment（见不变量 6a）。
 16. **Mount order load-bearing**：`TeamHarness.build` 必须先挂 `TeamToolRail` 并 eager `init`，再挂 `TeamPolicyRail`。原因：policy 输出引用 ability 快照，能力必须先就位。Rail 顺序的修改必须同步检视 mount path。
-17. **`uninit` 必须把自己写入 builder 的 section 全部清掉**：`TeamPolicyRail.uninit` 删除 `_static_sections` 里的每个 section + builder-bound 的 HITT 契约（`TeamSectionName.HITT`）；attachment-bound 的 roster/info/members 随 attachment_manager 销毁、无需 uninit 清理。rail 卸载后 builder 不得残留团队 section。
+17. **`uninit` 必须把自己写入 builder 的 section 全部清掉**：`TeamPolicyRail.uninit` 删除 `_static_sections` 里的每个 section + builder-bound 的 HITT 契约（`TeamSectionName.HITT`）；attachment-bound 的 identity / roster / info 随 attachment_manager 销毁、无需 uninit 清理。rail 卸载后 builder 不得残留团队 section。
 18. **dynamic section 在 `team_backend is None` 时整体跳过**：单测可只关心 static 内容；`_info_cache` / `_members_cache` 在缺 backend 时不构造，rail 行为退化成纯静态。
 
 ### `FirstIterationGate`
@@ -108,23 +110,29 @@ def load_shared_template(name: str) -> PromptTemplate:
 
 ```python
 class TeamSectionName:
+    IDENTITY = "team_identity"  # P:10 — own member_name + private prompt (attachment; static only for external CLI)
     ROLE = "team_role"        # P:11
     HITT = "team_hitt"        # P:12 — static collaboration contract (builder)
     BRIDGE = "team_bridge"    # P:12 — bridge avatar self-contract (BRIDGE_AGENT only)
     WORKFLOW = "team_workflow"   # P:13
     LIFECYCLE = "team_lifecycle" # P:14
-    PRIVATE_PROMPT = "team_private_prompt"  # P:16 — member-private prompt
     EXTRA = "team_extra"      # P:17
     INFO = "team_info"        # P:65
     MEMBERS = "team_members"  # P:66
 
+def build_team_identity_section(
+    *,
+    member_name: str | None,
+    member_prompt: str | None = None,   # rendered as a '## private working agreement' subsection
+    language: str = "cn",
+) -> PromptSection | None: ...    # None when neither is set
+
 def build_team_role_section(
     *,
     role: TeamRole,
-    member_name: str | None,
     teammate_mode: str = "build_mode",
     language: str = "cn",
-) -> PromptSection: ...
+) -> PromptSection: ...           # no member_name: identity lives in its own section
 
 def build_team_workflow_section(
     *,
@@ -140,12 +148,6 @@ def build_team_lifecycle_section(
     language: str = "cn",
 ) -> PromptSection | None: ...    # None when role != LEADER
 
-def build_team_private_prompt_section(
-    *,
-    member_prompt: str | None,
-    language: str = "cn",
-) -> PromptSection | None: ...    # None when member_prompt is empty; injects ONLY into the member's own prompt
-
 def build_team_extra_section(
     *,
     base_prompt: str | None,
@@ -153,15 +155,14 @@ def build_team_extra_section(
 ) -> PromptSection | None: ...    # None when base_prompt is empty/whitespace
 
 # Single source of truth for the static section set (role/hitt/bridge/workflow/
-# lifecycle/private-prompt/extra + the inbound-tag notice always, + the attachment
+# lifecycle/extra + the inbound-tag notice always, + the attachment
 # notice when include_attachment_notice). TeamPolicyRail._build_static_sections
-# delegates here with include_attachment_notice=True; build_team_member_system_prompt
-# (external CLI members) renders these into a standalone string via a throwaway
-# SystemPromptBuilder, excluding other rails, and leaves include_attachment_notice=False
-# (external CLI has no PromptAttachmentManager — it pulls team state via MCP tools — so
-# the attachment notice would mislead; it still renders inbound <team-inbound> XML, so it
-# keeps the inbound-tag notice). Note: the member's public `desc` is NOT rendered here —
-# it belongs only in peers' roster (team_members section).
+# delegates here with include_attachment_notice=True and leaves
+# include_member_specific at its default False (the rail attaches it instead);
+# build_team_member_system_prompt (external CLI members) renders these into a
+# standalone string via a throwaway SystemPromptBuilder, excluding other rails,
+# and sets include_member_specific=True. Note: the member's public `desc` is NOT
+# rendered here — it belongs only in peers' roster (team_members section).
 def build_team_static_sections(
     *,
     role: TeamRole,
@@ -175,6 +176,7 @@ def build_team_static_sections(
     hitt_enabled: bool = False,
     expose_human_agents_to_teammates: bool = False,
     include_attachment_notice: bool = False,
+    include_member_specific: bool = False,   # external CLI only; in-process gets it as an attachment
 ) -> list[PromptSection]: ...      # non-None sections, unsorted
 
 def build_team_member_system_prompt(  # same kwargs as build_team_static_sections
@@ -278,7 +280,7 @@ class TeamPolicyRail(DeepAgentRail):
 ```
 
 - `__init__` 中一次性 build **全部**团队静态 section（role / HITT 契约 [gate `team_backend.hitt_enabled()`] / bridge 自契约 [仅 BRIDGE_AGENT] / workflow / lifecycle / private / extra + attachment/inbound 说明）。HITT 契约 gate 用 sync 的 `hitt_enabled()`（而非 live 名册），所以 HITT 一开即 present、无需等 spawn 人类。
-- `before_model_call` 是该 rail 的唯一写入点：先把所有 static section 写回 builder，再 `_sync_dynamic_sections` 把 `team_members`（统一名册，人类标 `[human]`）/ `team_info` upsert 进 attachment。`_sync_dynamic_sections` **不碰 builder**——所有 builder section 都是静态的。`team_backend` / attachment_manager 缺席时相应跳过。
+- `before_model_call` 是该 rail 的唯一写入点：先把所有 static section 写回 builder，再 `_sync_dynamic_sections` 把 `team_identity`（自身 `member_name` + 私有工作约定，恒定但 per-member）/ `team_members`（统一名册，人类标 `[human]`）/ `team_info` upsert 进 attachment。`_sync_dynamic_sections` **不碰 builder**——所有 builder section 都是静态的。`team_backend` / attachment_manager 缺席时相应跳过。
 - `uninit` 删 `_static_sections` 里每个 section（HITT 契约 / bridge 自契约都在其中）；attachment-bound 的 info / members 随 manager 销毁，无需 uninit 清理。
 
 ### `rails/first_iteration_gate.py`

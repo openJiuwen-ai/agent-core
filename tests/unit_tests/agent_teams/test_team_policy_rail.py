@@ -8,12 +8,13 @@ import pytest
 
 from openjiuwen.agent_teams.prompts import (
     TeamSectionName,
+    build_team_attachment_notice_section,
     build_team_extra_section,
+    build_team_identity_section,
     build_team_info_section,
     build_team_lifecycle_section,
     build_team_member_system_prompt,
     build_team_members_section,
-    build_team_private_prompt_section,
     build_team_role_section,
     build_team_static_sections,
     build_team_workflow_section,
@@ -55,7 +56,6 @@ class TestTeamRoleSection:
     def test_leader_role_section(self):
         section = build_team_role_section(
             role=TeamRole.LEADER,
-            member_name="leader1",
             language="cn",
         )
         assert section is not None
@@ -64,28 +64,46 @@ class TestTeamRoleSection:
 
         content = section.render("cn")
         assert "# 团队角色" in content
-        assert "你的 member_name: leader1" in content
         assert "create_task" in content  # from leader_policy.md
 
     @pytest.mark.level0
     def test_teammate_role_section(self):
         section = build_team_role_section(
             role=TeamRole.TEAMMATE,
-            member_name="dev1",
             language="cn",
         )
         content = section.render("cn")
         assert "view_task" in content  # from teammate_policy.md
 
     @pytest.mark.level0
-    def test_role_without_member_id(self):
+    def test_role_section_carries_no_member_name(self):
+        # The member's own name is the only per-member value; it lives in the
+        # team_identity attachment so the role section stays byte-identical
+        # across every member sharing a role (shared prompt-prefix cache).
         section = build_team_role_section(
             role=TeamRole.LEADER,
-            member_name=None,
             language="cn",
         )
         content = section.render("cn")
         assert "你的 member_name" not in content
+
+
+class TestTeamIdentitySection:
+    @pytest.mark.level0
+    def test_identity_section(self):
+        section = build_team_identity_section(member_name="dev1", language="cn")
+        assert section is not None
+        assert section.name == TeamSectionName.IDENTITY
+        assert section.priority == 10
+
+        content = section.render("cn")
+        assert "# 成员身份" in content
+        assert "你的 member_name: dev1" in content
+
+    @pytest.mark.level0
+    def test_identity_section_without_any_member_content(self):
+        assert build_team_identity_section(member_name=None, language="cn") is None
+        assert build_team_identity_section(member_name="", member_prompt="", language="cn") is None
 
 
 class TestTeamWorkflowSection:
@@ -169,20 +187,39 @@ class TestTeamLifecycleSection:
         assert section is None
 
 
-class TestTeamPrivatePromptSection:
+class TestTeamPrivatePromptInIdentity:
+    """The private working agreement rides inside the identity section.
+
+    Both are per-member and share one lifetime, so they travel as a single
+    ``team_identity`` attachment rather than two.
+    """
+
     @pytest.mark.level0
-    def test_with_private_prompt(self):
-        section = build_team_private_prompt_section(member_prompt="Ship small PRs", language="cn")
+    def test_private_prompt_nested_under_identity(self):
+        section = build_team_identity_section(
+            member_name="dev1",
+            member_prompt="Ship small PRs",
+            language="cn",
+        )
         assert section is not None
-        assert section.priority == 16
+        assert section.name == TeamSectionName.IDENTITY
         content = section.render("cn")
-        assert "# 私有工作约定" in content
+        assert "你的 member_name: dev1" in content
+        assert "## 私有工作约定" in content
         assert "Ship small PRs" in content
 
     @pytest.mark.level1
-    def test_empty_private_prompt_returns_none(self):
-        assert build_team_private_prompt_section(member_prompt="", language="cn") is None
-        assert build_team_private_prompt_section(member_prompt=None, language="cn") is None
+    def test_empty_private_prompt_drops_only_that_subsection(self):
+        for member_prompt in ("", None, "   "):
+            section = build_team_identity_section(
+                member_name="dev1",
+                member_prompt=member_prompt,
+                language="cn",
+            )
+            assert section is not None
+            content = section.render("cn")
+            assert "你的 member_name: dev1" in content
+            assert "私有工作约定" not in content
 
 
 class TestTeamExtraSection:
@@ -431,13 +468,14 @@ class TestTeamPolicyRailStaticSections:
             TeamSectionName.ROLE,
             TeamSectionName.WORKFLOW,
             TeamSectionName.LIFECYCLE,
-            TeamSectionName.PRIVATE_PROMPT,
             TeamSectionName.EXTRA,
         ):
             assert name in sections
         # Without a backend the dynamic sections are skipped entirely.
         assert TeamSectionName.INFO not in sections
         assert TeamSectionName.MEMBERS not in sections
+        # The per-member section never enters the builder; it is an attachment.
+        assert TeamSectionName.IDENTITY not in sections
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -462,7 +500,7 @@ class TestTeamPolicyRailStaticSections:
         assert TeamSectionName.LIFECYCLE not in sections
         assert TeamSectionName.EXTRA not in sections
         assert TeamSectionName.ROLE in sections
-        assert TeamSectionName.PRIVATE_PROMPT in sections
+        assert TeamSectionName.IDENTITY not in sections
 
 
 async def _attachment_content(
@@ -688,14 +726,26 @@ class TestTeamPolicyRailDynamicSections:
         idx_role = prompt.index("# 团队角色")
         idx_workflow = prompt.index("# 工作流程")
         idx_lifecycle = prompt.index("# 团队生命周期")
-        idx_private_prompt = prompt.index("# 私有工作约定")
-        assert idx_role < idx_workflow < idx_lifecycle < idx_private_prompt
-        # Dynamic sections do not leak into the system prompt anymore.
+        assert idx_role < idx_workflow < idx_lifecycle
+        # Dynamic sections do not leak into the system prompt anymore, and
+        # neither do the per-member ones (shared prefix cache).
         assert "# 团队信息" not in prompt
         assert "# 成员关系" not in prompt
+        assert "# 成员身份" not in prompt
+        assert "你的 member_name" not in prompt
+        # (the attachment notice mentions the private agreement by name, so
+        # match the heading, not the bare phrase)
+        assert "## 私有工作约定" not in prompt
+        assert "PM" not in prompt
         # But are present as attachments.
         assert await _attachment_content(manager, TeamSectionName.INFO) is not None
         assert await _attachment_content(manager, TeamSectionName.MEMBERS) is not None
+        identity = await _attachment_content(manager, TeamSectionName.IDENTITY)
+        assert identity is not None
+        assert "你的 member_name: leader1" in identity
+        # The private working agreement rides inside the same attachment.
+        assert "## 私有工作约定" in identity
+        assert "PM" in identity
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -730,7 +780,7 @@ class TestTeamPolicyRailDynamicSections:
             TeamSectionName.ROLE,
             TeamSectionName.WORKFLOW,
             TeamSectionName.LIFECYCLE,
-            TeamSectionName.PRIVATE_PROMPT,
+            TeamSectionName.EXTRA,
         ):
             assert not builder.has_section(name)
 
@@ -916,6 +966,62 @@ class TestTagNoticeInclusion:
         prompt = build_team_member_system_prompt(role=TeamRole.LEADER, member_name="l", language="cn")
         assert "team-inbound" in prompt
         assert "prompt-attachment" in prompt
+
+
+class TestMemberSpecificInclusion:
+    """The per-member section is inlined only for external CLI members.
+
+    ``team_identity`` (member_name + private working agreement) differs between
+    members, so in-process members receive it as a prompt attachment (see
+    ``TeamPolicyRail``) and every member of a team shares one cacheable
+    system-prompt prefix. An external CLI prompt is a standalone per-member
+    snapshot with no attachment channel at startup, so it inlines it.
+    """
+
+    @pytest.mark.level1
+    def test_static_sections_omit_member_specific_by_default(self):
+        secs = build_team_static_sections(
+            role=TeamRole.TEAMMATE,
+            member_name="dev1",
+            member_prompt="ship small PRs",
+            language="cn",
+        )
+        names = {s.name for s in secs}
+        assert TeamSectionName.IDENTITY not in names
+
+    @pytest.mark.level1
+    def test_static_sections_include_member_specific_when_flagged(self):
+        secs = build_team_static_sections(
+            role=TeamRole.TEAMMATE,
+            member_name="dev1",
+            member_prompt="ship small PRs",
+            language="cn",
+            include_member_specific=True,
+        )
+        names = {s.name for s in secs}
+        assert TeamSectionName.IDENTITY in names
+
+    @pytest.mark.level1
+    def test_external_cli_prompt_inlines_member_specific(self):
+        prompt = build_team_member_system_prompt(
+            role=TeamRole.TEAMMATE,
+            member_name="dev1",
+            member_prompt="ship small PRs",
+            language="cn",
+        )
+        assert "你的 member_name: dev1" in prompt
+        assert "ship small PRs" in prompt
+
+    @pytest.mark.level1
+    def test_attachment_notice_documents_every_type(self):
+        # Every attachment type the member can receive must be named in the
+        # notice, otherwise the LLM meets an undocumented <prompt-attachment>.
+        section = build_team_attachment_notice_section(language="cn")
+        for language in ("cn", "en"):
+            content = section.render(language)
+            assert TeamSectionName.IDENTITY in content
+            assert TeamSectionName.MEMBERS in content
+            assert TeamSectionName.INFO in content
 
     @pytest.mark.asyncio
     @pytest.mark.level1
