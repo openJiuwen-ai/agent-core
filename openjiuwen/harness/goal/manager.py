@@ -171,14 +171,22 @@ class GoalManager:
                 # finish naturally (including assessment).  Bumping would make
                 # the finishing attempt look stale and drop last_assessment /
                 # COMPLETE.  Pending continuations are discarded below.
-                record.status = GoalStatus.PAUSED
-                record.touch(bump_revision=False)
-                self._store.save(record)
-                await self._commit_store_locked()
                 self._event_manager.discard_goal_work(
                     session_id=record.session_id,
                     goal_id=record.goal_id,
                 )
+                # Always settle first so hosts that only display time_used while
+                # paused (and ignore active_started_at) do not jump to 0.
+                record.settle_active_time(keep_active=False)
+                # If an attempt is still finishing, reopen the clock for
+                # backend accounting. Resume's start_timing is a no-op while
+                # this remains set; CONTINUE under PAUSED settles it closed.
+                if self._has_in_flight_goal_attempt(record):
+                    record.start_timing()
+                record.status = GoalStatus.PAUSED
+                record.touch(bump_revision=False)
+                self._store.save(record)
+                await self._commit_store_locked()
                 if self._has_output_stream():
                     self._emit_goal_updated_locked(record)
             return record.copy_for_response()
@@ -189,12 +197,24 @@ class GoalManager:
             if record is None:
                 return None
             if record.status in (GoalStatus.PAUSED, GoalStatus.BLOCKED):
+                # While paused, hosts freeze on time_used_seconds. If an attempt
+                # kept running, active_started_at still tracks that segment—
+                # fold it into time_used here so becoming ACTIVE jumps the
+                # displayed total. Idle pause (no open clock) is a no-op.
+                in_flight = self._has_in_flight_goal_attempt(record)
+                record.settle_active_time(keep_active=False)
                 record.status = GoalStatus.ACTIVE
-                record.touch(bump_revision=True)
+                record.start_timing()
+                # Idle / BLOCKED resume bumps revision and may ensure a new
+                # attempt (generation token). If the same attempt is still
+                # running, keep the revision so its assessment can commit and
+                # do not queue a duplicate round.
+                record.touch(bump_revision=not in_flight)
                 self._store.save(record)
                 await self._commit_store_locked()
                 if self._has_output_stream():
-                    self._ensure_goal_work_locked(record)
+                    if not in_flight:
+                        self._ensure_goal_work_locked(record)
                     self._emit_goal_updated_locked(record)
             return record.copy_for_response()
 
@@ -203,6 +223,7 @@ class GoalManager:
             record = self._store.load()
             if record is None:
                 return None
+            record.settle_active_time(keep_active=False)
             self._store.clear()
             await self._commit_store_locked()
             self._event_manager.discard_goal_work(
@@ -241,6 +262,7 @@ class GoalManager:
             if record is None or not self._matches_active(record, goal_id, revision):
                 return None
             record.attempt_count += 1
+            record.start_timing()
             record.touch()
             self._store.save(record)
             await self._commit_store_locked()
@@ -259,6 +281,12 @@ class GoalManager:
             record = self._store.load()
             if record is None or not self._matches_in_flight(record, goal_id, revision):
                 return
+            # PAUSED finishing attempts still own active_started_at; flush them too.
+            if record.active_started_at is not None and record.status in (
+                GoalStatus.ACTIVE,
+                GoalStatus.PAUSED,
+            ):
+                record.settle_active_time(keep_active=True)
             record.token_usage.accumulate(input_tokens, output_tokens, cached_input_tokens)
             record.touch()
             self._store.save(record)
@@ -282,11 +310,19 @@ class GoalManager:
                 return None
             record.last_assessment = assessment
             if assessment.status is GoalAssessmentStatus.COMPLETE:
+                record.settle_active_time(keep_active=False)
                 record.status = GoalStatus.COMPLETED
                 record.last_stop_reason = "completed"
             elif assessment.status is GoalAssessmentStatus.BLOCKED:
+                record.settle_active_time(keep_active=False)
                 record.status = GoalStatus.BLOCKED
                 record.last_stop_reason = "blocked"
+            elif record.status is GoalStatus.ACTIVE:
+                record.settle_active_time(keep_active=True)
+            elif record.status is GoalStatus.PAUSED:
+                # Attempt finished under pause: stop the clock; resume opens a
+                # fresh segment so idle pause time is not counted.
+                record.settle_active_time(keep_active=False)
             record.touch()
             self._store.save(record)
             await self._commit_store_locked()
@@ -333,6 +369,15 @@ class GoalManager:
             and record.goal_id == goal_id
             and record.revision == revision
         )
+
+    def _has_in_flight_goal_attempt(self, record: GoalRecord) -> bool:
+        """Whether a dequeued/active goal attempt is still executing.
+
+        Call after ``discard_goal_work`` so queued continuations are ignored.
+        Match by ``goal_id`` only: the finishing attempt must stay visible to
+        pause/resume even if revision was bumped.
+        """
+        return self._event_manager.has_running_goal(goal_id=record.goal_id)
 
     @staticmethod
     def _matches_in_flight(
