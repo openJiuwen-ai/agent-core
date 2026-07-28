@@ -33,7 +33,7 @@ agent_teams/
 ├── __init__.py          # 公开 API 聚合导出
 ├── constants.py         # 保留名（user/team_leader/human_agent）集中定义
 ├── context.py           # session_id 跨成员/跨模式共享 contextvars
-├── i18n.py              # 运行时中/英文字符串（仅装运行时 hard-coded 串）
+├── i18n.py              # 运行时中/英文字符串（仅装运行时 hard-coded 串）+ `reply_hint_for(sender)`：按发件人选 reply-hint 文案（user 走无条件强制版，其余走通用条件版）——文案归它管，选哪条文案也归它管，两个消费点（coordination `MessageHandler` / external `format`）不各写一遍
 ├── timefmt.py           # 毫秒 epoch → "绝对本地时间 + 相对差" 渲染（喂 LLM/观测，文案走 i18n）
 ├── inbound_render.py    # 入站消息/框架事件 → <team-inbound>/<team-event>/<team-note> XML 渲染（纯函数，喂 LLM；文案由 handler 从 i18n 取）。见 F_46
 ├── message_template.py  # 框架模板消息的两阶段渲染：发送存意图（消息行 content 空 + meta={template,refs,params}），投递时按收件人语言加载 prompts/<lang>/<key>.md、用 {{task.*}}/{{member.*}}/{{param.*}} 填当前行（单遍替换不二次扫描、字段白名单、失败降级为 meta 合成的 fallback 行）。见 F_63
