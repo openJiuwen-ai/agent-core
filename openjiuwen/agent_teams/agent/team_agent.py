@@ -689,6 +689,7 @@ class TeamAgent(BaseAgent):
                 if raw_query:
                     await self._coordination.enqueue_user_input(inputs)
                 await self._coordination.enqueue_initial_mailbox_poll()
+                await self._coordination.enqueue_initial_task_poll()
             last_result = None
             while True:
                 chunk = await self._stream_controller.stream_queue.get()
@@ -745,6 +746,7 @@ class TeamAgent(BaseAgent):
                 if raw_query:
                     await self._coordination.enqueue_user_input(inputs)
                 await self._coordination.enqueue_initial_mailbox_poll()
+                await self._coordination.enqueue_initial_task_poll()
             while True:
                 chunk = await self._stream_controller.stream_queue.get()
                 if chunk is None:

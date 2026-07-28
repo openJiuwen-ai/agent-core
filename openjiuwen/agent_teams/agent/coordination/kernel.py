@@ -632,6 +632,31 @@ class CoordinationKernel:
             InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX),
         )
 
+    async def enqueue_initial_task_poll(self) -> None:
+        """Queue the member's one startup board survey (F_69).
+
+        The counterpart of ``enqueue_initial_mailbox_poll``: the mailbox
+        sweep picks up messages sent while the member was down, this one
+        picks up *work* assigned while it was down. A task assigned at
+        creation time is announced only by a transient ``TASK_CLAIMED``
+        event, which a member that has not started yet — ``spawn_member``
+        leaves it ``UNSTARTED`` — can never receive.
+
+        Leader-excluded for the same reason as the mailbox poll: its board
+        survey renders the whole board (or an all-done prompt on an empty
+        one), which is not what a leader coming up should be handed. Queued
+        after the mailbox poll so the member reads its messages first and
+        the board second.
+        """
+        host = self._host
+        if host.role == TeamRole.LEADER:
+            return
+        if self._event_bus is None:
+            return
+        await self._event_bus.enqueue(
+            InnerEventMessage(event_type=InnerEventType.INITIAL_POLL_TASK),
+        )
+
     async def drain_agent_task(self) -> None:
         """Hard-cancel the in-flight round. Stop / teardown paths only."""
         await self._host.stream_controller.drain_agent_task()

@@ -72,12 +72,15 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # agent/coordination/handlers/stale_task.py — idle-clock stall nudges (autonomous, F_65)
         "dispatcher.stale_idle_claim_self": (
-            "[催促] 你持有任务 [{task_id}] {title}，但已空闲 {minutes} 分钟未推进。"
-            "如需回顾详情请用 view_task；请继续推进，完成后用 claim_task(status='completed') 标记完成。"
+            "[催促] 任务 [{task_id}] {title} 归你负责（当前状态：{status}），"
+            "但你已空闲 {minutes} 分钟未推进。如需回顾详情请用 view_task；"
+            "尚未开始就用 claim_task(status='claimed') 认领开工，已在进行就继续推进，"
+            "完成后用 claim_task(status='completed') 标记完成。"
         ),
         "dispatcher.stale_idle_claim_escalate": (
-            "[停滞上报] 我持有任务 [{task_id}] {title}，但已连续空闲 {minutes} 分钟未推进"
-            "（多次自我催促无效）。请评估是否需要问询、改派或更换成员。"
+            "[停滞上报] 任务 [{task_id}] {title} 归我负责（当前状态：{status}），"
+            "但我已连续空闲 {minutes} 分钟未推进（多次自我催促无效）。"
+            "请评估是否需要问询、改派或更换成员。"
         ),
         # agent/dispatcher.py — task assignment notification
         "dispatcher.task_assigned_to_self": (
@@ -309,14 +312,15 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # agent/coordination/handlers/stale_task.py — idle-clock stall nudges (autonomous, F_65)
         "dispatcher.stale_idle_claim_self": (
-            "[Nudge] You hold task [{task_id}] {title} but have been idle for {minutes} minute(s) "
-            "without progressing it. Use view_task to review the details; keep pushing it forward "
-            "and call claim_task(status='completed') when done."
+            "[Nudge] Task [{task_id}] {title} is yours (currently {status}) but you have been idle "
+            "for {minutes} minute(s) without progressing it. Use view_task to review the details; "
+            "call claim_task(status='claimed') to start it if it has not begun, otherwise keep "
+            "pushing it forward, and call claim_task(status='completed') when done."
         ),
         "dispatcher.stale_idle_claim_escalate": (
-            "[Stall report] I hold task [{task_id}] {title} but have been idle for {minutes} "
-            "minute(s) without progressing it (repeated self-nudges did not help). Please consider "
-            "checking in, reassigning, or replacing the assignee."
+            "[Stall report] Task [{task_id}] {title} is mine (currently {status}) but I have been "
+            "idle for {minutes} minute(s) without progressing it (repeated self-nudges did not "
+            "help). Please consider checking in, reassigning, or replacing the assignee."
         ),
         # agent/dispatcher.py — task assignment notification
         "dispatcher.task_assigned_to_self": (
