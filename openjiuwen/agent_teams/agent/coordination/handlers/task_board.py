@@ -15,6 +15,10 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from openjiuwen.agent_teams.agent.coordination.event_bus import (
+    InnerEventMessage,
+    InnerEventType,
+)
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
 from openjiuwen.agent_teams.external.format import render_task_line
 from openjiuwen.agent_teams.i18n import t
@@ -29,6 +33,8 @@ class TaskBoardHandler(BaseCoordinationHandler):
     """Handle TASK_CLAIMED / TASK_REVOKED + 6 task-board state-transition events."""
 
     EVENT_METHOD_MAP: ClassVar[dict[str, str]] = {
+        # One-shot startup board survey (F_69), enqueued by the kernel.
+        InnerEventType.INITIAL_POLL_TASK.value: "on_initial_task_poll",
         # Targeted to the affected member (self-branch), else board fallback
         TeamEvent.TASK_CLAIMED: "on_task_claimed",
         TeamEvent.TASK_REVOKED: "on_task_revoked",
@@ -405,6 +411,26 @@ class TaskBoardHandler(BaseCoordinationHandler):
         team_logger.debug("task trigger detected, nudging idle agent: member_name={}", member_name)
         await self._nudge_idle_agent(member_name)
 
+    async def on_initial_task_poll(self, event: InnerEventMessage) -> None:
+        """First board survey after this member's runtime comes up (F_69).
+
+        The symmetric counterpart of the startup mailbox sweep: that one
+        picks up messages sent while the member was down, this one picks up
+        work assigned while it was down. A task assigned at creation time is
+        announced only by a transient ``TASK_CLAIMED`` event, so a member
+        that had not started yet never sees it and would otherwise sit idle
+        until the stale-claim window elapses.
+
+        Surfaces the same board slice as any other nudge — claimable work
+        plus tasks assigned to this member — and inherits its silence on an
+        empty slice, so a member starting into a board with nothing for it
+        never burns a round.
+        """
+        member_name = self._blueprint.member_name
+        if not member_name or self._infra.task_manager is None:
+            return
+        await self._nudge_idle_agent(member_name)
+
     async def _nudge_idle_agent(self, member_name: str, from_poll: bool = False) -> None:
         """Feed task context to an idle agent.
 
@@ -496,6 +522,21 @@ class ScheduledTaskBoardHandler(TaskBoardHandler):
         TeamEvent.TASK_VERIFIED: "on_task_board_event",
         TeamEvent.TASK_REVISION_REQUESTED: "on_task_board_event",
     }
+
+    async def on_initial_task_poll(self, event: InnerEventMessage) -> None:
+        """No startup board survey under scheduled dispatch (F_69).
+
+        The autonomous survey exists because a member that was down when
+        work was assigned to it has no other way to learn of it. Under
+        scheduled dispatch it does: the scheduler's start scan runs on every
+        wake, and its handoff lands in the mailbox as a durable row that the
+        startup mailbox sweep drains. Surveying the board here would deliver
+        the same task a second time, next to the scheduler's mail.
+        """
+        team_logger.debug(
+            "[{}] scheduled dispatch: startup board survey skipped",
+            self._blueprint.member_name,
+        )
 
     async def on_task_board_event(self, event: EventMessage) -> None:
         """Board churn in scheduled dispatch: keep polling alive, wake nobody.

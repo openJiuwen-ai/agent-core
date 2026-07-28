@@ -293,6 +293,7 @@ class EventDispatcher:
             if role == TeamRole.HUMAN_AGENT and event.event_type in (
                 InnerEventType.POLL_TASK,
                 InnerEventType.POLL_MAILBOX,
+                InnerEventType.INITIAL_POLL_TASK,
             ):
                 return
             team_logger.debug("inner event received: type={}, payload={}", event.event_type, event.payload)
