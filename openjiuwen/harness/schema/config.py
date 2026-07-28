@@ -189,7 +189,17 @@ class DeepAgentConfig:
         subagents: Sub-agent specifications or Sub-agent instance.
         tools: Tool cards mounted on the agent.
         mcps: MCP server configs mounted on the agent.
-        workspace: Workspace path for file operations.
+        workspace: Workspace root for this agent's own artifacts (memory,
+            skills view, produced files). NOT the shell working directory —
+            see ``cwd``.
+        cwd: Working directory shell commands run in and relative paths
+            resolve against. Defaults to the workspace root, which keeps the
+            single-agent case unchanged. Team members point it at the project
+            directory (or their isolated worktree) while keeping their own
+            workspace for artifacts.
+        project_root: Project identity anchor (repo root). Defaults to
+            ``cwd``. Used for access-boundary checks, not for path
+            resolution.
         skills: Skill definitions (P1).
         backend: Backend protocol instance (P2).
         sys_operation: System operation.
@@ -219,6 +229,8 @@ class DeepAgentConfig:
     tools: Optional[List[ToolCard]] = None
     mcps: Optional[List[McpServerConfig]] = None
     workspace: Optional[Workspace] = None
+    cwd: Optional[str] = None
+    project_root: Optional[str] = None
     skills: Optional[Union[str, List[str]]] = None
     enable_skill_discovery: bool = False
     backend: Optional[Any] = None

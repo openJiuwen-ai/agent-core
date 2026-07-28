@@ -460,6 +460,10 @@ class DeepAgentSpec(BaseModel):
     enable_tool_resilience_rail: bool = True
     max_iterations: int = 15
     workspace: Optional[WorkspaceSpec] = None
+    cwd: Optional[str] = None
+    """Shell working directory / relative-path base. Defaults to the workspace root."""
+    project_root: Optional[str] = None
+    """Project identity anchor. Defaults to ``cwd``."""
     skills: Optional[list[str]] = None
     enable_skill_discovery: bool = False
     sys_operation: Optional[SysOperationSpec] = None
@@ -583,6 +587,8 @@ class DeepAgentSpec(BaseModel):
             enable_tool_resilience_rail=self.enable_tool_resilience_rail,
             max_iterations=self.max_iterations,
             workspace=workspace,
+            cwd=self.cwd,
+            project_root=self.project_root,
             skills=self.skills,
             enable_skill_discovery=self.enable_skill_discovery,
             sys_operation=sys_operation,

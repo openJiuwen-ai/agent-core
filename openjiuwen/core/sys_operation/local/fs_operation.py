@@ -1052,11 +1052,14 @@ class FsOperation(BaseFsOperation):
         Sandbox enforcement uses ``sandbox_root`` from config -- a list of
         allowed root directories.  A path is accepted when it falls within
         any one of the entries.  When ``sandbox_root`` is ``None``, the
-        effective list falls back to ``[get_workspace(), get_project_root()]``
-        read from the per-agent CwdState ContextVar so every DeepAgent gets
-        sensible defaults without having to plumb paths through config.
-        The sandbox list is independent of CWD so the security boundary
-        stays fixed even when CWD moves (e.g. worktree enter).
+        effective list falls back to
+        ``[get_workspace(), get_project_root(), get_cwd()]`` read from the
+        per-agent CwdState ContextVar so every DeepAgent gets sensible
+        defaults without having to plumb paths through config.  ``get_cwd()``
+        is in the list because the three layers are independent: a team
+        member runs in the project dir (or an isolated worktree) while its
+        workspace stays a private artifact directory elsewhere, so cwd is not
+        necessarily inside either of the other two roots.
         """
         from openjiuwen.core.sys_operation.cwd import (
             get_cwd,
@@ -1079,7 +1082,7 @@ class FsOperation(BaseFsOperation):
             if configured:
                 roots = list(configured)
             else:
-                roots = [p for p in (get_workspace(), get_project_root()) if p]
+                roots = [p for p in (get_workspace(), get_project_root(), get_cwd()) if p]
 
             resolved_roots = [pathlib.Path(r).expanduser().resolve() for r in roots]
             if not any(self._is_within(normalized, root) for root in resolved_roots):

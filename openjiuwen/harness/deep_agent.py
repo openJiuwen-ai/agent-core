@@ -960,18 +960,26 @@ class DeepAgent(BaseAgent):
         # Initialize ContextVar CWD in the current asyncio Task context.
         # Each agent sets its own CWD unconditionally — ContextVar copies
         # are per-Task, so this won't affect the parent agent.
-        if self._deep_config and self._deep_config.workspace:
+        if self._deep_config and (self._deep_config.workspace or self._deep_config.cwd):
             from openjiuwen.core.sys_operation.cwd import init_cwd
 
-            init_root = self._deep_config.workspace.root_path or os.getcwd()
+            workspace = self._deep_config.workspace
+            workspace_root = (workspace.root_path if workspace else None) or os.getcwd()
             if self._inherited_artifact_root:
                 init_cwd(
                     self._inherited_artifact_root,
                     project_root=self._inherited_artifact_root,
-                    workspace=init_root,
+                    workspace=workspace_root,
                 )
             else:
-                init_cwd(init_root, workspace=init_root)
+                # cwd and workspace are separate layers: the workspace holds
+                # this agent's artifacts, cwd is where shell runs and relative
+                # paths resolve. They coincide unless the host says otherwise
+                # (team members run in the project dir / their worktree while
+                # keeping a private workspace).
+                cwd_root = self._deep_config.cwd or workspace_root
+                project_root = self._deep_config.project_root or cwd_root
+                init_cwd(cwd_root, project_root=project_root, workspace=workspace_root)
 
         await self._register_pending_mcps()
 
