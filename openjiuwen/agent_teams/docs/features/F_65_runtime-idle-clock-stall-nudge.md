@@ -50,7 +50,7 @@ idle_since: Optional[float] = None   # time.monotonic()，进程本地、不持�
 
 1. **autonomous 的两个 sweep 全部改用 idle 计时**，不与旧路径并存（并存必然双重 nudge）。
 2. **场景 A：先自催，连续 3 个窗口无效才升级 leader**。成员自己才能推进自己的任务，leader 替不了它干活，所以第一层补救是喂成员自己的 loop（沿用 F_53 的 self-only 投递，只换计时基准）。连续 `_STALE_CLAIM_ESCALATE_STREAK = 3` 个窗口仍停滞，说明自催无效，此时由**停滞成员自己发消息上报 leader**（`send_message`），leader 据此问询 / 改派 / 换人。方向是成员→leader，与 F_53 砍掉的 leader→成员跨进程催**方向相反**，不违反其设计。
-3. **场景 A 排除 `IN_REVIEW`**：author 在等 reviewer 裁决时 idle 是设计使然，不是停滞。只扫 `{PLANNING, IN_PROGRESS}`——成员自己该推的两个条件。
+3. **场景 A 排除 `IN_REVIEW`**：author 在等 reviewer 裁决时 idle 是设计使然，不是停滞。只扫 `{PLANNING, IN_PROGRESS}`——成员自己该推的两个条件。**（已由 F_69 修订）** 本决策漏掉了 `PENDING(assignee=self)`——已指派未开工的任务两条 sweep 都不覆盖（场景 B 要求 assignee 为空），定向指派的瞬时 `TASK_CLAIMED` 一丢便永久停滞。F_69 补为"活跃优先、待开工兜底"，排除 `IN_REVIEW` 的部分不变。
 4. **场景 B 以 leader 自己的 idle 计时为「团队静默多久」的基准**，并新增两个前置：任务必须**无 assignee**（用户要的是「没人认领」），且**至少有一个非 leader 成员 READY**。全员都忙时排队是常态，催 leader 是噪音。
 5. **阈值做成 spec 可调**：`stale_claim_idle_timeout` / `stale_pending_idle_timeout`（各默认 600 秒），风格对齐 `review_stall_timeout`。
 6. **scheduled 原样不动**：`ScheduledStaleTaskHandler` 覆写 `_check_stale_claimed_tasks` + `_self_nudge_stale_claim`，钉住 pre-F_65 的 `updated_at` 实现，autonomous 基类里不留 `updated_at` 痕迹。
