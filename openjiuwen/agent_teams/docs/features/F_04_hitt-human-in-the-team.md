@@ -97,7 +97,14 @@ await Runner.register_human_agent_inbound(
 
 - **唯一输入源**：用户经 `interact()` 投递的内容。其它成员的消息**不会**进入 avatar 的 LLM 上下文。
 - **不主动发声**：avatar 没有 `send_message` 工具。需要回复团队时由用户输入 `"$<name> @<member> ...`" 显式路由，inbox 用人类成员身份代发。
-- **不自主认领任务**：avatar 没有 `claim_task` 工具。任务必须由 leader 经 `update_task(assignee=<human-member>)` 指派；进入 `CLAIMED` 状态后 leader 不能 cancel / 不能 reassign（HITT 任务锁），完成与否取决于人类。**该锁只在这个人类仍在团队中时成立**——leader 用 `shutdown_member` 请他退队后锁即解除，其遗留任务退化成普通遗留任务（可 cancel / reassign）；否则踢掉一个不响应的人类会把他手上的任务永久搁浅。当前判定以 `S_07` 运行约束 3 为准。
+- **不自主认领任务**：avatar 没有 `claim_task` 工具。任务必须由 leader 经
+  `create_task(..., assignee=<human-member>)` 或 `update_task(assignee=<human-member>)`
+  指派；已可运行的人类预指派任务由后端直接进入 `IN_PROGRESS`（plan-mode 则进入
+  `PLANNING`），依赖解除时也按同一规则启动，不要求人类自行 claim。进入活跃状态后
+  leader 不能 cancel / 不能 reassign（HITT 任务锁），完成与否取决于人类。
+  **该锁只在这个人类仍在团队中时成立**——leader 用 `shutdown_member` 请他退队后锁即解除，
+  其遗留任务退化成普通遗留任务（可 cancel / reassign）；否则踢掉一个不响应的人类会把他手上的任务永久搁浅。
+  当前判定以 `S_07` 运行约束 3 为准。
 
 ### 工具集差集
 
