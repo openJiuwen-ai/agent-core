@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
+
 Language = Literal["cn", "en"]
 
 _DEFAULT_LANGUAGE: Language = "cn"
@@ -153,6 +155,15 @@ STRINGS: dict[str, dict[str, str]] = {
         # the framework hint land in distinct <team-inbound> / <team-note>
         # tags. The legacy templates stay for the external/format.py path.
         "dispatcher.reply_hint": "如果对方在提问或等待回复，请务必通过 send_message 工具回复 {sender}。",
+        # Sender-specific variant: the ``user`` pseudo-member is the human
+        # outside the team, not a roster member. Unconditional by design —
+        # the generic hint's "if the sender is asking" lets the model talk
+        # itself out of replying, and a dropped user reply is invisible.
+        "dispatcher.reply_hint_user": (
+            "这条消息来自 user——委托本团队工作的**团队外部真人**，不是团队成员，不在成员名册里。"
+            "你必须调用 send_message(to=\"user\") 把答复发回用户；"
+            "你写在回复正文里的任何文字都不会送达用户，不调用工具就等于没有回复。"
+        ),
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": ("所有任务已完成。请汇总本轮工作成果。团队继续保持运行，等待新的任务指令。"),
         "dispatcher.all_done_temporary": (
@@ -392,6 +403,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "dispatcher.reply_hint": (
             "If the sender is asking or waiting for a reply, be sure to reply to {sender} via send_message."
         ),
+        # Sender-specific variant: see the cn note above.
+        "dispatcher.reply_hint_user": (
+            "This message is from user — the **human outside the team** who commissioned this team's work. "
+            "They are not a team member and do not appear in the roster. "
+            'You MUST call send_message(to="user") to deliver your reply; '
+            "any text you write in your reply body never reaches the user, "
+            "so not calling the tool means you did not reply at all."
+        ),
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": (
             "All tasks are complete. Please summarize this round's results. "
@@ -556,4 +575,23 @@ def t(key: str, **kwargs: object) -> str:
     return raw.format_map(kwargs) if kwargs else raw
 
 
-__all__ = ["Language", "STRINGS", "get_language", "set_language", "t"]
+def reply_hint_for(sender: str) -> str:
+    """Resolve the ``reply-hint`` note body for one inbound sender.
+
+    The ``user`` pseudo-member is not a roster member and has no agent
+    process, so a member that answers it in plain text silently drops the
+    reply. That case gets its own unconditional wording; every other
+    sender keeps the generic, conditional hint.
+
+    Args:
+        sender: The sending member's ``member_name``.
+
+    Returns:
+        The localized note body for the active language.
+    """
+    if sender == USER_PSEUDO_MEMBER_NAME:
+        return t("dispatcher.reply_hint_user")
+    return t("dispatcher.reply_hint", sender=sender)
+
+
+__all__ = ["Language", "STRINGS", "get_language", "reply_hint_for", "set_language", "t"]
