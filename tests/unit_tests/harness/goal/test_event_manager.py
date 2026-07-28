@@ -46,6 +46,25 @@ def test_goal_work_is_deduplicated_across_queued_dequeued_and_active_states() ->
     assert manager.push_goal(_goal())
 
 
+def test_has_running_goal_ignores_queue_and_revision() -> None:
+    manager = EventManager()
+    assert not manager.has_running_goal(goal_id="goal-1")
+
+    assert manager.push_goal(_goal(revision=0))
+    assert not manager.has_running_goal(goal_id="goal-1")
+
+    work = manager.next_work()
+    assert work is not None
+    assert manager.has_running_goal(goal_id="goal-1")
+
+    manager.mark_started(work)
+    assert manager.has_running_goal(goal_id="goal-1")
+    assert not manager.has_running_goal(goal_id="other")
+
+    manager.mark_finished(work)
+    assert not manager.has_running_goal(goal_id="goal-1")
+
+
 def test_discard_goal_work_only_removes_pending_matching_goal() -> None:
     manager = EventManager()
     manager.push_goal(_goal(goal_id="replace-me"))

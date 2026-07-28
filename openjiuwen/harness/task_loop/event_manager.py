@@ -86,6 +86,23 @@ class EventManager:
             or matches(self._active)
         )
 
+    def has_running_goal(self, *, goal_id: object) -> bool:
+        """Whether a dequeued or active goal attempt exists for ``goal_id``.
+
+        Ignores revision and the pending queue. Used by pause/resume so a
+        still-finishing attempt is recognized even if the record revision was
+        bumped, and so queued continuations (discarded on pause) are ignored.
+        """
+
+        def matches(work: Optional[RoundWorkItem]) -> bool:
+            return (
+                work is not None
+                and work.kind == "goal"
+                and work.context.get("goal_id") == goal_id
+            )
+
+        return matches(self._dequeued) or matches(self._active)
+
     def discard_goal_work(
         self,
         *,

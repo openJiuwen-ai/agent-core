@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from abc import ABC
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -236,6 +237,21 @@ class AgentCallbackEvent(str, Enum):
     ON_TOOL_EXCEPTION = "on_tool_exception"
 
 
+@dataclass
+class RetryRecord:
+    """Immutable record of a single failed attempt inside the @rail retry loop.
+
+    Collected on ``AgentCallbackContext.retry_history`` so the final
+    error message can tell the LLM (and the operator) exactly how many
+    times the call was retried, what failed each time, and how long
+    the whole sequence took.
+    """
+    attempt_index: int
+    exception_type: str
+    exception_message: str
+    timestamp: float
+
+
 # ================================================================
 # Agent Callback Context
 # ================================================================
@@ -254,6 +270,8 @@ class AgentCallbackContext:
             across events within a single invoke)
         exception: Exception object (set on error events)
         retry_attempt: Current failed-attempt index
+        retry_history: Chronological list of every failed attempt
+            inside the @rail retry loop for this invoke.
     """
     agent: 'BaseAgent'
     event: Optional[AgentCallbackEvent] = None
@@ -264,6 +282,8 @@ class AgentCallbackContext:
     extra: Dict[str, Any] = field(default_factory=dict)
     exception: Optional[Exception] = None
     retry_attempt: int = 0
+    retry_history: List[RetryRecord] = field(default_factory=list)
+    invoke_start_time: float = 0.0
     _retry_request: Optional[RetryRequest] = field(
         default=None, init=False, repr=False
     )
@@ -618,6 +638,7 @@ def rail(
     def decorator(fn):
         @wraps(fn)
         async def wrapper(self, ctx, *args, **kwargs):
+            ctx.invoke_start_time = time.monotonic()
             attempt = 0
             while True:
                 # Drop stale requests from previous attempts.
@@ -625,6 +646,7 @@ def rail(
                 ctx.retry_attempt = attempt
                 ctx.exception = None
                 exc_to_raise = None
+                will_retry = False
                 try:
                     if before:
                         await ctx.fire(before)
@@ -636,6 +658,16 @@ def rail(
                 except Exception as e:
                     exc_to_raise = e
                     ctx.exception = e
+                    # Record this failed attempt so the final error message
+                    # can tell the LLM how many retries happened and why.
+                    ctx.retry_history.append(
+                        RetryRecord(
+                            attempt_index=attempt,
+                            exception_type=type(e).__name__,
+                            exception_message=str(e),
+                            timestamp=time.monotonic(),
+                        )
+                    )
                     if on_exception:
                         try:
                             await ctx.fire(on_exception)
@@ -656,17 +688,24 @@ def rail(
                             retry_request.delay_seconds
                         )
                     exc_to_raise = None
+                    will_retry = True
                     attempt += 1
                 finally:
-                    # 跳过 after 回调当函数被 asyncio.CancelledError 中断时。
+                    # 跳过 after 回调当：
+                    # 1. 函数被 asyncio.CancelledError 中断时；
+                    # 2. tool call 即将进入重试时（避免 on_tool_exception 写入的
+                    #    中间态 tool_result 被 after 回调当作最终结果消费）。
+                    # model call 重试时不跳过 —— after_model_call 契约要求每次
+                    # model 调用后（含失败+即将重试）都触发，CancellationRail
+                    # 等回调依赖此做取消检测。
                     # CancelledError 是 BaseException 不是 Exception（Python 3.9+），
                     # 会跳过上面的 except 块直接进入 finally。
-                    # 此时触发 after_tool_call 会发出虚假的空结果事件。
                     is_cancelled = isinstance(
                         sys.exc_info()[1] if sys.exc_info()[1] is not None else None,
                         asyncio.CancelledError,
                     )
-                    if after and not is_cancelled:
+                    skip_after = will_retry and after is AgentCallbackEvent.AFTER_TOOL_CALL
+                    if after and not is_cancelled and not skip_after:
                         try:
                             await ctx.fire(after)
                         except Exception as callback_exc:

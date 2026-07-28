@@ -183,9 +183,11 @@ DESCRIPTION: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 TASK_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
     "subagent_type": {
-        "cn": "子代理类型（必填，须与上方可用代理类型名称完全一致，如 general-purpose、explore_agent）",
-        "en": "Required subagent type; must exactly match a name from the available subagent types list "
-              "(e.g. general-purpose, explore_agent)",
+        "cn": "子代理类型（必填，须与上方「可用代理类型」列表中的名称完全一致；"
+              "不要使用列表中未出现的名称）",
+        "en": "Required subagent type; must exactly match a name from the "
+              "\"Available subagent types\" list above. Do not use any name "
+              "that is not listed there.",
     },
     "task_description": {
         "cn": "任务描述（必填，需包含完整上下文）",

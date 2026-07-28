@@ -14,12 +14,9 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import (
     LOOP_COMPACT_BAILOUT_STATE_KEY,
-    FullCompactProcessorConfig,
-    MicroCompactProcessorConfig,
+    TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY,
     ReasoningToolLoopCompactProcessorConfig,
-    ToolResultBudgetProcessorConfig,
 )
-from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     SessionMemoryConfig,
     SessionMemoryManager,
@@ -29,9 +26,11 @@ from openjiuwen.core.context_engine.processor.forked import (  # pylint: disable
     DialogueCompressorConfig,
     MessageSummaryOffloaderConfig,
     RoundLevelCompressorConfig,
+    SessionMemoryCompressorConfig,
     activate,
 )
 from openjiuwen.core.foundation.llm import ModelRequestConfig
+from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.sections.compression_recall import build_compression_recall_section
 from openjiuwen.harness.prompts.sections.reload import build_reload_section
@@ -42,9 +41,22 @@ from openjiuwen.harness.schema.state import (
     DeepAgentState,
 )
 
-
-_LOOP_BAILOUT_MARKER = "reasoning/tool loop unresolved after repeated compaction"
-_LOOP_COMPACT_PROCESSOR_KEY = "ReasoningToolLoopCompactProcessor"
+# (processor_key, config_attr, session_state_key, abort_marker)
+_LOOP_BAILOUT_SPECS: Tuple[Tuple[str, str, str, str], ...] = (
+    (
+        "ReasoningToolLoopCompactProcessor",
+        "bailout_threshold",
+        LOOP_COMPACT_BAILOUT_STATE_KEY,
+        "reasoning/tool loop unresolved after repeated compaction",
+    ),
+    (
+        "ReasoningToolLoopCompactProcessor",
+        "tool_args_bailout_threshold",
+        TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY,
+        "identical tool-call/args loop unresolved after repeated compaction",
+    ),
+)
+_SESSION_MEMORY_PROCESSOR_KEY = "SessionMemoryCompressor"
 
 
 class ContextProcessorRail(DeepAgentRail):
@@ -78,7 +90,16 @@ class ContextProcessorRail(DeepAgentRail):
         Args:
             processors: One or more (processor_key, config) pairs.
             preset: Whether to enable preset default processor config. Defaults to True.
-            session_memory: Session memory configuration.
+            session_memory: Deprecated, kept only for backward compatibility of
+                the constructor signature. Accepted and ignored; configure
+                session memory via the ``SessionMemoryCompressor`` processor
+                (``SessionMemoryCompressorConfig.enabled`` / ``.memory``).
+
+        Session memory ships in the default (forked) preset chain as a disabled
+        ``SessionMemoryCompressor``; users opt in by overriding it with
+        ``enabled=True``. The companion async memory updater
+        (``SessionMemoryManager``) is configured via
+        ``SessionMemoryCompressorConfig.memory``.
         """
         super().__init__()
         self._preset = preset
@@ -89,15 +110,7 @@ class ContextProcessorRail(DeepAgentRail):
             else:
                 self._user_processors = list(processors)
 
-        self._session_memory_enabled = session_memory is not None
-        self._session_memory_config: SessionMemoryConfig | None = None
         self._session_memory_mgr: SessionMemoryManager | None = None
-        if isinstance(session_memory, dict):
-            self._session_memory_config = SessionMemoryConfig(**session_memory)
-        elif session_memory is not None:
-            self._session_memory_config = session_memory
-        if self._session_memory_config is not None:
-            self._session_memory_mgr = SessionMemoryManager(self._session_memory_config)
 
         self._system_prompt_builder = None
         self._all_processors: List[Tuple[str, BaseModel]] = []
@@ -171,62 +184,52 @@ class ContextProcessorRail(DeepAgentRail):
             model_cfg = ModelRequestConfig.model_copy(model_config)
         else:
             model_cfg = None
-        if self._session_memory_enabled:
-            presets: List[Tuple[str, BaseModel]] = [
-                (
-                    "ToolResultBudgetProcessor",
-                    ToolResultBudgetProcessorConfig(),
+        # The forked chain is the default preset. SessionMemoryCompressor ships
+        # disabled: users opt in by overriding it with enabled=True, which also
+        # starts the companion SessionMemoryManager (see init()).
+        presets: List[Tuple[str, BaseModel]] = [
+            (
+                "MessageSummaryOffloader",
+                MessageSummaryOffloaderConfig(
+                    protected_tool_names=["read_file"],
                 ),
-                ("MicroCompactProcessor", MicroCompactProcessorConfig()),
-                (
-                    "ReasoningToolLoopCompactProcessor",
-                    ReasoningToolLoopCompactProcessorConfig(),
+            ),
+            (
+                "SessionMemoryCompressor",
+                SessionMemoryCompressorConfig(enabled=False),
+            ),
+            (
+                "ReasoningToolLoopCompactProcessor",
+                ReasoningToolLoopCompactProcessorConfig(),
+            ),
+            (
+                "DialogueCompressor",
+                DialogueCompressorConfig(
+                    enable_recall=True,
+                    model=model_cfg,
+                    model_client=model_client_config,
                 ),
-                (
-                    "FullCompactProcessor",
-                    FullCompactProcessorConfig(model=model_config, model_client=model_client_config),
+            ),
+            (
+                "CurrentRoundCompressor",
+                CurrentRoundCompressorConfig(
+                    keep_recent_messages=3,
+                    enable_recall=True,
+                    model=model_cfg,
+                    model_client=model_client_config,
                 ),
-            ]
-        else:
-            presets: List[Tuple[str, BaseModel]] = [
-                (
-                    "MessageSummaryOffloader",
-                    MessageSummaryOffloaderConfig(
-                        protected_tool_names=["read_file"],
-                    ),
+            ),
+            (
+                "RoundLevelCompressor",
+                RoundLevelCompressorConfig(
+                    trigger_context_ratio=0.9,
+                    keep_recent_messages=6,
+                    enable_recall=True,
+                    model=model_cfg,
+                    model_client=model_client_config,
                 ),
-                (
-                    "ReasoningToolLoopCompactProcessor",
-                    ReasoningToolLoopCompactProcessorConfig(),
-                ),
-                (
-                    "DialogueCompressor",
-                    DialogueCompressorConfig(
-                        enable_recall=True,
-                        model=model_cfg,
-                        model_client=model_client_config,
-                    ),
-                ),
-                (
-                    "CurrentRoundCompressor",
-                    CurrentRoundCompressorConfig(
-                        keep_recent_messages=3,
-                        enable_recall=True,
-                        model=model_cfg,
-                        model_client=model_client_config,
-                    ),
-                ),
-                (
-                    "RoundLevelCompressor",
-                    RoundLevelCompressorConfig(
-                        trigger_context_ratio=0.9,
-                        keep_recent_messages=6,
-                        enable_recall=True,
-                        model=model_cfg,
-                        model_client=model_client_config,
-                    ),
-                ),
-            ]
+            ),
+        ]
         return presets
 
     def init(self, agent) -> None:
@@ -239,12 +242,17 @@ class ContextProcessorRail(DeepAgentRail):
         model_config = getattr(config, "model_config_obj", None)
         model_client_config = getattr(config, "model_client_config", None)
 
-        if self._session_memory_config is not None and self._session_memory_mgr is not None:
-            if self._session_memory_config.model is None:
-                self._session_memory_config.model = model_config
-            if self._session_memory_config.model_client is None:
-                self._session_memory_config.model_client = model_client_config
-            self._session_memory_mgr.bind_model_defaults(model_config, model_client_config)
+        # The engine instantiates every processor in the final list regardless
+        # of its ``enabled`` flag, so the forked implementations must be
+        # resolvable whenever a SessionMemoryCompressor is present. The preset
+        # chain activates them in _build_preset_processors; with preset=False
+        # do it here when the user registers one explicitly. The companion
+        # async updater (SessionMemoryManager) only starts when the merged
+        # compressor config is enabled.
+        if not self._preset and any(key == _SESSION_MEMORY_PROCESSOR_KEY for key, _ in self._user_processors):
+            from openjiuwen.core.context_engine.processor import forked
+
+            forked.activate()
 
         if self._preset:
             all_processors = self._merge_processors(
@@ -261,12 +269,20 @@ class ContextProcessorRail(DeepAgentRail):
                 model_client_config=model_client_config,
             )
 
+        self._maybe_setup_session_memory_manager(all_processors, model_config, model_client_config)
+
         config.context_processors = all_processors
         processor_paths = ", ".join(
             f"{name}={processor_config.__class__.__module__}.{processor_config.__class__.__qualname__}"
             for name, processor_config in all_processors
         )
         logger.info("context processors initialized: %s", processor_paths)
+        for name, processor_config in all_processors:
+            logger.info(
+                "processor effective config: %s %s",
+                name,
+                self._summarize_processor_config(processor_config),
+            )
 
         self._all_processors = all_processors
         self._system_prompt_builder = getattr(agent, "system_prompt_builder", None)
@@ -281,10 +297,57 @@ class ContextProcessorRail(DeepAgentRail):
         context_engine_config = getattr(config, "context_engine_config", None)
         self._reload_enabled = bool(getattr(context_engine_config, "enable_reload", False))
 
+    def _maybe_setup_session_memory_manager(
+        self,
+        all_processors: List[Tuple[str, BaseModel]],
+        model_config,
+        model_client_config,
+    ) -> None:
+        """Create / bind the SessionMemoryManager paired with an enabled compressor."""
+        memory_cfg = None
+        for key, cfg in all_processors:
+            if key == _SESSION_MEMORY_PROCESSOR_KEY and getattr(cfg, "enabled", False):
+                memory_cfg = getattr(cfg, "memory", None)
+                break
+        if memory_cfg is None:
+            return
+        if memory_cfg.model is None:
+            memory_cfg.model = model_config
+        if memory_cfg.model_client is None:
+            memory_cfg.model_client = model_client_config
+        if self._session_memory_mgr is None:
+            self._session_memory_mgr = SessionMemoryManager(memory_cfg)
+        self._session_memory_mgr.bind_model_defaults(model_config, model_client_config)
+        logger.info(
+            "SessionMemoryManager enabled: async session memory updates active, config: %s",
+            self._summarize_processor_config(memory_cfg),
+        )
+
+    @staticmethod
+    def _summarize_processor_config(cfg: BaseModel) -> Dict[str, Any]:
+        """Extract scalar (and nested scalar) config fields for effective-config logging."""
+        skipped_fields = {"model", "model_client", "api_key"}
+        summary: Dict[str, Any] = {}
+        for field, value in cfg.model_dump().items():
+            if field in skipped_fields:
+                continue
+            if isinstance(value, (bool, int, float, str)):
+                summary[field] = value
+            elif isinstance(value, dict):
+                nested = {
+                    k: v for k, v in value.items() if k not in skipped_fields and isinstance(v, (bool, int, float, str))
+                }
+                if nested:
+                    summary[field] = nested
+            elif isinstance(value, (list, tuple)) and all(isinstance(v, (bool, int, float, str)) for v in value):
+                summary[field] = list(value)
+        return summary
+
     def uninit(self, agent) -> None:
         """Clear context processors and shutdown session memory manager."""
         if self._session_memory_mgr is not None:
             self._session_memory_mgr.shutdown()
+            self._session_memory_mgr = None
 
         config = getattr(getattr(agent, "react_agent", None), "_config", None)
         if config is not None:
@@ -305,7 +368,7 @@ class ContextProcessorRail(DeepAgentRail):
         await self.fix_incomplete_tool_context(ctx)
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        self._maybe_bailout_reasoning_tool_loop(ctx)
+        self._maybe_bailout_loop_compactions(ctx)
         self._refresh_task_state_runtime(ctx)
         await self._maybe_inject_offload_section()
         self._maybe_inject_compression_recall_section()
@@ -330,19 +393,19 @@ class ContextProcessorRail(DeepAgentRail):
         await self.fix_incomplete_tool_context(ctx)
 
     async def _maybe_schedule_session_memory_update(self, ctx: AgentCallbackContext) -> None:
-        if not self._session_memory_enabled or self._session_memory_mgr is None:
+        if self._session_memory_mgr is None:
             return
         await self._session_memory_mgr.maybe_schedule_update(
             ctx,
             workspace=self.workspace,
         )
 
-    def _resolve_loop_bailout_threshold(self) -> int:
+    def _resolve_loop_bailout_threshold(self, processor_key: str, config_attr: str) -> int:
         """Return the configured loop-compaction bail-out threshold (0 = off)."""
         for key, cfg in self._all_processors:
-            if key != _LOOP_COMPACT_PROCESSOR_KEY:
+            if key != processor_key:
                 continue
-            threshold = getattr(cfg, "bailout_threshold", 0)
+            threshold = getattr(cfg, config_attr, 0)
             try:
                 return max(0, int(threshold))
             except (TypeError, ValueError):
@@ -351,57 +414,59 @@ class ContextProcessorRail(DeepAgentRail):
 
     @staticmethod
     def _reset_loop_bailout_counter(ctx: AgentCallbackContext) -> None:
-        """Clear the shared loop-compaction counter at the start of an invoke."""
+        """Clear shared loop-compaction counters at the start of an invoke."""
         session = ctx.session
         if session is None:
             return
-        session.update_state({LOOP_COMPACT_BAILOUT_STATE_KEY: 0})
+        session.update_state({state_key: 0 for _, _, state_key, _ in _LOOP_BAILOUT_SPECS})
 
-    def _maybe_bailout_reasoning_tool_loop(self, ctx: AgentCallbackContext) -> None:
-        """Raise before the model call when the loop persists after compaction.
+    def _maybe_bailout_loop_compactions(self, ctx: AgentCallbackContext) -> None:
+        """Raise before the model call when a loop persists after compaction.
 
-        The ``ReasoningToolLoopCompactProcessor`` increments a shared counter on
-        the session every time it folds a consecutive identical reasoning/tool
-        loop. Once that counter reaches ``bailout_threshold`` (i.e. the model
-        keeps looping even after being compacted/warned that many times), abort
-        the run so the caller can perceive the failure instead of looping forever.
+        ``ReasoningToolLoopCompactProcessor`` increments shared counters on the
+        session every time it folds a consecutive identical loop (one counter
+        per match rule). Once a counter reaches its configured bail-out
+        threshold, abort the run so the caller can perceive the failure instead
+        of looping forever.
 
         Raising ``AbortError`` (with a ``build_error`` cause) is required because
         plain exceptions raised inside a rail callback are swallowed by the
         callback framework; ``AbortError`` re-raises its cause across the
         ``trigger`` boundary so the underlying ``build_error`` propagates.
         """
-        threshold = self._resolve_loop_bailout_threshold()
-        if threshold <= 0:
-            return
         session = ctx.session
         if session is None:
             return
-        try:
-            count = int(session.get_state(LOOP_COMPACT_BAILOUT_STATE_KEY) or 0)
-        except (TypeError, ValueError):
-            count = 0
-        if count < threshold:
-            return
-        # Clear first so a caller-level retry / next invoke starts clean.
-        session.update_state({LOOP_COMPACT_BAILOUT_STATE_KEY: 0})
-        logger.warning(
-            "[ContextProcessorRail] %s: compaction_count=%d >= threshold=%d; aborting run",
-            _LOOP_BAILOUT_MARKER,
-            count,
-            threshold,
-        )
-        raise AbortError(
-            _LOOP_BAILOUT_MARKER,
-            cause=build_error(
-                StatusCode.CONTEXT_EXECUTION_ERROR,
-                error_msg=(
-                    f"{_LOOP_BAILOUT_MARKER}: the model repeated identical "
-                    f"reasoning and tool calls through {count} compaction(s) "
-                    f"(threshold={threshold})"
+        for processor_key, config_attr, state_key, marker in _LOOP_BAILOUT_SPECS:
+            threshold = self._resolve_loop_bailout_threshold(processor_key, config_attr)
+            if threshold <= 0:
+                continue
+            try:
+                count = int(session.get_state(state_key) or 0)
+            except (TypeError, ValueError):
+                count = 0
+            if count < threshold:
+                continue
+            # Clear first so a caller-level retry / next invoke starts clean.
+            session.update_state({state_key: 0})
+            logger.warning(
+                "[ContextProcessorRail] %s: compaction_count=%d >= threshold=%d; aborting run",
+                marker,
+                count,
+                threshold,
+            )
+            raise AbortError(
+                marker,
+                cause=build_error(
+                    StatusCode.CONTEXT_EXECUTION_ERROR,
+                    error_msg=(
+                        f"{marker}: the model repeated identical tool loops "
+                        f"through {count} compaction(s) "
+                        f"(processor={processor_key}, rule={config_attr}, "
+                        f"threshold={threshold})"
+                    ),
                 ),
-            ),
-        )
+            )
 
     @staticmethod
     def _refresh_task_state_runtime(ctx: AgentCallbackContext) -> None:

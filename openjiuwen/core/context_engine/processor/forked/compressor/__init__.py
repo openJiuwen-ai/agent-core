@@ -9,6 +9,11 @@ _EXPORT_MODULES = {
     "DialogueCompressorConfig": ".dialogue_compressor",
     "RoundLevelCompressor": ".round_level_compressor",
     "RoundLevelCompressorConfig": ".round_level_compressor",
+    "SessionMemoryAgent": ".session_memory_agent",
+    "SessionMemoryAgentConfig": ".session_memory_agent",
+    "SessionMemoryAbilityManager": ".session_memory_agent",
+    "SessionMemoryCompressor": ".session_memory_compressor",
+    "SessionMemoryCompressorConfig": ".session_memory_compressor",
 }
 
 __all__ = list(_EXPORT_MODULES)

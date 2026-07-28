@@ -26,6 +26,9 @@ from openjiuwen.harness.rails import (
     SysOperationRail,
     TaskPlanningRail,
 )
+from openjiuwen.harness.rails.tool_call_resilience_rail import (
+    ToolCallResilienceRail,
+)
 from openjiuwen.harness.schema.agent_mode import AgentMode
 from openjiuwen.harness.schema.config import (
     AudioModelConfig,
@@ -345,6 +348,7 @@ def resolve_deep_agent_parts(
         (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
         (SubagentRail, bool(effective_subagents),
          lambda: SubagentRail(enable_async_subagent=enable_async_subagent)),
+        (ToolCallResilienceRail, config.enable_tool_resilience_rail, lambda: ToolCallResilienceRail()),
     ]
     for rail_cls, should_add, make_rail in default_rails:
         if should_add and not _already_provided(rail_cls):

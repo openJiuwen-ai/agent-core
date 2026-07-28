@@ -9,6 +9,8 @@ import json
 import os
 from dataclasses import dataclass
 from typing import List, Any, Union, Optional, Tuple, Dict, Iterable
+
+import anyio
 from pydantic import BaseModel
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -20,6 +22,7 @@ from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.single_agent.rail import AgentCallbackContext
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -66,6 +69,19 @@ class AbilityExecutionError(AgentError):
             **kwargs,
         )
         self.tool_message = tool_message
+
+
+# 单次 tool.invoke 的默认调用级超时上限(秒)。作为"工具自身无超时"时的
+# 兜底,防止卡死的 tool.invoke 永久阻塞整轮 task_loop。工具可在
+# ``ToolCard.properties["resilience"]["timeout_s"]`` 声明覆盖;声明 ``None``
+# 表示豁免外层超时(完全交给工具内部超时管控)。
+DEFAULT_TOOL_CALL_TIMEOUT: float = float(os.getenv("DEFAULT_TOOL_CALL_TIMEOUT", 300.0))
+
+#: 全局绝对硬上限(秒)。即使工具被声明为非幂等或显式豁免(timeout_s=None)，
+#: 也不能超过此上限，防止"合法挂起"。
+MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT: float = float(
+    os.getenv("MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT", "3600.0")
+)
 
 
 class AbilityManager:
@@ -369,6 +385,45 @@ class AbilityManager:
                 tool_call_id=tool_call.id,
             ),
         )
+
+    @staticmethod
+    def _resolve_call_timeout(
+            tool_card: Optional[ToolCard],
+    ) -> Optional[float]:
+        """Resolve the per-call timeout for ``tool.invoke``.
+
+        Override order:
+
+        1. ``ToolCard.properties["resilience"]["timeout_s"]`` declared:
+           ``None`` or non-positive → ``None`` (exempt, internal timeout governs);
+           a positive number → that many seconds.
+        2. absent / no ``resilience`` block → ``DEFAULT_TOOL_CALL_TIMEOUT``.
+
+        ``ToolCard.idempotent`` is no longer consulted here. Whether a tool
+        is retried on failure is owned by ``ToolCallResilienceRail``; the
+        call-level timeout applies uniformly. An exempt (``None``) result
+        is still bounded by ``MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT`` at the call
+        site to prevent indefinite hangs.
+
+        Returning ``None`` means the caller passes it to
+        ``anyio.fail_after(None)``, which is a no-op deadline.
+        """
+        properties = getattr(tool_card, "properties", None) if tool_card else None
+        if not isinstance(properties, dict):
+            return DEFAULT_TOOL_CALL_TIMEOUT
+        resilience = properties.get("resilience")
+        if not isinstance(resilience, dict):
+            return DEFAULT_TOOL_CALL_TIMEOUT
+        declared = resilience.get("timeout_s", "unset")
+        if declared == "unset":
+            return DEFAULT_TOOL_CALL_TIMEOUT
+        if declared is None:
+            return None
+        try:
+            value = float(declared)
+        except (TypeError, ValueError):
+            return DEFAULT_TOOL_CALL_TIMEOUT
+        return value if value > 0 else None
 
     @staticmethod
     def _get_stream_writer_manager(session: Session) -> Any:
@@ -1115,8 +1170,26 @@ class AbilityManager:
                     tool_call,
                     f"Tool instance not found in resource_mgr: {tool_id}",
                 )
+            call_timeout = self._resolve_call_timeout(tool_card)
+            # Global hard limit: even exempt tools (None) get a ceiling so they
+            # cannot hang the round indefinitely.
+            if call_timeout is None:
+                call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
-                result = await tool.invoke(tool_args, session=session)
+                with anyio.fail_after(call_timeout):
+                    result = await tool.invoke(tool_args, session=session)
+            except TimeoutError as e:
+                error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
+                logger.warning(error_msg)
+                raise self._build_execution_error(
+                    tool_call,
+                    error_msg,
+                ) from e
+            except asyncio.CancelledError:
+                # Do not swallow cancellation; let outer scopes (e.g. DeepAgent
+                # round cancellation) propagate correctly through anyio CancelScope.
+                logger.warning("[AbilityManager] Task cancellation caught, re-raising CancelledError")
+                raise
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
                 logger.error(error_msg)
@@ -1200,8 +1273,27 @@ class AbilityManager:
                     tool_call,
                     f"Ability not found in resource_mgr: {tool_name}",
                 )
+            # Resolve timeout from the tool's own card so non-idempotent
+            # tools are exempt on this path too (Layer 0 reads
+            # ``ToolCard.idempotent``); the name kwarg is no longer used.
+            call_timeout = self._resolve_call_timeout(tool.card)
+            # Global hard limit: even exempt tools (None) get a ceiling.
+            if call_timeout is None:
+                call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
-                result = await tool.invoke(tool_args, session=session)
+                with anyio.fail_after(call_timeout):
+                    result = await tool.invoke(tool_args, session=session)
+            except TimeoutError as e:
+                error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
+                logger.warning(error_msg)
+                raise self._build_execution_error(
+                    tool_call,
+                    error_msg,
+                ) from e
+            except asyncio.CancelledError:
+                # Do not swallow cancellation; let outer scopes propagate correctly.
+                logger.warning("[AbilityManager] Task cancellation caught, re-raising CancelledError")
+                raise
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
                 logger.error(error_msg)

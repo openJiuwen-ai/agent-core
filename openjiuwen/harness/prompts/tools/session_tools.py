@@ -161,8 +161,11 @@ SESSIONS_SPAWN_DESCRIPTION: Dict[str, str] = {
 
 SESSIONS_SPAWN_PARAMS: Dict[str, Dict[str, str]] = {
     "subagent_type": {
-        "cn": "子 agent 类型(如 'general-purpose')",
-        "en": "Subagent type (e.g., 'general-purpose')",
+        "cn": "子 agent 类型（必填，须与上方「可用代理类型」列表中的名称完全一致；"
+              "不要使用列表中未出现的名称）",
+        "en": "Required subagent type; must exactly match a name from the "
+              "available subagent types list above. Do not use any name "
+              "that is not listed there.",
     },
     "task_description": {
         "cn": "任务描述",
