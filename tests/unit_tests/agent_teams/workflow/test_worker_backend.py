@@ -406,8 +406,11 @@ def test_worktree_isolation_sets_worker_workspace_and_removes_clean_worktree(tmp
 
     assert result.text == "ok"
     assert manager.created and manager.created[0].startswith("agent-code-team-wf-sum-0-")
-    assert captured["spec"].workspace.root_path == str(worktree_path)
-    assert captured["spec"].workspace.stable_base is False
+    # Isolation moves the worker's cwd into the worktree; its workspace stays
+    # the stable per-worker directory under the team home.
+    assert captured["spec"].cwd == str(worktree_path)
+    assert captured["spec"].workspace.root_path != str(worktree_path)
+    assert captured["spec"].workspace.stable_base is True
     assert manager.removed == [(str(worktree_path), str(tmp_path))]
     assert captured["session"].worktree_path == str(worktree_path)
 
