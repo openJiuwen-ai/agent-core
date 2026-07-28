@@ -27,6 +27,7 @@ rail's constructor. Returning ``None`` gates the rail out for this member.
 """
 from __future__ import annotations
 
+from importlib.util import find_spec
 from typing import Any, Optional
 
 from openjiuwen.agent_teams.harness.manifest import (
@@ -61,6 +62,27 @@ TEAM_TOOL_APPROVAL = "core.team.tool_approval"
 TEAM_PLAN_MODE = "core.team.plan_mode"
 TEAM_RELIABILITY = "core.team.reliability"
 OBSERVABILITY = "core.observability"
+
+
+def observability_dependency_installed() -> bool:
+    """Report whether the optional ``observability`` extra is importable.
+
+    ``opentelemetry`` ships only in the ``observability`` extra, so a
+    default install has no tracing stack at all. Every module of the
+    observability package imports it at module scope — including
+    ``maybe_observability_rail``, the "is observability on" guard itself —
+    so the dependency must be probed *before* the package is touched;
+    catching the failure inside it is not possible. Probing the SDK covers
+    the API too (the SDK depends on it) and matches what
+    ``setup.is_initialized`` needs.
+
+    Returns:
+        True when the tracing stack can be imported, False otherwise.
+    """
+    try:
+        return find_spec("opentelemetry.sdk") is not None
+    except (ImportError, ValueError):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -334,13 +356,18 @@ def build_team_reliability_rail(params: dict[str, Any], context: Any) -> Any:
     description="Creates per-iteration agent spans for observability tracing.",
 )
 def build_observability_rail(params: dict[str, Any], context: Any) -> Any:
-    """Build an ObservabilityRail when observability is initialized.
+    """Build an ObservabilityRail when observability is available and on.
 
-    Delegates to ``maybe_observability_rail`` so the "is observability on"
-    guard lives in one place. Returns ``None`` when observability is not
-    initialized, making this a safe unconditional addition to any spec's
-    ``rails`` list — the provider handles the on/off logic itself.
+    Two gates, in order: the optional ``observability`` extra must be
+    installed (``observability_dependency_installed``), and observability
+    must be initialized (``maybe_observability_rail``, the shared guard).
+    Returns ``None`` for either, making this a safe unconditional addition
+    to any spec's ``rails`` list — the provider handles the on/off logic
+    itself.
     """
+    if not observability_dependency_installed():
+        return None
+
     from openjiuwen.agent_teams.observability.rail import maybe_observability_rail
 
     return maybe_observability_rail()
@@ -354,4 +381,5 @@ __all__ = [
     "TEAM_PLAN_MODE",
     "TEAM_RELIABILITY",
     "OBSERVABILITY",
+    "observability_dependency_installed",
 ]
