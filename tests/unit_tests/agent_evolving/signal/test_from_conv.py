@@ -451,6 +451,27 @@ class TestConversationSignalDetector:
         assert signals[0].signal_type == "user_intent"
         assert signals[0].skill_name == "my_skill"
         assert signals[0].context == {"source": "passive_conversation"}
+        prompt = llm.invoke.await_args.kwargs["messages"][0]["content"]
+        assert "[用户] Use the read_file tool" in prompt
+        assert "[助手] I'll read the file" in prompt
+        assert "待判定的用户消息" in prompt
+        assert "不对，你应该先检查文件是否存在" in prompt
+        assert "tool_calls" not in prompt
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_fallback_only_uses_last_user_message() -> None:
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/my_skill/SKILL.md"}]},
+            {"role": "user", "content": "不对，你应该先检查文件是否存在"},
+            {"role": "assistant", "content": "好的，我重新检查"},
+            {"role": "user", "content": "继续"},
+        ]
+        detector = ConversationSignalDetector(existing_skills={"my_skill"})
+
+        signals = await detector.detect_user_intent(messages)
+
+        assert signals == []
 
     @staticmethod
     @pytest.mark.asyncio
