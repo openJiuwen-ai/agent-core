@@ -266,6 +266,12 @@ class ContextProcessorRail(DeepAgentRail):
             for name, processor_config in all_processors
         )
         logger.info("context processors initialized: %s", processor_paths)
+        for name, processor_config in all_processors:
+            logger.info(
+                "processor effective config: %s %s",
+                name,
+                self._summarize_processor_config(processor_config),
+            )
 
         self._all_processors = all_processors
         context_engine_config = getattr(config, "context_engine_config", None)
@@ -293,6 +299,30 @@ class ContextProcessorRail(DeepAgentRail):
         if self._session_memory_mgr is None:
             self._session_memory_mgr = SessionMemoryManager(memory_cfg)
         self._session_memory_mgr.bind_model_defaults(model_config, model_client_config)
+        logger.info(
+            "SessionMemoryManager enabled: async session memory updates active, config: %s",
+            self._summarize_processor_config(memory_cfg),
+        )
+
+    @staticmethod
+    def _summarize_processor_config(cfg: BaseModel) -> Dict[str, Any]:
+        """Extract scalar (and nested scalar) config fields for effective-config logging."""
+        skipped_fields = {"model", "model_client", "api_key"}
+        summary: Dict[str, Any] = {}
+        for field, value in cfg.model_dump().items():
+            if field in skipped_fields:
+                continue
+            if isinstance(value, (bool, int, float, str)):
+                summary[field] = value
+            elif isinstance(value, dict):
+                nested = {
+                    k: v for k, v in value.items() if k not in skipped_fields and isinstance(v, (bool, int, float, str))
+                }
+                if nested:
+                    summary[field] = nested
+            elif isinstance(value, (list, tuple)) and all(isinstance(v, (bool, int, float, str)) for v in value):
+                summary[field] = list(value)
+        return summary
 
     def uninit(self, agent) -> None:
         """Clear context processors and shutdown session memory manager."""
