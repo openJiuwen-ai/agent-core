@@ -46,6 +46,8 @@ class SessionMemoryCompressor(ContextProcessor):
         **kwargs: Any,
     ) -> bool:
         _ = kwargs
+        if not self.config.enabled:
+            return False
         if not self._context_reaches_threshold(context, context_window):
             return False
         return self._build_candidate(context, context_window, check_threshold=False) is not None
