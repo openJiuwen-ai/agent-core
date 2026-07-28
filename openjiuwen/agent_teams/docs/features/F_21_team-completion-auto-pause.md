@@ -9,6 +9,7 @@
 | 测试基线 | 受影响文件 297 passed（`test_team` / `test_message_manager` / `test_database` / `test_stream_controller` / `test_team_agent_coordination` / `test_team_agent` / `test_persistent_team` / `test_coordination_lifecycle`）；新增 11 条用例全绿 |
 | Refs | `#751` |
 | 修订 | 2026-05-24：推翻原"排除广播"决策，改为完成判定含广播（`is_team_completed` 传 `include_broadcast=True`），任何未读消息都阻塞团队结论。理由见"决策"段 |
+| 修订 | 2026-07-28：完成判定仍含广播，但只统计尚未 `SHUTDOWN` 的可达成员；已退场成员遗留的未读 direct/broadcast 不再阻塞团队结论。 |
 
 ## 背景
 
@@ -64,10 +65,10 @@ leader 一轮结束 (_run_one_round finally, 已 await update_status(READY), 无
 - **复用现有 `is_team_completed` + `TeamCompletionHandler.on_poll_task` 作为唯一完成评估入口**，
   本特性只"接线"不重写判定逻辑。round-end 只负责"请求即时评估"（enqueue POLL_TASK），
   评估和 conclude 决策仍在 handler。
-- **完成判定含广播（任何未读都阻塞）**：`message_dao.has_unread_messages` /
+- **完成判定含广播（可达成员的任何未读都阻塞）**：`message_dao.has_unread_messages` /
   `message_manager.has_unread_messages` / 内存 DAO 提供 keyword 参数
   `include_broadcast: bool = True`（默认 True），`is_team_completed` 传 `True`。完成判定从严——
-  任何未投递消息（直消息或 fan-out 广播）都阻塞团队结论；广播常承载关键通知（任务取消、团队公告），
+  发给可达成员的任何未投递消息（直消息或 fan-out 广播）都阻塞团队结论；广播常承载关键通知（任务取消、团队公告），
   成员未消费就 auto-pause 会让其错过。**修订说明**：本特性最初的决策是"排除广播"（`is_team_completed`
   传 `False`，理由是"广播无强制接收者、不应阻塞"），后于 2026-05-24 反转为含广播；`include_broadcast`
   参数本身保留（默认 True），调用方仍可按需排除。
