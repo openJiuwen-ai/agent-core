@@ -583,17 +583,18 @@ CoordinationEvent = Union[InnerEventMessage, EventMessage]
 
 | 优先级 | Section | 内容 | 适用角色 |
 |--------|---------|------|---------|
-| P:11 | `team_role` | member_name + 角色策略 | All |
+| P:10 | `team_identity` | 自身 member_name + 私有工作约定（attachment；仅外部 CLI 内联静态） | All |
+| P:11 | `team_role` | 角色策略 + 执行模式 | All |
 | P:12 | `team_hitt` | HITT 协作规则（当存在 human 成员时） | All |
 | P:13 | `team_workflow` | Leader 工作流（按 team_mode 选择模板） | Leader |
 | P:14 | `team_lifecycle` | 生命周期策略 | Leader |
-| P:16 | `team_private_prompt` | 私有 prompt（仅本成员） | All |
 | P:16 | `team_extra` | 用户自定义 base_prompt | All |
 | P:65 | `team_info` | 团队元数据 | All |
 | P:66 | `team_members` | 成员关系 | All |
 
-- **静态分段**（role / hitt / workflow / lifecycle / private-prompt / extra）在 `__init__` 一次性构建，每次 `before_model_call` 重新 `add_section`
+- **静态分段**（role / hitt / workflow / lifecycle / extra）在 `__init__` 一次性构建，每次 `before_model_call` 重新 `add_section`
 - **动态分段**（`team_info` / `team_members`）由 `MtimeSectionCache` 包装，先 probe `updated_at`，未变则复用缓存
+- **per-member 分段**（`team_identity`：member_name + 私有工作约定）内容恒定，但成员之间各不相同：留在系统提示词里会让每个成员各占一份前缀 KV cache，故与动态分段同走 attachment 通道
 
 ### 7.2 模板组织
 
