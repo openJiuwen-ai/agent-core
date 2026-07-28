@@ -1034,6 +1034,27 @@ def test_session_memory_compressor_config_rejects_invalid_memory():
         SessionMemoryCompressorConfig(memory=True)
 
 
+# =============================================================================
+# ContextProcessorRail - legacy session_memory compatibility Tests
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_legacy_session_memory_param_accepted_and_ignored(tmp_path: Path):
+    """The deprecated session_memory constructor arg is accepted but has no effect."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    for legacy_value in (None, {}, SessionMemoryConfig()):
+        rail = ContextProcessorRail(preset=True, session_memory=legacy_value)
+        rail.init(agent)
+
+        merged = dict(rail._all_processors)["SessionMemoryCompressor"]
+        assert merged.enabled is False
+        assert rail._session_memory_mgr is None
+
+
 @pytest.mark.asyncio
 async def test_fix_incomplete_tool_context_with_empty_messages(tmp_path: Path):
     """fix_incomplete_tool_context should handle empty messages list."""

@@ -18,6 +18,7 @@ from openjiuwen.core.context_engine import (
     ReasoningToolLoopCompactProcessorConfig,
 )
 from openjiuwen.core.context_engine.context.session_memory_manager import (
+    SessionMemoryConfig,
     SessionMemoryManager,
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor import (
@@ -88,12 +89,17 @@ class ContextProcessorRail(DeepAgentRail):
             None,
         ] = None,
         preset: bool = True,
+        session_memory: SessionMemoryConfig | Dict[str, Any] | None = None,
     ):
         """Initialize ContextProcessorRail.
 
         Args:
             processors: One or more (processor_key, config) pairs.
             preset: Whether to enable preset default processor config. Defaults to True.
+            session_memory: Deprecated, kept only for backward compatibility of
+                the constructor signature. Accepted and ignored; configure
+                session memory via the ``SessionMemoryCompressor`` processor
+                (``SessionMemoryCompressorConfig.enabled`` / ``.memory``).
 
         Session memory ships in the default (forked) preset chain as a disabled
         ``SessionMemoryCompressor``; users opt in by overriding it with
