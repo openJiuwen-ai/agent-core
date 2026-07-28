@@ -243,16 +243,17 @@ class TeamTaskManager:
         for node in new_tasks:
             status = status_by_id.get(node.task_id, node.initial_status)
             await self._publish_task_created(node.task_id, status)
-            created.append(
-                TeamTaskBase(
-                    task_id=node.task_id,
-                    team_name=self.team_name,
-                    title=node.title,
-                    content=node.content,
-                    status=status,
-                    assignee=node.assignee,
-                )
+            task = TeamTaskBase(
+                task_id=node.task_id,
+                team_name=self.team_name,
+                title=node.title,
+                content=node.content,
+                status=status,
+                assignee=node.assignee,
             )
+            if await self._start_human_assigned_task_if_ready(task):
+                task = await self.get(node.task_id) or task
+            created.append(task)
         team_logger.debug(f"Added {len(created)} task(s) with {len(edges)} dependency edge(s)")
         return TaskGraphResult.success(created)
 
@@ -675,7 +676,7 @@ class TeamTaskManager:
                     "updated_at": _now_iso(),
                 },
             )
-        await self._publish_unblocked_events(unblocked_tasks)
+        await self._handle_unblocked_tasks(unblocked_tasks)
         await self._maybe_publish_task_list_drained()
         return TaskOpResult.success()
 
@@ -875,7 +876,7 @@ class TeamTaskManager:
             ),
             error_label=f"Task verified event for {task.task_id}",
         )
-        await self._publish_unblocked_events(unblocked_tasks)
+        await self._handle_unblocked_tasks(unblocked_tasks)
         await self._maybe_publish_task_list_drained()
         return TaskOpResult.success()
 
@@ -1208,7 +1209,7 @@ class TeamTaskManager:
             TaskCancelledEvent(team_name=self.team_name, task_id=task_id, member_name=task.assignee),
             error_label=f"Task cancelled event for {task_id}",
         )
-        await self._publish_unblocked_events(unblocked_tasks)
+        await self._handle_unblocked_tasks(unblocked_tasks)
         await self._maybe_publish_task_list_drained()
         return task
 
@@ -1249,7 +1250,7 @@ class TeamTaskManager:
                 ),
                 error_label=f"Task cancelled event for {task.task_id}",
             )
-        await self._publish_unblocked_events(unblocked_tasks)
+        await self._handle_unblocked_tasks(unblocked_tasks)
         await self._maybe_publish_task_list_drained()
         return cancelled_tasks
 
@@ -1263,6 +1264,29 @@ class TeamTaskManager:
             team_logger.debug(f"Published: {error_label}")
         except Exception as e:
             team_logger.error(f"Failed to publish {error_label}: {e}")
+
+    async def _start_human_assigned_task_if_ready(self, task: TeamTaskBase) -> bool:
+        """Start a ready task already assigned to a live human member."""
+        if task.status != TaskStatus.PENDING.value or not task.assignee:
+            return False
+        if not await self.db.member.is_live_human_agent(self.team_name, task.assignee):
+            return False
+
+        result = await self.start_task(task.task_id)
+        if not result.ok:
+            team_logger.debug(
+                "Human-assigned task %s was not auto-started: %s",
+                task.task_id,
+                result.reason,
+            )
+            return False
+        return True
+
+    async def _handle_unblocked_tasks(self, unblocked_tasks: List[TeamTaskBase]) -> None:
+        """Handle tasks whose dependencies were just satisfied."""
+        for task in unblocked_tasks:
+            await self._start_human_assigned_task_if_ready(task)
+        await self._publish_unblocked_events(unblocked_tasks)
 
     async def _publish_unblocked_events(self, unblocked_tasks: List[TeamTaskBase]) -> None:
         """Notify the team about tasks that just transitioned to PENDING."""
