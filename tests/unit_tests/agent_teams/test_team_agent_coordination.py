@@ -1532,6 +1532,34 @@ def _make_pending_task(
     return task
 
 
+def _stub_tasks_by_status(
+    agent: TeamAgent,
+    *,
+    planning: list | None = None,
+    in_progress: list | None = None,
+    pending: list | None = None,
+) -> MagicMock:
+    """Stub ``list_tasks`` so each condition query returns its own rows.
+
+    The claim sweep queries planning / in_progress first and only falls back
+    to pending when it found no active task, so splitting the rows per
+    condition is what makes that fallback observable.
+    """
+    by_status = {
+        "planning": planning or [],
+        "in_progress": in_progress or [],
+        "pending": pending or [],
+    }
+    task_manager = MagicMock()
+
+    async def _list_tasks(status: str | None = None):
+        return list(by_status.get(status, []))
+
+    task_manager.list_tasks = AsyncMock(side_effect=_list_tasks)
+    agent._configurator.task_manager = task_manager
+    return task_manager
+
+
 def _set_idle(agent: TeamAgent, seconds: float) -> None:
     """Put the member's runtime idle clock ``seconds`` into the past.
 
@@ -1577,11 +1605,12 @@ async def test_stale_claim_leader_ignores_other_members_claim():
 
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
 
-    # Only the two conditions the member itself is expected to push are
-    # swept. IN_REVIEW is excluded: an author idle while reviewers decide is
-    # waiting by design, not stalling (F_65).
+    # The two conditions the member itself is expected to push, plus the
+    # assigned-but-unstarted backlog it falls back to once it holds no
+    # active task. IN_REVIEW is excluded either way: an author idle while
+    # reviewers decide is waiting by design, not stalling (F_65).
     surveyed = {c.kwargs.get("status") for c in agent._configurator.task_manager.list_tasks.await_args_list}
-    assert surveyed == {"planning", "in_progress"}
+    assert surveyed == {"planning", "in_progress", "pending"}
     agent._configurator.message_manager.send_message.assert_not_called()
     agent.deliver_input.assert_not_called()
     assert "task-1" not in agent._coordination.dispatcher.stale_task._last_stale_nudge
@@ -1611,6 +1640,108 @@ async def test_stale_claim_leader_self_nudges_own_claim():
     assert "task-1" in body
     assert "Work on task-1" not in body
     assert "task-1" in agent._coordination.dispatcher.stale_task._last_stale_nudge
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_claim_nudges_an_unstarted_assignment():
+    """A task assigned to this member but never started is swept too.
+
+    Targeted assignment is announced by one transient TASK_CLAIMED event; a
+    member that was down or missed it would otherwise sit on the task
+    forever, since the leader's stale-PENDING self-prompt only covers
+    *unassigned* work. The body names the task's current condition so the
+    member knows it still has to claim it rather than resume it.
+    """
+    agent = _make_teammate()
+    agent._state.team_member = None
+    assigned = _make_pending_task("task-p1", updated_at=0, assignee="dev-1")
+    _set_idle(agent, 700)
+
+    _stub_tasks_by_status(agent, pending=[assigned])
+    agent.deliver_input = AsyncMock()
+
+    await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
+
+    agent.deliver_input.assert_awaited_once()
+    body = agent.deliver_input.await_args.args[0]
+    assert agent.deliver_input.await_args.kwargs.get("use_steer") is False
+    assert "task-p1" in body
+    assert "pending" in body
+    # Minimal body: the member reads the details through view_task.
+    assert "Work on task-p1" not in body
+    assert "task-p1" in agent._coordination.dispatcher.stale_task._last_stale_nudge
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_claim_backlog_yields_to_an_active_task():
+    """Queued assignments are a normal queue, not a stall.
+
+    ``claim_task`` allows one active task per member, so a member already
+    holding active work could not start the queued one even if nudged —
+    the backlog is a fallback for an empty active set, never an addition.
+    """
+    agent = _make_teammate()
+    agent._state.team_member = None
+    active = _make_claimed_task("task-a", assignee="dev-1", updated_at=0)
+    queued = _make_pending_task("task-p2", updated_at=0, assignee="dev-1")
+    _set_idle(agent, 700)
+
+    _stub_tasks_by_status(agent, in_progress=[active], pending=[queued])
+    agent.deliver_input = AsyncMock()
+
+    await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
+
+    agent.deliver_input.assert_awaited_once()
+    assert "task-a" in agent.deliver_input.await_args.args[0]
+    assert "task-p2" not in agent._coordination.dispatcher.stale_task._last_stale_nudge
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_claim_backlog_nudges_only_the_earliest_assignment():
+    """With several assignments queued, only the oldest one is nudged.
+
+    Nudging the whole queue would just produce one-active refusals.
+    """
+    agent = _make_teammate()
+    agent._state.team_member = None
+    older = _make_pending_task("task-p4", updated_at=100, assignee="dev-1")
+    newer = _make_pending_task("task-p3", updated_at=900, assignee="dev-1")
+    _set_idle(agent, 700)
+
+    _stub_tasks_by_status(agent, pending=[newer, older])
+    agent.deliver_input = AsyncMock()
+
+    await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
+
+    agent.deliver_input.assert_awaited_once()
+    assert "task-p4" in agent.deliver_input.await_args.args[0]
+    assert "task-p3" not in agent._coordination.dispatcher.stale_task._last_stale_nudge
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stale_claim_ignores_unassigned_pending():
+    """Unclaimed work belongs to the leader's stale-PENDING sweep, not here.
+
+    The two sweeps partition the board by assignee and must not overlap:
+    this one takes ``assignee == self``, the leader's takes ``assignee``
+    empty.
+    """
+    agent = _make_teammate()
+    agent._state.team_member = None
+    unclaimed = _make_pending_task("task-p5", updated_at=0)
+    _set_idle(agent, 700)
+
+    _stub_tasks_by_status(agent, pending=[unclaimed])
+    agent.deliver_input = AsyncMock()
+
+    await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
+
+    agent.deliver_input.assert_not_called()
+    assert "task-p5" not in agent._coordination.dispatcher.stale_task._last_stale_nudge
 
 
 @pytest.mark.asyncio
