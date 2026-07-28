@@ -15,23 +15,17 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import (
     LOOP_COMPACT_BAILOUT_STATE_KEY,
     TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY,
-    CurrentRoundCompressorConfig,
-    DialogueCompressorConfig,
     FullCompactProcessorConfig,
-    MessageSummaryOffloaderConfig,
     MicroCompactProcessorConfig,
     ReasoningToolLoopCompactProcessorConfig,
     ToolResultBudgetProcessorConfig,
 )
-from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     SessionMemoryConfig,
     SessionMemoryManager,
 )
-from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
-    RoundLevelCompressorConfig,
-)
 from openjiuwen.core.foundation.llm import ModelRequestConfig
+from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.sections.reload import build_reload_section
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -40,7 +34,6 @@ from openjiuwen.harness.schema.state import (
     _SESSION_STATE_KEY,
     DeepAgentState,
 )
-
 
 # (processor_key, config_attr, session_state_key, abort_marker)
 _LOOP_BAILOUT_SPECS: Tuple[Tuple[str, str, str, str], ...] = (
@@ -198,16 +191,18 @@ class ContextProcessorRail(DeepAgentRail):
                 ),
             ]
         else:
+            # Activate the refactored ("forked") processor implementations:
+            # they register under the official processor names and use
+            # ratio-based thresholds relative to the model's context
+            # capacity, replacing the legacy absolute token thresholds.
+            from openjiuwen.core.context_engine.processor import forked
+
+            forked.activate()
+
             presets: List[Tuple[str, BaseModel]] = [
                 (
                     "MessageSummaryOffloader",
-                    MessageSummaryOffloaderConfig(
-                        large_message_threshold=15000,
-                        offload_message_type=["tool"],
-                        protected_tool_names=["read_file"],
-                        model=model_cfg,
-                        model_client=model_client_config,
-                    ),
+                    forked.MessageSummaryOffloaderConfig(),
                 ),
                 (
                     "ReasoningToolLoopCompactProcessor",
@@ -215,33 +210,15 @@ class ContextProcessorRail(DeepAgentRail):
                 ),
                 (
                     "DialogueCompressor",
-                    DialogueCompressorConfig(
-                        tokens_threshold=100000,
-                        messages_to_keep=10,
-                        keep_last_round=False,
-                        compression_target_tokens=1800,
-                        model=model_cfg,
-                        model_client=model_client_config,
-                    ),
+                    forked.DialogueCompressorConfig(model=model_cfg, model_client=model_client_config),
                 ),
                 (
                     "CurrentRoundCompressor",
-                    CurrentRoundCompressorConfig(
-                        tokens_threshold=100000,
-                        messages_to_keep=3,
-                        model=model_cfg,
-                        model_client=model_client_config,
-                    ),
+                    forked.CurrentRoundCompressorConfig(model=model_cfg, model_client=model_client_config),
                 ),
                 (
                     "RoundLevelCompressor",
-                    RoundLevelCompressorConfig(
-                        trigger_context_ratio=0.9,
-                        target_total_tokens=160000,
-                        keep_recent_messages=6,
-                        model=model_cfg,
-                        model_client=model_client_config,
-                    ),
+                    forked.RoundLevelCompressorConfig(model=model_cfg, model_client=model_client_config),
                 ),
             ]
         return presets
@@ -357,10 +334,7 @@ class ContextProcessorRail(DeepAgentRail):
         session = ctx.session
         if session is None:
             return
-        session.update_state({
-            state_key: 0
-            for _, _, state_key, _ in _LOOP_BAILOUT_SPECS
-        })
+        session.update_state({state_key: 0 for _, _, state_key, _ in _LOOP_BAILOUT_SPECS})
 
     def _maybe_bailout_loop_compactions(self, ctx: AgentCallbackContext) -> None:
         """Raise before the model call when a loop persists after compaction.

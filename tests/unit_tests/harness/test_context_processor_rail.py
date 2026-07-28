@@ -5,24 +5,27 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import Mock, patch
+
 import pytest
 
 from openjiuwen.core.context_engine import (
     LOOP_COMPACT_BAILOUT_STATE_KEY,
     TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY,
 )
+from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig
 from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
     DialogueCompressorConfig,
 )
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
-from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.foundation.llm import (
-    SystemMessage,
     AssistantMessage,
+    SystemMessage,
     ToolMessage,
     UserMessage,
 )
+from openjiuwen.core.foundation.llm.model import init_model
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -30,8 +33,6 @@ from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode, SysOpe
 from openjiuwen.harness import Workspace
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
-from openjiuwen.core.foundation.llm.model import init_model
-from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig
 
 
 class _DummyResponse:
@@ -64,8 +65,11 @@ def _make_sys_operation(tmp_path: Path):
 
 def _make_agent(sys_operation, workspace, *, enable_reload: bool = False):
     model = init_model(
-        provider="OpenAI", model_name="dummy-model", api_key="dummy-key",
-        api_base="https://example.com/v1", verify_ssl=False,
+        provider="OpenAI",
+        model_name="dummy-model",
+        api_key="dummy-key",
+        api_base="https://example.com/v1",
+        verify_ssl=False,
     )
     agent = create_deep_agent(
         model=model,
@@ -84,10 +88,7 @@ def _make_model_call_context(agent):
     return AgentCallbackContext(
         agent=agent,
         inputs=ModelCallInputs(
-            messages=[
-                SystemMessage(content="You are a test assistant."),
-                {"role": "user", "content": "test"}
-            ]
+            messages=[SystemMessage(content="You are a test assistant."), {"role": "user", "content": "test"}]
         ),
         session=None,
     )
@@ -123,6 +124,7 @@ class _MockModelContext:
 # Preset Processor Tests
 # =============================================================================
 
+
 @pytest.mark.asyncio
 async def test_init_processors_merge(tmp_path: Path):
     """init should merge preset and custom processors correctly."""
@@ -142,32 +144,41 @@ async def test_init_processors_merge(tmp_path: Path):
                 "RoundLevelCompressor",
             ],
         ),
-        (True, [("d", DialogueCompressorConfig(messages_threshold=99))],
-         [
-             "MessageSummaryOffloader",
-             "ReasoningToolLoopCompactProcessor",
-             "DialogueCompressor",
-             "CurrentRoundCompressor",
-             "RoundLevelCompressor",
-             "d",
-         ]),
-        (True, [("c", DialogueCompressorConfig(messages_to_keep=5))],
-         [
-             "MessageSummaryOffloader",
-             "ReasoningToolLoopCompactProcessor",
-             "DialogueCompressor",
-             "CurrentRoundCompressor",
-             "RoundLevelCompressor",
-             "c",
-         ]),
-        (True, [("DialogueCompressor", DialogueCompressorConfig(messages_threshold=99))],
-         [
-             "MessageSummaryOffloader",
-             "ReasoningToolLoopCompactProcessor",
-             "DialogueCompressor",
-             "CurrentRoundCompressor",
-             "RoundLevelCompressor",
-         ]),
+        (
+            True,
+            [("d", DialogueCompressorConfig(messages_threshold=99))],
+            [
+                "MessageSummaryOffloader",
+                "ReasoningToolLoopCompactProcessor",
+                "DialogueCompressor",
+                "CurrentRoundCompressor",
+                "RoundLevelCompressor",
+                "d",
+            ],
+        ),
+        (
+            True,
+            [("c", DialogueCompressorConfig(messages_to_keep=5))],
+            [
+                "MessageSummaryOffloader",
+                "ReasoningToolLoopCompactProcessor",
+                "DialogueCompressor",
+                "CurrentRoundCompressor",
+                "RoundLevelCompressor",
+                "c",
+            ],
+        ),
+        (
+            True,
+            [("DialogueCompressor", DialogueCompressorConfig(messages_threshold=99))],
+            [
+                "MessageSummaryOffloader",
+                "ReasoningToolLoopCompactProcessor",
+                "DialogueCompressor",
+                "CurrentRoundCompressor",
+                "RoundLevelCompressor",
+            ],
+        ),
     ]
     for preset, processors, expected_keys in cases:
         sys_operation = _make_sys_operation(tmp_path)
@@ -192,40 +203,38 @@ async def test_init_preset_defaults(tmp_path: Path):
 
     procs = dict(agent.react_config.context_processors)
 
-    # MessageSummaryOffloader tests
+    # MessageSummaryOffloader tests (forked, ratio-based)
     off = procs.get("MessageSummaryOffloader")
     assert off is not None
     assert "messages_threshold" not in type(off).model_fields
     assert "tokens_threshold" not in type(off).model_fields
     assert "messages_to_keep" not in type(off).model_fields
     assert "keep_last_round" not in type(off).model_fields
-    assert off.large_message_threshold == 15000
-    assert off.offload_message_type == ["tool"]
+    assert "large_message_threshold" not in type(off).model_fields
+    assert off.add_message_threshold_ratio == 0.1
+    assert off.ttl_seconds == 300
+    assert off.ttl_context_occupancy_ratio == 0.5
+    assert off.ttl_message_threshold_ratio == 0.05
     assert off.protected_tool_names == ["read_file"]
-    assert off.summary_max_tokens == 900
 
-    # DialogueCompressor tests
+    # DialogueCompressor tests (forked, ratio-based)
     comp = procs.get("DialogueCompressor")
     assert comp is not None
-    assert comp.messages_threshold is None
-    assert comp.tokens_threshold == 100000
-    assert comp.messages_to_keep == 10
-    assert comp.keep_last_round is False
-    assert comp.compression_target_tokens == 1800
+    assert comp.trigger_context_ratio == 0.8
+    assert comp.min_target_context_ratio == 0.1
 
-    # CurrentRoundCompressor tests
+    # CurrentRoundCompressor tests (forked, ratio-based)
     curr = procs.get("CurrentRoundCompressor")
     assert curr is not None
-    assert curr.tokens_threshold == 100000
-    assert curr.messages_to_keep == 3
-    assert curr.compression_target_tokens == 4000
+    assert curr.trigger_context_ratio == 0.8
+    assert curr.min_target_context_ratio == 0.1
+    assert curr.keep_recent_messages == 0
 
-    # RoundLevelCompressor tests
+    # RoundLevelCompressor tests (forked, ratio-based)
     round_lvl = procs.get("RoundLevelCompressor")
     assert round_lvl is not None
-    assert round_lvl.trigger_context_ratio == 0.9
-    assert round_lvl.target_total_tokens == 160000
-    assert round_lvl.keep_recent_messages == 6
+    assert round_lvl.trigger_context_ratio == 0.8
+    assert round_lvl.keep_recent_messages == 4
 
 
 @pytest.mark.asyncio
@@ -235,9 +244,7 @@ async def test_init_logs_processor_config_module_paths(tmp_path: Path):
     agent = _make_agent(sys_operation, workspace)
     rail = ContextProcessorRail(preset=True)
 
-    with patch(
-        "openjiuwen.harness.rails.context_engineer.context_processor_rail.logger.info"
-    ) as info:
+    with patch("openjiuwen.harness.rails.context_engineer.context_processor_rail.logger.info") as info:
         await agent.register_rail(rail)
         await agent.ensure_initialized()
 
@@ -245,7 +252,7 @@ async def test_init_logs_processor_config_module_paths(tmp_path: Path):
     message = next(message for message in messages if message.startswith("context processors initialized:"))
     assert (
         "MessageSummaryOffloader="
-        "openjiuwen.core.context_engine.processor.offloader.message_summary_offloader."
+        "openjiuwen.core.context_engine.processor.forked.offloader.message_offloader."
         "MessageSummaryOffloaderConfig"
     ) in message
 
@@ -253,6 +260,7 @@ async def test_init_logs_processor_config_module_paths(tmp_path: Path):
 # =============================================================================
 # fix_incomplete_tool_context Tests
 # =============================================================================
+
 
 def _make_fix_ctx(agent, messages):
     return AgentCallbackContext(
@@ -272,15 +280,25 @@ async def test_fix_incomplete_tool_context(tmp_path: Path):
         ([SystemMessage(content="sys"), UserMessage(content="user")], 2, []),
         ([AssistantMessage(content="no tools")], 1, []),
         ([UserMessage(content="user")], 1, []),
-        ([AssistantMessage(content="call",
-            tool_calls=[ToolCall(id="tc1", type="function", name="t", arguments="{}")
-        ])], 2, ["tc1"]),
-        ([AssistantMessage(content="call",
-            tool_calls=[ToolCall(id="", type="function", name="t", arguments="{}")])], 2, [""]),
         (
             [
-                AssistantMessage(content="c1",
-                    tool_calls=[ToolCall(id="a", type="function", name="t", arguments="{}")]),
+                AssistantMessage(
+                    content="call", tool_calls=[ToolCall(id="tc1", type="function", name="t", arguments="{}")]
+                )
+            ],
+            2,
+            ["tc1"],
+        ),
+        (
+            [AssistantMessage(content="call", tool_calls=[ToolCall(id="", type="function", name="t", arguments="{}")])],
+            2,
+            [""],
+        ),
+        (
+            [
+                AssistantMessage(
+                    content="c1", tool_calls=[ToolCall(id="a", type="function", name="t", arguments="{}")]
+                ),
                 UserMessage(content="user"),
             ],
             3,
@@ -288,20 +306,25 @@ async def test_fix_incomplete_tool_context(tmp_path: Path):
         ),
         (
             [
-                AssistantMessage(content="c1",
-                    tool_calls=[ToolCall(id="a", type="function", name="t1", arguments="{}")]),
-                AssistantMessage(content="c2",
-                    tool_calls=[ToolCall(id="b", type="function", name="t2", arguments="{}")]),
+                AssistantMessage(
+                    content="c1", tool_calls=[ToolCall(id="a", type="function", name="t1", arguments="{}")]
+                ),
+                AssistantMessage(
+                    content="c2", tool_calls=[ToolCall(id="b", type="function", name="t2", arguments="{}")]
+                ),
             ],
             4,
             ["a", "b"],
         ),
         (
             [
-                AssistantMessage(content="call", tool_calls=[
-                    ToolCall(id="x", type="function", name="t1", arguments="{}"),
-                    ToolCall(id="y", type="function", name="t2", arguments="{}"),
-                ]),
+                AssistantMessage(
+                    content="call",
+                    tool_calls=[
+                        ToolCall(id="x", type="function", name="t1", arguments="{}"),
+                        ToolCall(id="y", type="function", name="t2", arguments="{}"),
+                    ],
+                ),
                 ToolMessage(content="res", tool_call_id="x"),
             ],
             3,
@@ -311,8 +334,8 @@ async def test_fix_incomplete_tool_context(tmp_path: Path):
             [
                 ToolMessage(content="res", tool_call_id="old"),
                 AssistantMessage(
-                    content="call",
-                    tool_calls=[ToolCall(id="new", type="function", name="t", arguments="{}")]),
+                    content="call", tool_calls=[ToolCall(id="new", type="function", name="t", arguments="{}")]
+                ),
             ],
             3,
             ["new"],
@@ -332,10 +355,10 @@ async def test_fix_incomplete_tool_context(tmp_path: Path):
         added = ctx.context.added_messages
         assert len(added) == exp_count, f"case {i}: expected {exp_count}, got {len(added)}"
 
-        placeholders = [m.tool_call_id for m in added
-                        if isinstance(m, ToolMessage) and "[Tool execution interrupted]" in m.content]
-        assert (sorted(placeholders) == sorted(exp_ids)), \
-            f"case {i}: expected ids {exp_ids}, got {placeholders}"
+        placeholders = [
+            m.tool_call_id for m in added if isinstance(m, ToolMessage) and "[Tool execution interrupted]" in m.content
+        ]
+        assert sorted(placeholders) == sorted(exp_ids), f"case {i}: expected ids {exp_ids}, got {placeholders}"
 
 
 @pytest.mark.asyncio
@@ -346,12 +369,7 @@ async def test_fix_incomplete_tool_context_null_context(tmp_path: Path):
     agent = _make_agent(sys_operation, workspace, enable_reload=True)
     await agent.ensure_initialized()
 
-    ctx = AgentCallbackContext(
-        agent=agent,
-        inputs=ModelCallInputs(messages=[]),
-        session=None,
-        context=None
-    )
+    ctx = AgentCallbackContext(agent=agent, inputs=ModelCallInputs(messages=[]), session=None, context=None)
     rail = ContextProcessorRail()
     await rail.fix_incomplete_tool_context(ctx)  # should not raise
 
@@ -365,39 +383,39 @@ async def test_before_invoke_and_on_exception_call_fix_context(tmp_path: Path):
     await agent.ensure_initialized()
 
     tool_call = ToolCall(id="tc", type="function", name="t", arguments="{}")
-    ctx = _make_fix_ctx(
-        agent,
-        [
-            AssistantMessage(content="call", tool_calls=[tool_call]),
-            UserMessage(content="u")
-        ]
-    )
+    ctx = _make_fix_ctx(agent, [AssistantMessage(content="call", tool_calls=[tool_call]), UserMessage(content="u")])
 
     rail = ContextProcessorRail()
     await rail.before_invoke(ctx)
-    placeholders = [m for m in ctx.context.added_messages
-                    if isinstance(m, ToolMessage) and "[Tool execution interrupted]" in m.content]
+    placeholders = [
+        m
+        for m in ctx.context.added_messages
+        if isinstance(m, ToolMessage) and "[Tool execution interrupted]" in m.content
+    ]
     assert len(placeholders) == 1
 
     ctx2 = _make_fix_ctx(
         agent,
         [
             AssistantMessage(
-                content="call",
-                tool_calls=[ToolCall(id="tc2", type="function", name="t", arguments="{}")]
+                content="call", tool_calls=[ToolCall(id="tc2", type="function", name="t", arguments="{}")]
             ),
-            UserMessage(content="u")
-        ]
+            UserMessage(content="u"),
+        ],
     )
     await rail.on_model_exception(ctx2)
-    placeholders2 = [m for m in ctx2.context.added_messages
-                     if isinstance(m, ToolMessage) and "[Tool execution interrupted]" in m.content]
+    placeholders2 = [
+        m
+        for m in ctx2.context.added_messages
+        if isinstance(m, ToolMessage) and "[Tool execution interrupted]" in m.content
+    ]
     assert len(placeholders2) == 1
 
 
 # =============================================================================
 # _ensure_json_arguments Tests
 # =============================================================================
+
 
 @pytest.mark.asyncio
 async def test_ensure_json_arguments_with_invalid_json(tmp_path: Path):
@@ -408,7 +426,7 @@ async def test_ensure_json_arguments_with_invalid_json(tmp_path: Path):
         ("{}", "{}"),  # empty object
         ('{"a": 1, "b": 2}', '{"a": 1, "b": 2}'),  # valid
         ('{"incomplete": ', "{}"),  # truncated JSON
-        ('{bad json}', "{}"),  # not JSON at all
+        ("{bad json}", "{}"),  # not JSON at all
         ('{"unterminated": "string', "{}"),  # unterminated string
         ("[1, 2,", "{}"),  # truncated array
         ("null", "{}"),  # not an object
@@ -450,12 +468,9 @@ async def test_fix_incomplete_tool_context_with_broken_arguments(tmp_path: Path)
         id="tc1",
         type="function",
         name="test_tool",
-        arguments='{"incomplete": '  # broken JSON
+        arguments='{"incomplete": ',  # broken JSON
     )
-    ctx = _make_fix_ctx(
-        agent,
-        [AssistantMessage(content="call", tool_calls=[tool_call])]
-    )
+    ctx = _make_fix_ctx(agent, [AssistantMessage(content="call", tool_calls=[tool_call])])
     await ContextProcessorRail.fix_incomplete_tool_context(ctx)
 
     added = ctx.context.added_messages
@@ -473,6 +488,7 @@ async def test_fix_incomplete_tool_context_with_broken_arguments(tmp_path: Path)
 # =============================================================================
 # ContextProcessorRail - _merge_config_with_overrides Tests
 # =============================================================================
+
 
 def test_merge_config_with_overrides():
     """_merge_config_with_overrides should merge dict overrides into base config."""
@@ -506,6 +522,7 @@ def test_merge_config_with_overrides_none():
 # =============================================================================
 # ContextProcessorRail - _merge_processors Tests
 # =============================================================================
+
 
 def test_merge_processors_replace_existing():
     """_merge_processors should replace existing processor configs."""
@@ -575,11 +592,7 @@ def test_merge_processors_with_model_config():
     ]
     overrides = []
 
-    ContextProcessorRail._merge_processors(
-        base, overrides,
-        model_config=base_model_cfg,
-        model_client_config=None
-    )
+    ContextProcessorRail._merge_processors(base, overrides, model_config=base_model_cfg, model_client_config=None)
 
     # Processor has model attribute, and it should be set from model_config
     # Note: DialogueCompressorConfig may not have model attribute, check accordingly
@@ -588,6 +601,7 @@ def test_merge_processors_with_model_config():
 # =============================================================================
 # ContextProcessorRail - _build_preset_processors Tests
 # =============================================================================
+
 
 def test_build_preset_processors_without_session_memory(tmp_path: Path):
     """_build_preset_processors should return standard preset when session_memory disabled."""
@@ -632,6 +646,7 @@ def test_build_preset_processors_with_session_memory_dict(tmp_path: Path):
 # ContextProcessorRail - init/uninit Tests
 # =============================================================================
 
+
 @pytest.mark.asyncio
 async def test_context_processor_rail_init_with_preset(tmp_path: Path):
     """ContextProcessorRail.init should inject preset processors into agent config."""
@@ -657,9 +672,9 @@ async def test_context_processor_rail_init_without_preset(tmp_path: Path):
     workspace = Workspace(root_path=str(tmp_path))
     agent = _make_agent(sys_operation, workspace)
 
-    rail = ContextProcessorRail(preset=False, processors=[
-        ("CustomProcessor", DialogueCompressorConfig(messages_threshold=25))
-    ])
+    rail = ContextProcessorRail(
+        preset=False, processors=[("CustomProcessor", DialogueCompressorConfig(messages_threshold=25))]
+    )
     await agent.register_rail(rail)
     await agent.ensure_initialized()
 
@@ -677,8 +692,7 @@ async def test_context_processor_rail_init_with_tuple_processors(tmp_path: Path)
     agent = _make_agent(sys_operation, workspace)
 
     rail = ContextProcessorRail(
-        preset=False,
-        processors=("SingleProcessor", DialogueCompressorConfig(messages_threshold=30))
+        preset=False, processors=("SingleProcessor", DialogueCompressorConfig(messages_threshold=30))
     )
     await agent.register_rail(rail)
     await agent.ensure_initialized()
@@ -694,15 +708,12 @@ async def test_context_processor_rail_init_with_dict_override(tmp_path: Path):
     workspace = Workspace(root_path=str(tmp_path))
     agent = _make_agent(sys_operation, workspace)
 
-    rail = ContextProcessorRail(
-        preset=True,
-        processors=[("DialogueCompressor", {"messages_threshold": 88})]
-    )
+    rail = ContextProcessorRail(preset=True, processors=[("DialogueCompressor", {"trigger_context_ratio": 0.5})])
     await agent.register_rail(rail)
     await agent.ensure_initialized()
 
     config = dict(agent.react_config.context_processors)
-    assert config["DialogueCompressor"].messages_threshold == 88
+    assert config["DialogueCompressor"].trigger_context_ratio == 0.5
 
 
 @pytest.mark.asyncio
@@ -726,6 +737,7 @@ async def test_context_processor_rail_uninit_clears_processors(tmp_path: Path):
 # ContextProcessorRail - _refresh_task_state_runtime Tests
 # =============================================================================
 
+
 @pytest.mark.asyncio
 async def test_refresh_task_state_runtime_with_deep_agent_state(tmp_path: Path):
     """_refresh_task_state_runtime should extract state from DeepAgentState."""
@@ -734,7 +746,7 @@ async def test_refresh_task_state_runtime_with_deep_agent_state(tmp_path: Path):
     agent = _make_agent(sys_operation, workspace)
     await agent.ensure_initialized()
 
-    from openjiuwen.harness.schema.state import DeepAgentState, PlanModeState, _SESSION_RUNTIME_ATTR
+    from openjiuwen.harness.schema.state import _SESSION_RUNTIME_ATTR, DeepAgentState, PlanModeState
 
     mock_session = Mock()
     mock_session.get_state.return_value = {
@@ -829,6 +841,7 @@ async def test_refresh_task_state_runtime_no_session():
 # ContextProcessorRail - Lifecycle Hooks Tests
 # =============================================================================
 
+
 @pytest.mark.asyncio
 async def test_before_model_call_refreshes_state(tmp_path: Path):
     """before_model_call should refresh task state runtime."""
@@ -905,6 +918,7 @@ async def test_after_tool_call_refreshes_state(tmp_path: Path):
 # ContextProcessorRail - Session Memory Integration Tests
 # =============================================================================
 
+
 @pytest.mark.asyncio
 async def test_init_with_session_memory_config(tmp_path: Path):
     """ContextProcessorRail should initialize session memory manager when configured."""
@@ -919,10 +933,7 @@ async def test_init_with_session_memory_config(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_init_with_session_memory_dict(tmp_path: Path):
     """ContextProcessorRail should accept session_memory as dict."""
-    rail = ContextProcessorRail(
-        preset=True,
-        session_memory={"max_history_rounds": 5}
-    )
+    rail = ContextProcessorRail(preset=True, session_memory={"max_history_rounds": 5})
 
     assert rail._session_memory_enabled is True
     assert isinstance(rail._session_memory_config, SessionMemoryConfig)
@@ -982,14 +993,17 @@ async def test_fix_incomplete_tool_context_multiple_tools_same_call(tmp_path: Pa
             ToolCall(id="tc1", type="function", name="tool1", arguments="{}"),
             ToolCall(id="tc2", type="function", name="tool2", arguments="{}"),
             ToolCall(id="tc3", type="function", name="tool3", arguments="{}"),
-        ]
+        ],
     )
     ctx = _make_fix_ctx(agent, [assistant_msg])
     rail = ContextProcessorRail()
     await rail.fix_incomplete_tool_context(ctx)
 
-    placeholders = [m for m in ctx.context.added_messages
-                    if isinstance(m, ToolMessage) and "[Tool execution interrupted]" in m.content]
+    placeholders = [
+        m
+        for m in ctx.context.added_messages
+        if isinstance(m, ToolMessage) and "[Tool execution interrupted]" in m.content
+    ]
     assert len(placeholders) == 3
     assert sorted([p.tool_call_id for p in placeholders]) == ["tc1", "tc2", "tc3"]
 
@@ -1003,16 +1017,16 @@ async def test_fix_incomplete_tool_context_with_matching_response(tmp_path: Path
     await agent.ensure_initialized()
 
     assistant_msg = AssistantMessage(
-        content="using tool",
-        tool_calls=[ToolCall(id="tc1", type="function", name="t", arguments="{}")]
+        content="using tool", tool_calls=[ToolCall(id="tc1", type="function", name="t", arguments="{}")]
     )
     tool_msg = ToolMessage(content="result", tool_call_id="tc1")
     ctx = _make_fix_ctx(agent, [assistant_msg, tool_msg])
     rail = ContextProcessorRail()
     await rail.fix_incomplete_tool_context(ctx)
 
-    placeholders = [m for m in ctx.context.added_messages
-                    if isinstance(m, ToolMessage) and "[工具执行被中断]" in m.content]
+    placeholders = [
+        m for m in ctx.context.added_messages if isinstance(m, ToolMessage) and "[工具执行被中断]" in m.content
+    ]
     assert len(placeholders) == 0
     # Should have original assistant msg and tool msg
     tool_messages = [m for m in ctx.context.added_messages if isinstance(m, ToolMessage)]
@@ -1030,8 +1044,7 @@ async def test_fix_incomplete_tool_context_unordered_tool_responses(tmp_path: Pa
 
     # Assistant with tool call
     assistant_msg = AssistantMessage(
-        content="using tool",
-        tool_calls=[ToolCall(id="tc1", type="function", name="t", arguments="{}")]
+        content="using tool", tool_calls=[ToolCall(id="tc1", type="function", name="t", arguments="{}")]
     )
     # Tool response for different tool
     tool_msg = ToolMessage(content="result2", tool_call_id="tc2")
@@ -1039,8 +1052,11 @@ async def test_fix_incomplete_tool_context_unordered_tool_responses(tmp_path: Pa
     rail = ContextProcessorRail()
     await rail.fix_incomplete_tool_context(ctx)
 
-    placeholders = [m for m in ctx.context.added_messages
-                    if isinstance(m, ToolMessage) and "[Tool execution interrupted]" in m.content]
+    placeholders = [
+        m
+        for m in ctx.context.added_messages
+        if isinstance(m, ToolMessage) and "[Tool execution interrupted]" in m.content
+    ]
     # Should have placeholder for tc1 (not matched)
     assert len(placeholders) == 1
     assert placeholders[0].tool_call_id == "tc1"
@@ -1057,6 +1073,7 @@ async def test_ensure_json_arguments_with_nested_dict():
 # =============================================================================
 # Offload Section Injection Tests
 # =============================================================================
+
 
 class _MockSystemPromptBuilder:
     """Mock SystemPromptBuilder for testing offload section injection."""
@@ -1144,8 +1161,7 @@ async def test_offload_section_injected_when_user_processors_exist(tmp_path: Pat
     agent = _make_agent(sys_operation, workspace, enable_reload=True)
 
     rail = ContextProcessorRail(
-        preset=False,
-        processors=[("CustomProcessor", DialogueCompressorConfig(messages_threshold=25))]
+        preset=False, processors=[("CustomProcessor", DialogueCompressorConfig(messages_threshold=25))]
     )
     await agent.register_rail(rail)
     await agent.ensure_initialized()
@@ -1296,6 +1312,7 @@ async def test_before_model_call_injects_offload_section(tmp_path: Path):
 # ContextProcessorRail - reasoning/tool loop bail-out Tests
 # =============================================================================
 
+
 @pytest.mark.asyncio
 async def test_before_model_call_bailout_raises_when_threshold_reached(tmp_path: Path):
     """before_model_call should abort when the reasoning-loop counter reaches threshold."""
@@ -1376,8 +1393,10 @@ async def test_before_model_call_no_bailout_below_threshold(tmp_path: Path):
     await rail.before_model_call(ctx)
 
     reset_calls = [
-        call for call in mock_session.update_state.call_args_list
-        if call.args and (
+        call
+        for call in mock_session.update_state.call_args_list
+        if call.args
+        and (
             call.args[0] == {LOOP_COMPACT_BAILOUT_STATE_KEY: 0}
             or call.args[0] == {TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY: 0}
         )
@@ -1436,8 +1455,9 @@ async def test_before_invoke_resets_bailout_counter(tmp_path: Path):
 
     await rail.before_invoke(ctx)
 
-    mock_session.update_state.assert_any_call({
-        LOOP_COMPACT_BAILOUT_STATE_KEY: 0,
-        TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY: 0,
-    })
-
+    mock_session.update_state.assert_any_call(
+        {
+            LOOP_COMPACT_BAILOUT_STATE_KEY: 0,
+            TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY: 0,
+        }
+    )
