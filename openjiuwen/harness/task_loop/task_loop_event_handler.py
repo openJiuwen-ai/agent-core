@@ -11,6 +11,8 @@ import asyncio
 import uuid
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+import anyio
+
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.controller.modules.event_handler import (
     EventHandler,
@@ -142,13 +144,11 @@ class TaskLoopEventHandler(EventHandler):
             return {"error": "no active round"}
         try:
             if timeout is not None:
-                result = await asyncio.wait_for(
-                    self._current_future,
-                    timeout=timeout,
-                )
+                with anyio.fail_after(timeout):
+                    result = await self._current_future
             else:
                 result = await self._current_future
-        except asyncio.TimeoutError:
+        except TimeoutError:
             result = {"error": "completion_timeout"}
         except asyncio.CancelledError:
             result = {"error": "cancelled"}

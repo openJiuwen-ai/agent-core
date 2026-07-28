@@ -254,6 +254,12 @@ class DeepAgentConfig:
     # Whether or not the inner ReactAgent executes tool calls in parallel.
     parallel_tool_calls: bool = True
 
+    # Auto-mount ToolCallResilienceRail: bounded retry of retryable tool-call
+    # failures (transport/timeout markers) via the @rail retry loop. Non-
+    # idempotent tools (write/shell/spawn) are never retried. Turn off for
+    # deployments that supply their own retry rail or want raw exceptions.
+    enable_tool_resilience_rail: bool = True
+
     # Filesystem sandbox: when True, file ops are restricted to workspace/project root.
     # Subagents inherit the stricter of their own spec and this value.
     restrict_to_work_dir: bool = True
