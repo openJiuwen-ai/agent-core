@@ -930,13 +930,16 @@ class ShellOperation(BaseShellOperation):
         """Return resolved sandbox roots when restrict_to_sandbox is active, else None."""
         if not getattr(self._run_config, "restrict_to_sandbox", False):
             return None
-        from openjiuwen.core.sys_operation.cwd import get_project_root, get_workspace
+        from openjiuwen.core.sys_operation.cwd import get_cwd, get_project_root, get_workspace
 
         configured = getattr(self._run_config, "sandbox_root", None)
         if configured:
             raw_roots = list(configured)
         else:
-            raw_roots = [p for p in (get_workspace(), get_project_root()) if p]
+            # cwd is its own root: the three layers are independent, so a
+            # member running in the project dir (or a worktree) with a private
+            # workspace elsewhere would otherwise be locked out of its own cwd.
+            raw_roots = [p for p in (get_workspace(), get_project_root(), get_cwd()) if p]
         resolved = [pathlib.Path(r).expanduser().resolve() for r in raw_roots]
         return resolved or None
 

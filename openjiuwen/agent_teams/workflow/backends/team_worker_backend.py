@@ -333,8 +333,10 @@ class TeamWorkerBackend(AgentBackend):
                 description="swarmflow worker",
             )
             # Worker gets its own workspace, not the teammate's.
-            worker_workspace = self._setup_worker_workspace(member_name)
-            worker_spec = worker_spec.model_copy(update={"workspace": worker_workspace})
+            worker_workspace, worker_cwd = self._setup_worker_workspace(member_name)
+            worker_spec = worker_spec.model_copy(
+                update={"workspace": worker_workspace, "cwd": worker_cwd}
+            )
             worker_build_context = derive_member_build_context(
                 self._build_context,
                 team_name=self._team_name,
@@ -392,7 +394,7 @@ class TeamWorkerBackend(AgentBackend):
     # Worker workspace setup
     # ------------------------------------------------------------------
 
-    def _setup_worker_workspace(self, member_name: str) -> WorkspaceSpec:
+    def _setup_worker_workspace(self, member_name: str) -> tuple[WorkspaceSpec, str | None]:
         """Compute, link, and mount the worker's independent workspace.
 
         Mirrors the layout used by ``agent_configurator`` for stable_base
@@ -403,30 +405,30 @@ class TeamWorkerBackend(AgentBackend):
         the team and needs no per-worker cleanup registration. Also mounts the
         team shared workspace into the worker's tree (``.team/{team_name}/``).
 
+        The workspace is always the worker's own directory. With
+        ``agent(options={"isolation": "worktree"})`` only the *cwd* moves into
+        the owner-scoped worktree — otherwise the worker's artifacts and skills
+        view would live inside an ephemeral checkout and vanish with it.
+
         Returns:
-            A ``WorkspaceSpec`` with the worker's resolved root_path.
+            The worker's ``WorkspaceSpec`` and its cwd (the worktree path when
+            isolated, else ``None`` meaning "use the workspace root").
         """
         worktree = self._worktrees.get(member_name)
-        workspace_is_worktree = worktree is not None
-        # Compute worker's workspace path. With ``agent(options={"isolation": "worktree"})``,
-        # the worker starts directly inside the owner-scoped worktree.
-        ws_root = (
-            worktree.worktree_path
-            if worktree is not None
-            else ensure_team_member_workspace_link(self._team_name, member_name)
-        )
+        worker_cwd = worktree.worktree_path if worktree is not None else None
+        ws_root = ensure_team_member_workspace_link(self._team_name, member_name)
 
         if self._worker_base_spec.workspace is not None:
             # Inherit language / stable_base from the base spec, only override root_path.
             worker_workspace = self._worker_base_spec.workspace.model_copy(
-                update={"root_path": ws_root, "stable_base": not workspace_is_worktree}
+                update={"root_path": ws_root, "stable_base": True}
             )
         else:
             # Base spec has no workspace — create a fresh one for this worker.
             worker_workspace = WorkspaceSpec(
                 root_path=ws_root,
                 language=self._language,
-                stable_base=not workspace_is_worktree,
+                stable_base=True,
             )
 
         # Mount team workspace into worker workspace so it can access shared
@@ -436,7 +438,7 @@ class TeamWorkerBackend(AgentBackend):
         if workspace_manager is not None:
             workspace_manager.mount_into_workspace(ws_root)
 
-        return worker_workspace
+        return worker_workspace, worker_cwd
 
     # ------------------------------------------------------------------
     # Helpers
