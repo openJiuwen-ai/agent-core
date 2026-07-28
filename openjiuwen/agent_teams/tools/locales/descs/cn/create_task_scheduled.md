@@ -9,7 +9,7 @@
 
 - **title**: 简明描述任务目标（祈使语气，如 "实现用户认证"）
 - **content**: 目标、验收标准和约束 — 不写具体操作步骤
-- **assignee**（必填）: 承担该任务的成员名称。**该成员必须已经存在**——先 `spawn_teammate` 建人，再 `create_task` 派活
+- **assignee**（必填）: 承担该任务的成员名称。**该成员必须已经存在且不能是 leader**——先 `spawn_teammate` 建人，再 `create_task` 派活
 - **reviewer**（可选）: 验证者成员名列表（须已存在且 ≠ assignee）。配了验证者的任务完成后进入 `in_review` 验收，多验证者按投票判定
 - **max_review_rounds**（可选，需配 reviewer）: 验证返工轮数上限，超限后不再自动打回而是升级给你处置；不传用团队默认
 - **task_id**（可选）: 自定义 ID，便于依赖引用（不提供则自动生成）
@@ -22,5 +22,5 @@
 
 ## 强制流程
 
-1. **创建前**：所有 assignee / reviewer 必须已经存在（先 `spawn_teammate`）；必须先调用 `view_task` 查看当前任务看板，避免重复创建、避免漏掉依赖、了解可复用的任务 ID
+1. **创建前**：所有 assignee / reviewer 必须已经存在（先 `spawn_teammate`），且 assignee 不能是 leader；必须先调用 `view_task` 查看当前任务看板，避免重复创建、避免漏掉依赖、了解可复用的任务 ID
 2. **创建后**：再次调用 `view_task` 复查刚刚的写入是否符合预期（标题、依赖关系、指派对象是否正确）。**不需要广播启动成员**——调度框架会按 assignee 自动通知并拉起对应成员

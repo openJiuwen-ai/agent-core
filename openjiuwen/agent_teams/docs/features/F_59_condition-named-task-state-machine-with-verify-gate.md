@@ -121,8 +121,8 @@ verify 闸的裁决者是**专职 reviewer 成员**（与 leader 审批计划同
 
 - 任务表加 `reviewer` 列，存 **member 名列表**（nullable）——支持一个任务多个验证者，为未来
   **投票机制**（作为验证控制）预留。列由 **leader 指派**，reviewer 不自主选择。
-- 指派入口：`create_task(reviewer=[...])` 与 `update_task(reviewer=[...])`；与 `assignee`（author）
-  正交，两个 create_task 形态都可带。校验：reviewer 是真实成员、且 `reviewer ∉ {assignee}`
+- 指派入口：`update_task(reviewer=[...])`；调度形态 `create_task` 也可创建时设置 reviewer。
+  与 `assignee`（author）正交。校验：reviewer 是真实成员、且 `reviewer ∉ {assignee}`
   （不自审）。
 
 ### 谁验证 / 怎么拿到验证任务

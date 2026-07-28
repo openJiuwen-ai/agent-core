@@ -517,16 +517,22 @@ async def test_cancel_task_owned_by_departed_human_agent_is_allowed(built_team, 
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_reassign_task_owned_by_departed_human_agent_is_allowed(built_team, db):
+    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
     from openjiuwen.agent_teams.tools.locales import make_translator
     from openjiuwen.agent_teams.tools.team_tools import UpdateTaskTool
 
     await _create_and_assign(built_team, db, "t-gone", HUMAN_AGENT_MEMBER_NAME)
     await _depart(built_team, HUMAN_AGENT_MEMBER_NAME, MemberStatus.SHUTDOWN_REQUESTED)
+    await built_team.spawn_member(
+        member_name="dev-1",
+        display_name="Dev",
+        agent_card=AgentCard(name="Dev"),
+    )
 
     tool = UpdateTaskTool(built_team, make_translator("cn"))
-    out = await tool.invoke({"task_id": "t-gone", "assignee": "team_leader"})
+    out = await tool.invoke({"task_id": "t-gone", "assignee": "dev-1"})
     assert out.success is True, out.error
-    assert (await built_team.task_manager.get("t-gone")).assignee == "team_leader"
+    assert (await built_team.task_manager.get("t-gone")).assignee == "dev-1"
 
 
 @pytest.mark.asyncio

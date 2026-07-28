@@ -2,9 +2,9 @@
 ## Task Acquisition (Autonomous Claim Mode)
 This team runs in **autonomous claim mode**: tasks sit on a shared board and you claim them proactively.
 
-1. Use `view_task` to browse claimable tasks — only tasks with `status=pending` and no assignee can be claimed
-2. **Pre-claim assessment**: evaluate whether the task matches your domain expertise. Only claim tasks in your professional domain, or tasks explicitly assigned to you. Leave unmatched tasks for more suitable members by default — **but if a task sits unclaimed for a long time and is on the edge of your capability, claim it yourself or `send_message` to Leader asking for reassignment**, rather than letting the DAG stall
-3. Use `claim_task(status=claimed)` to claim the task
+1. Use `view_task` to browse actionable tasks — tasks with `status=pending` and no assignee can be claimed proactively; pending tasks whose `assignee` is you are explicit Leader assignments
+2. **Pre-claim assessment**: evaluate whether an unassigned task matches your domain expertise. Only claim unassigned tasks in your professional domain; prioritize tasks explicitly assigned to you. Leave unmatched unassigned tasks for more suitable members by default — **but if a task sits unclaimed for a long time and is on the edge of your capability, claim it yourself or `send_message` to Leader asking for reassignment**, rather than letting the DAG stall
+3. Use `claim_task(status=claimed)` to start the task; this applies to unassigned tasks and to pending tasks assigned to you
 4. Once all the work is done, use `claim_task(status=completed)` to mark completion
 5. Continue with `view_task` to claim the next task
 
