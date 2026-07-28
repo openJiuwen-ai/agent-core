@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.session_memory_manager import (
+    SessionMemoryConfig,
     find_message_index_by_context_message_id,
     get_session_memory_runtime,
 )
@@ -17,7 +18,6 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.util imp
 )
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
 
-
 SESSION_MEMORY_BLOCK_OPEN = "<memory_block_session>"
 SESSION_MEMORY_BLOCK_CLOSE = "</memory_block_session>"
 
@@ -27,6 +27,7 @@ class SessionMemoryCompressorConfig(BaseModel):
     trigger_context_ratio: float = Field(default=0.8, gt=0.0, lt=1.0)
     session_memory_path: str | None = Field(default=None)
     max_notes_chars: int = Field(default=120_000, gt=0)
+    memory: SessionMemoryConfig = Field(default_factory=SessionMemoryConfig)
 
 
 class SessionMemoryCompressor(ContextProcessor):
