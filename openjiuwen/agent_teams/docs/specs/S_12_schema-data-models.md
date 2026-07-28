@@ -14,7 +14,7 @@ does not.
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-07-16 |
+| 最近一次修订日期 | 2026-07-28 |
 | 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）。其余条目见 `docs/features/` |
 
 ## 范围 / 边界
@@ -771,8 +771,9 @@ CANCELLED    -> (terminal)
 ### 自主停滞阈值（F_65）
 
 - **spec 配置**（`TeamAgentSpec`，仅自主模式消费，调度模式忽略）：
-  `stale_claim_idle_timeout: int = 600`（秒，>0——成员 idle 超此值且仍持
-  `{PLANNING, IN_PROGRESS}` 任务即自催，连续 3 个窗口无效则由该成员自报 leader）、
+  `stale_claim_idle_timeout: int = 600`（秒，>0——成员 idle 超此值且名下有该推的任务即自催，
+  连续 3 个窗口无效则由该成员自报 leader。"该推的任务" = 持有的 `{PLANNING, IN_PROGRESS}`，
+  一个活跃任务都没有时回落到名下最早的一个 `PENDING(assignee=self)`，见 F_69）、
   `stale_pending_idle_timeout: int = 600`（秒，>0——leader idle 超此值、且存在无 assignee
   的 `PENDING`、且 roster 里有非 leader 成员 READY，三者同时成立才自催）。
   校验在独立的 `_validate_stall_settings`（与 `_validate_review_settings` 分开：前者管停滞
