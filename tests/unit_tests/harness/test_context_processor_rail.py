@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from openjiuwen.core.context_engine import (
     LOOP_COMPACT_BAILOUT_STATE_KEY,
@@ -15,6 +16,9 @@ from openjiuwen.core.context_engine import (
 from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig
 from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
     DialogueCompressorConfig,
+)
+from openjiuwen.core.context_engine.processor.forked.compressor.session_memory_compressor import (
+    SessionMemoryCompressorConfig,
 )
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.llm import (
@@ -138,6 +142,7 @@ async def test_init_processors_merge(tmp_path: Path):
             None,
             [
                 "MessageSummaryOffloader",
+                "SessionMemoryCompressor",
                 "ReasoningToolLoopCompactProcessor",
                 "DialogueCompressor",
                 "CurrentRoundCompressor",
@@ -149,6 +154,7 @@ async def test_init_processors_merge(tmp_path: Path):
             [("d", DialogueCompressorConfig(messages_threshold=99))],
             [
                 "MessageSummaryOffloader",
+                "SessionMemoryCompressor",
                 "ReasoningToolLoopCompactProcessor",
                 "DialogueCompressor",
                 "CurrentRoundCompressor",
@@ -161,6 +167,7 @@ async def test_init_processors_merge(tmp_path: Path):
             [("c", DialogueCompressorConfig(messages_to_keep=5))],
             [
                 "MessageSummaryOffloader",
+                "SessionMemoryCompressor",
                 "ReasoningToolLoopCompactProcessor",
                 "DialogueCompressor",
                 "CurrentRoundCompressor",
@@ -173,6 +180,7 @@ async def test_init_processors_merge(tmp_path: Path):
             [("DialogueCompressor", DialogueCompressorConfig(messages_threshold=99))],
             [
                 "MessageSummaryOffloader",
+                "SessionMemoryCompressor",
                 "ReasoningToolLoopCompactProcessor",
                 "DialogueCompressor",
                 "CurrentRoundCompressor",
@@ -216,6 +224,11 @@ async def test_init_preset_defaults(tmp_path: Path):
     assert off.ttl_context_occupancy_ratio == 0.5
     assert off.ttl_message_threshold_ratio == 0.05
     assert off.protected_tool_names == ["read_file"]
+
+    # SessionMemoryCompressor ships in the default chain but disabled
+    mem = procs.get("SessionMemoryCompressor")
+    assert mem is not None
+    assert mem.enabled is False
 
     # DialogueCompressor tests (forked, ratio-based)
     comp = procs.get("DialogueCompressor")
@@ -603,43 +616,27 @@ def test_merge_processors_with_model_config():
 # =============================================================================
 
 
-def test_build_preset_processors_without_session_memory(tmp_path: Path):
-    """_build_preset_processors should return standard preset when session_memory disabled."""
-    rail = ContextProcessorRail(preset=True, session_memory=None)
+def test_build_preset_processors_default_forked_chain(tmp_path: Path):
+    """_build_preset_processors should return the forked chain by default."""
+    rail = ContextProcessorRail(preset=True)
     presets = rail._build_preset_processors()
 
     keys = [k for k, _ in presets]
-    assert "MessageSummaryOffloader" in keys
-    assert "DialogueCompressor" in keys
-    assert "CurrentRoundCompressor" in keys
-    assert "RoundLevelCompressor" in keys
+    assert keys == [
+        "MessageSummaryOffloader",
+        "SessionMemoryCompressor",
+        "ReasoningToolLoopCompactProcessor",
+        "DialogueCompressor",
+        "CurrentRoundCompressor",
+        "RoundLevelCompressor",
+    ]
     assert "ToolResultBudgetProcessor" not in keys
     assert "MicroCompactProcessor" not in keys
     assert "FullCompactProcessor" not in keys
 
-
-def test_build_preset_processors_with_session_memory(tmp_path: Path):
-    """_build_preset_processors should return session memory presets when enabled."""
-    session_config = SessionMemoryConfig()
-    rail = ContextProcessorRail(preset=True, session_memory=session_config)
-    presets = rail._build_preset_processors()
-
-    keys = [k for k, _ in presets]
-    assert "ToolResultBudgetProcessor" in keys
-    assert "MicroCompactProcessor" in keys
-    assert "FullCompactProcessor" in keys
-    assert "MessageSummaryOffloader" not in keys
-    assert "DialogueCompressor" not in keys
-
-
-def test_build_preset_processors_with_session_memory_dict(tmp_path: Path):
-    """_build_preset_processors should accept session_memory as dict."""
-    rail = ContextProcessorRail(preset=True, session_memory={"max_history_rounds": 5})
-    presets = rail._build_preset_processors()
-
-    keys = [k for k, _ in presets]
-    assert "ToolResultBudgetProcessor" in keys
-    assert "FullCompactProcessor" in keys
+    # Session memory ships disabled; users opt in via override.
+    compressor_cfg = dict(presets)["SessionMemoryCompressor"]
+    assert compressor_cfg.enabled is False
 
 
 # =============================================================================
@@ -920,23 +917,80 @@ async def test_after_tool_call_refreshes_state(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_init_with_session_memory_config(tmp_path: Path):
-    """ContextProcessorRail should initialize session memory manager when configured."""
-    session_config = SessionMemoryConfig(max_history_rounds=10)
-    rail = ContextProcessorRail(preset=True, session_memory=session_config)
+async def test_init_with_session_memory_compressor(tmp_path: Path):
+    """Registering an enabled SessionMemoryCompressor starts the memory manager."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
 
-    assert rail._session_memory_enabled is True
-    assert rail._session_memory_config is not None
+    compressor_cfg = SessionMemoryCompressorConfig(enabled=True, memory=SessionMemoryConfig())
+    rail = ContextProcessorRail(
+        preset=True,
+        processors=[("SessionMemoryCompressor", compressor_cfg)],
+    )
+    rail.init(agent)
+
+    keys = [k for k, _ in rail._all_processors]
+    assert "SessionMemoryCompressor" in keys
     assert rail._session_memory_mgr is not None
 
 
 @pytest.mark.asyncio
-async def test_init_with_session_memory_dict(tmp_path: Path):
-    """ContextProcessorRail should accept session_memory as dict."""
-    rail = ContextProcessorRail(preset=True, session_memory={"max_history_rounds": 5})
+async def test_init_with_session_memory_compressor_dict_override(tmp_path: Path):
+    """A dict override with enabled=True turns on session memory."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
 
-    assert rail._session_memory_enabled is True
-    assert isinstance(rail._session_memory_config, SessionMemoryConfig)
+    rail = ContextProcessorRail(
+        preset=True,
+        processors=[("SessionMemoryCompressor", {"enabled": True, "trigger_context_ratio": 0.7})],
+    )
+    rail.init(agent)
+
+    merged = dict(rail._all_processors)["SessionMemoryCompressor"]
+    assert merged.enabled is True
+    assert merged.trigger_context_ratio == 0.7
+    assert isinstance(merged.memory, SessionMemoryConfig)
+    assert rail._session_memory_mgr is not None
+
+
+@pytest.mark.asyncio
+async def test_init_with_session_memory_compressor_dict_override_disabled(tmp_path: Path):
+    """A dict override without enabled keeps session memory off."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    rail = ContextProcessorRail(
+        preset=True,
+        processors=[("SessionMemoryCompressor", {"trigger_context_ratio": 0.7})],
+    )
+    rail.init(agent)
+
+    merged = dict(rail._all_processors)["SessionMemoryCompressor"]
+    assert merged.enabled is False
+    assert merged.trigger_context_ratio == 0.7
+    assert rail._session_memory_mgr is None
+
+
+@pytest.mark.asyncio
+async def test_init_with_disabled_session_memory_compressor(tmp_path: Path):
+    """A disabled SessionMemoryCompressor stays in the chain but starts no manager."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    compressor_cfg = SessionMemoryCompressorConfig(enabled=False)
+    rail = ContextProcessorRail(
+        preset=True,
+        processors=[("SessionMemoryCompressor", compressor_cfg)],
+    )
+    rail.init(agent)
+
+    keys = [k for k, _ in rail._all_processors]
+    assert "SessionMemoryCompressor" in keys
+    assert rail._session_memory_mgr is None
 
 
 @pytest.mark.asyncio
@@ -946,22 +1000,59 @@ async def test_uninit_shuts_down_session_memory_manager(tmp_path: Path):
     workspace = Workspace(root_path=str(tmp_path))
     agent = _make_agent(sys_operation, workspace)
 
-    session_config = SessionMemoryConfig()
-    rail = ContextProcessorRail(preset=True, session_memory=session_config)
-
+    compressor_cfg = SessionMemoryCompressorConfig(enabled=True)
+    rail = ContextProcessorRail(
+        preset=True,
+        processors=[("SessionMemoryCompressor", compressor_cfg)],
+    )
+    rail.init(agent)
     assert rail._session_memory_mgr is not None
+
     # uninit should not raise
     rail.uninit(agent)
+    assert rail._session_memory_mgr is None
 
 
 @pytest.mark.asyncio
-async def test_session_memory_not_enabled_without_config(tmp_path: Path):
-    """ContextProcessorRail should not enable session memory when config is None."""
-    rail = ContextProcessorRail(preset=True, session_memory=None)
+async def test_session_memory_disabled_by_default(tmp_path: Path):
+    """Default preset includes a disabled SessionMemoryCompressor and no manager."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
 
-    assert rail._session_memory_enabled is False
-    assert rail._session_memory_config is None
+    rail = ContextProcessorRail(preset=True)
+    rail.init(agent)
+
+    merged = dict(rail._all_processors)["SessionMemoryCompressor"]
+    assert merged.enabled is False
     assert rail._session_memory_mgr is None
+
+
+def test_session_memory_compressor_config_rejects_invalid_memory():
+    """memory must be a SessionMemoryConfig; other types fail validation."""
+    with pytest.raises(ValidationError):
+        SessionMemoryCompressorConfig(memory=True)
+
+
+# =============================================================================
+# ContextProcessorRail - legacy session_memory compatibility Tests
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_legacy_session_memory_param_accepted_and_ignored(tmp_path: Path):
+    """The deprecated session_memory constructor arg is accepted but has no effect."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    for legacy_value in (None, {}, SessionMemoryConfig()):
+        rail = ContextProcessorRail(preset=True, session_memory=legacy_value)
+        rail.init(agent)
+
+        merged = dict(rail._all_processors)["SessionMemoryCompressor"]
+        assert merged.enabled is False
+        assert rail._session_memory_mgr is None
 
 
 @pytest.mark.asyncio

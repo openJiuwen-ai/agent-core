@@ -140,7 +140,14 @@ class CompressionExecutor:
         )
 
     @staticmethod
-    def build_messages(request: CompressionRequest) -> list[BaseMessage]:
+    def build_context_messages(request: CompressionRequest) -> list[BaseMessage]:
+        """Build the seed context used by forked-agent executors.
+
+        ``build_messages`` appends the compression prompt as a user message,
+        which is correct for a direct model call.  A ReAct agent receives the
+        prompt through ``agent.invoke`` instead, so agent executors need the
+        system/context prefix without duplicating the prompt.
+        """
         context_messages = list(request.context_messages)
         if request.exclude_recent_messages > 0:
             keep_count = max(len(context_messages) - request.exclude_recent_messages, 0)
@@ -148,6 +155,12 @@ class CompressionExecutor:
         return [
             *list(request.system_messages or []),
             *context_messages,
+        ]
+
+    @staticmethod
+    def build_messages(request: CompressionRequest) -> list[BaseMessage]:
+        return [
+            *CompressionExecutor.build_context_messages(request),
             UserMessage(content=request.prompt),
         ]
 

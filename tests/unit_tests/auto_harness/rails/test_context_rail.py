@@ -47,6 +47,7 @@ def test_auto_harness_context_rail_init_keeps_context_processors():
     processors = dict(agent.react_agent._config.context_processors)
     assert list(processors) == [
         "MessageSummaryOffloader",
+        "SessionMemoryCompressor",
         "ReasoningToolLoopCompactProcessor",
         "DialogueCompressor",
         "CurrentRoundCompressor",
