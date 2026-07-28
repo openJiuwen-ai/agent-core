@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, AsyncIterator
 
 from openjiuwen.agent_teams.external.cli_agent.claude.options import build_claude_options, load_claude_sdk
@@ -159,8 +160,8 @@ def _assistant_chunks(content: Any, start_index: int) -> list[OutputSchema]:
                     type="tool_call",
                     index=index,
                     payload={
-                        "tool_name": block.name,
-                        "tool_args": block.input,
+                        "name": block.name,
+                        "arguments": _json_arguments(block.input),
                         "tool_call_id": block.id,
                     },
                 ),
@@ -176,15 +177,14 @@ def _user_chunks(message: Any, start_index: int) -> list[OutputSchema]:
     content_chunks = _tool_result_content_chunks(message.content, index)
     chunks.extend(content_chunks)
     index += len(content_chunks)
-    if message.tool_use_result is not None:
+    if not content_chunks and message.tool_use_result is not None:
         chunks.append(
             OutputSchema(
                 type="tool_result",
                 index=index,
                 payload={
                     "tool_name": "",
-                    "tool_args": "",
-                    "tool_result": message.tool_use_result,
+                    "result": _normalize_tool_result(message.tool_use_result),
                     "tool_call_id": message.parent_tool_use_id or "",
                 },
             ),
@@ -207,8 +207,7 @@ def _tool_result_content_chunks(content: Any, start_index: int) -> list[OutputSc
                     index=index,
                     payload={
                         "tool_name": "",
-                        "tool_args": "",
-                        "tool_result": block.content,
+                        "result": _normalize_tool_result(block.content),
                         "tool_call_id": block.tool_use_id,
                     },
                 ),
@@ -224,6 +223,28 @@ def _text_chunk(chunk_type: str, content: str, index: int) -> OutputSchema:
         index=index,
         payload={"content": content, "result_type": "answer"},
     )
+
+
+def _json_arguments(value: Any) -> str:
+    """Serialize external tool arguments into the native tool-call shape."""
+    return json.dumps(value if value is not None else {}, ensure_ascii=False)
+
+
+def _normalize_tool_result(value: Any) -> Any:
+    """Convert SDK text content blocks into the native string result shape."""
+    if not isinstance(value, list):
+        return value
+    text_parts: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            return value
+        if item.get("type") != "text":
+            return value
+        text = item.get("text")
+        if not isinstance(text, str):
+            return value
+        text_parts.append(text)
+    return "\n".join(text_parts)
 
 
 __all__ = ["ClaudeSdkRuntime", "build_claude_runtime"]
