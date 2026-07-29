@@ -53,6 +53,7 @@ class TracerWorkflowUtils:
                              parent_node_id='',
                              metadata=TracerWorkflowUtils._get_workflow_metadata(session),
                              inputs=inputs,
+                             session_id=session.session_id(),
                              need_send=True)
 
     @staticmethod
@@ -66,6 +67,7 @@ class TracerWorkflowUtils:
                              invoke_id=executable_id,
                              parent_node_id=parent_id,
                              source_ids=source_ids,
+                             session_id=session.session_id(),
                              metadata=TracerWorkflowUtils._get_component_metadata(session))
 
     @staticmethod

@@ -46,6 +46,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_META_DATA,
     OJ_PARENT_INVOKE_ID,
     OJ_PARENT_NODE_ID,
+    OJ_SESSION_ID,
     OJ_START_TIME,
     OJ_STATUS,
     OJ_STREAM_INPUTS,
@@ -107,7 +108,35 @@ class TestOtelAgentHandler:
         assert OJ_TRACE_ID in s.attributes
         assert OJ_INVOKE_ID in s.attributes
         assert OJ_PARENT_INVOKE_ID in s.attributes
+        # Optional session IDs stay absent for legacy callers.
+        assert OJ_SESSION_ID not in s.attributes
         assert s.status.status_code == trace.StatusCode.OK
+
+    async def test_agent_span_contains_session_id_when_provided(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        TracerHandlerRegistry.register_handler("otel_agent", handler)
+        tracer = Tracer(session_id="session-123")
+        tracer.init()
+        agent_span = tracer.tracer_agent_span_manager.create_agent_span()
+
+        await tracer.trigger(
+            TracerHandlerName.TRACE_AGENT.value,
+            "on_llm_start",
+            span=agent_span,
+            inputs={"prompt": "hello"},
+            instance_info={"class_name": "TestModel"},
+        )
+        await tracer.trigger(
+            TracerHandlerName.TRACE_AGENT.value,
+            "on_llm_end",
+            span=agent_span,
+            outputs={"response": "world"},
+        )
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        assert finished[0].attributes[OJ_SESSION_ID] == "session-123"
 
     async def test_agent_llm_end_closes_span(self):
         config = OtelTracerConfig(redaction_enabled=False)
@@ -378,6 +407,40 @@ class TestOtelAgentHandler:
         assert finished[0].attributes[OJ_AGENT_INVOKE_TYPE] == InvokeType.PLUGIN.value
         assert finished[0].attributes[OJ_AGENT_NAME] == "TestTool"
 
+    async def test_agent_plugin_span_contains_session_id_when_provided(self):
+        """Tool spans carry the session id stamped on the span by SpanManager."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        agent_span = SpanManager("test-trace-id", session_id="tool-session-123").create_agent_span()
+
+        await handler.on_plugin_start(
+            span=agent_span,
+            inputs={"query": "hello"},
+            instance_info={"class_name": "TestTool"},
+        )
+        await handler.on_plugin_end(span=agent_span, outputs="ok")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        assert finished[0].attributes[OJ_SESSION_ID] == "tool-session-123"
+
+    async def test_agent_span_session_id_survives_concurrent_handler_reuse(self):
+        """A globally registered handler is shared across sessions; the span-carried
+        session id must win over the last one injected via set_session_id()."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        handler.set_session_id("other-session")
+
+        agent_span = SpanManager("test-trace-id", session_id="own-session").create_agent_span()
+
+        await handler.on_llm_start(span=agent_span, inputs="hi", instance_info={"class_name": "M"})
+        await handler.on_llm_end(span=agent_span, outputs="ok")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        assert finished[0].attributes[OJ_SESSION_ID] == "own-session"
+
     async def test_agent_fields_use_span_value_when_present(self):
         """When span already has invoke_type/name (built-in handler ran first), use those values."""
         config = OtelTracerConfig(redaction_enabled=False)
@@ -421,6 +484,7 @@ class TestOtelWorkflowHandler:
             metadata={"workflow_id": "wf1", "workflow_name": "MyWorkflow", "workflow_version": "1.0"},
             inputs={"input": "test"},
             parent_node_id="",
+            session_id="workflow-session-123",
         )
 
         # Span not finished yet
@@ -436,6 +500,7 @@ class TestOtelWorkflowHandler:
         assert s.attributes[OJ_WORKFLOW_ID] == "wf1"
         # Base attributes (field-completion)
         assert OJ_TRACE_ID in s.attributes
+        assert s.attributes[OJ_SESSION_ID] == "workflow-session-123"
         assert OJ_INVOKE_ID in s.attributes
         assert OJ_PARENT_NODE_ID in s.attributes
         assert OJ_START_TIME in s.attributes
@@ -444,6 +509,39 @@ class TestOtelWorkflowHandler:
         assert OJ_ELAPSED_TIME in s.attributes
         assert OJ_STATUS in s.attributes
         assert s.status.status_code == trace.StatusCode.OK
+
+    async def test_workflow_span_omits_session_id_when_absent(self):
+        """Callers that never supply a session id keep the pre-existing attribute set."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="wf_root",
+            metadata={"workflow_id": "wf1"},
+            parent_node_id="",
+        )
+        await handler.on_call_done(invoke_id="wf_root")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        assert OJ_SESSION_ID not in finished[0].attributes
+
+    async def test_workflow_span_falls_back_to_injected_session_id(self):
+        """Direct callers that omit the per-event id still get the tracer-injected one."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+        handler.set_session_id("injected-session")
+
+        await handler.on_call_start(
+            invoke_id="wf_root",
+            metadata={"workflow_id": "wf1"},
+            parent_node_id="",
+        )
+        await handler.on_call_done(invoke_id="wf_root")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        assert finished[0].attributes[OJ_SESSION_ID] == "injected-session"
 
     async def test_workflow_call_done_closes_span(self):
         config = OtelTracerConfig(redaction_enabled=False)

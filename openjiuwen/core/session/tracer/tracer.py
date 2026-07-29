@@ -96,9 +96,10 @@ class TracerHandlerRegistry:
 
 
 class Tracer:
-    def __init__(self):
+    def __init__(self, session_id: str | None = None):
         self._trace_id = str(uuid.uuid4())
-        self.tracer_agent_span_manager = SpanManager(self._trace_id)
+        self._session_id = session_id
+        self.tracer_agent_span_manager = SpanManager(self._trace_id, session_id=session_id)
         self.tracer_workflow_span_manager_dict = {}
         self._agent_handlers = {}
         self._workflow_handlers = {}
@@ -119,15 +120,17 @@ class Tracer:
         # Pick up globally registered extension handlers and inject trace_id
         for name, handler in TracerHandlerRegistry.get_agent_handlers().items():
             handler.set_trace_id(self._trace_id)
+            handler.set_session_id(self._session_id)
             self._agent_handlers[name] = handler
         for name, handler in TracerHandlerRegistry.get_workflow_handlers().items():
             handler.set_trace_id(self._trace_id)
+            handler.set_session_id(self._session_id)
             self._workflow_handlers[name] = handler
 
         # Register built-in TraceSchema handlers only when trace writer is available
         if stream_writer_manager is not None and stream_writer_manager.get_trace_writer() is not None:
             agent_handler = TraceAgentHandler(stream_writer_manager, self.tracer_agent_span_manager)
-            parent_wf_span_manager = SpanManager(self._trace_id)
+            parent_wf_span_manager = SpanManager(self._trace_id, session_id=self._session_id)
             wf_handler = TraceWorkflowHandler(stream_writer_manager, parent_wf_span_manager)
             self.tracer_workflow_span_manager_dict[""] = parent_wf_span_manager
             self._agent_handlers[TracerHandlerName.TRACE_AGENT.value] = agent_handler
@@ -136,7 +139,7 @@ class Tracer:
             }
 
     def register_workflow_span_manager(self, parent_node_id: str):
-        span_manager = SpanManager(self._trace_id, parent_node_id=parent_node_id)
+        span_manager = SpanManager(self._trace_id, parent_node_id=parent_node_id, session_id=self._session_id)
         self.tracer_workflow_span_manager_dict[parent_node_id] = span_manager
         # Only create TraceWorkflowHandler when TraceSchema output is enabled
         # (i.e., init() was called with a stream_writer_manager that has a trace writer)
