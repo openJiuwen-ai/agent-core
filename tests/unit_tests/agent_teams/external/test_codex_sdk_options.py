@@ -79,10 +79,7 @@ def test_build_codex_config_uses_sdk_config_and_mcp_overrides():
     assert config.kwargs["client_name"] == "openjiuwen_agent_team"
     assert 'mcp_servers.openjiuwen_team.command="openjiuwen-team-mcp"' in config.kwargs["config_overrides"]
     assert 'mcp_servers.openjiuwen_team.args=["--stdio"]' in config.kwargs["config_overrides"]
-    assert (
-        'mcp_servers.openjiuwen_team.default_tools_approval_mode="approve"'
-        in config.kwargs["config_overrides"]
-    )
+    assert 'mcp_servers.openjiuwen_team.default_tools_approval_mode="approve"' in config.kwargs["config_overrides"]
 
 
 def test_build_codex_config_uses_custom_binary_without_rebuilding_app_server_argv():
@@ -102,11 +99,52 @@ def test_build_codex_config_uses_custom_binary_without_rebuilding_app_server_arg
 
     assert config.kwargs["codex_bin"] == "/opt/codex"
     assert 'mcp_servers.team.command="team-mcp"' in config.kwargs["config_overrides"]
-    assert not any(
-        "default_tools_approval_mode" in item
-        for item in config.kwargs["config_overrides"]
-    )
+    assert not any("default_tools_approval_mode" in item for item in config.kwargs["config_overrides"])
     assert "launch_args_override" not in config.kwargs
+
+
+def test_build_codex_config_routes_native_otel_logs_to_loopback_receiver():
+    from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_config
+
+    config = build_codex_config(
+        cwd="/workspace",
+        env={},
+        inject_mcp=False,
+        mcp_server_name="team",
+        mcp_server_command=(),
+        mcp_default_tools_approval_mode=None,
+        member_name="developer",
+        codex_bin=None,
+        native_otel_log_endpoint="http://127.0.0.1:4318/v1/logs",
+        sdk=_FAKE_SDK,
+    )
+
+    overrides = config.kwargs["config_overrides"]
+    assert 'otel.environment="openjiuwen"' in overrides
+    assert (
+        'otel.exporter={ otlp-http = { endpoint = "http://127.0.0.1:4318/v1/logs", protocol = "binary" } }'
+    ) in overrides
+    assert "otel.log_user_prompt=false" in overrides
+    assert config.kwargs["env"]["OTEL_BLRP_SCHEDULE_DELAY"] == "100"
+
+
+def test_build_codex_config_preserves_explicit_otel_log_export_delay():
+    from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_config
+
+    config = build_codex_config(
+        cwd="/workspace",
+        env={"OTEL_BLRP_SCHEDULE_DELAY": "250"},
+        inject_mcp=False,
+        mcp_server_name="team",
+        mcp_server_command=(),
+        mcp_default_tools_approval_mode=None,
+        member_name="developer",
+        codex_bin=None,
+        native_otel_log_endpoint="http://127.0.0.1:4318/v1/logs",
+        sdk=_FAKE_SDK,
+    )
+
+    assert config.kwargs["env"]["OTEL_BLRP_SCHEDULE_DELAY"] == "250"
 
 
 def test_build_codex_thread_options_leave_approval_and_sandbox_unset():
@@ -119,6 +157,7 @@ def test_build_codex_thread_options_leave_approval_and_sandbox_unset():
 
     assert options == {
         "ephemeral": False,
+        "config": {"model_reasoning_summary": "detailed"},
         "cwd": "/workspace",
         "developer_instructions": "You are the developer.",
     }

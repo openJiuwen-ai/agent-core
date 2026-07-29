@@ -13,6 +13,8 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 
 _MCP_STARTUP_TIMEOUT_S = 120
+_REASONING_SUMMARY = "detailed"
+_OTEL_LOG_EXPORT_DELAY_MS = 100
 
 
 def load_codex_sdk() -> Any:
@@ -39,11 +41,30 @@ def build_codex_config(
     mcp_default_tools_approval_mode: str | None,
     member_name: str,
     codex_bin: str | None,
+    native_otel_log_endpoint: str | None = None,
     sdk: Any | None = None,
 ) -> Any:
     """Build ``CodexConfig`` without importing the optional SDK eagerly."""
     sdk = sdk or load_codex_sdk()
+    process_env = dict(env)
     config_overrides: tuple[str, ...] = ()
+    if native_otel_log_endpoint:
+        # Codex uses the OTel batch log processor. Keep its delivery interval
+        # below Jiuwen's turn-finalization grace period so real transport
+        # events can be paired with the corresponding SDK response.
+        process_env.setdefault(
+            "OTEL_BLRP_SCHEDULE_DELAY",
+            str(_OTEL_LOG_EXPORT_DELAY_MS),
+        )
+        config_overrides = (
+            'otel.environment="openjiuwen"',
+            (
+                "otel.exporter={ otlp-http = { "
+                f"endpoint = {json.dumps(native_otel_log_endpoint)}, "
+                'protocol = "binary" } }'
+            ),
+            "otel.log_user_prompt=false",
+        )
     if inject_mcp:
         if not mcp_server_command:
             raise_error(
@@ -61,7 +82,7 @@ def build_codex_config(
         codex_bin=codex_bin,
         config_overrides=config_overrides,
         cwd=cwd,
-        env=env,
+        env=process_env,
         client_name="openjiuwen_agent_team",
         client_title=f"OpenJiuwen Team Member {member_name}",
         client_version="1",
@@ -75,8 +96,11 @@ def build_codex_thread_options(
     bypass_approvals_and_sandbox: bool = False,
     sdk: Any | None = None,
 ) -> dict[str, Any]:
-    """Build thread options, applying full-access bypass only when requested."""
-    options: dict[str, Any] = {"ephemeral": False}
+    """Build thread options, including an SDK-visible reasoning summary."""
+    options: dict[str, Any] = {
+        "ephemeral": False,
+        "config": {"model_reasoning_summary": _REASONING_SUMMARY},
+    }
     if cwd:
         options["cwd"] = cwd
     if system_prompt:
@@ -110,10 +134,7 @@ def codex_mcp_config_overrides(
         ]
     )
     if default_tools_approval_mode is not None:
-        overrides.append(
-            f"mcp_servers.{key}.default_tools_approval_mode="
-            f"{json.dumps(default_tools_approval_mode)}"
-        )
+        overrides.append(f"mcp_servers.{key}.default_tools_approval_mode={json.dumps(default_tools_approval_mode)}")
     return tuple(overrides)
 
 
