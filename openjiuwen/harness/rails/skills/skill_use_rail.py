@@ -139,7 +139,11 @@ class SkillUseRail(DeepAgentRail):
         self._skills_snapshot_signature = None
 
     async def _prepare_skills(self) -> None:
-        """Refresh skills incrementally from skills_dir and apply filters."""
+        """Refresh skills incrementally from skills_dir and apply filters.
+
+        Directory names are filtered by enabled/disabled lists before any
+        SKILL.md read; ``_filter_skills`` remains a safety net on the result.
+        """
         if not self.enable_cache:
             self._skill_cache.clear()
             self._skill_update_at.clear()
@@ -148,14 +152,36 @@ class SkillUseRail(DeepAgentRail):
         await self._refresh_skills_incrementally()
         self.skills = self._filter_skills(self._collect_skills_in_order())
 
+    def _is_skill_name_allowed(self, name: str) -> bool:
+        """Return whether a skill directory/name should be loaded into the rail."""
+        if self.enabled_skills and name not in self.enabled_skills:
+            return False
+        if name in self.disabled_skills:
+            return False
+        return True
+
     async def _refresh_skills_incrementally(self) -> None:
-        """Refresh skills by loading only new or updated SKILL.md files."""
+        """Refresh skills by loading only new or updated SKILL.md files.
+
+        When ``enabled_skills`` / ``disabled_skills`` are set, skip disallowed
+        directories before reading SKILL.md (filter-then-load).
+        """
         roots = self._normalize_skill_dirs(self.skills_dir)
         if not roots:
             raise ValueError("skills_dir is empty")
 
+        logger.info(
+            "[SkillUseRail] filter_before_load=1 enabled=%s disabled=%s roots=%s",
+            sorted(self.enabled_skills) if self.enabled_skills else [],
+            sorted(self.disabled_skills) if self.disabled_skills else [],
+            [str(r) for r in roots],
+        )
+
         discovered_keys: Set[str] = set()
         ordered_keys: List[str] = []
+        scanned_dirs = 0
+        skipped_by_filter = 0
+        loaded_or_cached = 0
 
         for root in roots:
             if not root.exists():
@@ -177,6 +203,11 @@ class SkillUseRail(DeepAgentRail):
                 if not item.is_dir():
                     continue
 
+                scanned_dirs += 1
+                if not self._is_skill_name_allowed(item.name):
+                    skipped_by_filter += 1
+                    continue
+
                 skill_md_path = item / "SKILL.md"
                 if not skill_md_path.exists():
                     continue
@@ -195,12 +226,21 @@ class SkillUseRail(DeepAgentRail):
                     self._skill_cache[key] = skill
                     self._skill_update_at[key] = update_at
 
+                loaded_or_cached += 1
+
         stale_keys = [key for key in self._skill_cache.keys() if key not in discovered_keys]
         for key in stale_keys:
             self._skill_cache.pop(key, None)
             self._skill_update_at.pop(key, None)
 
         self._skill_order = [key for key in ordered_keys if key in self._skill_cache]
+
+        logger.info(
+            "[SkillUseRail] filter_before_load done scanned=%s skipped=%s kept=%s",
+            scanned_dirs,
+            skipped_by_filter,
+            loaded_or_cached,
+        )
 
     async def _load_skill(self, skill_dir: Path, update_at: float) -> Skill:
         """Load one skill from a skill directory."""
@@ -251,16 +291,7 @@ class SkillUseRail(DeepAgentRail):
 
     def _filter_skills(self, skills: List[Skill]) -> List[Skill]:
         """Filter skills by enabled_skills and disabled_skills."""
-        filtered: List[Skill] = []
-
-        for skill in skills:
-            if self.enabled_skills and skill.name not in self.enabled_skills:
-                continue
-            if skill.name in self.disabled_skills:
-                continue
-            filtered.append(skill)
-
-        return filtered
+        return [skill for skill in skills if self._is_skill_name_allowed(skill.name)]
 
     def init(self, agent):
         """Register this rail's tools through the agent ability manager.
