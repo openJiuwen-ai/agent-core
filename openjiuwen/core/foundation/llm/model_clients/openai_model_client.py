@@ -761,9 +761,11 @@ class OpenAIModelClient(BaseModelClient):
             AssistantMessage: Parsed assistant message
             
         Note:
-            Non-streaming finish_reason can only be "stop" or "tool_calls":
-            - stop: Model generation completed without tool calls
-            - tool_calls: Model generation completed with tool calls
+            Non-streaming finish_reason is normalized as follows:
+            - If the provider returns a value, it is preserved as-is (e.g. "stop",
+              "tool_calls", "length", "content_filter", etc.).
+            - If the provider returns None or an empty string, it defaults to
+              "tool_calls" when tool_calls are present, otherwise "stop".
         """
         choice = response.choices[0]
         message = choice.message
@@ -854,12 +856,14 @@ class OpenAIModelClient(BaseModelClient):
         prompt_token_ids = getattr(response, 'prompt_token_ids', None) or None
         completion_token_ids = getattr(choice, 'token_ids', None) or None
         logprobs = self._normalize_logprobs(getattr(choice, 'logprobs', None))
-
+        finish_reason = getattr(choice, 'finish_reason', None) or None
+        if not finish_reason:
+            finish_reason = "tool_calls" if tool_calls else "stop"
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
-            finish_reason="tool_calls" if tool_calls else "stop",
+            finish_reason=finish_reason,
             reasoning_content=reasoning_content,
             parser_content=parser_content,
             prompt_token_ids=prompt_token_ids,
