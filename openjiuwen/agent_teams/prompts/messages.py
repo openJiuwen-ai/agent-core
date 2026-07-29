@@ -37,6 +37,11 @@ _LABELS: dict[str, dict[str, str]] = {
         "identity_heading": "# 成员身份",
         "member_name_line": "你的 member_name",
         "display_name_line": "你的 display_name",
+        "member_workspace_line": "你的私有工作区",
+        "member_workspace_purpose": (
+            "存放你自己的产物、记忆与技能视图；团队共享文件走团队共享工作空间，不要放这里，"
+            "也不要把新 skill 创建到这里"
+        ),
         "private_prompt_heading": "## 私有工作约定",
         "info_heading": "# 团队信息",
         "team_name_label": "team_name（团队唯一标识）",
@@ -58,6 +63,11 @@ _LABELS: dict[str, dict[str, str]] = {
         "identity_heading": "# Member Identity",
         "member_name_line": "Your member_name",
         "display_name_line": "Your display_name",
+        "member_workspace_line": "Your private workspace",
+        "member_workspace_purpose": (
+            "Holds your own artifacts, memory and skills view. Team-shared files belong in the "
+            "team shared workspace, not here, and new skills must not be created here either"
+        ),
         "private_prompt_heading": "## Private Working Agreement",
         "info_heading": "# Team Info",
         "team_name_label": "team_name (unique identifier)",
@@ -171,10 +181,18 @@ def format_member_line(
     return line
 
 
+def _parenthesized(text: str, language: str) -> str:
+    """Wrap a trailing clause in the brackets that language actually uses."""
+    if language == "cn":
+        return f"（{text}）"
+    return f" ({text})"
+
+
 def build_identity_text(
     *,
     member_name: str | None,
     display_name: str | None = None,
+    member_workspace_path: str | None = None,
     member_prompt: str | None = None,
     language: str = "cn",
 ) -> str | None:
@@ -189,9 +207,15 @@ def build_identity_text(
     names: without its own label a member cannot tell which roster row is
     itself, nor refer to itself the way the rest of the team does.
 
+    ``member_workspace_path`` is the member's own artifact directory. It is
+    per-member and constant, exactly like the names, so it belongs in the same
+    body rather than in a channel of its own.
+
     Args:
         member_name: Semantic member identifier.
         display_name: Human-readable label; blank drops that line.
+        member_workspace_path: The member's private workspace; blank drops
+            that line.
         member_prompt: The member's private working agreement; blank (a member
             spawned without one) drops that subsection.
         language: Body language ('cn' or 'en').
@@ -201,7 +225,8 @@ def build_identity_text(
     """
     private_prompt = member_prompt.strip() if member_prompt else ""
     label = display_name.strip() if display_name else ""
-    if not member_name and not label and not private_prompt:
+    workspace = member_workspace_path.strip() if member_workspace_path else ""
+    if not member_name and not label and not workspace and not private_prompt:
         return None
     labels = labels_for(language)
     lines = [labels["identity_heading"], ""]
@@ -209,6 +234,8 @@ def build_identity_text(
         lines.append(f"{labels['member_name_line']}: {member_name}")
     if label:
         lines.append(f"{labels['display_name_line']}: {label}")
+    if workspace:
+        lines.append(f"{labels['member_workspace_line']}: `{workspace}`{_parenthesized(labels['member_workspace_purpose'], language)}")
     if private_prompt:
         lines.extend(["", labels["private_prompt_heading"], "", private_prompt])
     return "\n".join(lines) + "\n"

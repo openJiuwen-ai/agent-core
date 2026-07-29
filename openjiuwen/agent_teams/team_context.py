@@ -92,6 +92,7 @@ class TeamContextTracker:
         member_name: This member's semantic identifier.
         role: This member's team role; gates the ``[human]`` roster tag.
         display_name: This member's human-readable label.
+        member_workspace_path: This member's own artifact directory.
         member_prompt: This member's private working agreement.
         team_workspace_mount: Agent-relative mount of the shared workspace.
         team_workspace_path: Absolute path of the shared workspace.
@@ -107,6 +108,7 @@ class TeamContextTracker:
         member_name: str | None,
         role: TeamRole,
         display_name: str = "",
+        member_workspace_path: str | None = None,
         member_prompt: str = "",
         team_workspace_mount: str | None = None,
         team_workspace_path: str | None = None,
@@ -117,6 +119,7 @@ class TeamContextTracker:
         self._member_name = member_name
         self._role = role
         self._display_name = display_name
+        self._member_workspace_path = member_workspace_path
         self._member_prompt = member_prompt
         self._team_workspace_mount = team_workspace_mount
         self._team_workspace_path = team_workspace_path
@@ -222,6 +225,7 @@ class TeamContextTracker:
         return build_identity_text(
             member_name=self._member_name,
             display_name=display_name,
+            member_workspace_path=self._member_workspace_path,
             member_prompt=self._member_prompt,
             language=self._language,
         )

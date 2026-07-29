@@ -4,7 +4,7 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-07-29 |
-| 范围 | **core**：`single_agent/rail/base.py` 新增 `AgentCallbackEvent.ON_USER_MESSAGE` + `UserMessageInputs` + `AgentRail.on_user_message`（`rail/__init__.py` 同步导出）、`single_agent/agents/react_agent.py` 三处输入准入收敛为 `_admit_user_message` 并触发该事件；新增 `schema/team.py` 的 `TeamRuntimeContext.display_name`（leader 经 `blueprint`、teammate 经 `spawn_manager` / `payload` 填充）；新增 `team_context.py`（`TeamContextTracker` + session 基线）、`prompts/messages.py`（三种消息正文 + `diff_roster`）；`prompts/sections.py`（删 `build_team_info_section` / `build_team_members_section` / `build_team_attachment_notice_section` + `TeamSectionName.INFO`/`MEMBERS`/`ATTACHMENT_NOTICE` + `include_attachment_notice` 参数，`build_team_identity_section` 改为包装 `build_identity_text`）；`prompts/__init__.py`；`inbound_render.py`（`render_team_context`）；`i18n.py`（`team_context.roster_announcement_note` cn/en）；`rails/team_policy_rail.py`（attachment 通道整体删除，改写历史落位 + `prepend_to_content`）；`external/runtime.py`（`CliRuntimeBase` 统一 member session + `send` 主钩子 + `announce_team_context` 补偿钩子 + `_send_raw` 下沉）；`external/cli_agent/{spawn,claude/runtime,codex/runtime}.py`；`spawn/external_cli_spawn.py`；`agent/coordination/handlers/member.py`（删三份重复实现）；模板 `prompts/{cn,en}/inbound_tags.md`、`teammate_policy_external.md`、`tools/locales/descs/{cn,en}/list_members.md`；删 `prompts/{cn,en}/attachment_notice.md` |
+| 范围 | **core**：`single_agent/rail/base.py` 新增 `AgentCallbackEvent.ON_USER_MESSAGE` + `UserMessageInputs` + `AgentRail.on_user_message`（`rail/__init__.py` 同步导出）、`single_agent/agents/react_agent.py` 三处输入准入收敛为 `_admit_user_message` 并触发该事件；**harness**：`deep_agent.py` 把该事件加入 `_BRIDGE_EVENTS`（否则回调挂到外层 agent、永不触发）；新增 `schema/team.py` 的 `TeamRuntimeContext.display_name`（leader 经 `blueprint`、teammate 经 `spawn_manager` / `payload` 填充）；新增 `team_context.py`（`TeamContextTracker` + session 基线）、`prompts/messages.py`（三种消息正文 + `diff_roster`）；`prompts/sections.py`（删 `build_team_info_section` / `build_team_members_section` / `build_team_attachment_notice_section` + `TeamSectionName.INFO`/`MEMBERS`/`ATTACHMENT_NOTICE` + `include_attachment_notice` 参数，`build_team_identity_section` 改为包装 `build_identity_text`）；`prompts/__init__.py`；`inbound_render.py`（`render_team_context`）；`i18n.py`（`team_context.roster_announcement_note` cn/en）；`rails/team_policy_rail.py`（attachment 通道整体删除，改写历史落位 + `prepend_to_content`）；`external/runtime.py`（`CliRuntimeBase` 统一 member session + `send` 主钩子 + `announce_team_context` 补偿钩子 + `_send_raw` 下沉）；`external/cli_agent/{spawn,claude/runtime,codex/runtime}.py`；`spawn/external_cli_spawn.py`；`agent/coordination/handlers/member.py`（删三份重复实现）；模板 `prompts/{cn,en}/inbound_tags.md`、`teammate_policy_external.md`、`tools/locales/descs/{cn,en}/list_members.md`；删 `prompts/{cn,en}/attachment_notice.md` |
 | 测试基线 | `tests/unit_tests/{agent_teams,core/single_agent,harness}/` 4650 passed / 31 skipped |
 | Refs | #751 |
 
@@ -158,6 +158,20 @@ query / follow-up / steer 进来的消息），不是历史里任意一条 user 
 
 `_seen_message_count` / `_placement_target` / `_round_start_index` 全部删除。
 
+**落地时踩的坑：新事件必须挂进 `DeepAgent` 的路由表**。DeepAgent 有两个 callback-manager
+命名空间（自己的、内层 ReActAgent 的），`_register_rail_selective` 按事件把 rail 的每个回调
+分派到其中之一。`ON_USER_MESSAGE` 由**内层** agent 触发，却没进 `_BRIDGE_EVENTS`，于是落进
+"Unknown rail event → 注册到外层 DeepAgent + 打一条 warning" 的兜底——回调挂在一个永远不会
+触发它的 manager 上，`on_user_message` **完全不执行**，团队上下文全靠 `before_model_call`
+兜底追加成一条独立消息。功能静默失效，日志里只有一行 warning。
+
+补的回归**针对这一类而不是这一个**：断言
+`_BRIDGE_EVENTS | _OUTER_ONLY_EVENTS | _DEEP_EVENTS` **覆盖全部** `AgentCallbackEvent`。那条
+兜底分支正是让失败变静默的原因，有了完整性断言，以后新增事件不给路由决策就直接挂测试。
+
+这个坑能溜过去还有测试方法的原因：当时的单测直接调 `rail.on_user_message(ctx)`，验证了
+"rail 会正确改写消息"，没验证"rail 会被调用"——**绕过注册测组件，等于没测接线**。
+
 <details>
 <summary>被替换掉的三版中间方案（记下来以免后人重走）</summary>
 
@@ -239,6 +253,30 @@ agent_mode 等 rail 仍在用 attachment 通道，那段说明不归团队管。
 attachment 给出"，`tools/locales/descs/*/list_members.md` 的"名册在
 `<prompt-attachment type="team_members">` 里实时提供"。
 
+### D6：成员私有工作区并进 identity，jiuwenswarm 那条 attachment 撤掉
+
+`TeamRuntimeContext` 的 workspace root（`agent_configurator` 里的 `workspace_root_path`，
+即 `ensure_team_member_workspace_link(team, member)`）作为一行进 identity 正文：
+
+```
+你的私有工作区: `/…/workspaces/<member>_workspace`（存放你自己的产物、记忆与技能视图；
+团队共享文件走团队共享工作空间，不要放这里，也不要把新 skill 创建到这里）
+```
+
+判据和 `member_name` / `display_name` 完全一致——**per-member、spawn 时固定、此后恒定**，
+所以它属于同一段正文，而不是另开一条通道。括号里的用途说明一并带上：只给路径，模型分不清
+它和团队共享工作空间的分工。
+
+**jiuwenswarm 的 `TeamSkillStoragePolicyRail` 不再管这件事**（撤销 [[F_68]] D4）：删掉
+`MEMBER_WORKSPACE_SECTION_NAME` / `_build_member_workspace_section` /
+`_sync_member_workspace_attachment` / `attachment_manager` / `ATTACHMENT_SOURCE`，构造参数去掉
+`member_workspace_root` 与 `language`（后者只服务于那条 attachment），provider 的
+`TeamSkillStoragePolicyInput` 同步瘦身。它的静态 section 只留团队级路径——"成员 skill 目录
+不作为新 skill 的创建目标"这条规则本来就是 roster-agnostic 的，留在系统提示词里即可；具体是
+哪个目录，成员从自己的 identity 里已经知道。
+
+这样"成员工作区"这件事只有一处产出，不再一个仓库讲一半。
+
 ## 拒绝的方案
 
 - **给 `ContextMessageBuffer` 加 `add_front` / 用 `set_messages` 重排历史**（把恒定信息拍在
@@ -280,7 +318,14 @@ attachment 给出"，`tools/locales/descs/*/list_members.md` 的"名册在
   一条独立消息且既有历史逐字不变）。
 - 新增 `tests/unit_tests/core/single_agent/rail/test_on_user_message.py`（6 passed）：事件→方法
   映射、只有 override 的 rail 才注册回调、rail 就地改写 `message.content`、三种 `source`
-  取值。
+  取值。**注意这一组全部绕过注册**——它只证明 rail 拿到消息会做对的事，不证明 rail 会被调用，
+  D1c 那个路由 bug 就是从这个缝里溜过去的。
+- 新增 `tests/unit_tests/harness/test_deep_agent_rail_event_routing.py`（3 passed）：
+  `_BRIDGE_EVENTS | _OUTER_ONLY_EVENTS | _DEEP_EVENTS` 覆盖全部 `AgentCallbackEvent`、三个集合
+  互不相交、内层触发的事件（含 `ON_USER_MESSAGE`）确实在 bridge 集合里。撤掉 D1c 的路由修复
+  即挂两条。
+- **端到端尚未复验**：以上都是单测。"团队上下文落在本轮第一条 user message 内部"这条要跑真实
+  团队看上下文才算数——D1c 的路由 bug 正是"组件全绿、接线断掉"的形态。
 - 新增 `prompts/test_team_messages.py`（24 passed）：三种正文的 cn/en、空值返回 `None`、
   workspace mount 与 path-only 两种形态、`diff_roster` 的 joined / left / changed / 空 diff /
   只改 status 不算变更、`mark_humans` 门控、`render_team_context` 转义。
@@ -304,8 +349,8 @@ attachment 给出"，`tools/locales/descs/*/list_members.md` 的"名册在
   （`harness/prompts/sections/workspace.py`，P:70）渲染，本来就在**系统提示词**里、不在
   attachment 里，不存在"每轮重发"的浪费。它确实是 per-member 内容、违反 S_09 不变量 6a
   （每个成员各占一份前缀），但要修得动通用 workspace section、影响所有 DeepAgent。
-- **jiuwenswarm 的 `team_skill_storage_member_workspace` attachment**（[[F_68]] D4）：另一个
-  仓库里的成员工作区路径 attachment，恒定内容却逐轮重发，同样该并进本机制。跨仓库 follow-up。
+- ~~**jiuwenswarm 的 `team_skill_storage_member_workspace` attachment**（[[F_68]] D4）~~
+  已在本次一并收掉，见 D6。
 - **共享 card 会让 teammate 共用一个 `agent_id`**：若用户在 `spec.agents["teammate"]` 上设了
   `card`，所有 teammate 塌到同一个 `agent_id`、共用一份 checkpoint。这是既有问题（对话历史
   本身就会串），本次基线只是同样受影响，不在此修。

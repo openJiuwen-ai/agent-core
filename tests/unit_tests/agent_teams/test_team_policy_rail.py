@@ -676,6 +676,7 @@ class TestTeamPolicyRailTeamContext:
             role=TeamRole.TEAMMATE,
             member_name="dev1",
             display_name="spec-time default",
+            member_workspace_path="/ws/dev1",
             member_prompt="报数要快",
             language="cn",
             team_backend=backend,
@@ -688,6 +689,7 @@ class TestTeamPolicyRailTeamContext:
         assert "你的 member_name: dev1" in message.content
         assert "你的 display_name: 成员一" in message.content
         assert "spec-time default" not in message.content
+        assert "你的私有工作区: `/ws/dev1`" in message.content
         assert "## 私有工作约定" in message.content
         assert "报数要快" in message.content
 

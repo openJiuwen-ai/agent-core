@@ -51,6 +51,38 @@ def test_identity_carries_both_names_and_private_agreement():
 
 
 @pytest.mark.level0
+def test_identity_carries_the_member_workspace():
+    """Per-member and constant, exactly like the names — same body, not a channel."""
+    body = build_identity_text(member_name="dev1", member_workspace_path="/ws/dev1", language="cn")
+    assert body is not None
+    assert "你的私有工作区: `/ws/dev1`" in body
+    # It says what the directory is for, so the model does not misuse it.
+    assert "团队共享工作空间" in body
+    assert "skill" in body
+
+
+@pytest.mark.level0
+def test_identity_workspace_english():
+    body = build_identity_text(member_name="dev1", member_workspace_path="/ws/dev1", language="en")
+    assert body is not None
+    assert "Your private workspace: `/ws/dev1`" in body
+
+
+@pytest.mark.level0
+def test_identity_without_workspace_drops_that_line():
+    body = build_identity_text(member_name="dev1", language="cn")
+    assert body is not None
+    assert "私有工作区" not in body
+
+
+@pytest.mark.level0
+def test_identity_with_only_a_workspace_still_renders():
+    body = build_identity_text(member_name=None, member_workspace_path="/ws/dev1", language="cn")
+    assert body is not None
+    assert "你的私有工作区: `/ws/dev1`" in body
+
+
+@pytest.mark.level0
 def test_identity_without_display_name_drops_that_line():
     body = build_identity_text(member_name="dev1", language="cn")
     assert body is not None

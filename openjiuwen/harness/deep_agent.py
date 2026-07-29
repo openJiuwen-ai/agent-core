@@ -145,6 +145,9 @@ _BRIDGE_EVENTS = frozenset(
         # rail registered via DeepAgent.register_rail must bridge to the inner
         # agent (same callback-manager namespace) rather than the outer one.
         AgentCallbackEvent.AFTER_REACT_ITERATION,
+        # Same reason: the inner agent is what admits consumed inputs into the
+        # conversation, so it is what fires this.
+        AgentCallbackEvent.ON_USER_MESSAGE,
     }
 )
 

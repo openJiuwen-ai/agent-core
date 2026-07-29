@@ -39,7 +39,7 @@
 5. **section name 全局唯一**：`SystemPromptBuilder._sections` 是 `dict[str, PromptSection]`，同名 add 直接覆盖。团队 section 与 harness 内置 section（safety / capabilities / runtime / ...）必须不冲突。
 6. **section priority 单调约定**：进 builder 的团队 section 占 11–18（含 HITT 契约 / bridge 自契约 P:12、inbound 说明 section P:18）；harness 内置 section 排在 0–10、20–60、70–99，priority 升序拼接。相同 priority 顺序由插入序决定。**团队侧不再有任何 prompt attachment**（[[F_70]]）——`team_identity`（P:10）只在外部 CLI 的静态 prompt 里出现，`team_info` / `team_members` 已不是 section。
 
-6a. **系统提示词前缀里不放 per-member 内容**：进 builder 的团队 section 必须对同一 team、同一角色的所有成员逐字一致，否则每个成员各自占一份 prompt 前缀 KV cache，成员一多缓存命中率就塌。**当前唯一的 per-member 内容**是成员自己的 `member_name` + 私有工作约定（`prompts/messages.build_identity_text`）；进程内成员经**对话历史**收到它（见不变量 13），只有外部 CLI 成员把它内联成静态 `team_identity` section（P:10，`include_member_specific=True`）——那份 prompt 是独立进程的一次性快照，不与兄弟成员共享前缀。例外仅两处，都因角色本身单例而不构成放大：`hitt_human_agent` / `bridge_agent` 模板的 `{{self_line}}`。新增 section 前先问它是否 per-member——是就走历史消息，不要塞进 builder。
+6a. **系统提示词前缀里不放 per-member 内容**：进 builder 的团队 section 必须对同一 team、同一角色的所有成员逐字一致，否则每个成员各自占一份 prompt 前缀 KV cache，成员一多缓存命中率就塌。**当前唯一的 per-member 内容**是成员自己的身份（`member_name` / `display_name` / 私有工作区路径 / 私有工作约定，见 `prompts/messages.build_identity_text`）；进程内成员经**对话历史**收到它（见不变量 13），只有外部 CLI 成员把它内联成静态 `team_identity` section（P:10，`include_member_specific=True`）——那份 prompt 是独立进程的一次性快照，不与兄弟成员共享前缀。例外仅两处，都因角色本身单例而不构成放大：`hitt_human_agent` / `bridge_agent` 模板的 `{{self_line}}`。新增 section 前先问它是否 per-member——是就走历史消息，不要塞进 builder。
 
 7. **role-specific section 在不应出现的角色下返回 `None`**：`build_team_workflow_section` / `build_team_lifecycle_section` 在 `role != LEADER` 时返回 `None`；`build_team_hitt_section` 在 `hitt_enabled` 为 False（或角色无 HITT 版）时返回 `None`；`build_team_bridge_section` 在 `role != BRIDGE_AGENT` 时返回 `None`。**禁止用空字符串占位**——返回 `None` 等价于不挂 section。
    - **HITT 是单一静态契约（[[F_52]]）**：`build_team_hitt_section` 出 roster-agnostic 的规则段，进 system prompt builder（P:12，静态、KV 稳定），gate 用 `hitt_enabled`（capability flag，HITT 一开即 present，无需先 spawn 人类）。人类成员不再有独立名册段——他们在名册消息里标 `[human]`（撤销 [[F_50]] 的 `team_hitt_roster`）。
@@ -64,7 +64,7 @@
       - **兜底 `before_model_call`**：只**追加**一条独立 user message，不定位。state 也可能在一轮的 tool-loop 中途出现（leader 的 `build_team` 在中途建队、写自己的 member 行和名册），此时没有输入可搭车，而下一条输入可能很久才来。尾部是唯一不需要定位、也不受"压缩重写了它前面的历史"影响的位置。
       - 两条通道共用同一个 tracker，谁先拿到 pending 就谁投递；**已在历史里的消息永远不改写**——改一条旧消息会让它之后的 KV cache 全部作废。
     - **同一次投递里产生的 `<team-context>` 正文合并成一个标签**：身份与团队元数据都是"关于团队的既成事实"，各包一个标签是把同一类东西说两遍。分别在不同调用上产生时自然是两条消息，不合并。
-    - **身份带 `member_name` + `display_name` + 私有工作约定，且 `display_name` 读自己那行 member 行**：名册每行都以两个名字标识成员，少了 `display_name` 成员认不出哪一行是自己；而构造期的值只是 spec 默认（leader 的真实标签由 `build_team(leader_display_name=...)` 写入 DB），所以身份通道**等自己那行存在**才发——teammate 在 spawn 时就有行，leader 则在建队后那次调用上拿到。公开 `desc` 仍然不进自己的身份（见不变量 18a）。
+    - **身份 = `member_name` + `display_name` + 私有工作区路径 + 私有工作约定**：判据是"per-member、spawn 时固定、此后恒定"，凡满足的都进这一段正文，不另开通道。`display_name` 必须**读自己那行 member 行**——名册每行都以两个名字标识成员，少了它成员认不出哪一行是自己，而构造期的值只是 spec 默认（leader 的真实标签由 `build_team(leader_display_name=...)` 写入 DB），所以身份通道**等自己那行存在**才发：teammate 在 spawn 时就有行，leader 则在建队后那次调用上拿到。私有工作区路径带一句用途说明（区分于团队共享工作空间、不作为新 skill 的创建目标）——只给路径模型分不清分工。公开 `desc` 仍然不进自己的身份（见不变量 18a）。
     - **投递进度基线必须持久化在成员自己的 child `AgentSession`**（state key `team_prompt_context`，字段 `identity_emitted` / `team_info_mtime` / `roster_mtime` / `roster`）。`TeamPolicyRail` **每一轮都会被重建**（round 结束 native 进 TERMINATED，下次 start 重新 `RailSpec.build`），基线留内存等于每轮重发；pause/resume、stop→start 只是更严重的版本。该 state 与成员的对话历史存在同一个 agent-session 桶里，由同一次 `AgentStorage.save` 落盘，故两者不会漂移。
     - **先投递、后 `commit`**：`pending_text()` 只渲染不推进，`commit()` 由调用方在投递成功后调用；反过来写会在投递失败时永久丢掉一条公告。tracker **不持锁**——一个成员的 rail 钩子、CLI `send` 与事件补偿都在同一条协程上。
     - **名册消息必带 `<team-note kind="announcement-only">`**（文案 `i18n.team_context.roster_announcement_note`）：否则成员看到"有人加入"就会礼节性寒暄，白烧一轮 LLM + 一轮邮箱投递并连锁触发对方。
@@ -133,12 +133,14 @@ class TeamSectionName:
     EXTRA = "team_extra"      # P:17
     INBOUND_TAGS = "team_inbound_tags"  # P:18
 
-def build_team_identity_section(
+def build_team_identity_section(   # external CLI only; a thin PromptSection wrapper
     *,
     member_name: str | None,
+    display_name: str | None = None,
+    member_workspace_path: str | None = None,
     member_prompt: str | None = None,   # rendered as a '## private working agreement' subsection
     language: str = "cn",
-) -> PromptSection | None: ...    # None when neither is set
+) -> PromptSection | None: ...    # None when no field is set
 
 def build_team_role_section(
     *,
@@ -249,7 +251,8 @@ def format_member_line(
     prefix: str | None = None,   # '[joined]' / '[left]' / '[updated]' marker
 ) -> str: ...
 
-def build_identity_text(*, member_name, member_prompt=None, language="cn") -> str | None
+def build_identity_text(*, member_name, display_name=None, member_workspace_path=None,
+                        member_prompt=None, language="cn") -> str | None
 def build_team_info_text(*, team_info, team_workspace_mount=None,
                          team_workspace_path=None, language="cn") -> str | None
 def build_roster_snapshot_text(*, members, mark_humans=False, language="cn") -> str | None
@@ -276,6 +279,8 @@ class TeamContextTracker:
         team_backend: TeamBackend | None,
         member_name: str | None,
         role: TeamRole,
+        display_name: str = "",              # fallback only; the DB row wins
+        member_workspace_path: str | None = None,
         member_prompt: str = "",
         team_workspace_mount: str | None = None,
         team_workspace_path: str | None = None,

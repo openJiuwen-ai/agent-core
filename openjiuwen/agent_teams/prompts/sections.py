@@ -133,6 +133,7 @@ def build_team_identity_section(
     *,
     member_name: str | None,
     display_name: str | None = None,
+    member_workspace_path: str | None = None,
     member_prompt: str | None = None,
     language: str = "cn",
 ) -> Optional[PromptSection]:
@@ -154,6 +155,7 @@ def build_team_identity_section(
     Args:
         member_name: Semantic member identifier.
         display_name: Human-readable member label.
+        member_workspace_path: The member's own artifact directory.
         member_prompt: The member's private working agreement; blank (a member
             spawned without one) drops that subsection.
         language: Prompt language ('cn' or 'en').
@@ -165,6 +167,7 @@ def build_team_identity_section(
     body = build_identity_text(
         member_name=member_name,
         display_name=display_name,
+        member_workspace_path=member_workspace_path,
         member_prompt=member_prompt,
         language=language,
     )
@@ -523,6 +526,7 @@ def build_team_static_sections(
     role: TeamRole,
     member_name: str | None,
     display_name: str = "",
+    member_workspace_path: str | None = None,
     member_prompt: str = "",
     lifecycle: str = "temporary",
     teammate_mode: str = "build_mode",
@@ -583,6 +587,7 @@ def build_team_static_sections(
         identity_section = build_team_identity_section(
             member_name=member_name,
             display_name=display_name,
+            member_workspace_path=member_workspace_path,
             member_prompt=member_prompt,
             language=language,
         )
@@ -640,6 +645,7 @@ def build_team_member_system_prompt(
     role: TeamRole,
     member_name: str | None,
     display_name: str = "",
+    member_workspace_path: str | None = None,
     member_prompt: str = "",
     lifecycle: str = "temporary",
     teammate_mode: str = "build_mode",
@@ -673,6 +679,7 @@ def build_team_member_system_prompt(
         role=role,
         member_name=member_name,
         display_name=display_name,
+        member_workspace_path=member_workspace_path,
         member_prompt=member_prompt,
         lifecycle=lifecycle,
         teammate_mode=teammate_mode,
