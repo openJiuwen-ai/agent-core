@@ -2252,6 +2252,36 @@ class SkillEvolutionRail(EvolutionRail):
             logger.warning("[SkillEvolutionRail] archived body is empty for %s: %s", skill_name, body_archive.name)
             return False
 
+        from openjiuwen.agent_evolving.checkpointing.evolution_store import (
+            _EVOLUTION_INDEX_PATTERN,
+            _debug_evolution_log,
+        )
+
+        skill_dir = store._resolve_skill_dir(skill_name)
+        current_body = ""
+        if skill_dir is not None:
+            current_md = store._find_skill_md(skill_dir)
+            if current_md is not None and current_md.is_file():
+                current_body = current_md.read_text(encoding="utf-8")
+
+        # #region agent log
+        _debug_evolution_log(
+            "skill_evolution_rail.py:rollback_skill",
+            "rollback_start",
+            {
+                "skill_name": skill_name,
+                "body_archive": body_archive.name,
+                "evo_archive": evo_archive.name if evo_archive is not None else None,
+                "archived_body_has_index": bool(_EVOLUTION_INDEX_PATTERN.search(old_body)),
+                "current_body_has_index": bool(_EVOLUTION_INDEX_PATTERN.search(current_body)),
+                "archived_body_tail": old_body[-120:],
+            },
+            "H1",
+        )
+        # #endregion
+
+        old_body = store.strip_evolution_index_block(old_body)
+
         await store.archive_current_state(skill_name)
         await store.write_skill_content(skill_name, old_body)
 
@@ -2269,6 +2299,26 @@ class SkillEvolutionRail(EvolutionRail):
                 skill_name,
                 body_archive.name,
             )
+
+        # #region agent log
+        final_body = ""
+        if skill_dir is not None:
+            final_md = store._find_skill_md(skill_dir)
+            if final_md is not None and final_md.is_file():
+                final_body = final_md.read_text(encoding="utf-8")
+        evo_log = await store.load_full_evolution_log(skill_name)
+        _debug_evolution_log(
+            "skill_evolution_rail.py:rollback_skill",
+            "rollback_end",
+            {
+                "skill_name": skill_name,
+                "final_body_has_index": bool(_EVOLUTION_INDEX_PATTERN.search(final_body)),
+                "evo_entry_count": len(evo_log.entries),
+                "final_body_tail": final_body[-200:],
+            },
+            "H5",
+        )
+        # #endregion
 
         logger.info("[SkillEvolutionRail] rollback completed for %s -> %s", skill_name, body_archive.name)
         return True
