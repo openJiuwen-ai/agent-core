@@ -550,7 +550,7 @@ def test_resolve_tracked_skill_name(tool_name, tool_args, tool_msg, expected):
 
 def test_session_used_skills_remember_and_get(tmp_path):
     rail = _make_rail(tmp_path)
-    session = SimpleNamespace()
+    session = SimpleNamespace(get_session_id=lambda: "sess-a")
 
     assert rail._get_session_used_skills(session) == set()
     rail._remember_session_used_skill(session, "weather")
@@ -561,6 +561,17 @@ def test_session_used_skills_remember_and_get(tmp_path):
 
     assert rail._get_session_used_skills(session) == {"weather", "travel-planner"}
     assert rail._get_session_used_skills(None) == set()
+
+
+def test_session_used_skills_shared_across_recreated_session_objects(tmp_path):
+    """Same session_id must keep used-skills when Session object is recreated."""
+    rail = _make_rail(tmp_path)
+    turn1 = SimpleNamespace(get_session_id=lambda: "officeclaw_abc")
+    turn2 = SimpleNamespace(get_session_id=lambda: "officeclaw_abc")
+
+    rail._remember_session_used_skill(turn1, "official-document-skill")
+    assert rail._get_session_used_skills(turn2) == {"official-document-skill"}
+    assert turn1 is not turn2
 
 
 # =============================================================================
@@ -590,7 +601,7 @@ async def test_after_tool_call_injects_body_experience(tmp_path):
 async def test_after_tool_call_remembers_skill_on_session(tmp_path):
     rail = _make_rail(tmp_path)
     rail._evolution_store.format_body_experience_text = AsyncMock(return_value="")
-    session = SimpleNamespace()
+    session = SimpleNamespace(get_session_id=lambda: "sess-tool")
 
     await rail.after_tool_call(
         AgentCallbackContext(
@@ -616,12 +627,17 @@ async def test_after_tool_call_remembers_skill_on_session(tmp_path):
     )
 
     assert rail._get_session_used_skills(session) == {"weather", "travel-planner"}
+    # Recreated session object with same id still sees the snapshot.
+    later = SimpleNamespace(get_session_id=lambda: "sess-tool")
+    assert rail._get_session_used_skills(later) == {"weather", "travel-planner"}
 
 
 @pytest.mark.asyncio
 async def test_run_evolution_passes_session_skills_to_detect_user_intent(tmp_path, monkeypatch):
     rail = _make_rail(tmp_path, auto_save=True)
-    session = SimpleNamespace(_skill_evolution_used_skills={"weather", "travel-planner"})
+    session = SimpleNamespace(get_session_id=lambda: "sess-fb")
+    rail._remember_session_used_skill(session, "weather")
+    rail._remember_session_used_skill(session, "travel-planner")
     captured: dict[str, Any] = {}
 
     async def _fake_detect_user_intent(self, trajectory, *, extra_skills=None):
@@ -649,13 +665,17 @@ async def test_run_evolution_passes_session_skills_to_detect_user_intent(tmp_pat
         "openjiuwen.harness.rails.skill_evolution_rail.resolve_skill_evolution_action",
         lambda skill_name, **kwargs: "auto",
     )
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=session)
+    # New Session object, same session_id — must still pass extra_skills.
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=None,
+        session=SimpleNamespace(get_session_id=lambda: "sess-fb"),
+    )
 
     await rail.run_evolution(None, ctx)
 
     assert captured["extra_skills"] == ["travel-planner", "weather"]
     rail._generate_experience_for_skill.assert_awaited()
-
 
 @pytest.mark.asyncio
 async def test_after_tool_call_injects_body_experience_for_skill_tool_bare_skill_path(tmp_path):

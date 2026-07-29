@@ -339,6 +339,9 @@ class SkillEvolutionRail(EvolutionRail):
         self._pending_evolution_tasks: Set[asyncio.Task[Any]] = set()
         # Strong ref for sync-uninit drain so cancelled tasks are not GC'd mid-write.
         self._uninit_drain_task: Optional[asyncio.Task[Any]] = None
+        # In-memory snapshot: session_id → skills used in this chat (cross-turn;
+        # Session objects are recreated per request so setattr on session is lost).
+        self._used_skills_by_session: Dict[str, Set[str]] = {}
 
     @property
     def store(self) -> EvolutionStore:
@@ -598,7 +601,7 @@ class SkillEvolutionRail(EvolutionRail):
 
         This override:
         1. Calls super().after_tool_call(ctx) to record trajectory step
-        2. Remembers skill_tool / skill_complete names on the session (cross-turn)
+        2. Remembers skill_tool / skill_complete names by session_id (cross-turn)
         3. Injects body experiences when reading SKILL.md
         4. Tracks presented records for scoring
         """
@@ -1628,29 +1631,48 @@ class SkillEvolutionRail(EvolutionRail):
         return cls._format_messages_snippet(messages, start=start)
 
     # Session-level state isolation helpers
-    def _get_session_used_skills(self, session: Any) -> Set[str]:
-        """Return skill names used earlier in this session (cross-turn inheritance)."""
+    @staticmethod
+    def _resolve_used_skills_session_key(session: Any) -> Optional[str]:
+        """Resolve stable key for in-memory used-skills snapshot (no disk)."""
         if session is None:
+            return None
+        getter = getattr(session, "get_session_id", None)
+        if callable(getter):
+            try:
+                sid = str(getter() or "").strip()
+            except Exception:
+                sid = ""
+            if sid:
+                return sid
+        # Tests / callers without get_session_id: same object only.
+        return f"__obj__:{id(session)}"
+
+    def _get_session_used_skills(self, session: Any) -> Set[str]:
+        """Return skill names used earlier for this session_id (cross-turn)."""
+        key = self._resolve_used_skills_session_key(session)
+        if not key:
             return set()
-        raw = getattr(session, "_skill_evolution_used_skills", None)
+        raw = self._used_skills_by_session.get(key)
         if not isinstance(raw, set):
             return set()
         return {str(name).strip() for name in raw if str(name).strip()}
 
     def _remember_session_used_skill(self, session: Any, skill_name: str) -> None:
-        """Record a skill as used in this session for later feedback attribution."""
+        """Record a skill as used for this session_id (in-memory, no disk)."""
         name = (skill_name or "").strip()
-        if session is None or not name:
+        key = self._resolve_used_skills_session_key(session)
+        if not key or not name:
             return
-        used = getattr(session, "_skill_evolution_used_skills", None)
+        used = self._used_skills_by_session.get(key)
         if not isinstance(used, set):
             used = set()
-            setattr(session, "_skill_evolution_used_skills", used)
+            self._used_skills_by_session[key] = used
         if name not in used:
             used.add(name)
             logger.info(
-                "[SkillEvolutionRail] remember session used skill=%s total=%d",
+                "[SkillEvolutionRail] remember session used skill=%s session_id=%s total=%d",
                 name,
+                key,
                 len(used),
             )
 
