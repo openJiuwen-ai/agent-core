@@ -176,6 +176,28 @@ class TaskIterationInputs:
 
 
 @dataclass
+class UserMessageInputs:
+    """Input data for the ON_USER_MESSAGE event.
+
+    Fired once for each consumed input, just before it is written into the
+    conversation. This is the only point at which a rail can act on an input
+    *as an input*: afterwards it is an ordinary history message that may be
+    compacted, summarized or dropped, and reaching back to it by position is
+    not safe.
+
+    Attributes:
+        message: The ``UserMessage`` about to be written. Rails may modify
+            ``message.content`` in place — typically to prefix context the
+            model should read before the input itself.
+        source: Where the input came from — ``"query"`` (a new round or a
+            follow-up), ``"steering"`` (injected mid-round), or ``"resume"``
+            (a workflow interrupt being resumed).
+    """
+    message: Any = None
+    source: str = "query"
+
+
+@dataclass
 class RetryRequest:
     """Retry directive produced by on_exception rails."""
 
@@ -195,6 +217,7 @@ EventInputs = Union[
     ModelCallInputs,
     ToolCallInputs,
     TaskIterationInputs,
+    UserMessageInputs,
     Dict[str, Any],
 ]
 
@@ -214,6 +237,12 @@ class AgentCallbackEvent(str, Enum):
             (LLM + all tool calls + ToolMessage writes). Only fires on
             fully successful iterations, not on any break path.
 
+    Input Callbacks:
+        ON_USER_MESSAGE: Before one consumed input (a new round's query, a
+            follow-up, a steering message, or a resumed workflow interrupt)
+            is written into the conversation. Rails may rewrite its content;
+            see :class:`UserMessageInputs`.
+
     Model Interaction Callbacks:
         BEFORE_MODEL_CALL: Before LLM is called
         AFTER_MODEL_CALL: After LLM response is received
@@ -229,6 +258,7 @@ class AgentCallbackEvent(str, Enum):
     BEFORE_TASK_ITERATION = "before_task_iteration"
     AFTER_TASK_ITERATION = "after_task_iteration"
     AFTER_REACT_ITERATION = "after_react_iteration"
+    ON_USER_MESSAGE = "on_user_message"
     BEFORE_MODEL_CALL = "before_model_call"
     AFTER_MODEL_CALL = "after_model_call"
     ON_MODEL_EXCEPTION = "on_model_exception"
@@ -479,6 +509,7 @@ EVENT_METHOD_MAP: Dict[AgentCallbackEvent, str] = {
     AgentCallbackEvent.BEFORE_TASK_ITERATION: "before_task_iteration",
     AgentCallbackEvent.AFTER_TASK_ITERATION: "after_task_iteration",
     AgentCallbackEvent.AFTER_REACT_ITERATION: "after_react_iteration",
+    AgentCallbackEvent.ON_USER_MESSAGE: "on_user_message",
 }
 
 
@@ -516,7 +547,7 @@ class AgentRail(ABC):
     def uninit(self, agent):
         pass
 
-    # -- 8 hook methods (override to activate) --
+    # -- hook methods (override to activate) --
 
     async def before_invoke(
         self, ctx: AgentCallbackContext
@@ -528,6 +559,16 @@ class AgentRail(ABC):
         self, ctx: AgentCallbackContext
     ) -> None:
         """Called after agent.invoke() completes."""
+        pass
+
+    async def on_user_message(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Called before one consumed input is written into the conversation.
+
+        ``ctx.inputs`` is a :class:`UserMessageInputs`; rails may rewrite
+        ``ctx.inputs.message.content`` in place.
+        """
         pass
 
     async def before_model_call(

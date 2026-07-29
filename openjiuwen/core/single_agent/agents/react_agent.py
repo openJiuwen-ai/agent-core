@@ -68,6 +68,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     InvokeInputs,
     ModelCallInputs,
+    UserMessageInputs,
     rail,
 )
 from openjiuwen.core.single_agent.prompts.builder import (
@@ -719,6 +720,37 @@ class ReActAgent(BaseAgent):
             self._skill_util.get_skill_prompt(),
             priority=_SKILLS_SECTION_PRIORITY,
         )
+
+    async def _admit_user_message(
+            self,
+            ctx: AgentCallbackContext,
+            context: ModelContext,
+            text: str,
+            *,
+            source: str,
+    ) -> None:
+        """Write one consumed input into the conversation, rails first.
+
+        Every input the agent consumes -- a new round's query, a follow-up, a
+        steering message, a resumed workflow interrupt -- lands here, and
+        ON_USER_MESSAGE fires before it is written. That is the one moment a
+        rail can treat it as an *input*: once written it is ordinary history,
+        subject to compaction, and can no longer be located by position.
+
+        Args:
+            ctx: Callback context; ``inputs`` carries the message for rails.
+            context: Model context the message is written into.
+            text: The input text.
+            source: Which input path this came from (see UserMessageInputs).
+        """
+        message = UserMessage(content=text)
+        previous_inputs = ctx.inputs
+        ctx.inputs = UserMessageInputs(message=message, source=source)
+        try:
+            await ctx.fire(AgentCallbackEvent.ON_USER_MESSAGE)
+        finally:
+            ctx.inputs = previous_inputs
+        await context.add_messages(message)
 
     def _build_preview_messages(self, context: ModelContext) -> List[Any]:
         """Build a lightweight preview of the current model input messages."""
@@ -1776,7 +1808,12 @@ class ReActAgent(BaseAgent):
                         start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
                     else:
                         # Workflow Interrupt
-                        await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
+                        await self._admit_user_message(
+                            ctx,
+                            context,
+                            self._extract_user_text(user_input),
+                            source="resume",
+                        )
                         resume_result = await self._handle_resume(
                             interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
                         )
@@ -1785,7 +1822,12 @@ class ReActAgent(BaseAgent):
                         else:
                             start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
                 elif not resume_continuation:
-                    await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
+                    await self._admit_user_message(
+                        ctx,
+                        context,
+                        self._extract_user_text(user_input),
+                        source="query",
+                    )
 
                 if invoke_inputs.result is None:
                     for iteration in range(start_iteration, self._config.max_iterations):
@@ -1806,13 +1848,11 @@ class ReActAgent(BaseAgent):
                         steering = ctx.drain_steering()
                         if steering:
                             combined = "\n".join(steering)
-                            await context.add_messages(
-                                UserMessage(
-                                    content=(
-                                        f"[STEERING] "
-                                        f"{combined}"
-                                    )
-                                )
+                            await self._admit_user_message(
+                                ctx,
+                                context,
+                                f"[STEERING] {combined}",
+                                source="steering",
                             )
 
                         ai_message = await self._call_model(
