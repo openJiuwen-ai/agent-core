@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import struct
 import zlib
@@ -12,6 +13,7 @@ from typing import Any, Iterable, List, Optional
 from openjiuwen.core.common.logging import logger
 
 _IMAGE_INPUT_SCAN_MAX_DEPTH = 8
+_IMAGE_MODALITY_PROBE_TIMEOUT_SECONDS = 30.0
 _IMAGE_INPUT_UNSUPPORTED_ERROR_CODES = (
     "invalid_image_input",
     "image_input_unsupported",
@@ -136,33 +138,43 @@ async def probe_image_support(llm) -> Optional[bool]:
 
     Returns:
         True if the model named the color it was shown, False if it responded
-        without naming it or deterministically rejected the image (e.g. a 404
-        "no endpoints found that support image input"), and None if the call
-        failed for some other reason (timeout, auth, rate limit, 5xx) and the
-        result is therefore inconclusive and should not be cached.
+        without naming it, deterministically rejected the image (e.g. a 404
+        "no endpoints found that support image input"), or the probe timed out,
+        and None if the call failed for some other reason (auth, rate limit,
+        5xx) and the result is therefore inconclusive and should not be cached.
     """
     try:
-        response = await llm.invoke(
-            [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{DUMMY_IMAGE_B64}",
+        response = await asyncio.wait_for(
+            llm.invoke(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{DUMMY_IMAGE_B64}",
+                                },
                             },
-                        },
-                        {
-                            "type": "text",
-                            "text": "What color is this image? Reply with one word.",
-                        },
-                    ],
-                }
-            ],
-            max_tokens=1024,
-            temperature=0,
+                            {
+                                "type": "text",
+                                "text": "What color is this image? Reply with one word.",
+                            },
+                        ],
+                    }
+                ],
+                max_tokens=1024,
+                temperature=0,
+            ),
+            timeout=_IMAGE_MODALITY_PROBE_TIMEOUT_SECONDS,
         )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[ImageModalityProbe] image modality probe timed out after %.0fs; "
+            "treating read_file image multimodal as unsupported",
+            _IMAGE_MODALITY_PROBE_TIMEOUT_SECONDS,
+        )
+        return False
     except Exception as exc:
         if is_image_modality_rejection(exc):
             logger.info(
