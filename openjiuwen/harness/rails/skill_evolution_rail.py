@@ -2262,8 +2262,6 @@ class SkillEvolutionRail(EvolutionRail):
         else:
             await store.clear_evolutions(skill_name)
 
-        await store.render_evolution_markdown(skill_name)
-
         deleted = await store.delete_archive_version(skill_name, body_archive.name)
         if not deleted:
             logger.warning(

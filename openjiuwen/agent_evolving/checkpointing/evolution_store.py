@@ -1311,7 +1311,6 @@ version: v1.0.0
         empty_log = EvolutionLog.empty(skill_id=name)
         empty_log.version = version
         await self._save_evolution_log(name, empty_log, skill_dir=skill_dir)
-        await self.render_evolution_markdown(name)
         logger.info(
             "[EvolutionStore] cleared evolutions for skill=%s (version=%s)",
             name,
