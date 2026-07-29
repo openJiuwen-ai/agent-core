@@ -28,6 +28,7 @@ __all__ = [
     "browser_tools",
     "controller",
     "register_browser_runtime_mcp_server",
+    "reset_active_browser_runtimes",
     "restart_local_browser_runtime_server",
     "service",
     "stop_local_browser_runtime_server",
@@ -41,6 +42,9 @@ def __getattr__(name: str) -> Any:
         return import_module("openjiuwen.harness.tools.browser_move.playwright_runtime.browser_tools")
     if name == "service":
         return import_module("openjiuwen.harness.tools.browser_move.playwright_runtime.service")
+    if name == "reset_active_browser_runtimes":
+        module = import_module("openjiuwen.harness.tools.browser_move.playwright_runtime.runtime")
+        return getattr(module, name)
     if name in {
         "build_browser_runtime_mcp_config",
         "register_browser_runtime_mcp_server",

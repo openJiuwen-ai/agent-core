@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -17,6 +18,7 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
@@ -157,6 +159,7 @@ class CoordinationKernel:
             # runtime's outputs, so the runtime must be started first.
             if resources.harness is not None:
                 await resources.harness.start(team_session=session)
+                await kv_cache_hooks.register_harness_binding(host, resources.harness)
                 await host.stream_controller.start()
         else:
             sess_mgr.release_session()
@@ -221,6 +224,7 @@ class CoordinationKernel:
             team_name = host.team_name
             if team_name and not self._subscribed_topics:
                 await self.subscribe_transport(team_name)
+        await self._event_bus.enqueue(InnerEventMessage(event_type=InnerEventType.REFRESH_TEAM_CONTEXT))
         # Re-arm the team-completion rising-edge guard on every start (cold
         # start / resume / recover) so each run cycle evaluates completion
         # independently — a resumed persistent team can conclude again.
@@ -471,7 +475,19 @@ class CoordinationKernel:
                 e,
             )
 
-    async def stop(self) -> None:
+    async def stop(
+        self,
+        *,
+        on_quiesced: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        """Quiesce coordination and then tear down its runtime resources.
+
+        ``on_quiesced`` runs after new scheduler admission is disabled, the
+        active agent task is drained, and allocator state is persisted, but
+        before memory, transport, harness, and session resources are released.
+        The hook is best-effort: its failure is logged and never blocks the
+        original Team stop path.
+        """
         # Idempotent: terminal state. Pause -> stop is allowed (resources
         # still need close), running -> stop is the normal path, idle/stopped
         # are no-ops.
@@ -483,6 +499,11 @@ class CoordinationKernel:
             self._scheduler.deactivate()
         await self.drain_agent_task()
         host.persist_allocator_state()
+        if on_quiesced is not None:
+            try:
+                await on_quiesced()
+            except Exception as exc:
+                team_logger.warning("[{}] quiesced stop hook failed: {}", host.member_name or "?", exc)
         # Final memory extraction before permanent teardown. Only extract
         # when transitioning directly from running (session still bound).
         # When coming from paused, extraction already happened in pause()
@@ -514,6 +535,9 @@ class CoordinationKernel:
         # not always follow a ``finalize_round`` (e.g. external stop_team).
         if host.resources.harness is not None:
             await host.resources.harness.dispose()
+        messager = host.infra.messager
+        if messager is not None:
+            await messager.stop()
         host.session_manager.release_session()
         # See pause(): team_member status update for the agent's own
         # ``team_member`` handle is owned by
@@ -606,6 +630,31 @@ class CoordinationKernel:
         # FirstIterationGate wait is gone with the single-supervisor model.
         await self._event_bus.enqueue(
             InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX),
+        )
+
+    async def enqueue_initial_task_poll(self) -> None:
+        """Queue the member's one startup board survey (F_69).
+
+        The counterpart of ``enqueue_initial_mailbox_poll``: the mailbox
+        sweep picks up messages sent while the member was down, this one
+        picks up *work* assigned while it was down. A task assigned at
+        creation time is announced only by a transient ``TASK_CLAIMED``
+        event, which a member that has not started yet — ``spawn_member``
+        leaves it ``UNSTARTED`` — can never receive.
+
+        Leader-excluded for the same reason as the mailbox poll: its board
+        survey renders the whole board (or an all-done prompt on an empty
+        one), which is not what a leader coming up should be handed. Queued
+        after the mailbox poll so the member reads its messages first and
+        the board second.
+        """
+        host = self._host
+        if host.role == TeamRole.LEADER:
+            return
+        if self._event_bus is None:
+            return
+        await self._event_bus.enqueue(
+            InnerEventMessage(event_type=InnerEventType.INITIAL_POLL_TASK),
         )
 
     async def drain_agent_task(self) -> None:

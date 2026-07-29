@@ -143,11 +143,11 @@ class TaskGraphSpec:
     the tool boundary rejects in-batch ``depended_by`` targets as
     redundant before the batch reaches this layer.
 
-    ``assignee`` pre-assigns the task as part of the same atomic mutation
-    (scheduled dispatch): an unblocked pre-assigned task lands as
-    ``PENDING`` with the assignee on record (assigned, not yet started), a
-    blocked one keeps the assignee until its dependencies resolve. Left
-    ``None``, the task is claimable by any member.
+    ``assignee`` pre-assigns the task as part of the same atomic mutation:
+    an unblocked pre-assigned task lands as ``PENDING`` with the assignee on
+    record (assigned, not yet started), a blocked one keeps the assignee
+    until its dependencies resolve. Left ``None``, the task is claimable by
+    any member in autonomous dispatch.
 
     ``reviewer`` names the verify-gate reviewers (member names, leader-assigned,
     may be several). A task carrying reviewers routes through ``IN_REVIEW`` on

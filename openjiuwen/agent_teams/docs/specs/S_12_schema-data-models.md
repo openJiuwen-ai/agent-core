@@ -14,8 +14,8 @@ does not.
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-07-16 |
-| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）。其余条目见 `docs/features/` |
+| 最近一次修订日期 | 2026-07-28 |
+| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）。其余条目见 `docs/features/` |
 
 ## 范围 / 边界
 
@@ -417,6 +417,12 @@ tool / rail / sys_operation 与 `DeepAgentSpec.build()` 同模式。
 `build() -> Workspace`。`stable_base` 的路径重写**不在 `build()` 内部完成**，由
 `agent_configurator` 在装配过程中完成。
 
+**workspace ≠ cwd**（见 [[F_69]]）：`WorkspaceSpec` 只描述"这个 agent 的产物目录"。
+shell 执行点与相对路径基准是 `DeepAgentSpec.cwd`，项目身份锚点是
+`DeepAgentSpec.project_root`，两者都缺省为 workspace 根（单 agent 下三者同值）。
+team 成员由 `agent_configurator` 把 cwd 指向项目目录或隔离 worktree，workspace 保持
+成员私有——**不要**再通过改写 `root_path` 来搬动成员的工作目录。
+
 #### 其余叶子 Spec
 
 - `VisionModelSpec` / `AudioModelSpec`：pydantic 镜像对应 dataclass，`build()`
@@ -771,8 +777,9 @@ CANCELLED    -> (terminal)
 ### 自主停滞阈值（F_65）
 
 - **spec 配置**（`TeamAgentSpec`，仅自主模式消费，调度模式忽略）：
-  `stale_claim_idle_timeout: int = 600`（秒，>0——成员 idle 超此值且仍持
-  `{PLANNING, IN_PROGRESS}` 任务即自催，连续 3 个窗口无效则由该成员自报 leader）、
+  `stale_claim_idle_timeout: int = 600`（秒，>0——成员 idle 超此值且名下有该推的任务即自催，
+  连续 3 个窗口无效则由该成员自报 leader。"该推的任务" = 持有的 `{PLANNING, IN_PROGRESS}`，
+  一个活跃任务都没有时回落到名下最早的一个 `PENDING(assignee=self)`，见 F_69）、
   `stale_pending_idle_timeout: int = 600`（秒，>0——leader idle 超此值、且存在无 assignee
   的 `PENDING`、且 roster 里有非 leader 成员 READY，三者同时成立才自催）。
   校验在独立的 `_validate_stall_settings`（与 `_validate_review_settings` 分开：前者管停滞

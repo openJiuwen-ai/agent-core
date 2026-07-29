@@ -38,7 +38,7 @@ class TestModelContext:
         window_message_limit: int = 100,
         dialogue_round: int = None,
         max_context_message_num: Optional[int] = None,
-        enable_kv_cache_release: bool = False,
+        enable_reload: bool = False,
         processors: Optional[List] = None,
         token_counter=None,
     ) -> ModelContext:
@@ -46,7 +46,7 @@ class TestModelContext:
             default_window_message_num=window_message_limit,
             default_window_round_num=dialogue_round,
             max_context_message_num=max_context_message_num,
-            enable_kv_cache_release=enable_kv_cache_release,
+            enable_reload=enable_reload,
         )
         context_engine = ContextEngine(config)
         session = None
@@ -698,19 +698,26 @@ class TestModelContext:
         await context.add_messages(msg_list)
         assert len(context) == 200
 
-    # ---------- enable_kv_cache_release ----------
+    # ---------- enable_reload ----------
     @pytest.mark.asyncio
-    async def test_enable_kv_cache_release_creates_manager(self):
-        context = await self.create_context(enable_kv_cache_release=True)
-        assert getattr(context, "_kv_cache_manager") is not None
+    async def test_enable_reload_does_not_add_reloader_prompt_in_context_window(self):
+        context = await self.create_context(enable_reload=True)
+        window = await context.get_context_window()
+        assert window.system_messages == []
 
     @pytest.mark.asyncio
-    async def test_enable_kv_cache_release_calls_release_on_get_window(self):
-        context = await self.create_context(enable_kv_cache_release=True)
-        with patch.object(getattr(context, "_kv_cache_manager"), "release", new_callable=AsyncMock) as mock_release:
-            await context.get_context_window()
-            await context.get_context_window()
-            assert mock_release.call_count >= 1
+    async def test_enable_reload_false_no_reloader_prompt(self):
+        context = await self.create_context(enable_reload=False)
+        window = await context.get_context_window()
+        assert window.system_messages == []
+
+    @pytest.mark.asyncio
+    async def test_enable_reload_with_custom_system_messages(self):
+        context = await self.create_context(enable_reload=True)
+        sys_msgs = [SystemMessage(content="custom sys")]
+        window = await context.get_context_window(system_messages=sys_msgs)
+        assert len(window.system_messages) == 1
+        assert window.system_messages[0].content == "custom sys"
 
     # ---------- token_counter ----------
     @pytest.mark.asyncio

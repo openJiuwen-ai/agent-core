@@ -43,6 +43,7 @@ class _FakeCoordination:
         self.finalized = False
         self.enqueued_inputs: list[Any] = []
         self.mailbox_enqueued = False
+        self.task_poll_enqueued = False
 
     async def start(self, session=None) -> None:
         self.started = True
@@ -53,6 +54,9 @@ class _FakeCoordination:
 
     async def enqueue_initial_mailbox_poll(self) -> None:
         self.mailbox_enqueued = True
+
+    async def enqueue_initial_task_poll(self) -> None:
+        self.task_poll_enqueued = True
 
     async def finalize_round(self) -> None:
         self.finalized = True

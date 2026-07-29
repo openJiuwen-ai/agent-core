@@ -10,6 +10,26 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.context_engine.token.base import TokenCounter
 
 
+class ContextWindowChange(BaseModel):
+    """
+    Difference between the last LLM-bound ContextWindow and the current one.
+
+    The old messages/tools are kept so AscendAffinity can evict KV cache by
+    locating half-open ranges ``[start, end)`` in the window that was already
+    sent to inference.
+    """
+    old_messages: List[BaseMessage] = Field(default_factory=list)
+    old_tools: List[ToolInfo] = Field(default_factory=list)
+    msg_start: Optional[int] = None
+    msg_end: Optional[int] = None
+    tools_start: Optional[int] = None
+    tools_end: Optional[int] = None
+
+    @property
+    def has_change(self) -> bool:
+        return self.msg_start is not None or self.tools_start is not None
+
+
 class ModelContext(ABC):
     """
     Abstract base class for managing conversational context in a model-agnostic way.
@@ -155,6 +175,18 @@ class ModelContext(ABC):
             A window object containing the constructed message list and metadata.
         """
         pass
+
+    def detect_context_window_change(
+            self,
+            new_window: "ContextWindow",
+    ) -> Optional[ContextWindowChange]:
+        """
+        Return the diff from the previous tracked LLM-bound window.
+
+        Implementations may keep a snapshot for KV cache management. The
+        default no-op keeps existing ModelContext subclasses compatible.
+        """
+        return None
 
     @abstractmethod
     def statistic(self) -> "ContextStats":

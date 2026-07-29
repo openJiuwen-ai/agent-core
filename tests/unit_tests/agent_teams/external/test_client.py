@@ -11,6 +11,7 @@ from openjiuwen.agent_teams.external import ExternalTeamClient
 from openjiuwen.agent_teams.external import client as client_module
 from openjiuwen.agent_teams.messager import hybrid as hybrid_module
 from openjiuwen.agent_teams.schema.status import TaskStatus
+from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 
 
 class _FakeWebSocketPublisher:
@@ -123,6 +124,38 @@ async def test_list_members_returns_roster(team_db, make_descriptor):
         members = await dev.list_members()
         names = {m.member_name for m in members}
         assert {"leader", "dev-1"} <= names
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_member_scope_tools_follow_teammate_mode(team_db, make_descriptor):
+    build_descriptor = make_descriptor(member="dev-1", scope="member", teammate_mode="build_mode")
+    plan_descriptor = make_descriptor(member="dev-1", scope="member", teammate_mode="plan_mode")
+
+    async with ExternalTeamClient(build_descriptor) as build_client:
+        assert "submit_plan" not in build_client.tools
+        assert "workspace_meta" not in build_client.tools
+
+    async with ExternalTeamClient(plan_descriptor) as plan_client:
+        assert "submit_plan" in plan_client.tools
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_member_scope_tools_include_workspace_meta_when_workspace_enabled(
+    team_db,
+    make_descriptor,
+    tmp_path,
+):
+    descriptor = make_descriptor(
+        member="dev-1",
+        scope="member",
+        workspace_config=TeamWorkspaceConfig(enabled=True, root_path=str(tmp_path)),
+        workspace_path=str(tmp_path),
+    )
+
+    async with ExternalTeamClient(descriptor) as client:
+        assert "workspace_meta" in client.tools
 
 
 @pytest.mark.asyncio

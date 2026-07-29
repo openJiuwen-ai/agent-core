@@ -1014,23 +1014,20 @@ class NativeHarness(DeepAgent):
         """
         was_graceful = active.graceful_abort
         is_resume = isinstance(active.original_query, InteractiveInput)
-        # Abnormal death: the round crashed (an inner failure surfaces as a
-        # TASK_FAILED error result, a harness-level failure as ``cmd.error``)
-        # or a completion-timeout kill produced its error result. Control
-        # errors are excluded: "cancelled" belongs to abort/pause (a user
-        # decision, never retried) and "no active round" is a submit-state
-        # mismatch, not a death of this round's work.
+        # Keep structured task failures separate from runtime crashes. A task
+        # failure has already reported its outcome and may have queued a retry
+        # follow-up; only a harness-level crash means the consumed inbound query
+        # could be lost and therefore needs the one-shot replay below.
         result_error = (cmd.result or {}).get("error")
-        died_abnormally = cmd.error is not None or (
-            bool(result_error) and result_error not in ("cancelled", "no active round")
-        )
+        task_failed = bool(result_error) and result_error not in ("cancelled", "no active round")
+        runtime_crashed = cmd.error is not None
         self._st.active = None
 
         # Cooperative pause settled: the loop force-finished at a clean inner
         # iteration boundary, so context is already there — no rollback, and no
         # coordinator advance (this round was suspended, not completed). Queued
         # follow-ups are preserved for the round that ``resume()`` continues.
-        if active.pause_requested and cmd.error is None and not died_abnormally:
+        if active.pause_requested and not runtime_crashed and not task_failed:
             await self._emit_round("paused", cmd.round_id)
             await self._transition(HarnessState.PAUSED)
             return
@@ -1042,10 +1039,9 @@ class NativeHarness(DeepAgent):
                 cmd.error,
             )
             await self._emit_round("failed", cmd.round_id, cmd.result)
-        elif died_abnormally:
-            # A watchdog kill is a failure, not a normal finish: surface it to
-            # round subscribers (StreamController maps "failed") instead of
-            # letting a killed round masquerade as a completed one.
+        elif task_failed:
+            # Structured task failures are terminal for this round, but retry
+            # policy belongs to the queued follow-up/StreamController path.
             await self._emit_round("failed", cmd.round_id, cmd.result)
         else:
             await self._emit_round("finished", cmd.round_id, cmd.result)
@@ -1071,7 +1067,7 @@ class NativeHarness(DeepAgent):
             await self._transition(HarnessState.IDLE)
             return
 
-        # Abnormal death (crash / timeout kill): the round died without
+        # Runtime crash: the round died without
         # consuming its inbound query, and that message was already marked
         # read at deliver time — no poll will ever re-deliver it. Retry the
         # query once on a fresh round so the message is not silently lost; a
@@ -1081,9 +1077,9 @@ class NativeHarness(DeepAgent):
         # must not be read as a user abort — reset it either way so the next
         # round starts clean. An InteractiveInput query (interrupt resume) is
         # not replayable, so it goes straight to the give-up branch.
-        if died_abnormally:
+        if runtime_crashed:
             self._reset_coordinator()
-            death_reason = cmd.error if cmd.error is not None else result_error
+            death_reason = cmd.error
             if isinstance(active.original_query, str) and not active.failure_retry:
                 logger.warning(
                     "[NativeHarness] round_id=%s died abnormally (%s); "

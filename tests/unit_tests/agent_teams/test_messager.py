@@ -130,7 +130,7 @@ async def test_external_publisher_publishes_without_local_messager() -> None:
 
 
 @pytest.mark.level0
-def test_websocket_publisher_uses_standard_interact_payload() -> None:
+def test_websocket_publisher_uses_team_mq_publish_payload() -> None:
     publisher = WebSocketEventPublisher(
         url="ws://gateway:19000/ws",
         session_id="session-1",
@@ -144,13 +144,12 @@ def test_websocket_publisher_uses_standard_interact_payload() -> None:
         "request-1",
     )
 
-    assert request["session_id"] == "session-1"
-    assert request["channel"] == "web"
-    assert request["method"] == "chat.send"
-    assert request["is_stream"] is True
-    assert request["params"]["mode"] == "team"
-    assert request["params"]["team"] is True
-    assert request["params"]["query"] == {
+    assert request["type"] == "req"
+    assert request["id"] == "request-1"
+    assert request["method"] == "team.mq.publish"
+    assert request["is_stream"] is False
+    assert request["params"]["session_id"] == "session-1"
+    assert request["params"]["payload"] == {
         "type": "team.external_event",
         "topic": TeamTopic.MESSAGE.value,
         "event": {
@@ -183,9 +182,10 @@ async def test_websocket_publisher_connects_once_when_started() -> None:
                     type=aiohttp.WSMsgType.TEXT,
                     data=json.dumps(
                         {
-                            "request_id": request["request_id"],
-                            "response_kind": "e2a.complete",
-                            "status": "succeeded",
+                            "type": "res",
+                            "id": request["id"],
+                            "ok": True,
+                            "payload": {"published": True},
                         }
                     ),
                 )
@@ -240,25 +240,20 @@ async def test_websocket_publisher_requires_start_before_publish() -> None:
 
 
 @pytest.mark.level0
-def test_websocket_publisher_waits_for_e2a_complete() -> None:
-    assert WebSocketEventPublisher._is_successful_response(
+def test_websocket_publisher_validates_webchannel_response() -> None:
+    assert WebSocketEventPublisher._validate_response(
         {
-            "response_kind": "e2a.chunk",
-            "status": "in_progress",
+            "type": "res",
+            "ok": True,
+            "payload": {"published": True},
         }
-    ) is False
-    assert WebSocketEventPublisher._is_successful_response(
-        {
-            "response_kind": "e2a.complete",
-            "status": "succeeded",
-        }
-    ) is True
+    ) is None
     with pytest.raises(RuntimeError, match="event rejected"):
-        WebSocketEventPublisher._is_successful_response(
+        WebSocketEventPublisher._validate_response(
             {
-                "response_kind": "e2a.error",
-                "status": "failed",
-                "body": {"message": "event rejected"},
+                "type": "res",
+                "ok": False,
+                "payload": {"error": "event rejected"},
             }
         )
 

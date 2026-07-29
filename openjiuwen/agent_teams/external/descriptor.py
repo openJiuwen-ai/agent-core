@@ -20,6 +20,7 @@ from typing import Literal, Mapping
 from pydantic import BaseModel, Field, ValidationError
 
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
+from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 from openjiuwen.agent_teams.tools.database.config import DatabaseConfig
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
@@ -64,6 +65,10 @@ class TeamJoinDescriptor(BaseModel):
             spawn time). The leader name a scheduled member's ``send_message``
             targets is not carried here — the backend reads it from the shared
             ``team_info`` DB row (``TeamBackend.resolve_leader_member_name``).
+        teammate_mode: How teammates execute tasks — ``"build_mode"`` or
+            ``"plan_mode"``. A ``"member"``-scope connection resolves its tool
+            set against this so plan-mode members get ``submit_plan`` when the
+            system prompt asks them to use it.
         db_config: Team database connection. For cross-process use this must
             be a file-backed sqlite ``connection_string``; a sqlite
             ``:memory:`` connection string is single-process only and is
@@ -71,6 +76,10 @@ class TeamJoinDescriptor(BaseModel):
         transport_config: Messager transport config used by the external
             client. ``external_publish_url`` is the Gateway relay WebSocket
             endpoint for standard team events.
+        workspace_config: Shared workspace config. Present for spawned
+            external members when the team workspace is enabled.
+        workspace_path: Absolute shared workspace path resolved by the team
+            host. External clients use this to mount ``workspace_meta``.
     """
 
     session_id: str
@@ -80,8 +89,11 @@ class TeamJoinDescriptor(BaseModel):
     scope: Literal["operator", "member"] = "operator"
     language: str = "cn"
     dispatch_mode: Literal["autonomous", "scheduled"] = "autonomous"
+    teammate_mode: Literal["build_mode", "plan_mode"] = "build_mode"
     db_config: DatabaseConfig = Field(default_factory=DatabaseConfig)
     transport_config: MessagerTransportConfig = Field(default_factory=MessagerTransportConfig)
+    workspace_config: TeamWorkspaceConfig | None = None
+    workspace_path: str | None = None
 
     def to_json(self) -> str:
         """Serialise to a compact JSON string."""

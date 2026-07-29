@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
+
 Language = Literal["cn", "en"]
 
 _DEFAULT_LANGUAGE: Language = "cn"
@@ -70,12 +72,15 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # agent/coordination/handlers/stale_task.py — idle-clock stall nudges (autonomous, F_65)
         "dispatcher.stale_idle_claim_self": (
-            "[催促] 你持有任务 [{task_id}] {title}，但已空闲 {minutes} 分钟未推进。"
-            "如需回顾详情请用 view_task；请继续推进，完成后用 claim_task(status='completed') 标记完成。"
+            "[催促] 任务 [{task_id}] {title} 归你负责（当前状态：{status}），"
+            "但你已空闲 {minutes} 分钟未推进。如需回顾详情请用 view_task；"
+            "尚未开始就用 claim_task(status='claimed') 认领开工，已在进行就继续推进，"
+            "完成后用 claim_task(status='completed') 标记完成。"
         ),
         "dispatcher.stale_idle_claim_escalate": (
-            "[停滞上报] 我持有任务 [{task_id}] {title}，但已连续空闲 {minutes} 分钟未推进"
-            "（多次自我催促无效）。请评估是否需要问询、改派或更换成员。"
+            "[停滞上报] 任务 [{task_id}] {title} 归我负责（当前状态：{status}），"
+            "但我已连续空闲 {minutes} 分钟未推进（多次自我催促无效）。"
+            "请评估是否需要问询、改派或更换成员。"
         ),
         # agent/dispatcher.py — task assignment notification
         "dispatcher.task_assigned_to_self": (
@@ -153,6 +158,15 @@ STRINGS: dict[str, dict[str, str]] = {
         # the framework hint land in distinct <team-inbound> / <team-note>
         # tags. The legacy templates stay for the external/format.py path.
         "dispatcher.reply_hint": "如果对方在提问或等待回复，请务必通过 send_message 工具回复 {sender}。",
+        # Sender-specific variant: the ``user`` pseudo-member is the human
+        # outside the team, not a roster member. Unconditional by design —
+        # the generic hint's "if the sender is asking" lets the model talk
+        # itself out of replying, and a dropped user reply is invisible.
+        "dispatcher.reply_hint_user": (
+            "这条消息来自 user——委托本团队工作的**团队外部真人**，不是团队成员，不在成员名册里。"
+            "你必须调用 send_message(to=\"user\") 把答复发回用户；"
+            "你写在回复正文里的任何文字都不会送达用户，不调用工具就等于没有回复。"
+        ),
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": ("所有任务已完成。请汇总本轮工作成果。团队继续保持运行，等待新的任务指令。"),
         "dispatcher.all_done_temporary": (
@@ -168,7 +182,9 @@ STRINGS: dict[str, dict[str, str]] = {
             "- 整体进度是否符合预期"
         ),
         "dispatcher.teammate_task_list": (
-            "以下是当前可认领的任务：\n- 请认领适合你领域的任务\n- 认领后用 view_task 查看详情并开始执行"
+            "以下是当前可处理的任务：\n"
+            "- 未指派的 pending 任务可由你认领\n"
+            "- 已指派给你的任务请先用 view_task 查看详情，再按任务工具推进"
         ),
         "dispatcher.task_unassigned_marker": " (待领取)",
         # agent/dispatcher.py — stale-pending leader self-prompt
@@ -296,14 +312,15 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # agent/coordination/handlers/stale_task.py — idle-clock stall nudges (autonomous, F_65)
         "dispatcher.stale_idle_claim_self": (
-            "[Nudge] You hold task [{task_id}] {title} but have been idle for {minutes} minute(s) "
-            "without progressing it. Use view_task to review the details; keep pushing it forward "
-            "and call claim_task(status='completed') when done."
+            "[Nudge] Task [{task_id}] {title} is yours (currently {status}) but you have been idle "
+            "for {minutes} minute(s) without progressing it. Use view_task to review the details; "
+            "call claim_task(status='claimed') to start it if it has not begun, otherwise keep "
+            "pushing it forward, and call claim_task(status='completed') when done."
         ),
         "dispatcher.stale_idle_claim_escalate": (
-            "[Stall report] I hold task [{task_id}] {title} but have been idle for {minutes} "
-            "minute(s) without progressing it (repeated self-nudges did not help). Please consider "
-            "checking in, reassigning, or replacing the assignee."
+            "[Stall report] Task [{task_id}] {title} is mine (currently {status}) but I have been "
+            "idle for {minutes} minute(s) without progressing it (repeated self-nudges did not "
+            "help). Please consider checking in, reassigning, or replacing the assignee."
         ),
         # agent/dispatcher.py — task assignment notification
         "dispatcher.task_assigned_to_self": (
@@ -390,6 +407,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "dispatcher.reply_hint": (
             "If the sender is asking or waiting for a reply, be sure to reply to {sender} via send_message."
         ),
+        # Sender-specific variant: see the cn note above.
+        "dispatcher.reply_hint_user": (
+            "This message is from user — the **human outside the team** who commissioned this team's work. "
+            "They are not a team member and do not appear in the roster. "
+            'You MUST call send_message(to="user") to deliver your reply; '
+            "any text you write in your reply body never reaches the user, "
+            "so not calling the tool means you did not reply at all."
+        ),
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": (
             "All tasks are complete. Please summarize this round's results. "
@@ -408,9 +433,9 @@ STRINGS: dict[str, dict[str, str]] = {
             "- Whether the overall progress matches expectations"
         ),
         "dispatcher.teammate_task_list": (
-            "Tasks available to claim:\n"
-            "- Claim the ones that fit your domain\n"
-            "- After claiming, use view_task for details and start working"
+            "Tasks available to work on:\n"
+            "- Unassigned pending tasks may be claimed by you\n"
+            "- For tasks already assigned to you, use view_task for details and proceed with the task tools"
         ),
         "dispatcher.task_unassigned_marker": " (unassigned)",
         # agent/dispatcher.py — stale-pending leader self-prompt
@@ -554,4 +579,23 @@ def t(key: str, **kwargs: object) -> str:
     return raw.format_map(kwargs) if kwargs else raw
 
 
-__all__ = ["Language", "STRINGS", "get_language", "set_language", "t"]
+def reply_hint_for(sender: str) -> str:
+    """Resolve the ``reply-hint`` note body for one inbound sender.
+
+    The ``user`` pseudo-member is not a roster member and has no agent
+    process, so a member that answers it in plain text silently drops the
+    reply. That case gets its own unconditional wording; every other
+    sender keeps the generic, conditional hint.
+
+    Args:
+        sender: The sending member's ``member_name``.
+
+    Returns:
+        The localized note body for the active language.
+    """
+    if sender == USER_PSEUDO_MEMBER_NAME:
+        return t("dispatcher.reply_hint_user")
+    return t("dispatcher.reply_hint", sender=sender)
+
+
+__all__ = ["Language", "STRINGS", "get_language", "reply_hint_for", "set_language", "t"]

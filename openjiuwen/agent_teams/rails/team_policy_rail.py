@@ -4,7 +4,7 @@
 """TeamPolicyRail injects team policy as ordered PromptSections.
 
 Decomposes the team's system prompt into one PromptSection per content
-category (role, workflow, lifecycle, private-prompt, ...) and registers them
+category (identity, role, workflow, lifecycle, ...) and registers them
 on the agent's shared ``SystemPromptBuilder`` before every model call,
 so team-specific slices line up with the harness sections (safety,
 tools, memory, workspace, ...) by priority.
@@ -12,14 +12,18 @@ tools, memory, workspace, ...) by priority.
 Section layout owned by this rail (see ``prompts/sections.py`` for
 builders):
 
-  P:11  team_role        - member id + role policy (always)
+  P:10  team_identity    - this member's own member_name + private working
+                           agreement (attachment, per round). The only
+                           per-member content, kept out of the system prompt so
+                           every member shares one cacheable prefix.
+  P:11  team_role        - role policy + execution mode (always)
   P:12  team_hitt        - HITT collaboration contract (static rules, gated on
                            hitt_enabled). Human members are tagged ``[human]``
                            in the team_members roster, not listed inline.
   P:12  team_bridge      - bridge-avatar self-contract (BRIDGE_AGENT only)
   P:13  team_workflow    - leader workflow (LEADER only)
   P:14  team_lifecycle   - team lifecycle policy (LEADER only)
-  P:16  team_private_prompt  - member-private working agreement (when set)
+  P:15  team_dispatch    - autonomous claim vs scheduled assignment
   P:17  team_extra           - user-supplied base prompt (when set)
   P:65  team_info            - team metadata (attachment, per round)
   P:66  team_members         - unified roster (attachment, per round)
@@ -32,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from openjiuwen.agent_teams.prompts import (
     MtimeSectionCache,
     TeamSectionName,
+    build_team_identity_section,
     build_team_info_section,
     build_team_members_section,
     build_team_static_sections,
@@ -59,14 +64,18 @@ class TeamPolicyRail(DeepAgentRail):
 
       * **System-prompt builder** (cache-stable prefix) -- role, HITT
         collaboration contract, bridge self-contract, workflow, dispatch,
-        lifecycle, private-prompt, extra. All static: built once at ``__init__`` and
-        re-added to the builder on every ``before_model_call`` (cheap dict
-        insert). Team-state churn never touches this prefix.
-      * **Prompt attachment tail** (per round, disposable) -- ``team_members``
-        (the unified roster; human members tagged ``[human]``) and
-        ``team_info``. These are the only churning bits; pushing them to the
-        DeepAgent's :class:`PromptAttachmentManager` (kind = the section name)
-        keeps roster / team-state churn off the system-prompt KV cache. mtime
+        lifecycle, extra. All static **and identical across the members of a
+        team**: built once at ``__init__`` and re-added to the builder on every
+        ``before_model_call`` (cheap dict insert). Neither team-state churn nor
+        per-member content ever touches this prefix.
+      * **Prompt attachment tail** (per round, disposable) -- ``team_identity``
+        (this member's own ``member_name`` + private working agreement),
+        ``team_members`` (the unified roster; human members tagged
+        ``[human]``) and ``team_info``. The last two churn per round;
+        ``team_identity`` never changes but differs *between members*, so
+        keeping it out of the prefix lets every member of a team share one
+        cached prefix. All three go to the DeepAgent's
+        :class:`PromptAttachmentManager` (kind = the section name). mtime
         caches avoid a full table read on every call.
 
     When ``team_backend`` is ``None`` (e.g. unit tests that only care about
@@ -126,6 +135,15 @@ class TeamPolicyRail(DeepAgentRail):
             hitt_enabled=hitt_enabled,
         )
 
+        # Constant content, attachment-delivered: this is the only content that
+        # differs between members of the same team, so it stays out of the
+        # shared system-prompt prefix.
+        self._identity_section: Optional[PromptSection] = build_team_identity_section(
+            member_name=member_name,
+            member_prompt=member_prompt,
+            language=language,
+        )
+
         # Dynamic attachment caches: keyed on table-level mtime probes so
         # repeated calls pay only for the cheap probe + dict insert.
         self._info_cache: MtimeSectionCache | None = None
@@ -148,9 +166,9 @@ class TeamPolicyRail(DeepAgentRail):
         """Remove the team static sections from the shared builder.
 
         Every builder-bound team section lives in ``_static_sections``; the
-        attachment-bound sections (roster / info) live in the prompt attachment
-        manager and are torn down with the DeepAgent, so there is nothing to
-        strip for them here.
+        attachment-bound sections (identity / roster / info) live in the prompt
+        attachment manager and are torn down with the DeepAgent, so there is
+        nothing to strip for them here.
         """
         if self.system_prompt_builder is not None:
             for section in self._static_sections:
@@ -176,20 +194,23 @@ class TeamPolicyRail(DeepAgentRail):
         await self._sync_dynamic_sections(ctx)
 
     async def _sync_dynamic_sections(self, ctx: AgentCallbackContext) -> None:
-        """Upsert the dynamic team-state sections as prompt attachments.
+        """Upsert the attachment-delivered team sections.
 
-        Only ``team_members`` (the unified roster) and ``team_info`` are
-        dynamic; both are refreshed from their mtime-backed caches and upserted
-        into the attachment tail (cleared when None) so stale state never
-        lingers across rounds. This method never touches the system prompt
-        builder — every builder section is static. When no attachment manager
-        is available (e.g. a minimal unit-test agent) it is a no-op.
+        ``team_members`` (the unified roster) and ``team_info`` are dynamic and
+        refreshed from their mtime-backed caches; ``team_identity`` is constant
+        but per-member, so it rides the same channel to keep the system-prompt
+        prefix identical across members.
+        All are upserted into the attachment tail (cleared when None) so stale
+        state never lingers across rounds. This method never touches the system
+        prompt builder — every builder section is static. When no attachment
+        manager is available (e.g. a minimal unit-test agent) it is a no-op.
         """
         if self.attachment_manager is None:
             return
         members_section = await self._refresh_members_section() if self._team_backend is not None else None
         info_section = await self._info_cache.refresh() if self._info_cache is not None else None
         writer = self.attachment_manager.bind_context(ctx)
+        await self._upsert_or_clear(writer, TeamSectionName.IDENTITY, self._identity_section)
         await self._upsert_or_clear(writer, TeamSectionName.MEMBERS, members_section)
         await self._upsert_or_clear(writer, TeamSectionName.INFO, info_section)
 
@@ -199,11 +220,12 @@ class TeamPolicyRail(DeepAgentRail):
         section_name: str,
         section: Optional[PromptSection],
     ) -> None:
-        """Upsert one dynamic section as an attachment, or clear it when empty.
+        """Upsert one section as an attachment, or clear it when empty.
 
-        The attachment ``kind`` is the section name itself (``team_members`` /
-        ``team_info``), which becomes the rendered ``type="..."`` attribute the
-        LLM reads (see the attachment-notice section). A missing ``session_id``
+        The attachment ``kind`` is the section name itself (``team_identity`` /
+        ``team_members`` / ``team_info``), which becomes the rendered
+        ``type="..."`` attribute the LLM reads (see the attachment-notice
+        section). A missing ``session_id``
         raises ``ValueError`` from the writer; that is swallowed with a warning
         so a transient context glitch never breaks the model call.
         """

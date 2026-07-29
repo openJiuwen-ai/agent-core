@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/spawn/`、`openjiuwen/agent_teams/agent/spawn_manager.py`、`openjiuwen/agent_teams/agent/stream_controller.py`、`openjiuwen/agent_teams/agent/payload.py`、`openjiuwen/agent_teams/agent/agent_configurator.py`、`openjiuwen/agent_teams/worktree/`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-07-14 |
-| 关联 feature | F_38_team-teammate-worktree-isolation-agenttool.md、F_28_native-harness-team-adoption.md、F_60_native-harness-pause-abort-resume.md |
+| 最近一次修订日期 | 2026-07-28 |
+| 关联 feature | F_38_team-teammate-worktree-isolation-agenttool.md、F_28_native-harness-team-adoption.md、F_60_native-harness-pause-abort-resume.md、F_69_cwd-workspace-project-root-separation.md |
 
 ## 范围 / 边界
 
@@ -114,12 +114,18 @@
    （`worktree/naming.py`）。`TeamMember.options.worktree` 持久化 `isolation/path`；
    旧库 migration 会把 `model_ref_json` backfill 到 `options.model_ref` 后删除旧列。
    完整 worktreeInfo（`worktree_name/worktree_branch/head_commit`）留在 leader 侧
-   宿主内存；`TeamRuntimeContext` 只携带 `worktree_path` 作为 teammate 的
-   cwd override。
-7. **Worktree workspace 不走 cleanup_path**：`AgentConfigurator.setup_agent`
-   看到 `ctx.worktree_path` 时把成员 `WorkspaceSpec.root_path` 覆盖为该路径，
-   并关闭 stable_base；该路径不能注册到 `TeamBackend.cleanup_path`，否则
-   `clean_team` 会绕过 `git worktree remove` 直接删除工作树。
+   宿主内存；`TeamRuntimeContext` 只携带 `worktree_path`，它是 teammate 的
+   **cwd** override（不是 workspace override，见下方不变量 7）。
+7. **Worktree 只移动 cwd，不夺走 workspace**（见 [[F_69]]）：`AgentConfigurator.setup_agent`
+   看到 `ctx.worktree_path` 时把它写进成员的 **cwd**（`DeepAgentSpec.cwd`），
+   `WorkspaceSpec.root_path` **始终**是成员自己的稳定目录
+   （`ensure_team_member_workspace_link`，即 stable_base 语义）。理由：workspace 装
+   成员产物 / memory / skills 视图 / `.team` 挂载点，若它跟着 worktree 走，worktree
+   一删这些就没了。由此 workspace 恒为团队自己的目录，**无条件**注册进
+   `TeamBackend.cleanup_path`；worktree 本身不在 cleanup_path 里，`clean_team` 仍
+   只经 `git worktree remove` 拆它。成员没有 workspace spec 时兜底
+   `WorkspaceSpec(stable_base=True)`——team 成员恒有 workspace，`DeepAgent` 的 cwd
+   初始化以它为锚。
 8. **Worktree finalize fail-closed，且不在 `cleanup_teammate` 里**：finalize 由
    `TeammateWorktreeLifecycle` 拥有，两个入口——
    `finalize_non_contributing_member_worktrees()`（leader round 收尾，经

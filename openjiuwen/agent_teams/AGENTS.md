@@ -33,7 +33,7 @@ agent_teams/
 ├── __init__.py          # 公开 API 聚合导出
 ├── constants.py         # 保留名（user/team_leader/human_agent）集中定义
 ├── context.py           # session_id 跨成员/跨模式共享 contextvars
-├── i18n.py              # 运行时中/英文字符串（仅装运行时 hard-coded 串）
+├── i18n.py              # 运行时中/英文字符串（仅装运行时 hard-coded 串）+ `reply_hint_for(sender)`：按发件人选 reply-hint 文案（user 走无条件强制版，其余走通用条件版）——文案归它管，选哪条文案也归它管，两个消费点（coordination `MessageHandler` / external `format`）不各写一遍
 ├── timefmt.py           # 毫秒 epoch → "绝对本地时间 + 相对差" 渲染（喂 LLM/观测，文案走 i18n）
 ├── inbound_render.py    # 入站消息/框架事件 → <team-inbound>/<team-event>/<team-note> XML 渲染（纯函数，喂 LLM；文案由 handler 从 i18n 取）。见 F_46
 ├── message_template.py  # 框架模板消息的两阶段渲染：发送存意图（消息行 content 空 + meta={template,refs,params}），投递时按收件人语言加载 prompts/<lang>/<key>.md、用 {{task.*}}/{{member.*}}/{{param.*}} 填当前行（单遍替换不二次扫描、字段白名单、失败降级为 meta 合成的 fallback 行）。见 F_63
@@ -88,7 +88,7 @@ customizer 后处理）。
 
 | 文件 | 职责 |
 |---|---|
-| `team_policy_rail.py` | `TeamPolicyRail`：所有团队 section 均静态（role / HITT 协作契约 [gate `hitt_enabled`] / bridge avatar 自契约 [仅 BRIDGE_AGENT] / workflow / dispatch [gate `dispatch_mode`，LEADER + TEAMMATE] / lifecycle / private / extra + 两个说明 section），init 建一次注入 `SystemPromptBuilder`（前缀 KV cache 稳定）；仅 churn 的 `team_members`（统一名册，人类标 `[human]`）/ `team_info` 经探针缓存刷新后挂 `prompt_attachment_manager`（`_sync_dynamic_sections` 不碰 builder）。见 F_46 / F_50 / F_52 |
+| `team_policy_rail.py` | `TeamPolicyRail`：所有进 builder 的团队 section 均静态**且成员间逐字一致**（role / HITT 协作契约 [gate `hitt_enabled`] / bridge avatar 自契约 [仅 BRIDGE_AGENT] / workflow / dispatch [gate `dispatch_mode`，LEADER + TEAMMATE] / lifecycle / extra + 两个说明 section），init 建一次注入 `SystemPromptBuilder`（前缀 KV cache 稳定）；churn 的 `team_members`（统一名册，人类标 `[human]`）/ `team_info` 经探针缓存刷新后、以及恒定但 per-member 的 `team_identity`（自身 `member_name` + 私有工作约定）一并挂 `prompt_attachment_manager`（`_sync_dynamic_sections` 不碰 builder）。见 F_46 / F_50 / F_52 / F_68 |
 | `confirm_payload.py` | `TeamConfirmPayload` + `TeamPermissionConfirmResponse`：team-specific confirmation payload/response models（extend harness base classes with `decided_by` tracking） |
 | `team_permission_rail.py` | `TeamPermissionRail` + `TeamApprovalOrchestrator`：team-mode permission guardrail；继承 `PermissionInterruptRail`，leader-mediated ASK resolution + session-scoped auto-confirm（`_persist_allow_always=False`）。`enable_permissions=True` 时替代 `TeamToolApprovalRail` |
 | `tool_approval_rail.py` | `TeamToolApprovalRail`：teammate 调工具时通过消息向 leader 申请审批的中断 rail（`enable_permissions=False` 时使用） |
@@ -120,18 +120,22 @@ task.py            # TaskSummary / TaskDetail —— 任务返回模型
 ### models/ — 多模型部署原语
 
 ```
-pool.py        # ModelPoolEntry / ModelRouterConfig / inherit_pool_ids
-               # —— 池条目 + 单端点 router 便利配置 + 池刷新 model_id 继承
+pool.py        # ModelPoolEntry / ModelRouterConfig / IntelliRouterConfig
+               # / IntelliRouterDeployment / inherit_pool_ids
+               # —— 池条目 + 两种 router 便利配置 + 池刷新 model_id 继承
 allocator.py   # Allocation / ModelAllocator(Protocol)
-               # / RoundRobinModelAllocator / ByModelNameAllocator / RouterAllocator
+               # / RoundRobinModelAllocator / ByModelNameAllocator
+               # / RouterAllocator / IntelliRouterAllocator
                # build_model_allocator / resolve_member_model
 ```
 
 - `ModelPoolEntry` 是 `TeamSpec.model_pool` 的元素，描述一个 LLM 端点 + 凭证 + provider；通过 `to_team_model_config()` 物化为 `TeamModelConfig`。
 - 持久化身份用 `(model_name, group_index)`，运行时 client 身份用自动 uuid `model_id`；`inherit_pool_ids` 在池刷新时只对 bit-exact 旧条目继承 `model_id`，避免基础设施层缓存到旧凭证的 client。
-- 三条分配策略：`RoundRobinModelAllocator`（线性轮转，无视 `model_name`）/ `ByModelNameAllocator`（按 `model_name` 分组、组内轮转）/ `RouterAllocator`（单端点路由，model_name 唯一映射，无 hint 时返回首项）。新策略实现 `ModelAllocator` 协议即可；`build_model_allocator` 读 `team_spec.model_pool_strategy` 派发。
+- 四条分配策略：`RoundRobinModelAllocator`（线性轮转，无视 `model_name`）/ `ByModelNameAllocator`（按 `model_name` 分组、组内轮转）/ `RouterAllocator`（单端点路由，model_name 唯一映射，无 hint 时返回首项）/ `IntelliRouterAllocator`（`RouterAllocator` 子类，客户端可靠路由）。新策略实现 `ModelAllocator` 协议即可；`build_model_allocator` 读 `team_spec.model_pool_strategy` 派发。
+- **可靠性只归一层**（S_11 不变量 14）：前三条策略把成员摊到多个端点上，可靠性归 allocator；`intelli_router` 把多端点整个下沉给客户端 router（请求级重试 / failover / 限流感知），可靠性归 client。两者**二选一**，叠加即两层都做负载均衡。
 - `ModelRouterConfig` 是用户面向的便利输入：一份 `(api_key, api_base_url, api_provider)` + `model_names: list[str]`。在 `TeamAgentSpec.build()` 时通过 `to_pool_entries()` 展开成 `model_pool` 并把 `model_pool_strategy` 设为 `"router"`，下游 `resolve_member_model` / `inherit_pool_ids` / `update_model_pool` 全部复用 pool 路径，没有特殊分支。
-- `model_router` 与 `model_pool` 在 `TeamAgentSpec` 上**互斥**：同时配置直接 `ValueError`。strategy `"router"` 也可以由用户手动配 pool + 设置 strategy 触发，但必须保证 pool 内 `model_name` 唯一（RouterAllocator 在构造时校验）。
+- `IntelliRouterConfig` 同理展开（strategy 设为 `"intelli_router"`）：每个逻辑 name 一条 entry，**每条都带全量 deployment 列表**、`api_provider="intelli_router"`、entry 自身 `api_key` / `api_base_url` 为空（凭证 per-deployment）。`"*"`（统一路由）默认排首位，故 leader 不配 `model_name` 即取到可用性最高的一档。**`IntelliRouterDeployment.api_base` 不含 `/v1`**——与 `ModelClientConfig.api_base` 约定相反，intelli_router 的 adapter 自己拼 `/v1/chat/completions`；配错的报错是 `ResponseNotRead` 而非 404。详见 [[F_67]]。
+- `model_pool` / `model_router` / `model_intelli_router` 在 `TeamAgentSpec` 上**三者互斥**：配置超过一个直接 `ValueError`。strategy `"router"` / `"intelli_router"` 也可以由用户手动配 pool + 设置 strategy 触发，但对应 allocator 在构造时强制约束（`router` 要求 name 唯一；`intelli_router` 额外要求 provider 正确 + deployments 非空）。
 - 空池 → `build_model_allocator` 返回 `None` → 走 `TeamAgentSpec.agents` per-agent 模型配置兜底。
 - 新增模型相关原语优先放本目录，避免渗回 `schema/team.py`（schema 层只声明字段引用，实现在 models/）。
 
@@ -212,7 +216,7 @@ messager，不经本地 avatar 代理。与 F_07 bridge（本地完整 DeepAgent
 "自主一等成员"。
 
 - `external/descriptor.py`：`TeamJoinDescriptor`（session/team/member + role + language +
-  db_config + transport_config）+ `TEAM_JOIN_ENV` 环境变量（`OPENJIUWEN_TEAM_JOIN`）。
+  dispatch_mode + teammate_mode + db_config + transport_config）+ `TEAM_JOIN_ENV` 环境变量（`OPENJIUWEN_TEAM_JOIN`）。
   团队拉起外部 agent 时注入，或运维下发给独立服务。
 **两个场景，按 `descriptor.scope` 首次连接时分化（F_26）**——`scope` 与 team `role` 正交：
 

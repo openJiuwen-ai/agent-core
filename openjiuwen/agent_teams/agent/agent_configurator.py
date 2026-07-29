@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.agent.payload import SpawnPayloadBuilder
 from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
 from openjiuwen.agent_teams.harness import TeamHarness
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.messager import (
     Messager,
     create_messager,
@@ -280,6 +281,9 @@ class AgentConfigurator:
 
             self.model_allocator = build_model_allocator(spec, ctx.team_spec)
 
+        if ctx.role == TeamRole.LEADER:
+            kv_cache_hooks.ensure_leader_registry(self)
+
         self.setup_team_backend(
             spec,
             ctx,
@@ -423,31 +427,31 @@ class AgentConfigurator:
         member_name = ctx.member_name
 
         ws_spec = agent_spec.workspace or spec.agents.get("leader", agent_spec).workspace
-        workspace_is_worktree = bool(ctx.worktree_path)
-        if ctx.worktree_path:
-            # Team-managed isolation creates the teammate worktree before this
-            # point. Build the DeepAgent with that worktree as its visible
-            # workspace so shell/file tools start inside the isolated checkout.
-            base_ws_spec = ws_spec or WorkspaceSpec()
-            ws_spec = base_ws_spec.model_copy(
-                update={
-                    "root_path": ctx.worktree_path,
-                    "stable_base": False,
-                }
-            )
-        if ws_spec and ws_spec.stable_base:
+        if ws_spec is None:
+            # A team member always owns a workspace -- it is where its
+            # artifacts, memory and the .team mount live, and DeepAgent keys
+            # its cwd initialisation off it.
+            ws_spec = WorkspaceSpec(stable_base=True)
+        if ws_spec.stable_base:
             team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
             ws_spec = ws_spec.model_copy(
                 update={"root_path": ensure_team_member_workspace_link(team_name, member_name)}
             )
 
+        # cwd is a separate layer from the workspace. The workspace stays the
+        # member's private artifact directory (memory, skills view, .team
+        # mount); cwd is where shell runs and relative paths resolve. Team
+        # isolation moves cwd into the worktree without dragging the workspace
+        # along -- otherwise the member's artifacts and skills view would live
+        # inside an ephemeral checkout and vanish with it.
+        member_cwd = ctx.worktree_path or agent_spec.cwd or None
+        member_project_root = agent_spec.project_root or agent_spec.cwd or None
+
         workspace_root_path = ws_spec.root_path if ws_spec is not None else None
-        should_register_cleanup_path = (
-            bool(workspace_root_path)
-            and self.team_backend is not None
-            and not workspace_is_worktree
-        )
-        if should_register_cleanup_path and workspace_root_path is not None:
+        # The workspace is now always the member's own directory (never the
+        # project dir, never a worktree), so it is unconditionally ours to
+        # clean up.
+        if workspace_root_path and self.team_backend is not None:
             self.team_backend.register_cleanup_path(workspace_root_path)
 
         if self.workspace_manager and ws_spec and ws_spec.root_path:
@@ -465,6 +469,8 @@ class AgentConfigurator:
                 "card": self._card,
                 "model": model_config,
                 "workspace": ws_spec,
+                "cwd": member_cwd,
+                "project_root": member_project_root,
                 "sys_operation": sys_operation_spec,
                 "tools": list(agent_spec.tools or []),
                 "enable_skill_discovery": True,
@@ -640,6 +646,7 @@ class AgentConfigurator:
         swarmflow_worker_base_spec = None
         swarmflow_human_base_spec = None
         swarmflow_concurrency_governor = None
+        swarmflow_budget = None
         if ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
             team_spec_for_models = ctx.team_spec
 
@@ -689,6 +696,13 @@ class AgentConfigurator:
                 agents_per_run_cap=l2_cap,
             )
 
+            from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
+
+            # One ledger per leader, shared by every run it launches (like the
+            # governor's L3): concurrent runs draw down one pool. ``total=None``
+            # keeps it unbounded while still giving scripts a live ``spent()``.
+            swarmflow_budget = BudgetLedger(total=spec.swarmflow_budget)
+
         inject_team_handles(
             member_build_context.extras,
             team_backend=self.team_backend,
@@ -700,6 +714,7 @@ class AgentConfigurator:
             swarmflow_worker_base_spec=swarmflow_worker_base_spec,
             swarmflow_human_base_spec=swarmflow_human_base_spec,
             swarmflow_concurrency_governor=swarmflow_concurrency_governor,
+            swarmflow_budget=swarmflow_budget,
             reliability_components=reliability_components,
             permissions_override=ctx.permissions_override,
             worktree_manager=self.worktree_manager,

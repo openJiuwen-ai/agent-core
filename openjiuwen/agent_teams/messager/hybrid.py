@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import json
 from typing import Protocol
 import uuid
@@ -73,39 +72,28 @@ class WebSocketEventPublisher:
         if topic_id != topic.build(self._session_id, self._team_name):
             raise ValueError(f"team topic does not match the external client identity: {topic_id}")
         return {
-            "protocol_version": "1.0",
-            "provenance": {
-                "source_protocol": "e2a",
-                "converter": "openjiuwen.agent_teams.messager.hybrid",
-                "converted_at": datetime.now(timezone.utc).isoformat(),
-                "details": {"kind": "team_external_event"},
-            },
-            "request_id": request_id,
-            "session_id": self._session_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "identity_origin": "agent",
-            "channel": "web",
-            "method": "chat.send",
+            "type": "req",
+            "id": request_id,
+            "method": "team.mq.publish",
             "params": {
-                "query": ExternalTeamEvent(topic=topic, event=message).to_wire(),
-                "mode": "team",
-                "team": True,
+                "session_id": self._session_id,
+                "payload": ExternalTeamEvent(topic=topic, event=message).to_wire(),
             },
-            "is_stream": True,
+            "is_stream": False,
         }
 
     @staticmethod
-    def _is_successful_response(data: dict) -> bool:
-        """Return whether an E2A response completes a published event."""
-        response_kind = data.get("response_kind")
-        if response_kind == "e2a.chunk":
-            return False
-        if response_kind == "e2a.complete" and data.get("status") == "succeeded":
-            return True
+    def _validate_response(data: dict) -> None:
+        """Validate the unary acknowledgement for a published event."""
+        if data.get("type") == "res" and data.get("ok") is True:
+            return
 
-        body = data.get("body") or {}
-        message = body.get("message") if isinstance(body, dict) else None
-        raise RuntimeError(str(message or "team event publish failed"))
+        error = data.get("error")
+        if not error:
+            payload = data.get("payload")
+            if isinstance(payload, dict):
+                error = payload.get("error")
+        raise RuntimeError(str(error or "team event publish failed"))
 
     async def publish(self, topic_id: str, message: EventMessage) -> None:
         request_id = f"team-event-{uuid.uuid4()}"
@@ -123,10 +111,10 @@ class WebSocketEventPublisher:
                             data = json.loads(frame.data)
                             if data.get("type") == "event" and data.get("event") == "connection.ack":
                                 continue
-                            if data.get("request_id") != request_id:
+                            if data.get("id") != request_id:
                                 continue
-                            if self._is_successful_response(data):
-                                return
+                            self._validate_response(data)
+                            return
                         if frame.type in {
                             aiohttp.WSMsgType.CLOSE,
                             aiohttp.WSMsgType.CLOSED,

@@ -143,8 +143,9 @@ leader 全板巡视 nudge 关闭（见 §4）。
 - **提示词**：`dispatch_autonomous_*` / `dispatch_scheduled_*` 模板按 spec 模式装配
   （既有 F_57 管线），调度版 leader 模板只讲调度契约（assignee 必填、框架代办交接、
   reviewer/轮数指引、升级处置），不含任何"另一种模式"的说明。
-- **工具**：`create_task` 两个形态照旧构建期查表（autonomous 无 `assignee`；scheduled
-  `assignee` 必填 + 可选 `max_review_rounds`）；`verify_task` 语义按模式二分，**描述随语义
+- **工具**：`create_task` 两个形态照旧构建期查表（autonomous 的 `assignee` 可选且不暴露
+  `reviewer`；scheduled `assignee` 必填 + 可选 `reviewer` / `max_review_rounds`）；
+  `verify_task` 语义按模式二分，**描述随语义
   分离**（desc_key 形态：`verify_task` 首裁即决 / `verify_task_scheduled` 投票记录，照
   `member_complete_task` 的 `_MEMBER_COMPLETE_DESC_KEY` 先例）。
 - **运行时消费**：`TeamBackend.dispatch_mode` / `TeamTaskManager._dispatch_mode` 直接持

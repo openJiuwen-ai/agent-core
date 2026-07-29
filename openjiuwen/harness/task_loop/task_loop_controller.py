@@ -136,6 +136,17 @@ class TaskLoopController(Controller):
         if queues is not None:
             queues.push_follow_up(msg)
 
+    def enqueue_steer(self, msg: str) -> None:
+        """Push a steering message into the current round's steering queue.
+
+        The inner ReAct loop drains this queue before each model call,
+        allowing real-time guidance without interrupting the current round.
+        Used when a user sends a message while a goal round is running.
+        """
+        queues = self._get_interaction_queues()
+        if queues is not None:
+            queues.push_steer(msg)
+
     def has_follow_up(self) -> bool:
         """Check if follow-up messages are pending.
 

@@ -1,0 +1,10 @@
+finetuned_models/
+sample_videos/
+memory_dumps/
+__pycache__/
+logs/
+evaluation/
+perstream.egg-info/
+.env
+tmp/
+CHANGELOG.md

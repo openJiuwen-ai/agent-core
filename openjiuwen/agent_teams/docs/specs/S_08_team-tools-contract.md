@@ -19,7 +19,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-07-16 |
+| 最近一次修订日期 | 2026-07-28 |
 | 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md |
 
 ## 范围 / 边界
@@ -80,11 +80,11 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 7. **每条 ToolCard 描述都过 Translator**。工具构造器拿到的是同一个
    `t: Translator` 闭包，`ToolCard.description` 必须由 `t(name)` 提供，
    不许在构造器里写硬编码字面量。
-8. **审批工具的角色门控**：`approve_plan` /
-   `approve_tool` 只在 `teammate_mode == "plan_mode"` 才进入 leader 工具集；
-   `build_mode` 下默认不包含。但当 `team_permissions_enabled=True` 时，
-   `approve_tool` 在 `build_mode` 下也保留——leader 需用它解决 teammate ASK interrupt。
-   `teammate_mode` 不影响 teammate / human_agent 的工具集。
+8. **计划与审批工具的模式门控**：`approve_plan` 只在
+   `teammate_mode == "plan_mode"` 才进入 leader 工具集；`submit_plan` 只在
+   `teammate_mode == "plan_mode"` 才进入 teammate 工具集；`build_mode` 下默认不包含。
+   但当 `team_permissions_enabled=True` 时，`approve_tool` 在 `build_mode` 下也保留——
+   leader 需用它解决 teammate ASK interrupt。human_agent 工具集不受实际影响。
 9. **`exclude_tools` 是减法，不是注册口**。它从角色集合里**移除**给定名字，
    不能通过它注册新工具。新工具靠的是工厂里的静态 `all_tools` 字典。
 10. **角色集合互相对称**：
@@ -97,7 +97,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
       调度模式的成员。
     - human_agent = 显式枚举的 `HUMAN_AGENT_TOOLS`，**不沿用** `SHARED_TOOLS`。
     Human agent 不得拿到 `claim_task`——它属于**自主认领模式**的 teammate 路径，
-    人类化身只能等 leader 通过 `update_task(assignee=...)` 显式指派。同理
+    人类化身只能等 leader 通过 `create_task(..., assignee=...)` / `update_task(assignee=...)`
+    显式指派；可运行的人类预指派任务由后端进入执行态，不要求人类自行认领。同理
     `scheduled` 的 teammate 也拿不到 `claim_task`：那里根本没有认领这回事。
     Human agent **可以**拿到 `send_message`，但其使用规则由 `team_hitt`
     prompt section 强约束：仅在用户当轮 Inbox 输入里明确下达「转告 /
@@ -191,15 +192,20 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     **扩展就是加 key**；语义变了的同名参数用新的 desc_key 命名空间
     （`send_message_scheduled.to`）。**绝不让 resolver 学会 variant**。
 19. **`create_task` 的 `assignee` 与任务图同一事务落库**（F_57 / F_59 / F_62）。scheduled
-    形态的 `assignee` **必填**（成员不自主认领，无主任务永远不会执行），随 `TaskGraphSpec` →
+    形态的 `assignee` **必填**（scheduled 成员不自主认领，未指定 assignee 的 scheduled 任务不会被调度），随 `TaskGraphSpec` →
     `NewTaskSpec` 进同一次 `mutate_dependency_graph`。**每个任务一律 seed `PENDING`**
     （携带 assignee）：无依赖 → 停在 `PENDING(assignee)`（"已指派未开始"），带依赖 →
     refresh pass 翻成 `BLOCKED(assignee)`。指派与开工是两个事件，故创建期**不再** seed
-    执行态。禁止「建图后逐个 `assign()`、失败的记为 deferred」——那会给原子的
+    执行态。**例外**：`assignee` 是仍在队的人类成员且任务经 refresh 后可运行时，
+    `TeamTaskManager` 在图事务提交后立即调用 `start_task()`，让任务进入 `IN_PROGRESS`
+    （或 plan-mode 的 `PLANNING`）；依赖解除时同样由 `TeamTaskManager._handle_unblocked_tasks`
+    对刚解锁的人类预指派任务执行这一步，且保留 `TASK_UNBLOCKED` 作为依赖解除事实。
+    DAO 仍只负责 `BLOCKED <-> PENDING` 的依赖图刷新。
+    禁止「建图后逐个 `assign()`、失败的记为 deferred」——那会给原子的
     `create_task` 引入不可回滚的部分成功态。`PENDING(assignee)` 的开工（build 成员 →
     `IN_PROGRESS`、plan 成员 → `PLANNING`，DAO `start_task(to_status=...)` 参数化）由
     `TeamTaskManager.start_task` 完成，调用方是 `agent/scheduling/` 的 `TeamScheduler`
-    （见 `S_22`）。scheduled 形态额外带可选 `max_review_rounds`（整数 ≥1，验证返工轮数
+    （见 `S_22`），或上述 human-agent 后端编排路径。scheduled 形态额外带可选 `max_review_rounds`（整数 ≥1，验证返工轮数
     上限，须伴随 `reviewer`，亦可经 `update_task` 事后设置）。
 20. **verify 闸：reviewer 由 leader 指派，裁决策略按生效分发模式二分**（F_59 / F_62）。任务的
     `reviewer` 列（JSON member 名列表）经 `create_task` / `update_task` 由 leader 指派，可多个，
@@ -262,7 +268,7 @@ def create_team_tools(
 | `role` | `"leader"` / `"teammate"` / `"human_agent"` | 决定基础工具集——分别为 `LEADER_TOOLS` / `MEMBER_TOOLS_BY_DISPATCH[dispatch_mode]` / `HUMAN_AGENT_TOOLS`。其它字符串当作 teammate 走（落入 else 分支）。新增角色必须显式补一个集合常量，不要靠 fall-through。 |
 | `dispatch_mode` | `"autonomous"` / `"scheduled"` | 任务如何到达成员。选择 `create_task` / `send_message` 的形态、`member_complete_task` 的 desc_key，以及成员工具集。未知值抛 `KeyError`。见不变量 18。 |
 | `agent_team` | `TeamBackend` | 后端句柄，所有写操作（`build_team` / `spawn_*` / 任务 / 消息）通过它走，不绕过去直接打数据库或 messager。 |
-| `teammate_mode` | `"build_mode"` / `"plan_mode"` | 仅 leader 角色相关：非 plan_mode 时把 `approve_plan` / `approve_tool` 从 allowed 集合里减掉。 |
+| `teammate_mode` | `"build_mode"` / `"plan_mode"` | plan_mode 门禁。非 plan_mode 时从 allowed 集合里减掉 `approve_plan` / `submit_plan`，且未启用 team permissions 时也减掉 `approve_tool`。 |
 | `on_teammate_created` | `Callable[[str], Awaitable[None]]` | leader 用 `send_message` 时若发现成员未启动，自动 startup 的回调；不传则没有 auto-start 行为。teammate / human_agent 不消费这个回调。 |
 | `model_config_allocator` | `Callable[[str \| None], Allocation \| None]` | leader 的 `spawn_teammate` 调它选 model；不传则 spawn 出来的 teammate 无 allocation，由后端兜底。teammate 不消费。 |
 | `exclude_tools` | `set[str]` 或 `None` | **减法**——从该角色 allowed 集合里再减一遍。不存在于 allowed 的名字静默忽略（因为减法对空集是恒等）。 |
@@ -350,14 +356,18 @@ worktree 隔离只通过 spawn 时的 `isolation="worktree"` 由 leader / 宿主
 ### `teammate_mode` 的精确门禁
 
 ```python
-if role == "leader" and teammate_mode != "plan_mode":
-    allowed = allowed - {"approve_plan", "approve_tool"}
+if teammate_mode != "plan_mode":
+    excluded = {"approve_plan", "submit_plan"}
+    if not team_permissions_enabled:
+        excluded.add("approve_tool")
+    allowed = allowed - excluded
 ```
 
-- 只对 `role == "leader"` 生效。
-- `teammate_mode` 取 `"plan_mode"` 时 leader 拿到全套审批工具；其它取值
-  （含默认 `"build_mode"`）一律剥离这两个工具。
-- teammate / human_agent 不受此门禁影响——他们本来就不在 leader 集合里。
+- `teammate_mode` 取 `"plan_mode"` 时 leader 拿到计划审批工具，teammate 拿到
+  `submit_plan`。
+- 其它取值（含默认 `"build_mode"`）剥离计划相关工具；`approve_tool` 在 team
+  permissions 开启时保留给 leader 处理成员 ASK 中断。
+- human_agent 不受此门禁的实际影响——它本来就不在这些集合里。
 
 ### `create_task` 的依赖表示契约（F_55）
 

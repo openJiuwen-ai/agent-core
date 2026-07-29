@@ -78,6 +78,7 @@ class TeamToolRail(DeepAgentRail):
         swarmflow_worker_base_spec: Optional[Any] = None,
         swarmflow_human_base_spec: Optional[Any] = None,
         swarmflow_concurrency_governor: Optional[Any] = None,
+        swarmflow_budget: Optional[Any] = None,
         team_permissions_enabled: bool = False,
     ) -> None:
         super().__init__()
@@ -99,6 +100,7 @@ class TeamToolRail(DeepAgentRail):
         self._swarmflow_worker_base_spec = swarmflow_worker_base_spec
         self._swarmflow_human_base_spec = swarmflow_human_base_spec
         self._swarmflow_concurrency_governor = swarmflow_concurrency_governor
+        self._swarmflow_budget = swarmflow_budget
         self._team_permissions_enabled = team_permissions_enabled
         self._tools: list[Tool] | None = None
 
@@ -130,6 +132,7 @@ class TeamToolRail(DeepAgentRail):
             swarmflow_worker_base_spec=self._swarmflow_worker_base_spec,
             swarmflow_human_base_spec=self._swarmflow_human_base_spec,
             concurrency_governor=self._swarmflow_concurrency_governor,
+            swarmflow_budget=self._swarmflow_budget,
             team_permissions_enabled=self._team_permissions_enabled,
         )
 

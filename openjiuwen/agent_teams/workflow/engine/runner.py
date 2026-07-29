@@ -20,6 +20,7 @@ from typing import Any, Callable
 from .admission import AgentAdmission
 from .backends import MockBackend
 from .backends.base import AgentBackend
+from .budget import BudgetLedger
 from .journal import Journal
 from .loader import load_workflow_source
 from .primitives import _fresh_holder, _invoke_loaded, _path, _preview, _rt, _seq
@@ -111,7 +112,7 @@ async def run_workflow(
     progress_sink: ProgressSink | None = None,
     cap: int | None = None,
     agent_gate: AgentAdmission | None = None,
-    budget_total: int | None = None,
+    budget: BudgetLedger | None = None,
     abort_event: asyncio.Event | None = None,
 ) -> Any:
     # The ``swarmflow`` name a script imports the primitives under is registered
@@ -142,10 +143,13 @@ async def run_workflow(
         progress_sink=progress_sink or noop_progress_sink,
         strict=strict,
         cap_override=cap,
-        budget_total=budget_total,
+        budget=budget if budget is not None else BudgetLedger(),
         abort_event=abort_event,
         agent_gate=agent_gate,
     )
+    # Hand the ledger to the backend: it is the only layer that sees what a call
+    # really costs, so it does the accounting and the engine only reads.
+    rt.backend.bind_budget(rt.budget)
     try:
         result = await _exec_loaded(loaded, rt)
     finally:

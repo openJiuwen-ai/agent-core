@@ -46,6 +46,13 @@ class InnerEventType(str, Enum):
     USER_INPUT = "user_input"
     POLL_MAILBOX = "coordination_poll_mailbox"
     POLL_TASK = "coordination_poll_task"
+    # One-shot board survey on member startup (F_69), the counterpart of the
+    # startup mailbox sweep. Kept distinct from the periodic POLL_TASK: the
+    # board survey must run exactly once, when the member comes up, not on
+    # every tick — a teammate re-scanning an unchanged board would burn a
+    # round each interval.
+    INITIAL_POLL_TASK = "coordination_initial_poll_task"
+    REFRESH_TEAM_CONTEXT = "refresh_team_context"
     # Scheduler wake echo (F_62): the kernel converts a *self-published* task
     # event — which the coordination self-filter drops — into this inner
     # event so the leader-side scheduler still observes board changes the

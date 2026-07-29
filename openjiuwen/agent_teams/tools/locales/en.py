@@ -250,14 +250,12 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "Custom task ID for dependency reference (auto-generated if omitted)",
     "create_task.task.title": "Task title — concise description of the goal",
     "create_task.task.content": "Task details including goals and acceptance criteria",
-    # Only the scheduled create_task variant exposes this property; the
-    # description lives under the shared create_task.* key namespace so both
-    # variants read the same strings for the properties they have in common.
+    # Both create_task variants expose assignee. Autonomous treats it as
+    # optional; scheduled requires it.
     "create_task.task.assignee": (
-        "Member name that carries this task (required); the member must already exist. "
-        "Members never claim, so an unowned task would never run — a dependency-free task "
-        "is started by the scheduling runtime, and a blocked one transfers automatically "
-        "once its dependencies complete"
+        "Member name that carries this task; the member must already exist and must not be the leader. "
+        "Optional in autonomous mode (omitted tasks enter the shared claim pool); required in scheduled mode "
+        "because members never claim there"
     ),
     "create_task.task.depends_on": (
         "Prerequisite task IDs; may reference tasks created in this same call "
@@ -300,7 +298,8 @@ STRINGS: dict[str, str] = {
     "update_task.title": "New task title",
     "update_task.content": "New task content",
     "update_task.assignee": (
-        "member_name to assign this task to (only when currently unassigned). A notification is sent to the assignee"
+        "member_name to assign or reassign this task to; the target must already exist and must not be the leader. "
+        "A notification is sent to the assignee"
     ),
     "update_task.reviewer": (
         "Set this task's reviewer member names (an empty list clears the verify gate); reviewers must "

@@ -28,13 +28,11 @@ class RuleCompressionPipeline:
         time_func: Callable[[], float] = time.time,
         enable_dump: bool = False,
         dump_dir: str | None = None,
-        translate_query_text: Callable[[str], str] | None = None,
     ) -> None:
         self._router = router or RuleContentRouter()
         self._time_func = time_func
         self._enable_dump = enable_dump
         self._dump_dir_override = dump_dir
-        self._translate_query_text = translate_query_text
 
     def current_time(self) -> float:
         return self._time_func()
@@ -215,8 +213,8 @@ class RuleCompressionPipeline:
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-")
         return safe[:80] or "unknown"
 
+    @staticmethod
     def _query_terms_for_message(
-        self,
         context_messages: list[BaseMessage],
         tool_name: str | None,
         tool_arguments: object,
@@ -231,7 +229,6 @@ class RuleCompressionPipeline:
             latest_user_content,
             tool_name,
             tool_arguments,
-            translate_query_text=self._translate_query_text,
         )
 
     @staticmethod

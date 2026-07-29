@@ -3,6 +3,7 @@
 
 import asyncio
 import datetime
+import hashlib
 import os
 import pathlib
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -438,6 +439,23 @@ class FsOperation(BaseFsOperation):
             timeout = self._get_lock_timeout(options)
 
             async with self._file_lock(file_path, "write", timeout):
+                expected_hash = options.get("expected_content_sha256") if options else None
+                if expected_hash is not None:
+                    try:
+                        current_bytes = file_path.read_bytes()
+                    except FileNotFoundError:
+                        current_bytes = b""
+                    current_hash = hashlib.sha256(current_bytes).hexdigest()
+                    if current_hash != expected_hash:
+                        return self._create_error_result(
+                            "write_file",
+                            (
+                                f"File changed while preparing the write: {file_path}. "
+                                "Re-read the file and retry the edit."
+                            ),
+                            WriteFileResult,
+                            _ErrorLogParams(method_name, method_params, start_time),
+                        )
                 if mode == "text":
                     txt = str(content)
                     if prepend_newline:
@@ -1034,11 +1052,14 @@ class FsOperation(BaseFsOperation):
         Sandbox enforcement uses ``sandbox_root`` from config -- a list of
         allowed root directories.  A path is accepted when it falls within
         any one of the entries.  When ``sandbox_root`` is ``None``, the
-        effective list falls back to ``[get_workspace(), get_project_root()]``
-        read from the per-agent CwdState ContextVar so every DeepAgent gets
-        sensible defaults without having to plumb paths through config.
-        The sandbox list is independent of CWD so the security boundary
-        stays fixed even when CWD moves (e.g. worktree enter).
+        effective list falls back to
+        ``[get_workspace(), get_project_root(), get_cwd()]`` read from the
+        per-agent CwdState ContextVar so every DeepAgent gets sensible
+        defaults without having to plumb paths through config.  ``get_cwd()``
+        is in the list because the three layers are independent: a team
+        member runs in the project dir (or an isolated worktree) while its
+        workspace stays a private artifact directory elsewhere, so cwd is not
+        necessarily inside either of the other two roots.
         """
         from openjiuwen.core.sys_operation.cwd import (
             get_cwd,
@@ -1061,7 +1082,7 @@ class FsOperation(BaseFsOperation):
             if configured:
                 roots = list(configured)
             else:
-                roots = [p for p in (get_workspace(), get_project_root()) if p]
+                roots = [p for p in (get_workspace(), get_project_root(), get_cwd()) if p]
 
             resolved_roots = [pathlib.Path(r).expanduser().resolve() for r in roots]
             if not any(self._is_within(normalized, root) for root in resolved_roots):

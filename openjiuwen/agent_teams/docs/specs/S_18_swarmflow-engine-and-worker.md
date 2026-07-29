@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/`（engine / backends / observer / schema / runner / tool_swarmflow）、`schema/team.py`、`schema/events.py`、`schema/blueprint.py`、`agent/team_agent.py`、`agent/coordination/handlers/workflow.py`、`rails/team_policy_rail.py`、`prompts/sections.py` |
-| 最近一次修订日期 | 2026-07-03 |
-| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md` |
+| 最近一次修订日期 | 2026-07-28 |
+| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md` |
 
 ## 范围 / 边界
 
@@ -41,12 +41,24 @@
 - **单次 fan-out 上限**：`parallel(thunks)` / `pipeline(items, ...)` 入口校验长度 ≤ `_MAX_FANOUT`（4096），超出抛 `WorkflowError`——显式报错而非静默截断（对齐参考工具的单次上限）。
 - **`agent()` 的 CC 对齐参数（接口就位、执行留空）**：`agent(..., isolation='worktree', agent_type=...)` 经 `_ENGINE_OPTIONS` 接受并透传至 backend，但参考引擎暂不据其改变执行（不起 worktree 隔离、不解析具名专家 agent），`call_signature` 暂不纳入二者。对齐 Claude Code Workflow 工具表面，便于脚本针对完整 API 编写。详见 `F_42`。
 
+## Token 预算（`BudgetLedger`，`F_66`）
+
+- **账本是共享对象，不是计数字段**：`Runtime.budget: BudgetLedger`（`total` / `spent` / `remaining()` / `exhausted`）取代了旧的 `budget_total: int | None` + `tokens_spent: int`。`int` 不可变、传不进 backend 装的 rail，天花板也就无从执行——形状换成可共享引用才有下文。`BudgetLedger` 住 `engine/budget.py`（纯计数器 + 天花板，零业务耦合，与 `admission.py` 同性质，不破铁律 1）。
+- **单写者：backend 记账，引擎只读**。`run_workflow` 在跑之前调 `AgentBackend.bind_budget(rt.budget)` 一次性注入；此后**只有 backend 写账本**。引擎**不再**累加 `AgentResult.tokens`（那行已删）——一次 `agent()` 是一整圈 agent 循环，引擎只看得见首尾，累加它等于把 backend 已记的账再记一遍。`AgentResult.tokens` 因此退化为**单次调用成本的如实上报**（无人累加）。
+- **数字必须来自模型返回值**：`SwarmflowBudgetRail`（`workflow/backends/budget_rail.py`，业务层）读 `AssistantMessage.usage_metadata`（`total_tokens`，缺失时回落 `input_tokens + output_tokens`）。provider 不报 usage 就记 **0，不猜**——按长度估算会让天花板的含义随 provider 而变。`MockBackend` 无模型可问，用自己的估算喂账本（离线确定性）。
+- **两级执法，缺一不可**：
+  - **rail（主力）**：backend 给每个 worker / avatar harness 挂一个 `SwarmflowBudgetRail`。`after_model_call` 记账、超了 `ctx.request_force_finish` **就地终止该 round**；`before_model_call` 挡下付不起的调用（专治并发——账本共享，兄弟 worker 烧干预算时本 worker 立刻被挡）。用 force-finish 而非抛异常：超预算是钱花完了，不是坏了，已做的工作照常返回。
+  - **引擎（兜底）**：`_check_budget(rt)` 紧挨 `_check_abort(rt)`，只在 `agent()` / `AgentSession.send()` **入口**，`raise BudgetExhausted`。**不做 pre-journal 检查**（与 `_check_abort` 不同）：钱已经花了的调用必须落 journal，否则 resume 会重跑并再付一次。
+- **`BudgetExhausted` 是 `BaseException`**（与 `WorkflowAborted` 同理由：能被 `except Exception` 吞掉的天花板不叫天花板，须穿透 `parallel` / `pipeline` 分支体）。但语义相反——abort 可恢复（resume 重跑），exhausted 是**终态**（重跑只会撞同一个 gate），故 `SwarmflowTool.run_background` 单独捕获它转成 `BackendError`，让 async-tool runtime 注入 leader 读得到的失败；直接放 `BaseException` 上去会静默杀掉 task。
+- **允许小幅越界**：一次调用的用量只有返回后才入账，最后那次可以把 `spent` 顶过 `total`；`remaining()` 因此 clamp 到 0，不返回负数。要不越界就得预知成本——不可能。
+- **作用域是 leader，不是 run**：账本由 `agent_configurator` 在 `role==LEADER and enable_swarmflow` 时建一个，经 `inject_team_handles(SWARMFLOW_BUDGET)` → `TeamToolRail` → `create_team_tools` → `SwarmflowTool` → `run_swarmflow(budget=)` 下发（与 `swarmflow_concurrency` 完全平行的链路）。并发 run 抽同一个池，对齐工具描述里 `spent()`「跨主循环 + 所有工作流共享」的语义。配置入口是 `TeamAgentSpec.swarmflow_budget: int | None`（build 期校验 `>= 1`，与 `validate_swarmflow_concurrency` 同层）；**不是 `swarmflow()` 工具入参**——花钱上限是部署方的决定，不该由 leader 每次现编。
+
 ## WORKER 不变量（`TeamRole.WORKER`）
 
 1. **单轮、无状态、用完即弃**：一个 `agent()` 调用对应一个 worker；worker 跑一次即销毁，上下文每次全新。
 2. **worker = 没有团队工具的 teammate**：`TeamWorkerBackend` 从 team 的 **teammate spec**（缺失则 leader spec，经 `agent_configurator` → `inject_team_handles` 的 `SWARMFLOW_WORKER_BASE_SPEC` 注入）`model_copy` 派生 worker `DeepAgentSpec`——保留 teammate 能力（model / tools / skills / workspace / sys_operation / **todo 规划 `enable_task_planning` / `enable_task_loop`**），但因 team rail 是装配期注入、原始 spec 不含，worker 天然无团队协作工具。每个 worker 是一个 `TeamHarness(role=WORKER)`。
 3. **不进 coordination 协作循环**：worker 不订阅消息总线、不认领任务、不被 dispatcher 唤醒。它经 **`TeamHarness.run_once`** 执行——`run_once` = `DeepAgent.invoke`（按 spec 的 `enable_task_loop` 自动单轮或自驱 task-loop），**不开 supervisor → 无 steer / 无 outputs 流**，返回值与 `Runner.run_agent` 一致；**不经** `TeamAgent.invoke` / `CoordinationKernel.start`。结束 `harness.dispose()` 释放 sys_operation（工具由 `run_once` 的 `teardown_tools` 自动清理）。
-4. **无 DB roster 身份、不持 `team_backend`**：swarmflow worker **不是 teammate**，`TeamWorkerBackend` **不**经 `spawn_member` 往 team DB 写 member row。每个 worker mint 成员名：有 `run_id` 时为 `{run_prefix}-{label_slug}-{n}`，否则 `wf-{slug}-{n}`（`F_47` / `S_21`），满足 `_MEMBER_NAME_PATTERN`，只用作 worker card / owner id / 工作区目录名——纯进程内身份，用完即弃，不污染团队成员表。worker 工作区落在 `team_home/workspaces/{member}_workspace`；`agent_configurator` 已把整个 `team_home` 登记进团队 cleanup，故 worker 工作区随 `clean_team` 一并删除，**无需** backend 单独 `register_cleanup_path`。`TeamWorkerBackend` / `run_swarmflow` / `SwarmflowTool` 整条链**不注入 `team_backend`**（`F_44`）——worker 路径与 team DB 解耦。
+4. **无 DB roster 身份、不持 `team_backend`**：swarmflow worker **不是 teammate**，`TeamWorkerBackend` **不**经 `spawn_member` 往 team DB 写 member row。每个 worker mint 成员名：有 `run_id` 时为 `{run_prefix}-{label_slug}-{n}`，否则 `wf-{slug}-{n}`（`F_47` / `S_21`），满足 `_MEMBER_NAME_PATTERN`，只用作 worker card / owner id / 工作区目录名——纯进程内身份，用完即弃，不污染团队成员表。worker 工作区落在 `team_home/workspaces/{member}_workspace`——**开 worktree 隔离时也是它**，隔离只把 worker 的 cwd（`DeepAgentSpec.cwd`）指向 worktree，工作区不跟着走（[[F_69]]）；`agent_configurator` 已把整个 `team_home` 登记进团队 cleanup，故 worker 工作区随 `clean_team` 一并删除，**无需** backend 单独 `register_cleanup_path`。`TeamWorkerBackend` / `run_swarmflow` / `SwarmflowTool` 整条链**不注入 `team_backend`**（`F_44`）——worker 路径与 team DB 解耦。
 5. **model**：worker 默认继承 base spec（teammate/leader）的 `model`（`TeamModelConfig`）。`agent(model="X")` 的 per-call hint 经注入的 `model_resolver` 回调解析为**配置而非实例**——`agent_configurator` 在 leader+`enable_swarmflow` 时构造闭包，用 `resolve_member_model(ctx.team_spec, model_name="X", model_index=None)` 对 team model pool 做**纯位置查找**（无 allocator 轮转、无状态），返回 `TeamModelConfig`；命中则覆盖 worker spec.model，未命中（pool 未配 / 名字缺失 / 无 hint）返回 `None` → 继承 base spec model。resolver 经 `BuildContext.extras` 的 `SWARMFLOW_MODEL_RESOLVER` 注入，`TeamWorkerBackend` 只持 `(name) -> TeamModelConfig | None` 回调，engine 对接层不耦合 pool/allocator 结构。
 6. **worktree isolation**：`agent(isolation="worktree")` 给该 worker 创建
    owner-scoped worktree。`TeamWorkerBackend` 调

@@ -8,6 +8,7 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
+from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm.model import Model
 
 from openjiuwen.core.single_agent.rail.base import AgentRail
@@ -173,6 +174,9 @@ class DeepAgentConfig:
             engineering configuration. If set, applied
             as the inner ReAct agent's ``ContextEngineConfig``
             when the embedded agent is created.
+        kv_cache_affinity_config: KV cache affinity configuration
+            applied as the inner ReAct agent's
+            ``KVCacheAffinityConfig`` when the embedded agent is created.
         enable_task_loop: Whether to enable the outer
             task loop (P1).
         enable_async_subagent: Enable async subagent mode (default False).
@@ -185,7 +189,17 @@ class DeepAgentConfig:
         subagents: Sub-agent specifications or Sub-agent instance.
         tools: Tool cards mounted on the agent.
         mcps: MCP server configs mounted on the agent.
-        workspace: Workspace path for file operations.
+        workspace: Workspace root for this agent's own artifacts (memory,
+            skills view, produced files). NOT the shell working directory —
+            see ``cwd``.
+        cwd: Working directory shell commands run in and relative paths
+            resolve against. Defaults to the workspace root, which keeps the
+            single-agent case unchanged. Team members point it at the project
+            directory (or their isolated worktree) while keeping their own
+            workspace for artifacts.
+        project_root: Project identity anchor (repo root). Defaults to
+            ``cwd``. Used for access-boundary checks, not for path
+            resolution.
         skills: Skill definitions (P1).
         backend: Backend protocol instance (P2).
         sys_operation: System operation.
@@ -206,6 +220,7 @@ class DeepAgentConfig:
     card: Optional[AgentCard] = None
     system_prompt: Optional[str] = None
     context_engine_config: Optional[Any] = None
+    kv_cache_affinity_config: Optional[KVCacheAffinityConfig] = None
     enable_task_loop: bool = False
     enable_async_subagent: bool = False
     add_general_purpose_agent: bool = False
@@ -214,6 +229,8 @@ class DeepAgentConfig:
     tools: Optional[List[ToolCard]] = None
     mcps: Optional[List[McpServerConfig]] = None
     workspace: Optional[Workspace] = None
+    cwd: Optional[str] = None
+    project_root: Optional[str] = None
     skills: Optional[Union[str, List[str]]] = None
     enable_skill_discovery: bool = False
     backend: Optional[Any] = None
@@ -248,6 +265,12 @@ class DeepAgentConfig:
 
     # Whether or not the inner ReactAgent executes tool calls in parallel.
     parallel_tool_calls: bool = True
+
+    # Auto-mount ToolCallResilienceRail: bounded retry of retryable tool-call
+    # failures (transport/timeout markers) via the @rail retry loop. Non-
+    # idempotent tools (write/shell/spawn) are never retried. Turn off for
+    # deployments that supply their own retry rail or want raw exceptions.
+    enable_tool_resilience_rail: bool = True
 
     # Filesystem sandbox: when True, file ops are restricted to workspace/project root.
     # Subagents inherit the stricter of their own spec and this value.

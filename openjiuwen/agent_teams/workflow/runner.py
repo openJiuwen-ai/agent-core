@@ -28,6 +28,7 @@ from openjiuwen.agent_teams.workflow.engine import (
     WorkflowProgressEvent,
     run_workflow,
 )
+from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
 from openjiuwen.agent_teams.workflow.engine.loader import extract_workflow_meta, load_workflow_meta
 from openjiuwen.agent_teams.workflow.observer import WorkflowObserver
 from openjiuwen.agent_teams.workflow.schema import WorkflowRun
@@ -140,6 +141,7 @@ async def run_swarmflow(
     on_backend_ready: Callable[[Any], None] | None = None,
     run_id: str | None = None,
     agent_gate: Any = None,
+    budget: BudgetLedger | None = None,
 ) -> Any:
     """Execute a swarmflow script with real LLM workers.
 
@@ -175,9 +177,17 @@ async def run_swarmflow(
         on_backend_ready: Optional callback invoked with the constructed
             ``TeamWorkerBackend`` before the run starts — the launcher uses it to
             register a control handle (so pause can reach ``abort_sessions``).
+        budget: The leader's shared token ledger. Workers bill their real usage
+            to it and are cut short at their next model call once its ceiling is
+            reached; ``agent()`` then refuses to start another. ``None`` runs
+            unbounded (the ledger still counts, so ``budget.spent()`` works).
 
     Returns:
         Whatever the script's ``run(args)`` returned.
+
+    Raises:
+        BudgetExhausted: If the ledger's ceiling is reached and the script keeps
+            calling ``agent()`` instead of winding down on ``budget.remaining()``.
     """
     def _on_human_prompt(member_name: str, correlation_id: str, prompt: str) -> None:
         """Surface a pending human turn as a progress event (leader narrates it)."""
@@ -190,13 +200,14 @@ async def run_swarmflow(
             )
         )
 
-    def _on_human_replied(member_name: str, correlation_id: str) -> None:
-        """Signal that a pending human turn was answered."""
+    def _on_human_replied(member_name: str, correlation_id: str, answer: str | None) -> None:
+        """Signal that a pending human turn was answered (answer = raw reply)."""
         observer.emit(
             WorkflowProgressEvent(
                 kind=ProgressKind.HUMAN_REPLIED,
                 label=member_name,
                 correlation_id=correlation_id,
+                answer=answer,
             )
         )
 
@@ -227,6 +238,7 @@ async def run_swarmflow(
         journal_path=journal_path,
         abort_event=abort_event,
         agent_gate=agent_gate,
+        budget=budget,
     )
 
 

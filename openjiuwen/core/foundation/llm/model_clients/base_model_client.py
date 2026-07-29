@@ -146,6 +146,65 @@ class BaseModelClient(ABC):
         return 0
 
     @staticmethod
+    def _extract_reasoning_tokens(obj: Any) -> int:
+        """Extract reasoning/thinking token count from provider usage metadata.
+
+        Providers disagree on the field shape. OpenAI-compatible providers
+        nest it under ``completion_tokens_details.reasoning_tokens``; some
+        surface it as a top-level field. Mirrors ``_extract_cache_tokens``
+        so callers can pass the raw usage object from either a streaming
+        chunk or a non-streaming response.
+        """
+
+        def _get_value(source: Any, key: str) -> Any:
+            if source is None:
+                return None
+            if isinstance(source, dict):
+                return source.get(key)
+            return getattr(source, key, None)
+
+        def _get_path(source: Any, path: tuple[str, ...]) -> Any:
+            current = source
+            for key in path:
+                current = _get_value(current, key)
+                if current is None:
+                    return None
+            return current
+
+        def _to_int(value: Any) -> int:
+            if value is None or isinstance(value, bool):
+                return 0
+            if not isinstance(value, (int, float, str)):
+                return 0
+            try:
+                return max(int(float(value)), 0)
+            except (TypeError, ValueError):
+                return 0
+
+        reasoning_token_paths = (
+            ("completion_tokens_details", "reasoning_tokens"),
+            ("completionTokensDetails", "reasoningTokens"),
+            ("usage", "completion_tokens_details", "reasoning_tokens"),
+            ("usageMetadata", "thoughtsTokenCount"),
+        )
+        for path in reasoning_token_paths:
+            reasoning_tokens = _to_int(_get_path(obj, path))
+            if reasoning_tokens:
+                return reasoning_tokens
+
+        reasoning_token_fields = (
+            "reasoning_tokens",
+            "reasoningTokens",
+            "thinking_tokens",
+            "thoughtsTokenCount",
+        )
+        for field in reasoning_token_fields:
+            reasoning_tokens = _to_int(_get_value(obj, field))
+            if reasoning_tokens:
+                return reasoning_tokens
+        return 0
+
+    @staticmethod
     def _extract_cost_info(obj: Any) -> tuple:
         """Extract cost information from a response or chunk object.
         Supports three formats:
@@ -208,9 +267,11 @@ class BaseModelClient(ABC):
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                               error_msg="model client config verify_ssl must be a boolean type.")
 
-        if self.model_client_config.verify_ssl is True and self.model_client_config.ssl_cert is None:
-            raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
-                              error_msg="model client config ssl_cert is required when verify_ssl is True.")
+        # NOTE: ssl_cert is no longer mandatory when verify_ssl=True. With the
+        # updated SslUtils.create_strict_ssl_context, omitting ssl_cert makes
+        # the client fall back to the system default trust store (public CAs
+        # like api.openai.com work out of the box); a user-provided ssl_cert is
+        # loaded additively on top of the default store for self-signed endpoints.
 
     @staticmethod
     def _convert_messages_to_dict(messages: Union[str, List[BaseMessage], List[dict]]) -> List[dict]:

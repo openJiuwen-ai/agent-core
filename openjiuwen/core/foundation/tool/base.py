@@ -20,6 +20,14 @@ Output = TypeVar('Output', contravariant=True)
 class ToolCard(BaseCard):
     input_params: Dict[str, Any] | Type[BaseModel] = Field(default_factory=dict)
     properties: Dict[str, Any] = Field(default_factory=dict)
+    parallel_safe: bool = Field(
+        default=True,
+        description=(
+            "Whether this tool can safely execute concurrently with other tool "
+            "calls emitted in the same assistant turn. Tools that mutate shared "
+            "state or external resources should set this to False."
+        ),
+    )
     stateless: bool = Field(
         default=False,
         description=(
@@ -27,6 +35,16 @@ class ToolCard(BaseCard):
             "(module-level singletons) are shared across agents under their bare "
             "id; stateful tools are owned exclusively by one agent and get an "
             "agent-qualified id at registration."
+        ),
+    )
+    idempotent: bool = Field(
+        default=False,
+        description=(
+            "Whether repeated invocations with the same inputs have no additional "
+            "side effects. Non-idempotent tools (write, shell, spawn) are exempt "
+            "from outer call-level timeouts and are never retried by resilience rails. "
+            "Defaults to False for secure-by-default: new tools must explicitly opt-in "
+            "to idempotency."
         ),
     )
 
@@ -140,6 +158,10 @@ class Tool(metaclass=_ToolMeta):
     @property
     def card(self) -> ToolCard:
         return self._card
+
+    def is_parallel_safe(self) -> bool:
+        """Return whether this tool may run concurrently with sibling tool calls."""
+        return bool(getattr(self.card, "parallel_safe", True))
 
     @abstractmethod
     async def invoke(self, inputs: Input, **kwargs) -> Output:
