@@ -2240,6 +2240,9 @@ class SkillEvolutionRail(EvolutionRail):
         ``version`` may be a body archive filename (``SKILL.v1.0.0.md``) or a bare
         SemVer string (``1.0.0``). When omitted, the newest body archive by mtime
         is used.
+
+        Restores the archived ``SKILL.md`` body and always clears live
+        ``evolutions.json`` (empty entries, retained version).
         """
         store = self._evolution_store
         archive = store.get_skill_archive_dir(skill_name)
@@ -2267,8 +2270,6 @@ class SkillEvolutionRail(EvolutionRail):
                 return False
             body_archive = body_files[0]
 
-        evo_archive = store.resolve_paired_evolution_archive(skill_name, body_archive.name)
-
         old_body = await store.read_archive_text(skill_name, body_archive.name)
         if not old_body:
             logger.warning("[SkillEvolutionRail] archived body is empty for %s: %s", skill_name, body_archive.name)
@@ -2276,13 +2277,7 @@ class SkillEvolutionRail(EvolutionRail):
 
         await store.archive_current_state(skill_name)
         await store.write_skill_content(skill_name, old_body)
-
-        if evo_archive is not None:
-            restored = await store.restore_evolution_log_from_archive(skill_name, evo_archive.name)
-            if not restored:
-                return False
-        else:
-            await store.clear_evolutions(skill_name)
+        await store.clear_evolutions(skill_name)
 
         deleted = await store.delete_archive_version(skill_name, body_archive.name)
         if not deleted:
