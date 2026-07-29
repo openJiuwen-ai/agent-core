@@ -854,12 +854,14 @@ class OpenAIModelClient(BaseModelClient):
         prompt_token_ids = getattr(response, 'prompt_token_ids', None) or None
         completion_token_ids = getattr(choice, 'token_ids', None) or None
         logprobs = self._normalize_logprobs(getattr(choice, 'logprobs', None))
-
+        finish_reason = getattr(choice, 'finish_reason', None) or None
+        if not finish_reason:
+            finish_reason = "tool_calls" if tool_calls else "stop"
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
-            finish_reason="tool_calls" if tool_calls else "stop",
+            finish_reason=finish_reason,
             reasoning_content=reasoning_content,
             parser_content=parser_content,
             prompt_token_ids=prompt_token_ids,
