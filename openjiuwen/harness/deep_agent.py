@@ -455,6 +455,30 @@ class DeepAgent(BaseAgent):
             if prail is not None:
                 self._pending_rails.append(prail)
 
+        self._queue_online_rl_rail_from_env()
+
+    def _queue_online_rl_rail_from_env(self) -> None:
+        """Queue the online RL rail when enabled by process environment."""
+        try:
+            from openjiuwen.agent_evolving.agent_rl.online.rail.factory import (
+                build_rl_online_rail_from_env,
+            )
+            from openjiuwen.agent_evolving.agent_rl.online.rail.online_rail import (
+                RLOnlineRail,
+            )
+        except Exception as exc:
+            logger.warning("[DeepAgent] online RL rail factory unavailable: %s", exc)
+            return
+
+        if any(isinstance(rail, RLOnlineRail) for rail in self.configured_rails()):
+            return
+        rail = build_rl_online_rail_from_env()
+        if rail is None:
+            return
+        setattr(rail, "_async_evolution", False)
+        self._pending_rails.append(rail)
+        logger.info("[DeepAgent] RLOnlineRail added from environment")
+
     def set_react_agent(
         self,
         react_agent: Any,

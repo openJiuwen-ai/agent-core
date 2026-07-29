@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
@@ -24,6 +26,8 @@ from openjiuwen.agent_evolving.trajectory import (
 )
 
 from .llm_response import extract_logprobs, extract_prompt_ids, extract_token_ids
+
+logger = logging.getLogger(__name__)
 
 
 def _model_dump(value: Any) -> dict[str, Any] | None:
@@ -211,10 +215,145 @@ class OnlineTrajectoryConverter:
         tenant_id: Optional[str] = None,
         model_id: Optional[str] = None,
         session_done: bool = False,
+        tokenizer_path: Optional[str] = None,
     ) -> None:
         self.tenant_id = tenant_id
         self.model_id = model_id
         self.session_done = session_done
+        self.tokenizer_path = (tokenizer_path or os.getenv("TRAJECTORY_TOKENIZER_PATH", "")).strip()
+        self._tokenizer: Any = None
+        self._tokenizer_failed = False
+
+    def _get_tokenizer(self) -> Any | None:
+        if self._tokenizer is not None:
+            return self._tokenizer
+        if self._tokenizer_failed or not self.tokenizer_path:
+            return None
+        try:
+            from transformers import AutoTokenizer
+
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self.tokenizer_path,
+                trust_remote_code=True,
+            )
+            return self._tokenizer
+        except Exception as exc:
+            self._tokenizer_failed = True
+            logger.warning(
+                "OnlineTrajectoryConverter tokenizer fallback disabled path=%s err=%r",
+                self.tokenizer_path,
+                exc,
+            )
+            return None
+
+    @staticmethod
+    def _coerce_token_ids(value: Any) -> list[int] | None:
+        if value is None:
+            return None
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+        if isinstance(value, dict):
+            value = value.get("input_ids")
+        if isinstance(value, list) and value and isinstance(value[0], list):
+            value = value[0]
+        if not isinstance(value, list):
+            return None
+        out: list[int] = []
+        for item in value:
+            try:
+                out.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        return out or None
+
+    @staticmethod
+    def _normalise_chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for message in messages:
+            role = str(message.get("role") or "user")
+            content = message.get("content", "")
+            if not isinstance(content, str):
+                content = json.dumps(_json_value(content), ensure_ascii=False)
+            item = {"role": role, "content": content}
+            for key in ("name", "tool_calls", "tool_call_id"):
+                if message.get(key) is not None:
+                    item[key] = _json_value(message.get(key))
+            out.append(item)
+        return out
+
+    @staticmethod
+    def _fallback_prompt_text(messages: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        for message in messages:
+            role = str(message.get("role") or "user")
+            content = _extract_text(message.get("content"))
+            lines.append(f"{role}: {content}")
+        lines.append("assistant:")
+        return "\n".join(lines)
+
+    def _encode_prompt_ids(self, messages: list[dict[str, Any]], tools: Any) -> list[int] | None:
+        tokenizer = self._get_tokenizer()
+        if tokenizer is None:
+            return None
+        chat_messages = self._normalise_chat_messages(messages)
+        try:
+            ids = tokenizer.apply_chat_template(
+                chat_messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                tools=tools or None,
+            )
+            coerced = self._coerce_token_ids(ids)
+            if coerced:
+                return coerced
+        except TypeError:
+            try:
+                ids = tokenizer.apply_chat_template(
+                    chat_messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                )
+                coerced = self._coerce_token_ids(ids)
+                if coerced:
+                    return coerced
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        try:
+            text = tokenizer.apply_chat_template(
+                chat_messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                tools=tools or None,
+            )
+        except TypeError:
+            try:
+                text = tokenizer.apply_chat_template(
+                    chat_messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            except Exception:
+                text = self._fallback_prompt_text(chat_messages)
+        except Exception:
+            text = self._fallback_prompt_text(chat_messages)
+        try:
+            return self._coerce_token_ids(tokenizer.encode(text, add_special_tokens=False))
+        except Exception:
+            return None
+
+    def _encode_response_ids(self, response_text: str) -> list[int] | None:
+        if not response_text:
+            return None
+        tokenizer = self._get_tokenizer()
+        if tokenizer is None:
+            return None
+        try:
+            return self._coerce_token_ids(tokenizer.encode(response_text, add_special_tokens=False))
+        except Exception:
+            return None
 
     def convert(
         self,
@@ -251,6 +390,11 @@ class OnlineTrajectoryConverter:
                 or step.meta.get("prompt_ids")
                 or extract_prompt_ids(token_source)
             )
+            tools = _json_value(detail.tools)
+            if prompt_ids is None:
+                prompt_ids = self._encode_prompt_ids(messages, tools)
+            if response_tokens is None:
+                response_tokens = self._encode_response_ids(response_text)
             logprobs = _coerce_logprobs(step.logprobs) or extract_logprobs(token_source)
             sample = PerTurnSample(
                 trajectory_id=trajectory_id,
@@ -264,7 +408,7 @@ class OnlineTrajectoryConverter:
                 logprobs=logprobs,
                 prompt_ids=prompt_ids,
                 render_fingerprint=step.meta.get("render_fingerprint") or _fingerprint_payload(messages, detail.tools),
-                tools=_json_value(detail.tools),
+                tools=tools,
                 meta={**detail_meta, **dict(step.meta or {})},
             )
             samples.append(sample)
