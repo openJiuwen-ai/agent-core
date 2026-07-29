@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
+import os
 from enum import Enum
 from typing import Any, AsyncIterator
 
@@ -429,8 +431,8 @@ def _tool_call_chunk(item: Any, index: int) -> OutputSchema:
         type="tool_call",
         index=index,
         payload={
-            "tool_name": _tool_name(item),
-            "tool_args": _tool_args(item),
+            "name": _tool_name(item),
+            "arguments": _json_arguments(_tool_args(item)),
             "tool_call_id": getattr(item, "id", ""),
         },
     )
@@ -443,8 +445,7 @@ def _tool_result_chunk(item: Any, index: int) -> OutputSchema:
         index=index,
         payload={
             "tool_name": _tool_name(item),
-            "tool_args": _tool_args(item),
-            "tool_result": _tool_result(item),
+            "result": _tool_result(item),
             "tool_call_id": getattr(item, "id", ""),
         },
     )
@@ -490,16 +491,16 @@ def _tool_result(item: Any) -> Any:
         result = getattr(item, "result", None)
         if result is None:
             result = getattr(item, "error", None)
-        return _jsonable(result)
+        return _normalize_tool_result(result)
     if item_type == "dynamicToolCall":
-        return _jsonable(getattr(item, "content_items", None))
+        return _normalize_tool_result(getattr(item, "content_items", None))
     if item_type == "commandExecution":
-        return {
-            "exit_code": getattr(item, "exit_code", None),
-            "output": getattr(item, "aggregated_output", None),
-        }
+        output = getattr(item, "aggregated_output", None)
+        if isinstance(output, str) and output:
+            return output
+        return f"exit_code={getattr(item, 'exit_code', None)}"
     if item_type == "fileChange":
-        return {"status": _enum_value(getattr(item, "status", None))}
+        return _normalize_tool_result({"status": _enum_value(getattr(item, "status", None))})
     return None
 
 
@@ -509,15 +510,52 @@ def _enum_value(value: Any) -> Any:
 
 def _jsonable(value: Any) -> Any:
     """Convert SDK Pydantic/enum values to stream-safe Python objects."""
-    if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json", by_alias=True)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
     if isinstance(value, Enum):
         return value.value
+    if isinstance(value, os.PathLike):
+        return os.fspath(value)
+    if hasattr(value, "model_dump"):
+        return _jsonable(value.model_dump(mode="json", by_alias=True))
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
+    try:
+        json.dumps(value, ensure_ascii=False)
+    except TypeError:
+        return str(value)
     return value
+
+
+def _json_arguments(value: Any) -> str:
+    """Serialize external tool arguments into the native tool-call shape."""
+    return json.dumps(_jsonable(value) if value is not None else {}, ensure_ascii=False)
+
+
+def _normalize_tool_result(value: Any) -> str:
+    """Convert SDK tool results into the native string result shape."""
+    jsonable = _jsonable(value)
+    if isinstance(jsonable, str):
+        if not jsonable:
+            return json.dumps(jsonable, ensure_ascii=False)
+        return jsonable
+    if isinstance(jsonable, list):
+        if not jsonable:
+            return json.dumps(jsonable, ensure_ascii=False)
+        text_parts: list[str] = []
+        for item in jsonable:
+            if not isinstance(item, dict):
+                return json.dumps(jsonable, ensure_ascii=False)
+            if item.get("type") != "text":
+                return json.dumps(jsonable, ensure_ascii=False)
+            text = item.get("text")
+            if not isinstance(text, str):
+                return json.dumps(jsonable, ensure_ascii=False)
+            text_parts.append(text)
+        return "\n".join(text_parts)
+    return json.dumps(jsonable, ensure_ascii=False)
 
 
 async def build_codex_runtime(

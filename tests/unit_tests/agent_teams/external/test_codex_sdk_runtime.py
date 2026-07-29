@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from openjiuwen.agent_teams.external.cli_agent.codex.runtime import (
     CodexSdkRuntime,
+    _json_arguments,
     _tool_result,
 )
 
@@ -77,6 +79,28 @@ class _BlockingThread(_FakeThread):
         self.prompts.append(prompt)
         self.handles.append(self.handle)
         return self.handle
+
+
+class _SdkPathString:
+    def __init__(self, value: str):
+        self.value = value
+
+    def __str__(self) -> str:
+        return self.value
+
+
+def test_codex_json_arguments_stringifies_sdk_path_values():
+    arguments = _json_arguments(
+        {
+            "path": _SdkPathString("codex-report.txt"),
+            "nested": {"paths": [_SdkPathString(".team/workspace")]},
+        }
+    )
+
+    assert json.loads(arguments) == {
+        "path": "codex-report.txt",
+        "nested": {"paths": [".team/workspace"]},
+    }
 
 
 class _HandleSequenceThread(_FakeThread):
@@ -264,7 +288,16 @@ async def test_codex_sdk_runtime_reuses_thread_and_maps_stream_events():
         "tool_result",
         "llm_output",
     ]
-    assert first[1].payload["tool_name"] == "openjiuwen-team.send_message"
+    assert first[1].payload == {
+        "name": "openjiuwen-team.send_message",
+        "arguments": '{"recipient": "leader"}',
+        "tool_call_id": "tool-1",
+    }
+    assert first[2].payload == {
+        "tool_name": "openjiuwen-team.send_message",
+        "result": '{"ok": true}',
+        "tool_call_id": "tool-1",
+    }
     assert first[3].payload["content"] == "done"
     assert second[0].payload["content"] == "continued"
 
@@ -293,8 +326,7 @@ def test_codex_sdk_runtime_preserves_falsy_mcp_tool_results(result):
 
     actual = _tool_result(item)
 
-    assert actual == result
-    assert type(actual) is type(result)
+    assert actual == json.dumps(result, ensure_ascii=False)
 
 
 @pytest.mark.level0
@@ -302,7 +334,34 @@ def test_codex_sdk_runtime_uses_mcp_error_when_result_is_none():
     error = {"message": "tool failed"}
     item = SimpleNamespace(type="mcpToolCall", result=None, error=error)
 
-    assert _tool_result(item) == error
+    assert _tool_result(item) == '{"message": "tool failed"}'
+
+
+@pytest.mark.level0
+def test_codex_sdk_runtime_returns_command_output_as_tool_result():
+    item = SimpleNamespace(type="commandExecution", aggregated_output="codex reporter in\n", exit_code=0)
+
+    assert _tool_result(item) == "codex reporter in\n"
+
+
+@pytest.mark.level0
+def test_codex_sdk_runtime_returns_exit_code_when_command_output_is_empty():
+    item = SimpleNamespace(type="commandExecution", aggregated_output="", exit_code=0)
+
+    assert _tool_result(item) == "exit_code=0"
+
+
+@pytest.mark.level0
+def test_codex_sdk_runtime_joins_text_block_tool_results():
+    item = SimpleNamespace(
+        type="dynamicToolCall",
+        content_items=[
+            {"type": "text", "text": "first"},
+            {"type": "text", "text": "second"},
+        ],
+    )
+
+    assert _tool_result(item) == "first\nsecond"
 
 
 @pytest.mark.asyncio
