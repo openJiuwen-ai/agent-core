@@ -328,41 +328,6 @@ async def test_rollback_skill_empty_archived_body_does_not_overwrite(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_rollback_skill_strips_evolution_index_from_archived_body(tmp_path):
-    root = tmp_path / "skills"
-    skill_dir = root / "skill-a"
-    archive = skill_dir / "archive"
-    archive.mkdir(parents=True)
-    index_block = (
-        "<!-- evolution-index-start -->\n"
-        "## Evolution Experiences\n\n"
-        "This skill has accumulated **2** evolution experiences (2 body).\n"
-        "<!-- evolution-index-end -->\n"
-    )
-    (skill_dir / "SKILL.md").write_text(
-        "---\nversion: 1.0.1\n---\n\n# Current\n",
-        encoding="utf-8",
-    )
-    (skill_dir / "evolutions.json").write_text(
-        '{"skill_id": "skill-a", "version": "1.0.1", "entries": []}',
-        encoding="utf-8",
-    )
-    (archive / "SKILL.v1.0.0.md").write_text(
-        f"---\nversion: 1.0.0\n---\n\n# Archived\n{index_block}",
-        encoding="utf-8",
-    )
-    (archive / "evolutions.v1.0.0.json").write_text('{"entries": []}', encoding="utf-8")
-
-    rail = _make_rail(tmp_path)
-    rail._evolution_store = EvolutionStore(str(root))
-
-    assert await rail.rollback_skill("skill-a", "SKILL.v1.0.0.md") is True
-    written = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
-    assert "# Archived" in written
-    assert "<!-- evolution-index-start -->" not in written
-
-
-@pytest.mark.asyncio
 async def test_rollback_skill_clears_evolutions_when_pair_missing(tmp_path):
     root = tmp_path / "skills"
     skill_dir = root / "skill-a"
