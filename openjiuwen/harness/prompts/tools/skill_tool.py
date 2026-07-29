@@ -11,13 +11,14 @@ from openjiuwen.harness.prompts.tools.base import (
 
 DESCRIPTION: Dict[str, str] = {
     "cn": (
-        "使用此工具查看特定技能的内容。"
+        "使用此工具查看特定技能的 SKILL.md 正文。仅支持读取技能目录下的 SKILL.md。"
         "成功时默认附带技能根目录的 ASCII 目录树（directory_tree）"
         "以及嵌套子技能相对路径列表（discovered_skill_names，含 SKILL.md 的子目录）；"
         "加载子技能请再次调用本工具，并设置 relative_file_path（如 designer/SKILL.md）。"
     ),
     "en": (
-        "Use this tool to view the skill contents of a certain skill. "
+        "Use this tool to view a skill's SKILL.md body. "
+        "Only SKILL.md within the skill directory is readable. "
         "On success it always includes an ASCII directory_tree of the skill root "
         "and discovered_skill_names (relative paths of nested dirs that contain SKILL.md). "
         "To load a nested skill, call again with relative_file_path "
@@ -31,9 +32,9 @@ SKILL_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
         "en": "Name of the skill",
     },
     "relative_file_path": {
-        "cn": "可选。查看技能目录中指定路径（relative_file_path）下的特定文件。留空则查看主 SKILL.md 文件。",
-        "en": "Optional. Views a specific file within the skill directory at the relative_file_path. "\
-              "Leave blank to view the main SKILL.md file.",
+        "cn": "可选。仅支持读取技能目录下的 SKILL.md（留空或传 SKILL.md 均可）。其他路径会被拒绝。",
+        "en": "Optional. Only SKILL.md within the skill directory is supported (omit, or pass SKILL.md). "
+              "Other paths are rejected.",
     },
 }
 

@@ -315,6 +315,21 @@ def _format_layout_appendix_for_model(layout: Dict[str, Any]) -> str:
     return "\n\n".join(parts)
 
 
+_ALLOWED_SKILL_FILE_NAME = "SKILL.md"
+
+
+def _is_allowed_skill_relative_file(file_path: str) -> bool:
+    """``skill_tool`` may only read ``SKILL.md`` files under the skill directory.
+
+    Accepts the primary ``SKILL.md`` as well as nested ones such as
+    ``subskill/SKILL.md``; non-``SKILL.md`` files are rejected. Path-safety
+    (no absolute paths / ``..`` traversal) is enforced separately by
+    ``_is_safe_relative_file_path``.
+    """
+    normalized = file_path.replace("\\", "/").removeprefix("./")
+    return normalized == _ALLOWED_SKILL_FILE_NAME or normalized.endswith("/" + _ALLOWED_SKILL_FILE_NAME)
+
+
 class SkillTool(Tool):
     """View the skill contents of a certain skill"""
     operation: SysOperation
@@ -358,6 +373,16 @@ class SkillTool(Tool):
                 error=(
                     "Invalid relative_file_path: absolute paths and '..' traversal "
                     "components are not allowed"
+                ),
+            )
+
+        if not _is_allowed_skill_relative_file(relative_file_path):
+            return ToolOutput(
+                success=False,
+                error=(
+                    f"skill_tool only supports reading {_ALLOWED_SKILL_FILE_NAME} files under the skill directory; "
+                    f"got relative_file_path={relative_file_path!r}. "
+                    "Use filesystem tools for other files under the skill directory."
                 ),
             )
 

@@ -114,7 +114,7 @@ async def test_skill_tool_invalid_skill(sys_op, temp_dir):
     assert skill_res.error is not None
 
 @pytest.mark.asyncio
-async def test_skill_tool_reference_file(sys_op, temp_dir):
+async def test_skill_tool_rejects_non_skill_md_path(sys_op, temp_dir):
     skills_root = Path(temp_dir) / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
     skill_list = []
@@ -124,12 +124,31 @@ async def test_skill_tool_reference_file(sys_op, temp_dir):
 
     def get_skill_list():
         return skill_list
-    
+
     skill_tool = SkillTool(sys_op, get_skill_list)
 
     skill_res = await skill_tool.invoke({"skill_name": "test_skill_1", "relative_file_path": "reference/temp_file.md"})
+    assert skill_res.success is False
+    assert skill_res.error is not None
+    assert "SKILL.md" in skill_res.error
+
+@pytest.mark.asyncio
+async def test_skill_tool_reads_nested_skill_md(sys_op, temp_dir):
+    skills_root = Path(temp_dir) / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    skill_list = []
+    skill = _write_skill(skills_root, "test_skill_1", "skill description 1", "skill body 1")
+    _write_skill_reference_file(skills_root, "test_skill_1", "subskill/SKILL.md", "nested skill body")
+    skill_list.append(skill)
+
+    def get_skill_list():
+        return skill_list
+
+    skill_tool = SkillTool(sys_op, get_skill_list)
+
+    skill_res = await skill_tool.invoke({"skill_name": "test_skill_1", "relative_file_path": "subskill/SKILL.md"})
     assert skill_res.success is True
-    assert _data_contains_str(skill_res.data, "test_skill_1 temp file content")
+    assert _data_contains_str(skill_res.data, "nested skill body")
 
 @pytest.mark.asyncio
 async def test_skill_tool_invalid_reference_file(sys_op, temp_dir):
