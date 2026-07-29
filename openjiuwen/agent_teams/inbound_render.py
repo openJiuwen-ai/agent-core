@@ -16,8 +16,11 @@ clean boundary:
 - ``<team-inbound>`` wraps the **original message** verbatim, with the
   sender / id / type / time as attributes.
 - ``<team-event>`` wraps a **framework event** (task assignment, plan
-  decision, nudge, completion notice, task board, ...), with the event
-  type in the ``kind`` attribute.
+  decision, nudge, completion notice, task board, roster change, ...),
+  with the event type in the ``kind`` attribute.
+- ``<team-context>`` wraps **standing team state** the member is being
+  told about for the first time (its own identity, the team metadata) —
+  a fact about the team rather than something that happened.
 - ``<team-note>`` carries a framework-added hint or constraint attached to
   either of the above (e.g. a reply hint, or the HITT silence constraint).
 - A ``for="controller"`` attribute marks content surfaced to a human
@@ -146,9 +149,28 @@ def render_event(
     return f"{block}\n{note}" if note else block
 
 
+def render_team_context(*, body: str) -> str:
+    """Render standing team state as a ``<team-context>`` XML block.
+
+    Used for the member's own identity and the team metadata: facts about the
+    team rather than events. Unlike the per-round prompt attachment this
+    replaces, the block is written into the conversation once, at the moment the
+    state first exists, and stays there — so it is ordinary history, not a
+    snapshot that is refreshed or withdrawn.
+
+    Args:
+        body: The rendered state text (escaped into the element body).
+
+    Returns:
+        The rendered ``<team-context>`` block.
+    """
+    return f"<team-context>\n{_esc_text(body)}\n</team-context>"
+
+
 __all__ = [
     "INBOUND_TYPE_BROADCAST",
     "INBOUND_TYPE_DIRECT",
     "render_event",
     "render_inbound",
+    "render_team_context",
 ]

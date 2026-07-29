@@ -156,11 +156,16 @@ class CodexSdkRuntime(CliRuntimeBase):
         resume_external_backend: bool = False,
         turn_idle_timeout_s: float = _DEFAULT_TURN_IDLE_TIMEOUT_S,
         turn_idle_retries: int = _DEFAULT_TURN_IDLE_RETRIES,
+        team_context_tracker: Any = None,
         span_bridge: Any | None = None,
         native_otel_receiver: Any | None = None,
         rollout_trace_reader: Any | None = None,
     ) -> None:
-        super().__init__(member_name=member_name)
+        super().__init__(
+            member_name=member_name,
+            member_agent_id=member_agent_id,
+            team_context_tracker=team_context_tracker,
+        )
         if turn_idle_timeout_s <= 0:
             raise ValueError("turn_idle_timeout_s must be greater than zero")
         if turn_idle_retries < 0:
@@ -182,7 +187,6 @@ class CodexSdkRuntime(CliRuntimeBase):
         self._turn_idle_retries = turn_idle_retries
         self._thread_id: str | None = None
         self._persisted_thread_id: str | None = None
-        self._member_session: Any | None = None
         self._client: Any | None = None
         self._thread: Any | None = None
         self._active_turn: Any | None = None
@@ -198,25 +202,22 @@ class CodexSdkRuntime(CliRuntimeBase):
     async def start(self, *, team_session: Any | None = None) -> None:
         """Restore the member checkpoint, then create or resume its SDK thread."""
         await super().start(team_session=team_session)
-        await self._ensure_member_session(team_session)
+        self._restore_thread_id()
         await self._ensure_thread()
 
-    async def _ensure_member_session(self, team_session: Any | None) -> Any:
-        """Open this external member's stable child AgentSession once."""
-        if self._member_session is not None:
-            return self._member_session
-        if team_session is None:
+    def _restore_thread_id(self) -> None:
+        """Pick the Codex thread id back up from this member's checkpoint.
+
+        The member AgentSession itself is opened by ``CliRuntimeBase.start``;
+        Codex only reads its own slice back out. It is stricter than the base
+        about that session existing, because without it a resume cannot tell an
+        interrupted thread from a fresh one.
+        """
+        member_session = self._member_session
+        if member_session is None:
             raise RuntimeError(
                 f"Codex SDK member {self._member_name!r} requires a team_session to restore its member checkpoint",
             )
-
-        member_session = team_session.create_agent_session(
-            agent_id=self._member_agent_id,
-            share_stream_writer=False,
-        )
-        await member_session.pre_run()
-        self._member_session = member_session
-
         restored_thread_id = self._read_persisted_thread_id(member_session)
         self._persisted_thread_id = restored_thread_id
         if self._resume_external_backend:
@@ -227,7 +228,6 @@ class CodexSdkRuntime(CliRuntimeBase):
                     "forbids starting a replacement thread",
                 )
             self._thread_id = restored_thread_id
-        return member_session
 
     @staticmethod
     def _read_persisted_thread_id(member_session: Any) -> str | None:
@@ -876,6 +876,7 @@ async def build_codex_runtime(
     resume_external_backend: bool = False,
     turn_idle_timeout_s: float | None = None,
     turn_idle_retries: int | None = None,
+    team_context_tracker: Any = None,
 ) -> CodexSdkRuntime:
     """Build a Codex Python SDK runtime without starting its thread eagerly."""
     sdk = load_codex_sdk()
@@ -951,6 +952,7 @@ async def build_codex_runtime(
             resume_external_backend=resume_external_backend,
             turn_idle_timeout_s=(_DEFAULT_TURN_IDLE_TIMEOUT_S if turn_idle_timeout_s is None else turn_idle_timeout_s),
             turn_idle_retries=(_DEFAULT_TURN_IDLE_RETRIES if turn_idle_retries is None else turn_idle_retries),
+            team_context_tracker=team_context_tracker,
             span_bridge=span_bridge,
             native_otel_receiver=native_otel_receiver,
             rollout_trace_reader=rollout_trace_reader,

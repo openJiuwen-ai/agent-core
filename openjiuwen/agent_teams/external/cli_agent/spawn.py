@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.external.cli_agent.adapters import CliAgentAdapter, build_adapter
@@ -178,6 +178,7 @@ async def build_cli_runtime(
     ssh_transport: SshTransportConfig | None = None,
     resume_external_backend: bool = False,
     member_agent_id: str | None = None,
+    team_context_tracker: Any = None,
 ) -> CliRuntimeBase:
     """Build the member runtime for ``ctx.cli_agent``.
 
@@ -225,6 +226,9 @@ async def build_cli_runtime(
             instead of starting it as a fresh session.
         member_agent_id: Stable TeamAgent card id used to address this
             external member's own AgentSession checkpoint.
+        team_context_tracker: Tracker deciding which team state this member has
+            not been told about yet; the runtime folds its output into the next
+            message it sends to the CLI. ``None`` disables team-state delivery.
     """
     if not ctx.cli_agent:
         raise_error(
@@ -265,6 +269,8 @@ async def build_cli_runtime(
             ssh_transport=ssh_transport,
             team_session_id=descriptor.session_id,
             resume_external_backend=resume_external_backend,
+            member_agent_id=member_agent_id,
+            team_context_tracker=team_context_tracker,
         )
     if ctx.cli_agent == "codex":
         if command_override is not None:
@@ -306,6 +312,7 @@ async def build_cli_runtime(
             resume_external_backend=resume_external_backend,
             turn_idle_timeout_s=codex_turn_idle_timeout_s,
             turn_idle_retries=codex_turn_idle_retries,
+            team_context_tracker=team_context_tracker,
         )
     if ssh_transport is not None:
         raise_error(
@@ -364,6 +371,8 @@ async def build_cli_runtime(
             cwd=cwd,
             cli_session_id=str(uuid.uuid4()),
             launch_extra_args=launch_extra_args,
+            member_agent_id=member_agent_id,
+            team_context_tracker=team_context_tracker,
         )
 
     command = adapter.build_command(extra_args=launch_extra_args)
@@ -383,6 +392,8 @@ async def build_cli_runtime(
         output_lines=_aiter_stdout(process.stdout),
         process=process,
         transport=transport,
+        member_agent_id=member_agent_id,
+        team_context_tracker=team_context_tracker,
     )
 
 

@@ -31,9 +31,15 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         transport: Any | None = None,
         inject_mcp: bool = True,
         mcp_server_name: str = "openjiuwen-team",
+        member_agent_id: str | None = None,
+        team_context_tracker: Any = None,
     ):
         """Bind SDK options; the SDK client is connected on start."""
-        super().__init__(member_name=member_name)
+        super().__init__(
+            member_name=member_name,
+            member_agent_id=member_agent_id,
+            team_context_tracker=team_context_tracker,
+        )
         self._options = options
         self._transport = transport
         self._inject_mcp = inject_mcp
@@ -167,6 +173,8 @@ def build_claude_runtime(
     ssh_transport: SshTransportConfig | None,
     team_session_id: str | None,
     resume_external_backend: bool,
+    member_agent_id: str | None = None,
+    team_context_tracker: Any = None,
 ) -> ClaudeSdkRuntime:
     """Build a Claude SDK runtime, using an SSH SDK transport when configured."""
     _ = mcp_server_command
@@ -189,6 +197,8 @@ def build_claude_runtime(
         transport=transport,
         inject_mcp=inject_mcp,
         mcp_server_name=mcp_server_name,
+        member_agent_id=member_agent_id,
+        team_context_tracker=team_context_tracker,
     )
 
 

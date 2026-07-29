@@ -28,6 +28,7 @@ from openjiuwen.core.common.logging import team_logger
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
     from openjiuwen.agent_teams.schema.team import TeamAgentSpec, TeamRuntimeContext
+    from openjiuwen.agent_teams.team_context import TeamContextTracker
 
 
 async def _build_member_system_prompt(
@@ -72,6 +73,47 @@ async def _build_member_system_prompt(
         workspace_prompt_variant="external",
     )
     return prompt or None
+
+
+def _build_team_context_tracker(
+    team_agent: "TeamAgent",
+    spec: "TeamAgentSpec",
+    ctx: "TeamRuntimeContext",
+    member_name: str | None,
+    team_name: str,
+) -> "TeamContextTracker":
+    """Build the tracker feeding team state into this CLI member's messages.
+
+    An external CLI has no rail, so the runtime folds the tracker's output into
+    the next message it sends. The workspace paths mirror what an in-process
+    member is told (``agent_configurator``): the agent-relative ``.team`` mount
+    and the shared workspace's absolute path.
+
+    Args:
+        team_agent: The leader TeamAgent, source of the team backend.
+        spec: The team spec carrying workspace + HITT exposure config.
+        ctx: The member's runtime context (role / private prompt / language).
+        member_name: The member's semantic identifier.
+        team_name: The team this member belongs to.
+
+    Returns:
+        A tracker scoped to this member.
+    """
+    from openjiuwen.agent_teams.team_context import TeamContextTracker
+
+    language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
+    workspace = spec.workspace
+    workspace_enabled = workspace is not None and workspace.enabled
+    return TeamContextTracker(
+        team_backend=team_agent.team_backend,
+        member_name=member_name,
+        role=ctx.role,
+        member_prompt=ctx.prompt or "",
+        team_workspace_mount=f".team/{team_name}/" if workspace_enabled else None,
+        team_workspace_path=_team_workspace_path(spec, team_name) if workspace_enabled else None,
+        expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
+        language=language,
+    )
 
 
 def _path_value(value: object) -> str | None:
@@ -169,6 +211,7 @@ async def external_cli_spawn(
     # sections an in-process member gets), excluding the other DeepAgent rails.
     system_prompt = await _build_member_system_prompt(team_agent, spec, ctx, member_name)
     backend = backend_for(ctx.cli_agent) if ctx.cli_agent else None
+    team_context_tracker = _build_team_context_tracker(team_agent, spec, ctx, member_name, team_name)
 
     # Resolve the static launch config declared on the spec for this CLI kind.
     # The member was registered through ``spawn_external_cli_agent`` which
@@ -204,6 +247,7 @@ async def external_cli_spawn(
             ssh_transport=cli_cfg.ssh_transport,
             resume_external_backend=resume_external_backend,
             member_agent_id=card.id,
+            team_context_tracker=team_context_tracker,
         )
     else:
         cwd, add_dirs = _resolve_external_paths(
@@ -219,6 +263,7 @@ async def external_cli_spawn(
             system_prompt=system_prompt,
             resume_external_backend=resume_external_backend,
             member_agent_id=card.id,
+            team_context_tracker=team_context_tracker,
         )
 
     teammate = _TeamAgent(card)
